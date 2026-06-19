@@ -116,7 +116,7 @@ NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-
 NtCreateResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtCreateSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
 NtCreateSectionEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
+NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract (0x14083A400): Validates Limit>0 and 0<=InitialCount<=Limit; returns STATUS_INVALID_PARAMETER (0xC000000D) if invalid. Initializes semaphore via KeInitializeSemaphore. Runtime tests: NtCreateSemaphore tests pass with initial_count validation.	verified
 NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtCreateThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtCreateThreadEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
@@ -329,7 +329,7 @@ NtOpenProcessTokenEx	process.cpp	ntoskrnl	2	process-info-sample	Tested via proce
 NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtOpenResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtOpenSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
+NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Locates named semaphore via object manager, returns STATUS_OBJECT_NAME_NOT_FOUND if not found. Runtime tests: Named semaphore open tests pass; multiple opens return same handle.	verified
 NtOpenSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
 NtOpenThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
@@ -429,7 +429,7 @@ NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested 
 NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
 NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
+NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Increments semaphore count by release_count. Fails with STATUS_SEMAPHORE_LIMIT_EXCEEDED if would exceed maximum. Runtime tests: Release count tracking verified; limit enforcement confirmed.	verified
 NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	3	-	Release worker; thread pool, specialized	stub-deferred
 NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
 NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
@@ -670,7 +670,7 @@ NtUserTrackMouseEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample
 NtUserTransformPoint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtUserTransformRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtUserTranslateMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserUnhookWindowsHookEx	user.cpp	win32kbase/full	3	-	Unhook Windows hook; GUI hook system	stub-deferreduser.cpp	win32kbase/win32kfull		-		unverified
+NtUserUnhookWindowsHookEx	user.cpp	win32kbase/full	3	-	Unhook Windows hook; GUI hook system	stub-deferreduser.cpp
 NtUserUnregisterClass	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtUserUpdateWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
 NtUserValidateRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
