@@ -1,0 +1,6 @@
+# Generated audit reports — not committed
+report-*
+gap-scan-*.txt
+
+# Infrastructure files (committed)
+!ledger.tsv
