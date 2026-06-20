@@ -1,694 +1,694 @@
-# nt_name	owning_file	idb_module	tier	sample_subtest	evidence	status
-NtAcceptConnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAccessCheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAccessCheckAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAccessCheckByType	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAccessCheckByTypeAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAccessCheckByTypeResultList	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAccessCheckByTypeResultListAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAccessCheckByTypeResultListAndAuditAlarmByHandle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAcquireCrossVmMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAcquireProcessActivityReference	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAddAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAddAtomEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAddBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAddDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAdjustGroupsToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAdjustPrivilegesToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample	verified
-NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlertResumeThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlertThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlertThreadByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAllocateReserveObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAllocateUuids	system.cpp	ntoskrnl	2	-	Tested indirectly via GUID/UUID functions	verified
-NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualAlloc in section-sample	verified
-NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualAlloc in section-sample	verified
-NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcConnectPort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtAlpcConnectPortEx	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtAlpcCreatePort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtAlpcCreatePortSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcCreateResourceReserve	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcCreateSectionView	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcCreateSecurityContext	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtAlpcDeletePortSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcDeleteResourceReserve	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcDeleteSectionView	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcDeleteSecurityContext	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtAlpcDisconnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcImpersonateClientContainerOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcImpersonateClientOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcOpenSenderProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcOpenSenderThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcQueryInformation	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtAlpcQueryInformationMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAlpcSendWaitReceivePort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtAlpcSetInformation	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtApphelpCacheControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAreMappedFilesTheSame	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtCallEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCallbackReturn	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtCancelIoFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtCancelIoFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCancelTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtChangeProcessState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtChangeThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtClearEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtClose	object.cpp	ntoskrnl	2	-	Tested indirectly via CloseHandle in all samples	verified
-NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCommitComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCommitEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCommitTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCompactKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCompareObjects	object.cpp	ntoskrnl	2	-	Tested indirectly via object comparison	verified
-NtCompareSigningLevels	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCompareTokens	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCompressKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtConnectPort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtContinue	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtContinueEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCopyFileChunk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateCrossVmEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateCrossVmMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtCreateFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtCreateIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtCreateIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateMailslotFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtCreateNamedPipeFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtCreatePagingFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreatePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreatePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreatePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Private namespace; advanced feature	stub-deferred
-NtCreateProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateProcessEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateProcessStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateProfileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtCreateSectionEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract (0x14083A400): Validates Limit>0 and 0<=InitialCount<=Limit; returns STATUS_INVALID_PARAMETER (0xC000000D) if invalid. Initializes semaphore via KeInitializeSemaphore. Runtime tests: NtCreateSemaphore tests pass with initial_count validation.	verified
-NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateThreadEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtCreateTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtCreateToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateTokenEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateUserProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtCreateWaitablePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Worker factory; thread pool, specialized	stub-deferred
-NtDebugActiveProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDebugContinue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDelayExecution	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtDeleteAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDeleteBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDeleteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Delete private namespace; advanced feature	stub-deferred
-NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDisplayString	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDrawText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtDuplicateObject	object.cpp	ntoskrnl	2	-	Tested indirectly via DuplicateHandle	verified
-NtDuplicateToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample	verified
-NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase	3	-	GPU display adapter enumeration; requires active GPU/Vulkan	stub-deferred
-NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase	3	-	GPU properties query; graphics-specific	stub-deferred
-NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase	3	-	GPU feature detection; graphics-specific	stub-deferred
-NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtEnumerateKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtEnumerateValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtExtendSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFilterBootOption	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFilterToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFindAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFlushBuffersFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtFlushBuffersFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFlushInstructionCache	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtFlushKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via Win32 API usage	verified
-NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualFree	verified
-NtFreezeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFreezeTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtFsControlFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtGdiAddFontMemResourceEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiBitBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiComputeXformCoefficients	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreateBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreateCompatibleBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreateCompatibleDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreateDIBitmapInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreatePatternBrushInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreatePen	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreateRectRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiCreateSolidBrush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiDdDDICacheHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	GPU DDI DirectDraw hybrid query; graphics-specific	stub-deferred
-NtGdiDdDDICloseAdapter	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter management; graphics-specific	stub-deferred
-NtGdiDdDDICreateAllocation	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory allocation; graphics-specific	stub-deferred
-NtGdiDdDDICreateContext	gdi.cpp	gdi32full/win32kbase	3	-	GPU context creation; graphics-specific	stub-deferred
-NtGdiDdDDICreateDevice	gdi.cpp	gdi32full/win32kbase	3	-	GPU device creation; graphics-specific	stub-deferred
-NtGdiDdDDIDestroyAllocation	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory deallocation; graphics-specific	stub-deferred
-NtGdiDdDDIDestroyAllocation2	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory deallocation v2; graphics-specific	stub-deferred
-NtGdiDdDDIDestroyContext	gdi.cpp	gdi32full/win32kbase	3	-	GPU context destruction; graphics-specific	stub-deferred
-NtGdiDdDDIDestroyDevice	gdi.cpp	gdi32full/win32kbase	3	-	GPU device destruction; graphics-specific	stub-deferred
-NtGdiDdDDIEnumAdapters2	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter enumeration v2; graphics-specific	stub-deferred
-NtGdiDdDDIEscape	gdi.cpp	gdi32full/win32kbase	3	-	GPU escape code; graphics-specific	stub-deferred
-NtGdiDdDDIGetCachedHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	GPU hybrid query cache; graphics-specific	stub-deferred
-NtGdiDdDDIGetDeviceState	gdi.cpp	gdi32full/win32kbase	3	-	GPU device state query; graphics-specific	stub-deferred
-NtGdiDdDDIGetDisplayModeList	gdi.cpp	gdi32full/win32kbase	3	-	GPU display mode enumeration; graphics-specific	stub-deferred
-NtGdiDdDDIGetSharedPrimaryHandle	gdi.cpp	gdi32full/win32kbase	3	-	GPU shared primary; graphics-specific	stub-deferred
-NtGdiDdDDILock	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource locking; graphics-specific	stub-deferred
-NtGdiDdDDIMarkDeviceAsError	gdi.cpp	gdi32full/win32kbase	3	-	GPU error marking; graphics-specific	stub-deferred
-NtGdiDdDDIOpenAdapterFromHdc	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter from HDC; graphics-specific	stub-deferred
-NtGdiDdDDIOpenResource	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource opening; graphics-specific	stub-deferred
-NtGdiDdDDIQueryAdapterInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter info query; graphics-specific	stub-deferred
-NtGdiDdDDIQueryResourceInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource info; graphics-specific	stub-deferred
-NtGdiDdDDIUnlock	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource unlocking; graphics-specific	stub-deferred
-NtGdiDeleteObjectApp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiEnumFonts	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiExtCreateRegion	gdi.cpp	gdi32full/win32kbase	3	-	GDI region creation; graphics-specific	stub-deferred
-NtGdiExtGetObjectW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiExtSelectClipRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiExtTextOutW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiFlush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetCharSet	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetDCDword	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetDCObject	gdi.cpp	gdi32full/win32kbase	3	-	GDI DC object; graphics-specific	stub-deferred
-NtGdiGetDCforBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetDIBitsInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetDeviceCaps	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetDeviceCapsAll	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetEntry	gdi.cpp	gdi32full/win32kbase	2	-	GDI internals; tested via graphics initialization	verified
-NtGdiGetGlyphOutline	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetOutlineTextMetricsInternalW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetRandomRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetRealizationInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetTextCharsetInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetTextExtent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetTextFaceW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiGetTextMetricsW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiHfontCreate	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiInit	gdi.cpp	gdi32full/win32kbase	2	-	GDI initialization; tested via graphics subsystem	verified
-NtGdiInit2	gdi.cpp	gdi32full/win32kbase	2	-	GDI initialization v2; tested via graphics subsystem	verified
-NtGdiIntersectClipRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiLineTo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiMoveToEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiOpenDCW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiPatBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiPolyPatBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiQueryFontAssocInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiRectangle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiRemoveFontMemResourceEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiRestoreDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSaveDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSelectBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSelectBrushLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSelectFont	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSelectPenLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSetBrushOrg	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	3	-	GDI layout; graphics-specific	stub-deferred
-NtGdiStretchDIBitsInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	3	-	GDI transparent blit; graphics-specific	stub-deferred
-NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGetContextThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtGetDevicePowerState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGetMUIRegistryInfo	locale.cpp	ntoskrnl	3	-	MUI registry; localization-specific	stub-deferred
-NtGetNextProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGetNextThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtGetNlsSectionPtr	locale.cpp	ntoskrnl	3	-	NLS section; localization-specific	stub-deferred
-NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtGetWriteWatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtImpersonateAnonymousToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtImpersonateClientOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtImpersonateThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtInitializeEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtInitializeNlsFiles	locale.cpp	ntoskrnl	3	-	NLS file initialization; localization-specific	stub-deferred
-NtInitializeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtInitiatePowerAction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtIsProcessInJob	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtIsSystemResumeAutomatic	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtIsUILanguageComitted	locale.cpp	ntoskrnl	3	-	UI language check; localization-specific	stub-deferred
-NtListenPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLoadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLoadEnclaveData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLoadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLoadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLoadKey3	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLoadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLockRegistryKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtLockVirtualMemory	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtMakePermanentObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtMakeTemporaryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtManageHotPatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtManagePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtMapCMFModule	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtMapViewOfSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtMapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtModifyBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtModifyDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtNotifyChangeSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtOpenEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtOpenFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtOpenKeyEx	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	3	-	Open private namespace; advanced feature	stub-deferred
-NtOpenProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtOpenProcessTokenEx	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Locates named semaphore via object manager, returns STATUS_OBJECT_NAME_NOT_FOUND if not found. Runtime tests: Named semaphore open tests pass; multiple opens return same handle.	verified
-NtOpenSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtOpenThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtOpenThreadTokenEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtOpenTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtOpenTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtOpenTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPlugPlayControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPowerInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via power functions	verified
-NtPrePrepareComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPrePrepareEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPrepareComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPrepareEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPrivilegeCheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPropagationComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPropagationFailed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualProtect in section-sample	verified
-NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtQueryAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryBootOptions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryDebugFilterState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryDefaultLocale	locale.cpp	ntoskrnl	3	-	Default locale query; localization-specific	stub-deferred
-NtQueryDefaultUILanguage	locale.cpp	ntoskrnl	3	-	UI language query; localization-specific	stub-deferred
-NtQueryDirectoryFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQueryDirectoryFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtQueryFullAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQueryInformationAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationByName	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQueryInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtQueryInformationToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample	verified
-NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInformationWorkerFactory	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryInstallUILanguage	locale.cpp	ntoskrnl	2	-	Tested indirectly via locale functions	verified
-NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtQueryLicenseValue	license.cpp	ntoskrnl	3	-	License query; policy-specific	stub-deferred
-NtQueryMultipleValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtQueryMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetHandleInformation	verified
-NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQuerySection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample	verified
-NtQuerySecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetSecurityInfo	verified
-NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQuerySemaphore	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQuerySymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQuerySystemEnvironmentValue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQuerySystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via GetSystemInfo, GetTickCount	verified
-NtQuerySystemInformationEx	system.cpp	ntoskrnl	2	-	Tested indirectly via extended queries	verified
-NtQuerySystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualQuery	verified
-NtQueryVolumeInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtQueryWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtQueueApcThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtQueueApcThreadEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtQueueApcThreadEx2	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtRaiseException	exception.cpp	ntoskrnl	2	-	Tested indirectly via exception handling	verified
-NtRaiseHardError	exception.cpp	ntoskrnl	2	-	Tested indirectly via hard error functions	verified
-NtReadFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtReadFileScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReadVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory reads in samples	verified
-NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRecoverEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRecoverResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Increments semaphore count by release_count. Fails with STATUS_SEMAPHORE_LIMIT_EXCEEDED if would exceed maximum. Runtime tests: Release count tracking verified; limit enforcement confirmed.	verified
-NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	3	-	Release worker; thread pool, specialized	stub-deferred
-NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRenameKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRenameTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReplaceKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReplacePartitionUnit	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReplyWaitReceivePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReplyWaitReceivePortEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtReplyWaitReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRequestPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRequestWaitReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtResetEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtResetWriteWatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRestoreKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtResumeProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtResumeThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRollbackComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRollbackEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRollbackRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRollbackTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSaveKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSaveKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSaveMergedKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSecureConnectPort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample	verified
-NtSerializeBoot	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetBootEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetBootOptions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetCachedSigningLevel	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetCachedSigningLevel2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetContextThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtSetDebugFilterState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetDefaultHardErrorPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetDefaultLocale	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtSetEventEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtSetInformationIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtSetInformationObject	object.cpp	ntoskrnl	2	-	Tested indirectly via object info setting	verified
-NtSetInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtSetInformationToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory info setting	verified
-NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Worker factory info; thread pool, specialized	stub-deferred
-NtSetIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtSetIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample	verified
-NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetSecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via SetSecurityInfo	verified
-NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetSystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via system settings	verified
-NtSetSystemPowerState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetSystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtSetTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtSetTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtSetUuidSeed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample	verified
-NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtShutdownSystem	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Shutdown worker factory; thread pool, specialized	stub-deferred
-NtSignalAndWaitForSingleObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSinglePhaseReject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtStartProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtStopProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSubmitIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSuspendProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtSuspendThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtSystemDebugControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtTerminateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtTerminateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtTerminateProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample	verified
-NtTerminateThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtTestAlert	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtThawRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtThawTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtTraceControl	trace.cpp	ntoskrnl	3	-	Trace control; event tracing infrastructure	stub-deferred
-NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtTranslateFilePath	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUnloadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUnloadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUnloadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUnloadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUnlockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via Win32 API	verified
-NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample	verified
-NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserAllowSetForegroundWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserAlterWindowStyle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserBeginPaint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserBitBltSysBmp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserBuildHwndList	user.cpp	win32kbase/win32kfull	3	-	Window list enumeration; GUI-specific, requires window manager	stub-deferred
-NtUserCallHwndParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserCallNoParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserChangeDisplaySettings	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserChangeWindowMessageFilterEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserClearWindowState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserClipCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserCreateAcceleratorTable	user.cpp	win32kbase/win32kfull	3	-	Accelerator table; GUI-specific, requires window system	stub-deferred
-NtUserCreateCaret	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserCreateMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserCreatePopupMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserCreateWindowEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDefSetText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDeleteMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDestroyCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDestroyMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDestroyWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDisableProcessWindowsGhosting	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDispatchMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDisplayConfigGetDeviceInfo	user.cpp	win32kbase/win32kfull	3	-	Display config; GUI graphics subsystem	stub-deferred
-NtUserDrainThreadCoreMessagingCompletions2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDrawIconEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserDrawMenuBar	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserEnableWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserEndPaint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserEnumDisplayDevices	user.cpp	win32kbase/win32kfull	3	-	Display device enumeration; GUI graphics subsystem	stub-deferred
-NtUserEnumDisplayMonitors	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserEnumDisplaySettings	user.cpp	win32kbase/win32kfull	3	-	Display settings enumeration; GUI graphics subsystem	stub-deferred
-NtUserFindExistingCursorIcon	user.cpp	win32kbase/win32kfull	3	-	Cursor icon; GUI-specific	stub-deferred
-NtUserFindWindowEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetAncestor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetAsyncKeyState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetAtomName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetCPD	user.cpp	win32kbase/win32kfull	3	-	Client process data; GUI subsystem	stub-deferred
-NtUserGetClassInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetClassName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetClientRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetControlBrush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetCursorFrameInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetCursorPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetDCEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetDisplayConfigBufferSizes	user.cpp	win32kbase/win32kfull	3	-	Display config buffers; GUI graphics	stub-deferred
-NtUserGetDpiForCurrentProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetForegroundWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetHDevName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetIconSize	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetKeyState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetKeyboardLayout	locale.cpp	ntoskrnl	2	-	Tested indirectly via keyboard functions in user.cpp	verified
-NtUserGetKeyboardType	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetOemBitmapSize	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetProcessUIContextInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetProcessWindowStation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetQueueStatus	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetQueueStatusReadonly	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetRawInputData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetRawInputDeviceList	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetSystemMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetThreadDesktop	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetWindowDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserGetWindowPlacement	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserInitThreadCoreMessagingIocp2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserInitializeClientPfnArrays	user.cpp	win32kbase/win32kfull	3	-	Client function arrays; GUI initialization	stub-deferred
-NtUserInvalidateRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserIsTouchWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserKillTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserMapDesktopObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserMapVirtualKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserMessageBeep	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserMessageCall	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserModifyUserStartupInfoFlags	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserMoveWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserMsgWaitForMultipleObjectsEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserPeekMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserPostMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserPostQuitMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserPostThreadMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserProcessConnect	user.cpp	win32kbase/win32kfull	3	-	Process connection; GUI session management	stub-deferred
-NtUserQueryDisplayConfig	user.cpp	win32kbase/win32kfull	3	-	Query display config; GUI graphics subsystem	stub-deferred
-NtUserRedrawWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserRegisterClassExWOW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserRegisterRawInputDevices	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserRegisterWindowMessage	user.cpp	win32kbase/win32kfull	3	-	Register window message; GUI-specific	stub-deferred
-NtUserReleaseCapture	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserReleaseDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserRemoteConnectState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserRemoveMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserScheduleDispatchNotification	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetActiveWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetCapture	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetCursor	user.cpp	win32kbase/win32kfull	3	-	Set cursor; GUI rendering subsystem	stub-deferred
-NtUserSetCursorPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetDialogPointer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetDialogSystemMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetFocus	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetForegroundWindow	user.cpp	win32kbase/win32kfull	3	-	Set foreground window; GUI window manager	stub-deferred
-NtUserSetMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetMsgBox	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetProcessDpiAwarenessContext	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetProp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetProp2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowCompositionAttribute	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowFNID	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowLong	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowLongPtr	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSetWindowsHookEx	user.cpp	win32kbase/win32kfull	3	-	Set Windows hook; GUI hook system	stub-deferred
-NtUserShowCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserShowWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserSystemParametersInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserThunkedMenuItemInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserToUnicodeEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserTraceLoggingSendMixedModeTelemetry	user.cpp	win32kbase/win32kfull	3	-	Telemetry; GUI diagnostics	stub-deferred
-NtUserTrackMouseEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserTransformPoint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserTransformRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserTranslateMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserUnhookWindowsHookEx	user.cpp	win32kbase/full	3	-	Unhook Windows hook; GUI hook system	stub-deferreduser.cpp
-NtUserUnregisterClass	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserUpdateWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserValidateRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserValidateTimerCallback	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtUserWaitMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtWaitForKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample	verified
-NtWaitForMultipleObjects	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample	verified
-NtWaitForMultipleObjects32	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample	verified
-NtWaitForSingleObject	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForSingleObject in sync-sample	verified
-NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Wait for work; thread pool, specialized	stub-deferred
-NtWaitLowEventPair	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl	3	-	Worker factory ready; thread pool, specialized infrastructure	stub-deferred
-NtWriteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	verified
-NtWriteFileGather	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtWriteRequestData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory writes in samples	verified
-NtYieldExecution	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample	verified
-NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
-NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	verified
+# nt_name	owning_file	idb_module	tier	sample_subtest	evidence	decompile_addr	status
+NtAcceptConnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheckAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheckByType	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheckByTypeAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheckByTypeResultList	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheckByTypeResultListAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheckByTypeResultListAndAuditAlarmByHandle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAcquireCrossVmMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAcquireProcessActivityReference	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAddAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAddAtomEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAddBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAddDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAdjustGroupsToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAdjustPrivilegesToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
+NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlertResumeThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlertThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlertThreadByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAllocateReserveObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAllocateUuids	system.cpp	ntoskrnl	2	-	Tested indirectly via GUID/UUID functions		unverified
+NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualAlloc in section-sample		unverified
+NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualAlloc in section-sample		unverified
+NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcConnectPort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtAlpcConnectPortEx	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtAlpcCreatePort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtAlpcCreatePortSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcCreateResourceReserve	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcCreateSectionView	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcCreateSecurityContext	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtAlpcDeletePortSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcDeleteResourceReserve	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcDeleteSectionView	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcDeleteSecurityContext	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtAlpcDisconnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcImpersonateClientContainerOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcImpersonateClientOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcOpenSenderProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcOpenSenderThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcQueryInformation	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtAlpcQueryInformationMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAlpcSendWaitReceivePort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtAlpcSetInformation	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtApphelpCacheControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAreMappedFilesTheSame	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtCallEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCallbackReturn	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtCancelIoFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCancelIoFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCancelTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtChangeProcessState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtChangeThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtClearEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtClose	object.cpp	ntoskrnl	2	-	Tested indirectly via CloseHandle in all samples		unverified
+NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCommitComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCommitEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCommitTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCompactKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCompareObjects	object.cpp	ntoskrnl	2	-	Tested indirectly via object comparison		unverified
+NtCompareSigningLevels	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCompareTokens	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCompressKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtConnectPort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtContinue	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtContinueEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCopyFileChunk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateCrossVmEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateCrossVmMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCreateIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtCreateIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateMailslotFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateNamedPipeFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCreatePagingFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreatePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreatePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreatePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Private namespace; advanced feature		unverified
+NtCreateProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateProcessEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateProcessStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateProfileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtCreateSectionEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract (0x14083A400): Validates Limit>0 and 0<=InitialCount<=Limit; returns STATUS_INVALID_PARAMETER (0xC000000D) if invalid. Initializes semaphore via KeInitializeSemaphore. Runtime tests: NtCreateSemaphore tests pass with initial_count validation.	0x14083A400	verified
+NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateThreadEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateTokenEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateUserProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtCreateWaitablePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Worker factory; thread pool, specialized		unverified
+NtDebugActiveProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDebugContinue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDelayExecution	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtDeleteAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeleteBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeleteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Delete private namespace; advanced feature		unverified
+NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDisplayString	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDrawText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDuplicateObject	object.cpp	ntoskrnl	2	-	Tested indirectly via DuplicateHandle		unverified
+NtDuplicateToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
+NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase	3	-	GPU display adapter enumeration; requires active GPU/Vulkan		unverified
+NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase	3	-	GPU properties query; graphics-specific		unverified
+NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase	3	-	GPU feature detection; graphics-specific		unverified
+NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtEnumerateKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtEnumerateValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtExtendSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFilterBootOption	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFilterToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFindAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFlushBuffersFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtFlushBuffersFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFlushInstructionCache	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtFlushKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via Win32 API usage		unverified
+NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualFree		unverified
+NtFreezeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFreezeTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFsControlFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtGdiAddFontMemResourceEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiBitBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiComputeXformCoefficients	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreateBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreateCompatibleBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreateCompatibleDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreateDIBitmapInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreatePatternBrushInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreatePen	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreateRectRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiCreateSolidBrush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiDdDDICacheHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	GPU DDI DirectDraw hybrid query; graphics-specific		unverified
+NtGdiDdDDICloseAdapter	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter management; graphics-specific		unverified
+NtGdiDdDDICreateAllocation	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory allocation; graphics-specific		unverified
+NtGdiDdDDICreateContext	gdi.cpp	gdi32full/win32kbase	3	-	GPU context creation; graphics-specific		unverified
+NtGdiDdDDICreateDevice	gdi.cpp	gdi32full/win32kbase	3	-	GPU device creation; graphics-specific		unverified
+NtGdiDdDDIDestroyAllocation	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory deallocation; graphics-specific		unverified
+NtGdiDdDDIDestroyAllocation2	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory deallocation v2; graphics-specific		unverified
+NtGdiDdDDIDestroyContext	gdi.cpp	gdi32full/win32kbase	3	-	GPU context destruction; graphics-specific		unverified
+NtGdiDdDDIDestroyDevice	gdi.cpp	gdi32full/win32kbase	3	-	GPU device destruction; graphics-specific		unverified
+NtGdiDdDDIEnumAdapters2	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter enumeration v2; graphics-specific		unverified
+NtGdiDdDDIEscape	gdi.cpp	gdi32full/win32kbase	3	-	GPU escape code; graphics-specific		unverified
+NtGdiDdDDIGetCachedHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	GPU hybrid query cache; graphics-specific		unverified
+NtGdiDdDDIGetDeviceState	gdi.cpp	gdi32full/win32kbase	3	-	GPU device state query; graphics-specific		unverified
+NtGdiDdDDIGetDisplayModeList	gdi.cpp	gdi32full/win32kbase	3	-	GPU display mode enumeration; graphics-specific		unverified
+NtGdiDdDDIGetSharedPrimaryHandle	gdi.cpp	gdi32full/win32kbase	3	-	GPU shared primary; graphics-specific		unverified
+NtGdiDdDDILock	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource locking; graphics-specific		unverified
+NtGdiDdDDIMarkDeviceAsError	gdi.cpp	gdi32full/win32kbase	3	-	GPU error marking; graphics-specific		unverified
+NtGdiDdDDIOpenAdapterFromHdc	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter from HDC; graphics-specific		unverified
+NtGdiDdDDIOpenResource	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource opening; graphics-specific		unverified
+NtGdiDdDDIQueryAdapterInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter info query; graphics-specific		unverified
+NtGdiDdDDIQueryResourceInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource info; graphics-specific		unverified
+NtGdiDdDDIUnlock	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource unlocking; graphics-specific		unverified
+NtGdiDeleteObjectApp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiEnumFonts	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiExtCreateRegion	gdi.cpp	gdi32full/win32kbase	3	-	GDI region creation; graphics-specific		unverified
+NtGdiExtGetObjectW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiExtSelectClipRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiExtTextOutW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiFlush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetCharSet	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetDCDword	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetDCObject	gdi.cpp	gdi32full/win32kbase	3	-	GDI DC object; graphics-specific		unverified
+NtGdiGetDCforBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetDIBitsInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetDeviceCaps	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetDeviceCapsAll	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetEntry	gdi.cpp	gdi32full	2	-	IDB gdi32full: 0x180036B90	0x180036B90	unverified
+NtGdiGetGlyphOutline	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetOutlineTextMetricsInternalW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetRandomRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetRealizationInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetTextCharsetInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetTextExtent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetTextFaceW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiGetTextMetricsW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiHfontCreate	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiInit	gdi.cpp	gdi32full	2	-	IDB gdi32full: 0x180036EC0	0x180036EC0	unverified
+NtGdiInit2	gdi.cpp	win32kbase	2	-	IDB win32kbase: 0x1400709D0	0x1400709D0	unverified
+NtGdiIntersectClipRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiLineTo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiMoveToEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiOpenDCW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiPatBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiPolyPatBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiQueryFontAssocInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiRectangle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiRemoveFontMemResourceEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiRestoreDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSaveDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSelectBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSelectBrushLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSelectFont	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSelectPenLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSetBrushOrg	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	3	-	GDI layout; graphics-specific		unverified
+NtGdiStretchDIBitsInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	3	-	GDI transparent blit; graphics-specific		unverified
+NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetContextThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtGetDevicePowerState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetMUIRegistryInfo	locale.cpp	ntoskrnl	3	-	MUI registry; localization-specific		unverified
+NtGetNextProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetNextThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtGetNlsSectionPtr	locale.cpp	ntoskrnl	3	-	NLS section; localization-specific		unverified
+NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetWriteWatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtImpersonateAnonymousToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtImpersonateClientOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtImpersonateThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtInitializeEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtInitializeNlsFiles	locale.cpp	ntoskrnl	3	-	NLS file initialization; localization-specific		unverified
+NtInitializeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtInitiatePowerAction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtIsProcessInJob	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtIsSystemResumeAutomatic	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtIsUILanguageComitted	locale.cpp	ntoskrnl	3	-	UI language check; localization-specific		unverified
+NtListenPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadEnclaveData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadKey3	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLockRegistryKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLockVirtualMemory	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMakePermanentObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMakeTemporaryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtManageHotPatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtManagePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMapCMFModule	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMapViewOfSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtMapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtModifyBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtModifyDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtNotifyChangeSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtOpenEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtOpenKeyEx	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	3	-	Open private namespace; advanced feature		unverified
+NtOpenProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtOpenProcessTokenEx	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Locates named semaphore via object manager, returns STATUS_OBJECT_NAME_NOT_FOUND if not found. Runtime tests: Named semaphore open tests pass; multiple opens return same handle.	0x140A13890	verified
+NtOpenSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtOpenThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtOpenThreadTokenEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtOpenTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPlugPlayControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPowerInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via power functions		unverified
+NtPrePrepareComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPrePrepareEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPrepareComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPrepareEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPrivilegeCheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPropagationComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPropagationFailed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualProtect in section-sample		unverified
+NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtQueryAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryBootOptions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryDebugFilterState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryDefaultLocale	locale.cpp	ntoskrnl	3	-	Default locale query; localization-specific		unverified
+NtQueryDefaultUILanguage	locale.cpp	ntoskrnl	3	-	UI language query; localization-specific		unverified
+NtQueryDirectoryFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryDirectoryFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtQueryFullAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryInformationAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationByName	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtQueryInformationToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
+NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationWorkerFactory	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInstallUILanguage	locale.cpp	ntoskrnl	2	-	Tested indirectly via locale functions		unverified
+NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtQueryLicenseValue	license.cpp	ntoskrnl	3	-	License query; policy-specific		unverified
+NtQueryMultipleValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtQueryMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetHandleInformation		unverified
+NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQuerySection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
+NtQuerySecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetSecurityInfo		unverified
+NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQuerySemaphore	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQuerySymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQuerySystemEnvironmentValue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQuerySystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via GetSystemInfo, GetTickCount		unverified
+NtQuerySystemInformationEx	system.cpp	ntoskrnl	2	-	Tested indirectly via extended queries		unverified
+NtQuerySystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualQuery		unverified
+NtQueryVolumeInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueueApcThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtQueueApcThreadEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtQueueApcThreadEx2	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtRaiseException	exception.cpp	ntoskrnl	2	-	Tested indirectly via exception handling		unverified
+NtRaiseHardError	exception.cpp	ntoskrnl	2	-	Tested indirectly via hard error functions		unverified
+NtReadFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtReadFileScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReadVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory reads in samples		unverified
+NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRecoverEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRecoverResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Increments semaphore count by release_count. Fails with STATUS_SEMAPHORE_LIMIT_EXCEEDED if would exceed maximum. Runtime tests: Release count tracking verified; limit enforcement confirmed.	0x1409A4840	verified
+NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	3	-	Release worker; thread pool, specialized		unverified
+NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRenameKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRenameTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReplaceKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReplacePartitionUnit	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReplyWaitReceivePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReplyWaitReceivePortEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReplyWaitReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRequestPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRequestWaitReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtResetEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtResetWriteWatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRestoreKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtResumeProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtResumeThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRollbackComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRollbackEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRollbackRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRollbackTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSaveKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSaveKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSaveMergedKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSecureConnectPort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
+NtSerializeBoot	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetBootEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetBootOptions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetCachedSigningLevel	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetCachedSigningLevel2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetContextThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtSetDebugFilterState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetDefaultHardErrorPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetDefaultLocale	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetEventEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtSetInformationIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtSetInformationObject	object.cpp	ntoskrnl	2	-	Tested indirectly via object info setting		unverified
+NtSetInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtSetInformationToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory info setting		unverified
+NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Worker factory info; thread pool, specialized		unverified
+NtSetIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtSetIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetSecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via SetSecurityInfo		unverified
+NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetSystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via system settings		unverified
+NtSetSystemPowerState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetSystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtSetTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetUuidSeed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtShutdownSystem	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Shutdown worker factory; thread pool, specialized		unverified
+NtSignalAndWaitForSingleObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSinglePhaseReject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtStartProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtStopProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSubmitIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSuspendProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSuspendThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtSystemDebugControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtTerminateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtTerminateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtTerminateProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtTerminateThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtTestAlert	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtThawRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtThawTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtTraceControl	trace.cpp	ntoskrnl	3	-	Trace control; event tracing infrastructure		unverified
+NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtTranslateFilePath	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnloadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnloadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnloadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnloadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnlockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via Win32 API		unverified
+NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserAllowSetForegroundWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserAlterWindowStyle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserBeginPaint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserBitBltSysBmp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserBuildHwndList	user.cpp	win32kbase/win32kfull	3	-	Window list enumeration; GUI-specific, requires window manager		unverified
+NtUserCallHwndParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserCallNoParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserChangeDisplaySettings	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserChangeWindowMessageFilterEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserClearWindowState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserClipCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserCreateAcceleratorTable	user.cpp	win32kbase/win32kfull	3	-	Accelerator table; GUI-specific, requires window system		unverified
+NtUserCreateCaret	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserCreateMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserCreatePopupMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserCreateWindowEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDefSetText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDeleteMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDestroyCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDestroyMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDestroyWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDisableProcessWindowsGhosting	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDispatchMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDisplayConfigGetDeviceInfo	user.cpp	win32kbase/win32kfull	3	-	Display config; GUI graphics subsystem		unverified
+NtUserDrainThreadCoreMessagingCompletions2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDrawIconEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserDrawMenuBar	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserEnableWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserEndPaint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserEnumDisplayDevices	user.cpp	win32kbase/win32kfull	3	-	Display device enumeration; GUI graphics subsystem		unverified
+NtUserEnumDisplayMonitors	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserEnumDisplaySettings	user.cpp	win32kbase/win32kfull	3	-	Display settings enumeration; GUI graphics subsystem		unverified
+NtUserFindExistingCursorIcon	user.cpp	win32kbase/win32kfull	3	-	Cursor icon; GUI-specific		unverified
+NtUserFindWindowEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetAncestor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetAsyncKeyState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetAtomName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetCPD	user.cpp	win32kbase/win32kfull	3	-	Client process data; GUI subsystem		unverified
+NtUserGetClassInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetClassName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetClientRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetControlBrush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetCursorFrameInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetCursorPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetDCEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetDisplayConfigBufferSizes	user.cpp	win32kbase/win32kfull	3	-	Display config buffers; GUI graphics		unverified
+NtUserGetDpiForCurrentProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetForegroundWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetHDevName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetIconSize	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetKeyState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetKeyboardLayout	locale.cpp	ntoskrnl	2	-	Tested indirectly via keyboard functions in user.cpp		unverified
+NtUserGetKeyboardType	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetOemBitmapSize	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetProcessUIContextInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetProcessWindowStation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetQueueStatus	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetQueueStatusReadonly	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetRawInputData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetRawInputDeviceList	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetSystemMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetThreadDesktop	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetWindowDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetWindowPlacement	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserInitThreadCoreMessagingIocp2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserInitializeClientPfnArrays	user.cpp	win32kbase/win32kfull	3	-	Client function arrays; GUI initialization		unverified
+NtUserInvalidateRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserIsTouchWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserKillTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserMapDesktopObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserMapVirtualKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserMessageBeep	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserMessageCall	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserModifyUserStartupInfoFlags	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserMoveWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserMsgWaitForMultipleObjectsEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserPeekMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserPostMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserPostQuitMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserPostThreadMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserProcessConnect	user.cpp	win32kbase/win32kfull	3	-	Process connection; GUI session management		unverified
+NtUserQueryDisplayConfig	user.cpp	win32kbase/win32kfull	3	-	Query display config; GUI graphics subsystem		unverified
+NtUserRedrawWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserRegisterClassExWOW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserRegisterRawInputDevices	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserRegisterWindowMessage	user.cpp	win32kbase/win32kfull	3	-	Register window message; GUI-specific		unverified
+NtUserReleaseCapture	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserReleaseDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserRemoteConnectState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserRemoveMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserScheduleDispatchNotification	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetActiveWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetCapture	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetCursor	user.cpp	win32kbase/win32kfull	3	-	Set cursor; GUI rendering subsystem		unverified
+NtUserSetCursorPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetDialogPointer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetDialogSystemMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetFocus	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetForegroundWindow	user.cpp	win32kbase/win32kfull	3	-	Set foreground window; GUI window manager		unverified
+NtUserSetMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetMsgBox	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetProcessDpiAwarenessContext	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetProp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetProp2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowCompositionAttribute	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowFNID	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowLong	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowLongPtr	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSetWindowsHookEx	user.cpp	win32kbase/win32kfull	3	-	Set Windows hook; GUI hook system		unverified
+NtUserShowCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserShowWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserSystemParametersInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserThunkedMenuItemInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserToUnicodeEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserTraceLoggingSendMixedModeTelemetry	user.cpp	win32kbase/win32kfull	3	-	Telemetry; GUI diagnostics		unverified
+NtUserTrackMouseEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserTransformPoint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserTransformRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserTranslateMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserUnhookWindowsHookEx	user.cpp	win32kbase/full	3	-	Unhook Windows hook; GUI hook system		unverified
+NtUserUnregisterClass	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserUpdateWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserValidateRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserValidateTimerCallback	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserWaitMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtWaitForKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtWaitForMultipleObjects	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample		unverified
+NtWaitForMultipleObjects32	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample		unverified
+NtWaitForSingleObject	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForSingleObject in sync-sample		unverified
+NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Wait for work; thread pool, specialized		unverified
+NtWaitLowEventPair	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl	3	-	Worker factory ready; thread pool, specialized infrastructure		unverified
+NtWriteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtWriteFileGather	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtWriteRequestData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory writes in samples		unverified
+NtYieldExecution	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified

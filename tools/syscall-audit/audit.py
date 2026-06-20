@@ -133,17 +133,33 @@ def load_ledger(ledger_path: Path) -> dict[str, dict]:
             if not line or line.startswith('#'):
                 continue
             parts = line.split('\t')
+            # Support both old (7 columns) and new (8 columns with decompile_addr) formats
             if len(parts) >= 7:
                 nt_name = parts[0]
-                rows[nt_name] = {
-                    'nt_name': parts[0],
-                    'owning_file': parts[1],
-                    'idb_module': parts[2],
-                    'tier': parts[3],
-                    'sample_subtest': parts[4],
-                    'evidence': parts[5],
-                    'status': parts[6],
-                }
+                if len(parts) >= 8:
+                    # New format with decompile_addr
+                    rows[nt_name] = {
+                        'nt_name': parts[0],
+                        'owning_file': parts[1],
+                        'idb_module': parts[2],
+                        'tier': parts[3],
+                        'sample_subtest': parts[4],
+                        'evidence': parts[5],
+                        'decompile_addr': parts[6],
+                        'status': parts[7],
+                    }
+                else:
+                    # Old format without decompile_addr
+                    rows[nt_name] = {
+                        'nt_name': parts[0],
+                        'owning_file': parts[1],
+                        'idb_module': parts[2],
+                        'tier': parts[3],
+                        'sample_subtest': parts[4],
+                        'evidence': parts[5],
+                        'decompile_addr': '',
+                        'status': parts[6],
+                    }
     return rows
 
 
@@ -171,7 +187,7 @@ def main():
         ledger_path = Path(args.init_ledger)
         print(f"Initializing ledger at {ledger_path} …", file=sys.stderr)
         with open(ledger_path, 'w') as f:
-            f.write("# nt_name\towning_file\tidb_module\ttier\tsample_subtest\tevidence\tstatus\n")
+            f.write("# nt_name\towning_file\tidb_module\ttier\tsample_subtest\tevidence\tdecompile_addr\tstatus\n")
             for nt_name in sorted(registered_set):
                 owning_file = registered[nt_name]
                 is_stub = nt_name in stubs
@@ -179,6 +195,7 @@ def main():
                 tier = ""
                 sample_subtest = "-"
                 evidence = ""
+                decompile_addr = ""  # Empty until decompiled
                 idb_module = ""  # Will be filled in during verification
 
                 # Guess IDB module based on owning file
@@ -191,7 +208,7 @@ def main():
                 else:
                     idb_module = "ntoskrnl"
 
-                f.write(f"{nt_name}\t{owning_file}\t{idb_module}\t{tier}\t{sample_subtest}\t{evidence}\t{status}\n")
+                f.write(f"{nt_name}\t{owning_file}\t{idb_module}\t{tier}\t{sample_subtest}\t{evidence}\t{decompile_addr}\t{status}\n")
         print(f"Created {ledger_path} with {len(registered_set)} entries", file=sys.stderr)
         return
 
@@ -222,6 +239,17 @@ def main():
             print(f"ERROR: Orphan handlers (registered but not in ledger): {sorted(orphans)}", file=sys.stderr)
         if stale:
             print(f"ERROR: Stale ledger rows (no longer registered): {sorted(stale)}", file=sys.stderr)
+
+        # Check for verified/deferred rows missing decompile_addr
+        missing_addr = []
+        for name, row in ledger.items():
+            status = row.get('status', '')
+            addr = row.get('decompile_addr', '')
+            if status in ('verified', 'stub-deferred') and not addr:
+                missing_addr.append(f"{name} ({status})")
+
+        if missing_addr:
+            print(f"ERROR: Verified/deferred handlers missing decompile_addr: {sorted(missing_addr)}", file=sys.stderr)
 
         # Count verification status
         verified_count = sum(1 for r in ledger.values() if r['status'] == 'verified')
