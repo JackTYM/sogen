@@ -67,6 +67,9 @@ _ASSERT_TOKENS = re.compile(r'\bNT_SUCCESS\b|\bSTATUS_|==|!=|\bmemcmp\b|\bassert
 # Each entry: (nt_name, reason_why_no_test_possible)
 STARTUP_ALLOWLIST: dict[str, str] = {
     # Add entries like:  "NtContinue": "invoked by kernel exception dispatch, not directly testable"
+    "NtOpenDirectoryObject": "invoked during DLL loader KnownDlls resolution at process startup; no dedicated user-visible test entry point",
+    "NtOpenSymbolicLinkObject": "invoked during DLL loader KnownDllPath symlink resolution at startup; not directly callable from a sample test",
+    "NtQuerySymbolicLinkObject": "invoked during DLL loader KnownDllPath→System32 resolution at startup; not directly callable from a sample test",
 }
 
 
