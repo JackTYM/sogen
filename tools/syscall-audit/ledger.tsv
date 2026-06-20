@@ -415,8 +415,8 @@ NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pi
 NtQueueApcThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtQueueApcThreadEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtQueueApcThreadEx2	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtRaiseException	exception.cpp	ntoskrnl	2	-	Tested indirectly via exception handling		unverified
-NtRaiseHardError	exception.cpp	ntoskrnl	2	-	Tested indirectly via hard error functions		unverified
+NtRaiseException	exception.cpp	ntoskrnl	2	misc-ops-sample	IDB: 0x1406A9020 — Kernel handler verified	0x1406A9020	verified
+NtRaiseHardError	exception.cpp	ntoskrnl	2	misc-ops-sample	IDB: 0x140A47BA0 — Kernel handler verified	0x140A47BA0	verified
 NtReadFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtReadFileScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
