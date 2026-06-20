@@ -16,6 +16,8 @@ typedef struct _EVENT_BASIC_INFORMATION
 
 extern "C" NTSTATUS NTAPI NtQueryEvent(HANDLE EventHandle, EVENT_INFORMATION_CLASS EventInformationClass,
                                        PVOID EventInformation, ULONG EventInformationLength, PULONG ReturnLength);
+extern "C" NTSTATUS NTAPI NtWaitForMultipleObjects(ULONG Count, HANDLE* Handles, UINT WaitType, BOOLEAN Alertable,
+                                                   PLARGE_INTEGER Timeout);
 
 namespace
 {
@@ -252,6 +254,15 @@ namespace
         CloseHandle(timer);
         return res == WAIT_OBJECT_0;
     }
+
+    bool test_wait_count_validation()
+    {
+        // Kernel: if ( (count - 1) > 0x3F ) return STATUS_INVALID_PARAMETER_1
+        // count=0 must be rejected (0 - 1 = 0xFFFFFFFF > 0x3F)
+        LARGE_INTEGER zero_timeout{};
+        NTSTATUS st = NtWaitForMultipleObjects(0, nullptr, 0 /*WaitAll*/, FALSE, &zero_timeout);
+        return st != STATUS_SUCCESS; // Must fail
+    }
 }
 
 int main()
@@ -269,5 +280,6 @@ int main()
     ok &= report("Semaphore named", test_semaphore_named());
     ok &= report("WaitForMultipleObjects", test_wait_multiple());
     ok &= report("Waitable timer", test_waitable_timer());
+    ok &= report("Wait count zero rejected", test_wait_count_validation());
     return ok ? 0 : 1;
 }

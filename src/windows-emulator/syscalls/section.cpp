@@ -617,14 +617,19 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUnmapViewOfSectionEx(const syscall_context& c, const handle process_handle, const uint64_t base_address,
-                                               const ULONG /*flags*/)
+                                               const ULONG flags)
         {
+            // Kernel: if ( (flags & 0xFFFFFFFC) != 0 ) return STATUS_INVALID_PARAMETER_3
+            if ((flags & 0xFFFFFFFC) != 0)
+            {
+                return STATUS_INVALID_PARAMETER_3;
+            }
             return handle_NtUnmapViewOfSection(c, process_handle, base_address);
         }
 
-        NTSTATUS handle_NtAreMappedFilesTheSame()
+        NTSTATUS handle_NtAreMappedFilesTheSame(const syscall_context& /*c*/, uint64_t /*file1_address*/, uint64_t /*file2_address*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_NOT_SAME_OBJECT;
         }
 
         NTSTATUS handle_NtQuerySection(const syscall_context& c, const handle section_handle,

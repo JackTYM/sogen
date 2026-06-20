@@ -163,6 +163,8 @@ namespace sogen
                 return u"Directory";
             case handle_types::process:
                 return u"Process";
+            case handle_types::keyed_event:
+                return u"KeyedEvent";
             default:
                 return u"";
             }
@@ -604,16 +606,16 @@ namespace sogen
                                                  const WAIT_TYPE wait_type, const BOOLEAN alertable,
                                                  const emulator_object<LARGE_INTEGER> timeout)
         {
-            if (wait_type != WaitAny && wait_type != WaitAll)
-            {
-                c.win_emu.log.error("Wait type not supported!\n");
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
-            }
-
+            // Kernel: if ( (unsigned int)(count - 1) > 0x3F ) return STATUS_INVALID_PARAMETER_1
             if (count == 0 || count > 64) // MAXIMUM_WAIT_OBJECTS
             {
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_INVALID_PARAMETER_1;
+            }
+
+            // Kernel: if ( wait_type > 1 ) return STATUS_INVALID_PARAMETER_3
+            if (wait_type != WaitAny && wait_type != WaitAll)
+            {
+                return STATUS_INVALID_PARAMETER_3;
             }
 
             auto& t = c.win_emu.current_thread();
@@ -663,16 +665,16 @@ namespace sogen
                                                    const WAIT_TYPE wait_type, const BOOLEAN alertable,
                                                    const emulator_object<LARGE_INTEGER> timeout)
         {
-            if (wait_type != WaitAny && wait_type != WaitAll)
-            {
-                c.win_emu.log.error("Wait type not supported!\n");
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
-            }
-
+            // Kernel: if ( (unsigned int)(count - 1) > 0x3F ) return STATUS_INVALID_PARAMETER_1
             if (count == 0 || count > 64) // MAXIMUM_WAIT_OBJECTS
             {
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_INVALID_PARAMETER_1;
+            }
+
+            // Kernel: if ( wait_type > 1 ) return STATUS_INVALID_PARAMETER_3
+            if (wait_type != WaitAny && wait_type != WaitAll)
+            {
+                return STATUS_INVALID_PARAMETER_3;
             }
 
             auto& t = c.win_emu.current_thread();
@@ -743,9 +745,10 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetInformationObject()
+        NTSTATUS handle_NtSetInformationObject(const syscall_context& /*c*/, handle /*handle*/, uint32_t /*object_info_class*/,
+                                               uint64_t /*object_information*/, ULONG /*object_information_length*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, const handle /*h*/, const SECURITY_INFORMATION security_information,
@@ -860,7 +863,8 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetSecurityObject()
+        NTSTATUS handle_NtSetSecurityObject(const syscall_context& /*c*/, handle /*object_handle*/,
+                                            SECURITY_INFORMATION /*security_information*/, uint64_t /*security_descriptor*/)
         {
             return STATUS_SUCCESS;
         }

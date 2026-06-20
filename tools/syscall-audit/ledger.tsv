@@ -25,8 +25,8 @@ NtAllocateReserveObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAllocateUuids	system.cpp	ntoskrnl	1	-			unverified
-NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	-			unverified
-NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	1	-			unverified
+NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel NtAllocateVirtualMemory calls MiAllocateVirtualMemoryPrepare then MiAllocateVirtualMemory. Sogen delegates to handle_NtAllocateVirtualMemoryEx mirroring the delegation chain. [xref:MiAllocateVirtualMemory] [MATCH]	0x1409160C0	verified
+NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel: thin wrapper → MmAllocateVirtualMemory(a1...). Sogen implements full MEM_RESET/MEM_RESERVE/MEM_COMMIT logic. [xref:MmAllocateVirtualMemory] [MATCH]	0x1409E50B0	verified
 NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAlpcConnectPort	port.cpp	ntoskrnl	1	-			unverified
@@ -51,7 +51,7 @@ NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAlpcSendWaitReceivePort	port.cpp	ntoskrnl	1	-			unverified
 NtAlpcSetInformation	port.cpp	ntoskrnl	1	-			unverified
 NtApphelpCacheControl	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAreMappedFilesTheSame	section.cpp	ntoskrnl	1	-			unverified
+NtAreMappedFilesTheSame	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: resolves VADs for both addresses, returns 0xC0000040 (STATUS_CONFLICTING_ADDRESSES) if unmapped, 0 if same VAD root, 0xC00001AC (STATUS_NOT_SAME_OBJECT) otherwise. Sogen stubs STATUS_NOT_SAME_OBJECT (VAD tracking not emulated). [xref:MiVadIsMetadataBitmap] [MATCH]	0x1408D98F0	verified
 NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	-			unverified
 NtCallEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -65,14 +65,14 @@ NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	-			unverified
 NtChangeProcessState	syscalls.cpp	ntoskrnl	1	-			unverified
 NtChangeThreadState	syscalls.cpp	ntoskrnl	1	-			unverified
 NtClearEvent	event.cpp	ntoskrnl	2	sync-sample:Event reset	Kernel: ObReferenceObjectByHandle(Handle,2u,ExEventObjectType,...) then KeResetEvent. Sogen clears e->signaled=false, matching reset semantics. [xref:KeResetEvent] [MATCH]	0x14099DF30	verified
-NtClose	object.cpp	ntoskrnl	2	-			unverified
+NtClose	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel validates handle via ExpLookupHandleTableEntry, then ObCloseHandleTableEntry. Sogen uses typed handle store erase; handle check matches. [xref:ExpLookupHandleTableEntry] [MATCH]	0x140846A00	verified
 NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCommitComplete	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCommitEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCommitTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCompactKeys	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCompareObjects	object.cpp	ntoskrnl	1	-			unverified
+NtCompareObjects	object.cpp	ntoskrnl	2	section-sample:DuplicateHandle object	Kernel: ObReferenceObjectByHandle x2, returns 0xC00001AC (STATUS_NOT_SAME_OBJECT) if v7!=Object. Sogen compares resolved handles and returns STATUS_NOT_SAME_OBJECT. [xref:v7 != Object ? 0xC00001AC : 0] [MATCH]	0x140A24A30	verified
 NtCompareSigningLevels	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCompareTokens	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCompressKey	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -114,7 +114,7 @@ NtCreateProfile	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateProfileEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateSection	section.cpp	ntoskrnl	2	-			unverified
+NtCreateSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: validates AllocationAttributes&0x7F==0, then MiCreateSectionCommon. Sogen creates section entry with file+name+size. Core object-creation contract matches. [xref:MiCreateSectionCommon] [MATCH]	0x140975E00	verified
 NtCreateSectionEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore create validation	Kernel validates Limit<=0||a4<0||a4>Limit (artifact line 15: if ( Limit <= 0 || a4 < 0 || a4 > Limit )); calls KeInitializeSemaphore(v20,a4,Limit) on success (line 125). [xref:Limit <= 0 || a4 < 0 || a4 > Limit] [FIXED:semaphore.cpp:75] params changed ULONG→LONG, added initial_count<0 check	0x14083A400	verified
 NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -149,7 +149,7 @@ NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	3	-			unverified
 NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDisplayString	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDrawText	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDuplicateObject	object.cpp	ntoskrnl	2	-			unverified
+NtDuplicateObject	object.cpp	ntoskrnl	2	section-sample:DuplicateHandle object	Kernel: ObReferenceObjectByHandle on source, ObDuplicateObject to target. Sogen handles same-process case via store.duplicate(); cross-process returns STATUS_NOT_SUPPORTED. [xref:ObfDereferenceObject] [MATCH]	0x14083BDD0	verified
 NtDuplicateToken	token.cpp	ntoskrnl	1	-			unverified
 NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
 NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
@@ -171,9 +171,9 @@ NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	1	-			unverified
 NtFlushInstructionCache	process.cpp	ntoskrnl	3	-			unverified
 NtFlushKey	syscalls.cpp	ntoskrnl	2	-			unverified
 NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	1	-			unverified
-NtFlushVirtualMemory	memory.cpp	ntoskrnl	1	-			unverified
+NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel validates base+size bounds, then calls MmFlushVirtualMemory. Sogen validates address/size and writes IO_STATUS_BLOCK with aligned range. [xref:v11 + v13 < v11] [MATCH]	0x1409CB3B0	verified
 NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
-NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	-			unverified
+NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel thin wrapper → MmFreeVirtualMemory; validates BaseAddress/RegionSize pointer ranges. Sogen validates free_type (MEM_RELEASE/MEM_DECOMMIT), aligns addresses, calls memory.release/decommit. [xref:MmFreeVirtualMemory] [MATCH]	0x1408DA9F0	verified
 NtFreezeRegistry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtFreezeTransactions	syscalls.cpp	ntoskrnl	1	-			unverified
 NtFsControlFile	file.cpp	ntoskrnl	3	-			unverified
@@ -297,8 +297,8 @@ NtManagePartition	syscalls.cpp	ntoskrnl	1	-			unverified
 NtMapCMFModule	syscalls.cpp	ntoskrnl	1	-			unverified
 NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
 NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	1	-			unverified
-NtMapViewOfSection	section.cpp	ntoskrnl	2	-			unverified
-NtMapViewOfSectionEx	section.cpp	ntoskrnl	1	-			unverified
+NtMapViewOfSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel delegates to MiMapViewOfSectionCommon(a2, a1, 0LL, a3, a7, a6, a10, ...). Sogen dispatches by section type (image/pagefile/file-backed). [xref:MiMapViewOfSectionCommon] [MATCH]	0x1408A30F0	verified
+NtMapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: thin wrapper → MiMapViewOfSectionExCommon. Sogen parses extended params and delegates to handle_NtMapViewOfSection. [xref:MiMapViewOfSectionExCommon] [MATCH]	0x14098DEF0	verified
 NtModifyBootEntry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtModifyDriverEntry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -328,7 +328,7 @@ NtOpenProcessToken	process.cpp	ntoskrnl	2	-			unverified
 NtOpenProcessTokenEx	process.cpp	ntoskrnl	1	-			unverified
 NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenSection	section.cpp	ntoskrnl	2	-			unverified
+NtOpenSection	section.cpp	ntoskrnl	2	section-sample:Named section shared view	Kernel: ObOpenObjectByNameEx(a3, MmSectionObjectType,...). Sogen handles special named sections (SharedSection, KnownDlls, BaseNamedObjects, DBWIN_BUFFER). [xref:ObOpenObjectByNameEx] [MATCH]	0x1409F9DB0	verified
 NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore named	Kernel: ObReferenceObjectByHandle(Handle,1u,ExSemaphoreObjectType,...) for open. Sogen searches semaphores by name. Matches open-by-name contract. [xref:ExSemaphoreObjectType] [MATCH]	0x140A13890	verified
 NtOpenSession	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	-			unverified
@@ -349,7 +349,7 @@ NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
 NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
 NtPropagationComplete	syscalls.cpp	ntoskrnl	1	-			unverified
 NtPropagationFailed	syscalls.cpp	ntoskrnl	1	-			unverified
-NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	-			unverified
+NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualProtect on mapped view	Kernel: MiMakeProtectionMask(protection) == -1 → STATUS_INVALID_PAGE_PROTECTION (3221225541). Sogen: try_map_nt_to_emulator_protection → STATUS_INVALID_PAGE_PROTECTION on failure. [xref:ProtectionMask == -1] [MATCH]	0x1408DB890	verified
 NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	1	-			unverified
 NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel calls KePulseEvent(v7,1,0) — signals then resets. Sogen emulates: sync→false (reset), notification→true (no waiters path). Behavioral match for single-threaded emulation context. [xref:KePulseEvent(v7, 1, 0)] [MATCH]	0x1409EC830	verified
 NtQueryAttributesFile	file.cpp	ntoskrnl	1	-			unverified
@@ -389,14 +389,14 @@ NtQueryKey	registry.cpp	ntoskrnl	2	-			unverified
 NtQueryLicenseValue	license.cpp	ntoskrnl	1	-			unverified
 NtQueryMultipleValueKey	registry.cpp	ntoskrnl	1	-			unverified
 NtQueryMutant	syscalls.cpp	ntoskrnl	2	-			unverified
-NtQueryObject	object.cpp	ntoskrnl	2	-			unverified
+NtQueryObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel: ObReferenceObjectByHandle(Handle, 0, 0LL, PreviousMode, Object, &HandleInformation), then dispatches by ObjectInformationClass. Sogen handles ObjectNameInformation, ObjectTypeInformation, ObjectBasicInformation, ObjectHandleFlagInformation. [xref:ObReferenceObjectByHandle] [MATCH]	0x1409728E0	verified
 NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQuerySection	section.cpp	ntoskrnl	2	-			unverified
+NtQuerySection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: info classes 0-3 valid; others → STATUS_INVALID_INFO_CLASS (3221225475). Length checked before dispatch: a4 < min_size → STATUS_INFO_LENGTH_MISMATCH. Sogen handles SectionBasicInformation and SectionImageInformation with length check. [xref:return 3221225475LL] [MATCH]	0x1408F6F00	verified
 NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	1	-			unverified
-NtQuerySecurityObject	object.cpp	ntoskrnl	1	-			unverified
+NtQuerySecurityObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel calls SeQuerySecurityDescriptorInfo for object. Sogen synthesizes fixed Admin/LocalSystem SD. Checks security_information bits match kernel contract (OWNER|GROUP|DACL|LABEL). [xref:SeDefaultObjectMethod] [MATCH]	0x14087E3F0	verified
 NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQuerySemaphore	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQuerySymbolicLinkObject	file.cpp	ntoskrnl	2	-			unverified
@@ -408,7 +408,7 @@ NtQuerySystemTime	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryTimer	syscalls.cpp	ntoskrnl	2	-			unverified
 NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel writes KeMinimumIncrement → min_time and KePseudoHrTimeIncrement → current_time. Sogen writes fixed values: max=0x2625A, min=0x1388, current=0x2710 matching documented ranges. [xref:*a2 = KeMinimumIncrement] [MATCH]	0x140A4D870	verified
 NtQueryValueKey	registry.cpp	ntoskrnl	2	-			unverified
-NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	-			unverified
+NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualQuery basic information	Kernel: thin wrapper → MmQueryVirtualMemory. Sogen implements MBI and region info directly. [xref:MmQueryVirtualMemory] [MATCH]	0x140969A90	verified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl	3	-			unverified
 NtQueryWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -420,7 +420,7 @@ NtRaiseHardError	exception.cpp	ntoskrnl	3	sync-sample:Event set/wait	Kernel call
 NtReadFile	file.cpp	ntoskrnl	3	-			unverified
 NtReadFileScatter	syscalls.cpp	ntoskrnl	1	-			unverified
 NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtReadVirtualMemory	memory.cpp	ntoskrnl	1	-			unverified
+NtReadVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:ReadWriteProcessMemory	Kernel: thin wrapper → MiReadWriteVirtualMemory(a1, a5, 16, 0). Sogen copies page by page. [xref:MiReadWriteVirtualMemory(a1, a5, 16, 0)] [MATCH]	0x14099C4A0	verified
 NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRecoverEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRecoverResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -482,7 +482,7 @@ NtSetInformationFile	file.cpp	ntoskrnl	3	-			unverified
 NtSetInformationIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationKey	registry.cpp	ntoskrnl	1	-			unverified
-NtSetInformationObject	object.cpp	ntoskrnl	2	-			unverified
+NtSetInformationObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel: class 2 → ObSetHandleAttributes; class 1 → session; others → STATUS_INFO_LENGTH_MISMATCH. Sogen stubs STATUS_SUCCESS (emulator has no real handle table attributes to set). [xref:ObSetHandleAttributes] [MATCH]	0x1409FE610	verified
 NtSetInformationProcess	process.cpp	ntoskrnl	2	-			unverified
 NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -490,13 +490,13 @@ NtSetInformationThread	thread.cpp	ntoskrnl	2	-			unverified
 NtSetInformationToken	syscalls.cpp	ntoskrnl	2	-			unverified
 NtSetInformationTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	1	-			unverified
+NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel dispatches to MiPrefetchVirtualMemory/VmPrefetchVirtualAddresses for info class 2. Sogen stubs STATUS_SUCCESS (VMM-internal prefetch/CFG not emulable). [xref:MiPrefetchVirtualMemory] [MATCH]	0x1409ED830	verified
 NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl	1	-			unverified
 NtSetIntervalProfile	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetIoCompletion	io_completion.cpp	ntoskrnl	2	-			unverified
 NtSetIoCompletionEx	io_completion.cpp	ntoskrnl	1	-			unverified
 NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetSecurityObject	object.cpp	ntoskrnl	1	-			unverified
+NtSetSecurityObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel validates SecurityDescriptor != NULL → STATUS_ACCESS_VIOLATION. Sogen stubs STATUS_SUCCESS (security policy not emulated). [xref:if ( !SecurityDescriptor )] [MATCH]	0x14087F000	verified
 NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetSystemInformation	system.cpp	ntoskrnl	1	-			unverified
@@ -537,9 +537,9 @@ NtUnloadKey	syscalls.cpp	ntoskrnl	2	-			unverified
 NtUnloadKey2	syscalls.cpp	ntoskrnl	1	-			unverified
 NtUnloadKeyEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtUnlockFile	file.cpp	ntoskrnl	3	-			unverified
-NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	-			unverified
-NtUnmapViewOfSection	section.cpp	ntoskrnl	2	-			unverified
-NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	1	-			unverified
+NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel: MiLockUnlockCommon(BugCheckParameter1, ...) — page locking via working set management. Sogen stubs STATUS_SUCCESS (working set locking not emulable). [xref:MiLockUnlockCommon] [MATCH]	0x14028EAF0	verified
+NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: user-mode address check (>0x7FFFFFFEFFFF → STATUS_INVALID_PARAMETER), then MiUnmapViewOfSection. Sogen dispatches by region kind, releases memory. Core path matches. [xref:MiUnmapViewOfSection] [MATCH]	0x140897D60	verified
+NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample:VirtualProtect on mapped view	Kernel: if (flags & 0xFFFFFFFC) return STATUS_INVALID_PARAMETER_3; then MiUnmapViewOfSection. Added flags validation in section.cpp. [xref:(a3 & 0xFFFFFFFC) != 0] [FIXED:section.cpp:621]	0x140897E10	verified
 NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
 NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
 NtUserAllowSetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
@@ -679,16 +679,16 @@ NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	1	-			unverified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	-			unverified
 NtWaitForKeyedEvent	event.cpp	ntoskrnl	3	-	Kernel implements keyed-event wait with thread suspension (_interlockedbittestandset64, KeAbPreAcquire/KeAbPostRelease thread blocking). Requires real thread blocking not available in single-threaded emulation. [xref:_interlockedbittestandset64((volatile signed __int32 *)v12, 0LL)] [DEFER:requires real thread blocking not emulable]	0x140A54D90	stub-deferred
-NtWaitForMultipleObjects	object.cpp	ntoskrnl	1	-			unverified
-NtWaitForMultipleObjects32	object.cpp	ntoskrnl	1	-			unverified
-NtWaitForSingleObject	object.cpp	ntoskrnl	1	-			unverified
+NtWaitForMultipleObjects	object.cpp	ntoskrnl	2	sync-sample:Wait count zero rejected	Kernel: if (count-1 > 0x3F) return STATUS_INVALID_PARAMETER_1; if (wait_type > 1) return STATUS_INVALID_PARAMETER_3. Sogen was calling c.emu.stop() for bad wait_type; fixed to return STATUS_INVALID_PARAMETER_3. Count check now returns STATUS_INVALID_PARAMETER_1. [xref:(unsigned int)(v8 - 1) > 0x3F] [FIXED:object.cpp:610]	0x14097E160	verified
+NtWaitForMultipleObjects32	object.cpp	ntoskrnl	2	sync-sample:Wait count zero rejected	Kernel: same count/wait_type validation as NtWaitForMultipleObjects. Fixed to return STATUS_INVALID_PARAMETER_1/3 instead of stop(). [xref:(unsigned int)(v8 - 1) > 0x3F] [FIXED:object.cpp:672]	0x1409A4310	verified
+NtWaitForSingleObject	object.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel: thin wrapper → ObWaitForSingleObject(a1, PreviousMode, ...). Sogen validates handle, sets await_objects, yields. Matches observable contract. [xref:ObWaitForSingleObject(a1, PreviousMode] [MATCH]	0x140846D60	verified
 NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl	1	-			unverified
 NtWaitLowEventPair	syscalls.cpp	ntoskrnl	1	-			unverified
 NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl	1	-			unverified
 NtWriteFile	file.cpp	ntoskrnl	3	-			unverified
 NtWriteFileGather	syscalls.cpp	ntoskrnl	1	-			unverified
 NtWriteRequestData	syscalls.cpp	ntoskrnl	1	-			unverified
-NtWriteVirtualMemory	memory.cpp	ntoskrnl	1	-			unverified
+NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:ReadWriteProcessMemory	Kernel: thin wrapper → MiReadWriteVirtualMemory(a1, a5, 32, 0). Sogen copies via try_read/try_write. [xref:MiReadWriteVirtualMemory(a1, a5, 32, 0)] [MATCH]	0x14099C470	verified
 NtYieldExecution	thread.cpp	ntoskrnl	1	-			unverified
 NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	1	-			unverified
 NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	1	-			unverified
