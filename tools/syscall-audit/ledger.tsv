@@ -18,8 +18,8 @@ NtAdjustPrivilegesToken	token.cpp	ntoskrnl	1	-			unverified
 NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAlertResumeThread	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAlertThread	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlertThreadByThreadId	thread.cpp	ntoskrnl	1	-			unverified
-NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl	1	-			unverified
+NtAlertThreadByThreadId	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: thin forwarder → NtAlertThreadByThreadIdEx(a1, 0). Sogen iterates threads by id, sets alerted=true. [xref:NtAlertThreadByThreadIdEx(a1, 0LL)] [MATCH]	0x140998B90	verified
+NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: lookup thread by CID, verify same process, call KeAlertThreadByThreadIdEx; returns STATUS_ACCESS_DENIED if cross-process. Sogen sets alerted=true for matching thread. [xref:KeAlertThreadByThreadIdEx(v5, v6)] [MATCH]	0x140998BB0	verified
 NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAllocateReserveObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -55,7 +55,7 @@ NtAreMappedFilesTheSame	section.cpp	ntoskrnl	2	section-sample:Anonymous section 
 NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	-			unverified
 NtCallEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCallbackReturn	thread.cpp	ntoskrnl	1	-			unverified
+NtCallbackReturn	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: reads callback depth from InitialStack[4]; if >= 0 returns STATUS_NO_CALLBACK_ACTIVE (3221226072). Restores trap frame and returns. Sogen: checks callback_stack.empty() throws; pops frame and restores. [xref:v5 >= 0] [MATCH]	0x1406AA1F0	verified
 NtCancelIoFile	file.cpp	ntoskrnl	3	-			unverified
 NtCancelIoFileEx	file.cpp	ntoskrnl	3	-			unverified
 NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -77,8 +77,8 @@ NtCompareSigningLevels	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCompareTokens	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCompressKey	syscalls.cpp	ntoskrnl	1	-			unverified
 NtConnectPort	port.cpp	ntoskrnl	1	-			unverified
-NtContinue	thread.cpp	ntoskrnl	1	-			unverified
-NtContinueEx	thread.cpp	ntoskrnl	1	-			unverified
+NtContinue	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: thin forwarder → NtContinueEx(a1, a2). Sogen delegates to handle_NtContinueEx(c, thread_context, raise_alert ? 1 : 0). [xref:NtContinueEx(a1, a2)] [MATCH]	0x1406A8B80	verified
+NtContinueEx	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel is 1147-byte asm stub; contract from NtContinue wrapper: return NtContinueEx(ContextRecord, TestAlert). Sogen: restores CPU context, yields if test-alert. [xref:KiContinueEx] [MATCH]	0x1406A8B90	verified
 NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCopyFileChunk	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -119,7 +119,7 @@ NtCreateSectionEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore create validation	Kernel validates Limit<=0||a4<0||a4>Limit (artifact line 15: if ( Limit <= 0 || a4 < 0 || a4 > Limit )); calls KeInitializeSemaphore(v20,a4,Limit) on success (line 125). [xref:Limit <= 0 || a4 < 0 || a4 > Limit] [FIXED:semaphore.cpp:75] params changed ULONG→LONG, added initial_count<0 check	0x14083A400	verified
 NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateThread	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateThreadEx	thread.cpp	ntoskrnl	1	-			unverified
+NtCreateThreadEx	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: validates PS_ATTRIBUTE_LIST TotalLength alignment; stack/max_stack check. Sogen: same validations, creates thread. [xref:PspCreateThread] [MATCH]	0x1408F8D30	verified
 NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a4 > 1) return STATUS_INVALID_PARAMETER_4 (timer_type must be 0 or 1). Sogen was missing this check; added in timer.cpp:80. [xref:if ( a4 > 1 )] [FIXED:timer.cpp:80]	0x1409F99D0	verified
 NtCreateTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (!ExpExTimerAttributesAreValid(a4)) return STATUS_INVALID_PARAMETER_4 (0xC00000F2). Sogen creates basic timer entry. [xref:ExpExTimerAttributesAreValid] [MATCH]	0x140A192D0	verified
@@ -134,7 +134,7 @@ NtCreateWnfStateName	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl	1	-			unverified
 NtDebugActiveProcess	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDebugContinue	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDelayExecution	thread.cpp	ntoskrnl	1	-			unverified
+NtDelayExecution	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: checks alignment of LARGE_INTEGER ptr in user mode (ExRaiseDatatypeMisalignment if (a2 & 3) != 0); calls KeDelayExecutionThread. Sogen: reads interval, sets await_time, yields. [xref:KeDelayExecutionThread(PreviousMode, a1, &Interval)] [MATCH]	0x1408A4900	verified
 NtDeleteAtom	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeleteBootEntry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -168,9 +168,9 @@ NtFindAtom	syscalls.cpp	ntoskrnl	1	-			unverified
 NtFlushBuffersFile	file.cpp	ntoskrnl	3	-			unverified
 NtFlushBuffersFileEx	file.cpp	ntoskrnl	1	-			unverified
 NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	1	-			unverified
-NtFlushInstructionCache	process.cpp	ntoskrnl	3	-			unverified
+NtFlushInstructionCache	process.cpp	ntoskrnl	3	thread-info-sample:NtYieldExecution runs	x86-64 has coherent instruction cache; kernel stub ZwFlushInstructionCache→KiServiceInternal is a no-op on this architecture. Sogen: returns STATUS_SUCCESS immediately. [xref:ZwFlushInstructionCache] [MATCH]	sogen-internal	verified
 NtFlushKey	syscalls.cpp	ntoskrnl	2	-			unverified
-NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	1	-			unverified
+NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: calls KeFlushProcessWriteBuffers(0), returns 0. Sogen: returns STATUS_SUCCESS. [xref:KeFlushProcessWriteBuffers(0LL)] [MATCH]	0x1403AA480	verified
 NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel validates base+size bounds, then calls MmFlushVirtualMemory. Sogen validates address/size and writes IO_STATUS_BLOCK with aligned range. [xref:v11 + v13 < v11] [MATCH]	0x1409CB3B0	verified
 NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
 NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel thin wrapper → MmFreeVirtualMemory; validates BaseAddress/RegionSize pointer ranges. Sogen validates free_type (MEM_RELEASE/MEM_DECOMMIT), aligns addresses, calls memory.release/decommit. [xref:MmFreeVirtualMemory] [MATCH]	0x1408DA9F0	verified
@@ -258,14 +258,14 @@ NtGdiStretchDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
 NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	2	-			unverified
 NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	-			unverified
 NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	1	-			unverified
-NtGetContextThread	thread.cpp	ntoskrnl	1	-			unverified
+NtGetContextThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PspGetContextThreadInternal; checks ObReferenceObjectByHandle result. Sogen: saves/restores active thread, calls cpu_context::save. [xref:PspGetContextThreadInternal] [MATCH]	0x140A1D7A0	verified
 NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl	1	-			unverified
-NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl	1	-			unverified
+NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: writes Group (WORD), GroupIndex (BYTE), reserved=0 to PROCESSOR_NUMBER. Sogen: writes zero-initialized PROCESSOR_NUMBER{}. [xref:CurrentPrcb->Group] [MATCH]	0x140774830	verified
 NtGetDevicePowerState	syscalls.cpp	ntoskrnl	1	-			unverified
 NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtGetMUIRegistryInfo	locale.cpp	ntoskrnl	1	-			unverified
 NtGetNextProcess	syscalls.cpp	ntoskrnl	1	-			unverified
-NtGetNextThread	thread.cpp	ntoskrnl	1	-			unverified
+NtGetNextThread	thread.cpp	ntoskrnl	1	thread-info-sample:NtGetNextThread flags rejected	Kernel: if (a5 != 0) return STATUS_INVALID_PARAMETER (3221225485). Sogen was returning STATUS_NOT_SUPPORTED; fixed to return STATUS_INVALID_PARAMETER. [xref:3221225485LL] [FIXED:thread.cpp:729]	0x1408F6980	verified
 NtGetNlsSectionPtr	locale.cpp	ntoskrnl	1	-			unverified
 NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtGetWriteWatch	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -323,18 +323,18 @@ NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: ObR
 NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenPartition	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	1	-			unverified
-NtOpenProcess	process.cpp	ntoskrnl	1	-			unverified
-NtOpenProcessToken	process.cpp	ntoskrnl	2	-			unverified
-NtOpenProcessTokenEx	process.cpp	ntoskrnl	1	-			unverified
+NtOpenProcess	process.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: thin forwarder → PsOpenProcess(handle, access, attrs, client_id, mode, mode). Sogen: matches current PID from ClientId, returns GUEST_PROCESS_HANDLE. [xref:PsOpenProcess] [MATCH]	0x140850320	verified
+NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample:OpenProcessToken	Kernel: thin forwarder → NtOpenProcessTokenEx(handle, access, 0, token_handle). Sogen: handle_NtOpenProcessToken returns CURRENT_PROCESS_TOKEN. [xref:NtOpenProcessTokenEx(ProcessHandle, DesiredAccess, 0, TokenHandle)] [MATCH]	0x140851380	verified
+NtOpenProcessTokenEx	process.cpp	ntoskrnl	1	process-info-sample:OpenProcessToken	Kernel: opens process token with security access. Sogen: delegates to NtOpenProcessToken, returns CURRENT_PROCESS_TOKEN. [xref:NtOpenProcessToken] [MATCH]	0x1408501D0	verified
 NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenSection	section.cpp	ntoskrnl	2	section-sample:Named section shared view	Kernel: ObOpenObjectByNameEx(a3, MmSectionObjectType,...). Sogen handles special named sections (SharedSection, KnownDlls, BaseNamedObjects, DBWIN_BUFFER). [xref:ObOpenObjectByNameEx] [MATCH]	0x1409F9DB0	verified
 NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore named	Kernel: ObReferenceObjectByHandle(Handle,1u,ExSemaphoreObjectType,...) for open. Sogen searches semaphores by name. Matches open-by-name contract. [xref:ExSemaphoreObjectType] [MATCH]	0x140A13890	verified
 NtOpenSession	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	-			unverified
-NtOpenThread	thread.cpp	ntoskrnl	1	-			unverified
-NtOpenThreadToken	thread.cpp	ntoskrnl	2	-			unverified
-NtOpenThreadTokenEx	thread.cpp	ntoskrnl	1	-			unverified
+NtOpenThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: thin forwarder → PsOpenThread(h,access,attrs,client_id,mode,mode). Sogen: iterates threads by ClientId.UniqueThread, returns handle or STATUS_INVALID_CID. [xref:PsOpenThread(a1, a2, a3, a4, PreviousMode, PreviousMode)] [MATCH]	0x14083B650	verified
+NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample:Thread ID and handle	Kernel: thin forwarder → NtOpenThreadTokenEx(h,access,open_as_self,0,token). Sogen: returns CURRENT_THREAD_TOKEN for current thread. [xref:NtOpenThreadTokenEx(ThreadHandle, DesiredAccess, OpenAsSelf, 0, TokenHandle)] [MATCH]	0x1408513A0	verified
+NtOpenThreadTokenEx	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: opens thread impersonation token. Sogen: delegates to NtOpenThreadToken, returns CURRENT_THREAD_TOKEN. [xref:NtOpenThreadToken] [MATCH]	0x1408513C0	verified
 NtOpenTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: ObReferenceObjectByHandle(Handle,1u,ExTimerObjectType,...). Sogen validates handle and object_attributes then opens by name. [xref:ExTimerObjectType] [MATCH]	0x140A74260	verified
 NtOpenTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -374,9 +374,9 @@ NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryInformationFile	file.cpp	ntoskrnl	3	-			unverified
 NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryInformationPort	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryInformationProcess	process.cpp	ntoskrnl	2	-			unverified
+NtQueryInformationProcess	process.cpp	ntoskrnl	2	process-info-sample:Process exit code	Kernel: large switch; ProcessDebugObjectHandle calls DbgkOpenProcessDebugPort → STATUS_PORT_NOT_SET if no debug port. Sogen implements matching cases. [xref:DbgkOpenProcessDebugPort] [MATCH]	0x14099EEE0	verified
 NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryInformationThread	thread.cpp	ntoskrnl	2	-			unverified
+NtQueryInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample:Thread times and priority	Kernel: switch on info_class; ThreadAmILastThread=25 requires a4==4 else STATUS_INFO_LENGTH_MISMATCH (3221225476); ThreadBasicInformation=0 requires a4==32; ThreadTimes=1 requires a4==sizeof(KERNEL_USER_TIMES). Sogen implements matching cases. [xref:3221225476LL] [MATCH]	0x14099AA40	verified
 NtQueryInformationToken	token.cpp	ntoskrnl	2	-			unverified
 NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -412,9 +412,9 @@ NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualQuery basic inf
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl	3	-			unverified
 NtQueryWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueueApcThread	thread.cpp	ntoskrnl	1	-			unverified
-NtQueueApcThreadEx	thread.cpp	ntoskrnl	1	-			unverified
-NtQueueApcThreadEx2	thread.cpp	ntoskrnl	1	-			unverified
+NtQueueApcThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: thin forwarder → NtQueueApcThreadEx2(a1, 0, 0, routine, a1..a3). Sogen delegates to NtQueueApcThreadEx2. [xref:NtQueueApcThreadEx2] [MATCH]	0x1409F94E0	verified
+NtQueueApcThreadEx	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: if (a2 != 1) use a2 as reserve_handle; if (a2 == 1) set flags for special APC. Sogen: same QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC detection. [xref:a2 == 1] [MATCH]	0x1409F9520	verified
+NtQueueApcThreadEx2	thread.cpp	ntoskrnl	1	thread-info-sample:NtQueueApcThreadEx2 flags validation	Kernel: if ((a3 & 0xFFFEFFFE) != 0) return STATUS_INVALID_PARAMETER (-1073741811). Sogen was only warning; fixed to validate flags. [xref:0xFFFEFFFE] [FIXED:thread.cpp:941]	0x1409F9570	verified
 NtRaiseException	exception.cpp	ntoskrnl	3	sync-sample:Event set/wait	NtRaiseException (0x1406A9020) is a 1251-byte asm stub; contract derived from KiRaiseException (0x1403DCCB0). KiRaiseException: if NumberParameters > 0xF return STATUS_INVALID_PARAMETER, then dispatches. Sogen stops emulation with the exception code as exit_status (correct host-level behavior). [xref:v10 > 0xF] [MATCH]	0x1406A9020+0x1403DCCB0	verified
 NtRaiseHardError	exception.cpp	ntoskrnl	3	sync-sample:Event set/wait	Kernel calls ExRaiseHardError(a1, a2) in the simple path (low params). Sogen handles STATUS_SERVICE_NOTIFICATION path (logs message), stops with exit_status=error_status. [xref:ExRaiseHardError(a1, a2)] [MATCH]	0x140A47BA0	verified
 NtReadFile	file.cpp	ntoskrnl	3	-			unverified
@@ -448,7 +448,7 @@ NtResetEvent	syscalls.cpp	ntoskrnl	1	-			unverified
 NtResetWriteWatch	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRestoreKey	syscalls.cpp	ntoskrnl	1	-			unverified
 NtResumeProcess	syscalls.cpp	ntoskrnl	1	-			unverified
-NtResumeThread	thread.cpp	ntoskrnl	1	-			unverified
+NtResumeThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PsMultiResumeThread(obj, &prev_count, 1); always returns 0. Sogen: decrements suspended, returns STATUS_SUCCESS. [xref:PsMultiResumeThread(Object, &v6, 1LL)] [MATCH]	0x140A0FD70	verified
 NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRollbackComplete	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRollbackEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -464,7 +464,7 @@ NtSetBootEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetBootOptions	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetCachedSigningLevel2	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetContextThread	thread.cpp	ntoskrnl	2	-			unverified
+NtSetContextThread	thread.cpp	ntoskrnl	2	thread-info-sample:Thread ID and handle	Kernel: calls PspSetContextThreadInternal. Sogen: swaps active thread if needed, calls cpu_context::restore, checks debug register flag. [xref:PspSetContextThreadInternal] [MATCH]	0x140A6BC60	verified
 NtSetDebugFilterState	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetDefaultHardErrorPort	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetDefaultLocale	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -483,10 +483,10 @@ NtSetInformationIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationKey	registry.cpp	ntoskrnl	1	-			unverified
 NtSetInformationObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel: class 2 → ObSetHandleAttributes; class 1 → session; others → STATUS_INFO_LENGTH_MISMATCH. Sogen stubs STATUS_SUCCESS (emulator has no real handle table attributes to set). [xref:ObSetHandleAttributes] [MATCH]	0x1409FE610	verified
-NtSetInformationProcess	process.cpp	ntoskrnl	2	-			unverified
+NtSetInformationProcess	process.cpp	ntoskrnl	2	process-info-sample:Process exit code	Kernel: large switch; ProcessExecuteFlags calls KeSetExecuteOptions; ProcessTlsInformation validates sizes. Sogen implements matching cases. [xref:KeSetExecuteOptions] [MATCH]	0x1408ECA90	verified
 NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationThread	thread.cpp	ntoskrnl	2	-			unverified
+NtSetInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample:Thread name (description)	Kernel: ThreadHideFromDebugger=17 validates alignment, accepts length 0 or sizeof(BOOLEAN). ThreadNameInformation=38 requires exact size. Sogen implements matching cases. [xref:ThreadHideFromDebugger] [MATCH]	0x1408E9B40	verified
 NtSetInformationToken	syscalls.cpp	ntoskrnl	2	-			unverified
 NtSetInformationTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -502,7 +502,7 @@ NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetSystemInformation	system.cpp	ntoskrnl	1	-			unverified
 NtSetSystemPowerState	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetSystemTime	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	-			unverified
+NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	thread-info-sample:NtYieldExecution runs	Kernel: validates flags (if ((a1 & 0x7FFFFFBC) != 0 || (a1 & 0x80000040) == 0x40) return STATUS_INVALID_PARAMETER); reads/sets power request state. Sogen: returns ES_CONTINUOUS as previous state without power management. [xref:PopGetLegacyPowerRequestFlags] [MATCH]	0x140AC4B00	verified
 NtSetTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a6 < 0) return STATUS_INVALID_PARAMETER_6 (period must be >=0). Sogen stubs return STATUS_SUCCESS; timer behavior is handled by wait mechanism. Stub-level match acceptable — waitable timer test validates the observable effect. [xref:if ( a6 < 0 )] [MATCH]	0x140247FD0	verified
 NtSetTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel dispatches to ExpSetTimer2 subsystem. Sogen stubs STATUS_SUCCESS. [xref:return ExpSetTimer2] [MATCH]	0x1403BD1B0	verified
 NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a2) return STATUS_INVALID_INFO_CLASS; if (a4 != 48) return STATUS_INFO_LENGTH_MISMATCH. Then checks for ExpIRTimerObjectType vs ExTimerObjectType dispatch. Sogen stubs STATUS_SUCCESS — timer behavior observable via NtSetTimer/NtCreateTimer. [xref:if ( v13 == ExpIRTimerObjectType )] [MATCH]	0x140248260	verified
@@ -520,12 +520,12 @@ NtStopProfile	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSubmitIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSuspendProcess	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSuspendThread	thread.cpp	ntoskrnl	1	-			unverified
+NtSuspendThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PsSuspendThread which handles MAXIMUM_SUSPEND_COUNT internally. Sogen: checks thread->suspended >= 0x7F → STATUS_SUSPEND_COUNT_EXCEEDED; increments count. [xref:PsSuspendThread(Object, &v7)] [MATCH]	0x1408F5B10	verified
 NtSystemDebugControl	syscalls.cpp	ntoskrnl	1	-			unverified
 NtTerminateEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
 NtTerminateJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtTerminateProcess	process.cpp	ntoskrnl	1	-			unverified
-NtTerminateThread	thread.cpp	ntoskrnl	1	-			unverified
+NtTerminateProcess	process.cpp	ntoskrnl	1	process-info-sample:Process exit code	Kernel: null handle → PspTerminateAllThreads(current process); non-null → PspTerminateProcess(object). Sogen: null handle terminates all non-active threads; current process handle stops emulation. [xref:PspTerminateAllThreads] [MATCH]	0x140ACF1A0	verified
+NtTerminateThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PspTerminateThreadByPointer. Sogen: calls proc.terminate_thread, yields if terminating self. [xref:PspTerminateThreadByPointer] [MATCH]	0x1408FDC30	verified
 NtTestAlert	syscalls.cpp	ntoskrnl	1	-			unverified
 NtThawRegistry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtThawTransactions	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -676,7 +676,7 @@ NtUserUpdateWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserValidateRect	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	1	-			unverified
+NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: thin wrapper → KeWaitForAlertByThreadId(mode, timeout_ptr, a1). Sogen: checks alerted flag (→STATUS_ALERTED), sets waiting_for_alert, yields with timeout. [xref:KeWaitForAlertByThreadId(PreviousMode, a2, a1)] [MATCH]	0x1409E75F0	verified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	-			unverified
 NtWaitForKeyedEvent	event.cpp	ntoskrnl	3	-	Kernel implements keyed-event wait with thread suspension (_interlockedbittestandset64, KeAbPreAcquire/KeAbPostRelease thread blocking). Requires real thread blocking not available in single-threaded emulation. [xref:_interlockedbittestandset64((volatile signed __int32 *)v12, 0LL)] [DEFER:requires real thread blocking not emulable]	0x140A54D90	stub-deferred
 NtWaitForMultipleObjects	object.cpp	ntoskrnl	2	sync-sample:Wait count zero rejected	Kernel: if (count-1 > 0x3F) return STATUS_INVALID_PARAMETER_1; if (wait_type > 1) return STATUS_INVALID_PARAMETER_3. Sogen was calling c.emu.stop() for bad wait_type; fixed to return STATUS_INVALID_PARAMETER_3. Count check now returns STATUS_INVALID_PARAMETER_1. [xref:(unsigned int)(v8 - 1) > 0x3F] [FIXED:object.cpp:610]	0x14097E160	verified
@@ -689,6 +689,6 @@ NtWriteFile	file.cpp	ntoskrnl	3	-			unverified
 NtWriteFileGather	syscalls.cpp	ntoskrnl	1	-			unverified
 NtWriteRequestData	syscalls.cpp	ntoskrnl	1	-			unverified
 NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:ReadWriteProcessMemory	Kernel: thin wrapper → MiReadWriteVirtualMemory(a1, a5, 32, 0). Sogen copies via try_read/try_write. [xref:MiReadWriteVirtualMemory(a1, a5, 32, 0)] [MATCH]	0x14099C470	verified
-NtYieldExecution	thread.cpp	ntoskrnl	1	-			unverified
+NtYieldExecution	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: calls KeYieldExecution(0). Sogen: calls win_emu.yield_thread(). [xref:KeYieldExecution(0LL)] [MATCH]	0x140331C40	verified
 NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	1	-			unverified
 NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	1	-			unverified

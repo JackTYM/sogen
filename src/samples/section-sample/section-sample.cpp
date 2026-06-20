@@ -174,15 +174,18 @@ namespace
         HANDLE ev2 = CreateEventA(nullptr, TRUE, FALSE, nullptr);
         if (!ev1 || !ev2)
         {
-            if (ev1) CloseHandle(ev1);
-            if (ev2) CloseHandle(ev2);
+            if (ev1)
+                CloseHandle(ev1);
+            if (ev2)
+                CloseHandle(ev2);
             return false;
         }
         // Duplicate ev1 → should refer to same object
         HANDLE dup = nullptr;
         DuplicateHandle(GetCurrentProcess(), ev1, GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS);
         const bool dup_ok = dup != nullptr;
-        if (dup) CloseHandle(dup);
+        if (dup)
+            CloseHandle(dup);
         CloseHandle(ev1);
         CloseHandle(ev2);
         return dup_ok;

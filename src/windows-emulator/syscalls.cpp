@@ -166,11 +166,11 @@ namespace sogen
         NTSTATUS handle_NtFreeVirtualMemory(const syscall_context& c, handle process_handle, emulator_object<uint64_t> base_address,
                                             emulator_object<uint64_t> bytes_to_allocate, uint32_t free_type);
         NTSTATUS handle_NtReadVirtualMemory(const syscall_context& c, handle process_handle, emulator_pointer base_address,
-                                            emulator_pointer buffer, ULONG number_of_bytes_to_read,
-                                            emulator_object<ULONG> number_of_bytes_read);
+                                            emulator_pointer buffer, uint64_t number_of_bytes_to_read,
+                                            emulator_object<uint64_t> number_of_bytes_read);
         NTSTATUS handle_NtWriteVirtualMemory(const syscall_context& c, handle process_handle, emulator_pointer base_address,
-                                             emulator_pointer buffer, ULONG number_of_bytes_to_write,
-                                             emulator_object<ULONG> number_of_bytes_write);
+                                             emulator_pointer buffer, uint64_t number_of_bytes_to_write,
+                                             emulator_object<uint64_t> number_of_bytes_write);
         NTSTATUS handle_NtSetInformationVirtualMemory(const syscall_context& c, handle process_handle, uint32_t vm_info_class,
                                                       uint64_t number_of_entries, uint64_t virtual_addresses, uint64_t vm_information,
                                                       ULONG vm_information_length);
@@ -1023,8 +1023,8 @@ namespace sogen
         }
 
         NTSTATUS handle_NtReadVirtualMemoryEx(const syscall_context& c, handle process_handle, emulator_pointer base_address,
-                                              emulator_pointer buffer, ULONG number_of_bytes_to_read,
-                                              emulator_object<ULONG> number_of_bytes_read, ULONG /*flags*/)
+                                              emulator_pointer buffer, uint64_t number_of_bytes_to_read,
+                                              emulator_object<uint64_t> number_of_bytes_read, ULONG /*flags*/)
         {
             return handle_NtReadVirtualMemory(c, process_handle, base_address, buffer, number_of_bytes_to_read, number_of_bytes_read);
         }

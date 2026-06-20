@@ -443,6 +443,37 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadNameInformation)
+            {
+                const std::u16string& name16 = thread->name;
+                const auto name_bytes = static_cast<uint32_t>(name16.size() * sizeof(char16_t));
+                const auto total_size = static_cast<uint32_t>(sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>) + name_bytes);
+
+                if (return_length)
+                {
+                    return_length.write(total_size);
+                }
+
+                if (thread_information_length < total_size)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const emulator_object<THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>> info{c.emu, thread_information};
+                info.access([&](THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>& name_info) {
+                    const auto buffer_start = thread_information + sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>);
+                    if (name_bytes > 0)
+                    {
+                        c.emu.write_memory(buffer_start, name16.c_str(), name_bytes);
+                    }
+                    name_info.ThreadName.Length = static_cast<uint16_t>(name_bytes);
+                    name_info.ThreadName.MaximumLength = static_cast<uint16_t>(name_bytes);
+                    name_info.ThreadName.Buffer = buffer_start;
+                });
+
+                return STATUS_SUCCESS;
+            }
+
             c.win_emu.log.error("Unsupported thread query info class: %X\n", info_class);
             c.emu.stop();
 
@@ -697,9 +728,7 @@ namespace sogen
 
             if (flags != 0)
             {
-                c.win_emu.log.error("NtGetNextThread flags %X not supported\n", static_cast<uint32_t>(flags));
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_PARAMETER;
             }
 
             bool return_next_thread = resolved_thread_handle == NULL_HANDLE;
@@ -909,11 +938,11 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            if (apc_flags)
+            // Kernel: if ((a3 & 0xFFFEFFFE) != 0) return STATUS_INVALID_PARAMETER
+            // Valid bits: bit 0 (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) and bit 16
+            if ((apc_flags & 0xFFFEFFFE) != 0)
             {
-                c.win_emu.log.warn("Unsupported APC flags: %X\n", apc_flags);
-                // c.emu.stop();
-                // return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_PARAMETER;
             }
 
             thread->pending_apcs.push_back({
