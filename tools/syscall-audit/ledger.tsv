@@ -101,7 +101,7 @@ NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-s
 NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C4F20: creates keyed event for WaitForKeyedEvent/ReleaseKeyedEvent synchronization pairs	0x1407C4F20	verified
 NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateMailslotFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x14083AF00: Creates mutex (mutant) with initial ownership; validates InitialOwner flag	0x14083AF00	verified
 NtCreateNamedPipeFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtCreatePagingFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreatePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -319,7 +319,7 @@ NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		
 NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C5030: opens existing keyed event by name; error STATUS_NOT_FOUND if not found	0x1407C5030	verified
-NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x140A05F40: Opens named mutant by name; validates handle references ExMutantObjectType	0x140A05F40	verified
 NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	3	-	Open private namespace; advanced feature		unverified
@@ -388,7 +388,7 @@ NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sa
 NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
 NtQueryLicenseValue	license.cpp	ntoskrnl	3	-	License query; policy-specific		unverified
 NtQueryMultipleValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
-NtQueryMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryMutant	syscalls.cpp	ntoskrnl	2	sync-sample	0x140A2ED80: Info-class 0 (BasicInformation, 8 bytes: MutantBasicInformation); Info-class 1 (OwnerInformation, 16 bytes: CLIENT_ID)	0x140A2ED80	verified
 NtQueryObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetHandleInformation		unverified
 NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -428,7 +428,7 @@ NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-
 NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x140A536C0: releases waiter blocked on NtWaitForKeyedEvent with key_value match	0x140A536C0	verified
-NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x14098DB30: Releases mutex ownership; returns previous count in out-param	0x14098DB30	verified
 NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Increments semaphore count by release_count. Fails with STATUS_SEMAPHORE_LIMIT_EXCEEDED if would exceed maximum. Runtime tests: Release count tracking verified; limit enforcement confirmed.	0x1409A4840	verified
 NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	3	-	Release worker; thread pool, specialized		unverified
 NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
