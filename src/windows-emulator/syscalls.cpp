@@ -1580,13 +1580,25 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtResumeProcess(const syscall_context& /*c*/, handle /*process_handle*/)
+        NTSTATUS handle_NtResumeProcess(const syscall_context& c, handle process_handle)
         {
+            // Kernel: ObpReferenceObjectByHandleWithTag validates handle before calling PsMultiResumeProcess.
+            // Sogen only has one process; accept any valid process handle as a no-op.
+            if (!c.proc.is_current_process_handle(process_handle))
+            {
+                return STATUS_INVALID_HANDLE;
+            }
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSuspendProcess(const syscall_context& /*c*/, handle /*process_handle*/)
+        NTSTATUS handle_NtSuspendProcess(const syscall_context& c, handle process_handle)
         {
+            // Kernel: ObpReferenceObjectByHandleWithTag validates handle before calling PsSuspendProcess.
+            // Sogen only has one process; accept any valid process handle as a no-op.
+            if (!c.proc.is_current_process_handle(process_handle))
+            {
+                return STATUS_INVALID_HANDLE;
+            }
             return STATUS_SUCCESS;
         }
 

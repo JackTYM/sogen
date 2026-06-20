@@ -120,29 +120,15 @@ namespace sogen
 
             if (info_class == ThreadHideFromDebugger)
             {
-                BOOLEAN hide = true;
-
-                if (thread_information != 0 && thread_information % 4 != 0)
+                // Kernel requires length == 0 and ignores the buffer entirely.
+                if (thread_information_length != 0)
                 {
-                    return STATUS_DATATYPE_MISALIGNMENT;
+                    return STATUS_INVALID_PARAMETER;
                 }
 
-                if (thread_information_length == 0 || thread_information_length == sizeof(hide))
-                {
-                    if (thread_information_length == sizeof(hide))
-                    {
-                        if (thread_information == 0 || !c.win_emu.memory.try_read_memory(thread_information, &hide, sizeof(hide)))
-                        {
-                            return STATUS_INTERNAL_ERROR;
-                        }
-                    }
-
-                    c.win_emu.current_thread().debugger_hide = hide;
-                    c.win_emu.callbacks.on_suspicious_activity("Hiding thread from debugger");
-                    return STATUS_SUCCESS;
-                }
-
-                return STATUS_INFO_LENGTH_MISMATCH;
+                c.win_emu.current_thread().debugger_hide = true;
+                c.win_emu.callbacks.on_suspicious_activity("Hiding thread from debugger");
+                return STATUS_SUCCESS;
             }
 
             if (info_class == ThreadNameInformation)
@@ -165,11 +151,9 @@ namespace sogen
             {
                 if (thread_information_length != sizeof(handle))
                 {
-                    return STATUS_BUFFER_OVERFLOW;
+                    // Kernel: length != sizeof(HANDLE) → STATUS_INVALID_PARAMETER
+                    return STATUS_INVALID_PARAMETER;
                 }
-
-                const emulator_object<handle> info{c.emu, thread_information};
-                info.write(DUMMY_IMPERSONATION_TOKEN);
 
                 return STATUS_SUCCESS;
             }
@@ -228,9 +212,8 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported thread set info class: %X\n", info_class);
-            c.emu.stop();
-            return STATUS_NOT_SUPPORTED;
+            c.win_emu.log.print(color::gray, "Unsupported thread set info class: %X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtQueryInformationThread(const syscall_context& c, const handle thread_handle, const uint32_t info_class,
@@ -474,10 +457,8 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported thread query info class: %X\n", info_class);
-            c.emu.stop();
-
-            return STATUS_NOT_SUPPORTED;
+            c.win_emu.log.print(color::gray, "Unsupported thread query info class: %X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtOpenThread(const syscall_context& c, const emulator_object<handle> thread_handle, ACCESS_MASK /*desired_access*/,
@@ -828,6 +809,12 @@ namespace sogen
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
+            }
+
+            // Kernel: (a7 & 0xFFFFFF80) != 0 → STATUS_INVALID_PARAMETER_7
+            if ((create_flags & 0xFFFFFF80u) != 0)
+            {
+                return STATUS_INVALID_PARAMETER_7;
             }
 
             if (maximum_stack_size != 0 && stack_size > maximum_stack_size)

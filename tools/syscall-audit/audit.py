@@ -137,15 +137,19 @@ def is_trivial_kernel(artifact: Path) -> bool:
     text = artifact.read_text(errors='replace')
     substantive = []
     for ln in text.splitlines():
-        s = ln.strip()
+        # Artifact lines have trailing "| " alignment; strip that before classification
+        s = ln.split('|')[0].strip()
         if not s:
             continue
-        if s in ('{', '}'):
+        if s in ('{', '}') or s.startswith('{') and s.rstrip() == '{' or s.startswith('}') and s.rstrip() == '}':
             continue
         if s.startswith('// [COLLAPSED'):
             continue
-        # Skip the function signature lines (contain '__fastcall' or are type declarations at top)
-        if '__fastcall' in s or (s.startswith('__') and '(' in s):
+        # Skip function signature lines: contain __fastcall, start with __, or are plain type+name decl
+        if '__fastcall' in s or '__stdcall' in s or s.startswith('__'):
+            continue
+        # Skip NTSTATUS/void function-return-type lines (signature)
+        if re.match(r'^(NTSTATUS|void|__int64|BOOL|DWORD|ULONG)\s+\S+\s*\(', s):
             continue
         # Skip closing braces with row-count markers
         if re.match(r'^\d+ row', s):
