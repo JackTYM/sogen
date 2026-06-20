@@ -56,8 +56,8 @@ NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-s
 NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
 NtCallEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCallbackReturn	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtCancelIoFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtCancelIoFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCancelIoFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1409E6CD0: Verified	0x1409E6CD0	verified
+NtCancelIoFileEx	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A2C100: Verified	0x140A2C100	verified
 NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCancelTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140247BF0 — Kernel timer object verified	0x140247BF0	verified
 NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
@@ -85,12 +85,12 @@ NtCreateCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample	
 NtCreateCrossVmEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateCrossVmMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCreateDirectoryObject	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A3DD50: Verified	0x140A3DD50	verified
 NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample	0x140852FE0: validates info-class=0 (EventBasicInformation); returns STATUS_OBJECT_NAME_EXISTS on duplicate named; initializes EVENT_TYPE + initial state	0x140852FE0	verified
-NtCreateFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCreateFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140948EB0: Verified	0x140948EB0	verified
 NtCreateIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x140A196D0: Kernel handler verified	0x140A196D0	verified
 NtCreateIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -100,9 +100,9 @@ NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample
 NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C4F20: creates keyed event for WaitForKeyedEvent/ReleaseKeyedEvent synchronization pairs	0x1407C4F20	verified
 NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateMailslotFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateMailslotFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x140A76FB0: Verified	0x140A76FB0	verified
 NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x14083AF00: Creates mutex (mutant) with initial ownership; validates InitialOwner flag	0x14083AF00	verified
-NtCreateNamedPipeFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtCreateNamedPipeFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A27500: Verified	0x140A27500	verified
 NtCreatePagingFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreatePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreatePort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F580: Verified	0x14073F580	verified
@@ -138,14 +138,14 @@ NtDelayExecution	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info
 NtDeleteAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeleteBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDeleteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtDeleteFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A7C620: Verified	0x140A7C620	verified
 NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14086E740: Kernel handler verified	0x14086E740	verified
 NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Delete private namespace; advanced feature		unverified
 NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14095D140: Kernel handler verified	0x14095D140	verified
 NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x1408C0310: Verified	0x1408C0310	verified
 NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDisplayString	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDrawText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -165,7 +165,7 @@ NtExtendSection	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140914800: Kernel hand
 NtFilterBootOption	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFilterToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFindAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtFlushBuffersFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtFlushBuffersFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094AE50: Verified	0x14094AE50	verified
 NtFlushBuffersFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFlushInstructionCache	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
@@ -176,18 +176,18 @@ NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-samp
 NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1408DA9F0: Kernel handler verified	0x1408DA9F0	verified
 NtFreezeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFreezeTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtFsControlFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtGdiAddFontMemResourceEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiBitBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiComputeXformCoefficients	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreateBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreateCompatibleBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreateCompatibleDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreateDIBitmapInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreatePatternBrushInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreatePen	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreateRectRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiCreateSolidBrush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFsControlFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1408BFB10: Verified	0x1408BFB10	verified
+NtGdiAddFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036110: Verified	0x180036110	verified
+NtGdiBitBlt	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036200: Verified	0x180036200	verified
+NtGdiComputeXformCoefficients	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800362D0: Verified	0x1800362D0	verified
+NtGdiCreateBitmap	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036300: Verified	0x180036300	verified
+NtGdiCreateCompatibleBitmap	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036360: Verified	0x180036360	verified
+NtGdiCreateCompatibleDC	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036370: Verified	0x180036370	verified
+NtGdiCreateDIBitmapInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800363A0: Verified	0x1800363A0	verified
+NtGdiCreatePatternBrushInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036410: Verified	0x180036410	verified
+NtGdiCreatePen	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036420: Verified	0x180036420	verified
+NtGdiCreateRectRgn	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x140039720: Verified	0x140039720	verified
+NtGdiCreateSolidBrush	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036470: Verified	0x180036470	verified
 NtGdiDdDDICacheHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	GPU DDI DirectDraw hybrid query; graphics-specific		unverified
 NtGdiDdDDICloseAdapter	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter management; graphics-specific		unverified
 NtGdiDdDDICreateAllocation	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory allocation; graphics-specific		unverified
@@ -210,52 +210,52 @@ NtGdiDdDDIOpenResource	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource opening; gr
 NtGdiDdDDIQueryAdapterInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter info query; graphics-specific		unverified
 NtGdiDdDDIQueryResourceInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource info; graphics-specific		unverified
 NtGdiDdDDIUnlock	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource unlocking; graphics-specific		unverified
-NtGdiDeleteObjectApp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiEnumFonts	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiExtCreateRegion	gdi.cpp	gdi32full/win32kbase	3	-	GDI region creation; graphics-specific		unverified
-NtGdiExtGetObjectW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiExtSelectClipRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiExtTextOutW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiFlush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetCharSet	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetDCDword	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetDCObject	gdi.cpp	gdi32full/win32kbase	3	-	GDI DC object; graphics-specific		unverified
-NtGdiGetDCforBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetDIBitsInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetDeviceCaps	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetDeviceCapsAll	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetEntry	gdi.cpp	gdi32full	2	-	IDB gdi32full: 0x180036B90	0x180036B90	unverified
-NtGdiGetGlyphOutline	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetOutlineTextMetricsInternalW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetRandomRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetRealizationInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetTextCharsetInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetTextExtent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetTextFaceW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiGetTextMetricsW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiHfontCreate	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiInit	gdi.cpp	gdi32full	2	-	IDB gdi32full: 0x180036EC0	0x180036EC0	unverified
-NtGdiInit2	gdi.cpp	win32kbase	2	-	IDB win32kbase: 0x1400709D0	0x1400709D0	unverified
-NtGdiIntersectClipRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiLineTo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiDeleteObjectApp	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x14002B5A0: Verified	0x14002B5A0	verified
+NtGdiEnumFonts	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800367D0: Verified	0x1800367D0	verified
+NtGdiExtCreateRegion	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x140081480: Verified	0x140081480	verified
+NtGdiExtGetObjectW	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036860: Verified	0x180036860	verified
+NtGdiExtSelectClipRgn	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036870: Verified	0x180036870	verified
+NtGdiExtTextOutW	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036880: Verified	0x180036880	verified
+NtGdiFlush	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1400E8D20: Verified	0x1400E8D20	verified
+NtGdiGetCharSet	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036A50: Verified	0x180036A50	verified
+NtGdiGetDCDword	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036AD0: Verified	0x180036AD0	verified
+NtGdiGetDCObject	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x180036AE0: Verified	0x180036AE0	verified
+NtGdiGetDCforBitmap	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036B00: Verified	0x180036B00	verified
+NtGdiGetDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036B10: Verified	0x180036B10	verified
+NtGdiGetDeviceCaps	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x14001E250: Verified	0x14001E250	verified
+NtGdiGetDeviceCapsAll	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1400E2250: Verified	0x1400E2250	verified
+NtGdiGetEntry	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x14011A4C0: Verified	0x14011A4C0	verified
+NtGdiGetGlyphOutline	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036C10: Verified	0x180036C10	verified
+NtGdiGetOutlineTextMetricsInternalW	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036CC0: Verified	0x180036CC0	verified
+NtGdiGetRandomRgn	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036D20: Verified	0x180036D20	verified
+NtGdiGetRealizationInfo	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036D40: Verified	0x180036D40	verified
+NtGdiGetTextCharsetInfo	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800360D0: Verified	0x1800360D0	verified
+NtGdiGetTextExtent	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036DD0: Verified	0x180036DD0	verified
+NtGdiGetTextFaceW	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036DF0: Verified	0x180036DF0	verified
+NtGdiGetTextMetricsW	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036E00: Verified	0x180036E00	verified
+NtGdiHfontCreate	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036EA0: Verified	0x180036EA0	verified
+NtGdiInit	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x1401CC650: Verified	0x1401CC650	verified
+NtGdiInit2	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x1400709D0: Verified	0x1400709D0	verified
+NtGdiIntersectClipRect	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036EE0: Verified	0x180036EE0	verified
+NtGdiLineTo	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036F00: Verified	0x180036F00	verified
 NtGdiMoveToEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiOpenDCW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiPatBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiPolyPatBlt	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiQueryFontAssocInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiRectangle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiRemoveFontMemResourceEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiRestoreDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiSaveDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiSelectBitmap	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiOpenDCW	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x140081DE0: Verified	0x140081DE0	verified
+NtGdiPatBlt	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037020: Verified	0x180037020	verified
+NtGdiPolyPatBlt	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037060: Verified	0x180037060	verified
+NtGdiQueryFontAssocInfo	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800370B0: Verified	0x1800370B0	verified
+NtGdiRectangle	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800370F0: Verified	0x1800370F0	verified
+NtGdiRemoveFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037100: Verified	0x180037100	verified
+NtGdiRestoreDC	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037150: Verified	0x180037150	verified
+NtGdiSaveDC	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800371C0: Verified	0x1800371C0	verified
+NtGdiSelectBitmap	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037210: Verified	0x180037210	verified
 NtGdiSelectBrushLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiSelectFont	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSelectFont	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037240: Verified	0x180037240	verified
 NtGdiSelectPenLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiSetBrushOrg	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	3	-	GDI layout; graphics-specific		unverified
-NtGdiStretchDIBitsInternal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	3	-	GDI transparent blit; graphics-specific		unverified
+NtGdiSetBrushOrg	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800372B0: Verified	0x1800372B0	verified
+NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800372E0: Verified	0x1800372E0	verified
+NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x180037320: Verified	0x180037320	verified
+NtGdiStretchDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037440: Verified	0x180037440	verified
+NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x180037490: Verified	0x180037490	verified
 NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtGetContextThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x140A1D7A0: Verified	0x140A1D7A0	verified
@@ -286,7 +286,7 @@ NtLoadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140933700: Kernel handler ve
 NtLoadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLoadKey3	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLoadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtLockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtLockFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094CC90: Verified	0x14094CC90	verified
 NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLockRegistryKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLockVirtualMemory	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1403435C0: Kernel handler verified	0x1403435C0	verified
@@ -307,10 +307,10 @@ NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x1408BE0F0: 
 NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtNotifyChangeSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtOpenDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	IDB 0x1409EC730: Verified	0x1409EC730	verified
 NtOpenEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample	0x1409F9C30: opens named event by name; validates handle references ExEventObjectType	0x1409F9C30	verified
-NtOpenFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtOpenFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140948E40: Verified	0x140948E40	verified
 NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140712DA0: Kernel handler verified	0x140712DA0	verified
 NtOpenJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140A43780: Kernel handler verified	0x140A43780	verified
@@ -331,7 +331,7 @@ NtOpenResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample
 NtOpenSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x1409F9DB0: Kernel handler verified	0x1409F9DB0	verified
 NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Locates named semaphore via object manager, returns STATUS_OBJECT_NAME_NOT_FOUND if not found. Runtime tests: Named semaphore open tests pass; multiple opens return same handle.	0x140A13890	verified
 NtOpenSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	IDB 0x1409E35E0: Verified	0x1409E35E0	verified
 NtOpenThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample	IDB 0x1408513A0: Kernel handler verified	0x1408513A0	verified
 NtOpenThreadTokenEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
@@ -359,11 +359,11 @@ NtQueryBootOptions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		u
 NtQueryDebugFilterState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryDefaultLocale	locale.cpp	ntoskrnl	3	-	Default locale query; localization-specific		unverified
 NtQueryDefaultUILanguage	locale.cpp	ntoskrnl	3	-	UI language query; localization-specific		unverified
-NtQueryDirectoryFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryDirectoryFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1408C3B30: Verified	0x1408C3B30	verified
 NtQueryDirectoryFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryEaFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x14094A0D0: Verified	0x14094A0D0	verified
 NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample	0x1408BED70: EVENT_BASIC_INFORMATION struct (EventType@0, EventState@4, size=8); validates buffer_length >= 8; returns STATUS_INFO_LENGTH_MISMATCH if < 8	0x1408BED70	verified
 NtQueryFullAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
@@ -371,7 +371,7 @@ NtQueryInformationAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sampl
 NtQueryInformationByName	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtQueryInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryInformationFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094B5A0: Verified	0x14094B5A0	verified
 NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryInformationPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	IDB 0x14099EEE0: Verified	0x14099EEE0	verified
@@ -399,7 +399,7 @@ NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	2	security-sample	Tested via s
 NtQuerySecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetSecurityInfo		unverified
 NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQuerySemaphore	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQuerySymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQuerySymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	IDB 0x1409E8AE0: Verified	0x1409E8AE0	verified
 NtQuerySystemEnvironmentValue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQuerySystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via GetSystemInfo, GetTickCount		unverified
@@ -409,7 +409,7 @@ NtQueryTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB: 0x140A466F0 — Kernel tim
 NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140AE5730: Kernel handler verified	0x140AE5730	verified
 NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x140969A90: Kernel handler verified	0x140969A90	verified
-NtQueryVolumeInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtQueryVolumeInformationFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094A7E0: Verified	0x14094A7E0	verified
 NtQueryWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueueApcThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1409F94E0: Verified	0x1409F94E0	verified
@@ -417,7 +417,7 @@ NtQueueApcThreadEx	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1409F9520: Ver
 NtQueueApcThreadEx2	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtRaiseException	exception.cpp	ntoskrnl	2	misc-ops-sample	IDB: 0x1406A9020 — Kernel handler verified	0x1406A9020	verified
 NtRaiseHardError	exception.cpp	ntoskrnl	2	misc-ops-sample	IDB: 0x140A47BA0 — Kernel handler verified	0x140A47BA0	verified
-NtReadFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtReadFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140846380: Verified	0x140846380	verified
 NtReadFileScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtReadVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory reads in samples		unverified
@@ -470,7 +470,7 @@ NtSetDefaultHardErrorPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sa
 NtSetDefaultLocale	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetEaFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x14094E420: Verified	0x14094E420	verified
 NtSetEvent	event.cpp	ntoskrnl	2	sync-sample	0x14097B770: sets event to signaled state; returns previous state in emulator_object<LONG>	0x14097B770	verified
 NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample	0x140A94870: variant of NtSetEvent with priority boost semantics for thread scheduling	0x140A94870	verified
 NtSetEventEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -478,7 +478,7 @@ NtSetIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverif
 NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtSetInformationFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1403BEA70: Verified	0x1403BEA70	verified
 NtSetInformationIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
@@ -509,7 +509,7 @@ NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtSetUuidSeed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14086F7A0: Kernel handler verified	0x14086F7A0	verified
-NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x140715F90: Verified	0x140715F90	verified
 NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtShutdownSystem	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Shutdown worker factory; thread pool, specialized		unverified
@@ -536,146 +536,146 @@ NtUnloadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unver
 NtUnloadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1409336B0: Kernel handler verified	0x1409336B0	verified
 NtUnloadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUnloadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUnlockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtUnlockFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094D370: Verified	0x14094D370	verified
 NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x14028EAF0: Kernel handler verified	0x14028EAF0	verified
 NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x140897D60: Kernel handler verified	0x140897D60	verified
 NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
 NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserAllowSetForegroundWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserAlterWindowStyle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserBeginPaint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserBitBltSysBmp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserBuildHwndList	user.cpp	win32kbase/win32kfull	3	-	Window list enumeration; GUI-specific, requires window manager		unverified
+NtUserAllowSetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14002E1B0: Verified	0x14002E1B0	verified
+NtUserAlterWindowStyle	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401F9750: Verified	0x1401F9750	verified
+NtUserBeginPaint	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140023890: Verified	0x140023890	verified
+NtUserBitBltSysBmp	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140143320: Verified	0x140143320	verified
+NtUserBuildHwndList	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x14023AD80: Verified	0x14023AD80	verified
 NtUserCallHwndParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUserCallNoParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserChangeDisplaySettings	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserChangeWindowMessageFilterEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserClearWindowState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserClipCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserCreateAcceleratorTable	user.cpp	win32kbase/win32kfull	3	-	Accelerator table; GUI-specific, requires window system		unverified
-NtUserCreateCaret	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserCreateMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserCreatePopupMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserCreateWindowEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDefSetText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDeleteMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDestroyCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDestroyMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDestroyWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDisableProcessWindowsGhosting	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDispatchMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDisplayConfigGetDeviceInfo	user.cpp	win32kbase/win32kfull	3	-	Display config; GUI graphics subsystem		unverified
-NtUserDrainThreadCoreMessagingCompletions2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDrawIconEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserDrawMenuBar	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserEnableWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserEndPaint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserEnumDisplayDevices	user.cpp	win32kbase/win32kfull	3	-	Display device enumeration; GUI graphics subsystem		unverified
-NtUserEnumDisplayMonitors	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserEnumDisplaySettings	user.cpp	win32kbase/win32kfull	3	-	Display settings enumeration; GUI graphics subsystem		unverified
-NtUserFindExistingCursorIcon	user.cpp	win32kbase/win32kfull	3	-	Cursor icon; GUI-specific		unverified
-NtUserFindWindowEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetAncestor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetAsyncKeyState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetAtomName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetCPD	user.cpp	win32kbase/win32kfull	3	-	Client process data; GUI subsystem		unverified
-NtUserGetClassInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetClassName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserChangeDisplaySettings	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140167A10: Verified	0x140167A10	verified
+NtUserChangeWindowMessageFilterEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401957B0: Verified	0x1401957B0	verified
+NtUserClearWindowState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023B2F0: Verified	0x14023B2F0	verified
+NtUserClipCursor	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140104EA0: Verified	0x140104EA0	verified
+NtUserCreateAcceleratorTable	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x1401DD430: Verified	0x1401DD430	verified
+NtUserCreateCaret	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14002BA70: Verified	0x14002BA70	verified
+NtUserCreateMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140172A40: Verified	0x140172A40	verified
+NtUserCreatePopupMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140172930: Verified	0x140172930	verified
+NtUserCreateWindowEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140042D30: Verified	0x140042D30	verified
+NtUserDefSetText	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401E3C30: Verified	0x1401E3C30	verified
+NtUserDeleteMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140095A00: Verified	0x140095A00	verified
+NtUserDestroyCursor	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14009D520: Verified	0x14009D520	verified
+NtUserDestroyMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140095B70: Verified	0x140095B70	verified
+NtUserDestroyWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14013C180: Verified	0x14013C180	verified
+NtUserDisableProcessWindowsGhosting	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14020EE50: Verified	0x14020EE50	verified
+NtUserDispatchMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14028EA60: Verified	0x14028EA60	verified
+NtUserDisplayConfigGetDeviceInfo	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140167C20: Verified	0x140167C20	verified
+NtUserDrainThreadCoreMessagingCompletions2	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140018800: Verified	0x140018800	verified
+NtUserDrawIconEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14009CBF0: Verified	0x14009CBF0	verified
+NtUserDrawMenuBar	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023B560: Verified	0x14023B560	verified
+NtUserEnableWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023B840: Verified	0x14023B840	verified
+NtUserEndPaint	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140023780: Verified	0x140023780	verified
+NtUserEnumDisplayDevices	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140018AC0: Verified	0x140018AC0	verified
+NtUserEnumDisplayMonitors	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1400418D0: Verified	0x1400418D0	verified
+NtUserEnumDisplaySettings	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x1401685A0: Verified	0x1401685A0	verified
+NtUserFindExistingCursorIcon	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x14028FEE0: Verified	0x14028FEE0	verified
+NtUserFindWindowEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140290190: Verified	0x140290190	verified
+NtUserGetAncestor	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14014C150: Verified	0x14014C150	verified
+NtUserGetAsyncKeyState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140168A60: Verified	0x140168A60	verified
+NtUserGetAtomName	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401A1710: Verified	0x1401A1710	verified
+NtUserGetCPD	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x1400DC890: Verified	0x1400DC890	verified
+NtUserGetClassInfoEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140290770: Verified	0x140290770	verified
+NtUserGetClassName	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140290AE0: Verified	0x140290AE0	verified
 NtUserGetClientRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetControlBrush	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetCursorFrameInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetCursorPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetDCEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetDisplayConfigBufferSizes	user.cpp	win32kbase/win32kfull	3	-	Display config buffers; GUI graphics		unverified
-NtUserGetDpiForCurrentProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetForegroundWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetHDevName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetIconSize	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetKeyState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetKeyboardLayout	locale.cpp	ntoskrnl	2	-	Tested indirectly via keyboard functions in user.cpp		unverified
-NtUserGetKeyboardType	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetOemBitmapSize	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetProcessUIContextInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetProcessWindowStation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetQueueStatus	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetQueueStatusReadonly	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetRawInputData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetRawInputDeviceList	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetSystemMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetThreadDesktop	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetWindowDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserGetWindowPlacement	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserInitThreadCoreMessagingIocp2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserInitializeClientPfnArrays	user.cpp	win32kbase/win32kfull	3	-	Client function arrays; GUI initialization		unverified
-NtUserInvalidateRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserIsTouchWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserKillTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserMapDesktopObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserMapVirtualKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserMessageBeep	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserMessageCall	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserModifyUserStartupInfoFlags	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserMoveWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserMsgWaitForMultipleObjectsEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserPeekMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserPostMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserPostQuitMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserPostThreadMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserProcessConnect	user.cpp	win32kbase/win32kfull	3	-	Process connection; GUI session management		unverified
-NtUserQueryDisplayConfig	user.cpp	win32kbase/win32kfull	3	-	Query display config; GUI graphics subsystem		unverified
-NtUserRedrawWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserRegisterClassExWOW	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserRegisterRawInputDevices	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserRegisterWindowMessage	user.cpp	win32kbase/win32kfull	3	-	Register window message; GUI-specific		unverified
-NtUserReleaseCapture	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserReleaseDC	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserRemoteConnectState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserRemoveMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserScheduleDispatchNotification	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetActiveWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetCapture	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetCursor	user.cpp	win32kbase/win32kfull	3	-	Set cursor; GUI rendering subsystem		unverified
-NtUserSetCursorPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetDialogPointer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetDialogSystemMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetFocus	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetForegroundWindow	user.cpp	win32kbase/win32kfull	3	-	Set foreground window; GUI window manager		unverified
-NtUserSetMenu	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetMsgBox	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetProcessDpiAwarenessContext	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetProp	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetProp2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowCompositionAttribute	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowFNID	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowLong	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowLongPtr	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowPos	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowRgn	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSetWindowsHookEx	user.cpp	win32kbase/win32kfull	3	-	Set Windows hook; GUI hook system		unverified
-NtUserShowCursor	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserShowWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserSystemParametersInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserThunkedMenuItemInfo	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserToUnicodeEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserTraceLoggingSendMixedModeTelemetry	user.cpp	win32kbase/win32kfull	3	-	Telemetry; GUI diagnostics		unverified
-NtUserTrackMouseEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserTransformPoint	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserTransformRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserTranslateMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserUnhookWindowsHookEx	user.cpp	win32kbase/full	3	-	Unhook Windows hook; GUI hook system		unverified
-NtUserUnregisterClass	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserUpdateWindow	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserValidateRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserValidateTimerCallback	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserWaitMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetControlBrush	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14013D090: Verified	0x14013D090	verified
+NtUserGetCursor	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401B7AB0: Verified	0x1401B7AB0	verified
+NtUserGetCursorFrameInfo	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14009CA10: Verified	0x14009CA10	verified
+NtUserGetCursorPos	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14002A870: Verified	0x14002A870	verified
+NtUserGetDC	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140168E30: Verified	0x140168E30	verified
+NtUserGetDCEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023C650: Verified	0x14023C650	verified
+NtUserGetDisplayConfigBufferSizes	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140169010: Verified	0x140169010	verified
+NtUserGetDpiForCurrentProcess	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401DB8B0: Verified	0x1401DB8B0	verified
+NtUserGetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023C820: Verified	0x14023C820	verified
+NtUserGetHDevName	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14008AC50: Verified	0x14008AC50	verified
+NtUserGetIconSize	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14009F560: Verified	0x14009F560	verified
+NtUserGetKeyState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140169280: Verified	0x140169280	verified
+NtUserGetKeyboardLayout	locale.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140023B40: Verified	0x140023B40	verified
+NtUserGetKeyboardType	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140120630: Verified	0x140120630	verified
+NtUserGetMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401022A0: Verified	0x1401022A0	verified
+NtUserGetOemBitmapSize	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140291AD0: Verified	0x140291AD0	verified
+NtUserGetProcessUIContextInformation	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023CDB0: Verified	0x14023CDB0	verified
+NtUserGetProcessWindowStation	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401107C0: Verified	0x1401107C0	verified
+NtUserGetQueueStatus	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14001E070: Verified	0x14001E070	verified
+NtUserGetQueueStatusReadonly	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14015F2D0: Verified	0x14015F2D0	verified
+NtUserGetRawInputData	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14017EEC0: Verified	0x14017EEC0	verified
+NtUserGetRawInputDeviceList	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1400A9AC0: Verified	0x1400A9AC0	verified
+NtUserGetSystemMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023D3C0: Verified	0x14023D3C0	verified
+NtUserGetThreadDesktop	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140107F80: Verified	0x140107F80	verified
+NtUserGetThreadState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140291FB0: Verified	0x140291FB0	verified
+NtUserGetWindowDC	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401A2380: Verified	0x1401A2380	verified
+NtUserGetWindowPlacement	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023D650: Verified	0x14023D650	verified
+NtUserInitThreadCoreMessagingIocp2	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401C08F0: Verified	0x1401C08F0	verified
+NtUserInitializeClientPfnArrays	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140293940: Verified	0x140293940	verified
+NtUserInvalidateRect	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1402943A0: Verified	0x1402943A0	verified
+NtUserIsTouchWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1402134E0: Verified	0x1402134E0	verified
+NtUserKillTimer	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140017D50: Verified	0x140017D50	verified
+NtUserMapDesktopObject	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14009CBB0: Verified	0x14009CBB0	verified
+NtUserMapVirtualKeyEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14008B8B0: Verified	0x14008B8B0	verified
+NtUserMessageBeep	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401F2FC0: Verified	0x1401F2FC0	verified
+NtUserMessageCall	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140019B00: Verified	0x140019B00	verified
+NtUserModifyUserStartupInfoFlags	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140294B50: Verified	0x140294B50	verified
+NtUserMoveWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14009C310: Verified	0x14009C310	verified
+NtUserMsgWaitForMultipleObjectsEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14008CA90: Verified	0x14008CA90	verified
+NtUserPeekMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140102390: Verified	0x140102390	verified
+NtUserPostMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401330F0: Verified	0x1401330F0	verified
+NtUserPostQuitMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401B6620: Verified	0x1401B6620	verified
+NtUserPostThreadMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023EDB0: Verified	0x14023EDB0	verified
+NtUserProcessConnect	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x1400C11A0: Verified	0x1400C11A0	verified
+NtUserQueryDisplayConfig	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x14016C640: Verified	0x14016C640	verified
+NtUserRedrawWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140037B60: Verified	0x140037B60	verified
+NtUserRegisterClassExWOW	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140295560: Verified	0x140295560	verified
+NtUserRegisterRawInputDevices	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14011DC40: Verified	0x14011DC40	verified
+NtUserRegisterWindowMessage	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140296610: Verified	0x140296610	verified
+NtUserReleaseCapture	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14013F3C0: Verified	0x14013F3C0	verified
+NtUserReleaseDC	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140023250: Verified	0x140023250	verified
+NtUserRemoteConnectState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401BD970: Verified	0x1401BD970	verified
+NtUserRemoveMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140096730: Verified	0x140096730	verified
+NtUserScheduleDispatchNotification	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140117190: Verified	0x140117190	verified
+NtUserSetActiveWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14013D630: Verified	0x14013D630	verified
+NtUserSetCapture	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14013ED00: Verified	0x14013ED00	verified
+NtUserSetCursor	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x14009B420: Verified	0x14009B420	verified
+NtUserSetCursorPos	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140029000: Verified	0x140029000	verified
+NtUserSetDialogPointer	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140240DE0: Verified	0x140240DE0	verified
+NtUserSetDialogSystemMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140240E80: Verified	0x140240E80	verified
+NtUserSetFocus	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14017FEE0: Verified	0x14017FEE0	verified
+NtUserSetForegroundWindow	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140240F10: Verified	0x140240F10	verified
+NtUserSetMenu	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401EFE70: Verified	0x1401EFE70	verified
+NtUserSetMsgBox	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14020E7F0: Verified	0x14020E7F0	verified
+NtUserSetProcessDpiAwarenessContext	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140104D20: Verified	0x140104D20	verified
+NtUserSetProp	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1402414A0: Verified	0x1402414A0	verified
+NtUserSetProp2	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140241550: Verified	0x140241550	verified
+NtUserSetThreadState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401F0800: Verified	0x1401F0800	verified
+NtUserSetTimer	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140017DF0: Verified	0x140017DF0	verified
+NtUserSetWindowCompositionAttribute	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140241AE0: Verified	0x140241AE0	verified
+NtUserSetWindowFNID	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14029A070: Verified	0x14029A070	verified
+NtUserSetWindowLong	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140178F00: Verified	0x140178F00	verified
+NtUserSetWindowLongPtr	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14013B650: Verified	0x14013B650	verified
+NtUserSetWindowPos	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140242180: Verified	0x140242180	verified
+NtUserSetWindowRgn	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14002D160: Verified	0x14002D160	verified
+NtUserSetWindowState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140242430: Verified	0x140242430	verified
+NtUserSetWindowsHookEx	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x14029A6A0: Verified	0x14029A6A0	verified
+NtUserShowCursor	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140028FC0: Verified	0x140028FC0	verified
+NtUserShowWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140163CD0: Verified	0x140163CD0	verified
+NtUserSystemParametersInfo	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14016EA10: Verified	0x14016EA10	verified
+NtUserThunkedMenuItemInfo	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14029C1C0: Verified	0x14029C1C0	verified
+NtUserToUnicodeEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140170470: Verified	0x140170470	verified
+NtUserTraceLoggingSendMixedModeTelemetry	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x140200100: Verified	0x140200100	verified
+NtUserTrackMouseEvent	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140197DE0: Verified	0x140197DE0	verified
+NtUserTransformPoint	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14017D220: Verified	0x14017D220	verified
+NtUserTransformRect	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14015CBC0: Verified	0x14015CBC0	verified
+NtUserTranslateMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14001FD90: Verified	0x14001FD90	verified
+NtUserUnhookWindowsHookEx	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x14009CE90: Verified	0x14009CE90	verified
+NtUserUnregisterClass	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14029C4E0: Verified	0x14029C4E0	verified
+NtUserUpdateWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140242770: Verified	0x140242770	verified
+NtUserValidateRect	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140037820: Verified	0x140037820	verified
+NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140143950: Verified	0x140143950	verified
+NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140161830: Verified	0x140161830	verified
 NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A30CA0: Verified	0x140A30CA0	verified
 NtWaitForKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x140A54D90: blocks waiting for ReleaseKeyedEvent with matching key_value and timeout semantics	0x140A54D90	verified
@@ -685,7 +685,7 @@ NtWaitForSingleObject	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via Wa
 NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Wait for work; thread pool, specialized		unverified
 NtWaitLowEventPair	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl	3	-	Worker factory ready; thread pool, specialized infrastructure		unverified
-NtWriteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
+NtWriteFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1408BFB80: Verified	0x1408BFB80	verified
 NtWriteFileGather	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtWriteRequestData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory writes in samples		unverified
