@@ -151,9 +151,9 @@ NtDisplayString	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Ker
 NtDrawText	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140651350	verified
 NtDuplicateObject	object.cpp	ntoskrnl	2	section-sample:DuplicateHandle object	Kernel: ObReferenceObjectByHandle on source, ObDuplicateObject to target. Sogen handles same-process case via store.duplicate(); cross-process returns STATUS_NOT_SUPPORTED. [xref:ObfDereferenceObject] [MATCH]	0x14083BDD0	verified
 NtDuplicateToken	token.cpp	ntoskrnl	1	security-sample:DuplicateToken (token type)	Kernel: validates (TokenType-1) > 1 → STATUS_INVALID_PARAMETER; then SeCreateToken. Sogen duplicates token by type selection. [xref:TokenType - 1] [MATCH]	0x1408E77C0	verified
-NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
-NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
-NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
+NtDxgkEnumAdapters3	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: UserRequest. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:UserRequest] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140351FE0	stub-deferred
+NtDxgkGetProperties	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: MmUserProbeAddress. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:MmUserProbeAddress] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x1402F1DB0	stub-deferred
+NtDxgkIsFeatureEnabled	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: EventProfilerEnter. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:EventProfilerEnter] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x1401D3FA0	stub-deferred
 NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14082B090	verified
 NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14096F1B0	verified
 NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BE2C0	verified
@@ -177,85 +177,85 @@ NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and
 NtFreezeRegistry	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D0380	verified
 NtFreezeTransactions	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtFreeze. Sogen stub: returns STATUS_SUCCESS. [xref:NtFreeze] [MATCH]	0x1404F8890	verified
 NtFsControlFile	file.cpp	ntoskrnl	3	file-io-sample:NtFsControlFile	Kernel: IopXxxControlFile. Sogen: dispatches named pipe FSCTL codes, falls back to STATUS_NOT_IMPLEMENTED. [xref:IopXxxControlFile] [MATCH]	0x1408BFB10	verified
-NtGdiAddFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiBitBlt	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiComputeXformCoefficients	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreateBitmap	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreateCompatibleBitmap	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreateCompatibleDC	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreateDIBitmapInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreatePatternBrushInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreatePen	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreateRectRgn	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiCreateSolidBrush	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiDdDDICacheHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDICloseAdapter	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDICreateAllocation	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDICreateContext	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDICreateDevice	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIDestroyAllocation	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIDestroyAllocation2	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIDestroyContext	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIDestroyDevice	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIEnumAdapters2	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIEscape	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIGetCachedHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIGetDeviceState	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIGetDisplayModeList	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIGetSharedPrimaryHandle	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDILock	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIMarkDeviceAsError	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIOpenAdapterFromHdc	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIOpenResource	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIQueryAdapterInfo	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIQueryResourceInfo	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDdDDIUnlock	gdi.cpp	gdi32full/win32kbase	3	-			unverified
-NtGdiDeleteObjectApp	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiEnumFonts	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiExtCreateRegion	gdi.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiExtGetObjectW	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiExtSelectClipRgn	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiExtTextOutW	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiFlush	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetCharSet	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetDCDword	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetDCObject	gdi.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetDCforBitmap	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetDeviceCaps	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetDeviceCapsAll	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetEntry	gdi.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetGlyphOutline	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetOutlineTextMetricsInternalW	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetRandomRgn	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetRealizationInfo	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetTextCharsetInfo	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetTextExtent	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetTextFaceW	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiGetTextMetricsW	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiHfontCreate	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiInit	gdi.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiInit2	gdi.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiIntersectClipRect	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiLineTo	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiMoveToEx	syscalls.cpp	ntoskrnl	2	-			unverified
-NtGdiOpenDCW	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiPatBlt	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiPolyPatBlt	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiQueryFontAssocInfo	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiRectangle	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiRemoveFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiRestoreDC	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiSaveDC	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiSelectBitmap	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiSelectBrushLocal	syscalls.cpp	ntoskrnl	2	-			unverified
-NtGdiSelectFont	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiSelectPenLocal	syscalls.cpp	ntoskrnl	2	-			unverified
-NtGdiSetBrushOrg	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiStretchDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
-NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	2	-			unverified
+NtGdiAddFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14010E840	verified
+NtGdiBitBlt	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x1400589F0	verified
+NtGdiComputeXformCoefficients	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: QuickInitXform. Sogen: in-memory GDI/User operation without GPU bridge. [xref:QuickInitXform] [MATCH]	0x1401D06D0	verified
+NtGdiCreateBitmap	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreCreateBitmapInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreCreateBitmapInternal] [MATCH]	0x140066FE0	verified
+NtGdiCreateCompatibleBitmap	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: CompatibleBitmap. Sogen: in-memory GDI/User operation without GPU bridge. [xref:CompatibleBitmap] [MATCH]	0x1400531F0	verified
+NtGdiCreateCompatibleDC	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiCre. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiCre] [MATCH]	0x140269C10	verified
+NtGdiCreateDIBitmapInternal	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetBitmapSizeInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetBitmapSizeInternal] [MATCH]	0x140178380	verified
+NtGdiCreatePatternBrushInternal	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreCreatePatternBrushInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreCreatePatternBrushInternal] [MATCH]	0x1401DF480	verified
+NtGdiCreatePen	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreExtCreatePen. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreExtCreatePen] [MATCH]	0x1400B26B0	verified
+NtGdiCreateRectRgn	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreEncodeUserModePointer. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreEncodeUserModePointer] [MATCH]	0x140039720	verified
+NtGdiCreateSolidBrush	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiCre. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiCre] [MATCH]	0x1401DB0B0	verified
+NtGdiDdDDICacheHybridQueryValue	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016B48	stub-deferred
+NtGdiDdDDICloseAdapter	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016C10	stub-deferred
+NtGdiDdDDICreateAllocation	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016C38	stub-deferred
+NtGdiDdDDICreateContext	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016C60	stub-deferred
+NtGdiDdDDICreateDevice	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016C88	stub-deferred
+NtGdiDdDDIDestroyAllocation	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016D78	stub-deferred
+NtGdiDdDDIDestroyAllocation2	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016D8C	stub-deferred
+NtGdiDdDDIDestroyContext	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016DA0	stub-deferred
+NtGdiDdDDIDestroyDevice	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016DB4	stub-deferred
+NtGdiDdDDIEnumAdapters2	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016EB8	stub-deferred
+NtGdiDdDDIEscape	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016ECC	stub-deferred
+NtGdiDdDDIGetCachedHybridQueryValue	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016F58	stub-deferred
+NtGdiDdDDIGetDeviceState	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016FA8	stub-deferred
+NtGdiDdDDIGetDisplayModeList	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140016FBC	stub-deferred
+NtGdiDdDDIGetSharedPrimaryHandle	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x1400170D4	stub-deferred
+NtGdiDdDDILock	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140017160	stub-deferred
+NtGdiDdDDIMarkDeviceAsError	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x1400171B0	stub-deferred
+NtGdiDdDDIOpenAdapterFromHdc	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140017250	stub-deferred
+NtGdiDdDDIOpenResource	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x1400172F0	stub-deferred
+NtGdiDdDDIQueryAdapterInfo	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x140017458	stub-deferred
+NtGdiDdDDIQueryResourceInfo	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x1400174F8	stub-deferred
+NtGdiDdDDIUnlock	gdi.cpp	win32k/dxgkrnl	3	-	Kernel: NtGdiDdD. Win32k thunk → dxgkrnl GPU kernel path; sogen GPU bridge handles dispatching. [xref:NtGdiDdD] [DEFER:GPU bridge required; dxgkrnl dispatch not emulatable without GPU hardware]	0x14001787C	stub-deferred
+NtGdiDeleteObjectApp	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreReleaseSemaphoreSharedInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreReleaseSemaphoreSharedInternal] [MATCH]	0x14002B5A0	verified
+NtGdiEnumFonts	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x140194AC0	verified
+NtGdiExtCreateRegion	gdi.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreExtCreateRegion. Sogen: in-memory window/GDI operation without GPU requirement. [xref:GreExtCreateRegion] [MATCH]	0x140081480	verified
+NtGdiExtGetObjectW	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreExtGetObjectW. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreExtGetObjectW] [MATCH]	0x140053920	verified
+NtGdiExtSelectClipRgn	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x1400585E0	verified
+NtGdiExtTextOutW	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreExtTextOutRect. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreExtTextOutRect] [MATCH]	0x14025ADF0	verified
+NtGdiFlush	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiFlu. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiFlu] [MATCH]	0x1400E8D20	verified
+NtGdiGetCharSet	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetCharSet. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetCharSet] [MATCH]	0x1400E2D20	verified
+NtGdiGetDCDword	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1400598E0	verified
+NtGdiGetDCObject	gdi.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: UserSessionState. Sogen: in-memory window/GDI operation without GPU requirement. [xref:CurrentProcessSessionId] [MATCH]	0x140058B00	verified
+NtGdiGetDCforBitmap	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiGet. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiGet] [MATCH]	0x14019A160	verified
+NtGdiGetDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetBitmapSizeInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetBitmapSizeInternal] [MATCH]	0x14014B180	verified
+NtGdiGetDeviceCaps	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetDeviceCapsInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetDeviceCapsInternal] [MATCH]	0x14001E250	verified
+NtGdiGetDeviceCapsAll	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreReleaseSemaphoreCommon. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreReleaseSemaphoreCommon] [MATCH]	0x1400E2250	verified
+NtGdiGetEntry	gdi.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SessionState. Sogen: in-memory window/GDI operation without GPU requirement. [xref:SessionState] [MATCH]	0x14011A4C0	verified
+NtGdiGetGlyphOutline	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14025BDC0	verified
+NtGdiGetOutlineTextMetricsInternalW	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x14025C1F0	verified
+NtGdiGetRandomRgn	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetRandomRgn. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetRandomRgn] [MATCH]	0x140155B20	verified
+NtGdiGetRealizationInfo	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14025C3C0	verified
+NtGdiGetTextCharsetInfo	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x14025C530	verified
+NtGdiGetTextExtent	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14025C690	verified
+NtGdiGetTextFaceW	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1400E2DD0	verified
+NtGdiGetTextMetricsW	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14025CCC0	verified
+NtGdiHfontCreate	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1401797B0	verified
+NtGdiInit	gdi.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreEnterCriticalRegionAndAcquirePushLockExclusive. Sogen: in-memory window/GDI operation without GPU requirement. [xref:GreEnterCriticalRegionAndAcquirePushLockExclusive] [MATCH]	0x1401CC650	verified
+NtGdiInit2	gdi.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreEnterCriticalRegionAndAcquirePushLockExclusive. Sogen: in-memory window/GDI operation without GPU requirement. [xref:GreEnterCriticalRegionAndAcquirePushLockExclusive] [MATCH]	0x1400709D0	verified
+NtGdiIntersectClipRect	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreIntersectClipRect. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreIntersectClipRect] [MATCH]	0x140189630	verified
+NtGdiLineTo	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x140059730	verified
+NtGdiMoveToEx	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiMov. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiMov] [MATCH]		verified
+NtGdiOpenDCW	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140081DE0	verified
+NtGdiPatBlt	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiPat. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiPat] [MATCH]		verified
+NtGdiPolyPatBlt	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreProbeUntrustedVaRange. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreProbeUntrustedVaRange] [MATCH]	0x140171120	verified
+NtGdiQueryFontAssocInfo	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x140257070	verified
+NtGdiRectangle	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x1400B5DE0	verified
+NtGdiRemoveFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GrepRemoveFontMemResource. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GrepRemoveFontMemResource] [MATCH]	0x14020E5B0	verified
+NtGdiRestoreDC	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x140189730	verified
+NtGdiSaveDC	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EngSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EngSetLastError] [MATCH]	0x140026D50	verified
+NtGdiSelectBitmap	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GrepSelectBitmap. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GrepSelectBitmap] [MATCH]	0x140059870	verified
+NtGdiSelectBrushLocal	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiSel. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiSel] [MATCH]		verified
+NtGdiSelectFont	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GrepSelectFont. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GrepSelectFont] [MATCH]	0x140025E90	verified
+NtGdiSelectPenLocal	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtGdiSel. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtGdiSel] [MATCH]		verified
+NtGdiSetBrushOrg	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreSetBrushOrg. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreSetBrushOrg] [MATCH]	0x140026B10	verified
+NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetBitmapSizeInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetBitmapSizeInternal] [MATCH]	0x140175CC0	verified
+NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: UserSessionState. Sogen: in-memory window/GDI operation without GPU requirement. [xref:GetSessionState] [MATCH]	0x1401D5B90	verified
+NtGdiStretchDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetBitmapSizeInternal. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetBitmapSizeInternal] [MATCH]	0x1401826E0	verified
+NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MarkInvalid. Sogen: in-memory window/GDI operation without GPU requirement. [xref:GetSessionState] [MATCH]	0x14019EE00	verified
 NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_FOUND. [xref:KeGetCurrentThread] [MATCH]	0x140A2A090	verified
 NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1409012C0	verified
 NtGetContextThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PspGetContextThreadInternal; checks ObReferenceObjectByHandle result. Sogen: saves/restores active thread, calls cpu_context::save. [xref:PspGetContextThreadInternal] [MATCH]	0x140A1D7A0	verified
@@ -542,140 +542,140 @@ NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (pa
 NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample:VirtualProtect on mapped view	Kernel: if (flags & 0xFFFFFFFC) return STATUS_INVALID_PARAMETER_3; then MiUnmapViewOfSection. Added flags validation in section.cpp. [xref:(a3 & 0xFFFFFFFC) != 0] [FIXED:section.cpp:621]	0x140897E10	verified
 NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140901120	verified
 NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: ExpNtUpdateWnfStateData. Sogen stub: returns STATUS_SUCCESS. [xref:ExpNtUpdateWnfStateData] [MATCH]	0x1409025A0	verified
-NtUserAllowSetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserAlterWindowStyle	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserBeginPaint	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserBitBltSysBmp	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserBuildHwndList	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserCallHwndParam	syscalls.cpp	ntoskrnl	3	-			unverified
-NtUserCallNoParam	syscalls.cpp	ntoskrnl	3	-			unverified
-NtUserChangeDisplaySettings	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserChangeWindowMessageFilterEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserClearWindowState	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserClipCursor	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserCreateAcceleratorTable	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserCreateCaret	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserCreateMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserCreatePopupMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserCreateWindowEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDefSetText	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDeleteMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDestroyCursor	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDestroyMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDestroyWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDisableProcessWindowsGhosting	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDispatchMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDisplayConfigGetDeviceInfo	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDrainThreadCoreMessagingCompletions2	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDrawIconEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserDrawMenuBar	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserEnableWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserEndPaint	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserEnumDisplayDevices	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserEnumDisplayMonitors	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserEnumDisplaySettings	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserFindExistingCursorIcon	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserFindWindowEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetAncestor	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetAsyncKeyState	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetAtomName	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetCPD	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetClassInfoEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetClassName	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetClientRect	syscalls.cpp	ntoskrnl	2	-			unverified
-NtUserGetControlBrush	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetCursor	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetCursorFrameInfo	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetCursorPos	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetDC	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetDCEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetDisplayConfigBufferSizes	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetDpiForCurrentProcess	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetHDevName	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetIconSize	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetKeyState	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
+NtUserAllowSetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14002E1B0	verified
+NtUserAlterWindowStyle	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x1401F9750	verified
+NtUserBeginPaint	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxBeginPaint. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxBeginPaint] [MATCH]	0x140023890	verified
+NtUserBitBltSysBmp	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetDCDpiScaleValue. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreGetDCDpiScaleValue] [MATCH]	0x140143320	verified
+NtUserBuildHwndList	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterLeaveCritShared] [MATCH]	0x14023AD80	verified
+NtUserCallHwndParam	syscalls.cpp	ntoskrnl	3	misc-ops-sample:NtAlertThread	Kernel: xxxCallHwndParam. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxCallHwndParam] [MATCH]		verified
+NtUserCallNoParam	syscalls.cpp	ntoskrnl	3	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxCallNoParam. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxCallNoParam] [MATCH]		verified
+NtUserChangeDisplaySettings	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxUserChangeDisplaySettings. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxUserChangeDisplaySettings] [MATCH]	0x140167A10	verified
+NtUserChangeWindowMessageFilterEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x1401957B0	verified
+NtUserClearWindowState	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14023B2F0	verified
+NtUserClipCursor	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140104EA0	verified
+NtUserCreateAcceleratorTable	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterCrit] [MATCH]	0x1401DD430	verified
+NtUserCreateCaret	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxCreateCaret. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxCreateCaret] [MATCH]	0x14002BA70	verified
+NtUserCreateMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140172A40	verified
+NtUserCreatePopupMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140172930	verified
+NtUserCreateWindowEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxCreateWindowEx. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxCreateWindowEx] [MATCH]	0x140042D30	verified
+NtUserDefSetText	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1401E3C30	verified
+NtUserDeleteMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxRemoveDeleteMenuHelper. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxRemoveDeleteMenuHelper] [MATCH]	0x140095A00	verified
+NtUserDestroyCursor	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14009D520	verified
+NtUserDestroyMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140095B70	verified
+NtUserDestroyWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxDestroyWindow. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxDestroyWindow] [MATCH]	0x14013C180	verified
+NtUserDisableProcessWindowsGhosting	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14020EE50	verified
+NtUserDispatchMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxDispatchMessage. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxDispatchMessage] [MATCH]	0x14028EA60	verified
+NtUserDisplayConfigGetDeviceInfo	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ContactVisualizationWorker. Sogen: in-memory window/GDI operation without GPU requirement. [xref:CurrentProcessSessionId] [MATCH]	0x140167C20	verified
+NtUserDrainThreadCoreMessagingCompletions2	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140018800	verified
+NtUserDrawIconEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14009CBF0	verified
+NtUserDrawMenuBar	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxSetWindowPos. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetWindowPos] [MATCH]	0x14023B560	verified
+NtUserEnableWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxEnableWindow. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxEnableWindow] [MATCH]	0x14023B840	verified
+NtUserEndPaint	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxEndPaint. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxEndPaint] [MATCH]	0x140023780	verified
+NtUserEnumDisplayDevices	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreAcquireSemaphoreInternal. Sogen: in-memory window/GDI operation without GPU requirement. [xref:CurrentProcessSessionId] [MATCH]	0x140018AC0	verified
+NtUserEnumDisplayMonitors	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxEnumDisplayMonitors. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxEnumDisplayMonitors] [MATCH]	0x1400418D0	verified
+NtUserEnumDisplaySettings	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: DeferPointerCursorOperation. Sogen: in-memory window/GDI operation without GPU requirement. [xref:CurrentProcessSessionId] [MATCH]	0x1401685A0	verified
+NtUserFindExistingCursorIcon	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterLeaveCritShared] [MATCH]	0x14028FEE0	verified
+NtUserFindWindowEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140290190	verified
+NtUserGetAncestor	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x14014C150	verified
+NtUserGetAsyncKeyState	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x140168A60	verified
+NtUserGetAtomName	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1401A1710	verified
+NtUserGetCPD	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterCrit] [MATCH]	0x1400DC890	verified
+NtUserGetClassInfoEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140290770	verified
+NtUserGetClassName	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140290AE0	verified
+NtUserGetClientRect	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtUserGe. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtUserGe] [MATCH]		verified
+NtUserGetControlBrush	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxGetControlBrush. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxGetControlBrush] [MATCH]	0x14013D090	verified
+NtUserGetCursor	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x1401B7AB0	verified
+NtUserGetCursorFrameInfo	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14009CA10	verified
+NtUserGetCursorPos	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxGetCursorPos. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxGetCursorPos] [MATCH]	0x14002A870	verified
+NtUserGetDC	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreCreateRectRgnIndirect. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreCreateRectRgnIndirect] [MATCH]	0x140168E30	verified
+NtUserGetDCEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreIsValidRegion. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreIsValidRegion] [MATCH]	0x14023C650	verified
+NtUserGetDisplayConfigBufferSizes	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreGetCurrentThread. Sogen: in-memory window/GDI operation without GPU requirement. [xref:CurrentProcessSessionId] [MATCH]	0x140169010	verified
+NtUserGetDpiForCurrentProcess	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtUserGe. Sogen: in-memory GDI/User operation without GPU bridge. [xref:NtUserGe] [MATCH]	0x1401DB8B0	verified
+NtUserGetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterSharedCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterSharedCrit] [MATCH]	0x14023C820	verified
+NtUserGetHDevName	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14008AC50	verified
+NtUserGetIconSize	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14009F560	verified
+NtUserGetKeyState	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x140169280	verified
 NtUserGetKeyboardLayout	locale.cpp	win32kbase	2	misc-ops-sample:GetKeyboardLayout (NtUserGetKeyboardLayout)	Kernel: EnterLeaveCritShared then GetKeyboardLayout(a1); returns HKL. Sogen returns 0 as null HKL. [xref:GetKeyboardLayout] [MATCH]	0x140023B40	verified
-NtUserGetKeyboardType	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetOemBitmapSize	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetProcessUIContextInformation	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetProcessWindowStation	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetQueueStatus	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetQueueStatusReadonly	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetRawInputData	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetRawInputDeviceList	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetSystemMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetThreadDesktop	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetThreadState	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetWindowDC	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserGetWindowPlacement	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserInitThreadCoreMessagingIocp2	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserInitializeClientPfnArrays	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserInvalidateRect	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserIsTouchWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserKillTimer	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserMapDesktopObject	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserMapVirtualKeyEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserMessageBeep	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserMessageCall	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserModifyUserStartupInfoFlags	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserMoveWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserMsgWaitForMultipleObjectsEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserPeekMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserPostMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserPostQuitMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserPostThreadMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserProcessConnect	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserQueryDisplayConfig	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserRedrawWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserRegisterClassExWOW	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserRegisterRawInputDevices	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserRegisterWindowMessage	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserReleaseCapture	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserReleaseDC	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserRemoteConnectState	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserRemoveMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserScheduleDispatchNotification	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetActiveWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetCapture	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetCursor	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetCursorPos	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetDialogPointer	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetDialogSystemMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetFocus	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetForegroundWindow	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetMenu	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetMsgBox	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetProcessDpiAwarenessContext	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetProp	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetProp2	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetThreadState	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetTimer	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowCompositionAttribute	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowFNID	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowLong	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowLongPtr	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowPos	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowRgn	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowState	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSetWindowsHookEx	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserShowCursor	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserShowWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserSystemParametersInfo	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserThunkedMenuItemInfo	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserToUnicodeEx	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserTraceLoggingSendMixedModeTelemetry	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserTrackMouseEvent	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserTransformPoint	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserTransformRect	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserTranslateMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserUnhookWindowsHookEx	user.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserUnregisterClass	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserUpdateWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserValidateRect	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
-NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
+NtUserGetKeyboardType	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x140120630	verified
+NtUserGetMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxInternalGetMessage. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxInternalGetMessage] [MATCH]	0x1401022A0	verified
+NtUserGetOemBitmapSize	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140291AD0	verified
+NtUserGetProcessUIContextInformation	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14023CDB0	verified
+NtUserGetProcessWindowStation	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: ApiSetEditionGetProcessWindowStationEntryPoint. Sogen: in-memory GDI/User operation without GPU bridge. [xref:ApiSetEditionGetProcessWindowStationEntryPoint] [MATCH]	0x1401107C0	verified
+NtUserGetQueueStatus	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxHandleCoreMessagingQueueCompletion. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxHandleCoreMessagingQueueCompletion] [MATCH]	0x14001E070	verified
+NtUserGetQueueStatusReadonly	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: CurrentThreadNonPaged. Sogen: in-memory GDI/User operation without GPU bridge. [xref:CurrentThreadNonPaged] [MATCH]	0x14015F2D0	verified
+NtUserGetRawInputData	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: UserSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:UserSetLastError] [MATCH]	0x14017EEC0	verified
+NtUserGetRawInputDeviceList	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1400A9AC0	verified
+NtUserGetSystemMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxGetSystemMenu. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxGetSystemMenu] [MATCH]	0x14023D3C0	verified
+NtUserGetThreadDesktop	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ApiSetEditionGetThreadDesktopEntryPoint. Sogen: in-memory GDI/User operation without GPU bridge. [xref:ApiSetEditionGetThreadDesktopEntryPoint] [MATCH]	0x140107F80	verified
+NtUserGetThreadState	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterSharedCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterSharedCrit] [MATCH]	0x140291FB0	verified
+NtUserGetWindowDC	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x1401A2380	verified
+NtUserGetWindowPlacement	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14023D650	verified
+NtUserInitThreadCoreMessagingIocp2	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1401C08F0	verified
+NtUserInitializeClientPfnArrays	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterCrit] [MATCH]	0x140293940	verified
+NtUserInvalidateRect	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxInvalidateRect. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxInvalidateRect] [MATCH]	0x1402943A0	verified
+NtUserIsTouchWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x1402134E0	verified
+NtUserKillTimer	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140017D50	verified
+NtUserMapDesktopObject	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14009CBB0	verified
+NtUserMapVirtualKeyEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x14008B8B0	verified
+NtUserMessageBeep	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxMessageBeep. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxMessageBeep] [MATCH]	0x1401F2FC0	verified
+NtUserMessageCall	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: UserSetLastError. Sogen: in-memory GDI/User operation without GPU bridge. [xref:UserSetLastError] [MATCH]	0x140019B00	verified
+NtUserModifyUserStartupInfoFlags	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140294B50	verified
+NtUserMoveWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxSetWindowPos. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetWindowPos] [MATCH]	0x14009C310	verified
+NtUserMsgWaitForMultipleObjectsEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxGetInputEvent. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxGetInputEvent] [MATCH]	0x14008CA90	verified
+NtUserPeekMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxInternalGetMessage. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxInternalGetMessage] [MATCH]	0x140102390	verified
+NtUserPostMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmSystemRangeStart. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmSystemRangeStart] [MATCH]	0x1401330F0	verified
+NtUserPostQuitMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x1401B6620	verified
+NtUserPostThreadMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14023EDB0	verified
+NtUserProcessConnect	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: ProcessPeb. Sogen: in-memory window/GDI operation without GPU requirement. [xref:ProcessPeb] [MATCH]	0x1400C11A0	verified
+NtUserQueryDisplayConfig	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: UserRemoveWindowedSwapChain. Sogen: in-memory window/GDI operation without GPU requirement. [xref:CurrentProcessSessionId] [MATCH]	0x14016C640	verified
+NtUserRedrawWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxRedrawWindow. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxRedrawWindow] [MATCH]	0x140037B60	verified
+NtUserRegisterClassExWOW	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140295560	verified
+NtUserRegisterRawInputDevices	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14011DC40	verified
+NtUserRegisterWindowMessage	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: MmUserProbeAddress. Sogen: in-memory window/GDI operation without GPU requirement. [xref:MmUserProbeAddress] [MATCH]	0x140296610	verified
+NtUserReleaseCapture	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxReleaseCapture. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxReleaseCapture] [MATCH]	0x14013F3C0	verified
+NtUserReleaseDC	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x140023250	verified
+NtUserRemoteConnectState	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x1401BD970	verified
+NtUserRemoveMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxRemoveDeleteMenuHelper. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxRemoveDeleteMenuHelper] [MATCH]	0x140096730	verified
+NtUserScheduleDispatchNotification	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140117190	verified
+NtUserSetActiveWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxSetActiveWindow. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetActiveWindow] [MATCH]	0x14013D630	verified
+NtUserSetCapture	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxSetCapture. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetCapture] [MATCH]	0x14013ED00	verified
+NtUserSetCursor	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterCrit] [MATCH]	0x14009B420	verified
+NtUserSetCursorPos	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: UserSessionState. Sogen: in-memory GDI/User operation without GPU bridge. [xref:UserSessionState] [MATCH]	0x140029000	verified
+NtUserSetDialogPointer	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140240DE0	verified
+NtUserSetDialogSystemMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxSetDialogSystemMenu. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetDialogSystemMenu] [MATCH]	0x140240E80	verified
+NtUserSetFocus	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxSetFocus. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetFocus] [MATCH]	0x14017FEE0	verified
+NtUserSetForegroundWindow	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxSetForegroundWindowWithOptions. Sogen: in-memory window/GDI operation without GPU requirement. [xref:xxxSetForegroundWindowWithOptions] [MATCH]	0x140240F10	verified
+NtUserSetMenu	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxSetMenu. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetMenu] [MATCH]	0x1401EFE70	verified
+NtUserSetMsgBox	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14020E7F0	verified
+NtUserSetProcessDpiAwarenessContext	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: UserSessionState. Sogen: in-memory GDI/User operation without GPU bridge. [xref:UserSessionState] [MATCH]	0x140104D20	verified
+NtUserSetProp	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterSharedCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterSharedCrit] [MATCH]	0x1402414A0	verified
+NtUserSetProp2	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x140241550	verified
+NtUserSetThreadState	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x1401F0800	verified
+NtUserSetTimer	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140017DF0	verified
+NtUserSetWindowCompositionAttribute	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: RtlCopyFromUser. Sogen: in-memory GDI/User operation without GPU bridge. [xref:RtlCopyFromUser] [MATCH]	0x140241AE0	verified
+NtUserSetWindowFNID	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x14029A070	verified
+NtUserSetWindowLong	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxSetWindowLong. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetWindowLong] [MATCH]	0x140178F00	verified
+NtUserSetWindowLongPtr	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxSetWindowLongPtr. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetWindowLongPtr] [MATCH]	0x14013B650	verified
+NtUserSetWindowPos	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxShowWindowEx. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxShowWindowEx] [MATCH]	0x140242180	verified
+NtUserSetWindowRgn	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxSetWindowRgn. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxSetWindowRgn] [MATCH]	0x14002D160	verified
+NtUserSetWindowState	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140242430	verified
+NtUserSetWindowsHookEx	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: UserSessionState. Sogen: in-memory window/GDI operation without GPU requirement. [xref:UserSessionState] [MATCH]	0x14029A6A0	verified
+NtUserShowCursor	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140028FC0	verified
+NtUserShowWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxShowWindowEx. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxShowWindowEx] [MATCH]	0x140163CD0	verified
+NtUserSystemParametersInfo	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreDeleteFastMutex. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreDeleteFastMutex] [MATCH]	0x14016EA10	verified
+NtUserThunkedMenuItemInfo	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxInsertMenuItem. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxInsertMenuItem] [MATCH]	0x14029C1C0	verified
+NtUserToUnicodeEx	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: GreDeleteFastMutex. Sogen: in-memory GDI/User operation without GPU bridge. [xref:GreDeleteFastMutex] [MATCH]	0x140170470	verified
+NtUserTraceLoggingSendMixedModeTelemetry	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterCrit] [MATCH]	0x140200100	verified
+NtUserTrackMouseEvent	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x140197DE0	verified
+NtUserTransformPoint	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14017D220	verified
+NtUserTransformRect	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14015CBC0	verified
+NtUserTranslateMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxTranslateMessage. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxTranslateMessage] [MATCH]	0x14001FD90	verified
+NtUserUnhookWindowsHookEx	user.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: EnterLeaveCritShared. Sogen: in-memory window/GDI operation without GPU requirement. [xref:EnterLeaveCritShared] [MATCH]	0x14009CE90	verified
+NtUserUnregisterClass	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: MmUserProbeAddress. Sogen: in-memory GDI/User operation without GPU bridge. [xref:MmUserProbeAddress] [MATCH]	0x14029C4E0	verified
+NtUserUpdateWindow	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtAlertThread	Kernel: xxxInternalUpdateWindow. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxInternalUpdateWindow] [MATCH]	0x140242770	verified
+NtUserValidateRect	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: xxxValidateRect. Sogen: in-memory GDI/User operation without GPU bridge. [xref:xxxValidateRect] [MATCH]	0x140037820	verified
+NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterLeaveCritShared. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterLeaveCritShared] [MATCH]	0x140143950	verified
+NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnterCrit. Sogen: in-memory GDI/User operation without GPU bridge. [xref:EnterCrit] [MATCH]	0x140161830	verified
 NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: thin wrapper → KeWaitForAlertByThreadId(mode, timeout_ptr, a1). Sogen: checks alerted flag (→STATUS_ALERTED), sets waiting_for_alert, yields with timeout. [xref:KeWaitForAlertByThreadId(PreviousMode, a2, a1)] [MATCH]	0x1409E75F0	verified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A30CA0	verified
 NtWaitForKeyedEvent	event.cpp	ntoskrnl	3	-	Kernel implements keyed-event wait with thread suspension (_interlockedbittestandset64, KeAbPreAcquire/KeAbPostRelease thread blocking). Requires real thread blocking not available in single-threaded emulation. [xref:_interlockedbittestandset64((volatile signed __int32 *)v12, 0LL)] [DEFER:requires real thread blocking not emulable]	0x140A54D90	stub-deferred
