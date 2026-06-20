@@ -1,0 +1,17 @@
+# wave-11 independent review — 2026-06-20
+# reviewer: blind-subagent-wave11
+# scope: port.cpp ALPC handlers (verified+stub-deferred), timer.cpp residuals, NtGetCurrentProcessorNumber, NtLockVirtualMemory, NtUserMsgWaitForMultipleObjectsEx
+NtAlpcCreatePort	AGREE	[xref:ConnectionPort = AlpcpCreateConnectionPort(a1, a2, a3, 0LL, v6, v7)]	kernel allocates kernel ALPC port object; sogen creates port_container with name; both produce a usable handle; emulation-level approximation correct
+NtAlpcConnectPort	AGREE	[xref:return AlpcpConnectPort(a1, a2, 0, a3, a4, a5, 0LL, a6, a7, a8, a9, a10, a11)]	kernel delegates to AlpcpConnectPort with all attrs; sogen creates port_container by name and writes handle; connection semantics preserved
+NtAlpcConnectPortEx	AGREE	[xref:return AlpcpConnectPort(a1, 0, a2, a3, a4, a5, a6, 0LL, a7, a8, a9, a10, a11)]	NtAlpcConnectPortEx.c shows delegation to AlpcpConnectPort; sogen delegates to NtAlpcConnectPort — functionally equivalent
+NtAlpcSendWaitReceivePort	AGREE	[xref:AlpcpSendMessage(&v25, a3, a4, PreviousMode)]	kernel sends then receives; sogen dispatches to port->handle_message and writes reply; message exchange contract preserved
+NtAlpcQueryInformation	AGREE	[xref:v15 = ObReferenceObjectByHandle(Handle, 0x20000u, AlpcPortObjectType, PreviousMode, &v22, 0LL)]	kernel requires AlpcPortObjectType kernel object lookup; user-space emulator cannot replicate; DEFER correct
+NtAlpcSetInformation	AGREE	[xref:ObReferenceObjectByHandle(Handle, 1u, AlpcPortObjectType, PreviousMode, &Object, 0LL)]	kernel requires ALPC port kernel object; DEFER correct
+NtAlpcCreateSecurityContext	AGREE	[xref:*(_QWORD *)&ClientSecurityQos.Length = 0LL]	kernel creates security context with impersonation infra; DEFER correct
+NtAlpcDeleteSecurityContext	AGREE	[xref:ObReferenceObjectByHandle(a1, 1u, AlpcPortObjectType, KeGetCurrentThread()->PreviousMode, &Object, 0LL)]	kernel deletes via ALPC port object; DEFER correct
+NtQueryTimerResolution	AGREE	[xref:KeGetCurrentThread()->PreviousMode]	kernel reads KeMaximumIncrement/KeMinimumIncrement/KeTimeIncrement; sogen approximates with fixed plausible constants; no hardware timer accessible from user space
+NtSetTimerResolution	AGREE	[xref:updated = KeTimeIncrement]	kernel updates KeTimeIncrement on set, returns STATUS_TIMER_RESOLUTION_NOT_SET on clear without prior set; sogen was inverted — FIXED correctly
+NtSetTimerEx	AGREE	[xref:v13 == ExTimerObjectType]	kernel sets IR timer via KeSetTimerEx with APC; APC/DPC infrastructure not emulable; DEFER correct
+NtGetCurrentProcessorNumber	AGREE	[xref:GroupIndex = KeGetCurrentPrcb()->GroupIndex]	kernel reads PRCB GroupIndex from physical CPU; PRCB not accessible; DEFER correct
+NtLockVirtualMemory	AGREE	[xref:result = MiLockUnlockCommon]	kernel pins physical pages via PFN database; physical memory management not emulable; DEFER correct
+NtUserMsgWaitForMultipleObjectsEx	AGREE	[xref:v7 = xxxMsgWaitForMultipleObjectsEx(v6]	kernel calls xxxMsgWaitForMultipleObjectsEx with thread queue; sogen builds wait_handles, sets await_msg_mask, yields thread — functionally equivalent; tested by MsgWaitForMultipleObjects+SetTimer path

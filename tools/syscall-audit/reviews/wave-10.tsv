@@ -1,0 +1,218 @@
+# wave-10 independent review — 2026-06-20
+# reviewer: blind-subagent-wave10
+NtAcceptConnectPort	AGREE	[xref:__int64 __fastcall NtAcceptConnectPort(int a1, __i]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtAcquireCrossVmMutant	AGREE	[xref:__int64 __fastcall NtAcquireCrossVmMutant(void *a1]	Trivial sogen stub; cross-VM synchronization primitives require hypervisor support
+NtAcquireProcessActivityReference	AGREE	[xref:__int64 __fastcall NtAcquireProcessActivityReferen]	Trivial sogen stub; process activity reference is a kernel power/lifecycle tracking primitive
+NtAddBootEntry	AGREE	[xref:__int64 __fastcall NtAddBootEntry(__int64 a1, __in]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtAddDriverEntry	AGREE	[xref:__int64 __fastcall NtAddDriverEntry(__int64 a1, __]	Trivial sogen stub; modifies kernel driver load order in NVRAM
+NtAlertMultipleThreadByThreadId	AGREE	[xref:__int64 __fastcall NtAlertMultipleThreadByThreadId]	Trivial sogen stub; kernel schedules threads via dispatcher locks
+NtAlertResumeThread	AGREE	[xref:__int64 __fastcall NtAlertResumeThread(ULONG_PTR B]	Trivial sogen stub; kernel schedules threads via dispatcher locks
+NtAlertThread	AGREE	[xref:__int64 __fastcall NtAlertThread(ULONG_PTR a1)]	Trivial sogen stub; kernel schedules threads via dispatcher locks
+NtAllocateLocallyUniqueId	AGREE	[xref:__int64 __fastcall NtAllocateLocallyUniqueId(unsig]	Trivial sogen stub; LUID allocation requires kernel security LUID allocator
+NtAlpcAcceptConnectPort	AGREE	[xref:__int64 __fastcall NtAlpcAcceptConnectPort(]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcCancelMessage	AGREE	[xref:__int64 __fastcall NtAlpcCancelMessage(void *a1, u]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcCreatePortSection	AGREE	[xref:__int64 __fastcall NtAlpcCreatePortSection(HANDLE]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcCreateResourceReserve	AGREE	[xref:__int64 __fastcall NtAlpcCreateResourceReserve(HAN]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcCreateSectionView	AGREE	[xref:__int64 __fastcall NtAlpcCreateSectionView(HANDLE]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcDeletePortSection	AGREE	[xref:__int64 __fastcall NtAlpcDeletePortSection(void *a]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcDeleteResourceReserve	AGREE	[xref:__int64 __fastcall NtAlpcDeleteResourceReserve(voi]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcDeleteSectionView	AGREE	[xref:__int64 __fastcall NtAlpcDeleteSectionView(void *a]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcDisconnectPort	AGREE	[xref:__int64 __fastcall NtAlpcDisconnectPort(void *a1,]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcImpersonateClientContainerOfPort	AGREE	[xref:__int64 __fastcall NtAlpcImpersonateClientContaine]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcImpersonateClientOfPort	AGREE	[xref:__int64 __fastcall NtAlpcImpersonateClientOfPort(H]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcOpenSenderProcess	AGREE	[xref:__int64 __fastcall NtAlpcOpenSenderProcess(_QWORD]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcOpenSenderThread	AGREE	[xref:__int64 __fastcall NtAlpcOpenSenderThread(_QWORD *]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcQueryInformationMessage	AGREE	[xref:__int64 __fastcall NtAlpcQueryInformationMessage(]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtAlpcRevokeSecurityContext	AGREE	[xref:__int64 __fastcall NtAlpcRevokeSecurityContext(voi]	Trivial sogen stub; kernel implements Advanced Local Procedure Call
+NtApphelpCacheControl	AGREE	[xref:__int64 __fastcall NtApphelpCacheControl(int a1, v]	Trivial sogen stub; Application Compatibility cache control is a kernel shim infrastructure
+NtAssignProcessToJobObject	AGREE	[xref:__int64 __fastcall NtAssignProcessToJobObject(void]	Trivial sogen stub; kernel job object requires multi-process accounting
+NtCallEnclave	AGREE	[xref:NTSTATUS __stdcall NtCallEnclave(]	Trivial sogen stub; Intel SGX/VBS enclave creation requires hardware enclave support
+NtCancelSynchronousIoFile	AGREE	[xref:NTSTATUS __fastcall NtCancelSynchronousIoFile(void]	Trivial sogen stub; synchronous I/O cancellation requires kernel IRP cancellation path
+NtChangeProcessState	AGREE	[xref:__int64 __fastcall NtChangeProcessState(ULONG_PTR]	Trivial sogen stub; process/thread state-change objects are kernel scheduler primitives
+NtChangeThreadState	AGREE	[xref:__int64 __fastcall NtChangeThreadState(ULONG_PTR a]	Trivial sogen stub; process/thread state-change objects are kernel scheduler primitives
+NtCloseObjectAuditAlarm	AGREE	[xref:NTSTATUS __stdcall NtCloseObjectAuditAlarm(PUNICOD]	Trivial sogen stub; LSA audit alarm callbacks require lsass.exe integration unavailable in single-process sogen
+NtCommitRegistryTransaction	AGREE	[xref:__int64 __fastcall NtCommitRegistryTransaction(HAN]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtCompactKeys	AGREE	[xref:__int64 __fastcall NtCompactKeys(unsigned int a1,]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtCompareSigningLevels	AGREE	[xref:__int64 NtCompareSigningLevels()]	Trivial sogen stub; code integrity signing level cache resides in kernel CI.DLL structures
+NtCompressKey	AGREE	[xref:__int64 __fastcall NtCompressKey(int a1)]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	AGREE	[xref:__int64 __fastcall NtConvertBetweenAuxiliaryCounte]	Trivial sogen stub; auxiliary hardware counter conversion requires ring-0 hardware counter access
+NtCopyFileChunk	AGREE	[xref:__int64 __fastcall NtCopyFileChunk(]	Trivial sogen stub; kernel server-side file copy offload requires file-system mini-filter cooperation
+NtCreateCpuPartition	AGREE	[xref:__int64 __fastcall NtCreateCpuPartition(HANDLE *a1]	Trivial sogen stub; CPU/memory partition management is a Hyper-V hypervisor primitive
+NtCreateCrossVmEvent	AGREE	[xref:__int64 __fastcall NtCreateCrossVmEvent(_QWORD *a1]	Trivial sogen stub; cross-VM synchronization primitives require hypervisor support
+NtCreateCrossVmMutant	AGREE	[xref:__int64 __fastcall NtCreateCrossVmMutant(_QWORD *a]	Trivial sogen stub; cross-VM synchronization primitives require hypervisor support
+NtCreateDebugObject	AGREE	[xref:__int64 __fastcall NtCreateDebugObject(__int64 a1,]	Trivial sogen stub; kernel debug subsystem
+NtCreateEnclave	AGREE	[xref:__int64 __fastcall NtCreateEnclave(]	Trivial sogen stub; Intel SGX/VBS enclave creation requires hardware enclave support
+NtCreateEnlistment	AGREE	[xref:NTSTATUS __stdcall NtCreateEnlistment(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtCreateIoRing	AGREE	[xref:__int64 __fastcall NtCreateIoRing(unsigned __int64]	Trivial sogen stub; I/O ring requires kernel-side ring buffer management
+NtCreateJobObject	AGREE	[xref:__int64 __fastcall NtCreateJobObject(__int64 *a1,]	Trivial sogen stub; kernel job object requires multi-process accounting
+NtCreateMailslotFile	AGREE	[xref:__int64 __fastcall NtCreateMailslotFile(]	Trivial sogen stub; mailslot file creation requires kernel MSFS driver
+NtCreatePagingFile	AGREE	[xref:__int64 __fastcall NtCreatePagingFile(__int64 a1,]	Trivial sogen stub; paging file creation is a kernel VMM boot operation
+NtCreatePort	AGREE	[xref:__int64 __fastcall NtCreatePort(__int64 a1, __int6]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtCreateProcessStateChange	AGREE	[xref:__int64 __fastcall NtCreateProcessStateChange(HAND]	Trivial sogen stub; process/thread state-change objects are kernel scheduler primitives
+NtCreateProfile	AGREE	[xref:__int64 __fastcall NtCreateProfile(int a1, int a2,]	Trivial sogen stub; kernel profiling requires hardware performance counters and ring-0 sampling
+NtCreateProfileEx	AGREE	[xref:__int64 __fastcall NtCreateProfileEx(]	Trivial sogen stub; kernel profiling requires hardware performance counters and ring-0 sampling
+NtCreateRegistryTransaction	AGREE	[xref:__int64 __fastcall NtCreateRegistryTransaction(HAN]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtCreateResourceManager	AGREE	[xref:NTSTATUS __stdcall NtCreateResourceManager(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtCreateSymbolicLinkObject	AGREE	[xref:__int64 __fastcall NtCreateSymbolicLinkObject(unsi]	Trivial sogen stub; object manager symbolic links reside in kernel namespace
+NtCreateThreadStateChange	AGREE	[xref:__int64 __fastcall NtCreateThreadStateChange(HANDL]	Trivial sogen stub; process/thread state-change objects are kernel scheduler primitives
+NtCreateTransaction	AGREE	[xref:NTSTATUS __stdcall NtCreateTransaction(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtCreateTransactionManager	AGREE	[xref:NTSTATUS __stdcall NtCreateTransactionManager(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtCreateWaitablePort	AGREE	[xref:__int64 __fastcall NtCreateWaitablePort(__int64 a1]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtCreateWnfStateName	AGREE	[xref:__int64 __fastcall NtCreateWnfStateName(]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtDebugActiveProcess	AGREE	[xref:__int64 __fastcall NtDebugActiveProcess(ULONG_PTR]	Trivial sogen stub; kernel debug subsystem
+NtDebugContinue	AGREE	[xref:NTSTATUS __fastcall NtDebugContinue(void *a1, __in]	Trivial sogen stub; kernel debug subsystem
+NtDeleteAtom	AGREE	[xref:__int64 __fastcall NtDeleteAtom(unsigned __int16 a]	Trivial sogen stub; kernel object directory / atom table operations require kernel namespace
+NtDeleteBootEntry	AGREE	[xref:__int64 __fastcall NtDeleteBootEntry(unsigned int]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtDeleteDriverEntry	AGREE	[xref:__int64 __fastcall NtDeleteDriverEntry(unsigned in]	Trivial sogen stub; modifies kernel driver load order in NVRAM
+NtDeleteObjectAuditAlarm	AGREE	[xref:NTSTATUS __stdcall NtDeleteObjectAuditAlarm(PUNICO]	Trivial sogen stub; LSA audit alarm callbacks require lsass.exe integration unavailable in single-process sogen
+NtDeleteWnfStateName	AGREE	[xref:__int64 __fastcall NtDeleteWnfStateName(void *a1)]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtDisableLastKnownGood	AGREE	[xref:__int64 NtDisableLastKnownGood()]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtDrawText	AGREE	[xref:__int64 __fastcall NtDrawText(__int128 *a1)]	Trivial sogen stub; kernel-side DrawText is a GDI surface operation requiring kernel graphics stack
+NtEnableLastKnownGood	AGREE	[xref:__int64 NtEnableLastKnownGood()]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtEnumerateBootEntries	AGREE	[xref:__int64 __fastcall NtEnumerateBootEntries(unsigned]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtEnumerateDriverEntries	AGREE	[xref:__int64 __fastcall NtEnumerateDriverEntries(unsign]	Trivial sogen stub; modifies kernel driver load order in NVRAM
+NtEnumerateSystemEnvironmentValuesEx	AGREE	[xref:__int64 __fastcall NtEnumerateSystemEnvironmentVal]	Trivial sogen stub; system environment variable info and security policy queries require kernel UEFI/firmware interface
+NtEnumerateTransactionObject	AGREE	[xref:NTSTATUS __stdcall NtEnumerateTransactionObject(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtExtendSection	AGREE	[xref:__int64 __fastcall NtExtendSection(ULONG_PTR BugCh]	Trivial sogen stub; extending a section requires kernel VAD/PFN database manipulation
+NtFilterBootOption	AGREE	[xref:__int64 __fastcall NtFilterBootOption(int a1, int]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtFlushInstallUILanguage	AGREE	[xref:__int64 __fastcall NtFlushInstallUILanguage(int a1]	Trivial sogen stub; install UI language flush requires kernel NLS cache update
+NtFlushKey	AGREE	[xref:__int64 __fastcall NtFlushKey(int a1)]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtFreeUserPhysicalPages	AGREE	[xref:__int64 __fastcall NtFreeUserPhysicalPages(HANDLE]	Trivial sogen stub; Address Windowing Extensions require kernel physical page frame management
+NtFreezeRegistry	AGREE	[xref:__int64 __fastcall NtFreezeRegistry(unsigned int a]	Trivial sogen stub; registry freeze/thaw requires kernel hive lock coordination
+NtGetCachedSigningLevel	AGREE	[xref:__int64 __fastcall NtGetCachedSigningLevel(]	Trivial sogen stub; code integrity signing level cache resides in kernel CI.DLL structures
+NtGetCompleteWnfStateSubscription	AGREE	[xref:__int64 __fastcall NtGetCompleteWnfStateSubscripti]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtGetDevicePowerState	AGREE	[xref:NTSTATUS __fastcall NtGetDevicePowerState(HANDLE H]	Trivial sogen stub; power management requires kernel PoMgr infrastructure
+NtGetEnvironmentVariableEx	AGREE	[xref:__int64 __fastcall NtGetEnvironmentVariableEx(int]	Trivial sogen stub; system environment variable info and security policy queries require kernel UEFI/firmware interface
+NtGetNotificationResourceManager	AGREE	[xref:NTSTATUS __stdcall NtGetNotificationResourceManage]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtGetWriteWatch	AGREE	[xref:__int64 __fastcall NtGetWriteWatch(]	Trivial sogen stub; write-watch tracking is a kernel VMM feature
+NtInitializeEnclave	AGREE	[xref:__int64 __fastcall NtInitializeEnclave(]	Trivial sogen stub; Intel SGX/VBS enclave creation requires hardware enclave support
+NtInitializeRegistry	AGREE	[xref:__int64 NtInitializeRegistry()]	Trivial sogen stub; registry initialization is a boot-time kernel operation
+NtInitiatePowerAction	AGREE	[xref:__int64 __fastcall NtInitiatePowerAction(int a1, i]	Trivial sogen stub; power management requires kernel PoMgr infrastructure
+NtIsProcessInJob	AGREE	[xref:__int64 __fastcall NtIsProcessInJob(ULONG_PTR a1,]	Trivial sogen stub; kernel job object requires multi-process accounting
+NtListenPort	AGREE	[xref:__int64 __fastcall NtListenPort(HANDLE Handle, __i]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtLoadEnclaveData	AGREE	[xref:__int64 __fastcall NtLoadEnclaveData(]	Trivial sogen stub; Intel SGX/VBS enclave creation requires hardware enclave support
+NtLoadKey3	AGREE	[xref:__int64 __fastcall NtLoadKey3(]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtLoadKeyEx	AGREE	[xref:__int64 __fastcall NtLoadKeyEx(]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtLockProductActivationKeys	AGREE	[xref:NTSTATUS __fastcall NtLockProductActivationKeys(__]	Trivial sogen stub; product activation key locking is a kernel licensing operation
+NtLockRegistryKey	AGREE	[xref:__int64 __fastcall NtLockRegistryKey(int a1)]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtMakePermanentObject	AGREE	[xref:NTSTATUS __fastcall NtMakePermanentObject(HANDLE H]	Trivial sogen stub; object permanence requires kernel object manager namespace state
+NtMakeTemporaryObject	AGREE	[xref:NTSTATUS __fastcall NtMakeTemporaryObject(HANDLE H]	Trivial sogen stub; object permanence requires kernel object manager namespace state
+NtManageHotPatch	AGREE	[xref:__int64 __fastcall NtManageHotPatch(int a1, volati]	Trivial sogen stub; kernel hot-patch / CMF module mapping requires ring-0 code patching
+NtManagePartition	AGREE	[xref:__int64 __fastcall NtManagePartition(__int64 a1, _]	Trivial sogen stub; CPU/memory partition management is a Hyper-V hypervisor primitive
+NtMapCMFModule	AGREE	[xref:__int64 __fastcall NtMapCMFModule(int a1, unsigned]	Trivial sogen stub; kernel hot-patch / CMF module mapping requires ring-0 code patching
+NtMapUserPhysicalPages	AGREE	[xref:__int64 __fastcall NtMapUserPhysicalPages(__int64]	Trivial sogen stub; Address Windowing Extensions require kernel physical page frame management
+NtMapUserPhysicalPagesScatter	AGREE	[xref:__int64 __fastcall NtMapUserPhysicalPagesScatter(_]	Trivial sogen stub; Address Windowing Extensions require kernel physical page frame management
+NtModifyBootEntry	AGREE	[xref:__int64 __fastcall NtModifyBootEntry(__int64 a1)]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtModifyDriverEntry	AGREE	[xref:__int64 __fastcall NtModifyDriverEntry(__int64 a1)]	Trivial sogen stub; modifies kernel driver load order in NVRAM
+NtNotifyChangeDirectoryFile	AGREE	[xref:__int64 __fastcall NtNotifyChangeDirectoryFile(]	Trivial sogen stub; directory change notification requires kernel file-system completion port integration
+NtNotifyChangeDirectoryFileEx	AGREE	[xref:__int64 __fastcall NtNotifyChangeDirectoryFileEx(]	Trivial sogen stub; directory change notification requires kernel file-system completion port integration
+NtNotifyChangeMultipleKeys	AGREE	[xref:__int64 __fastcall NtNotifyChangeMultipleKeys(]	Trivial sogen stub; directory change notification requires kernel file-system completion port integration
+NtNotifyChangeSession	AGREE	[xref:NTSTATUS __fastcall NtNotifyChangeSession(]	Trivial sogen stub; directory change notification requires kernel file-system completion port integration
+NtOpenCpuPartition	AGREE	[xref:__int64 __fastcall NtOpenCpuPartition(_QWORD *a1,]	Trivial sogen stub; CPU/memory partition management is a Hyper-V hypervisor primitive
+NtOpenEnlistment	AGREE	[xref:NTSTATUS __stdcall NtOpenEnlistment(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtOpenJobObject	AGREE	[xref:__int64 __fastcall NtOpenJobObject(_QWORD *a1, int]	Trivial sogen stub; kernel job object requires multi-process accounting
+NtOpenObjectAuditAlarm	AGREE	[xref:NTSTATUS __stdcall NtOpenObjectAuditAlarm(]	Trivial sogen stub; LSA audit alarm callbacks require lsass.exe integration unavailable in single-process sogen
+NtOpenPartition	AGREE	[xref:__int64 __fastcall NtOpenPartition(HANDLE *a1, int]	Trivial sogen stub; CPU/memory partition management is a Hyper-V hypervisor primitive
+NtOpenRegistryTransaction	AGREE	[xref:__int64 __fastcall NtOpenRegistryTransaction(HANDL]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtOpenResourceManager	AGREE	[xref:NTSTATUS __stdcall NtOpenResourceManager(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtOpenSession	AGREE	[xref:__int64 __fastcall NtOpenSession(_QWORD *a1, int a]	Trivial sogen stub; session object open requires kernel session manager
+NtOpenTransaction	AGREE	[xref:NTSTATUS __stdcall NtOpenTransaction(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtOpenTransactionManager	AGREE	[xref:NTSTATUS __stdcall NtOpenTransactionManager(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtPlugPlayControl	AGREE	[xref:__int64 __fastcall NtPlugPlayControl(unsigned int]	Trivial sogen stub; Plug and Play manager control requires kernel PnP infrastructure
+NtPrivilegeCheck	AGREE	[xref:NTSTATUS __stdcall NtPrivilegeCheck(HANDLE ClientT]	Trivial sogen stub; LSA audit alarm callbacks require lsass.exe integration unavailable in single-process sogen
+NtPrivilegeObjectAuditAlarm	AGREE	[xref:NTSTATUS __stdcall NtPrivilegeObjectAuditAlarm(]	Trivial sogen stub; LSA audit alarm callbacks require lsass.exe integration unavailable in single-process sogen
+NtPrivilegedServiceAuditAlarm	AGREE	[xref:NTSTATUS __stdcall NtPrivilegedServiceAuditAlarm(]	Trivial sogen stub; LSA audit alarm callbacks require lsass.exe integration unavailable in single-process sogen
+NtPropagationComplete	AGREE	[xref:NTSTATUS __stdcall NtPropagationComplete(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtPssCaptureVaSpaceBulk	AGREE	[xref:__int64 __fastcall NtPssCaptureVaSpaceBulk(ULONG_P]	Trivial sogen stub; PSS VA space bulk capture requires kernel process snapshot infrastructure
+NtQueryAuxiliaryCounterFrequency	AGREE	[xref:__int64 __fastcall NtQueryAuxiliaryCounterFrequenc]	Trivial sogen stub; auxiliary hardware counter conversion requires ring-0 hardware counter access
+NtQueryBootEntryOrder	AGREE	[xref:__int64 __fastcall NtQueryBootEntryOrder(volatile]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtQueryBootOptions	AGREE	[xref:__int64 __fastcall NtQueryBootOptions(_DWORD *Addr]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtQueryDebugFilterState	AGREE	[xref:_BOOL8 __fastcall NtQueryDebugFilterState(unsigned]	Trivial sogen stub; kernel debug subsystem
+NtQueryDirectoryObject	AGREE	[xref:__int64 __fastcall NtQueryDirectoryObject(]	Trivial sogen stub; kernel object directory / atom table operations require kernel namespace
+NtQueryDriverEntryOrder	AGREE	[xref:__int64 __fastcall NtQueryDriverEntryOrder(volatil]	Trivial sogen stub; modifies kernel driver load order in NVRAM
+NtQueryEaFile	AGREE	[xref:__int64 __fastcall NtQueryEaFile(]	Trivial sogen stub; extended attributes require kernel NTFS EA stream support
+NtQueryEnvironmentVariableInfoEx	AGREE	[xref:__int64 __fastcall NtQueryEnvironmentVariableInfoE]	Trivial sogen stub; system environment variable info and security policy queries require kernel UEFI/firmware interface
+NtQueryInformationAtom	AGREE	[xref:__int64 __fastcall NtQueryInformationAtom(unsigned]	Trivial sogen stub; kernel object directory / atom table operations require kernel namespace
+NtQueryInformationCpuPartition	AGREE	[xref:__int64 __fastcall NtQueryInformationCpuPartition(]	Trivial sogen stub; CPU/memory partition management is a Hyper-V hypervisor primitive
+NtQueryInformationEnlistment	AGREE	[xref:NTSTATUS __stdcall NtQueryInformationEnlistment(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtQueryInformationJobObject	AGREE	[xref:__int64 __fastcall NtQueryInformationJobObject(ULO]	Trivial sogen stub; kernel job object requires multi-process accounting
+NtQueryInformationPort	AGREE	[xref:__int64 __fastcall NtQueryInformationPort(HANDLE H]	Trivial sogen stub; information query requires kernel object state not maintained in single-process emulator
+NtQueryInformationResourceManager	AGREE	[xref:NTSTATUS __stdcall NtQueryInformationResourceManag]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtQueryInformationTransaction	AGREE	[xref:NTSTATUS __stdcall NtQueryInformationTransaction(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtQueryInformationTransactionManager	AGREE	[xref:NTSTATUS __stdcall NtQueryInformationTransactionMa]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtQueryInformationWorkerFactory	AGREE	[xref:NTSTATUS __fastcall NtQueryInformationWorkerFactor]	Trivial sogen stub; information query requires kernel object state not maintained in single-process emulator
+NtQueryIntervalProfile	AGREE	[xref:__int64 __fastcall NtQueryIntervalProfile(__int64]	Trivial sogen stub; kernel profiling requires hardware performance counters and ring-0 sampling
+NtQueryIoRingCapabilities	AGREE	[xref:__int64 __fastcall NtQueryIoRingCapabilities(SIZE_]	Trivial sogen stub; I/O ring requires kernel-side ring buffer management
+NtQueryOpenSubKeys	AGREE	[xref:__int64 __fastcall NtQueryOpenSubKeys(int a1, _DWO]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtQueryOpenSubKeysEx	AGREE	[xref:__int64 __fastcall NtQueryOpenSubKeysEx(int a1, un]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtQueryQuotaInformationFile	AGREE	[xref:NTSTATUS __stdcall NtQueryQuotaInformationFile(]	Trivial sogen stub; disk quota management is a kernel NTFS quota subsystem operation
+NtQuerySecurityPolicy	AGREE	[xref:__int64 __fastcall NtQuerySecurityPolicy(]	Trivial sogen stub; system environment variable info and security policy queries require kernel UEFI/firmware interface
+NtQueryWnfStateData	AGREE	[xref:__int64 __fastcall NtQueryWnfStateData(]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtQueryWnfStateNameInformation	AGREE	[xref:__int64 __fastcall NtQueryWnfStateNameInformation(]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtReadFileScatter	AGREE	[xref:__int64 __fastcall NtReadFileScatter(]	Trivial sogen stub; scatter/gather I/O requires kernel MDL chain management
+NtRegisterProtocolAddressInformation	AGREE	[xref:NTSTATUS __stdcall NtRegisterProtocolAddressInform]	Trivial sogen stub; protocol address registration requires kernel TDI/network stack
+NtRegisterThreadTerminatePort	AGREE	[xref:NTSTATUS __fastcall NtRegisterThreadTerminatePort(]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtRemoveProcessDebug	AGREE	[xref:__int64 __fastcall NtRemoveProcessDebug(ULONG_PTR]	Trivial sogen stub; kernel debug subsystem
+NtRenameKey	AGREE	[xref:__int64 __fastcall NtRenameKey(__int64 a1, _OWORD]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtReplaceKey	AGREE	[xref:__int64 __fastcall NtReplaceKey(__int64 a1, int a2]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtReplacePartitionUnit	AGREE	[xref:__int64 __fastcall NtReplacePartitionUnit(__int128]	Trivial sogen stub; CPU/memory partition management is a Hyper-V hypervisor primitive
+NtReplyPort	AGREE	[xref:__int64 __fastcall NtReplyPort(HANDLE Handle, __in]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtReplyWaitReceivePortEx	AGREE	[xref:__int64 __fastcall NtReplyWaitReceivePortEx(HANDLE]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtReplyWaitReplyPort	AGREE	[xref:__int64 __fastcall NtReplyWaitReplyPort(void *a1,]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtRequestPort	AGREE	[xref:__int64 __fastcall NtRequestPort(HANDLE Handle, __]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtRequestWaitReplyPort	AGREE	[xref:__int64 __fastcall NtRequestWaitReplyPort(void *a1]	Trivial sogen stub; LPC port connection requires csrss/lsass server-side handling
+NtResetWriteWatch	AGREE	[xref:__int64 __fastcall NtResetWriteWatch(ULONG_PTR a1,]	Trivial sogen stub; write-watch tracking is a kernel VMM feature
+NtRestoreKey	AGREE	[xref:__int64 __fastcall NtRestoreKey(int a1, void *a2,]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtRollbackRegistryTransaction	AGREE	[xref:__int64 __fastcall NtRollbackRegistryTransaction(H]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtSaveKeyEx	AGREE	[xref:__int64 __fastcall NtSaveKeyEx(int a1, void *a2, i]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtSaveMergedKeys	AGREE	[xref:__int64 __fastcall NtSaveMergedKeys(__int64 a1, __]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtSerializeBoot	AGREE	[xref:__int64 NtSerializeBoot()]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtSetBootEntryOrder	AGREE	[xref:__int64 __fastcall NtSetBootEntryOrder(__int64 a1,]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtSetBootOptions	AGREE	[xref:__int64 __fastcall NtSetBootOptions(int *a1, char]	Trivial sogen stub; modifies UEFI/NVRAM boot variables
+NtSetCachedSigningLevel2	AGREE	[xref:__int64 __fastcall NtSetCachedSigningLevel2(]	Trivial sogen stub; code integrity signing level cache resides in kernel CI.DLL structures
+NtSetDebugFilterState	AGREE	[xref:__int64 __fastcall NtSetDebugFilterState(unsigned]	Trivial sogen stub; kernel debug subsystem
+NtSetDefaultHardErrorPort	AGREE	[xref:NTSTATUS __fastcall NtSetDefaultHardErrorPort(HAND]	Trivial sogen stub; hard error port registration requires kernel CSRSS port connection
+NtSetDriverEntryOrder	AGREE	[xref:__int64 __fastcall NtSetDriverEntryOrder(__int64 a]	Trivial sogen stub; modifies kernel driver load order in NVRAM
+NtSetEaFile	AGREE	[xref:__int64 __fastcall NtSetEaFile(int a1, unsigned __]	Trivial sogen stub; extended attributes require kernel NTFS EA stream support
+NtSetInformationCpuPartition	AGREE	[xref:__int64 __fastcall NtSetInformationCpuPartition(]	Trivial sogen stub; CPU/memory partition management is a Hyper-V hypervisor primitive
+NtSetInformationDebugObject	AGREE	[xref:NTSTATUS __fastcall NtSetInformationDebugObject(HA]	Trivial sogen stub; kernel debug subsystem
+NtSetInformationEnlistment	AGREE	[xref:NTSTATUS __stdcall NtSetInformationEnlistment(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtSetInformationIoRing	AGREE	[xref:__int64 __fastcall NtSetInformationIoRing(HANDLE H]	Trivial sogen stub; I/O ring requires kernel-side ring buffer management
+NtSetInformationJobObject	AGREE	[xref:__int64 __fastcall NtSetInformationJobObject(ULONG]	Trivial sogen stub; kernel job object requires multi-process accounting
+NtSetInformationResourceManager	AGREE	[xref:NTSTATUS __stdcall NtSetInformationResourceManager]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtSetInformationSymbolicLink	AGREE	[xref:__int64 __fastcall NtSetInformationSymbolicLink(vo]	Trivial sogen stub; symbolic link information update requires kernel object manager namespace
+NtSetInformationTransaction	AGREE	[xref:NTSTATUS __stdcall NtSetInformationTransaction(]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtSetInformationTransactionManager	AGREE	[xref:NTSTATUS __stdcall NtSetInformationTransactionMana]	Trivial sogen stub; Kernel Transaction Manager not emulated
+NtSetIntervalProfile	AGREE	[xref:__int64 __fastcall NtSetIntervalProfile(unsigned i]	Trivial sogen stub; kernel profiling requires hardware performance counters and ring-0 sampling
+NtSetQuotaInformationFile	AGREE	[xref:NTSTATUS __stdcall NtSetQuotaInformationFile(]	Trivial sogen stub; disk quota management is a kernel NTFS quota subsystem operation
+NtSetUuidSeed	AGREE	[xref:__int64 __fastcall NtSetUuidSeed(__int64 a1)]	Trivial sogen stub; UUID seed initialization updates kernel-mode UUID state
+NtSetVolumeInformationFile	AGREE	[xref:NTSTATUS __stdcall NtSetVolumeInformationFile(]	Trivial sogen stub; volume information updates require kernel file-system driver cooperation
+NtSetWnfProcessNotificationEvent	AGREE	[xref:__int64 __fastcall NtSetWnfProcessNotificationEven]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtShutdownSystem	AGREE	[xref:__int64 __fastcall NtShutdownSystem(int a1)]	Trivial sogen stub; system shutdown requires kernel executive power management
+NtSignalAndWaitForSingleObject	AGREE	[xref:NTSTATUS __fastcall NtSignalAndWaitForSingleObject]	Trivial sogen stub; kernel schedules threads via dispatcher locks
+NtStartProfile	AGREE	[xref:NTSTATUS __fastcall NtStartProfile(void *a1)]	Trivial sogen stub; kernel profiling requires hardware performance counters and ring-0 sampling
+NtStopProfile	AGREE	[xref:NTSTATUS __fastcall NtStopProfile(void *a1)]	Trivial sogen stub; kernel profiling requires hardware performance counters and ring-0 sampling
+NtSubmitIoRing	AGREE	[xref:__int64 __fastcall NtSubmitIoRing(HANDLE Handle, u]	Trivial sogen stub; I/O ring requires kernel-side ring buffer management
+NtSubscribeWnfStateChange	AGREE	[xref:__int64 __fastcall NtSubscribeWnfStateChange(__int]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtSystemDebugControl	AGREE	[xref:__int64 __fastcall NtSystemDebugControl(]	Trivial sogen stub; kernel debug subsystem
+NtTerminateEnclave	AGREE	[xref:__int64 __fastcall NtTerminateEnclave(__int64 a1,]	Trivial sogen stub; Intel SGX/VBS enclave creation requires hardware enclave support
+NtTerminateJobObject	AGREE	[xref:__int64 __fastcall NtTerminateJobObject(void *a1)]	Trivial sogen stub; kernel job object requires multi-process accounting
+NtThawRegistry	AGREE	[xref:__int64 NtThawRegistry()]	Trivial sogen stub; registry freeze/thaw requires kernel hive lock coordination
+NtTranslateFilePath	AGREE	[xref:__int64 __fastcall NtTranslateFilePath(char *Src,]	Trivial sogen stub; file path translation between GUID-volume and DOS paths requires kernel object manager
+NtUnloadKey	AGREE	[xref:__int64 NtUnloadKey()]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtUnloadKey2	AGREE	[xref:__int64 NtUnloadKey2()]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtUnloadKeyEx	AGREE	[xref:__int64 __fastcall NtUnloadKeyEx(__int64 a1, __int]	Trivial sogen stub; kernel registry hive loading/unloading manipulates hive files directly
+NtUnsubscribeWnfStateChange	AGREE	[xref:__int64 __fastcall NtUnsubscribeWnfStateChange(voi]	Trivial sogen stub; Windows Notification Facility requires kernel publish/subscribe infrastructure
+NtUserCallNoParam	AGREE	[xref:ULONG_PTR __stdcall NtUserCallNoParam(DWORD dwCode]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserGetDpiForCurrentProcess	AGREE	[xref:__int64 NtUserGetDpiForCurrentProcess()]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserGetKeyboardType	AGREE	[xref:__int64 __fastcall NtUserGetKeyboardType(unsigned]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserGetProcessUIContextInformation	AGREE	[xref:__int64 __fastcall NtUserGetProcessUIContextInform]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserGetRawInputDeviceList	AGREE	[xref:__int64 __fastcall NtUserGetRawInputDeviceList(vol]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserMapVirtualKeyEx	AGREE	[xref:__int64 __fastcall NtUserMapVirtualKeyEx(unsigned]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserModifyUserStartupInfoFlags	AGREE	[xref:__int64 __fastcall NtUserModifyUserStartupInfoFlag]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserSetProcessDpiAwarenessContext	AGREE	[xref:__int64 __fastcall NtUserSetProcessDpiAwarenessCon]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserSystemParametersInfo	AGREE	[xref:__int64 __fastcall NtUserSystemParametersInfo(unsi]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtUserToUnicodeEx	AGREE	[xref:__int64 __fastcall NtUserToUnicodeEx(]	Trivial sogen stub; win32k user-mode callback requires kernel win32k.sys infrastructure not fully emulated
+NtWaitForDebugEvent	AGREE	[xref:NTSTATUS __fastcall NtWaitForDebugEvent(HANDLE Han]	Trivial sogen stub; kernel debug subsystem
+NtWriteFileGather	AGREE	[xref:__int64 __fastcall NtWriteFileGather(]	Trivial sogen stub; scatter/gather I/O requires kernel MDL chain management
+NtWriteRequestData	AGREE	[xref:__int64 NtWriteRequestData()]	Trivial sogen stub; LPC request data write requires port connection infrastructure

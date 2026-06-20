@@ -1409,21 +1409,42 @@ namespace sogen
             return resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
         }
 
-        NTSTATUS handle_NtDxgkIsFeatureEnabled()
+        NTSTATUS handle_NtDxgkIsFeatureEnabled(const syscall_context& /*c*/)
         {
-            // puts("NtDxgkIsFeatureEnabled not supported");
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtGdiInit(const syscall_context& c)
         {
-            if (ensure_gdi_shared_table(c) == 0)
+            const auto table = ensure_gdi_shared_table(c);
+            if (table == 0)
             {
                 return STATUS_UNSUCCESSFUL;
             }
 
             const auto cookie = ensure_gdi_cookie(c);
             seed_gdi_stock_objects(c);
+
+            const auto* gdi32 = c.win_emu.mod_manager.find_by_name("gdi32.dll");
+            if (gdi32)
+            {
+                const auto gcookie_addr = gdi32->find_export("gCookie");
+                const auto ptable_addr = gdi32->find_export("pGdiSharedHandleTable");
+                if (const auto addr = gdi32->find_export("gMaxGdiHandleCount"); addr != 0)
+                {
+                    constexpr uint32_t max_count = GDI_MAX_HANDLE_COUNT;
+                    c.emu.write_memory(addr, &max_count, sizeof(max_count));
+                }
+                if (gcookie_addr != 0)
+                {
+                    const auto cookie32 = static_cast<uint32_t>(cookie);
+                    c.emu.write_memory(gcookie_addr, &cookie32, sizeof(cookie32));
+                }
+                if (ptable_addr != 0)
+                {
+                    c.emu.write_memory(ptable_addr, &table, sizeof(table));
+                }
+            }
 
             return static_cast<NTSTATUS>(cookie);
         }
@@ -2557,12 +2578,12 @@ namespace sogen
             return required_size;
         }
 
-        NTSTATUS handle_NtGdiExtCreateRegion()
+        NTSTATUS handle_NtGdiExtCreateRegion(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiTransparentBlt()
+        NTSTATUS handle_NtGdiTransparentBlt(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3036,12 +3057,12 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiSetLayout()
+        NTSTATUS handle_NtGdiSetLayout(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiGetDCObject()
+        NTSTATUS handle_NtGdiGetDCObject(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3155,7 +3176,7 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtGdiDdDDICloseAdapter()
+        NTSTATUS handle_NtGdiDdDDICloseAdapter(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3863,12 +3884,12 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDICacheHybridQueryValue()
+        NTSTATUS handle_NtGdiDdDDICacheHybridQueryValue(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDIUnlock()
+        NTSTATUS handle_NtGdiDdDDIUnlock(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3885,12 +3906,12 @@ namespace sogen
             return destroy_dxgk_allocations(c, destroy_allocation);
         }
 
-        NTSTATUS handle_NtGdiDdDDIDestroyContext()
+        NTSTATUS handle_NtGdiDdDDIDestroyContext(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDIDestroyDevice()
+        NTSTATUS handle_NtGdiDdDDIDestroyDevice(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }

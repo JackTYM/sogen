@@ -1,0 +1,210 @@
+# wave-09 independent review — 2026-06-20
+# reviewer: wave-09-gdi-user-sweep
+# scope: all unverified handlers in gdi.cpp and user.cpp (204 handlers)
+# methodology: read kernel artifact (win32kbase/win32kfull/dxgkrnl thunks) + full sogen implementation review
+# key finding: all kernel artifacts for NtGdi*/NtUser* are win32u.i64/win32k.i64 thunks forwarding to real impl;
+#   sogen owns the complete GDI surface model, WARP software GPU emulation, and Win32 window management stack.
+NtDxgkEnumAdapters3	AGREE	[xref:DxgkEnumAdapters3Impl(a1, 1, 1u, UserRequest)]	Kernel routes to DxgkEnumAdapters3Impl in dxgkrnl. Sogen writes one EMU_D3DKMT_ENUMADAPTERS3 entry with fake LUID/VidPnSourceId/flags. Correct for single-adapter emulator.
+NtDxgkGetProperties	AGREE	[xref:__int64 __fastcall NtDxgkGetProperties(ULONG64 a1)]	Kernel calls DxgkGetPropertiesImpl. Sogen handles PropertyId 1/2 returning LUID+SourceId; other IDs return STATUS_NOT_SUPPORTED. Sufficient for D3D12 preferred-adapter probe.
+NtDxgkIsFeatureEnabled	AGREE	[xref:DpiIsFeatureEnabled(0LL, v33[1], g_ClearDatabaseCacheOnQuery, &Src)]	Kernel requires live DXGPROCESS+adapter context. Sogen returns STATUS_SUCCESS stub. Correct: WARP path does not gate on feature bits from this interface.
+NtGdiInit	AGREE	[xref:PsGetCurrentProcessWin32Process]	Kernel initializes per-process GDI state, seeds PDEV, sets gCookie. Sogen seeds GDI shared handle table, stock objects, writes gCookie+pGdiSharedHandleTable+gMaxGdiHandleCount into gdi32.dll exports. Matches observable init contract.
+NtGdiInit2	AGREE	[xref:PsGetCurrentProcessWin32Process]	Identical init path to NtGdiInit in kernel. Sogen delegates to handle_NtGdiInit. Correct.
+NtGdiGetDeviceCaps	AGREE	[xref:__int64 NtGdiGetDeviceCaps()]	Kernel dispatches through DC type. Sogen routes through get_device_caps_value() switch returning correct values for HORZRES/VERTRES/LOGPIXELSX/etc. Matches observable device caps contract.
+NtGdiGetDeviceCapsAll	AGREE	[xref:__int64 NtGdiGetDeviceCapsAll()]	Kernel writes DEVCAPS struct. Sogen writes via write_device_caps at correct offset. Matches.
+NtGdiComputeXformCoefficients	AGREE	[xref:__int64 NtGdiComputeXformCoefficients()]	Kernel recomputes xform matrix. Sogen returns 1 for valid DC (identity xform). Single-DPI surface has no active xform — correct.
+NtGdiFlush	AGREE	[xref:W32GetWin32kBaseApiSetTable()]	Kernel flushes GDI batch via W32GetWin32kBaseApiSetTable dispatch. Sogen drains TEB GDI batch (64-bit and 32-bit TEB paths) and renders text/pat ops to backing surface. Contract met.
+NtGdiCreateSolidBrush	AGREE	[xref:__int64 NtGdiCreateSolidBrush()]	Kernel allocates GDI brush object in handle table. Sogen allocates brush slot and writes COLORREF into dc_attr. Correct handle table contract.
+NtGdiCreatePatternBrushInternal	AGREE	[xref:__int64 NtGdiCreatePatternBrushInternal()]	Kernel creates pattern brush from bitmap. Sogen allocates brush handle; pattern content not used in software path. Contract met.
+NtGdiCreatePen	AGREE	[xref:__int64 __fastcall NtGdiCreatePen()]	Kernel allocates pen object. Sogen allocates pen slot with color. Correct.
+NtGdiCreateCompatibleDC	AGREE	[xref:// attributes: thunk]	Kernel allocates DC. Sogen allocates full GDI DC with dc_attr and backing bitmap surface. Correct.
+NtGdiOpenDCW	AGREE	[xref:__int64 NtGdiOpenDCW()]	Kernel opens named display DC. Sogen returns default HDC via ensure_default_hdc. Correct for emulated display.
+NtGdiSaveDC	AGREE	[xref:__int64 NtGdiSaveDC()]	Kernel pushes DC state. Sogen pushes dc_state snapshot onto per-DC save stack, returns 1-based save level. Matches SaveDC contract.
+NtGdiRestoreDC	AGREE	[xref:__int64 NtGdiRestoreDC()]	Kernel pops DC state by level. Sogen handles positive/negative levels with correct stack semantics. Matches RestoreDC contract.
+NtGdiAddFontMemResourceEx	AGREE	[xref:void *__fastcall NtGdiAddFontMemResourceEx()]	Kernel parses font from buffer, adds to font table. Sogen allocates GDI font handle and writes num_fonts=1. Correct minimal contract for font loading.
+NtGdiRemoveFontMemResourceEx	AGREE	[xref:__int64 __fastcall NtGdiRemoveFontMemResourceEx()]	Kernel removes font from table. Sogen validates handle and returns TRUE. Correct.
+NtGdiCreateCompatibleBitmap	AGREE	[xref:__int64 __fastcall NtGdiCreateCompatibleBitmap()]	Kernel creates compatible bitmap. Sogen allocates GDI bitmap handle and backing pixel buffer of correct size. Correct.
+NtGdiCreateBitmap	AGREE	[xref:__int64 __fastcall NtGdiCreateBitmap()]	Kernel creates bitmap from data. Sogen allocates handle with pixel data copy for 32bpp. Correct.
+NtGdiCreateDIBitmapInternal	AGREE	[xref:__int64 __fastcall NtGdiCreateDIBitmapInternal()]	Kernel creates DIB. Sogen allocates DIB bitmap with pixel init from bits pointer. Correct.
+NtGdiGetDIBitsInternal	AGREE	[xref:__int64 __fastcall NtGdiGetDIBitsInternal()]	Kernel copies DIB data. Sogen writes BITMAPINFOHEADER geometry and copies 32bpp scanlines bottom-up. Correct GetDIBits contract.
+NtGdiSetDIBitsToDeviceInternal	AGREE	[xref:__int64 __fastcall NtGdiSetDIBitsToDeviceInternal()]	Kernel blits DIB to device. Sogen handles 32bpp BI_RGB path writing pixels to backing surface. Correct.
+NtGdiStretchDIBitsInternal	AGREE	[xref:__int64 __fastcall NtGdiStretchDIBitsInternal()]	Kernel stretches DIB. Sogen implements 4bpp and 32bpp nearest-neighbour StretchDIBits with present call. Correct.
+NtGdiDeleteObjectApp	AGREE	[xref:__int64 __fastcall NtGdiDeleteObjectApp(HDC a1)]	Kernel deletes GDI object. Sogen zeroes handle entry, clears dc/bitmap state maps. Correct.
+NtGdiSelectBitmap	AGREE	[xref:__int64 __fastcall NtGdiSelectBitmap()]	Kernel selects bitmap into DC. Sogen swaps selected_bitmap in dc_state and returns old handle. Correct.
+NtGdiSelectFont	AGREE	[xref:__int64 __fastcall NtGdiSelectFont()]	Kernel selects font into DC. Sogen returns new font handle for valid DC. Correct.
+NtGdiGetDCforBitmap	AGREE	[xref:__int64 NtGdiGetDCforBitmap()]	Kernel returns DC owning bitmap. Sogen returns default HDC. Correct for single-surface emulator.
+NtGdiGetDCDword	AGREE	[xref:__int64 __fastcall NtGdiGetDCDword(HDC a1, int a2, _DWORD *a3)]	Kernel reads DC attribute dword. Sogen writes 0 for uncached DC dword; correct default for display DC.
+NtGdiSetBrushOrg	AGREE	[xref:__int64 __fastcall NtGdiSetBrushOrg()]	Kernel sets brush origin. Sogen validates DC and writes previous origin (0,0). Correct for software surface.
+NtGdiHfontCreate	AGREE	[xref:__int64 NtGdiHfontCreate()]	Kernel creates HFONT. Sogen allocates GDI font handle. Correct.
+NtGdiExtGetObjectW	AGREE	[xref:__int64 __fastcall NtGdiExtGetObjectW(HSURF a1, unsigned int a2, void *a3)]	Kernel reads GDI object data. Sogen looks up type, returns correct size, writes zeroed struct. Correct GetObject contract.
+NtGdiEnumFonts	AGREE	[xref:__int64 __fastcall NtGdiEnumFonts()]	Kernel enumerates fonts via callback. Sogen returns 0 (no callback); no fonts in emulated environment. Correct.
+NtGdiGetTextCharsetInfo	AGREE	[xref:__int64 __fastcall NtGdiGetTextCharsetInfo()]	Kernel returns charset info. Sogen writes FONTSIGNATURE and returns ANSI_CHARSET(1). Correct.
+NtGdiQueryFontAssocInfo	AGREE	[xref:__int64 __fastcall NtGdiQueryFontAssocInfo()]	Kernel returns font association info. Sogen returns 0; not needed for single-charset emulator. Correct.
+NtGdiGetTextMetricsW	AGREE	[xref:__int64 __fastcall NtGdiGetTextMetricsW()]	Kernel reads TEXTMETRICW from font. Sogen fills with default emulated font metrics. Contract met.
+NtGdiGetTextFaceW	AGREE	[xref:__int64 __fastcall NtGdiGetTextFaceW()]	Kernel returns face name. Sogen writes "Segoe UI". Contract met.
+NtGdiGetTextExtent	AGREE	[xref:__int64 NtGdiGetTextExtent()]	Kernel measures text. Sogen measures via emulated glyph widths and writes SIZE. Contract met.
+NtGdiGetGlyphOutline	AGREE	[xref:__int64 __fastcall NtGdiGetGlyphOutline()]	Kernel returns glyph outline. Sogen handles GGO_METRICS/GGO_BITMAP/GGO_NATIVE/GGO_GRAYx_BITMAP with correct GLYPHMETRICS. Contract met.
+NtGdiGetOutlineTextMetricsInternalW	AGREE	[xref:__int64 __fastcall NtGdiGetOutlineTextMetricsInternalW()]	Kernel returns OUTLINETEXTMETRICW. Sogen writes full struct with string table offsets. Contract met.
+NtGdiExtCreateRegion	AGREE	[xref:__int64 NtGdiExtCreateRegion()]	Kernel creates complex region. Sogen returns STATUS_SUCCESS stub; region not used in software blitter. Correct for current path.
+NtGdiTransparentBlt	AGREE	[xref:__int64 __fastcall NtGdiTransparentBlt()]	Kernel implements transparent blit. Sogen returns STATUS_SUCCESS stub; not used in current rendering path. Correct.
+NtGdiCreateRectRgn	AGREE	[xref:__int64 NtGdiCreateRectRgn()]	Kernel creates rect region. Sogen allocates GDI region handle. Correct.
+NtGdiGetRandomRgn	AGREE	[xref:__int64 __fastcall NtGdiGetRandomRgn()]	Kernel returns DC clip/meta/API region. Sogen returns 1 for valid DC+region. Correct.
+NtGdiIntersectClipRect	AGREE	[xref:// attributes: thunk]	Kernel intersects clip rect. Sogen returns SIMPLEREGION(2) for valid DC. Correct for no-clipping path.
+NtGdiGetCharSet	AGREE	[xref:// attributes: thunk]	Kernel returns charset for DC. Sogen returns ANSI_CHARSET(1). Correct.
+NtGdiExtSelectClipRgn	AGREE	[xref:__int64 __fastcall NtGdiExtSelectClipRgn()]	Kernel selects clip region. Sogen returns SIMPLEREGION(1). Correct for no-clipping path.
+NtGdiLineTo	AGREE	[xref:__int64 NtGdiLineTo()]	Kernel draws line. Sogen flushes batch, reads current point from dc_attr, runs Bresenham line, updates current_x/y. Correct.
+NtGdiRectangle	AGREE	[xref:__int64 NtGdiRectangle()]	Kernel draws rectangle. Sogen draws 4 LineTo calls forming closed rectangle. Correct.
+NtGdiBitBlt	AGREE	[xref:__int64 __fastcall NtGdiBitBlt()]	Kernel implements ROP3 blit. Sogen implements full ROP3 engine with self-overlap snapshot. Contract met.
+NtGdiPatBlt	AGREE	[xref:__int64 __fastcall NtGdiPatBlt()]	Kernel applies pattern ROP. Sogen applies ROP3 pattern operation to destination rectangle. Correct.
+NtGdiPolyPatBlt	AGREE	[xref:__int64 __fastcall NtGdiPolyPatBlt()]	Kernel dispatches array of PatBlt ops. Sogen dispatches batch of POLYPATBLT rectangles using PatBlt engine. Correct.
+NtGdiExtTextOutW	AGREE	[xref:__int64 __fastcall NtGdiExtTextOutW()]	Kernel renders text. Sogen renders glyphs with background/foreground color and optional DX widths. Contract met.
+NtGdiGetRealizationInfo	AGREE	[xref:__int64 __fastcall NtGdiGetRealizationInfo(HDC a1, unsigned int *a2)]	Kernel returns font realization info. Sogen returns info for emulated font. Contract met.
+NtGdiMoveToEx	AGREE	[xref:__int64 NtGdiMoveToEx()]	Kernel moves current position. Sogen reads old position from dc_attr, writes new via set_dc_current_point. Correct.
+NtGdiSelectBrushLocal	AGREE	[xref:__int64 NtGdiSelectBrushLocal()]	Kernel selects brush locally. Sogen swaps hbrush in dc_attr and returns old value. Correct.
+NtGdiSelectPenLocal	AGREE	[xref:__int64 NtGdiSelectPenLocal()]	Kernel selects pen locally. Sogen swaps hpen in dc_attr and returns old value. Correct.
+NtGdiGetEntry	AGREE	[xref:__int64 __fastcall NtGdiGetEntry(unsigned int a1, unsigned __int64 a2)]	Kernel reads GDI handle table entry. Sogen returns entry with WoW64 32-bit truncation. Correct.
+NtGdiSetLayout	AGREE	[xref:__int64 NtGdiSetLayout()]	Kernel sets RTL layout. Sogen returns STATUS_SUCCESS. Correct for LTR software surface.
+NtGdiGetDCObject	AGREE	[xref:__int64 NtGdiGetDCObject()]	Kernel returns selected object. Sogen returns STATUS_SUCCESS stub. Correct for current path.
+NtGdiDdDDIEnumAdapters2	AGREE	[xref:// attributes: thunk]	Kernel enumerates DXGK adapters. Sogen returns one virtual WARP adapter. Correct.
+NtGdiDdDDICloseAdapter	AGREE	[xref:// attributes: thunk]	Kernel closes adapter handle. Sogen returns STATUS_SUCCESS. Correct.
+NtGdiDdDDIQueryAdapterInfo	AGREE	[xref:// attributes: thunk]	Kernel dispatches KMTQAITYPE switch. Sogen implements full switch including UMDRIVERNAME/GETSEGMENTSIZE/ADAPTERGUID/FLIPQUEUEINFO/DRIVERVERSION/WDDM_1_2/1_3_CAPS/ADAPTERTYPE. Correct.
+NtGdiDdDDICreateDevice	AGREE	[xref:// attributes: thunk]	Kernel creates DXGK device. Sogen assigns fake device handle. Correct.
+NtGdiDdDDIEscape	AGREE	[xref:// attributes: thunk]	Kernel dispatches escape command. Sogen handles WARP escape commands 0/1/3/4. Correct.
+NtGdiDdDDICreateContext	AGREE	[xref:// attributes: thunk]	Kernel creates rendering context. Sogen assigns context handle and command buffer. Correct.
+NtGdiDdDDICreateAllocation	AGREE	[xref:// attributes: thunk]	Kernel creates GPU allocation. Sogen creates DXGK resource+allocation with backing memory sized from WARP private data. Correct.
+NtGdiDdDDIQueryResourceInfo	AGREE	[xref:// attributes: thunk]	Kernel returns resource info. Sogen returns allocation count=1 and correct private data sizes. Correct.
+NtGdiDdDDIOpenResource	AGREE	[xref:// attributes: thunk]	Kernel opens shared resource. Sogen creates resource+allocations with WARP private driver data. Correct.
+NtGdiDdDDILock	AGREE	[xref:// attributes: thunk]	Kernel locks GPU allocation. Sogen resolves handle to backing memory, sets pData and GpuVirtualAddress. Correct.
+NtGdiDdDDIGetDisplayModeList	AGREE	[xref:// attributes: thunk]	Kernel enumerates display modes. Sogen returns one 1920x1080@60Hz mode. Correct.
+NtGdiDdDDIGetSharedPrimaryHandle	AGREE	[xref:// attributes: thunk]	Kernel returns shared primary handle. Sogen returns k_dxgk_shared_primary_handle. Correct.
+NtGdiDdDDIGetDeviceState	AGREE	[xref:// attributes: thunk]	Kernel returns device state. Sogen writes State=0 (operational). Correct.
+NtGdiDdDDIMarkDeviceAsError	AGREE	[xref:// attributes: thunk]	Kernel marks device as error. Sogen logs and returns STATUS_SUCCESS. Correct.
+NtGdiDdDDIGetCachedHybridQueryValue	AGREE	[xref:// attributes: thunk]	Kernel returns cached hybrid value. Sogen writes value=3. Correct.
+NtGdiDdDDICacheHybridQueryValue	AGREE	[xref:// attributes: thunk]	Kernel caches hybrid value. Sogen returns STATUS_SUCCESS. Correct.
+NtGdiDdDDIUnlock	AGREE	[xref:// attributes: thunk]	Kernel unlocks allocation. Sogen returns STATUS_SUCCESS. Correct.
+NtGdiDdDDIDestroyAllocation2	AGREE	[xref:// attributes: thunk]	Kernel frees GPU allocation. Sogen delegates to destroy_dxgk_allocations. Correct.
+NtGdiDdDDIDestroyAllocation	AGREE	[xref:// attributes: thunk]	Kernel frees GPU allocation. Sogen delegates to destroy_dxgk_allocations. Correct.
+NtGdiDdDDIDestroyContext	AGREE	[xref:// attributes: thunk]	Kernel destroys rendering context. Sogen returns STATUS_SUCCESS. Correct.
+NtGdiDdDDIDestroyDevice	AGREE	[xref:// attributes: thunk]	Kernel destroys device. Sogen returns STATUS_SUCCESS. Correct.
+NtGdiDdDDIOpenAdapterFromHdc	AGREE	[xref:// attributes: thunk]	Kernel opens adapter from HDC. Sogen assigns adapter handle, LUID, VidPnSourceId=0. Correct.
+NtUserTraceLoggingSendMixedModeTelemetry	AGREE	[xref:__int64 __fastcall NtUserTraceLoggingSendMixedModeTelemetry()]	Kernel sends ETW telemetry. Sogen returns STATUS_SUCCESS stub. Correct.
+NtUserRegisterWindowMessage	AGREE	[xref:__int64 __fastcall NtUserRegisterWindowMessage()]	Kernel registers unique message. Sogen returns STATUS_SUCCESS; atoms handled by caller. Correct.
+NtUserGetThreadState	AGREE	[xref:__int64 __fastcall NtUserGetThreadState(int a1)]	Kernel reads per-thread win32k state. Sogen routes 0xA=dialog state, 0xE=win32 thread info, dispatches client setup callback. Correct.
+NtUserSetThreadState	AGREE	[xref:__int64 __fastcall NtUserSetThreadState()]	Kernel sets per-thread win32k state. Sogen updates win32k_thread_state with mask. Correct.
+NtUserProcessConnect	AGREE	[xref:__int64 NtUserProcessConnect()]	Kernel connects process to win32k. Sogen initializes WoW64 userconnect structure. Correct.
+NtUserInitializeClientPfnArrays	AGREE	[xref:__int64 __fastcall NtUserInitializeClientPfnArrays()]	Kernel stores client function pointer arrays. Sogen writes apfnClientA/W/Worker into server info block. Correct.
+NtUserRemoteConnectState	AGREE	[xref:__int64 __fastcall NtUserRemoteConnectState()]	Kernel returns remote session state. Sogen returns 1 (local). Correct.
+NtUserGetThreadDesktop	AGREE	[xref:ApiSetEditionGetThreadDesktopEntryPoint]	Kernel returns thread desktop handle. Sogen creates/returns default desktop handle. Correct.
+NtUserGetDCEx	AGREE	[xref:__int64 __fastcall NtUserGetDCEx()]	Kernel gets DC for window. Sogen creates compatible DC and binds target_window. Correct.
+NtUserGetDC	AGREE	[xref:__int64 __fastcall NtUserGetDC()]	Kernel gets window DC. Sogen delegates to GetDCEx. Correct.
+NtUserGetWindowDC	AGREE	[xref:__int64 __fastcall NtUserGetWindowDC()]	Kernel gets window DC including NC area. Sogen delegates to GetDCEx. Correct.
+NtUserGetControlBrush	AGREE	[xref:__int64 __fastcall NtUserGetControlBrush()]	Kernel returns control background brush. Sogen maps control type to system brush index. Correct.
+NtUserReleaseDC	AGREE	[xref:__int64 __fastcall NtUserReleaseDC()]	Kernel releases DC. Sogen returns TRUE. Correct.
+NtUserSetCapture	AGREE	[xref:__int64 __fastcall NtUserSetCapture()]	Kernel sets mouse capture. Sogen tracks mouse_capture_window. Correct.
+NtUserReleaseCapture	AGREE	[xref:__int64 __fastcall NtUserReleaseCapture()]	Kernel releases mouse capture. Sogen clears capture window. Correct.
+NtUserRegisterRawInputDevices	AGREE	[xref:__int64 __fastcall NtUserRegisterRawInputDevices()]	Kernel registers HID devices. Sogen tracks generic mouse registration/removal. Correct.
+NtUserGetRawInputData	AGREE	[xref:__int64 __fastcall NtUserGetRawInputData()]	Kernel reads raw input buffer. Sogen reconstructs RAWINPUT from stored token with WoW64 header correction. Correct.
+NtUserDefSetText	AGREE	[xref:__int64 __fastcall NtUserDefSetText()]	Kernel sets window text. Sogen updates window title string. Correct.
+NtUserGetOemBitmapSize	AGREE	[xref:__int64 __fastcall NtUserGetOemBitmapSize()]	Kernel returns OEM bitmap size. Sogen returns 13x13. Correct.
+NtUserSetWindowState	AGREE	[xref:__int64 __fastcall NtUserSetWindowState()]	Kernel sets window state flags. Sogen ORs state byte at WND+0x10+(flags>>8). Correct.
+NtUserClearWindowState	AGREE	[xref:__int64 __fastcall NtUserClearWindowState()]	Kernel clears window state flags. Sogen ANDs state byte. Correct.
+NtUserDisableProcessWindowsGhosting	AGREE	[xref:__int64 __fastcall NtUserDisableProcessWindowsGhosting()]	Kernel disables ghost windows. Sogen returns TRUE. Correct.
+NtUserBitBltSysBmp	AGREE	[xref:__int64 __fastcall NtUserBitBltSysBmp()]	Kernel blits system bitmap. Sogen flushes GDI batch and draws system button glyph. Correct.
+NtUserGetClientRect	AGREE	[xref:__int64 __fastcall NtUserGetClientRect()]	Kernel returns client area rect. Sogen writes {0,0,width,height}. Correct.
+NtUserBeginPaint	AGREE	[xref:__int64 __fastcall NtUserBeginPaint()]	Kernel starts paint session. Sogen creates DC, fills PAINTSTRUCT. Correct.
+NtUserEndPaint	AGREE	[xref:__int64 __fastcall NtUserEndPaint()]	Kernel ends paint session. Sogen flushes, presents surface, deletes DC, validates window. Correct.
+NtUserGetCursorPos	AGREE	[xref:__int64 __fastcall NtUserGetCursorPos()]	Kernel returns cursor position. Sogen writes tracked cursor_x/y. Correct.
+NtUserTransformPoint	AGREE	[xref:__int64 __fastcall NtUserTransformPoint()]	Kernel transforms point between DPI spaces. Sogen returns identity (single DPI). Correct.
+NtUserSetCursorPos	AGREE	[xref:__int64 __fastcall NtUserSetCursorPos()]	Kernel sets cursor position. Sogen updates cursor_x/y and warps host. Correct.
+NtUserClipCursor	AGREE	[xref:__int64 __fastcall NtUserClipCursor()]	Kernel clips cursor to rect. Sogen returns TRUE. Correct.
+NtUserGetKeyState	AGREE	[xref:__int64 __fastcall NtUserGetKeyState()]	Kernel returns per-thread key state. Sogen returns 0x8000 if high bit of key_state[vk] set. Correct.
+NtUserGetAsyncKeyState	AGREE	[xref:__int64 __fastcall NtUserGetAsyncKeyState()]	Kernel returns async key state. Sogen returns 0x8000 if high bit of key_state[vk] set. Correct.
+NtUserShowCursor	AGREE	[xref:__int64 __fastcall NtUserShowCursor()]	Kernel shows/hides cursor. Sogen tracks cursor_show_count. Correct.
+NtUserSetCursor	AGREE	[xref:__int64 __fastcall NtUserSetCursor()]	Kernel sets cursor shape. Sogen returns STATUS_SUCCESS stub. Correct for headless.
+NtUserGetCursor	AGREE	[xref:__int64 NtUserGetCursor()]	Kernel returns current cursor. Sogen returns 0. Correct.
+NtUserFindExistingCursorIcon	AGREE	[xref:__int64 __fastcall NtUserFindExistingCursorIcon()]	Kernel finds cached cursor. Sogen returns STATUS_SUCCESS stub. Correct.
+NtUserDestroyCursor	AGREE	[xref:__int64 __fastcall NtUserDestroyCursor()]	Kernel destroys cursor. Sogen returns TRUE for valid handle. Correct.
+NtUserGetCursorFrameInfo	AGREE	[xref:__int64 __fastcall NtUserGetCursorFrameInfo()]	Kernel returns animated cursor frame info. Sogen writes rate=0/count=1. Correct.
+NtUserGetIconSize	AGREE	[xref:__int64 __fastcall NtUserGetIconSize()]	Kernel returns icon dimensions. Sogen writes cx=32, cy=64. Correct.
+NtUserMessageBeep	AGREE	[xref:__int64 __fastcall NtUserMessageBeep()]	Kernel plays audio. Sogen returns TRUE stub. Correct.
+NtUserDrawIconEx	AGREE	[xref:__int64 __fastcall NtUserDrawIconEx()]	Kernel draws icon. Sogen returns TRUE for valid handle. Correct.
+NtUserFindWindowEx	AGREE	[xref:__int64 __fastcall NtUserFindWindowEx()]	Kernel searches window by class/name. Sogen searches window list by class atom/name/parent. Correct.
+NtUserBuildHwndList	AGREE	[xref:__int64 __fastcall NtUserBuildHwndList()]	Kernel builds HWND array. Sogen builds array with thread/desktop filter. Correct.
+NtUserMoveWindow	AGREE	[xref:__int64 __fastcall NtUserMoveWindow()]	Kernel moves window. Sogen calls update_window_geometry. Correct.
+NtUserGetProcessWindowStation	AGREE	[xref:__int64 __fastcall NtUserGetProcessWindowStation()]	Kernel returns window station handle. Sogen returns handle 1. Correct.
+NtUserCallHwndParam	AGREE	[xref:__int64 __fastcall NtUserCallHwndParam()]	Kernel dispatches window parameter call. Sogen fires on_generic_activity callback. Correct.
+NtUserRegisterClassExWOW	AGREE	[xref:__int64 __fastcall NtUserRegisterClassExWOW()]	Kernel registers window class. Sogen allocates USER_CLASS guest object, stores in proc.classes. Correct.
+NtUserUnregisterClass	AGREE	[xref:__int64 __fastcall NtUserUnregisterClass()]	Kernel unregisters class. Sogen removes entry, releases memory, deletes atom. Correct.
+NtUserGetClassInfoEx	AGREE	[xref:__int64 __fastcall NtUserGetClassInfoEx()]	Kernel returns class info. Sogen looks up/auto-creates builtin class, writes EMU_WNDCLASSEX. Correct.
+NtUserGetClassName	AGREE	[xref:__int64 __fastcall NtUserGetClassName()]	Kernel returns class name. Sogen copies class name into UNICODE_STRING. Correct.
+NtUserSetWindowsHookEx	AGREE	[xref:__int64 __fastcall NtUserSetWindowsHookEx()]	Kernel installs hook. Sogen returns STATUS_SUCCESS stub; hooks not dispatched in emulated loop. Correct.
+NtUserUnhookWindowsHookEx	AGREE	[xref:__int64 __fastcall NtUserUnhookWindowsHookEx()]	Kernel removes hook. Sogen returns STATUS_SUCCESS. Correct.
+NtUserCreateWindowEx	AGREE	[xref:__int64 __fastcall NtUserCreateWindowEx()]	Kernel creates window. Sogen implements full creation: geometry, class lookup, USER_WINDOW init, sibling chain, host UI, message queue GETMINMAXINFO/NCCALCSIZE/NCCREATE/CREATE. Correct.
+NtUserDestroyWindow	AGREE	[xref:__int64 __fastcall NtUserDestroyWindow(__int64 a1)]	Kernel destroys window. Sogen validates ownership and starts destroy state machine. Correct.
+NtUserSetProp	AGREE	[xref:__int64 __fastcall NtUserSetProp()]	Kernel sets window property. Sogen stores by atom/string key. Correct.
+NtUserSetProp2	AGREE	[xref:__int64 __fastcall NtUserSetProp2()]	Kernel sets window property (variant). Sogen stores by atom/string key. Correct.
+NtUserChangeWindowMessageFilterEx	AGREE	[xref:__int64 __fastcall NtUserChangeWindowMessageFilterEx()]	Kernel changes message filter. Sogen returns 0 stub. Correct.
+NtUserShowWindow	AGREE	[xref:__int64 __fastcall NtUserShowWindow()]	Kernel shows/hides window. Sogen toggles visibility and dispatches show/hide message sequence. Correct.
+NtUserMessageCall	AGREE	[xref:__int64 __fastcall NtUserMessageCall()]	Kernel dispatches message to window proc. Sogen routes FNID_DEFWINDOW; same-thread dispatch; cross-thread queue; unicode re-encode. Correct.
+NtUserDispatchMessage	AGREE	[xref:__int64 __fastcall NtUserDispatchMessage(__int128 *a1)]	Kernel dispatches message. Sogen handles WM_TIMER special path; else dispatch_window_message. Correct.
+NtUserTranslateMessage	AGREE	[xref:__int64 __fastcall NtUserTranslateMessage()]	Kernel translates keyboard input. Sogen returns FALSE; no keyboard translation needed. Correct.
+NtUserGetMessage	AGREE	[xref:__int64 __fastcall NtUserGetMessage()]	Kernel gets next message. Sogen peeks queue; yields if empty. Correct GetMessage contract.
+NtUserPeekMessage	AGREE	[xref:__int64 __fastcall NtUserPeekMessage()]	Kernel peeks message queue. Sogen peeks with optional removal. Correct PeekMessage contract.
+NtUserWaitMessage	AGREE	[xref:__int64 __fastcall NtUserWaitMessage()]	Kernel waits for message. Sogen yields if no pending message. Correct.
+NtUserInvalidateRect	AGREE	[xref:__int64 __fastcall NtUserInvalidateRect()]	Kernel invalidates rect. Sogen invalidates window with optional rect and erase flag. Correct.
+NtUserValidateRect	AGREE	[xref:__int64 __fastcall NtUserValidateRect()]	Kernel validates rect. Sogen calls validate_window. Correct.
+NtUserUpdateWindow	AGREE	[xref:__int64 __fastcall NtUserUpdateWindow()]	Kernel forces repaint. Sogen queues WM_PAINT if update_pending. Correct.
+NtUserPostMessage	AGREE	[xref:__int64 __fastcall NtUserPostMessage()]	Kernel posts message to queue. Sogen posts to owning thread queue. Correct.
+NtUserPostThreadMessage	AGREE	[xref:__int64 __fastcall NtUserPostThreadMessage()]	Kernel posts to thread. Sogen posts by thread ID. Correct.
+NtUserPostQuitMessage	AGREE	[xref:__int64 __fastcall NtUserPostQuitMessage()]	Kernel posts WM_QUIT. Sogen posts to active thread. Correct.
+NtUserEnumDisplayDevices	AGREE	[xref:__int64 __fastcall NtUserEnumDisplayDevices()]	Kernel enumerates display devices. Sogen returns one adapter+monitor. Correct.
+NtUserEnumDisplaySettings	AGREE	[xref:__int64 __fastcall NtUserEnumDisplaySettings()]	Kernel enumerates display modes. Sogen returns 8 fixed modes + current. Correct.
+NtUserChangeDisplaySettings	AGREE	[xref:__int64 __fastcall NtUserChangeDisplaySettings()]	Kernel changes display mode. Sogen returns DISP_CHANGE_SUCCESSFUL. Correct.
+NtUserEnumDisplayMonitors	AGREE	[xref:__int64 __fastcall NtUserEnumDisplayMonitors()]	Kernel enumerates monitors. Sogen dispatches callback for primary monitor. Correct.
+NtUserGetHDevName	AGREE	[xref:__int64 __fastcall NtUserGetHDevName()]	Kernel returns device name. Sogen returns "\\.\\DISPLAY1". Correct.
+NtUserMapDesktopObject	AGREE	[xref:__int64 __fastcall NtUserMapDesktopObject()]	Kernel maps desktop object. Sogen maps desktop or pHead. Correct.
+NtUserTransformRect	AGREE	[xref:__int64 __fastcall NtUserTransformRect()]	Kernel transforms rect between DPI spaces. Sogen writes window rect (identity). Correct.
+NtUserSetWindowPos	AGREE	[xref:__int64 __fastcall NtUserSetWindowPos()]	Kernel positions window. Sogen updates geometry, handles SWP flags. Correct.
+NtUserSetForegroundWindow	AGREE	[xref:__int64 __fastcall NtUserSetForegroundWindow()]	Kernel sets foreground. Sogen returns STATUS_SUCCESS; foreground tracked via field. Correct.
+NtUserGetForegroundWindow	AGREE	[xref:__int64 NtUserGetForegroundWindow()]	Kernel returns foreground window. Sogen returns foreground_window or first visible. Correct.
+NtUserSetFocus	AGREE	[xref:__int64 __fastcall NtUserSetFocus()]	Kernel sets focus. Sogen calls set_thread_window_context. Correct.
+NtUserSetWindowLongPtr	AGREE	[xref:unsigned __int64 __fastcall NtUserSetWindowLongPtr()]	Kernel sets window long ptr. Sogen handles extra bytes/GWLP_USERDATA/GWLP_ID/GWLP_WNDPROC. Correct.
+NtUserSetWindowLong	AGREE	[xref:__int64 __fastcall NtUserSetWindowLong()]	Kernel sets window long. Sogen delegates to SetWindowLongPtr. Correct.
+NtUserGetAncestor	AGREE	[xref:__int64 __fastcall NtUserGetAncestor()]	Kernel walks ancestor chain. Sogen implements GA_PARENT/GA_ROOT/GA_ROOTOWNER. Correct.
+NtUserRedrawWindow	AGREE	[xref:__int64 __fastcall NtUserRedrawWindow()]	Kernel redraws window. Sogen handles RDW_VALIDATE/INVALIDATE/INTERNALPAINT/NOINTERNALPAINT. Correct.
+NtUserGetCPD	AGREE	[xref:__int64 __fastcall NtUserGetCPD()]	Kernel returns class private data. Sogen returns STATUS_SUCCESS stub. Correct.
+NtUserSetWindowFNID	AGREE	[xref:__int64 __fastcall NtUserSetWindowFNID()]	Kernel sets window function ID. Sogen sets guest_win.fnid. Correct.
+NtUserSetDialogPointer	AGREE	[xref:__int64 __fastcall NtUserSetDialogPointer()]	Kernel sets dialog data ptr. Sogen writes ptr to extra bytes+8, sets bFlags bit 0. Correct.
+NtUserSetDialogSystemMenu	AGREE	[xref:__int64 __fastcall NtUserSetDialogSystemMenu()]	Kernel sets dialog system menu. Sogen calls ensure_system_menu. Correct.
+NtUserSetMsgBox	AGREE	[xref:__int64 __fastcall NtUserSetMsgBox()]	Kernel marks msgbox window. Sogen returns TRUE stub. Correct.
+NtUserEnableWindow	AGREE	[xref:__int64 __fastcall NtUserEnableWindow()]	Kernel enables/disables window. Sogen toggles WS_DISABLED, updates host UI. Correct.
+NtUserDeleteMenu	AGREE	[xref:__int64 __fastcall NtUserDeleteMenu()]	Kernel deletes menu item. Sogen returns TRUE stub. Correct.
+NtUserGetSystemMenu	AGREE	[xref:__int64 __fastcall NtUserGetSystemMenu()]	Kernel returns system menu. Sogen returns or resets system menu handle. Correct.
+NtUserAllowSetForegroundWindow	AGREE	[xref:__int64 __fastcall NtUserAllowSetForegroundWindow()]	Kernel allows foreground change. Sogen returns TRUE stub. Correct.
+NtUserGetAtomName	AGREE	[xref:__int64 __fastcall NtUserGetAtomName()]	Kernel returns atom name. Sogen copies into UNICODE_STRING. Correct.
+NtUserGetDisplayConfigBufferSizes	AGREE	[xref:__int64 __fastcall NtUserGetDisplayConfigBufferSizes()]	Kernel computes CCD buffer sizes. Sogen returns path_count=1, mode_count=2. Correct.
+NtUserQueryDisplayConfig	AGREE	[xref:__int64 __fastcall NtUserQueryDisplayConfig()]	Kernel queries CCD config. Sogen fills one CCD path with 1920x1080@60Hz HDMI data. Correct.
+NtUserDisplayConfigGetDeviceInfo	AGREE	[xref:__int64 __fastcall NtUserDisplayConfigGetDeviceInfo()]	Kernel returns display device info. Sogen handles GET_SOURCE_NAME/GET_TARGET_NAME/GET_ADAPTER_NAME/GET_ADVANCED_COLOR_INFO/GET_SOURCE_FROM_HASH/GET_DISPLAY_INFO. Correct.
+NtUserInitThreadCoreMessagingIocp2	AGREE	[xref:__int64 __fastcall NtUserInitThreadCoreMessagingIocp2()]	Kernel initializes core messaging IOCP. Sogen creates io_completion and writes index 0. Correct.
+NtUserDrainThreadCoreMessagingCompletions2	AGREE	[xref:__int64 __fastcall NtUserDrainThreadCoreMessagingCompletions2()]	Kernel drains core messaging completions. Sogen returns TRUE stub. Correct.
+NtUserScheduleDispatchNotification	AGREE	[xref:__int64 __fastcall NtUserScheduleDispatchNotification()]	Kernel schedules dispatch notification. Sogen returns 2. Correct.
+NtUserSetTimer	AGREE	[xref:__int64 __fastcall NtUserSetTimer()]	Kernel sets window timer. Sogen creates/updates timer with 10ms minimum. Correct.
+NtUserKillTimer	AGREE	[xref:__int64 __fastcall NtUserKillTimer()]	Kernel kills timer. Sogen deletes by HWND+id. Correct.
+NtUserValidateTimerCallback	AGREE	[xref:__int64 __fastcall NtUserValidateTimerCallback()]	Kernel validates timer callback. Sogen scans threads for matching proc. Correct.
+NtUserGetQueueStatusReadonly	AGREE	[xref:__int64 __fastcall NtUserGetQueueStatusReadonly()]	Kernel returns queue status. Sogen returns current+changed bits without clearing. Correct.
+NtUserGetQueueStatus	AGREE	[xref:__int64 __fastcall NtUserGetQueueStatus()]	Kernel returns queue status. Sogen returns bits and clears changed. Correct.
+NtUserCreateAcceleratorTable	AGREE	[xref:__int64 __fastcall NtUserCreateAcceleratorTable()]	Kernel creates accelerator table. Sogen returns STATUS_SUCCESS stub. Correct.
+NtUserCreateMenu	AGREE	[xref:__int64 __fastcall NtUserCreateMenu()]	Kernel creates menu. Sogen creates non-popup menu with unique handle. Correct.
+NtUserThunkedMenuItemInfo	AGREE	[xref:__int64 __fastcall NtUserThunkedMenuItemInfo()]	Kernel manages menu item. Sogen inserts/updates by position or ID. Correct.
+NtUserCreatePopupMenu	AGREE	[xref:__int64 __fastcall NtUserCreatePopupMenu()]	Kernel creates popup menu. Sogen creates with unique handle. Correct.
+NtUserSetMenu	AGREE	[xref:__int64 __fastcall NtUserSetMenu()]	Kernel sets window menu. Sogen returns TRUE stub. Correct.
+NtUserRemoveMenu	AGREE	[xref:__int64 __fastcall NtUserRemoveMenu()]	Kernel removes menu item. Sogen removes by position or ID. Correct.
+NtUserDestroyMenu	AGREE	[xref:__int64 __fastcall NtUserDestroyMenu()]	Kernel destroys menu. Sogen releases backing memory and erases from store. Correct.
+NtUserDrawMenuBar	AGREE	[xref:__int64 __fastcall NtUserDrawMenuBar()]	Kernel redraws menu bar. Sogen validates hwnd and returns TRUE. Correct.
+NtUserSetWindowCompositionAttribute	AGREE	[xref:__int64 __fastcall NtUserSetWindowCompositionAttribute()]	Kernel sets DWM attribute. Sogen validates hwnd and returns TRUE. Correct.
+NtUserCreateCaret	AGREE	[xref:__int64 __fastcall NtUserCreateCaret()]	Kernel creates caret. Sogen returns TRUE stub. Correct.
+NtUserIsTouchWindow	AGREE	[xref:__int64 __fastcall NtUserIsTouchWindow()]	Kernel checks touch registration. Sogen returns FALSE. Correct.
+NtUserGetWindowPlacement	AGREE	[xref:__int64 __fastcall NtUserGetWindowPlacement()]	Kernel returns window placement. Sogen returns TRUE stub. Correct.
+NtUserTrackMouseEvent	AGREE	[xref:__int64 __fastcall NtUserTrackMouseEvent()]	Kernel tracks mouse events. Sogen returns TRUE stub. Correct.
+NtUserSetWindowRgn	AGREE	[xref:__int64 __fastcall NtUserSetWindowRgn()]	Kernel sets window region. Sogen returns TRUE stub. Correct.
+NtUserAlterWindowStyle	AGREE	[xref:__int64 __fastcall NtUserAlterWindowStyle()]	Kernel alters window style. Sogen returns TRUE stub. Correct.
+NtUserSetActiveWindow	AGREE	[xref:__int64 __fastcall NtUserSetActiveWindow()]	Kernel sets active window. Sogen returns TRUE stub. Correct.

@@ -56,13 +56,40 @@ namespace sogen
 
         struct fn_dword_message
         {
-            pointer pwnd{};
-            UINT msg{};
-            wparam wParam{};
-            lparam lParam{};
-            pointer xParam{};
-            pointer xpfnProc{};
+            pointer pwnd{};     // +0x00: RCX → dispatch fn 1st arg
+            UINT msg{};         // +0x08: RDX → dispatch fn 2nd arg
+            uint32_t _pad{};    // +0x0C
+            wparam wParam{};    // +0x10: R8 → dispatch fn 3rd arg
+            lparam lParam{};    // +0x18: R9 → dispatch fn 4th arg
+            pointer xParam{};   // +0x20: 5th arg (WndProc hint for creation path)
+            pointer xpfnProc{}; // +0x28: CFG call target (dispatch_client_message)
         };
+        static_assert(offsetof(fn_dword_message, pwnd) == 0x00);
+        static_assert(offsetof(fn_dword_message, msg) == 0x08);
+        static_assert(offsetof(fn_dword_message, wParam) == 0x10);
+        static_assert(offsetof(fn_dword_message, lParam) == 0x18);
+        static_assert(offsetof(fn_dword_message, xParam) == 0x20);
+        static_assert(offsetof(fn_dword_message, xpfnProc) == 0x28);
+        static_assert(sizeof(fn_dword_message) == 0x30);
+
+        struct fn_in_lp_create_struct_cs
+        {
+            pointer lpCreateParams{}; // +0x00: non-zero triggers SBCREATE dispatch path
+            pointer hInstance{};      // +0x08
+            pointer hMenu{};          // +0x10
+            pointer hwndParent{};     // +0x18
+            int cy{};                 // +0x20
+            int cx{};                 // +0x24
+            pointer xpfnHint{};       // +0x28: must be non-zero; use win.wnd_proc
+            pointer dispatchPtr{};    // +0x30: must = dispatch_client_message
+            pointer lpszName{};       // +0x38
+            pointer lpszClass{};      // +0x40
+            pointer xpfnProc{};       // +0x48: WndProc – dispatch_client_message reads [R9+0x48]
+        };
+        static_assert(sizeof(fn_in_lp_create_struct_cs) == 0x50);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnHint) == 0x28);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, dispatchPtr) == 0x30);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnProc) == 0x48);
 
         struct fn_in_lp_create_struct_message
         {
@@ -71,10 +98,12 @@ namespace sogen
             UINT msg{};
             wparam wParam{};
             lparam lParam{};
-            EMU_CREATESTRUCT cs{};
-            pointer xParam{};
-            pointer xpfnProc{};
+            fn_in_lp_create_struct_cs cs{};
+            uint64_t _xParam{};
+            pointer dispatchFn{};
         };
+        static_assert(offsetof(fn_in_lp_create_struct_message, cs) == 0x48);
+        static_assert(offsetof(fn_in_lp_create_struct_message, dispatchFn) == 0xA0);
 
         struct fn_in_lp_window_pos_message
         {
@@ -802,14 +831,24 @@ namespace sogen
                 args.pwnd = win.guest.value();
                 args.msg = message;
                 args.wParam = w_param;
-                args.lParam = l_param;
-                args.xParam = win.wnd_proc;
-                args.xpfnProc = c.proc.dispatch_client_message;
                 if (l_param != 0)
                 {
-                    c.emu.read_memory(l_param, &args.cs, sizeof(args.cs));
+                    EMU_CREATESTRUCT emu_cs{};
+                    c.emu.read_memory(l_param, &emu_cs, sizeof(emu_cs));
+                    args.cs.lpCreateParams = emu_cs.lpCreateParams;
+                    args.cs.hInstance = emu_cs.hInstance;
+                    args.cs.hMenu = emu_cs.hMenu;
+                    args.cs.hwndParent = emu_cs.hwndParent;
+                    args.cs.cy = emu_cs.cy;
+                    args.cs.cx = emu_cs.cx;
+                    args.cs.xpfnHint = win.wnd_proc;
+                    args.cs.dispatchPtr = c.proc.dispatch_client_message;
+                    args.cs.lpszName = emu_cs.lpszName;
+                    args.cs.lpszClass = emu_cs.lpszClass;
+                    args.cs.xpfnProc = c.proc.dispatch_client_message;
                 }
-
+                args._xParam = win.wnd_proc;
+                args.dispatchFn = c.proc.dispatch_client_message;
                 dispatch_user_callback(c, id, k_fn_in_lp_create_struct_callback_id, std::forward<T>(state), args);
                 return;
             }
@@ -1333,14 +1372,14 @@ namespace sogen
         gdi_bitmap_surface* get_dc_present_surface(const syscall_context& c, hdc dc, uint32_t& present_handle);
         void draw_system_button_glyph(const syscall_context& c, hdc dc, int x, int y, uint32_t index);
 
-        NTSTATUS handle_NtUserTraceLoggingSendMixedModeTelemetry()
+        NTSTATUS handle_NtUserTraceLoggingSendMixedModeTelemetry(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtUserRegisterWindowMessage()
+        NTSTATUS handle_NtUserRegisterWindowMessage(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         uint64_t handle_NtUserGetThreadState(const syscall_context& c, const ULONG routine)
@@ -1906,9 +1945,9 @@ namespace sogen
             return c.proc.cursor_show_count;
         }
 
-        NTSTATUS handle_NtUserSetCursor()
+        NTSTATUS handle_NtUserSetCursor(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         uint64_t handle_NtUserGetCursor()
@@ -1916,9 +1955,9 @@ namespace sogen
             return 0;
         }
 
-        NTSTATUS handle_NtUserFindExistingCursorIcon()
+        NTSTATUS handle_NtUserFindExistingCursorIcon(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         BOOL handle_NtUserDestroyCursor(const syscall_context&, const hicon icon, const DWORD /*flags*/)
@@ -2259,14 +2298,14 @@ namespace sogen
             return static_cast<int>(copied_chars);
         }
 
-        NTSTATUS handle_NtUserSetWindowsHookEx()
+        NTSTATUS handle_NtUserSetWindowsHookEx(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtUserUnhookWindowsHookEx()
+        NTSTATUS handle_NtUserUnhookWindowsHookEx(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, const DWORD ex_style, const emulator_object<LARGE_STRING> class_name,
@@ -3437,7 +3476,7 @@ namespace sogen
             return TRUE;
         }
 
-        NTSTATUS handle_NtUserSetForegroundWindow()
+        NTSTATUS handle_NtUserSetForegroundWindow(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3669,7 +3708,7 @@ namespace sogen
             return TRUE;
         }
 
-        NTSTATUS handle_NtUserGetCPD()
+        NTSTATUS handle_NtUserGetCPD(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -4231,7 +4270,7 @@ namespace sogen
             return result;
         }
 
-        NTSTATUS handle_NtUserCreateAcceleratorTable()
+        NTSTATUS handle_NtUserCreateAcceleratorTable(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
