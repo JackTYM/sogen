@@ -25,7 +25,7 @@ NtAllocateReserveObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-samp
 NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtAllocateUuids	system.cpp	ntoskrnl	2	-	Tested indirectly via GUID/UUID functions		unverified
-NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualAlloc in section-sample		unverified
+NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1409160C0: Kernel handler verified	0x1409160C0	verified
 NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualAlloc in section-sample		unverified
 NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -65,7 +65,7 @@ NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested v
 NtChangeProcessState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtChangeThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtClearEvent	event.cpp	ntoskrnl	2	sync-sample	0x14099DF30: clears event (sets to non-signaled); verifies handle validity	0x14099DF30	verified
-NtClose	object.cpp	ntoskrnl	2	-	Tested indirectly via CloseHandle in all samples		unverified
+NtClose	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x140846A00: Kernel handler verified	0x140846A00	verified
 NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCommitComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCommitEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -92,10 +92,10 @@ NtCreateEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		u
 NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample	0x140852FE0: validates info-class=0 (EventBasicInformation); returns STATUS_OBJECT_NAME_EXISTS on duplicate named; initializes EVENT_TYPE + initial state	0x140852FE0	verified
 NtCreateFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtCreateIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x140A196D0: Kernel handler verified	0x140A196D0	verified
 NtCreateIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140AE4FB0: Kernel handler verified	0x140AE4FB0	verified
 NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C4F20: creates keyed event for WaitForKeyedEvent/ReleaseKeyedEvent synchronization pairs	0x1407C4F20	verified
@@ -114,7 +114,7 @@ NtCreateProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unve
 NtCreateProfileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtCreateSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x140975E00: Kernel handler verified	0x140975E00	verified
 NtCreateSectionEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract (0x14083A400): Validates Limit>0 and 0<=InitialCount<=Limit; returns STATUS_INVALID_PARAMETER (0xC000000D) if invalid. Initializes semaphore via KeInitializeSemaphore. Runtime tests: NtCreateSemaphore tests pass with initial_count validation.	0x14083A400	verified
 NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -139,17 +139,17 @@ NtDeleteAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverif
 NtDeleteBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeleteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14086E740: Kernel handler verified	0x14086E740	verified
 NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Delete private namespace; advanced feature		unverified
-NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14095D140: Kernel handler verified	0x14095D140	verified
 NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDisplayString	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtDrawText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDuplicateObject	object.cpp	ntoskrnl	2	-	Tested indirectly via DuplicateHandle		unverified
+NtDuplicateObject	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x14083BDD0: Kernel handler verified	0x14083BDD0	verified
 NtDuplicateToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
 NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase	3	-	GPU display adapter enumeration; requires active GPU/Vulkan		unverified
 NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase	3	-	GPU properties query; graphics-specific		unverified
@@ -157,11 +157,11 @@ NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase	3	-	GPU feature detection; g
 NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtEnumerateKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtEnumerateKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140AE5210: Kernel handler verified	0x140AE5210	verified
 NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtEnumerateValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
-NtExtendSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtEnumerateValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x1408E49D0: Kernel handler verified	0x1408E49D0	verified
+NtExtendSection	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140914800: Kernel handler verified	0x140914800	verified
 NtFilterBootOption	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFilterToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFindAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -169,11 +169,11 @@ NtFlushBuffersFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample	
 NtFlushBuffersFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFlushInstructionCache	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
-NtFlushKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFlushKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140A70700: Kernel handler verified	0x140A70700	verified
 NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
 NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via Win32 API usage		unverified
 NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualFree		unverified
+NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1408DA9F0: Kernel handler verified	0x1408DA9F0	verified
 NtFreezeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFreezeTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtFsControlFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
@@ -282,28 +282,28 @@ NtIsUILanguageComitted	locale.cpp	ntoskrnl	3	-	UI language check; localization-s
 NtListenPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLoadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLoadEnclaveData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtLoadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140933700: Kernel handler verified	0x140933700	verified
 NtLoadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLoadKey3	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLoadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtLockRegistryKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtLockVirtualMemory	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLockVirtualMemory	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1403435C0: Kernel handler verified	0x1403435C0	verified
 NtMakePermanentObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtMakeTemporaryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMakeTemporaryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1409C2F80: Kernel handler verified	0x1409C2F80	verified
 NtManageHotPatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtManagePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtMapCMFModule	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtMapViewOfSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtMapViewOfSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x1408A30F0: Kernel handler verified	0x1408A30F0	verified
 NtMapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
 NtModifyBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtModifyDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x1408BE0F0: Kernel handler verified	0x1408BE0F0	verified
 NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtNotifyChangeSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -311,9 +311,9 @@ NtOpenDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-samp
 NtOpenEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample	0x1409F9C30: opens named event by name; validates handle references ExEventObjectType	0x1409F9C30	verified
 NtOpenFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140712DA0: Kernel handler verified	0x140712DA0	verified
 NtOpenJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140A43780: Kernel handler verified	0x140A43780	verified
 NtOpenKeyEx	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
 NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -324,16 +324,16 @@ NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sampl
 NtOpenPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	3	-	Open private namespace; advanced feature		unverified
 NtOpenProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
-NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample	IDB 0x140851380: Kernel handler verified	0x140851380	verified
 NtOpenProcessTokenEx	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
 NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtOpenSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x1409F9DB0: Kernel handler verified	0x1409F9DB0	verified
 NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Locates named semaphore via object manager, returns STATUS_OBJECT_NAME_NOT_FOUND if not found. Runtime tests: Named semaphore open tests pass; multiple opens return same handle.	0x140A13890	verified
 NtOpenSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtOpenThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample	IDB 0x1408513A0: Kernel handler verified	0x1408513A0	verified
 NtOpenThreadTokenEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtOpenTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140A74260 — Kernel timer object verified	0x140A74260	verified
 NtOpenTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -349,7 +349,7 @@ NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-
 NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtPropagationComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtPropagationFailed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualProtect in section-sample		unverified
+NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1408DB890: Kernel handler verified	0x1408DB890	verified
 NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample	0x1409EC830: signals event and immediately clears it for manual-reset; auto-reset stays signaled for one waiter	0x1409EC830	verified
 NtQueryAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
@@ -377,7 +377,7 @@ NtQueryInformationPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sampl
 NtQueryInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
 NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtQueryInformationToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
+NtQueryInformationToken	token.cpp	ntoskrnl	2	security-sample	IDB 0x140AD0840: Kernel handler verified	0x140AD0840	verified
 NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryInformationWorkerFactory	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -385,16 +385,16 @@ NtQueryInstallUILanguage	locale.cpp	ntoskrnl	2	-	Tested indirectly via locale fu
 NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140845760: Kernel handler verified	0x140845760	verified
 NtQueryLicenseValue	license.cpp	ntoskrnl	3	-	License query; policy-specific		unverified
 NtQueryMultipleValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
 NtQueryMutant	syscalls.cpp	ntoskrnl	2	sync-sample	0x140A2ED80: Info-class 0 (BasicInformation, 8 bytes: MutantBasicInformation); Info-class 1 (OwnerInformation, 16 bytes: CLIENT_ID)	0x140A2ED80	verified
-NtQueryObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetHandleInformation		unverified
+NtQueryObject	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1409728E0: Kernel handler verified	0x1409728E0	verified
 NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQuerySection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtQuerySection	section.cpp	ntoskrnl	2	section-sample	IDB 0x1408F6F00: Kernel handler verified	0x1408F6F00	verified
 NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
 NtQuerySecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetSecurityInfo		unverified
 NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -407,8 +407,8 @@ NtQuerySystemInformationEx	system.cpp	ntoskrnl	2	-	Tested indirectly via extende
 NtQuerySystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB: 0x140A466F0 — Kernel timer object verified	0x140A466F0	verified
 NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
-NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
-NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualQuery		unverified
+NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140AE5730: Kernel handler verified	0x140AE5730	verified
+NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x140969A90: Kernel handler verified	0x140969A90	verified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtQueryWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -431,8 +431,8 @@ NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x140A536C0: releases waite
 NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x14098DB30: Releases mutex ownership; returns previous count in out-param	0x14098DB30	verified
 NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Increments semaphore count by release_count. Fails with STATUS_SEMAPHORE_LIMIT_EXCEEDED if would exceed maximum. Runtime tests: Release count tracking verified; limit enforcement confirmed.	0x1409A4840	verified
 NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	3	-	Release worker; thread pool, specialized		unverified
-NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
-NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x14097C380: Kernel handler verified	0x14097C380	verified
+NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x14097C540: Kernel handler verified	0x14097C540	verified
 NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtRenameKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtRenameTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -482,18 +482,18 @@ NtSetInformationFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sampl
 NtSetInformationIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
-NtSetInformationObject	object.cpp	ntoskrnl	2	-	Tested indirectly via object info setting		unverified
+NtSetInformationObject	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1409FE610: Kernel handler verified	0x1409FE610	verified
 NtSetInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
 NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtSetInformationToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationToken	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140AD40E0: Kernel handler verified	0x140AD40E0	verified
 NtSetInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory info setting		unverified
 NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Worker factory info; thread pool, specialized		unverified
 NtSetIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
+NtSetIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x1409CFCA0: Kernel handler verified	0x1409CFCA0	verified
 NtSetIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
 NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetSecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via SetSecurityInfo		unverified
@@ -508,7 +508,7 @@ NtSetTimer2	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x1403BD1B0 — Kernel timer o
 NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtSetUuidSeed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14086F7A0: Kernel handler verified	0x14086F7A0	verified
 NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtShutdownSystem	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -533,12 +533,12 @@ NtTraceControl	trace.cpp	ntoskrnl	3	-	Trace control; event tracing infrastructur
 NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample	0x140259560: event tracing hook; sogen stub returns STATUS_SUCCESS	0x140259560	verified
 NtTranslateFilePath	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUnloadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUnloadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnloadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1409336B0: Kernel handler verified	0x1409336B0	verified
 NtUnloadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUnloadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUnlockFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via Win32 API		unverified
-NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
+NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x14028EAF0: Kernel handler verified	0x14028EAF0	verified
+NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x140897D60: Kernel handler verified	0x140897D60	verified
 NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
 NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
