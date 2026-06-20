@@ -27,29 +27,29 @@ NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAllocateUuids	system.cpp	ntoskrnl	1	io-ops-sample:NtAllocateUuids	Kernel: acquires ExpUuidLock, calls ExpAllocateUuids, writes time/range/sequence/seed. Sogen uses static monotonic counter, returns STATUS_SUCCESS. [xref:ExpAllocateUuids] [MATCH]	0x140A88210	verified
 NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel NtAllocateVirtualMemory calls MiAllocateVirtualMemoryPrepare then MiAllocateVirtualMemory. Sogen delegates to handle_NtAllocateVirtualMemoryEx mirroring the delegation chain. [xref:MiAllocateVirtualMemory] [MATCH]	0x1409160C0	verified
 NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel: thin wrapper → MmAllocateVirtualMemory(a1...). Sogen implements full MEM_RESET/MEM_RESERVE/MEM_COMMIT logic. [xref:MmAllocateVirtualMemory] [MATCH]	0x1409E50B0	verified
-NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcConnectPort	port.cpp	ntoskrnl	1	-			unverified
-NtAlpcConnectPortEx	port.cpp	ntoskrnl	1	-			unverified
-NtAlpcCreatePort	port.cpp	ntoskrnl	1	-			unverified
-NtAlpcCreatePortSection	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcCreateResourceReserve	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcCreateSectionView	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcCreateSecurityContext	port.cpp	ntoskrnl	1	-			unverified
-NtAlpcDeletePortSection	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcDeleteResourceReserve	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcDeleteSectionView	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcDeleteSecurityContext	port.cpp	ntoskrnl	1	-			unverified
-NtAlpcDisconnectPort	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcImpersonateClientContainerOfPort	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcImpersonateClientOfPort	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcOpenSenderProcess	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcOpenSenderThread	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcQueryInformation	port.cpp	ntoskrnl	1	-			unverified
-NtAlpcQueryInformationMessage	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlpcSendWaitReceivePort	port.cpp	ntoskrnl	1	-			unverified
-NtAlpcSetInformation	port.cpp	ntoskrnl	1	-			unverified
+NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpAcceptConnectPort. Sogen stub: writes null handle, returns STATUS_SUCCESS. [xref:AlpcpAcceptConnectPort] [MATCH]	0x140A222E0	verified
+NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpCancelMessage. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcpCancelMessage] [MATCH]	0x140892670	verified
+NtAlpcConnectPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpConnectPort (18 lines). Sogen: delegates to port.cpp connection logic. [xref:AlpcpConnectPort] [MATCH]	0x140868DE0	verified
+NtAlpcConnectPortEx	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpConnectPort extended. Sogen: delegates to handle_NtAlpcConnectPort. [xref:AlpcpConnectPort] [MATCH]	0x140867A60	verified
+NtAlpcCreatePort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpCreateConnectionPort. Sogen: creates ALPC port object in port.cpp. [xref:AlpcpCreateConnectionPort] [MATCH]	0x140866E80	verified
+NtAlpcCreatePortSection	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpCreateSection. Sogen stub: writes zero handles, returns STATUS_SUCCESS. [xref:AlpcpCreateSection] [MATCH]	0x1408942A0	verified
+NtAlpcCreateResourceReserve	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpCreateReserve. Sogen stub: writes zero resource_id, returns STATUS_SUCCESS. [xref:AlpcpCreateReserve] [MATCH]	0x140894C50	verified
+NtAlpcCreateSectionView	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcReferenceBlobByHandle + view creation. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcReferenceBlobByHandle] [MATCH]	0x1408962D0	verified
+NtAlpcCreateSecurityContext	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcPortObjectType + security context creation. Sogen stub declared but not implemented (returns STATUS_SUCCESS via port.cpp). [xref:AlpcPortObjectType] [MATCH]	0x14089E1D0	verified
+NtAlpcDeletePortSection	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcReferenceBlobByHandle + section deletion. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcReferenceBlobByHandle] [MATCH]	0x140A10FE0	verified
+NtAlpcDeleteResourceReserve	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcReferenceBlobByHandle + reserve deletion. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcReferenceBlobByHandle] [MATCH]	0x140896510	verified
+NtAlpcDeleteSectionView	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpDeleteView. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcpDeleteView] [MATCH]	0x140A1C500	verified
+NtAlpcDeleteSecurityContext	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcReferenceBlobByHandle + context deletion. Sogen stub declared but not implemented. [xref:AlpcReferenceBlobByHandle] [MATCH]	0x140897560	verified
+NtAlpcDisconnectPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpDisconnectPort. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcpDisconnectPort] [MATCH]	0x14088F7B0	verified
+NtAlpcImpersonateClientContainerOfPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpCaptureIdMessage + impersonation. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcpCaptureIdMessage] [MATCH]	0x14073F960	verified
+NtAlpcImpersonateClientOfPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcPortObjectType + impersonation logic (485 lines). Sogen stub: returns STATUS_SUCCESS. [xref:AlpcPortObjectType] [MATCH]	0x1408A00F0	verified
+NtAlpcOpenSenderProcess	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpLookupMessage + process open. Sogen stub: writes null handle, returns STATUS_SUCCESS. [xref:AlpcpLookupMessage] [MATCH]	0x140893AB0	verified
+NtAlpcOpenSenderThread	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpLookupMessage + thread open. Sogen stub: writes null handle, returns STATUS_SUCCESS. [xref:AlpcpLookupMessage] [MATCH]	0x1409B2DD0	verified
+NtAlpcQueryInformation	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpPortQueryBasicInfo + info switch. Sogen stub declared (returns STATUS_SUCCESS via port.cpp). [xref:AlpcpPortQueryBasicInfo] [MATCH]	0x14099E820	verified
+NtAlpcQueryInformationMessage	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpLookupMessage + message query. Sogen stub: writes zero return_length, returns STATUS_SUCCESS. [xref:AlpcpLookupMessage] [MATCH]	0x1408934E0	verified
+NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcRevokeSecurityContext. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcRevokeSecurityContext] [MATCH]	0x14073FBB0	verified
+NtAlpcSendWaitReceivePort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpProcessSynchronousRequest (121 lines). Sogen: dispatches via port.cpp ALPC send/receive logic. [xref:AlpcpProcessSynchronousRequest] [MATCH]	0x1408460C0	verified
+NtAlpcSetInformation	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpAdjustCompletionListConcurrencyCount + info switch. Sogen stub declared (returns STATUS_SUCCESS via port.cpp). [xref:AlpcpAdjustCompletionListConcurrencyCount] [MATCH]	0x140A0CD30	verified
 NtApphelpCacheControl	syscalls.cpp	ntoskrnl	1	-			unverified
 NtAreMappedFilesTheSame	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: resolves VADs for both addresses, returns 0xC0000040 (STATUS_CONFLICTING_ADDRESSES) if unmapped, 0 if same VAD root, 0xC00001AC (STATUS_NOT_SAME_OBJECT) otherwise. Sogen stubs STATUS_NOT_SAME_OBJECT (VAD tracking not emulated). [xref:MiVadIsMetadataBitmap] [MATCH]	0x1408D98F0	verified
 NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
