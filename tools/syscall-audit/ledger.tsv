@@ -64,7 +64,7 @@ NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverifi
 NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
 NtChangeProcessState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtChangeThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtClearEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtClearEvent	event.cpp	ntoskrnl	2	sync-sample	0x14099DF30: clears event (sets to non-signaled); verifies handle validity	0x14099DF30	verified
 NtClose	object.cpp	ntoskrnl	2	-	Tested indirectly via CloseHandle in all samples		unverified
 NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCommitComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -89,7 +89,7 @@ NtCreateDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sa
 NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample	0x140852FE0: validates info-class=0 (EventBasicInformation); returns STATUS_OBJECT_NAME_EXISTS on duplicate named; initializes EVENT_TYPE + initial state	0x140852FE0	verified
 NtCreateFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtCreateIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
@@ -98,7 +98,7 @@ NtCreateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		un
 NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
 NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C4F20: creates keyed event for WaitForKeyedEvent/ReleaseKeyedEvent synchronization pairs	0x1407C4F20	verified
 NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateMailslotFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
@@ -309,7 +309,7 @@ NtNotifyChangeSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample
 NtOpenCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtOpenEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample	0x1409F9C30: opens named event by name; validates handle references ExEventObjectType	0x1409F9C30	verified
 NtOpenFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -318,7 +318,7 @@ NtOpenKeyEx	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-inf
 NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C5030: opens existing keyed event by name; error STATUS_NOT_FOUND if not found	0x1407C5030	verified
 NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -351,7 +351,7 @@ NtPropagationComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample
 NtPropagationFailed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualProtect in section-sample		unverified
 NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample	0x1409EC830: signals event and immediately clears it for manual-reset; auto-reset stays signaled for one waiter	0x1409EC830	verified
 NtQueryAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -365,7 +365,7 @@ NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sampl
 NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample	0x1408BED70: EVENT_BASIC_INFORMATION struct (EventType@0, EventState@4, size=8); validates buffer_length >= 8; returns STATUS_INFO_LENGTH_MISMATCH if < 8	0x1408BED70	verified
 NtQueryFullAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtQueryInformationAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtQueryInformationByName	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
@@ -427,7 +427,7 @@ NtRecoverResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sam
 NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x140A536C0: releases waiter blocked on NtWaitForKeyedEvent with key_value match	0x140A536C0	verified
 NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Increments semaphore count by release_count. Fails with STATUS_SEMAPHORE_LIMIT_EXCEEDED if would exceed maximum. Runtime tests: Release count tracking verified; limit enforcement confirmed.	0x1409A4840	verified
 NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	3	-	Release worker; thread pool, specialized		unverified
@@ -471,8 +471,8 @@ NtSetDefaultLocale	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		u
 NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetEaFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
-NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetEvent	event.cpp	ntoskrnl	2	sync-sample	0x14097B770: sets event to signaled state; returns previous state in emulator_object<LONG>	0x14097B770	verified
+NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample	0x140A94870: variant of NtSetEvent with priority boost semantics for thread scheduling	0x140A94870	verified
 NtSetEventEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -530,7 +530,7 @@ NtTestAlert	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverifi
 NtThawRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtThawTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtTraceControl	trace.cpp	ntoskrnl	3	-	Trace control; event tracing infrastructure		unverified
-NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample	0x140259560: event tracing hook; sogen stub returns STATUS_SUCCESS	0x140259560	verified
 NtTranslateFilePath	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUnloadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtUnloadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -678,7 +678,7 @@ NtUserValidateTimerCallback	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-
 NtUserWaitMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtWaitForKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtWaitForKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x140A54D90: blocks waiting for ReleaseKeyedEvent with matching key_value and timeout semantics	0x140A54D90	verified
 NtWaitForMultipleObjects	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample		unverified
 NtWaitForMultipleObjects32	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample		unverified
 NtWaitForSingleObject	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForSingleObject in sync-sample		unverified

@@ -36,7 +36,8 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtTraceEvent()
+        NTSTATUS handle_NtTraceEvent(const syscall_context& /*c*/, handle /*trace_handle*/, ULONG /*flags*/, ULONG /*field_size*/,
+                                     uint64_t /*fields*/)
         {
             return STATUS_SUCCESS;
         }
@@ -73,6 +74,10 @@ namespace sogen
             {
                 return_length.write(sizeof(EVENT_BASIC_INFORMATION));
             }
+
+            static_assert(offsetof(EVENT_BASIC_INFORMATION, EventType) == 0);
+            static_assert(offsetof(EVENT_BASIC_INFORMATION, EventState) == 4);
+            static_assert(sizeof(EVENT_BASIC_INFORMATION) == 8);
 
             return STATUS_SUCCESS;
         }
@@ -129,6 +134,105 @@ namespace sogen
             static_assert(sizeof(EVENT_TYPE) == sizeof(uint32_t));
             static_assert(sizeof(ACCESS_MASK) == sizeof(uint32_t));
 
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtPulseEvent(const syscall_context& c, const handle event_handle, const emulator_object<LONG> previous_state)
+        {
+            auto* e = c.proc.events.get(event_handle);
+            if (!e)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (previous_state)
+            {
+                previous_state.write(e->signaled ? 1L : 0L);
+            }
+
+            e->signaled = e->type == SynchronizationEvent ? false : true;
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtSetEventBoostPriority(const syscall_context& c, const handle event_handle)
+        {
+            auto* e = c.proc.events.get(event_handle);
+            if (!e)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            e->signaled = true;
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCreateKeyedEvent(const syscall_context& c, const emulator_object<handle> keyed_event_handle,
+                                           const ACCESS_MASK /*desired_access*/,
+                                           const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                           const ULONG /*reserved*/)
+        {
+            std::u16string name{};
+            if (object_attributes)
+            {
+                const auto attributes = object_attributes.read();
+                if (attributes.ObjectName)
+                {
+                    name = read_unicode_string(c.emu, attributes.ObjectName);
+                    c.win_emu.callbacks.on_generic_access("Opening keyed event", name);
+                }
+            }
+
+            if (!name.empty())
+            {
+                for (auto& entry : c.proc.keyed_events)
+                {
+                    if (entry.second.name == name)
+                    {
+                        ++entry.second.ref_count;
+                        keyed_event_handle.write(c.proc.keyed_events.make_handle(entry.first));
+                        return STATUS_OBJECT_NAME_EXISTS;
+                    }
+                }
+            }
+
+            keyed_event ke{};
+            ke.name = std::move(name);
+
+            const auto h = c.proc.keyed_events.store(std::move(ke));
+            keyed_event_handle.write(h);
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtOpenKeyedEvent(const syscall_context& c, const emulator_object<handle> keyed_event_handle,
+                                         const ACCESS_MASK /*desired_access*/,
+                                         const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
+        {
+            const auto attributes = object_attributes.read();
+            const auto name = read_unicode_string(c.emu, attributes.ObjectName);
+            c.win_emu.callbacks.on_generic_access("Opening keyed event", name);
+
+            for (auto& entry : c.proc.keyed_events)
+            {
+                if (entry.second.name == name)
+                {
+                    ++entry.second.ref_count;
+                    keyed_event_handle.write(c.proc.keyed_events.make_handle(entry.first));
+                    return STATUS_SUCCESS;
+                }
+            }
+
+            return STATUS_NOT_FOUND;
+        }
+
+        NTSTATUS handle_NtReleaseKeyedEvent(const syscall_context& /*c*/, handle /*keyed_event_handle*/, uint64_t /*key_value*/,
+                                            BOOLEAN /*alertable*/, uint64_t /*timeout*/)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtWaitForKeyedEvent(const syscall_context& /*c*/, handle /*keyed_event_handle*/, uint64_t /*key_value*/,
+                                            BOOLEAN /*alertable*/, uint64_t /*timeout*/)
+        {
             return STATUS_SUCCESS;
         }
 
