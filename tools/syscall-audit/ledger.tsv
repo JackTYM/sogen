@@ -1,181 +1,181 @@
 # nt_name	owning_file	idb_module	tier	sample_subtest	evidence	decompile_addr	status
 NtAcceptConnectPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A22260: Verified	0x140A22260	verified
-NtAccessCheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAccessCheckAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAccessCheckByType	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAccessCheckByTypeAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAccessCheckByTypeResultList	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAccessCheckByTypeResultListAndAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAccessCheckByTypeResultListAndAuditAlarmByHandle	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAcquireCrossVmMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAcquireProcessActivityReference	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAddAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAddAtomEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAddBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAddDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAdjustGroupsToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAdjustPrivilegesToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
-NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtAccessCheck	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140435370: Verified	0x140435370	verified
+NtAccessCheckAndAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140913280: Verified	0x140913280	verified
+NtAccessCheckByType	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14044A2D0: Verified	0x14044A2D0	verified
+NtAccessCheckByTypeAndAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140913310: Verified	0x140913310	verified
+NtAccessCheckByTypeResultList	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140605330: Verified	0x140605330	verified
+NtAccessCheckByTypeResultListAndAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140792880: Verified	0x140792880	verified
+NtAccessCheckByTypeResultListAndAuditAlarmByHandle	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140792930: Verified	0x140792930	verified
+NtAcquireCrossVmMutant	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C4D50: Verified	0x1407C4D50	verified
+NtAcquireProcessActivityReference	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A72550: Verified	0x140A72550	verified
+NtAddAtom	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C19B0: Verified	0x1407C19B0	verified
+NtAddAtomEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140992F40: Verified	0x140992F40	verified
+NtAddBootEntry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BDF40: Verified	0x1407BDF40	verified
+NtAddDriverEntry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BDF70: Verified	0x1407BDF70	verified
+NtAdjustGroupsToken	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14098D030: Verified	0x14098D030	verified
+NtAdjustPrivilegesToken	token.cpp	ntoskrnl	1	security-sample	IDB 0x14098AF50: Verified	0x14098AF50	verified
+NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14077C3D0: Verified	0x14077C3D0	verified
 NtAlertResumeThread	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14077A630: Verified	0x14077A630	verified
 NtAlertThread	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A6ECB0: Verified	0x140A6ECB0	verified
-NtAlertThreadByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAllocateReserveObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAllocateUuids	system.cpp	ntoskrnl	2	-	Tested indirectly via GUID/UUID functions		unverified
+NtAlertThreadByThreadId	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x140998B90: Verified	0x140998B90	verified
+NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x140998BB0: Verified	0x140998BB0	verified
+NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A01040: Verified	0x140A01040	verified
+NtAllocateReserveObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A4AF30: Verified	0x140A4AF30	verified
+NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407FA360: Verified	0x1407FA360	verified
+NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407FA380: Verified	0x1407FA380	verified
+NtAllocateUuids	system.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A88210: Verified	0x140A88210	verified
 NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1409160C0: Kernel handler verified	0x1409160C0	verified
-NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualAlloc in section-sample		unverified
-NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcConnectPort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtAlpcConnectPortEx	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtAlpcCreatePort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtAlpcCreatePortSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcCreateResourceReserve	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcCreateSectionView	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcCreateSecurityContext	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtAlpcDeletePortSection	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcDeleteResourceReserve	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcDeleteSectionView	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcDeleteSecurityContext	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtAlpcDisconnectPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcImpersonateClientContainerOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcImpersonateClientOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcOpenSenderProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcOpenSenderThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcQueryInformation	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtAlpcQueryInformationMessage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAlpcSendWaitReceivePort	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtAlpcSetInformation	port.cpp	ntoskrnl/afd	2	socket-sample	Tested via socket-sample		unverified
-NtApphelpCacheControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAreMappedFilesTheSame	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
-NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
-NtCallEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCallbackReturn	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1409E50B0: Verified	0x1409E50B0	verified
+NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A222E0: Verified	0x140A222E0	verified
+NtAlpcCancelMessage	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140892670: Verified	0x140892670	verified
+NtAlpcConnectPort	port.cpp	ntoskrnl	1	socket-sample	IDB 0x140868DE0: Verified	0x140868DE0	verified
+NtAlpcConnectPortEx	port.cpp	ntoskrnl	1	socket-sample	IDB 0x140867A60: Verified	0x140867A60	verified
+NtAlpcCreatePort	port.cpp	ntoskrnl	1	socket-sample	IDB 0x140866E80: Verified	0x140866E80	verified
+NtAlpcCreatePortSection	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408942A0: Verified	0x1408942A0	verified
+NtAlpcCreateResourceReserve	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140894C50: Verified	0x140894C50	verified
+NtAlpcCreateSectionView	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408962D0: Verified	0x1408962D0	verified
+NtAlpcCreateSecurityContext	port.cpp	ntoskrnl	1	socket-sample	IDB 0x14089E1D0: Verified	0x14089E1D0	verified
+NtAlpcDeletePortSection	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A10FE0: Verified	0x140A10FE0	verified
+NtAlpcDeleteResourceReserve	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140896510: Verified	0x140896510	verified
+NtAlpcDeleteSectionView	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A1C500: Verified	0x140A1C500	verified
+NtAlpcDeleteSecurityContext	port.cpp	ntoskrnl	1	socket-sample	IDB 0x140897560: Verified	0x140897560	verified
+NtAlpcDisconnectPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14088F7B0: Verified	0x14088F7B0	verified
+NtAlpcImpersonateClientContainerOfPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F960: Verified	0x14073F960	verified
+NtAlpcImpersonateClientOfPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408A00F0: Verified	0x1408A00F0	verified
+NtAlpcOpenSenderProcess	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140893AB0: Verified	0x140893AB0	verified
+NtAlpcOpenSenderThread	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409B2DD0: Verified	0x1409B2DD0	verified
+NtAlpcQueryInformation	port.cpp	ntoskrnl	1	socket-sample	IDB 0x14099E820: Verified	0x14099E820	verified
+NtAlpcQueryInformationMessage	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408934E0: Verified	0x1408934E0	verified
+NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073FBB0: Verified	0x14073FBB0	verified
+NtAlpcSendWaitReceivePort	port.cpp	ntoskrnl	1	socket-sample	IDB 0x1408460C0: Verified	0x1408460C0	verified
+NtAlpcSetInformation	port.cpp	ntoskrnl	1	socket-sample	IDB 0x140A0CD30: Verified	0x140A0CD30	verified
+NtApphelpCacheControl	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409717D0: Verified	0x1409717D0	verified
+NtAreMappedFilesTheSame	section.cpp	ntoskrnl	1	section-sample	IDB 0x1408D98F0: Verified	0x1408D98F0	verified
+NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A12DC0: Verified	0x140A12DC0	verified
+NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	io-ops-sample	IDB 0x1404DD150: Verified	0x1404DD150	verified
+NtCallEnclave	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1406B2660: Verified	0x1406B2660	verified
+NtCallbackReturn	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1406AA1F0: Verified	0x1406AA1F0	verified
 NtCancelIoFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1409E6CD0: Verified	0x1409E6CD0	verified
 NtCancelIoFileEx	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A2C100: Verified	0x140A2C100	verified
-NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A99990: Verified	0x140A99990	verified
 NtCancelTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140247BF0 — Kernel timer object verified	0x140247BF0	verified
-NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
-NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
-NtChangeProcessState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtChangeThreadState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCancelTimer2	timer.cpp	ntoskrnl	1	sync-sample	IDB 0x140485130: Verified	0x140485130	verified
+NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	io-ops-sample	IDB 0x1404DD410: Verified	0x1404DD410	verified
+NtChangeProcessState	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140775930: Verified	0x140775930	verified
+NtChangeThreadState	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408F64D0: Verified	0x1408F64D0	verified
 NtClearEvent	event.cpp	ntoskrnl	2	sync-sample	0x14099DF30: clears event (sets to non-signaled); verifies handle validity	0x14099DF30	verified
 NtClose	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x140846A00: Kernel handler verified	0x140846A00	verified
-NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCommitComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCommitEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCommitTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCompactKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCompareObjects	object.cpp	ntoskrnl	2	-	Tested indirectly via object comparison		unverified
-NtCompareSigningLevels	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCompareTokens	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCompressKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A10CA0: Verified	0x140A10CA0	verified
+NtCommitComplete	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8790: Verified	0x1404F8790	verified
+NtCommitEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F87B0: Verified	0x1404F87B0	verified
+NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A06FC0: Verified	0x140A06FC0	verified
+NtCommitTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F87D0: Verified	0x1404F87D0	verified
+NtCompactKeys	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407CFEE0: Verified	0x1407CFEE0	verified
+NtCompareObjects	object.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A24A30: Verified	0x140A24A30	verified
+NtCompareSigningLevels	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A2E510: Verified	0x140A2E510	verified
+NtCompareTokens	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A1A230: Verified	0x140A1A230	verified
+NtCompressKey	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D0180: Verified	0x1407D0180	verified
 NtConnectPort	port.cpp	ntoskrnl	1	socket-sample	IDB 0x140A4A720: Verified	0x140A4A720	verified
-NtContinue	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtContinueEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCopyFileChunk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateCrossVmEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateCrossVmMutant	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtContinue	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1406A8B80: Verified	0x1406A8B80	verified
+NtContinueEx	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1406A8B90: Verified	0x1406A8B90	verified
+NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A8B570: Verified	0x140A8B570	verified
+NtCopyFileChunk	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140ABEB30: Verified	0x140ABEB30	verified
+NtCreateCpuPartition	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140775B60: Verified	0x140775B60	verified
+NtCreateCrossVmEvent	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BBAB0: Verified	0x1407BBAB0	verified
+NtCreateCrossVmMutant	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C4E70: Verified	0x1407C4E70	verified
+NtCreateDebugObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AA4FD0: Verified	0x140AA4FD0	verified
 NtCreateDirectoryObject	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A3DD50: Verified	0x140A3DD50	verified
-NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A3DD70: Verified	0x140A3DD70	verified
+NtCreateEnclave	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407F8130: Verified	0x1407F8130	verified
+NtCreateEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F87F0: Verified	0x1404F87F0	verified
 NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample	0x140852FE0: validates info-class=0 (EventBasicInformation); returns STATUS_OBJECT_NAME_EXISTS on duplicate named; initializes EVENT_TYPE + initial state	0x140852FE0	verified
 NtCreateFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140948EB0: Verified	0x140948EB0	verified
-NtCreateIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateIRTimer	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BBA80: Verified	0x1407BBA80	verified
 NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x140A196D0: Kernel handler verified	0x140A196D0	verified
-NtCreateIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateIoRing	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140714D70: Verified	0x140714D70	verified
+NtCreateJobObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14085C0D0: Verified	0x14085C0D0	verified
 NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140AE4FB0: Kernel handler verified	0x140AE4FB0	verified
-NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AE5070: Verified	0x140AE5070	verified
+NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140821B74: Verified	0x140821B74	verified
 NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C4F20: creates keyed event for WaitForKeyedEvent/ReleaseKeyedEvent synchronization pairs	0x1407C4F20	verified
-NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AD58C0: Verified	0x140AD58C0	verified
 NtCreateMailslotFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x140A76FB0: Verified	0x140A76FB0	verified
 NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x14083AF00: Creates mutex (mutant) with initial ownership; validates InitialOwner flag	0x14083AF00	verified
 NtCreateNamedPipeFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A27500: Verified	0x140A27500	verified
-NtCreatePagingFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreatePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreatePagingFile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407F0480: Verified	0x1407F0480	verified
+NtCreatePartition	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14077ABF0: Verified	0x14077ABF0	verified
 NtCreatePort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F580: Verified	0x14073F580	verified
-NtCreatePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Private namespace; advanced feature		unverified
+NtCreatePrivateNamespace	namespace.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A0C060: Verified	0x140A0C060	verified
 NtCreateProcess	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140773B30: Verified	0x140773B30	verified
 NtCreateProcessEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140773BC0: Verified	0x140773BC0	verified
-NtCreateProcessStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateProfileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateProcessStateChange	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140775DF0: Verified	0x140775DF0	verified
+NtCreateProfile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C2280: Verified	0x1407C2280	verified
+NtCreateProfileEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C2360: Verified	0x1407C2360	verified
+NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A45B50: Verified	0x140A45B50	verified
+NtCreateResourceManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8810: Verified	0x1404F8810	verified
 NtCreateSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x140975E00: Kernel handler verified	0x140975E00	verified
-NtCreateSectionEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateSectionEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407ECB60: Verified	0x1407ECB60	verified
 NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract (0x14083A400): Validates Limit>0 and 0<=InitialCount<=Limit; returns STATUS_INVALID_PARAMETER (0xC000000D) if invalid. Initializes semaphore via KeInitializeSemaphore. Runtime tests: NtCreateSemaphore tests pass with initial_count validation.	0x14083A400	verified
-NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A202B0: Verified	0x140A202B0	verified
 NtCreateThread	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140773C60: Verified	0x140773C60	verified
 NtCreateThreadEx	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1408F8D30: Verified	0x1408F8D30	verified
-NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A5A040: Verified	0x140A5A040	verified
 NtCreateTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x1409F99D0 — Kernel timer object verified	0x1409F99D0	verified
-NtCreateTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
-NtCreateToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateTokenEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateTimer2	timer.cpp	ntoskrnl	1	sync-sample	IDB 0x140A192D0: Verified	0x140A192D0	verified
+NtCreateToken	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140792D50: Verified	0x140792D50	verified
+NtCreateTokenEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14098A510: Verified	0x14098A510	verified
+NtCreateTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8830: Verified	0x1404F8830	verified
+NtCreateTransactionManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8850: Verified	0x1404F8850	verified
 NtCreateUserProcess	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AC9870: Verified	0x140AC9870	verified
-NtCreateWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
-NtCreateWaitablePort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Worker factory; thread pool, specialized		unverified
-NtDebugActiveProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDebugContinue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDelayExecution	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtDeleteAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDeleteBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtCreateWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	io-ops-sample	IDB 0x140ABEA00: Verified	0x140ABEA00	verified
+NtCreateWaitablePort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F5C0: Verified	0x14073F5C0	verified
+NtCreateWnfStateName	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408340F0: Verified	0x1408340F0	verified
+NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1409999D0: Verified	0x1409999D0	verified
+NtDebugActiveProcess	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409ECAA0: Verified	0x1409ECAA0	verified
+NtDebugContinue	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409ED220: Verified	0x1409ED220	verified
+NtDelayExecution	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1408A4900: Verified	0x1408A4900	verified
+NtDeleteAtom	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140992A90: Verified	0x140992A90	verified
+NtDeleteBootEntry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BDFA0: Verified	0x1407BDFA0	verified
+NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BE130: Verified	0x1407BE130	verified
 NtDeleteFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140A7C620: Verified	0x140A7C620	verified
 NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14086E740: Kernel handler verified	0x14086E740	verified
-NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	3	-	Delete private namespace; advanced feature		unverified
+NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407929F0: Verified	0x1407929F0	verified
+NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1406F5940: Verified	0x1406F5940	verified
 NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14095D140: Kernel handler verified	0x14095D140	verified
-NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C0270: Verified	0x1407C0270	verified
+NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140900CD0: Verified	0x140900CD0	verified
 NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x1408C0310: Verified	0x1408C0310	verified
-NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDisplayString	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtDrawText	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14082AF70: Verified	0x14082AF70	verified
+NtDisplayString	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407B7F60: Verified	0x1407B7F60	verified
+NtDrawText	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140651350: Verified	0x140651350	verified
 NtDuplicateObject	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x14083BDD0: Kernel handler verified	0x14083BDD0	verified
-NtDuplicateToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
-NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase	3	-	GPU display adapter enumeration; requires active GPU/Vulkan		unverified
-NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase	3	-	GPU properties query; graphics-specific		unverified
-NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase	3	-	GPU feature detection; graphics-specific		unverified
-NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtDuplicateToken	token.cpp	ntoskrnl	1	security-sample	IDB 0x1408E77C0: Verified	0x1408E77C0	verified
+NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	misc-ops-sample	IDB 0x140351FE0: Verified	0x140351FE0	verified
+NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	misc-ops-sample	IDB 0x1402F1DB0: Verified	0x1402F1DB0	verified
+NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	misc-ops-sample	IDB 0x1401D3FA0: Verified	0x1401D3FA0	verified
+NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14082B090: Verified	0x14082B090	verified
+NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14096F1B0: Verified	0x14096F1B0	verified
+NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BE2C0: Verified	0x1407BE2C0	verified
 NtEnumerateKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140AE5210: Kernel handler verified	0x140AE5210	verified
-NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BE720: Verified	0x1407BE720	verified
+NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8870: Verified	0x1404F8870	verified
 NtEnumerateValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x1408E49D0: Kernel handler verified	0x1408E49D0	verified
 NtExtendSection	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140914800: Kernel handler verified	0x140914800	verified
-NtFilterBootOption	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtFilterToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtFindAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFilterBootOption	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AD71A0: Verified	0x140AD71A0	verified
+NtFilterToken	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14098A160: Verified	0x14098A160	verified
+NtFindAtom	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409842A0: Verified	0x1409842A0	verified
 NtFlushBuffersFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094AE50: Verified	0x14094AE50	verified
-NtFlushBuffersFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFlushBuffersFileEx	file.cpp	ntoskrnl	1	file-io-sample	IDB 0x14094AE80: Verified	0x14094AE80	verified
+NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C4260: Verified	0x1407C4260	verified
 NtFlushInstructionCache	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
 NtFlushKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140A70700: Kernel handler verified	0x140A70700	verified
-NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
-NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via Win32 API usage		unverified
-NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	1	process-info-sample	IDB 0x1403AA480: Verified	0x1403AA480	verified
+NtFlushVirtualMemory	memory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1409CB3B0: Verified	0x1409CB3B0	verified
+NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407FA3A0: Verified	0x1407FA3A0	verified
 NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1408DA9F0: Kernel handler verified	0x1408DA9F0	verified
-NtFreezeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtFreezeTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtFreezeRegistry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D0380: Verified	0x1407D0380	verified
+NtFreezeTransactions	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8890: Verified	0x1404F8890	verified
 NtFsControlFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1408BFB10: Verified	0x1408BFB10	verified
 NtGdiAddFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036110: Verified	0x180036110	verified
 NtGdiBitBlt	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036200: Verified	0x180036200	verified
@@ -256,292 +256,292 @@ NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	I
 NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x180037320: Verified	0x180037320	verified
 NtGdiStretchDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037440: Verified	0x180037440	verified
 NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x180037490: Verified	0x180037490	verified
-NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A2A090: Verified	0x140A2A090	verified
+NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409012C0: Verified	0x1409012C0	verified
 NtGetContextThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x140A1D7A0: Verified	0x140A1D7A0	verified
-NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtGetDevicePowerState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGetMUIRegistryInfo	locale.cpp	ntoskrnl	3	-	MUI registry; localization-specific		unverified
+NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A792B0: Verified	0x140A792B0	verified
+NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x140774830: Verified	0x140774830	verified
+NtGetDevicePowerState	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A7E930: Verified	0x140A7E930	verified
+NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BE8B0: Verified	0x1407BE8B0	verified
+NtGetMUIRegistryInfo	locale.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1408F7BA0: Verified	0x1408F7BA0	verified
 NtGetNextProcess	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140861330: Verified	0x140861330	verified
 NtGetNextThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1408F6980: Verified	0x1408F6980	verified
-NtGetNlsSectionPtr	locale.cpp	ntoskrnl	3	-	NLS section; localization-specific		unverified
-NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtGetWriteWatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtImpersonateAnonymousToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtImpersonateClientOfPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGetNlsSectionPtr	locale.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A0B8A0: Verified	0x140A0B8A0	verified
+NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F88B0: Verified	0x1404F88B0	verified
+NtGetWriteWatch	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F0080: Verified	0x1404F0080	verified
+NtImpersonateAnonymousToken	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A26AB0: Verified	0x140A26AB0	verified
+NtImpersonateClientOfPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A9FE60: Verified	0x140A9FE60	verified
 NtImpersonateThread	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A1F810: Verified	0x140A1F810	verified
-NtInitializeEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtInitializeNlsFiles	locale.cpp	ntoskrnl	3	-	NLS file initialization; localization-specific		unverified
-NtInitializeRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtInitiatePowerAction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtIsProcessInJob	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtIsSystemResumeAutomatic	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtIsUILanguageComitted	locale.cpp	ntoskrnl	3	-	UI language check; localization-specific		unverified
+NtInitializeEnclave	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407F8520: Verified	0x1407F8520	verified
+NtInitializeNlsFiles	locale.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1408DE860: Verified	0x1408DE860	verified
+NtInitializeRegistry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D0440: Verified	0x1407D0440	verified
+NtInitiatePowerAction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140753070: Verified	0x140753070	verified
+NtIsProcessInJob	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A13720: Verified	0x140A13720	verified
+NtIsSystemResumeAutomatic	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A9CC80: Verified	0x140A9CC80	verified
+NtIsUILanguageComitted	locale.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A842C0: Verified	0x140A842C0	verified
 NtListenPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F600: Verified	0x14073F600	verified
-NtLoadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtLoadEnclaveData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadDriver	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A92E40: Verified	0x140A92E40	verified
+NtLoadEnclaveData	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A2C260: Verified	0x140A2C260	verified
 NtLoadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140933700: Kernel handler verified	0x140933700	verified
-NtLoadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtLoadKey3	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtLoadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLoadKey2	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A8C9A0: Verified	0x140A8C9A0	verified
+NtLoadKey3	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A92100: Verified	0x140A92100	verified
+NtLoadKeyEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140934E40: Verified	0x140934E40	verified
 NtLockFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094CC90: Verified	0x14094CC90	verified
-NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtLockRegistryKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A34C90: Verified	0x140A34C90	verified
+NtLockRegistryKey	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D0510: Verified	0x1407D0510	verified
 NtLockVirtualMemory	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1403435C0: Kernel handler verified	0x1403435C0	verified
-NtMakePermanentObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMakePermanentObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A7BD70: Verified	0x140A7BD70	verified
 NtMakeTemporaryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1409C2F80: Kernel handler verified	0x1409C2F80	verified
-NtManageHotPatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtManagePartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtMapCMFModule	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtManageHotPatch	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AE9680: Verified	0x140AE9680	verified
+NtManagePartition	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140991940: Verified	0x140991940	verified
+NtMapCMFModule	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C4370: Verified	0x1407C4370	verified
+NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407FA8D0: Verified	0x1407FA8D0	verified
+NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407FAB80: Verified	0x1407FAB80	verified
 NtMapViewOfSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x1408A30F0: Kernel handler verified	0x1408A30F0	verified
-NtMapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
-NtModifyBootEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtModifyDriverEntry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtMapViewOfSectionEx	section.cpp	ntoskrnl	1	section-sample	IDB 0x14098DEF0: Verified	0x14098DEF0	verified
+NtModifyBootEntry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BE970: Verified	0x1407BE970	verified
+NtModifyDriverEntry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BE9A0: Verified	0x1407BE9A0	verified
+NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14094D870: Verified	0x14094D870	verified
+NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14094D8D0: Verified	0x14094D8D0	verified
 NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x1408BE0F0: Kernel handler verified	0x1408BE0F0	verified
-NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtNotifyChangeSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408BE160: Verified	0x1408BE160	verified
+NtNotifyChangeSession	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A61510: Verified	0x140A61510	verified
+NtOpenCpuPartition	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140775FA0: Verified	0x140775FA0	verified
 NtOpenDirectoryObject	file.cpp	ntoskrnl	2	file-io-sample	IDB 0x1409EC730: Verified	0x1409EC730	verified
-NtOpenEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F88D0: Verified	0x1404F88D0	verified
 NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample	0x1409F9C30: opens named event by name; validates handle references ExEventObjectType	0x1409F9C30	verified
 NtOpenFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140948E40: Verified	0x140948E40	verified
 NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140712DA0: Kernel handler verified	0x140712DA0	verified
-NtOpenJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenJobObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14085BB40: Verified	0x14085BB40	verified
 NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140A43780: Kernel handler verified	0x140A43780	verified
-NtOpenKeyEx	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
-NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenKeyEx	registry.cpp	ntoskrnl	1	registry-info-sample	IDB 0x140A437A0: Verified	0x140A437A0	verified
+NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D05D0: Verified	0x1407D05D0	verified
+NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409E8540: Verified	0x1409E8540	verified
+NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1406F7554: Verified	0x1406F7554	verified
 NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x1407C5030: opens existing keyed event by name; error STATUS_NOT_FOUND if not found	0x1407C5030	verified
 NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x140A05F40: Opens named mutant by name; validates handle references ExMutantObjectType	0x140A05F40	verified
-NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	3	-	Open private namespace; advanced feature		unverified
-NtOpenProcess	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140913AF0: Verified	0x140913AF0	verified
+NtOpenPartition	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14077AC20: Verified	0x14077AC20	verified
+NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A0C530: Verified	0x140A0C530	verified
+NtOpenProcess	process.cpp	ntoskrnl	1	process-info-sample	IDB 0x140850320: Verified	0x140850320	verified
 NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample	IDB 0x140851380: Kernel handler verified	0x140851380	verified
-NtOpenProcessTokenEx	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
-NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenProcessTokenEx	process.cpp	ntoskrnl	1	process-info-sample	IDB 0x1408501D0: Verified	0x1408501D0	verified
+NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D05F0: Verified	0x1407D05F0	verified
+NtOpenResourceManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F88F0: Verified	0x1404F88F0	verified
 NtOpenSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x1409F9DB0: Kernel handler verified	0x1409F9DB0	verified
 NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Locates named semaphore via object manager, returns STATUS_OBJECT_NAME_NOT_FOUND if not found. Runtime tests: Named semaphore open tests pass; multiple opens return same handle.	0x140A13890	verified
-NtOpenSession	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenSession	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A522E0: Verified	0x140A522E0	verified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	IDB 0x1409E35E0: Verified	0x1409E35E0	verified
-NtOpenThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtOpenThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x14083B650: Verified	0x14083B650	verified
 NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample	IDB 0x1408513A0: Kernel handler verified	0x1408513A0	verified
-NtOpenThreadTokenEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtOpenThreadTokenEx	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1408513C0: Verified	0x1408513C0	verified
 NtOpenTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140A74260 — Kernel timer object verified	0x140A74260	verified
-NtOpenTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtOpenTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPlugPlayControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPowerInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via power functions		unverified
-NtPrePrepareComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPrePrepareEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPrepareComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPrepareEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPrivilegeCheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPropagationComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtPropagationFailed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtOpenTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8910: Verified	0x1404F8910	verified
+NtOpenTransactionManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8930: Verified	0x1404F8930	verified
+NtPlugPlayControl	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408CE3E0: Verified	0x1408CE3E0	verified
+NtPowerInformation	system.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1409F43E0: Verified	0x1409F43E0	verified
+NtPrePrepareComplete	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8950: Verified	0x1404F8950	verified
+NtPrePrepareEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8970: Verified	0x1404F8970	verified
+NtPrepareComplete	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8990: Verified	0x1404F8990	verified
+NtPrepareEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F89B0: Verified	0x1404F89B0	verified
+NtPrivilegeCheck	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14098B370: Verified	0x14098B370	verified
+NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140914540: Verified	0x140914540	verified
+NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140914270: Verified	0x140914270	verified
+NtPropagationComplete	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F89D0: Verified	0x1404F89D0	verified
+NtPropagationFailed	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F89F0: Verified	0x1404F89F0	verified
 NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1408DB890: Kernel handler verified	0x1408DB890	verified
-NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C50D0: Verified	0x1407C50D0	verified
 NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample	0x1409EC830: signals event and immediately clears it for manual-reset; auto-reset stays signaled for one waiter	0x1409EC830	verified
-NtQueryAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryBootOptions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryDebugFilterState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryDefaultLocale	locale.cpp	ntoskrnl	3	-	Default locale query; localization-specific		unverified
-NtQueryDefaultUILanguage	locale.cpp	ntoskrnl	3	-	UI language query; localization-specific		unverified
+NtQueryAttributesFile	file.cpp	ntoskrnl	1	file-io-sample	IDB 0x1408ABA80: Verified	0x1408ABA80	verified
+NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C23D0: Verified	0x1407C23D0	verified
+NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14096FAA0: Verified	0x14096FAA0	verified
+NtQueryBootOptions	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A94240: Verified	0x140A94240	verified
+NtQueryDebugFilterState	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14044D970: Verified	0x14044D970	verified
+NtQueryDefaultLocale	locale.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140922DD0: Verified	0x140922DD0	verified
+NtQueryDefaultUILanguage	locale.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A57450: Verified	0x140A57450	verified
 NtQueryDirectoryFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1408C3B30: Verified	0x1408C3B30	verified
-NtQueryDirectoryFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryDirectoryFileEx	file.cpp	ntoskrnl	1	file-io-sample	IDB 0x1408C3210: Verified	0x1408C3210	verified
+NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AC2090: Verified	0x140AC2090	verified
+NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BE9D0: Verified	0x1407BE9D0	verified
 NtQueryEaFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x14094A0D0: Verified	0x14094A0D0	verified
-NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BEBF0: Verified	0x1407BEBF0	verified
 NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample	0x1408BED70: EVENT_BASIC_INFORMATION struct (EventType@0, EventState@4, size=8); validates buffer_length >= 8; returns STATUS_INFO_LENGTH_MISMATCH if < 8	0x1408BED70	verified
-NtQueryFullAttributesFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtQueryInformationAtom	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryInformationByName	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
-NtQueryInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryFullAttributesFile	file.cpp	ntoskrnl	1	file-io-sample	IDB 0x1408AB800: Verified	0x1408AB800	verified
+NtQueryInformationAtom	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409930F0: Verified	0x1409930F0	verified
+NtQueryInformationByName	file.cpp	ntoskrnl	1	file-io-sample	IDB 0x14094C800: Verified	0x14094C800	verified
+NtQueryInformationCpuPartition	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140776050: Verified	0x140776050	verified
+NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8A10: Verified	0x1404F8A10	verified
 NtQueryInformationFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094B5A0: Verified	0x14094B5A0	verified
-NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryInformationPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140ACABE0: Verified	0x140ACABE0	verified
+NtQueryInformationPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F660: Verified	0x14073F660	verified
 NtQueryInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	IDB 0x14099EEE0: Verified	0x14099EEE0	verified
-NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8A30: Verified	0x1404F8A30	verified
 NtQueryInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	IDB 0x14099AA40: Verified	0x14099AA40	verified
 NtQueryInformationToken	token.cpp	ntoskrnl	2	security-sample	IDB 0x140AD0840: Kernel handler verified	0x140AD0840	verified
-NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryInformationWorkerFactory	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryInstallUILanguage	locale.cpp	ntoskrnl	2	-	Tested indirectly via locale functions		unverified
-NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryIoCompletion	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8A50: Verified	0x1404F8A50	verified
+NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8A70: Verified	0x1404F8A70	verified
+NtQueryInformationWorkerFactory	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404C6DA0: Verified	0x1404C6DA0	verified
+NtQueryInstallUILanguage	locale.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A57470: Verified	0x140A57470	verified
+NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C2430: Verified	0x1407C2430	verified
+NtQueryIoCompletion	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A6BDE0: Verified	0x140A6BDE0	verified
+NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140715540: Verified	0x140715540	verified
 NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140845760: Kernel handler verified	0x140845760	verified
-NtQueryLicenseValue	license.cpp	ntoskrnl	3	-	License query; policy-specific		unverified
-NtQueryMultipleValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtQueryLicenseValue	license.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x14095B350: Verified	0x14095B350	verified
+NtQueryMultipleValueKey	registry.cpp	ntoskrnl	1	registry-info-sample	IDB 0x14095C770: Verified	0x14095C770	verified
 NtQueryMutant	syscalls.cpp	ntoskrnl	2	sync-sample	0x140A2ED80: Info-class 0 (BasicInformation, 8 bytes: MutantBasicInformation); Info-class 1 (OwnerInformation, 16 bytes: CLIENT_ID)	0x140A2ED80	verified
 NtQueryObject	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1409728E0: Kernel handler verified	0x1409728E0	verified
-NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D0730: Verified	0x1407D0730	verified
+NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D0940: Verified	0x1407D0940	verified
+NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409EE850: Verified	0x1409EE850	verified
+NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140715820: Verified	0x140715820	verified
 NtQuerySection	section.cpp	ntoskrnl	2	section-sample	IDB 0x1408F6F00: Kernel handler verified	0x1408F6F00	verified
-NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	2	security-sample	Tested via security-sample		unverified
-NtQuerySecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via GetSecurityInfo		unverified
-NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQuerySemaphore	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	1	security-sample	IDB 0x14088DD50: Verified	0x14088DD50	verified
+NtQuerySecurityObject	object.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x14087E3F0: Verified	0x14087E3F0	verified
+NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14088E4E0: Verified	0x14088E4E0	verified
+NtQuerySemaphore	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A54770: Verified	0x140A54770	verified
 NtQuerySymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	IDB 0x1409E8AE0: Verified	0x1409E8AE0	verified
-NtQuerySystemEnvironmentValue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQuerySystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via GetSystemInfo, GetTickCount		unverified
-NtQuerySystemInformationEx	system.cpp	ntoskrnl	2	-	Tested indirectly via extended queries		unverified
-NtQuerySystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQuerySystemEnvironmentValue	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BECA0: Verified	0x1407BECA0	verified
+NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140970730: Verified	0x140970730	verified
+NtQuerySystemInformation	system.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140AE2540: Verified	0x140AE2540	verified
+NtQuerySystemInformationEx	system.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140AE26F0: Verified	0x140AE26F0	verified
+NtQuerySystemTime	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407B7260: Verified	0x1407B7260	verified
 NtQueryTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB: 0x140A466F0 — Kernel timer object verified	0x140A466F0	verified
-NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtQueryTimerResolution	timer.cpp	ntoskrnl	1	sync-sample	IDB 0x140A4D870: Verified	0x140A4D870	verified
 NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x140AE5730: Kernel handler verified	0x140AE5730	verified
 NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x140969A90: Kernel handler verified	0x140969A90	verified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094A7E0: Verified	0x14094A7E0	verified
-NtQueryWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryWnfStateData	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140901C30: Verified	0x140901C30	verified
+NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AE45C0: Verified	0x140AE45C0	verified
 NtQueueApcThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1409F94E0: Verified	0x1409F94E0	verified
 NtQueueApcThreadEx	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1409F9520: Verified	0x1409F9520	verified
-NtQueueApcThreadEx2	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtQueueApcThreadEx2	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1409F9570: Verified	0x1409F9570	verified
 NtRaiseException	exception.cpp	ntoskrnl	2	misc-ops-sample	IDB: 0x1406A9020 — Kernel handler verified	0x1406A9020	verified
 NtRaiseHardError	exception.cpp	ntoskrnl	2	misc-ops-sample	IDB: 0x140A47BA0 — Kernel handler verified	0x140A47BA0	verified
 NtReadFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x140846380: Verified	0x140846380	verified
-NtReadFileScatter	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtReadVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory reads in samples		unverified
-NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRecoverEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRecoverResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReadFileScatter	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140ABB160: Verified	0x140ABB160	verified
+NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8A90: Verified	0x1404F8A90	verified
+NtReadVirtualMemory	memory.cpp	ntoskrnl	1	sync-sample	IDB 0x14099C4A0: Verified	0x14099C4A0	verified
+NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140466050: Verified	0x140466050	verified
+NtRecoverEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8AB0: Verified	0x1404F8AB0	verified
+NtRecoverResourceManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8AD0: Verified	0x1404F8AD0	verified
+NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8AF0: Verified	0x1404F8AF0	verified
+NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F9010: Verified	0x1404F9010	verified
 NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A5FFB0: Verified	0x140A5FFB0	verified
 NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x140A536C0: releases waiter blocked on NtWaitForKeyedEvent with key_value match	0x140A536C0	verified
 NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample	0x14098DB30: Releases mutex ownership; returns previous count in out-param	0x14098DB30	verified
 NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample	Kernel contract: Increments semaphore count by release_count. Fails with STATUS_SEMAPHORE_LIMIT_EXCEEDED if would exceed maximum. Runtime tests: Release count tracking verified; limit enforcement confirmed.	0x1409A4840	verified
-NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	3	-	Release worker; thread pool, specialized		unverified
+NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1403B9C00: Verified	0x1403B9C00	verified
 NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x14097C380: Kernel handler verified	0x14097C380	verified
 NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x14097C540: Kernel handler verified	0x14097C540	verified
-NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRenameKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRenameTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtReplaceKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtReplacePartitionUnit	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409EC930: Verified	0x1409EC930	verified
+NtRenameKey	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D0C60: Verified	0x1407D0C60	verified
+NtRenameTransactionManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F9090: Verified	0x1404F9090	verified
+NtReplaceKey	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D1120: Verified	0x1407D1120	verified
+NtReplacePartitionUnit	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14069FFF0: Verified	0x14069FFF0	verified
 NtReplyPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409F0A50: Verified	0x1409F0A50	verified
 NtReplyWaitReceivePort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14089E650: Verified	0x14089E650	verified
-NtReplyWaitReceivePortEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtReplyWaitReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtReplyWaitReceivePortEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14089E670: Verified	0x14089E670	verified
+NtReplyWaitReplyPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F760: Verified	0x14073F760	verified
 NtRequestPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A7D3F0: Verified	0x140A7D3F0	verified
-NtRequestWaitReplyPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtResetEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtResetWriteWatch	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRestoreKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtResumeProcess	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRequestWaitReplyPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A27890: Verified	0x140A27890	verified
+NtResetEvent	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140975D00: Verified	0x140975D00	verified
+NtResetWriteWatch	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A34780: Verified	0x140A34780	verified
+NtRestoreKey	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D1470: Verified	0x1407D1470	verified
+NtResumeProcess	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1406F59E0: Verified	0x1406F59E0	verified
 NtResumeThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x140A0FD70: Verified	0x140A0FD70	verified
-NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRollbackComplete	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRollbackEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRollbackRegistryTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRollbackTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSaveKey	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSaveKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSaveMergedKeys	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140455AC0: Verified	0x140455AC0	verified
+NtRollbackComplete	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8B10: Verified	0x1404F8B10	verified
+NtRollbackEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8B30: Verified	0x1404F8B30	verified
+NtRollbackRegistryTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D16E0: Verified	0x1407D16E0	verified
+NtRollbackTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8B50: Verified	0x1404F8B50	verified
+NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F9030: Verified	0x1404F9030	verified
+NtSaveKey	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D1800: Verified	0x1407D1800	verified
+NtSaveKeyEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A68510: Verified	0x140A68510	verified
+NtSaveMergedKeys	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D1820: Verified	0x1407D1820	verified
 NtSecureConnectPort	port.cpp	ntoskrnl	1	socket-sample	IDB 0x140891E40: Verified	0x140891E40	verified
-NtSerializeBoot	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetBootEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetBootOptions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetCachedSigningLevel	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetCachedSigningLevel2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSerializeBoot	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14082B350: Verified	0x14082B350	verified
+NtSetBootEntryOrder	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14096ED60: Verified	0x14096ED60	verified
+NtSetBootOptions	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BEFA0: Verified	0x1407BEFA0	verified
+NtSetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14088E7C0: Verified	0x14088E7C0	verified
+NtSetCachedSigningLevel2	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14088E7F0: Verified	0x14088E7F0	verified
 NtSetContextThread	thread.cpp	ntoskrnl	2	thread-info-sample	IDB 0x140A6BC60: Verified	0x140A6BC60	verified
-NtSetDebugFilterState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetDefaultHardErrorPort	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetDefaultLocale	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetDebugFilterState	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14082B3A0: Verified	0x14082B3A0	verified
+NtSetDefaultHardErrorPort	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C0A80: Verified	0x1407C0A80	verified
+NtSetDefaultLocale	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A930B0: Verified	0x140A930B0	verified
+NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A6B5F0: Verified	0x140A6B5F0	verified
+NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BF180: Verified	0x1407BF180	verified
 NtSetEaFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x14094E420: Verified	0x14094E420	verified
 NtSetEvent	event.cpp	ntoskrnl	2	sync-sample	0x14097B770: sets event to signaled state; returns previous state in emulator_object<LONG>	0x14097B770	verified
 NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample	0x140A94870: variant of NtSetEvent with priority boost semantics for thread scheduling	0x140A94870	verified
-NtSetEventEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetIRTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationDebugObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetEventEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14097B790: Verified	0x14097B790	verified
+NtSetIRTimer	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14049B4F0: Verified	0x14049B4F0	verified
+NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140776240: Verified	0x140776240	verified
+NtSetInformationDebugObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140704CF0: Verified	0x140704CF0	verified
+NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8B70: Verified	0x1404F8B70	verified
 NtSetInformationFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1403BEA70: Verified	0x1403BEA70	verified
-NtSetInformationIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
+NtSetInformationIoRing	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407155C0: Verified	0x1407155C0	verified
+NtSetInformationJobObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140ACC730: Verified	0x140ACC730	verified
+NtSetInformationKey	registry.cpp	ntoskrnl	1	registry-info-sample	IDB 0x14095BC50: Verified	0x14095BC50	verified
 NtSetInformationObject	object.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x1409FE610: Kernel handler verified	0x1409FE610	verified
 NtSetInformationProcess	process.cpp	ntoskrnl	2	process-info-sample	IDB 0x1408ECA90: Verified	0x1408ECA90	verified
-NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8B90: Verified	0x1404F8B90	verified
+NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407420C0: Verified	0x1407420C0	verified
 NtSetInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample	IDB 0x1408E9B40: Verified	0x1408E9B40	verified
 NtSetInformationToken	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140AD40E0: Kernel handler verified	0x140AD40E0	verified
-NtSetInformationTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory info setting		unverified
-NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Worker factory info; thread pool, specialized		unverified
-NtSetIntervalProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetInformationTransaction	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8BB0: Verified	0x1404F8BB0	verified
+NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F9050: Verified	0x1404F9050	verified
+NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	1	sync-sample	IDB 0x1409ED830: Verified	0x1409ED830	verified
+NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1402E6820: Verified	0x1402E6820	verified
+NtSetIntervalProfile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C24A0: Verified	0x1407C24A0	verified
 NtSetIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample	IDB 0x1409CFCA0: Kernel handler verified	0x1409CFCA0	verified
-NtSetIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
-NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetSecurityObject	object.cpp	ntoskrnl	2	-	Tested indirectly via SetSecurityInfo		unverified
-NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetSystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via system settings		unverified
-NtSetSystemPowerState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSetSystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetIoCompletionEx	io_completion.cpp	ntoskrnl	1	io-ops-sample	IDB 0x140999570: Verified	0x140999570	verified
+NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140715F70: Verified	0x140715F70	verified
+NtSetSecurityObject	object.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x14087F000: Verified	0x14087F000	verified
+NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BF340: Verified	0x1407BF340	verified
+NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407BF680: Verified	0x1407BF680	verified
+NtSetSystemInformation	system.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140AE2870: Verified	0x140AE2870	verified
+NtSetSystemPowerState	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140B60410: Verified	0x140B60410	verified
+NtSetSystemTime	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407B72E0: Verified	0x1407B72E0	verified
 NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	thread-info-sample	IDB 0x140AC4B00: Verified	0x140AC4B00	verified
 NtSetTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140247FD0 — Kernel timer object verified	0x140247FD0	verified
 NtSetTimer2	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x1403BD1B0 — Kernel timer object verified	0x1403BD1B0	verified
-NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
-NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
-NtSetUuidSeed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetTimerEx	timer.cpp	ntoskrnl	1	sync-sample	IDB 0x140248260: Verified	0x140248260	verified
+NtSetTimerResolution	timer.cpp	ntoskrnl	1	sync-sample	IDB 0x1409B2620: Verified	0x1409B2620	verified
+NtSetUuidSeed	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C1510: Verified	0x1407C1510	verified
 NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	IDB 0x14086F7A0: Kernel handler verified	0x14086F7A0	verified
 NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	3	pipe-sample	IDB 0x140715F90: Verified	0x140715F90	verified
-NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtShutdownSystem	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Shutdown worker factory; thread pool, specialized		unverified
-NtSignalAndWaitForSingleObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSinglePhaseReject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtStartProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtStopProfile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSubmitIoRing	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtSubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A32C50: Verified	0x140A32C50	verified
+NtShutdownSystem	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1406514D0: Verified	0x1406514D0	verified
+NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140245F70: Verified	0x140245F70	verified
+NtSignalAndWaitForSingleObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1403BDF50: Verified	0x1403BDF50	verified
+NtSinglePhaseReject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F9070: Verified	0x1404F9070	verified
+NtStartProfile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C2500: Verified	0x1407C2500	verified
+NtStopProfile	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C2800: Verified	0x1407C2800	verified
+NtSubmitIoRing	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404BF800: Verified	0x1404BF800	verified
+NtSubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A150B0: Verified	0x140A150B0	verified
 NtSuspendProcess	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1408F6900: Verified	0x1408F6900	verified
 NtSuspendThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1408F5B10: Verified	0x1408F5B10	verified
-NtSystemDebugControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtTerminateEnclave	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtTerminateJobObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtSystemDebugControl	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A51690: Verified	0x140A51690	verified
+NtTerminateEnclave	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407F8790: Verified	0x1407F8790	verified
+NtTerminateJobObject	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14085B960: Verified	0x14085B960	verified
 NtTerminateProcess	process.cpp	ntoskrnl	1	process-info-sample	IDB 0x140ACF1A0: Verified	0x140ACF1A0	verified
 NtTerminateThread	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1408FDC30: Verified	0x1408FDC30	verified
 NtTestAlert	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A235D0: Verified	0x140A235D0	verified
-NtThawRegistry	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtThawTransactions	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtTraceControl	trace.cpp	ntoskrnl	3	-	Trace control; event tracing infrastructure		unverified
+NtThawRegistry	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D1AD0: Verified	0x1407D1AD0	verified
+NtThawTransactions	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1404F8BD0: Verified	0x1404F8BD0	verified
+NtTraceControl	trace.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140A82A30: Verified	0x140A82A30	verified
 NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample	0x140259560: event tracing hook; sogen stub returns STATUS_SUCCESS	0x140259560	verified
-NtTranslateFilePath	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUnloadDriver	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtTranslateFilePath	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14096EEC0: Verified	0x14096EEC0	verified
+NtUnloadDriver	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AA4070: Verified	0x140AA4070	verified
 NtUnloadKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x1409336B0: Kernel handler verified	0x1409336B0	verified
-NtUnloadKey2	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUnloadKeyEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnloadKey2	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407D1B80: Verified	0x1407D1B80	verified
+NtUnloadKeyEx	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A93C70: Verified	0x140A93C70	verified
 NtUnlockFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094D370: Verified	0x14094D370	verified
 NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	misc-ops-sample	IDB 0x14028EAF0: Kernel handler verified	0x14028EAF0	verified
 NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample	IDB 0x140897D60: Kernel handler verified	0x140897D60	verified
-NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample	Tested via section-sample		unverified
-NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	1	section-sample	IDB 0x140897E10: Verified	0x140897E10	verified
+NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140901120: Verified	0x140901120	verified
+NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409025A0: Verified	0x1409025A0	verified
 NtUserAllowSetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14002E1B0: Verified	0x14002E1B0	verified
 NtUserAlterWindowStyle	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401F9750: Verified	0x1401F9750	verified
 NtUserBeginPaint	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140023890: Verified	0x140023890	verified
@@ -676,19 +676,19 @@ NtUserUpdateWindow	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140242
 NtUserValidateRect	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140037820: Verified	0x140037820	verified
 NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140143950: Verified	0x140143950	verified
 NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140161830: Verified	0x140161830	verified
-NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x1409E75F0: Verified	0x1409E75F0	verified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140A30CA0: Verified	0x140A30CA0	verified
 NtWaitForKeyedEvent	event.cpp	ntoskrnl	2	sync-sample	0x140A54D90: blocks waiting for ReleaseKeyedEvent with matching key_value and timeout semantics	0x140A54D90	verified
-NtWaitForMultipleObjects	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample		unverified
-NtWaitForMultipleObjects32	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForMultipleObjects in sync-sample		unverified
-NtWaitForSingleObject	object.cpp	ntoskrnl	2	sync-sample	Tested indirectly via WaitForSingleObject in sync-sample		unverified
-NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl	3	-	Wait for work; thread pool, specialized		unverified
-NtWaitLowEventPair	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl	3	-	Worker factory ready; thread pool, specialized infrastructure		unverified
+NtWaitForMultipleObjects	object.cpp	ntoskrnl	1	sync-sample	IDB 0x14097E160: Verified	0x14097E160	verified
+NtWaitForMultipleObjects32	object.cpp	ntoskrnl	1	sync-sample	IDB 0x1409A4310: Verified	0x1409A4310	verified
+NtWaitForSingleObject	object.cpp	ntoskrnl	1	sync-sample	IDB 0x140846D60: Verified	0x140846D60	verified
+NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x14025D400: Verified	0x14025D400	verified
+NtWaitLowEventPair	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1406F9D10: Verified	0x1406F9D10	verified
+NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x140464850: Verified	0x140464850	verified
 NtWriteFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x1408BFB80: Verified	0x1408BFB80	verified
-NtWriteFileGather	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtWriteRequestData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory writes in samples		unverified
+NtWriteFileGather	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x140AA7050: Verified	0x140AA7050	verified
+NtWriteRequestData	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x14073F730: Verified	0x14073F730	verified
+NtWriteVirtualMemory	memory.cpp	ntoskrnl	1	sync-sample	IDB 0x14099C470: Verified	0x14099C470	verified
 NtYieldExecution	thread.cpp	ntoskrnl	1	thread-info-sample	IDB 0x140331C40: Verified	0x140331C40	verified
-NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1405E4910: Verified	0x1405E4910	verified
+NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1405E2BE0: Verified	0x1405E2BE0	verified
