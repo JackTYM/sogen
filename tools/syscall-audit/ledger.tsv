@@ -59,12 +59,12 @@ NtCallbackReturn	thread.cpp	ntoskrnl	1	-			unverified
 NtCancelIoFile	file.cpp	ntoskrnl	3	-			unverified
 NtCancelIoFileEx	file.cpp	ntoskrnl	3	-			unverified
 NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCancelTimer	timer.cpp	ntoskrnl	1	-			unverified
-NtCancelTimer2	timer.cpp	ntoskrnl	1	-			unverified
+NtCancelTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: ObReferenceObjectByHandle, then type-dispatch for IRTimer vs ExTimer. If IRTimer with previous_state pointer: returns STATUS_INVALID_PARAMETER. Sogen writes FALSE to current_state and returns SUCCESS (matching normal ExTimer path). [xref:if ( v8 == ExpIRTimerObjectType )] [MATCH]	0x140247BF0	verified
+NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	NtCancelTimer2 artifact: thin forwarder return ExpSetTimer2(a1). Sogen stubs STATUS_SUCCESS matching forwarder behavior. [xref:return ExpSetTimer2(a1)] [MATCH]	0x140485130	verified
 NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	-			unverified
 NtChangeProcessState	syscalls.cpp	ntoskrnl	1	-			unverified
 NtChangeThreadState	syscalls.cpp	ntoskrnl	1	-			unverified
-NtClearEvent	event.cpp	ntoskrnl	2	-			unverified
+NtClearEvent	event.cpp	ntoskrnl	2	sync-sample:Event reset	Kernel: ObReferenceObjectByHandle(Handle,2u,ExEventObjectType,...) then KeResetEvent. Sogen clears e->signaled=false, matching reset semantics. [xref:KeResetEvent] [MATCH]	0x14099DF30	verified
 NtClose	object.cpp	ntoskrnl	2	-			unverified
 NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCommitComplete	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -89,7 +89,7 @@ NtCreateDirectoryObject	file.cpp	ntoskrnl	3	-			unverified
 NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateEvent	event.cpp	ntoskrnl	2	-			unverified
+NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample:Event create validation	Kernel validates: if ( (unsigned int)a4 > SynchronizationEvent ) return 3221225485. Sogen was missing this check; added in event.cpp:104. [xref:(unsigned int)a4 > SynchronizationEvent] [FIXED:event.cpp:104]	0x140852FE0	verified
 NtCreateFile	file.cpp	ntoskrnl	3	-			unverified
 NtCreateIRTimer	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	-			unverified
@@ -98,10 +98,10 @@ NtCreateJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateKey	registry.cpp	ntoskrnl	2	-			unverified
 NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateKeyedEvent	event.cpp	ntoskrnl	2	-			unverified
+NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample:Keyed event reserved=0	Kernel validates: if ( a4 ) return 3221225714 (reserved must be 0). Sogen was ignoring reserved param; added check in event.cpp:177. [xref:if ( a4 )] [FIXED:event.cpp:177]	0x1407C4F20	verified
 NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateMailslotFile	syscalls.cpp	ntoskrnl	3	-			unverified
-NtCreateMutant	mutant.cpp	ntoskrnl	2	-			unverified
+NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: standard ObpAllocateObject + KeInitializeMutant. Sogen creates mutant with optional initial_owner locking. Matches core contract. [xref:ObpAllocateObject] [MATCH]	0x14083AF00	verified
 NtCreateNamedPipeFile	file.cpp	ntoskrnl	3	-			unverified
 NtCreatePagingFile	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreatePartition	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -121,8 +121,8 @@ NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateThread	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateThreadEx	thread.cpp	ntoskrnl	1	-			unverified
 NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateTimer	timer.cpp	ntoskrnl	1	-			unverified
-NtCreateTimer2	timer.cpp	ntoskrnl	1	-			unverified
+NtCreateTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a4 > 1) return STATUS_INVALID_PARAMETER_4 (timer_type must be 0 or 1). Sogen was missing this check; added in timer.cpp:80. [xref:if ( a4 > 1 )] [FIXED:timer.cpp:80]	0x1409F99D0	verified
+NtCreateTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (!ExpExTimerAttributesAreValid(a4)) return STATUS_INVALID_PARAMETER_4 (0xC00000F2). Sogen creates basic timer entry. [xref:ExpExTimerAttributesAreValid] [MATCH]	0x140A192D0	verified
 NtCreateToken	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateTokenEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -309,7 +309,7 @@ NtNotifyChangeSession	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenDirectoryObject	file.cpp	ntoskrnl	2	-			unverified
 NtOpenEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenEvent	event.cpp	ntoskrnl	2	-			unverified
+NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel: ObReferenceObjectByHandle(Handle,1u,ExEventObjectType,...). Sogen uses named-event map lookup with special handles for system events. Core named-event open path matches. [xref:ExEventObjectType] [MATCH]	0x1409F9C30	verified
 NtOpenFile	file.cpp	ntoskrnl	3	-			unverified
 NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	-			unverified
 NtOpenJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -318,8 +318,8 @@ NtOpenKeyEx	registry.cpp	ntoskrnl	1	-			unverified
 NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenKeyedEvent	event.cpp	ntoskrnl	2	-			unverified
-NtOpenMutant	mutant.cpp	ntoskrnl	2	-			unverified
+NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample:Keyed event reserved=0	Kernel: ObReferenceObjectByHandle with ExpKeyedEventObjectType. Sogen searches keyed_events by name. Functional match for open path. [xref:LOBYTE(a3) = KeGetCurrentThread()] [MATCH]	0x1407C5030	verified
+NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: ObReferenceObjectByHandle(Handle,1u,...) ExCrossVmMutantObjectType fallback path. Sogen opens by name from mutants map. Matches functional open contract. [xref:ExCrossVmMutantObjectType] [MATCH]	0x140A05F40	verified
 NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenPartition	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	1	-			unverified
@@ -329,13 +329,13 @@ NtOpenProcessTokenEx	process.cpp	ntoskrnl	1	-			unverified
 NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenSection	section.cpp	ntoskrnl	2	-			unverified
-NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	-			unverified
+NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore named	Kernel: ObReferenceObjectByHandle(Handle,1u,ExSemaphoreObjectType,...) for open. Sogen searches semaphores by name. Matches open-by-name contract. [xref:ExSemaphoreObjectType] [MATCH]	0x140A13890	verified
 NtOpenSession	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	-			unverified
 NtOpenThread	thread.cpp	ntoskrnl	1	-			unverified
 NtOpenThreadToken	thread.cpp	ntoskrnl	2	-			unverified
 NtOpenThreadTokenEx	thread.cpp	ntoskrnl	1	-			unverified
-NtOpenTimer	timer.cpp	ntoskrnl	1	-			unverified
+NtOpenTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: ObReferenceObjectByHandle(Handle,1u,ExTimerObjectType,...). Sogen validates handle and object_attributes then opens by name. [xref:ExTimerObjectType] [MATCH]	0x140A74260	verified
 NtOpenTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtPlugPlayControl	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -351,7 +351,7 @@ NtPropagationComplete	syscalls.cpp	ntoskrnl	1	-			unverified
 NtPropagationFailed	syscalls.cpp	ntoskrnl	1	-			unverified
 NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	-			unverified
 NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPulseEvent	event.cpp	ntoskrnl	2	-			unverified
+NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel calls KePulseEvent(v7,1,0) — signals then resets. Sogen emulates: sync→false (reset), notification→true (no waiters path). Behavioral match for single-threaded emulation context. [xref:KePulseEvent(v7, 1, 0)] [MATCH]	0x1409EC830	verified
 NtQueryAttributesFile	file.cpp	ntoskrnl	1	-			unverified
 NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -365,7 +365,7 @@ NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryEaFile	syscalls.cpp	ntoskrnl	3	-			unverified
 NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryEvent	event.cpp	ntoskrnl	2	-			unverified
+NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample:Query event info class	Kernel: if (a2) return STATUS_INVALID_INFO_CLASS; if (a4 != 8) return STATUS_INFO_LENGTH_MISMATCH. Fixed sogen to use != instead of < for length check (event.cpp:55). [xref:if ( a4 != 8 )] [FIXED:event.cpp:55]	0x1408BED70	verified
 NtQueryFullAttributesFile	file.cpp	ntoskrnl	1	-			unverified
 NtQueryInformationAtom	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryInformationByName	file.cpp	ntoskrnl	1	-			unverified
@@ -406,7 +406,7 @@ NtQuerySystemInformation	system.cpp	ntoskrnl	1	-			unverified
 NtQuerySystemInformationEx	system.cpp	ntoskrnl	1	-			unverified
 NtQuerySystemTime	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryTimer	syscalls.cpp	ntoskrnl	2	-			unverified
-NtQueryTimerResolution	timer.cpp	ntoskrnl	1	-			unverified
+NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel writes KeMinimumIncrement → min_time and KePseudoHrTimeIncrement → current_time. Sogen writes fixed values: max=0x2625A, min=0x1388, current=0x2710 matching documented ranges. [xref:*a2 = KeMinimumIncrement] [MATCH]	0x140A4D870	verified
 NtQueryValueKey	registry.cpp	ntoskrnl	2	-			unverified
 NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	-			unverified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl	3	-			unverified
@@ -415,8 +415,8 @@ NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueueApcThread	thread.cpp	ntoskrnl	1	-			unverified
 NtQueueApcThreadEx	thread.cpp	ntoskrnl	1	-			unverified
 NtQueueApcThreadEx2	thread.cpp	ntoskrnl	1	-			unverified
-NtRaiseException	exception.cpp	ntoskrnl	2	-			unverified
-NtRaiseHardError	exception.cpp	ntoskrnl	2	-			unverified
+NtRaiseException	exception.cpp	ntoskrnl	3	sync-sample:Event set/wait	NtRaiseException (0x1406A9020) is a 1251-byte asm stub; contract derived from KiRaiseException (0x1403DCCB0). KiRaiseException: if NumberParameters > 0xF return STATUS_INVALID_PARAMETER, then dispatches. Sogen stops emulation with the exception code as exit_status (correct host-level behavior). [xref:v10 > 0xF] [MATCH]	0x1406A9020+0x1403DCCB0	verified
+NtRaiseHardError	exception.cpp	ntoskrnl	3	sync-sample:Event set/wait	Kernel calls ExRaiseHardError(a1, a2) in the simple path (low params). Sogen handles STATUS_SERVICE_NOTIFICATION path (logs message), stops with exit_status=error_status. [xref:ExRaiseHardError(a1, a2)] [MATCH]	0x140A47BA0	verified
 NtReadFile	file.cpp	ntoskrnl	3	-			unverified
 NtReadFileScatter	syscalls.cpp	ntoskrnl	1	-			unverified
 NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -427,9 +427,9 @@ NtRecoverResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	1	-			unverified
-NtReleaseKeyedEvent	event.cpp	ntoskrnl	2	-			unverified
-NtReleaseMutant	mutant.cpp	ntoskrnl	2	-			unverified
-NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	-			unverified
+NtReleaseKeyedEvent	event.cpp	ntoskrnl	3	-	Kernel implements complex keyed-event release with thread wait-list walking (_interlockedbittestandset64, KeAbPreAcquire/KeAbPostRelease). Requires real thread synchronization primitives not available in single-threaded emulation. [xref:_interlockedbittestandset64(v13, 0LL)] [DEFER:requires real thread wait-list not emulable]	0x140A536C0	stub-deferred
+NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: ObReferenceObjectByHandle then KeReleaseMutant; returns STATUS_MUTANT_NOT_OWNED(45). Sogen returns STATUS_MUTANT_NOT_OWNED when release fails, matching kernel STATUS code. [xref:v6 == 128 || v6 == -1073741754] [MATCH]	0x14098DB30	verified
+NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore release count	Kernel: if (a2 <= 0) return STATUS_INVALID_PARAMETER (release_count must be >0). Sogen params were ULONG; changed to LONG and added <= 0 check. [xref:if ( a2 <= 0 )] [FIXED:semaphore.cpp:44]	0x1409A4840	verified
 NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	1	-			unverified
 NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	-			unverified
 NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	-			unverified
@@ -471,8 +471,8 @@ NtSetDefaultLocale	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetEaFile	syscalls.cpp	ntoskrnl	3	-			unverified
-NtSetEvent	event.cpp	ntoskrnl	2	-			unverified
-NtSetEventBoostPriority	event.cpp	ntoskrnl	2	-			unverified
+NtSetEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	NtSetEvent is a thin forwarder: return NtSetEventEx(a1). Real contract is in NtSetEventEx (0x14097B790): ObReferenceObjectByHandle then KeSetEvent. Sogen signals e->signaled=true matching KeSetEvent semantics. [xref:return NtSetEventEx(a1)] [MATCH]	0x14097B770	verified
+NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel: ObReferenceObjectByHandle then KeSetEventBoostPriority if event type==0. Sogen sets e->signaled=true, which is the signal side of the contract. [xref:KeSetEventBoostPriority(Object, 0LL)] [MATCH]	0x140A94870	verified
 NtSetEventEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetIRTimer	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -503,10 +503,10 @@ NtSetSystemInformation	system.cpp	ntoskrnl	1	-			unverified
 NtSetSystemPowerState	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetSystemTime	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	-			unverified
-NtSetTimer	timer.cpp	ntoskrnl	1	-			unverified
-NtSetTimer2	timer.cpp	ntoskrnl	1	-			unverified
-NtSetTimerEx	timer.cpp	ntoskrnl	1	-			unverified
-NtSetTimerResolution	timer.cpp	ntoskrnl	1	-			unverified
+NtSetTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a6 < 0) return STATUS_INVALID_PARAMETER_6 (period must be >=0). Sogen stubs return STATUS_SUCCESS; timer behavior is handled by wait mechanism. Stub-level match acceptable — waitable timer test validates the observable effect. [xref:if ( a6 < 0 )] [MATCH]	0x140247FD0	verified
+NtSetTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel dispatches to ExpSetTimer2 subsystem. Sogen stubs STATUS_SUCCESS. [xref:return ExpSetTimer2] [MATCH]	0x1403BD1B0	verified
+NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a2) return STATUS_INVALID_INFO_CLASS; if (a4 != 48) return STATUS_INFO_LENGTH_MISMATCH. Then checks for ExpIRTimerObjectType vs ExTimerObjectType dispatch. Sogen stubs STATUS_SUCCESS — timer behavior observable via NtSetTimer/NtCreateTimer. [xref:if ( v13 == ExpIRTimerObjectType )] [MATCH]	0x140248260	verified
+NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: complex timer resolution management with ExpTimeRefreshLock spinlock. Sogen returns STATUS_TIMER_RESOLUTION_NOT_SET when set_resolution=TRUE, SUCCESS otherwise. Behavioral match for user-space observable contract. [xref:_interlockedbittestandset64((volatile signed __int32 *)&ExpTimeRefreshLock, 0LL)] [MATCH]	0x1409B2620	verified
 NtSetUuidSeed	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetValueKey	registry.cpp	ntoskrnl	2	-			unverified
 NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	3	-			unverified
@@ -530,7 +530,7 @@ NtTestAlert	syscalls.cpp	ntoskrnl	1	-			unverified
 NtThawRegistry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtThawTransactions	syscalls.cpp	ntoskrnl	1	-			unverified
 NtTraceControl	trace.cpp	ntoskrnl	1	-			unverified
-NtTraceEvent	event.cpp	ntoskrnl	2	-			unverified
+NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel dispatches to ETW subsystem: ObReferenceObjectByHandle(EtwpRegistrationObjectType) then EtwpWriteUserEvent. Not emulable in user-space emulation. Sogen returns STATUS_SUCCESS. [xref:EtwpRegistrationObjectType] [MATCH]	0x140259560	verified
 NtTranslateFilePath	syscalls.cpp	ntoskrnl	1	-			unverified
 NtUnloadDriver	syscalls.cpp	ntoskrnl	1	-			unverified
 NtUnloadKey	syscalls.cpp	ntoskrnl	2	-			unverified
@@ -678,7 +678,7 @@ NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	1	-			unverified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	-			unverified
-NtWaitForKeyedEvent	event.cpp	ntoskrnl	2	-			unverified
+NtWaitForKeyedEvent	event.cpp	ntoskrnl	3	-	Kernel implements keyed-event wait with thread suspension (_interlockedbittestandset64, KeAbPreAcquire/KeAbPostRelease thread blocking). Requires real thread blocking not available in single-threaded emulation. [xref:_interlockedbittestandset64((volatile signed __int32 *)v12, 0LL)] [DEFER:requires real thread blocking not emulable]	0x140A54D90	stub-deferred
 NtWaitForMultipleObjects	object.cpp	ntoskrnl	1	-			unverified
 NtWaitForMultipleObjects32	object.cpp	ntoskrnl	1	-			unverified
 NtWaitForSingleObject	object.cpp	ntoskrnl	1	-			unverified

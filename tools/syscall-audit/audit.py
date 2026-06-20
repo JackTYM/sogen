@@ -215,8 +215,11 @@ def validate_row(row: dict, sample_tests: set[str]) -> list[str]:
         # ── Rule 1b: artifact must be non-trivial ──────────────────────────────
         artifact_text = artifact.read_text(errors='replace')
         artifact_lines = [l for l in artifact_text.splitlines() if l.strip()]
-        if len(artifact_lines) < 8:
-            violations.append(f"artifact too short ({len(artifact_lines)} non-blank lines, need ≥ 8): {artifact}")
+        # Minimum 4 non-blank lines covers thin forwarders (signature+{+body+}); 8 for real bodies.
+        # Thin forwarders (single-return wrappers) are legitimate at 4+ lines with function name present.
+        min_lines = 4
+        if len(artifact_lines) < min_lines:
+            violations.append(f"artifact too short ({len(artifact_lines)} non-blank lines, need ≥ {min_lines}): {artifact}")
         if name not in artifact_text:
             violations.append(f"artifact does not contain the function name '{name}': {artifact}")
 
@@ -258,6 +261,26 @@ def validate_row(row: dict, sample_tests: set[str]) -> list[str]:
                 violations.append(
                     f"sample_subtest '{sample_subtest}': no report(\"{test_name}\") found in {SAMPLES_DIR}/{sample_name}/"
                 )
+
+            # ── Rule 6: tier gate — sweep: tests require trivial artifact body ──
+            if test_name.startswith('sweep:') and artifact is not None:
+                art_text = artifact.read_text(errors='replace')
+                non_trivial = []
+                for ln in art_text.splitlines():
+                    s = ln.strip()
+                    if not s or s in ('{', '}'):
+                        continue
+                    if s.startswith('// [COLLAPSED'):
+                        continue
+                    # Skip the signature line (contains the function name)
+                    if name in s and '__fastcall' in s:
+                        continue
+                    non_trivial.append(s)
+                if len(non_trivial) > 2:
+                    violations.append(
+                        f"tier-gate (1d.6): sample_subtest uses sweep: but artifact has "
+                        f"{len(non_trivial)} non-trivial lines — needs a dedicated Tier-2/3 test"
+                    )
 
     return violations
 

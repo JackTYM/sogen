@@ -51,7 +51,8 @@ namespace sogen
                 return STATUS_INVALID_INFO_CLASS;
             }
 
-            if (event_information_length < sizeof(EVENT_BASIC_INFORMATION))
+            // Kernel validates: if ( a4 != 8 ) return STATUS_INFO_LENGTH_MISMATCH (exact size required)
+            if (event_information_length != sizeof(EVENT_BASIC_INFORMATION))
             {
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
@@ -99,6 +100,12 @@ namespace sogen
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                       const EVENT_TYPE event_type, const BOOLEAN initial_state)
         {
+            // Kernel validates: if ( a4 > SynchronizationEvent ) return STATUS_INVALID_PARAMETER
+            if (event_type > SynchronizationEvent)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             std::u16string name{};
             if (object_attributes)
             {
@@ -169,8 +176,14 @@ namespace sogen
         NTSTATUS handle_NtCreateKeyedEvent(const syscall_context& c, const emulator_object<handle> keyed_event_handle,
                                            const ACCESS_MASK /*desired_access*/,
                                            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                           const ULONG /*reserved*/)
+                                           const ULONG reserved)
         {
+            // Kernel validates: if ( reserved != 0 ) return 3221225714 (STATUS_INVALID_PARAMETER_4)
+            if (reserved != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             std::u16string name{};
             if (object_attributes)
             {
