@@ -61,7 +61,7 @@ BOILERPLATE_PATTERNS = re.compile(
 _CONTROL_FLOW = re.compile(r'\bif\s*\(|\belse\b|\bswitch\s*\(|\bwhile\s*\(|\bfor\s*\(|\?\s*\S')
 
 # Assertion tokens that make a test function genuinely checking behavior.
-_ASSERT_TOKENS = re.compile(r'\bNT_SUCCESS\b|\bSTATUS_|\b==\b|\b!=\b|\bmemcmp\b|\bassert\b|\bfailed\b|\bFAILED\b')
+_ASSERT_TOKENS = re.compile(r'\bNT_SUCCESS\b|\bSTATUS_|==|!=|\bmemcmp\b|\bassert\b|\bfailed\b|\bFAILED\b')
 
 # Allowlist of sample_subtest values that are startup-only and cannot have per-handler tests.
 # Each entry: (nt_name, reason_why_no_test_possible)
