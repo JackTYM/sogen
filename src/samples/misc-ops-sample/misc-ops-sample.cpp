@@ -360,5 +360,16 @@ int main()
     all_ok &= report("NtQueryPerformanceCounter", test_query_performance_counter());
     all_ok &= report("NtQuerySystemInformation SystemBasicInformation", test_query_system_basic_information());
     all_ok &= report("sweep:NtFlushProcessWriteBuffers", []() -> bool { FlushProcessWriteBuffers(); return true; }());
+    all_ok &= report("NtAddAtom add and find", []() -> bool {
+        ATOM a = GlobalAddAtomA("SogenTestAtom_Wave8");
+        if (!a) return false;
+        ATOM found = GlobalFindAtomA("SogenTestAtom_Wave8");
+        GlobalDeleteAtom(a);
+        return found == a;
+    }());
+    all_ok &= report("NtFindAtom not found", []() -> bool {
+        ATOM found = GlobalFindAtomA("SogenTestAtom_NotExist_Wave8");
+        return found == 0;
+    }());
     return all_ok ? 0 : 1;
 }
