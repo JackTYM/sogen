@@ -116,7 +116,7 @@ NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateSection	section.cpp	ntoskrnl	2	-			unverified
 NtCreateSectionEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	-			unverified
+NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore create validation	Kernel validates Limit<=0||a4<0||a4>Limit (artifact line 15: if ( Limit <= 0 || a4 < 0 || a4 > Limit )); calls KeInitializeSemaphore(v20,a4,Limit) on success (line 125). [xref:Limit <= 0 || a4 < 0 || a4 > Limit] [FIXED:semaphore.cpp:75] params changed ULONG→LONG, added initial_count<0 check	0x14083A400	verified
 NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateThread	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateThreadEx	thread.cpp	ntoskrnl	1	-			unverified

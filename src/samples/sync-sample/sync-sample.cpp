@@ -52,6 +52,29 @@ namespace
         return true;
     }
 
+    bool test_semaphore_create()
+    {
+        // Kernel contract: Limit<=0 || InitialCount<0 || InitialCount>Limit → STATUS_INVALID_PARAMETER
+        // Artifact: if ( Limit <= 0 || a4 < 0 || a4 > Limit ) return 3221225485LL
+        HANDLE h1 = CreateSemaphoreA(nullptr, 0, 0, nullptr);   // Limit=0 → rejected
+        if (h1 != nullptr)
+        {
+            CloseHandle(h1);
+            return false;
+        }
+        HANDLE h2 = CreateSemaphoreA(nullptr, 3, 2, nullptr);   // Initial > Max → rejected
+        if (h2 != nullptr)
+        {
+            CloseHandle(h2);
+            return false;
+        }
+        HANDLE h3 = CreateSemaphoreA(nullptr, 0, 1, nullptr);   // Valid: Initial=0, Max=1
+        if (h3 == nullptr)
+            return false;
+        CloseHandle(h3);
+        return true;
+    }
+
     bool test_semaphore()
     {
         HANDLE sem = CreateSemaphoreA(nullptr, 2, 4, nullptr);
@@ -185,6 +208,7 @@ int main()
     ok &= report("Event set/wait", test_event_set_wait());
     ok &= report("Event reset", test_event_reset());
     ok &= report("Mutex acquire/release", test_mutex());
+    ok &= report("Semaphore create validation", test_semaphore_create());
     ok &= report("Semaphore count", test_semaphore());
     ok &= report("Semaphore release count", test_semaphore_release_count());
     ok &= report("Semaphore named", test_semaphore_named());

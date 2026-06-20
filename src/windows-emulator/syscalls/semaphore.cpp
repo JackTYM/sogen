@@ -70,16 +70,18 @@ namespace sogen
         NTSTATUS handle_NtCreateSemaphore(const syscall_context& c, const emulator_object<handle> semaphore_handle,
                                           const ACCESS_MASK /*desired_access*/,
                                           const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                          const ULONG initial_count, const ULONG maximum_count)
+                                          const LONG initial_count, const LONG maximum_count)
         {
-            if (maximum_count <= 0 || initial_count > maximum_count)
+            // Kernel validates: Limit <= 0 || a4 < 0 || a4 > Limit (returns STATUS_INVALID_PARAMETER)
+            // decompile artifact line 15: if ( Limit <= 0 || a4 < 0 || a4 > Limit )
+            if (maximum_count <= 0 || initial_count < 0 || initial_count > maximum_count)
             {
                 return STATUS_INVALID_PARAMETER;
             }
 
             semaphore s{};
-            s.current_count = initial_count;
-            s.max_count = maximum_count;
+            s.current_count = static_cast<uint32_t>(initial_count);
+            s.max_count = static_cast<uint32_t>(maximum_count);
 
             if (object_attributes)
             {
