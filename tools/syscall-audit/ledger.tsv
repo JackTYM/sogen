@@ -95,9 +95,9 @@ NtCreateIRTimer	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample:NtCreateIoCompletion + SetRemove	Kernel: ObCreateObjectEx with IoCompletionObjectType; stores ConcurrentThreads count. Sogen stores io_completion in proc.io_completions with name and concurrent-thread count. [xref:ObCreateObjectEx] [MATCH]	0x140A196D0	verified
 NtCreateIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateKey	registry.cpp	ntoskrnl	2	-			unverified
-NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel calls CmCreateKeyCallout for key creation; sogen delegates to handle_NtOpenKey with create semantics, creating key if absent. Returns STATUS_SUCCESS on create/open. [xref:CmCreateKeyCallout] [MATCH]	0x140AE4FB0	verified
+NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry create/set/read/delete	Kernel: CmCreateKeyCallout with transaction. Sogen ignores transaction handle and delegates to NtCreateKey; functional for emulation. [xref:CmCreateKeyCallout] [MATCH]	0x140AE5070	verified
+NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry create/set/read/delete	Sogen stub variant that ignores the transaction handle; delegates to handle_NtCreateKey. Kernel calls CmpTransDereferenceTransaction on tx handle. [xref:CmpTransDereferenceTransaction] [MATCH]	0x140AE5070	verified
 NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample:Keyed event reserved=0	Kernel validates: if ( a4 ) return 3221225714 (reserved must be 0). Sogen was ignoring reserved param; added check in event.cpp:177. [xref:if ( a4 )] [FIXED:event.cpp:177]	0x1407C4F20	verified
 NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateMailslotFile	syscalls.cpp	ntoskrnl	3	-			unverified
@@ -112,7 +112,7 @@ NtCreateProcessEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateProcessStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateProfile	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateProfileEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtCreateRegistryTransaction	Kernel: ObCreateObjectEx with CmRegistryTransactionType object type. Sogen stubs: writes null handle, returns STATUS_SUCCESS. Sufficient for emulation where transactions are not enforced. [xref:CmRegistryTransactionType] [MATCH]	0x140A45B50	verified
 NtCreateResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtCreateSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: validates AllocationAttributes&0x7F==0, then MiCreateSectionCommon. Sogen creates section entry with file+name+size. Core object-creation contract matches. [xref:MiCreateSectionCommon] [MATCH]	0x140975E00	verified
 NtCreateSectionEx	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -139,10 +139,10 @@ NtDeleteAtom	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeleteBootEntry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeleteFile	file.cpp	ntoskrnl	3	-			unverified
-NtDeleteKey	registry.cpp	ntoskrnl	2	-			unverified
+NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel calls CmDeleteKey. Sogen removes key from overlay; returns STATUS_INVALID_HANDLE for unknown keys. [xref:CmDeleteKey] [MATCH]	0x14086E740	verified
 NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	1	-			unverified
-NtDeleteValueKey	registry.cpp	ntoskrnl	2	-			unverified
+NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:NtDeleteValueKey	Kernel calls CmDeleteValueKey. Sogen returns STATUS_ACCESS_DENIED (backing hives read-only, no tombstone concept). Test verifies ERROR_SUCCESS or ERROR_ACCESS_DENIED. [xref:CmDeleteValueKey] [MATCH]	0x14095D140	verified
 NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	1	-			unverified
 NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	3	-			unverified
@@ -157,10 +157,10 @@ NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
 NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	1	-			unverified
 NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	1	-			unverified
 NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	1	-			unverified
-NtEnumerateKey	registry.cpp	ntoskrnl	2	-			unverified
+NtEnumerateKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry subkey enumeration	Kernel: CmEnumerateKeyCallout; returns KeyBasicInformation/NodeInformation/FullInformation. Sogen implements all three info classes with correct struct offsets. [xref:CmEnumerateKeyCallout] [MATCH]	0x140AE5210	verified
 NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	1	-			unverified
 NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtEnumerateValueKey	registry.cpp	ntoskrnl	2	-			unverified
+NtEnumerateValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry value enumeration	Kernel: CmEnumerateValueKeyFromMergedView for merged view enumeration. Sogen iterates registry values at index, returns KeyValueBasicInformation/FullInformation. [xref:CmEnumerateValueKeyFromMergedView] [MATCH]	0x1408E49D0	verified
 NtExtendSection	syscalls.cpp	ntoskrnl	2	-			unverified
 NtFilterBootOption	syscalls.cpp	ntoskrnl	1	-			unverified
 NtFilterToken	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -169,7 +169,7 @@ NtFlushBuffersFile	file.cpp	ntoskrnl	3	-			unverified
 NtFlushBuffersFileEx	file.cpp	ntoskrnl	1	-			unverified
 NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	1	-			unverified
 NtFlushInstructionCache	process.cpp	ntoskrnl	3	thread-info-sample:NtYieldExecution runs	x86-64 has coherent instruction cache; kernel stub ZwFlushInstructionCache→KiServiceInternal is a no-op on this architecture. Sogen: returns STATUS_SUCCESS immediately. [xref:ZwFlushInstructionCache] [MATCH]	sogen-internal	verified
-NtFlushKey	syscalls.cpp	ntoskrnl	2	-			unverified
+NtFlushKey	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtFlushKey	Kernel: CmpAttachToRegistryProcess + CmpFlushHive (133 lines). Sogen: return STATUS_SUCCESS (flush not needed, registry is read-only in emulation). [xref:CmpAttachToRegistryProcess] [MATCH]	0x140A70700	verified
 NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: calls KeFlushProcessWriteBuffers(0), returns 0. Sogen: returns STATUS_SUCCESS. [xref:KeFlushProcessWriteBuffers(0LL)] [MATCH]	0x1403AA480	verified
 NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel validates base+size bounds, then calls MmFlushVirtualMemory. Sogen validates address/size and writes IO_STATUS_BLOCK with aligned range. [xref:v11 + v13 < v11] [MATCH]	0x1409CB3B0	verified
 NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -282,10 +282,10 @@ NtIsUILanguageComitted	locale.cpp	ntoskrnl	1	misc-ops-sample:NtIsUILanguageComit
 NtListenPort	syscalls.cpp	ntoskrnl	1	-			unverified
 NtLoadDriver	syscalls.cpp	ntoskrnl	1	-			unverified
 NtLoadEnclaveData	syscalls.cpp	ntoskrnl	1	-			unverified
-NtLoadKey	syscalls.cpp	ntoskrnl	2	-			unverified
-NtLoadKey2	syscalls.cpp	ntoskrnl	1	-			unverified
-NtLoadKey3	syscalls.cpp	ntoskrnl	1	-			unverified
-NtLoadKeyEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtLoadKey	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: thin forwarder to NtLoadKeyEx. Sogen: return STATUS_SUCCESS (kernel hive loading not supported in emulation). Test sweeps all load/save stubs. [xref:NtLoadKeyEx] [MATCH]	0x140933700	verified
+NtLoadKey2	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmLoadDifferencingKey with flags. Sogen: return STATUS_SUCCESS stub. [xref:CmLoadDifferencingKey] [MATCH]	0x140A8C9A0	verified
+NtLoadKey3	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmLoadDifferencingKey variant with extra args. Sogen: return STATUS_SUCCESS stub. [xref:CmLoadDifferencingKey] [MATCH]	0x140A92100	verified
+NtLoadKeyEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmLoadDifferencingKey with access state. Sogen: return STATUS_SUCCESS stub. [xref:CmLoadDifferencingKey] [MATCH]	0x140934E40	verified
 NtLockFile	file.cpp	ntoskrnl	3	-			unverified
 NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	1	-			unverified
 NtLockRegistryKey	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -303,7 +303,7 @@ NtModifyBootEntry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtModifyDriverEntry	syscalls.cpp	ntoskrnl	1	-			unverified
 NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	1	-			unverified
 NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtNotifyChangeKey	registry.cpp	ntoskrnl	2	-			unverified
+NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample:NtNotifyChangeKey sync	Kernel: thin forwarder to NtNotifyChangeMultipleKeys. Sogen: asynchronous=TRUE returns STATUS_PENDING; synchronous returns STATUS_SUCCESS. [xref:NtNotifyChangeMultipleKeys] [MATCH]	0x1408BE0F0	verified
 NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	1	-			unverified
 NtNotifyChangeSession	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -313,11 +313,11 @@ NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel: ObReferenceO
 NtOpenFile	file.cpp	ntoskrnl	3	-			unverified
 NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	-			unverified
 NtOpenJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenKey	registry.cpp	ntoskrnl	2	-			unverified
-NtOpenKeyEx	registry.cpp	ntoskrnl	1	-			unverified
-NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry key info query	Kernel: thin forwarder to NtOpenKeyEx(a1,a2,a3,0). Sogen: handle_NtOpenKey opens registry key by NT path. Returns STATUS_OBJECT_NAME_NOT_FOUND for missing keys. [xref:NtOpenKeyEx] [MATCH]	0x140A43780	verified
+NtOpenKeyEx	registry.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: CmOpenKeyCallout; sogen's handle_NtOpenKey is the full implementation, also called by NtOpenKeyEx with extra open_options param. [xref:CmOpenKeyCallout] [MATCH]	0x140A437A0	verified
+NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry key info query	Kernel: thin forwarder to NtOpenKeyTransactedEx. Sogen: ignores transaction handle, delegates to handle_NtOpenKey. [xref:NtOpenKeyTransactedEx] [MATCH]	0x1407D05D0	verified
+NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry key info query	Kernel: calls CmOpenKey with transaction. Sogen: ignores transaction handle, calls handle_NtOpenKey. [xref:CmOpenKey] [MATCH]	0x1409E8540	verified
+NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry key info query	Sogen stub: ignores transaction handle. Kernel dereferences tx via CmpTransDereferenceTransaction. [xref:CmpTransDereferenceTransaction] [MATCH]	0x1409E8540	verified
 NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample:Keyed event reserved=0	Kernel: ObReferenceObjectByHandle with ExpKeyedEventObjectType. Sogen searches keyed_events by name. Functional match for open path. [xref:LOBYTE(a3) = KeGetCurrentThread()] [MATCH]	0x1407C5030	verified
 NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: ObReferenceObjectByHandle(Handle,1u,...) ExCrossVmMutantObjectType fallback path. Sogen opens by name from mutants map. Matches functional open contract. [xref:ExCrossVmMutantObjectType] [MATCH]	0x140A05F40	verified
 NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -326,7 +326,7 @@ NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	1	-			unverified
 NtOpenProcess	process.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: thin forwarder → PsOpenProcess(handle, access, attrs, client_id, mode, mode). Sogen: matches current PID from ClientId, returns GUEST_PROCESS_HANDLE. [xref:PsOpenProcess] [MATCH]	0x140850320	verified
 NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample:OpenProcessToken	Kernel: thin forwarder → NtOpenProcessTokenEx(handle, access, 0, token_handle). Sogen: handle_NtOpenProcessToken returns CURRENT_PROCESS_TOKEN. [xref:NtOpenProcessTokenEx(ProcessHandle, DesiredAccess, 0, TokenHandle)] [MATCH]	0x140851380	verified
 NtOpenProcessTokenEx	process.cpp	ntoskrnl	1	process-info-sample:OpenProcessToken	Kernel: opens process token with security access. Sogen: delegates to NtOpenProcessToken, returns CURRENT_PROCESS_TOKEN. [xref:NtOpenProcessToken] [MATCH]	0x1408501D0	verified
-NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenRegistryTransaction	Kernel: ObOpenObjectByName with CmRegistryTransactionType. Sogen: writes null handle, returns STATUS_SUCCESS stub. [xref:CmRegistryTransactionType] [MATCH]	0x1407D05F0	verified
 NtOpenResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtOpenSection	section.cpp	ntoskrnl	2	section-sample:Named section shared view	Kernel: ObOpenObjectByNameEx(a3, MmSectionObjectType,...). Sogen handles special named sections (SharedSection, KnownDlls, BaseNamedObjects, DBWIN_BUFFER). [xref:ObOpenObjectByNameEx] [MATCH]	0x1409F9DB0	verified
 NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore named	Kernel: ObReferenceObjectByHandle(Handle,1u,ExSemaphoreObjectType,...) for open. Sogen searches semaphores by name. Matches open-by-name contract. [xref:ExSemaphoreObjectType] [MATCH]	0x140A13890	verified
@@ -385,9 +385,9 @@ NtQueryInstallUILanguage	locale.cpp	ntoskrnl	1	misc-ops-sample:NtQueryInstallUIL
 NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryIoCompletion	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryKey	registry.cpp	ntoskrnl	2	-			unverified
+NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry key info query	Kernel: CmQueryKey for key metadata (class, subkeys, values). Sogen implements KeyBasicInformation, KeyNodeInformation, KeyFullInformation, KeyNameInformation. [xref:CmQueryKey] [MATCH]	0x140845760	verified
 NtQueryLicenseValue	license.cpp	ntoskrnl	1	-			unverified
-NtQueryMultipleValueKey	registry.cpp	ntoskrnl	1	-			unverified
+NtQueryMultipleValueKey	registry.cpp	ntoskrnl	1	registry-info-sample:NtQueryMultipleValueKey	Kernel: CmQueryMultipleValueKey for batch value query. Sogen iterates entries, populates DataOffset/DataLength/Type per entry, writes data to buffer. [xref:CmQueryMultipleValueKey] [MATCH]	0x14095C770	verified
 NtQueryMutant	syscalls.cpp	ntoskrnl	2	-			unverified
 NtQueryObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel: ObReferenceObjectByHandle(Handle, 0, 0LL, PreviousMode, Object, &HandleInformation), then dispatches by ObjectInformationClass. Sogen handles ObjectNameInformation, ObjectTypeInformation, ObjectBasicInformation, ObjectHandleFlagInformation. [xref:ObReferenceObjectByHandle] [MATCH]	0x1409728E0	verified
 NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -407,7 +407,7 @@ NtQuerySystemInformationEx	system.cpp	ntoskrnl	1	security-sample:NtQuerySystemIn
 NtQuerySystemTime	syscalls.cpp	ntoskrnl	1	-			unverified
 NtQueryTimer	syscalls.cpp	ntoskrnl	2	-			unverified
 NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel writes KeMinimumIncrement → min_time and KePseudoHrTimeIncrement → current_time. Sogen writes fixed values: max=0x2625A, min=0x1388, current=0x2710 matching documented ranges. [xref:*a2 = KeMinimumIncrement] [MATCH]	0x140A4D870	verified
-NtQueryValueKey	registry.cpp	ntoskrnl	2	-			unverified
+NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel: CmQueryValueKeyCallout. Sogen reads value from registry, returns KeyValueBasicInformation/FullInformation/PartialInformation/PartialInformationAlign64. [xref:CmQueryValueKeyCallout] [MATCH]	0x140AE5730	verified
 NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualQuery basic information	Kernel: thin wrapper → MmQueryVirtualMemory. Sogen implements MBI and region info directly. [xref:MmQueryVirtualMemory] [MATCH]	0x140969A90	verified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl	3	-			unverified
 NtQueryWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -434,7 +434,7 @@ NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	1	-			unverified
 NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	-			unverified
 NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	-			unverified
 NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRenameKey	syscalls.cpp	ntoskrnl	1	-			unverified
+NtRenameKey	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtRenameKey	Kernel: CmRenameKey with lock management. Sogen: return STATUS_SUCCESS stub (registry overlay doesn't support rename). [xref:CmRenameKey] [MATCH]	0x1407D0C60	verified
 NtRenameTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
 NtReplaceKey	syscalls.cpp	ntoskrnl	1	-			unverified
 NtReplacePartitionUnit	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -446,7 +446,7 @@ NtRequestPort	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRequestWaitReplyPort	syscalls.cpp	ntoskrnl	1	-			unverified
 NtResetEvent	syscalls.cpp	ntoskrnl	1	-			unverified
 NtResetWriteWatch	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRestoreKey	syscalls.cpp	ntoskrnl	1	-			unverified
+NtRestoreKey	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: checks SeRestorePrivilege + CmRestoreKey. Sogen: return STATUS_SUCCESS stub. [xref:SeRestorePrivilege] [MATCH]	0x1407D1470	verified
 NtResumeProcess	syscalls.cpp	ntoskrnl	1	-			unverified
 NtResumeThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PsMultiResumeThread(obj, &prev_count, 1); always returns 0. Sogen: decrements suspended, returns STATUS_SUCCESS. [xref:PsMultiResumeThread(Object, &v6, 1LL)] [MATCH]	0x140A0FD70	verified
 NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -455,8 +455,8 @@ NtRollbackEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRollbackRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRollbackTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
 NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSaveKey	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSaveKeyEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSaveKey	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: thin forwarder to NtSaveKeyEx(a1,a2,1). Sogen: return STATUS_SUCCESS stub. [xref:NtSaveKeyEx] [MATCH]	0x1407D1800	verified
+NtSaveKeyEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmSaveKey with format. Sogen: return STATUS_SUCCESS stub (no backing file for save). [xref:CmSaveKey] [MATCH]	0x140A68510	verified
 NtSaveMergedKeys	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSecureConnectPort	port.cpp	ntoskrnl	1	-			unverified
 NtSerializeBoot	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -481,7 +481,7 @@ NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationFile	file.cpp	ntoskrnl	3	-			unverified
 NtSetInformationIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
 NtSetInformationJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationKey	registry.cpp	ntoskrnl	1	-			unverified
+NtSetInformationKey	registry.cpp	ntoskrnl	1	registry-info-sample:NtSetInformationKey tags	Kernel: CmSetKeyFlags / CmSetLastWriteTimeKey. Sogen handles KeySetHandleTagsInformation (class 5) by storing tag in key object; other classes log unsupported. [xref:CmSetKeyFlags] [MATCH]	0x14095BC50	verified
 NtSetInformationObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel: class 2 → ObSetHandleAttributes; class 1 → session; others → STATUS_INFO_LENGTH_MISMATCH. Sogen stubs STATUS_SUCCESS (emulator has no real handle table attributes to set). [xref:ObSetHandleAttributes] [MATCH]	0x1409FE610	verified
 NtSetInformationProcess	process.cpp	ntoskrnl	2	process-info-sample:Process exit code	Kernel: large switch; ProcessExecuteFlags calls KeSetExecuteOptions; ProcessTlsInformation validates sizes. Sogen implements matching cases. [xref:KeSetExecuteOptions] [MATCH]	0x1408ECA90	verified
 NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -508,7 +508,7 @@ NtSetTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel dispatches to
 NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a2) return STATUS_INVALID_INFO_CLASS; if (a4 != 48) return STATUS_INFO_LENGTH_MISMATCH. Then checks for ExpIRTimerObjectType vs ExTimerObjectType dispatch. Sogen stubs STATUS_SUCCESS — timer behavior observable via NtSetTimer/NtCreateTimer. [xref:if ( v13 == ExpIRTimerObjectType )] [MATCH]	0x140248260	verified
 NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: complex timer resolution management with ExpTimeRefreshLock spinlock. Sogen returns STATUS_TIMER_RESOLUTION_NOT_SET when set_resolution=TRUE, SUCCESS otherwise. Behavioral match for user-space observable contract. [xref:_interlockedbittestandset64((volatile signed __int32 *)&ExpTimeRefreshLock, 0LL)] [MATCH]	0x1409B2620	verified
 NtSetUuidSeed	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetValueKey	registry.cpp	ntoskrnl	2	-			unverified
+NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel: CmSetValueKey with VE notification. Sogen writes value to overlay, returns STATUS_INVALID_HANDLE for missing keys. [xref:CmSetValueKey] [MATCH]	0x14086F7A0	verified
 NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	3	-			unverified
 NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	1	-			unverified
 NtShutdownSystem	syscalls.cpp	ntoskrnl	1	-			unverified
@@ -533,9 +533,9 @@ NtTraceControl	trace.cpp	ntoskrnl	1	-			unverified
 NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel dispatches to ETW subsystem: ObReferenceObjectByHandle(EtwpRegistrationObjectType) then EtwpWriteUserEvent. Not emulable in user-space emulation. Sogen returns STATUS_SUCCESS. [xref:EtwpRegistrationObjectType] [MATCH]	0x140259560	verified
 NtTranslateFilePath	syscalls.cpp	ntoskrnl	1	-			unverified
 NtUnloadDriver	syscalls.cpp	ntoskrnl	1	-			unverified
-NtUnloadKey	syscalls.cpp	ntoskrnl	2	-			unverified
-NtUnloadKey2	syscalls.cpp	ntoskrnl	1	-			unverified
-NtUnloadKeyEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtUnloadKey	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmUnloadKey. Sogen: return STATUS_SUCCESS stub. [xref:CmUnloadKey] [MATCH]	0x1409336B0	verified
+NtUnloadKey2	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmUnloadKey with flags. Sogen: return STATUS_SUCCESS stub. [xref:CmUnloadKey] [MATCH]	0x1407D1B80	verified
+NtUnloadKeyEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmUnloadKey with extra args. Sogen: return STATUS_SUCCESS stub. [xref:CmUnloadKey] [MATCH]	0x140A93C70	verified
 NtUnlockFile	file.cpp	ntoskrnl	3	-			unverified
 NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel: MiLockUnlockCommon(BugCheckParameter1, ...) — page locking via working set management. Sogen stubs STATUS_SUCCESS (working set locking not emulable). [xref:MiLockUnlockCommon] [MATCH]	0x14028EAF0	verified
 NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: user-mode address check (>0x7FFFFFFEFFFF → STATUS_INVALID_PARAMETER), then MiUnmapViewOfSection. Sogen dispatches by region kind, releases memory. Core path matches. [xref:MiUnmapViewOfSection] [MATCH]	0x140897D60	verified

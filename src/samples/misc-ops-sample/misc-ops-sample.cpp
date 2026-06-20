@@ -264,6 +264,31 @@ namespace
         const HKL hkl = GetKeyboardLayout(0);
         return hkl != nullptr || true;
     }
+
+    bool test_registry_load_save_stubs()
+    {
+        using NtLoadKeyFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, POBJECT_ATTRIBUTES);
+        using NtLoadKey2Fn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, POBJECT_ATTRIBUTES, ULONG);
+        using NtUnloadKeyFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES);
+        using NtUnloadKey2Fn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, ULONG);
+        using NtSaveKeyFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE);
+        using NtSaveKeyExFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, ULONG);
+        using NtRestoreKeyFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, ULONG);
+        const auto load = reinterpret_cast<NtLoadKeyFn>(GetProcAddress(ntdll, "NtLoadKey"));
+        const auto load2 = reinterpret_cast<NtLoadKey2Fn>(GetProcAddress(ntdll, "NtLoadKey2"));
+        const auto unload = reinterpret_cast<NtUnloadKeyFn>(GetProcAddress(ntdll, "NtUnloadKey"));
+        const auto unload2 = reinterpret_cast<NtUnloadKey2Fn>(GetProcAddress(ntdll, "NtUnloadKey2"));
+        const auto save = reinterpret_cast<NtSaveKeyFn>(GetProcAddress(ntdll, "NtSaveKey"));
+        const auto saveex = reinterpret_cast<NtSaveKeyExFn>(GetProcAddress(ntdll, "NtSaveKeyEx"));
+        const auto restore = reinterpret_cast<NtRestoreKeyFn>(GetProcAddress(ntdll, "NtRestoreKey"));
+        if (!load || !load2 || !unload || !unload2 || !save || !saveex || !restore)
+            return false;
+        OBJECT_ATTRIBUTES oa{};
+        InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
+        return NT_SUCCESS(load(&oa, &oa)) && NT_SUCCESS(load2(&oa, &oa, 0)) && NT_SUCCESS(unload(&oa)) &&
+               NT_SUCCESS(unload2(&oa, 0)) && NT_SUCCESS(save(nullptr, nullptr)) && NT_SUCCESS(saveex(nullptr, nullptr, 1)) &&
+               NT_SUCCESS(restore(nullptr, nullptr, 0));
+    }
 }
 
 int main()
@@ -290,5 +315,6 @@ int main()
     all_ok &= report("NtGetMUIRegistryInfo", test_mui_registry_info());
     all_ok &= report("NtInitializeNlsFiles", test_initialize_nls_files());
     all_ok &= report("GetKeyboardLayout (NtUserGetKeyboardLayout)", test_get_keyboard_layout());
+    all_ok &= report("NtRegistryLoadSaveStubs", test_registry_load_save_stubs());
     return all_ok ? 0 : 1;
 }
