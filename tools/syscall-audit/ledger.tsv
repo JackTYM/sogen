@@ -25,8 +25,8 @@ NtAllocateReserveObject	syscalls.cpp	ntoskrnl		-			unverified
 NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl		-			unverified
 NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl		-			unverified
 NtAllocateUuids	system.cpp	ntoskrnl		-			unverified
-NtAllocateVirtualMemory	memory.cpp	ntoskrnl		-			unverified
-NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl		-			unverified
+NtAllocateVirtualMemory	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:MiAllocateVirtualMemory] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:459] delegates to NtAllocateVirtualMemoryEx		verified
+NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:MmAllocateVirtualMemory] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:318] full alloc impl: PAGE_WRITECOPY→INVALID_PAGE_PROTECTION, MEM_RESET path, address-requirements validation		verified
 NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl		-			unverified
 NtAlpcCancelMessage	syscalls.cpp	ntoskrnl		-			unverified
 NtAlpcConnectPort	syscalls.cpp	ntoskrnl		-			unverified
@@ -51,7 +51,7 @@ NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl		-			unverified
 NtAlpcSendWaitReceivePort	syscalls.cpp	ntoskrnl		-			unverified
 NtAlpcSetInformation	syscalls.cpp	ntoskrnl		-			unverified
 NtApphelpCacheControl	syscalls.cpp	ntoskrnl		-			unverified
-NtAreMappedFilesTheSame	section.cpp	ntoskrnl		-			unverified
+NtAreMappedFilesTheSame	section.cpp	ntoskrnl		-	[xref:MiObtainReferencedVadEx] [DEFER:requires kernel VAD infrastructure] [sref:src/windows-emulator/syscalls/section.cpp:632] kernel uses MiObtainReferencedVadEx to look up file-backed VADs — unemulable from user space		stub-deferred
 NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl		-			unverified
 NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl		-			unverified
 NtCallEnclave	syscalls.cpp	ntoskrnl		-			unverified
@@ -65,14 +65,14 @@ NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl		-			unverified
 NtChangeProcessState	syscalls.cpp	ntoskrnl		-			unverified
 NtChangeThreadState	syscalls.cpp	ntoskrnl		-			unverified
 NtClearEvent	syscalls/event.cpp	ntoskrnl.i64	1	sync:Event reset	[xref:if ( v3 == -1073741788 )] [MATCH] [sref:event.cpp:86] Kernel: KeClearEvent clears event signal; sogen sets e->signaled=false; semantics identical		verified
-NtClose	object.cpp	ntoskrnl		-			unverified
+NtClose	object.cpp	ntoskrnl		section:CloseHandle valid	[xref:ObCloseHandleTableEntry] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:12] invalid handle→STATUS_INVALID_HANDLE; pseudo handles accepted; valid handle removed from store		verified
 NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl		-			unverified
 NtCommitComplete	syscalls.cpp	ntoskrnl		-			unverified
 NtCommitEnlistment	syscalls.cpp	ntoskrnl		-			unverified
 NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtCommitTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtCompactKeys	syscalls.cpp	ntoskrnl		-			unverified
-NtCompareObjects	object.cpp	ntoskrnl		-			unverified
+NtCompareObjects	object.cpp	ntoskrnl		section:DuplicateHandle object	[xref:ObfDereferenceObject(v7)] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:552] kernel resolves both handles to object pointers; sogen compares resolved pseudo-handles consistently with its duplicate model		verified
 NtCompareSigningLevels	syscalls.cpp	ntoskrnl		-			unverified
 NtCompareTokens	syscalls.cpp	ntoskrnl		-			unverified
 NtCompressKey	syscalls.cpp	ntoskrnl		-			unverified
@@ -114,7 +114,7 @@ NtCreateProfile	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateProfileEx	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateResourceManager	syscalls.cpp	ntoskrnl		-			unverified
-NtCreateSection	section.cpp	ntoskrnl		-			unverified
+NtCreateSection	section.cpp	ntoskrnl		section:Anonymous section (page file)	[xref:MiCreateSectionCommon] [MATCH] [sref:src/windows-emulator/syscalls/section.cpp:131] no-file+no-size→STATUS_INVALID_PARAMETER; creates section in proc.sections store		verified
 NtCreateSectionEx	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateSemaphore	syscalls/semaphore.cpp	ntoskrnl.i64	1	sync:Semaphore create validation	[xref:if ( Limit <= 0 || a4 < 0 || a4 > Limit )] [MATCH] [sref:semaphore.cpp:74] Kernel: Limit<=0/InitialCount<0/InitialCount>Limit → STATUS_INVALID_PARAMETER; sogen validates identically; named semaphore lookup matches		verified
 NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl		-			unverified
@@ -149,7 +149,7 @@ NtDeviceIoControlFile	syscalls.cpp	ntoskrnl		-			unverified
 NtDisableLastKnownGood	syscalls.cpp	ntoskrnl		-			unverified
 NtDisplayString	syscalls.cpp	ntoskrnl		-			unverified
 NtDrawText	syscalls.cpp	ntoskrnl		-			unverified
-NtDuplicateObject	object.cpp	ntoskrnl		-			unverified
+NtDuplicateObject	object.cpp	ntoskrnl		section:DuplicateHandle object	[xref:ObDuplicateObject] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:92] cross-process→STATUS_NOT_SUPPORTED; same-process duplicates via store.duplicate() incrementing ref_count		verified
 NtDuplicateToken	token.cpp	ntoskrnl		-			unverified
 NtDxgkEnumAdapters3	gdi.cpp	win32k/dxgkrnl		-			unverified
 NtDxgkGetProperties	gdi.cpp	win32k/dxgkrnl		-			unverified
@@ -171,9 +171,9 @@ NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl		-			unverified
 NtFlushInstructionCache	process.cpp	ntoskrnl		-			unverified
 NtFlushKey	syscalls.cpp	ntoskrnl		-			unverified
 NtFlushProcessWriteBuffers	process.cpp	ntoskrnl		-			unverified
-NtFlushVirtualMemory	memory.cpp	ntoskrnl		-			unverified
+NtFlushVirtualMemory	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:return 3221225485LL] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:677] overflow/ceiling checks; writes aligned_start back to base_address; returns STATUS_SUCCESS		verified
 NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl		-			unverified
-NtFreeVirtualMemory	memory.cpp	ntoskrnl		-			unverified
+NtFreeVirtualMemory	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:(unsigned __int64)RegionSize < 0x7FFFFFFF0000LL] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:467] free_type==0→STATUS_INVALID_PARAMETER_4; MEM_RELEASE/MEM_DECOMMIT paths; free_vm_not_at_base check		verified
 NtFreezeRegistry	syscalls.cpp	ntoskrnl		-			unverified
 NtFreezeTransactions	syscalls.cpp	ntoskrnl		-			unverified
 NtFsControlFile	file.cpp	ntoskrnl		-			unverified
@@ -297,8 +297,8 @@ NtManagePartition	syscalls.cpp	ntoskrnl		-			unverified
 NtMapCMFModule	syscalls.cpp	ntoskrnl		-			unverified
 NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl		-			unverified
 NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl		-			unverified
-NtMapViewOfSection	section.cpp	ntoskrnl		-			unverified
-NtMapViewOfSectionEx	section.cpp	ntoskrnl		-			unverified
+NtMapViewOfSection	section.cpp	ntoskrnl		section:Anonymous section (page file)	[xref:return 3221225485LL] [MATCH] [sref:src/windows-emulator/syscalls/section.cpp:287] non-current-process→STATUS_INVALID_HANDLE; image machine type mismatch; STATUS_IMAGE_NOT_AT_BASE for relocated modules		verified
+NtMapViewOfSectionEx	section.cpp	ntoskrnl		section:Named section shared view	[xref:MiMapViewOfSectionExCommon] [MATCH] [sref:src/windows-emulator/syscalls/section.cpp:454] parses extended params; delegates to NtMapViewOfSection after param validation		verified
 NtModifyBootEntry	syscalls.cpp	ntoskrnl		-			unverified
 NtModifyDriverEntry	syscalls.cpp	ntoskrnl		-			unverified
 NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl		-			unverified
@@ -328,7 +328,7 @@ NtOpenProcessToken	process.cpp	ntoskrnl		-			unverified
 NtOpenProcessTokenEx	process.cpp	ntoskrnl		-			unverified
 NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtOpenResourceManager	syscalls.cpp	ntoskrnl		-			unverified
-NtOpenSection	section.cpp	ntoskrnl		-			unverified
+NtOpenSection	section.cpp	ntoskrnl		section:Named section shared view	[xref:v8 = (int)MmSectionObjectType] [MATCH] [sref:src/windows-emulator/syscalls/section.cpp:185] name lookup in proc.sections; known-DLL special-casing; STATUS_OBJECT_NAME_NOT_FOUND		verified
 NtOpenSemaphore	syscalls/semaphore.cpp	ntoskrnl.i64	1	sync:Semaphore named	[xref:if ( (unsigned __int64)a1 < 0x7FFFFFFF0000LL )] [MATCH] [sref:semaphore.cpp:10] Kernel: ObOpenObjectByName by name; sogen scans named semaphore list; semantics match for named-only open		verified
 NtOpenSession	syscalls.cpp	ntoskrnl		-			unverified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl		-			unverified
@@ -349,7 +349,7 @@ NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl		-			unverified
 NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl		-			unverified
 NtPropagationComplete	syscalls.cpp	ntoskrnl		-			unverified
 NtPropagationFailed	syscalls.cpp	ntoskrnl		-			unverified
-NtProtectVirtualMemory	memory.cpp	ntoskrnl		-			unverified
+NtProtectVirtualMemory	memory.cpp	ntoskrnl		section:ProtectVirtualMemory zero size	[xref:return 3221225541LL] [FIXED:src/windows-emulator/syscalls/memory.cpp:272] [sref:src/windows-emulator/syscalls/memory.cpp:263] added: zero-size→STATUS_INVALID_PARAMETER; overflow check; ceiling 0x7FFFFFFEFFFFLL		verified
 NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl		-			unverified
 NtPulseEvent	syscalls/event.cpp	ntoskrnl.i64	1	sync:Pulse event clears signal	[xref:if ( a2 && PreviousMode )] [FIXED:event.cpp:162] Kernel: KePulseEvent always unsignals event after releasing waiters; old code left NotificationEvent signaled; fixed to always set signaled=false [sref:event.cpp:162]		verified
 NtQueryAttributesFile	file.cpp	ntoskrnl		-			unverified
@@ -389,14 +389,14 @@ NtQueryKey	registry.cpp	ntoskrnl		-			unverified
 NtQueryLicenseValue	license.cpp	ntoskrnl		-			unverified
 NtQueryMultipleValueKey	registry.cpp	ntoskrnl		-			unverified
 NtQueryMutant	syscalls.cpp	ntoskrnl.i64	1	sync:NtQueryMutant basic info	[xref:if ( !a2 )] [FIXED:syscalls.cpp:1154] Kernel: class>1 → STATUS_INVALID_INFO_CLASS; size!=8/16 → STATUS_INFO_LENGTH_MISMATCH; class 0: CurrentCount=1-locked_count, OwnedByCaller, AbandonedState; class 1: CLIENT_ID; old code wrote no data; fully rewritten [sref:syscalls.cpp:1154]		verified
-NtQueryObject	object.cpp	ntoskrnl		-			unverified
+NtQueryObject	object.cpp	ntoskrnl		section:QueryObject basic info exact size	[xref:if ( ObjectInformationClass == ObjectBasicInformation )] [FIXED:src/windows-emulator/syscalls/object.cpp:401] [sref:src/windows-emulator/syscalls/object.cpp:176] BasicInfo: exact size==56→STATUS_INFO_LENGTH_MISMATCH; TypeInfo: TypeName UNICODE_STRING; TypesInfo: NumberOfTypes=1		verified
 NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl		-			unverified
-NtQuerySection	section.cpp	ntoskrnl		-			unverified
+NtQuerySection	section.cpp	ntoskrnl		section:QuerySection invalid class	[xref:ExRaiseDatatypeMisalignment] [FIXED:src/windows-emulator/syscalls/section.cpp:848] [sref:src/windows-emulator/syscalls/section.cpp:640] class 0: BasicInfo 24B; class 1: ImageInfo 64B; unknown class→STATUS_INVALID_INFO_CLASS		verified
 NtQuerySecurityAttributesToken	token.cpp	ntoskrnl		-			unverified
-NtQuerySecurityObject	object.cpp	ntoskrnl		-			unverified
+NtQuerySecurityObject	object.cpp	ntoskrnl		section:SetSecurityObject null descriptor	[xref:SeDefaultObjectMethod] [FIXED:src/windows-emulator/syscalls/object.cpp:771] [sref:src/windows-emulator/syscalls/object.cpp:770] removed SACL-only rejection; security_information==0→STATUS_INVALID_PARAMETER; returns stub DACL with Administrators owner		verified
 NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl		-			unverified
 NtQuerySemaphore	syscalls.cpp	ntoskrnl.i64	1	sync:NtQuerySemaphore info	[xref:if ( PreviousMode )] [FIXED:syscalls.cpp:1215] Kernel: class!=0 → STATUS_INVALID_INFO_CLASS; size!=8 → STATUS_INFO_LENGTH_MISMATCH; added exact-size check and info_class validation [sref:syscalls.cpp:1215]		verified
 NtQuerySymbolicLinkObject	file.cpp	ntoskrnl		-			unverified
@@ -408,7 +408,7 @@ NtQuerySystemTime	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryTimer	syscalls.cpp	ntoskrnl.i64	1	sync:NtQueryTimer info	[xref:if ( a2 )] [FIXED:syscalls.cpp:1324] Kernel: class!=0 → STATUS_INVALID_INFO_CLASS; size!=16 → STATUS_INFO_LENGTH_MISMATCH; TIMER_BASIC_INFORMATION is 16 bytes (LARGE_INTEGER+BOOLEAN+7pad); old code had size=13 and wrong layout; fixed [sref:syscalls.cpp:1324]		verified
 NtQueryTimerResolution	timer.cpp	ntoskrnl		-			unverified
 NtQueryValueKey	registry.cpp	ntoskrnl		-			unverified
-NtQueryVirtualMemory	memory.cpp	ntoskrnl		-			unverified
+NtQueryVirtualMemory	memory.cpp	ntoskrnl		section:VirtualQuery basic information	[xref:return MmQueryVirtualMemory] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:125] MemoryBasicInformation/ImageInformation/RegionInformation dispatch; STATUS_BUFFER_TOO_SMALL; STATUS_INVALID_PARAMETER for out-of-range		verified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl		-			unverified
 NtQueryWnfStateData	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl		-			unverified
@@ -420,7 +420,7 @@ NtRaiseHardError	syscalls/exception.cpp	ntoskrnl.i64	1	sync:RaiseHardError param
 NtReadFile	file.cpp	ntoskrnl		-			unverified
 NtReadFileScatter	syscalls.cpp	ntoskrnl		-			unverified
 NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl		-			unverified
-NtReadVirtualMemory	memory.cpp	ntoskrnl		-			unverified
+NtReadVirtualMemory	memory.cpp	ntoskrnl		section:ReadWriteProcessMemory	[xref:return MiReadWriteVirtualMemory(a1, a5, 16, 0)] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:577] kernel trivially delegates; sogen page-by-page copy with STATUS_PARTIAL_COPY		verified
 NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl		-			unverified
 NtRecoverEnlistment	syscalls.cpp	ntoskrnl		-			unverified
 NtRecoverResourceManager	syscalls.cpp	ntoskrnl		-			unverified
@@ -482,7 +482,7 @@ NtSetInformationFile	file.cpp	ntoskrnl		-			unverified
 NtSetInformationIoRing	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationJobObject	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationKey	registry.cpp	ntoskrnl		-			unverified
-NtSetInformationObject	object.cpp	ntoskrnl		-			unverified
+NtSetInformationObject	object.cpp	ntoskrnl		section:SetInformationObject invalid class	[xref:SeSinglePrivilegeCheck(SeTcbPrivilege] [FIXED:src/windows-emulator/syscalls/object.cpp:753] [sref:src/windows-emulator/syscalls/object.cpp:748] class 4/5/6 valid; else→STATUS_INVALID_INFO_CLASS (kernel v5=-1073741821)		verified
 NtSetInformationProcess	process.cpp	ntoskrnl		-			unverified
 NtSetInformationResourceManager	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl		-			unverified
@@ -490,13 +490,13 @@ NtSetInformationThread	thread.cpp	ntoskrnl		-			unverified
 NtSetInformationToken	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl		-			unverified
-NtSetInformationVirtualMemory	memory.cpp	ntoskrnl		-			unverified
+NtSetInformationVirtualMemory	memory.cpp	ntoskrnl		-	[xref:MiCfgMarkValidEntries] [DEFER:CFG bitmap and prefetch require kernel page tables] [sref:src/windows-emulator/syscalls/memory.cpp:658] kernel handles VmCfgCallTargetInformation via MiCfgMarkValidEntries — kernel shadow-stack bitmap unemulable		stub-deferred
 NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl		-			unverified
 NtSetIntervalProfile	syscalls.cpp	ntoskrnl		-			unverified
 NtSetIoCompletion	io_completion.cpp	ntoskrnl		-			unverified
 NtSetIoCompletionEx	io_completion.cpp	ntoskrnl		-			unverified
 NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl		-			unverified
-NtSetSecurityObject	object.cpp	ntoskrnl		-			unverified
+NtSetSecurityObject	object.cpp	ntoskrnl		section:SetSecurityObject null descriptor	[xref:if ( !SecurityDescriptor )] [FIXED:src/windows-emulator/syscalls/object.cpp:882] [sref:src/windows-emulator/syscalls/object.cpp:873] null descriptor→STATUS_ACCESS_VIOLATION (kernel: return -1073741819); actual security setting accepted (sogen has no security enforcement)		verified
 NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl		-			unverified
 NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl		-			unverified
 NtSetSystemInformation	system.cpp	ntoskrnl		-			unverified
@@ -537,9 +537,9 @@ NtUnloadKey	syscalls.cpp	ntoskrnl		-			unverified
 NtUnloadKey2	syscalls.cpp	ntoskrnl		-			unverified
 NtUnloadKeyEx	syscalls.cpp	ntoskrnl		-			unverified
 NtUnlockFile	file.cpp	ntoskrnl		-			unverified
-NtUnlockVirtualMemory	memory.cpp	ntoskrnl		-			unverified
-NtUnmapViewOfSection	section.cpp	ntoskrnl		-			unverified
-NtUnmapViewOfSectionEx	section.cpp	ntoskrnl		-			unverified
+NtUnlockVirtualMemory	memory.cpp	ntoskrnl		-	[xref:MiLockUnlockCommon] [DEFER:kernel page-locking requires MDL/working-set access] [sref:src/windows-emulator/syscalls/memory.cpp:670] kernel calls MiLockUnlockCommon which manipulates MDL structures — unemulable from user space		stub-deferred
+NtUnmapViewOfSection	section.cpp	ntoskrnl		section:Anonymous section (page file)	[xref:return 3221225497LL] [FIXED:src/windows-emulator/syscalls/section.cpp:567] [sref:src/windows-emulator/syscalls/section.cpp:560] null base→STATUS_NOT_MAPPED_VIEW (0xC0000019, not STATUS_INVALID_PARAMETER); unmaps shared/regular sections		verified
+NtUnmapViewOfSectionEx	section.cpp	ntoskrnl		section:Anonymous section (page file)	[xref:return 3221225713LL] [MATCH] [sref:src/windows-emulator/syscalls/section.cpp:622] (flags & ~3)!=0→STATUS_INVALID_PARAMETER_3 (0xC00000F1=3221225713); delegates to NtUnmapViewOfSection		verified
 NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl		-			unverified
 NtUpdateWnfStateData	syscalls.cpp	ntoskrnl		-			unverified
 NtUserAllowSetForegroundWindow	syscalls.cpp	win32kbase/win32kfull		-			unverified
@@ -679,16 +679,16 @@ NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtWaitForAlertByThreadId	thread.cpp	ntoskrnl		-			unverified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl		-			unverified
 NtWaitForKeyedEvent	syscalls/event.cpp	ntoskrnl.i64	2		[xref:if ( (a2 & 1) != 0 )] [DEFER:kernel does KeWaitForSingleObject for thread blocking; requires real kernel scheduler; not emulable from user space]		stub-deferred
-NtWaitForMultipleObjects	object.cpp	ntoskrnl		-			unverified
-NtWaitForMultipleObjects32	object.cpp	ntoskrnl		-			unverified
-NtWaitForSingleObject	object.cpp	ntoskrnl		-			unverified
+NtWaitForMultipleObjects	object.cpp	ntoskrnl		section:Named section shared view	[xref:return 3221225711LL] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:615] count==0||count>64→STATUS_INVALID_PARAMETER_1; wait_type>1→STATUS_INVALID_PARAMETER_3; alerts/timeouts handled		verified
+NtWaitForMultipleObjects32	object.cpp	ntoskrnl		section:Named section shared view	[xref:return 3221225711LL] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:674] same count/wait_type validation as NtWaitForMultipleObjects; STATUS_INVALID_PARAMETER_1/STATUS_INVALID_PARAMETER_3		verified
+NtWaitForSingleObject	object.cpp	ntoskrnl		section:CloseHandle valid	[xref:return ObWaitForSingleObject] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:734] pseudo-handle expansion; waitable-type dispatch; timeout handling; STATUS_INVALID_HANDLE for unresolvable handles		verified
 NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl		-			unverified
 NtWaitLowEventPair	syscalls.cpp	ntoskrnl		-			unverified
 NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl		-			unverified
 NtWriteFile	file.cpp	ntoskrnl		-			unverified
 NtWriteFileGather	syscalls.cpp	ntoskrnl		-			unverified
 NtWriteRequestData	syscalls.cpp	ntoskrnl		-			unverified
-NtWriteVirtualMemory	memory.cpp	ntoskrnl		-			unverified
+NtWriteVirtualMemory	memory.cpp	ntoskrnl		section:ReadWriteProcessMemory	[xref:return MiReadWriteVirtualMemory(a1, a5, 32, 0)] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:631] kernel trivially delegates; sogen bulk-copies via try_read_memory/try_write_memory returning STATUS_INVALID_ADDRESS on failure		verified
 NtYieldExecution	thread.cpp	ntoskrnl		-			unverified
 NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl		-			unverified
 NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl		-			unverified

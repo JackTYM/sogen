@@ -56,7 +56,9 @@ BOILERPLATE_PATTERNS = re.compile(
 )
 
 # Control-flow tokens that make a C++ function body non-trivial.
-_CONTROL_FLOW = re.compile(r'\bif\s*\(|\belse\b|\bswitch\s*\(|\bwhile\s*\(|\bfor\s*\(|\b\?\s*\S')
+# Note: ternary ? must not require \b (word-boundary) before it — ? is always \W so \b never
+# matches before it when preceded by ) or space.
+_CONTROL_FLOW = re.compile(r'\bif\s*\(|\belse\b|\bswitch\s*\(|\bwhile\s*\(|\bfor\s*\(|\?\s*\S')
 
 # Assertion tokens that make a test function genuinely checking behavior.
 _ASSERT_TOKENS = re.compile(r'\bNT_SUCCESS\b|\bSTATUS_|\b==\b|\b!=\b|\bmemcmp\b|\bassert\b|\bfailed\b|\bFAILED\b')
@@ -80,11 +82,26 @@ def extract_sogen_body(name: str) -> tuple[str | None, str | None, int | None]:
     """
     for cpp in _all_source_files():
         text = cpp.read_text(errors='replace')
-        # Match the function header; body starts after the opening brace
-        for fm in re.finditer(r'handle_' + re.escape(name) + r'\s*\([^)]*\)\s*\n?\s*\{', text):
-            start_char = fm.end()
+        # Find the function name; then walk forward through the param list (may contain nested
+        # parens from EMULATOR_CAST macros) to find the opening brace of the body.
+        for fm in re.finditer(r'handle_' + re.escape(name) + r'\s*\(', text):
+            # Walk forward counting parens to find the closing ) of the parameter list
+            i = fm.end()
             depth = 1
-            i = start_char
+            while i < len(text) and depth > 0:
+                if text[i] == '(':
+                    depth += 1
+                elif text[i] == ')':
+                    depth -= 1
+                i += 1
+            # Skip whitespace and the opening brace of the body
+            while i < len(text) and text[i] in ' \t\n\r':
+                i += 1
+            if i >= len(text) or text[i] != '{':
+                continue
+            i += 1  # skip opening brace
+            start_char = i
+            depth = 1
             while i < len(text) and depth > 0:
                 if text[i] == '{':
                     depth += 1
@@ -101,11 +118,14 @@ def is_trivial_sogen(body: str) -> bool:
     """Return True if the handler body has no branching logic — it cannot implement kernel contracts.
 
     Trivial means: after stripping comments, the body contains no if/else/switch/while/for/?:
-    Such a body can only return constants or echo inputs — it cannot implement real kernel behaviour.
+    AND is not a delegation to another handle_Nt* handler (which carries real implementation).
     """
     # Strip line comments and block comments
     body_no_comments = re.sub(r'//[^\n]*', '', body)
     body_no_comments = re.sub(r'/\*.*?\*/', '', body_no_comments, flags=re.DOTALL)
+    # Delegation to another handler is non-trivial — real contract lives in the callee
+    if re.search(r'return\s+handle_Nt\w+\s*\(', body_no_comments):
+        return False
     return not bool(_CONTROL_FLOW.search(body_no_comments))
 
 

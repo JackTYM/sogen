@@ -397,6 +397,13 @@ namespace sogen
 
             if (object_information_class == ObjectBasicInformation)
             {
+                // Kernel: if (v5 != 56) return STATUS_INFO_LENGTH_MISMATCH — exact size required
+                static_assert(sizeof(OBJECT_BASIC_INFORMATION) == 56, "OBJECT_BASIC_INFORMATION must be 56 bytes");
+                if (object_information_length != sizeof(OBJECT_BASIC_INFORMATION))
+                {
+                    return_length.write_if_valid(sizeof(OBJECT_BASIC_INFORMATION));
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
                 return handle_query<OBJECT_BASIC_INFORMATION>(c.emu, object_information, object_information_length, return_length,
                                                               [&](OBJECT_BASIC_INFORMATION& info) {
                                                                   info.GrantedAccess = GENERIC_ALL;
@@ -745,9 +752,15 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetInformationObject(const syscall_context& /*c*/, handle /*handle*/, uint32_t /*object_info_class*/,
+        NTSTATUS handle_NtSetInformationObject(const syscall_context& /*c*/, handle /*handle*/, uint32_t object_info_class,
                                                uint64_t /*object_information*/, ULONG /*object_information_length*/)
         {
+            // Kernel: a2 must be 4 (HandleInheritanceInformation/HandleFlagInformation), 5, or 6;
+            // else return STATUS_INVALID_INFO_CLASS. Artifact: v5 = -1073741821; if (a2-4 && ...)
+            if (object_info_class != 4 && object_info_class != 5 && object_info_class != 6)
+            {
+                return STATUS_INVALID_INFO_CLASS;
+            }
             return STATUS_SUCCESS;
         }
 
@@ -755,8 +768,9 @@ namespace sogen
                                               const emulator_pointer security_descriptor, const ULONG length,
                                               const emulator_object<ULONG> length_needed)
         {
-            if ((security_information &
-                 (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) == 0)
+            // Kernel does not reject SACL-only queries (security_information == SACL_SECURITY_INFORMATION == 0x8).
+            // The mask check against OWNER|GROUP|DACL|LABEL is used only for access-rights computation, not validation.
+            if (!security_information)
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -864,8 +878,14 @@ namespace sogen
         }
 
         NTSTATUS handle_NtSetSecurityObject(const syscall_context& /*c*/, handle /*object_handle*/,
-                                            SECURITY_INFORMATION /*security_information*/, uint64_t /*security_descriptor*/)
+                                            SECURITY_INFORMATION /*security_information*/, uint64_t security_descriptor)
         {
+            // Kernel: if (!SecurityDescriptor) return STATUS_ACCESS_VIOLATION (0xC0000005).
+            // Artifact: if ( !SecurityDescriptor ) return -1073741819LL
+            if (!security_descriptor)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
             return STATUS_SUCCESS;
         }
     }

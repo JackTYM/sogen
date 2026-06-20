@@ -269,6 +269,14 @@ namespace sogen
             const auto orig_start = base_address.read();
             const auto orig_length = bytes_to_protect.read();
 
+            // Kernel: zero size, wrap-around, or above user-space ceiling → STATUS_INVALID_PARAMETER
+            constexpr uint64_t user_space_ceiling = 0x7FFFFFFEFFFFULL;
+            if (orig_length == 0 || orig_start + orig_length - 1 < orig_start ||
+                orig_start + orig_length - 1 > user_space_ceiling)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             const auto aligned_start = page_align_down(orig_start);
             const auto aligned_length = page_align_up(orig_start + orig_length) - aligned_start;
 

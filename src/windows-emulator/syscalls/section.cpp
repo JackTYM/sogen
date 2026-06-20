@@ -565,7 +565,8 @@ namespace sogen
 
             if (!base_address)
             {
-                return STATUS_INVALID_PARAMETER;
+                // Kernel returns STATUS_NOT_MAPPED_VIEW for NULL base, not STATUS_INVALID_PARAMETER
+                return STATUS_NOT_MAPPED_VIEW;
             }
 
             if (c.proc.shared_section_address && base_address >= c.proc.shared_section_address &&
@@ -842,11 +843,11 @@ namespace sogen
             case SECTION_INFORMATION_CLASS::SectionRelocationInformation:
             case SECTION_INFORMATION_CLASS::SectionOriginalBaseInformation:
             case SECTION_INFORMATION_CLASS::SectionInternalImageInformation:
-                // These information classes are not implemented
                 return STATUS_NOT_SUPPORTED;
 
             default:
-                return STATUS_NOT_SUPPORTED;
+                // Kernel returns STATUS_INVALID_INFO_CLASS (0xC0000003) for unknown classes
+                return STATUS_INVALID_INFO_CLASS;
             }
         }
     }
