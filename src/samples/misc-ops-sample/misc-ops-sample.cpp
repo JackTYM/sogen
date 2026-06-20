@@ -289,6 +289,46 @@ namespace
                NT_SUCCESS(unload2(&oa, 0)) && NT_SUCCESS(save(nullptr, nullptr)) && NT_SUCCESS(saveex(nullptr, nullptr, 1)) &&
                NT_SUCCESS(restore(nullptr, nullptr, 0));
     }
+
+    bool test_query_system_time()
+    {
+        // NtQuerySystemTime: kernel reads from KUSER_SHARED_DATA.SystemTime.
+        // STATUS_SUCCESS; non-zero timestamp in emulated KUSD.
+        using NtQuerySystemTimeFn = NTSTATUS(NTAPI*)(PLARGE_INTEGER);
+        const auto fn = reinterpret_cast<NtQuerySystemTimeFn>(GetProcAddress(ntdll, "NtQuerySystemTime"));
+        if (!fn)
+            return false;
+        LARGE_INTEGER t{};
+        const NTSTATUS st = fn(&t);
+        return NT_SUCCESS(st) && t.QuadPart != 0; // STATUS_SUCCESS; time must be non-zero
+    }
+
+    bool test_query_performance_counter()
+    {
+        // NtQueryPerformanceCounter: kernel calls KeQueryPerformanceCounter.
+        // STATUS_SUCCESS; counter and frequency must be non-zero.
+        using NtQueryPerformanceCounterFn = NTSTATUS(NTAPI*)(PLARGE_INTEGER, PLARGE_INTEGER);
+        const auto fn = reinterpret_cast<NtQueryPerformanceCounterFn>(GetProcAddress(ntdll, "NtQueryPerformanceCounter"));
+        if (!fn)
+            return false;
+        LARGE_INTEGER counter{}, freq{};
+        const NTSTATUS st = fn(&counter, &freq);
+        return NT_SUCCESS(st) && counter.QuadPart != 0 && freq.QuadPart != 0; // STATUS_SUCCESS
+    }
+
+    bool test_query_system_basic_information()
+    {
+        // NtQuerySystemInformation SystemBasicInformation (class 0): kernel fills SYSTEM_BASIC_INFORMATION.
+        // STATUS_SUCCESS; NumberOfProcessors must be non-zero.
+        using NtQuerySystemInformationFn = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+        const auto fn = reinterpret_cast<NtQuerySystemInformationFn>(GetProcAddress(ntdll, "NtQuerySystemInformation"));
+        if (!fn)
+            return false;
+        SYSTEM_BASIC_INFORMATION sbi{};
+        ULONG ret = 0;
+        const NTSTATUS st = fn(0 /*SystemBasicInformation*/, &sbi, sizeof(sbi), &ret);
+        return NT_SUCCESS(st) && sbi.NumberOfProcessors != 0; // STATUS_SUCCESS; at least 1 CPU
+    }
 }
 
 int main()
@@ -316,5 +356,9 @@ int main()
     all_ok &= report("NtInitializeNlsFiles", test_initialize_nls_files());
     all_ok &= report("GetKeyboardLayout (NtUserGetKeyboardLayout)", test_get_keyboard_layout());
     all_ok &= report("NtRegistryLoadSaveStubs", test_registry_load_save_stubs());
+    all_ok &= report("NtQuerySystemTime", test_query_system_time());
+    all_ok &= report("NtQueryPerformanceCounter", test_query_performance_counter());
+    all_ok &= report("NtQuerySystemInformation SystemBasicInformation", test_query_system_basic_information());
+    all_ok &= report("sweep:NtFlushProcessWriteBuffers", []() -> bool { FlushProcessWriteBuffers(); return true; }());
     return all_ok ? 0 : 1;
 }

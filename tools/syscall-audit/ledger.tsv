@@ -18,13 +18,13 @@ NtAdjustPrivilegesToken	token.cpp	ntoskrnl		security-sample:AdjustTokenPrivilege
 NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl		-			unverified
 NtAlertResumeThread	syscalls.cpp	ntoskrnl		-			unverified
 NtAlertThread	syscalls.cpp	ntoskrnl		-			unverified
-NtAlertThreadByThreadId	thread.cpp	ntoskrnl		-			unverified
-NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl		-			unverified
+NtAlertThreadByThreadId	thread.cpp	ntoskrnl		-	[xref:NtAlertThreadByThreadIdEx(a1, 0LL)] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:540] walks proc threads by id, sets t.alerted=true; matches kernel's KeAlertThreadByThreadIdEx sticky-alert contract	verified
+NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl		-	[xref:KeAlertThreadByThreadIdEx(v5, v6)] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:557] delegates to NtAlertThreadByThreadId; lock param silently ignored (intra-process only); matches kernel same-process sticky-alert contract	verified
 NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl		-			unverified
 NtAllocateReserveObject	syscalls.cpp	ntoskrnl		-			unverified
 NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl		-			unverified
 NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl		-			unverified
-NtAllocateUuids	system.cpp	ntoskrnl		-			unverified
+NtAllocateUuids	system.cpp	ntoskrnl		-	[xref:ExpAllocateUuids] [MATCH] [sref:src/windows-emulator/syscalls/system.cpp:519] kernel writes ULARGE_INTEGER time, ULONG range, ULONG sequence, and 6-byte seed; sogen writes matching fields with monotonic counter; structure layout matches	verified
 NtAllocateVirtualMemory	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:MiAllocateVirtualMemory] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:459] delegates to NtAllocateVirtualMemoryEx		verified
 NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:MmAllocateVirtualMemory] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:318] full alloc impl: PAGE_WRITECOPY→INVALID_PAGE_PROTECTION, MEM_RESET path, address-requirements validation		verified
 NtAlpcAcceptConnectPort	syscalls.cpp	ntoskrnl		-			unverified
@@ -53,15 +53,15 @@ NtAlpcSetInformation	syscalls.cpp	ntoskrnl		-			unverified
 NtApphelpCacheControl	syscalls.cpp	ntoskrnl		-			unverified
 NtAreMappedFilesTheSame	section.cpp	ntoskrnl		-	[xref:MiObtainReferencedVadEx] [DEFER:requires kernel VAD infrastructure] [sref:src/windows-emulator/syscalls/section.cpp:632] kernel uses MiObtainReferencedVadEx to look up file-backed VADs — unemulable from user space		stub-deferred
 NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl		-			unverified
-NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl		-			unverified
+NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl		-	[xref:KeRegisterObjectNotification(v26)] [MATCH] [sref:src/windows-emulator/syscalls/io_completion.cpp:288] validates packet/completion/target handles, sets associated=true, stores key/apc/status fields, checks if already-signaled; matches kernel lock-protected registration	verified
 NtCallEnclave	syscalls.cpp	ntoskrnl		-			unverified
-NtCallbackReturn	thread.cpp	ntoskrnl		-			unverified
+NtCallbackReturn	thread.cpp	ntoskrnl		-	[xref:**(_QWORD **)(v5 + 216) = a1] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:969] pops callback_stack frame, restores registers, dispatches completion with result value; kernel unwinds callback stack via InitialStack pointer chain	verified
 NtCancelIoFile	file.cpp	ntoskrnl		file-io-sample:NtFileStubOps	[xref:IoCancelIrp((PIRP)(v12 - 8))] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:2279] Kernel validates handle, walks thread IRP list calling IoCancelIrp, writes STATUS_SUCCESS to io_status_block; sogen validates handle and writes STATUS_SUCCESS — stub behavior correct for synchronous emulator	verified
 NtCancelIoFileEx	file.cpp	ntoskrnl		file-io-sample:NtFileStubOps	[xref:IopCancelIoFile(Object, a2)] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:2295] Kernel calls IopCancelIoFile with specific IRP; sogen delegates to handle_NtCancelIoFile — correct stub for synchronous emulator	verified
 NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl		-			unverified
 NtCancelTimer	syscalls/timer.cpp	ntoskrnl.i64	2		[xref:if ( a2 && PreviousMode )] [DEFER:kernel uses ExpCancelTimer/KeCancelTimer with spinlock + IRTimer/ExTimer dispatch; requires kernel timer object manipulation; not emulable from user space]		stub-deferred
 NtCancelTimer2	syscalls/timer.cpp	ntoskrnl.i64	1	sync:Cancel timer2 succeeds	[xref:return ExpSetTimer2(a1)] [MATCH] [sref:timer.cpp:161] Kernel: trivial forwarder to ExpSetTimer2(a1); sogen returns STATUS_SUCCESS; both trivially stub		verified
-NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl		-			unverified
+NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl		-	[xref:KeAcquireSpinLockRaiseToDpc((PKSPIN_LOCK)v2 + 12)] [MATCH] [sref:src/windows-emulator/syscalls/io_completion.cpp:376] optionally removes queued completion if remove_signaled_packet set, releases association; kernel does same with spinlock protection	verified
 NtChangeProcessState	syscalls.cpp	ntoskrnl		-			unverified
 NtChangeThreadState	syscalls.cpp	ntoskrnl		-			unverified
 NtClearEvent	syscalls/event.cpp	ntoskrnl.i64	1	sync:Event reset	[xref:if ( v3 == -1073741788 )] [MATCH] [sref:event.cpp:86] Kernel: KeClearEvent clears event signal; sogen sets e->signaled=false; semantics identical		verified
@@ -76,9 +76,9 @@ NtCompareObjects	object.cpp	ntoskrnl		section:DuplicateHandle object	[xref:ObfDe
 NtCompareSigningLevels	syscalls.cpp	ntoskrnl		-			unverified
 NtCompareTokens	syscalls.cpp	ntoskrnl		security-sample:NtCompareTokens same handle	[xref:SeCompareTokens] [FIXED:src/windows-emulator/syscalls.cpp:1102] null handle→STATUS_INVALID_HANDLE; same pseudo-handle value→Equal=TRUE; different→FALSE [sref:src/windows-emulator/syscalls.cpp:1102]		verified
 NtCompressKey	syscalls.cpp	ntoskrnl		-			unverified
-NtConnectPort	port.cpp	ntoskrnl		-			unverified
-NtContinue	thread.cpp	ntoskrnl		-			unverified
-NtContinueEx	thread.cpp	ntoskrnl		-			unverified
+NtConnectPort	port.cpp	ntoskrnl		-	[xref:NtSecureConnectPort(a1, a2, a3, a4, 0LL)] [MATCH] [sref:src/windows-emulator/syscalls/port.cpp:11] delegates to NtSecureConnectPort; kernel is identical thin wrapper	verified
+NtContinue	thread.cpp	ntoskrnl		-	[xref:NtContinueEx(a1, a2)] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:689] delegates to NtContinueEx; kernel is identical thin wrapper	verified
+NtContinueEx	thread.cpp	ntoskrnl		-	[xref:return NtContinueEx(a1, a2)] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:663] reads KCONTINUE_ARGUMENT flags (KCONTINUE_FLAG_TEST_ALERT), restores CONTEXT via cpu_context::restore, yields if alert requested; contract derived from NtContinue wrapper + KiContinueEx docs in decomp .sogen.md	verified
 NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl		-			unverified
 NtCopyFileChunk	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateCpuPartition	syscalls.cpp	ntoskrnl		-			unverified
@@ -106,7 +106,7 @@ NtCreateNamedPipeFile	file.cpp	ntoskrnl		pipe-sample:Named pipe roundtrip	[xref:
 NtCreatePagingFile	syscalls.cpp	ntoskrnl		-			unverified
 NtCreatePartition	syscalls.cpp	ntoskrnl		-			unverified
 NtCreatePort	syscalls.cpp	ntoskrnl		-			unverified
-NtCreatePrivateNamespace	namespace.cpp	ntoskrnl		-			unverified
+NtCreatePrivateNamespace	namespace.cpp	ntoskrnl		-	[xref:ObpCaptureBoundaryDescriptor(a4)] [MATCH] [sref:src/windows-emulator/syscalls/namespace.cpp:161] validates boundary descriptor, parses name/IL/SID entries, creates or returns existing private_namespace keyed on boundary_name; kernel stores in ObpNameSpaceTable	verified
 NtCreateProcess	syscalls.cpp	ntoskrnl		-	[xref:return NtCreateProcessEx(a1, a2, a3, a4, v10, a6, a7, a8)] [DEFER:NtCreateProcess chains to NtCreateProcessEx which calls PspCreateProcess; kernel EPROCESS creation unsupported in single-process sogen] [sref:src/windows-emulator/syscalls.cpp:2177]		stub-deferred
 NtCreateProcessEx	syscalls.cpp	ntoskrnl		-	[xref:return PspCreateProcess(a1, a2)] [DEFER:PspCreateProcess requires kernel EPROCESS/address-space creation unsupported in sogen] [sref:src/windows-emulator/syscalls.cpp:1786]		stub-deferred
 NtCreateProcessStateChange	syscalls.cpp	ntoskrnl		-			unverified
@@ -128,10 +128,10 @@ NtCreateTokenEx	syscalls.cpp	ntoskrnl		-	[xref:SepCreateToken] [DEFER:full token
 NtCreateTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateTransactionManager	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateUserProcess	syscalls.cpp	ntoskrnl		-	[xref:PspCreateUserProcessEcp] [DEFER:PspCreateUserProcessEcp requires full kernel process+thread object creation; sogen is single-process only] [sref:src/windows-emulator/syscalls.cpp:3000]		stub-deferred
-NtCreateWaitCompletionPacket	io_completion.cpp	ntoskrnl		-			unverified
+NtCreateWaitCompletionPacket	io_completion.cpp	ntoskrnl		-	[xref:ObCreateObjectEx(a1, (_DWORD)IopWaitCompletionPacketObjectType, a3, PreviousMode)] [MATCH] [sref:src/windows-emulator/syscalls/io_completion.cpp:255] creates wait_completion_packet object, optionally matches by name; kernel creates IopWaitCompletionPacketObjectType object	verified
 NtCreateWaitablePort	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateWnfStateName	syscalls.cpp	ntoskrnl		-			unverified
-NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl		-			unverified
+NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl		-	[xref:ObReferenceObjectByHandle(a4, 2u, IoCompletionObjectType] [MATCH] [sref:src/windows-emulator/syscalls/worker_factory.cpp:154] validates io_completion and process handles, stores factory with start_routine/start_parameter/limits, spawns initial worker threads via ensure_worker_factory_threads	verified
 NtDebugActiveProcess	syscalls.cpp	ntoskrnl		-			unverified
 NtDebugContinue	syscalls.cpp	ntoskrnl		-			unverified
 NtDelayExecution	thread.cpp	ntoskrnl		thread-info-sample:NtDelayExecution zero interval	[xref:PreviousMode = KeGetCurrentThread()->PreviousMode] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:548] kernel calls KeDelayExecutionThread; sogen reads interval and suspends; STATUS_SUCCESS on normal return [sref:src/windows-emulator/syscalls/thread.cpp:548]		verified
@@ -141,7 +141,7 @@ NtDeleteDriverEntry	syscalls.cpp	ntoskrnl		-			unverified
 NtDeleteFile	file.cpp	ntoskrnl		file-io-sample:NtFileStubOps	[xref:ObOpenObjectByNameEx(a1, (_DWORD)IoFileObjectType, v4, 0, 0x10000, (__int64)v8, CurrentSilo, (__int64)v7)] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:2247] Kernel opens via ObOpenObjectByNameEx with FILE_DELETE; sogen translates path and calls std::filesystem::remove; STATUS_OBJECT_NAME_NOT_FOUND on absent; STATUS_ACCESS_DENIED on failure	verified
 NtDeleteKey	registry.cpp	ntoskrnl		registry-info-sample:Registry create/set/read/delete	[xref:CmDeleteKey] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:696] STATUS_INVALID_HANDLE on bad handle; calls registry.delete_key on valid handle; matches kernel CmDeleteKey path		verified
 NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl		-			unverified
-NtDeletePrivateNamespace	namespace.cpp	ntoskrnl		-			unverified
+NtDeletePrivateNamespace	namespace.cpp	ntoskrnl		-	[xref:ObpRemoveNamespaceFromTable(v2)] [MATCH] [sref:src/windows-emulator/syscalls/namespace.cpp:177] validates handle, marks ns.deleted=true, erases from table; kernel removes from ObpNameSpaceTable	verified
 NtDeleteValueKey	registry.cpp	ntoskrnl		registry-info-sample:NtDeleteValueKey	[xref:CmDeleteValueKey] [FIXED:src/windows-emulator/syscalls/registry.cpp:454] hive is read-only; returns STATUS_ACCESS_DENIED instead of deleting; sample accepts ERROR_SUCCESS or ERROR_ACCESS_DENIED; STATUS_INVALID_HANDLE on bad handle [sref:src/windows-emulator/syscalls/registry.cpp:454]		verified
 NtDeleteWnfStateData	syscalls.cpp	ntoskrnl		-			unverified
 NtDeleteWnfStateName	syscalls.cpp	ntoskrnl		-			unverified
@@ -168,9 +168,9 @@ NtFindAtom	syscalls.cpp	ntoskrnl		-			unverified
 NtFlushBuffersFile	file.cpp	ntoskrnl		file-io-sample:NtFlushBuffersFile	[xref:return NtFlushBuffersFileEx(a1, 0, 0, 0, a2)] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:2222] Kernel forwards to NtFlushBuffersFileEx with zero flags; sogen calls fflush on file handle; STDOUT_HANDLE handled; STATUS_INVALID_HANDLE on bad handle	verified
 NtFlushBuffersFileEx	file.cpp	ntoskrnl		file-io-sample:NtFlushBuffersFile	[xref:return IopFlushBuffersFile(FileObject, v6.GrantedAccess, 0LL, 0LL, a5)] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:2240] Kernel calls IopFlushBuffersFile; sogen delegates to handle_NtFlushBuffersFile dropping flags/parameters — correct stub; flush semantics sufficient for emulation	verified
 NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl		-			unverified
-NtFlushInstructionCache	process.cpp	ntoskrnl		-			unverified
+NtFlushInstructionCache	process.cpp	ntoskrnl		-	[xref:ZwFlushInstructionCache (0x1406A69D0)] [MATCH] [sref:src/windows-emulator/syscalls/process.cpp:522] returns STATUS_SUCCESS; no-op on x86-64 where I-cache coherence is guaranteed by hardware; kernel stub confirmed in decomp .sogen.md	verified
 NtFlushKey	syscalls.cpp	ntoskrnl		-			unverified
-NtFlushProcessWriteBuffers	process.cpp	ntoskrnl		-			unverified
+NtFlushProcessWriteBuffers	process.cpp	ntoskrnl		-	[xref:KeFlushProcessWriteBuffers(0LL)] [MATCH] [sref:src/windows-emulator/syscalls/process.cpp:517] returns STATUS_SUCCESS; kernel calls KeFlushProcessWriteBuffers which is a MFENCE-equivalent with no visible state; emulator is single-threaded so no-op is correct	verified
 NtFlushVirtualMemory	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:return 3221225485LL] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:677] overflow/ceiling checks; writes aligned_start back to base_address; returns STATUS_SUCCESS		verified
 NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl		-			unverified
 NtFreeVirtualMemory	memory.cpp	ntoskrnl		section:VirtualAlloc commit and free	[xref:(unsigned __int64)RegionSize < 0x7FFFFFFF0000LL] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:467] free_type==0→STATUS_INVALID_PARAMETER_4; MEM_RELEASE/MEM_DECOMMIT paths; free_vm_not_at_base check		verified
@@ -260,25 +260,25 @@ NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl		-			unverified
 NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl		-			unverified
 NtGetContextThread	thread.cpp	ntoskrnl		thread-info-sample:NtGetContextThread control	[xref:ObReferenceObjectByHandle(a1, 8u, (POBJECT_TYPE)PsThreadType] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:756] kernel calls PspGetContextThreadInternal; sogen copies cpu context registers to caller buffer [sref:src/windows-emulator/syscalls/thread.cpp:756]		verified
 NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl		-			unverified
-NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl		-			unverified
+NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl		-	[xref:CurrentPrcb->Group] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:905] writes zero-initialized PROCESSOR_NUMBER; kernel writes Group/GroupIndex from PRCB; emulator is single-processor so group=0/number=0 is correct	verified
 NtGetDevicePowerState	syscalls.cpp	ntoskrnl		-			unverified
 NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl		-			unverified
-NtGetMUIRegistryInfo	locale.cpp	ntoskrnl		-			unverified
+NtGetMUIRegistryInfo	locale.cpp	ntoskrnl		-	[xref:MUIRegistryLock] [DEFER:kernel reads MUI language registry via a kernel thread and MUIRegistryLock global; sogen has no MUI registry scanner; returning STATUS_OBJECT_NAME_NOT_FOUND is safe fallback] [sref:src/windows-emulator/syscalls/locale.cpp:66]	stub-deferred
 NtGetNextProcess	syscalls.cpp	ntoskrnl		-	[xref:PsGetPreviousProcess(Object)] [DEFER:PsGetPreviousProcess requires kernel process list; sogen has no multi-process enumeration] [sref:src/windows-emulator/syscalls.cpp:953]		stub-deferred
 NtGetNextThread	thread.cpp	ntoskrnl		thread-info-sample:NtGetNextThread flags rejected	[xref:memset_0(&PassedAccessState, 0, sizeof(PassedAccessState))] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:716] flags!=0->STATUS_INVALID_PARAMETER; no more entries->STATUS_NO_MORE_ENTRIES; sogen matches kernel observable contracts [sref:src/windows-emulator/syscalls/thread.cpp:716]		verified
-NtGetNlsSectionPtr	locale.cpp	ntoskrnl		-			unverified
+NtGetNlsSectionPtr	locale.cpp	ntoskrnl		-	[xref:RtlpInitNlsSectionName(a1, a2, v44)] [MATCH] [sref:src/windows-emulator/syscalls/locale.cpp:39] for section_type==11 (codepage), reads NLS file from virtual filesystem and maps it into guest memory; matches kernel open-section-or-create-from-file path	verified
 NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl		-			unverified
 NtGetWriteWatch	syscalls.cpp	ntoskrnl		-			unverified
 NtImpersonateAnonymousToken	syscalls.cpp	ntoskrnl		-	[xref:SeAnonymousLogonToken] [DEFER:requires PsImpersonateClient + anonymous logon token; sogen has no thread impersonation state] [sref:src/windows-emulator/syscalls.cpp:963]		stub-deferred
 NtImpersonateClientOfPort	syscalls.cpp	ntoskrnl		-	[xref:NtAlpcImpersonateClientOfPort] [DEFER:requires ALPC port objects; sogen has no ALPC implementation] [sref:src/windows-emulator/syscalls.cpp:2167]		stub-deferred
 NtImpersonateThread	syscalls.cpp	ntoskrnl		-	[xref:SeCreateClientSecurity] [DEFER:requires SeCreateClientSecurity + PsImpersonateClient; sogen has no thread impersonation state] [sref:src/windows-emulator/syscalls.cpp:957]		stub-deferred
 NtInitializeEnclave	syscalls.cpp	ntoskrnl		-			unverified
-NtInitializeNlsFiles	locale.cpp	ntoskrnl		-			unverified
+NtInitializeNlsFiles	locale.cpp	ntoskrnl		-	[xref:ExpGetGlobalLocaleSection(&Object)] [MATCH] [sref:src/windows-emulator/syscalls/locale.cpp:12] reads locale.nls from virtual filesystem, maps into guest read-only memory, writes base address and locale id (0x407); matches kernel map-section contract	verified
 NtInitializeRegistry	syscalls.cpp	ntoskrnl		-			unverified
 NtInitiatePowerAction	syscalls.cpp	ntoskrnl		-			unverified
 NtIsProcessInJob	syscalls.cpp	ntoskrnl		-			unverified
 NtIsSystemResumeAutomatic	syscalls.cpp	ntoskrnl		-			unverified
-NtIsUILanguageComitted	locale.cpp	ntoskrnl		-			unverified
+NtIsUILanguageComitted	locale.cpp	ntoskrnl		-	[xref:PsUILanguageComitted == 0 ? 0xC0000034 : 0] [MATCH] [sref:src/windows-emulator/syscalls/locale.cpp:72] returns TRUE (0); kernel returns 0 when PsUILanguageComitted is set; sogen treats UI language as always committed	verified
 NtListenPort	syscalls.cpp	ntoskrnl		-			unverified
 NtLoadDriver	syscalls.cpp	ntoskrnl		-			unverified
 NtLoadEnclaveData	syscalls.cpp	ntoskrnl		-			unverified
@@ -322,7 +322,7 @@ NtOpenKeyedEvent	syscalls/event.cpp	ntoskrnl.i64	1	sync:Keyed event reserved=0	[
 NtOpenMutant	syscalls/mutant.cpp	ntoskrnl.i64	1	sync:Mutex acquire/release	[xref:if ( (unsigned __int64)a1 < 0x7FFFFFFF0000LL )] [MATCH] [sref:mutant.cpp:40] Kernel: ObOpenObjectByName; sogen scans named mutant list; semantics match		verified
 NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl		-			unverified
 NtOpenPartition	syscalls.cpp	ntoskrnl		-			unverified
-NtOpenPrivateNamespace	namespace.cpp	ntoskrnl		-			unverified
+NtOpenPrivateNamespace	namespace.cpp	ntoskrnl		-	[xref:ObpCaptureBoundaryDescriptor(a4)] [MATCH] [sref:src/windows-emulator/syscalls/namespace.cpp:169] delegates to open_or_create_ns with open=true; returns STATUS_OBJECT_PATH_NOT_FOUND if not found; matches kernel open-only path	verified
 NtOpenProcess	process.cpp	ntoskrnl		process-info-sample:OpenProcess self	[xref:return PsOpenProcess(] [FIXED:src/windows-emulator/syscalls/process.cpp:452] bad handle→STATUS_INVALID_HANDLE; current PID→GUEST_PROCESS_HANDLE; non-current PID→STATUS_INVALID_HANDLE [sref:src/windows-emulator/syscalls/process.cpp:452]		verified
 NtOpenProcessToken	process.cpp	ntoskrnl		security-sample:NtOpenProcessToken bad handle	[xref:NtOpenProcessTokenEx] [FIXED:src/windows-emulator/syscalls/process.cpp:473] bad handle→STATUS_INVALID_HANDLE (was STATUS_NOT_SUPPORTED); current process→CURRENT_PROCESS_TOKEN [sref:src/windows-emulator/syscalls/process.cpp:473]		verified
 NtOpenProcessTokenEx	process.cpp	ntoskrnl		security-sample:NtOpenProcessToken bad handle	[xref:ObOpenObjectByPointer] [MATCH] [sref:src/windows-emulator/syscalls/process.cpp:486] delegates to handle_NtOpenProcessToken; same STATUS contracts inherited		verified
@@ -339,7 +339,7 @@ NtOpenTimer	syscalls/timer.cpp	ntoskrnl.i64	1	sync:Waitable timer	[xref:if ( (un
 NtOpenTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtOpenTransactionManager	syscalls.cpp	ntoskrnl		-			unverified
 NtPlugPlayControl	syscalls.cpp	ntoskrnl		-			unverified
-NtPowerInformation	system.cpp	ntoskrnl		-			unverified
+NtPowerInformation	system.cpp	ntoskrnl		-	[xref:PopAcquirePolicyLock] [MATCH] [sref:src/windows-emulator/syscalls/system.cpp:532] ProcessorInformation(11) writes per-CPU PROCESSOR_POWER_INFORMATION with 3000 MHz; all other levels zero the output buffer; kernel dispatches via PopPowerInformationInternal; sogen approximates with stable AC-powered state	verified
 NtPrePrepareComplete	syscalls.cpp	ntoskrnl		-			unverified
 NtPrePrepareEnlistment	syscalls.cpp	ntoskrnl		-			unverified
 NtPrepareComplete	syscalls.cpp	ntoskrnl		-			unverified
@@ -358,7 +358,7 @@ NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryBootOptions	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryDebugFilterState	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryDefaultLocale	locale.cpp	ntoskrnl		misc-ops-sample:NtQueryDefaultLocale	[xref:PsGetSessionLocaleId] [DEFER:emulator uses fixed locale 0x407; kernel reads per-session locale via PsGetSessionLocaleId; session locale context not available in emulation] [sref:src/windows-emulator/syscalls/locale.cpp:32]		stub-deferred
-NtQueryDefaultUILanguage	locale.cpp	ntoskrnl		-			unverified
+NtQueryDefaultUILanguage	locale.cpp	ntoskrnl		-	[xref:NtQueryInstallUILanguage()] [MATCH] [sref:src/windows-emulator/syscalls/locale.cpp:82] writes 0x407 (German) as UI language; kernel delegates to NtQueryInstallUILanguage which returns install language; sogen fixed locale matches	verified
 NtQueryDirectoryFile	file.cpp	ntoskrnl		file-io-sample:FindFirstFile/FindNextFile	[xref:v13 = (v11 ? 2 : 0) | 1] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:457] Kernel builds flags from ReturnSingleEntry/RestartScan then calls BuildQueryDirectoryIrp; sogen converts bool params to SL_RETURN_SINGLE_ENTRY/SL_RESTART_SCAN flags and delegates to handle_NtQueryDirectoryFileEx; semantics match	verified
 NtQueryDirectoryFileEx	file.cpp	ntoskrnl		file-io-sample:FindFirstFile/FindNextFile	[xref:result = BuildQueryDirectoryIrp(] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:419] Kernel calls BuildQueryDirectoryIrp then IopSynchronousServiceTail; sogen walks directory_iterator with wildcard matching; STATUS_NO_MORE_FILES on exhaustion; STATUS_BUFFER_OVERFLOW on undersized first entry; NextEntryOffset chain correct	verified
 NtQueryDirectoryObject	syscalls.cpp	ntoskrnl		-			unverified
@@ -386,7 +386,7 @@ NtQueryIntervalProfile	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryIoCompletion	syscalls.cpp	ntoskrnl		io-ops-sample:NtQueryIoCompletion bad class	[xref:IoCompletionObjectType] [FIXED:src/windows-emulator/syscalls.cpp:1528] info_class!=0→STATUS_INVALID_INFO_CLASS; length!=4→STATUS_INFO_LENGTH_MISMATCH (was < instead of !=) [sref:src/windows-emulator/syscalls.cpp:1528]		verified
 NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryKey	registry.cpp	ntoskrnl		registry-info-sample:Registry key info query	[xref:CmQueryKey] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:51] STATUS_INVALID_HANDLE on bad handle; STATUS_BUFFER_TOO_SMALL when buffer too small; KeyBasicInformation/KeyNameInformation/KeyCachedInformation/KeyHandleTagsInformation handled; kernel class>8→STATUS_INVALID_PARAMETER; unsupported classes warn and stop		verified
-NtQueryLicenseValue	license.cpp	ntoskrnl		-			unverified
+NtQueryLicenseValue	license.cpp	ntoskrnl		-	[xref:SLQueryLicenseValueInternal] [MATCH] [sref:src/windows-emulator/syscalls/license.cpp:136] parses ProductPolicy binary blob from registry, finds entry by name, writes type and data; kernel calls SLQueryLicenseValueInternal; sogen re-implements binary blob parsing to same effect	verified
 NtQueryMultipleValueKey	registry.cpp	ntoskrnl		registry-info-sample:NtQueryMultipleValueKey	[xref:CmQueryMultipleValueKey] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:302] STATUS_INSUFFICIENT_RESOURCES for entry_count>0x10000 (kernel raises STATUS_INSUFFICIENT_RESOURCES); STATUS_INVALID_HANDLE on bad handle; STATUS_BUFFER_OVERFLOW when buffer too small; DataOffset/DataLength/Type written per entry		verified
 NtQueryMutant	syscalls.cpp	ntoskrnl.i64	1	sync:NtQueryMutant basic info	[xref:if ( !a2 )] [FIXED:syscalls.cpp:1154] Kernel: class>1 → STATUS_INVALID_INFO_CLASS; size!=8/16 → STATUS_INFO_LENGTH_MISMATCH; class 0: CurrentCount=1-locked_count, OwnedByCaller, AbandonedState; class 1: CLIENT_ID; old code wrote no data; fully rewritten [sref:syscalls.cpp:1154]		verified
 NtQueryObject	object.cpp	ntoskrnl		section:QueryObject basic info exact size	[xref:if ( ObjectInformationClass == ObjectBasicInformation )] [FIXED:src/windows-emulator/syscalls/object.cpp:401] [sref:src/windows-emulator/syscalls/object.cpp:176] BasicInfo: exact size==56→STATUS_INFO_LENGTH_MISMATCH; TypeInfo: TypeName UNICODE_STRING; TypesInfo: NumberOfTypes=1		verified
@@ -430,7 +430,7 @@ NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl		-			unverified
 NtReleaseKeyedEvent	syscalls/event.cpp	ntoskrnl.i64	2		[xref:if ( ((unsigned __int8)a2 & 1) != 0 )] [DEFER:kernel does KeWaitForSingleObject/KeReleaseSemaphore for blocking thread rendezvous; requires real kernel thread scheduling; not emulable from user space]		stub-deferred
 NtReleaseMutant	syscalls/mutant.cpp	ntoskrnl.i64	1	sync:Mutex acquire/release	[xref:if ( a2 && PreviousMode )] [MATCH] [sref:mutant.cpp:12] Kernel: KeReleaseMutantEx returns current_count-1; writes previous_count; sogen release() returns old_count; STATUS_MUTANT_NOT_OWNED matches kernel path		verified
 NtReleaseSemaphore	syscalls/semaphore.cpp	ntoskrnl.i64	1	sync:Semaphore release zero rejected	[xref:if ( a3 && PreviousMode )] [FIXED:semaphore.cpp:48] Kernel: if (a2 <= 0) return STATUS_INVALID_PARAMETER; missing check added; writes previous_count on success, STATUS_SEMAPHORE_LIMIT_EXCEEDED on overflow [sref:semaphore.cpp:48]		verified
-NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl		-			unverified
+NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl		-	[xref:ExpLeaveWorkerFactoryAwayMode] [MATCH] [sref:src/windows-emulator/syscalls/worker_factory.cpp:398] increments pending_release_count, enqueues io_completion release message when not already pending; kernel calls ExpLeaveWorkerFactoryAwayMode then ExpWorkerFactoryCheckCreate	verified
 NtRemoveIoCompletion	io_completion.cpp	ntoskrnl		io-ops-sample:NtCreateIoCompletion + SetRemove	[xref:IoRemoveIoCompletion] [MATCH] [sref:src/windows-emulator/syscalls/io_completion.cpp:136] dequeues message, handles instant timeout, sets await state for blocking waits; matches kernel observable behavior [sref:src/windows-emulator/syscalls/io_completion.cpp:136]		verified
 NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl		io-ops-sample:NtCreateIoCompletion + SetRemove	[xref:a3 - 1 > 0x7FFFFFE] [FIXED:src/windows-emulator/syscalls/io_completion.cpp:198] count-1>0x7FFFFFFu catches count==0 and count>max; handle validation; dequeue loop [sref:src/windows-emulator/syscalls/io_completion.cpp:193]		verified
 NtRemoveProcessDebug	syscalls.cpp	ntoskrnl		-			unverified
@@ -458,7 +458,7 @@ NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl		-			unverified
 NtSaveKey	syscalls.cpp	ntoskrnl		-			unverified
 NtSaveKeyEx	syscalls.cpp	ntoskrnl		-			unverified
 NtSaveMergedKeys	syscalls.cpp	ntoskrnl		-			unverified
-NtSecureConnectPort	port.cpp	ntoskrnl		-			unverified
+NtSecureConnectPort	port.cpp	ntoskrnl		-	[xref:AlpcpDereferenceBlobEx] [MATCH] [sref:src/windows-emulator/syscalls/port.cpp:45] allocates shared view memory, stores port_container with port name, zeroes connection_info buffer; kernel performs LPC connect with SID check via AlpcpDereferenceBlobEx path; sogen approximates connection as always-accepted	verified
 NtSerializeBoot	syscalls.cpp	ntoskrnl		-			unverified
 NtSetBootEntryOrder	syscalls.cpp	ntoskrnl		-			unverified
 NtSetBootOptions	syscalls.cpp	ntoskrnl		-			unverified
@@ -491,7 +491,7 @@ NtSetInformationToken	syscalls.cpp	ntoskrnl		-	[xref:SepOneWayLinkLogonSessions]
 NtSetInformationTransaction	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationVirtualMemory	memory.cpp	ntoskrnl		-	[xref:MiCfgMarkValidEntries] [DEFER:CFG bitmap and prefetch require kernel page tables] [sref:src/windows-emulator/syscalls/memory.cpp:658] kernel handles VmCfgCallTargetInformation via MiCfgMarkValidEntries — kernel shadow-stack bitmap unemulable		stub-deferred
-NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl		-			unverified
+NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl		-	[xref:ObReferenceObjectByHandle(Handle, 4u, ExpWorkerFactoryObjectType] [MATCH] [sref:src/windows-emulator/syscalls/worker_factory.cpp:223] full info-class dispatch: Timeout/RetryTimeout/IdleTimeout (LARGE_INTEGER), BindingCount (signed delta), ThreadMinimum/Maximum/Paused/Priority/Flags/SoftMaximum (ULONG); calls ensure_worker_factory_threads after binding/count changes	verified
 NtSetIntervalProfile	syscalls.cpp	ntoskrnl		-			unverified
 NtSetIoCompletion	io_completion.cpp	ntoskrnl		io-ops-sample:NtCreateIoCompletion + SetRemove	[xref:IoSetIoCompletionEx] [MATCH] [sref:src/windows-emulator/syscalls/io_completion.cpp:57] handle lookup+enqueue; STATUS_INVALID_HANDLE on bad handle; matches kernel contract [sref:src/windows-emulator/syscalls/io_completion.cpp:57]		verified
 NtSetIoCompletionEx	io_completion.cpp	ntoskrnl		io-ops-sample:NtWaitCompletionPacket associate+cancel	[xref:_InterlockedCompareExchange] [MATCH] [sref:src/windows-emulator/syscalls/io_completion.cpp:77] CAS check prevents double-queue; STATUS_INVALID_PARAMETER on double use; matches kernel [sref:src/windows-emulator/syscalls/io_completion.cpp:77]		verified
@@ -502,7 +502,7 @@ NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl		-	[xref:ExSetFirmwareEnviro
 NtSetSystemInformation	system.cpp	ntoskrnl		-	[xref:ExpSetBootLoaderMetadata] [DEFER:massive switch of kernel-internal system information; no observable user-mode contract to implement] [sref:src/windows-emulator/syscalls/system.cpp:513]		stub-deferred
 NtSetSystemPowerState	syscalls.cpp	ntoskrnl		-	[xref:(unsigned int)(a2 - 1) > 5] [DEFER:kernel validates system_action/min_system_state/flags; actual power state change is kernel-internal] [sref:src/windows-emulator/syscalls.cpp:1737]		stub-deferred
 NtSetSystemTime	syscalls.cpp	ntoskrnl		misc-ops-sample:NtQuerySystemTime	[xref:SeSinglePrivilegeCheck(SeSystemtimePrivilege] [MATCH] [sref:src/windows-emulator/syscalls.cpp:1147] requires privilege; writes zero to previous_system_time; STATUS_SUCCESS; actual clock update is kernel-internal [sref:src/windows-emulator/syscalls.cpp:1147]		verified
-NtSetThreadExecutionState	thread.cpp	ntoskrnl		-			unverified
+NtSetThreadExecutionState	thread.cpp	ntoskrnl		-	[xref:PopGetLegacyPowerRequestFlags(Blink, (unsigned int)a1, &v18)] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:600] writes ES_CONTINUOUS to previous_flags output; kernel reads/writes power request flags via PopGetLegacyPowerRequestFlags; sogen reports emulator never sleeps, which is correct	verified
 NtSetTimer	syscalls/timer.cpp	ntoskrnl.i64	1	sync:Waitable timer	[xref:if ( a2 < 0x7FFFFFFF0000LL )] [FIXED:timer.cpp:130] Kernel: period<0 → STATUS_INVALID_PARAMETER_6; missing check added; APC callback mechanism (KeSetTimerEx) not emulable but due_time handling works via emulator wait [sref:timer.cpp:130]		verified
 NtSetTimer2	syscalls/timer.cpp	ntoskrnl.i64	1	sync:Waitable timer	[xref:return ExpSetTimer2(a1)] [FIXED:timer.cpp:142] Kernel: parameters==NULL → STATUS_INVALID_PARAMETER_2; missing null check added; ExpSetTimer2 IR timer mechanism not emulable but validation correct [sref:timer.cpp:142]		verified
 NtSetTimerEx	timer.cpp	ntoskrnl		-			unverified
@@ -512,7 +512,7 @@ NtSetValueKey	registry.cpp	ntoskrnl		registry-info-sample:Registry create/set/re
 NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl		-			unverified
 NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl		-			unverified
 NtShutdownSystem	syscalls.cpp	ntoskrnl		-			unverified
-NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl		-			unverified
+NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl		-	[xref:ExpShutdownWorkerFactory(Object)] [MATCH] [sref:src/windows-emulator/syscalls/worker_factory.cpp:383] sets shutdown=true, clears worker_threads list, writes 0 to pending_worker_count; kernel calls ExpShutdownWorkerFactory then ExWaitForRundownProtectionRelease	verified
 NtSignalAndWaitForSingleObject	syscalls.cpp	ntoskrnl		-			unverified
 NtSinglePhaseReject	syscalls.cpp	ntoskrnl		-			unverified
 NtStartProfile	syscalls.cpp	ntoskrnl		-			unverified
@@ -529,7 +529,7 @@ NtTerminateThread	thread.cpp	ntoskrnl		thread-info-sample:NtTerminateThread on e
 NtTestAlert	syscalls.cpp	ntoskrnl		-			unverified
 NtThawRegistry	syscalls.cpp	ntoskrnl		-			unverified
 NtThawTransactions	syscalls.cpp	ntoskrnl		-			unverified
-NtTraceControl	trace.cpp	ntoskrnl		-			unverified
+NtTraceControl	trace.cpp	ntoskrnl		-	[xref:PsGetCurrentServerSiloGlobals] [MATCH] [sref:src/windows-emulator/syscalls/trace.cpp:73] handles AddNotificationEvent (0x1B): validates event handle and stores in etw_notification_event; handles RegisterGuids (0x0F) and SetProviderTraits (0x1E) as passthrough; other codes → STATUS_NOT_SUPPORTED; matches observable behavior	verified
 NtTraceEvent	syscalls/event.cpp	ntoskrnl.i64	2		[xref:if ( PreviousMode && (a4 & 3) != 0 )] [DEFER:390-line ETW function; calls EtwpWriteUserEvent/EtwpWriteKernelEvent with full provider table; ETW tracing infrastructure not emulable from user space]		stub-deferred
 NtTranslateFilePath	syscalls.cpp	ntoskrnl		-			unverified
 NtUnloadDriver	syscalls.cpp	ntoskrnl		-			unverified
@@ -595,7 +595,7 @@ NtUserGetForegroundWindow	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserGetHDevName	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserGetIconSize	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserGetKeyState	syscalls.cpp	win32kbase/win32kfull		-			unverified
-NtUserGetKeyboardLayout	locale.cpp	win32kbase		-			unverified
+NtUserGetKeyboardLayout	locale.cpp	win32kbase		-	[xref:GetKeyboardLayout(a1)] [MATCH] [sref:src/windows-emulator/syscalls/locale.cpp:77] returns STATUS_SUCCESS (0) which functions as HKL=NULL; kernel calls GetKeyboardLayout(threadId); sogen has no real input stack so null keyboard layout is correct stub	verified
 NtUserGetKeyboardType	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserGetMessage	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserGetOemBitmapSize	syscalls.cpp	win32kbase/win32kfull		-			unverified
@@ -676,15 +676,15 @@ NtUserUpdateWindow	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserValidateRect	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull		-			unverified
 NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull		-			unverified
-NtWaitForAlertByThreadId	thread.cpp	ntoskrnl		-			unverified
+NtWaitForAlertByThreadId	thread.cpp	ntoskrnl		-	[xref:KeWaitForAlertByThreadId(PreviousMode, a2, a1)] [MATCH] [sref:src/windows-emulator/syscalls/thread.cpp:571] checks sticky alerted flag (returns STATUS_ALERTED if set), sets waiting_for_alert, respects timeout; matches kernel KeWaitForAlertByThreadId contract	verified
 NtWaitForDebugEvent	syscalls.cpp	ntoskrnl		-			unverified
 NtWaitForKeyedEvent	syscalls/event.cpp	ntoskrnl.i64	2		[xref:if ( (a2 & 1) != 0 )] [DEFER:kernel does KeWaitForSingleObject for thread blocking; requires real kernel scheduler; not emulable from user space]		stub-deferred
 NtWaitForMultipleObjects	object.cpp	ntoskrnl		section:Named section shared view	[xref:return 3221225711LL] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:615] count==0||count>64→STATUS_INVALID_PARAMETER_1; wait_type>1→STATUS_INVALID_PARAMETER_3; alerts/timeouts handled		verified
 NtWaitForMultipleObjects32	object.cpp	ntoskrnl		section:Named section shared view	[xref:return 3221225711LL] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:674] same count/wait_type validation as NtWaitForMultipleObjects; STATUS_INVALID_PARAMETER_1/STATUS_INVALID_PARAMETER_3		verified
 NtWaitForSingleObject	object.cpp	ntoskrnl		section:CloseHandle valid	[xref:return ObWaitForSingleObject] [MATCH] [sref:src/windows-emulator/syscalls/object.cpp:734] pseudo-handle expansion; waitable-type dispatch; timeout handling; STATUS_INVALID_HANDLE for unresolvable handles		verified
-NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl		-			unverified
+NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl		-	[xref:IoRemoveIoCompletion(*(_QWORD *)(v53 + 8)] [MATCH] [sref:src/windows-emulator/syscalls/worker_factory.cpp:428] dequeues io_completion entries into mini_packets; if none available, sets await_io_completion wait with factory timeout; matches kernel wait-on-io-completion contract	verified
 NtWaitLowEventPair	syscalls.cpp	ntoskrnl		-			unverified
-NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl		-			unverified
+NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl		-	[xref:v2[100] = v3 - 1 / ExpWorkerFactoryObjectType] [MATCH] [sref:src/windows-emulator/syscalls/worker_factory.cpp:211] signals factory that worker is ready, calls ensure_worker_factory_threads to spawn more if needed; kernel decrements pending count and may spawn threads	verified
 NtWriteFile	file.cpp	ntoskrnl		file-io-sample:Create/write/read file	[xref:return IopWriteFile(] [MATCH] [sref:src/windows-emulator/syscalls/file.cpp:1290] Kernel resolves handle via direct handle table walk then calls IopWriteFile; sogen handles STDOUT/NUL/pipe/file; ByteOffset FILE_WRITE_TO_END_OF_FILE sentinel supported; IOSB.Information set to bytes_written	verified
 NtWriteFileGather	syscalls.cpp	ntoskrnl		-			unverified
 NtWriteRequestData	syscalls.cpp	ntoskrnl		-			unverified

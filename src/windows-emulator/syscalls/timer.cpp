@@ -20,16 +20,11 @@ namespace sogen
         NTSTATUS handle_NtSetTimerResolution(const syscall_context&, const ULONG /*desired_resolution*/, const BOOLEAN set_resolution,
                                              const emulator_object<ULONG> current_resolution)
         {
-            if (current_resolution)
-            {
-                current_resolution.write(0x0002625a);
-            }
-
-            if (set_resolution)
+            current_resolution.write_if_valid(0x0002625a);
+            if (!set_resolution)
             {
                 return STATUS_TIMER_RESOLUTION_NOT_SET;
             }
-
             return STATUS_SUCCESS;
         }
 
