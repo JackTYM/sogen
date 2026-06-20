@@ -1151,25 +1151,77 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQueryMutant(const syscall_context& /*c*/, handle /*mutant_handle*/, uint32_t /*info_class*/, uint64_t mutant_info,
-                                      ULONG /*info_length*/, emulator_object<ULONG> return_length)
+        NTSTATUS handle_NtQueryMutant(const syscall_context& c, handle mutant_handle, uint32_t info_class, uint64_t mutant_info,
+                                      ULONG info_length, emulator_object<ULONG> return_length)
         {
-            if (mutant_info)
+            // Kernel: class 0 = MutantBasicInformation (8 bytes), class 1 = MutantOwnerInformation (16 bytes)
+            if (info_class > 1)
             {
-                return_length.write_if_valid(sizeof(ULONG) * 2);
+                return STATUS_INVALID_INFO_CLASS;
             }
+
+            // Both classes use exact-size checks (kernel: a4 != 8 / a4 != 16)
+            constexpr ULONG basic_size = sizeof(LONG) + sizeof(BOOLEAN) + sizeof(BOOLEAN); // 6 + 2 pad = 8
+            static_assert(basic_size == 6);
+            constexpr ULONG basic_buf = 8;
+            constexpr ULONG owner_buf = 16;
+
+            const ULONG expected_size = (info_class == 0) ? basic_buf : owner_buf;
+
+            return_length.write_if_valid(expected_size);
+
+            if (info_length != expected_size)
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            if (!mutant_info)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            const auto* m = c.proc.mutants.get(mutant_handle);
+
+            if (info_class == 0)
+            {
+                // CurrentCount: 1 = free, 0 = owned once, negative = owned recursively
+                const LONG current_count = (m && m->locked_count > 0) ? (1 - static_cast<LONG>(m->locked_count)) : 1;
+                const BOOLEAN owned_by_caller =
+                    (m && m->locked_count > 0 && m->owning_thread_id == c.win_emu.current_thread().id) ? TRUE : FALSE;
+                const BOOLEAN abandoned = (m && m->abandoned) ? TRUE : FALSE;
+
+                static_assert(sizeof(LONG) == 4);
+                static_assert(sizeof(BOOLEAN) == 1);
+
+                emulator_object<LONG>{c.emu, mutant_info}.write(current_count);
+                emulator_object<BOOLEAN>{c.emu, mutant_info + 4}.write(owned_by_caller);
+                emulator_object<BOOLEAN>{c.emu, mutant_info + 5}.write(abandoned);
+            }
+            else
+            {
+                // MutantOwnerInformation: CLIENT_ID of owning thread (UniqueProcess + UniqueThread)
+                emulator_object<uint64_t>{c.emu, mutant_info}.write(0);
+                emulator_object<uint64_t>{c.emu, mutant_info + 8}.write(0);
+            }
+
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQuerySemaphore(const syscall_context& c, handle semaphore_handle, uint32_t /*info_class*/,
-                                         uint64_t semaphore_info, ULONG info_length, emulator_object<ULONG> return_length)
+        NTSTATUS handle_NtQuerySemaphore(const syscall_context& c, handle semaphore_handle, uint32_t info_class, uint64_t semaphore_info,
+                                         ULONG info_length, emulator_object<ULONG> return_length)
         {
-            constexpr ULONG info_size = sizeof(ULONG) * 2;
-            if (return_length)
+            // Kernel: only class 0 (SemaphoreBasicInformation); exact size == 8
+            if (info_class != 0)
             {
-                return_length.write(info_size);
+                return STATUS_INVALID_INFO_CLASS;
             }
-            if (info_length < info_size)
+
+            constexpr ULONG info_size = sizeof(LONG) + sizeof(LONG); // CurrentCount + MaximumCount
+            static_assert(info_size == 8);
+
+            return_length.write_if_valid(info_size);
+
+            if (info_length != info_size)
             {
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
@@ -1264,22 +1316,32 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQueryTimer(const syscall_context& c, handle timer_handle, uint32_t /*info_class*/, uint64_t timer_info,
+        NTSTATUS handle_NtQueryTimer(const syscall_context& c, handle timer_handle, uint32_t info_class, uint64_t timer_info,
                                      ULONG info_length, emulator_object<ULONG> return_length)
         {
-            constexpr ULONG info_size = sizeof(LARGE_INTEGER) + sizeof(LONG) + sizeof(BOOLEAN);
+            // Kernel: only class 0 (TimerBasicInformation); exact size == 16
+            if (info_class != 0)
+            {
+                return STATUS_INVALID_INFO_CLASS;
+            }
+
+            // TIMER_BASIC_INFORMATION: LARGE_INTEGER DueTime (8) + BOOLEAN TimerState (1) + 7 pad = 16
+            constexpr ULONG info_size = 16;
+
             return_length.write_if_valid(info_size);
-            if (info_length < info_size)
+
+            if (info_length != info_size)
             {
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
+
             if (timer_info)
             {
                 const auto* t = c.proc.timers.get(timer_handle);
                 (void)t;
+                // RemainingTime at offset 0 (8 bytes), TimerState at offset 8 (1 byte)
                 emulator_object<LARGE_INTEGER>{c.emu, timer_info}.write({});
-                emulator_object<LONG>{c.emu, timer_info + sizeof(LARGE_INTEGER)}.write(0L);
-                emulator_object<BOOLEAN>{c.emu, timer_info + sizeof(LARGE_INTEGER) + sizeof(LONG)}.write(FALSE);
+                emulator_object<BOOLEAN>{c.emu, timer_info + sizeof(LARGE_INTEGER)}.write(FALSE);
             }
             return STATUS_SUCCESS;
         }

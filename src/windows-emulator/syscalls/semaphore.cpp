@@ -44,6 +44,12 @@ namespace sogen
         NTSTATUS handle_NtReleaseSemaphore(const syscall_context& c, const handle semaphore_handle, const ULONG release_count,
                                            const emulator_object<LONG> previous_count)
         {
+            // Kernel: if ( a2 <= 0 ) return STATUS_INVALID_PARAMETER — a2 is signed int in kernel ABI
+            if (static_cast<LONG>(release_count) <= 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             if (semaphore_handle.value.type != handle_types::semaphore)
             {
                 c.win_emu.log.error("Bad handle type for NtReleaseSemaphore\n");

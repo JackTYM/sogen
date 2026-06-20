@@ -157,7 +157,9 @@ namespace sogen
                 previous_state.write(e->signaled ? 1L : 0L);
             }
 
-            e->signaled = e->type == SynchronizationEvent ? false : true;
+            // KePulseEvent signals the event, releases any waiters, then clears it.
+            // The event is always unsignaled after a pulse regardless of type.
+            e->signaled = false;
             return STATUS_SUCCESS;
         }
 
@@ -167,6 +169,12 @@ namespace sogen
             if (!e)
             {
                 return STATUS_INVALID_HANDLE;
+            }
+
+            // Kernel: only works on SynchronizationEvent; NotificationEvent returns STATUS_OBJECT_TYPE_MISMATCH
+            if (e->type != SynchronizationEvent)
+            {
+                return STATUS_OBJECT_TYPE_MISMATCH;
             }
 
             e->signaled = true;

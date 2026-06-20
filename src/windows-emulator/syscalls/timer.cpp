@@ -123,16 +123,26 @@ namespace sogen
         }
 
         NTSTATUS handle_NtSetTimer(const syscall_context& /*c*/, handle /*timer_handle*/, uint64_t /*due_time*/, uint64_t /*apc_routine*/,
-                                   uint64_t /*apc_context*/, BOOLEAN /*resume_timer*/, LONG /*period*/,
+                                   uint64_t /*apc_context*/, BOOLEAN /*resume_timer*/, LONG period,
                                    const emulator_object<BOOLEAN> previous_state)
         {
+            // Kernel: period < 0 → STATUS_INVALID_PARAMETER_6 (0xC00000F4)
+            if (period < 0)
+            {
+                return STATUS_INVALID_PARAMETER_6;
+            }
             previous_state.write_if_valid(FALSE);
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtSetTimer2(const syscall_context& /*c*/, handle /*timer_handle*/, uint64_t /*due_time*/, uint64_t /*period*/,
-                                    uint64_t /*parameters*/)
+                                    uint64_t parameters)
         {
+            // Kernel: if (!a2) → STATUS_INVALID_PARAMETER_2 (0xC00000F0 = 3221225712)
+            if (!parameters)
+            {
+                return STATUS_INVALID_PARAMETER_2;
+            }
             return STATUS_SUCCESS;
         }
 
