@@ -1,0 +1,62 @@
+NTSTATUS __fastcall NtImpersonateThread(HANDLE Handle, HANDLE a2, struct _SECURITY_QUALITY_OF_SERVICE *a3) | 
+{                                                                                                          | 
+  // [COLLAPSED LOCAL DECLARATIONS. PRESS NUMPAD "+" TO EXPAND]                                            | 
+                                                                                                           | 
+  *(_QWORD *)&ClientSecurityQos.Length = 0LL;                                                              | 
+  *(_DWORD *)&ClientSecurityQos.ContextTrackingMode = 0;                                                   | 
+  *((_DWORD *)&ClientContext.SecurityQos + 3) = 0;                                                         | 
+  memset_0(&ClientContext, 0, 0x44uLL);                                                                    | 
+  PreviousMode = KeGetCurrentThread()->PreviousMode;                                                       | 
+  if ( PreviousMode && ((unsigned __int8)a3 & 3) != 0 )                                                    | 
+  {                                                                                                        | 
+    ExRaiseDatatypeMisalignment();                                                                         | 
+  }                                                                                                        | 
+  ClientSecurityQos = *a3;                                                                                 | 
+  Object = 0LL;                                                                                            | 
+  result = ObReferenceObjectByHandle(a2, 0x200u, (POBJECT_TYPE)PsThreadType, PreviousMode, &Object, 0LL);  | 
+  if ( result >= 0 )                                                                                       | 
+  {                                                                                                        | 
+    v15 = 0LL;                                                                                             | 
+    v8 = ObReferenceObjectByHandle(Handle, 0x100u, (POBJECT_TYPE)PsThreadType, PreviousMode, &v15, 0LL);   | 
+    v9 = Object;                                                                                           | 
+    if ( v8 >= 0 )                                                                                         | 
+    {                                                                                                      | 
+      v8 = SeCreateClientSecurity((PETHREAD)Object, &ClientSecurityQos, 0, &ClientContext);                | 
+      if ( v8 >= 0 )                                                                                       | 
+      {                                                                                                    | 
+        EffectiveOnly = ClientContext.SecurityQos.EffectiveOnly;                                           | 
+        if ( ClientContext.DirectlyAccessClientToken )                                                     | 
+        {                                                                                                  | 
+          EffectiveOnly = ClientContext.DirectAccessEffectiveOnly;                                         | 
+        }                                                                                                  | 
+        v11 = v15;                                                                                         | 
+        if ( v15 )                                                                                         | 
+        {                                                                                                  | 
+          CurrentThread = (struct _KTHREAD *)v15;                                                          | 
+        }                                                                                                  | 
+        else                                                                                               | 
+        {                                                                                                  | 
+          CurrentThread = KeGetCurrentThread();                                                            | 
+          v9 = Object;                                                                                     | 
+          v11 = 0LL;                                                                                       | 
+        }                                                                                                  | 
+        ClientToken = ClientContext.ClientToken;                                                           | 
+        v14 = PsImpersonateClient(                                                                         | 
+                CurrentThread,                                                                             | 
+                ClientContext.ClientToken,                                                                 | 
+                1u,                                                                                        | 
+                EffectiveOnly,                                                                             | 
+                ClientContext.SecurityQos.ImpersonationLevel);                                             | 
+        ObfDereferenceObjectWithTag(ClientToken, 0x63436553u);                                             | 
+        ObfDereferenceObject(v11);                                                                         | 
+        ObfDereferenceObject(v9);                                                                          | 
+        return v14;                                                                                        | 
+      }                                                                                                    | 
+      ObfDereferenceObject(v15);                                                                           | 
+    }                                                                                                      | 
+    ObfDereferenceObject(v9);                                                                              | 
+    return v8;                                                                                             | 
+  }                                                                                                        | 
+  return result;                                                                                           | 
+}                                                                                                          | 
+61 row(s)

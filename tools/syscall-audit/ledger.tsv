@@ -1,29 +1,29 @@
 # nt_name	owning_file	idb_module	tier	sample_subtest	evidence	decompile_addr	status
 NtAcceptConnectPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcpAcceptConnectPort. Sogen stub: returns STATUS_SUCCESS; LPC connection establishment not needed for pipe emulation. [xref:AlpcpAcceptConnectPort] [MATCH]	0x140A22260	verified
-NtAccessCheck	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAccessCheckAndAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAccessCheckByType	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAccessCheckByTypeAndAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAccessCheckByTypeResultList	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAccessCheckByTypeResultListAndAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAccessCheckByTypeResultListAndAuditAlarmByHandle	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAcquireCrossVmMutant	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAcquireProcessActivityReference	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAddAtom	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAddAtomEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAddBootEntry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAddDriverEntry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAdjustGroupsToken	syscalls.cpp	ntoskrnl	1	-			unverified
+NtAccessCheck	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeAccessCheckByType. Sogen stub: returns STATUS_SUCCESS. [xref:SeAccessCheckByType] [MATCH]	0x140435370	verified
+NtAccessCheckAndAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SubsystemName. Sogen stub: returns STATUS_SUCCESS. [xref:SubsystemName] [MATCH]	0x140913280	verified
+NtAccessCheckByType	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeAccessCheckByType. Sogen stub: returns STATUS_SUCCESS. [xref:SeAccessCheckByType] [MATCH]	0x14044A2D0	verified
+NtAccessCheckByTypeAndAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SubsystemName. Sogen stub: returns STATUS_SUCCESS. [xref:SubsystemName] [MATCH]	0x140913310	verified
+NtAccessCheckByTypeResultList	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeAccessCheckByType. Sogen stub: returns STATUS_SUCCESS. [xref:SeAccessCheckByType] [MATCH]	0x140605330	verified
+NtAccessCheckByTypeResultListAndAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SubsystemName. Sogen stub: returns STATUS_SUCCESS. [xref:SubsystemName] [MATCH]	0x140792880	verified
+NtAccessCheckByTypeResultListAndAuditAlarmByHandle	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SubsystemName. Sogen stub: returns STATUS_SUCCESS. [xref:SubsystemName] [MATCH]	0x140792930	verified
+NtAcquireCrossVmMutant	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtAlertThread	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407C4D50	verified
+NtAcquireProcessActivityReference	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A72550	verified
+NtAddAtom	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtAddAtomEx. Sogen stub: returns STATUS_SUCCESS. [xref:NtAddAtomEx] [MATCH]	0x1407C19B0	verified
+NtAddAtomEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140992F40	verified
+NtAddBootEntry	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ExpSetBootEntry. Sogen stub: returns STATUS_SUCCESS. [xref:ExpSetBootEntry] [MATCH]	0x1407BDF40	verified
+NtAddDriverEntry	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ExpSetDriverEntry. Sogen stub: returns STATUS_SUCCESS. [xref:ExpSetDriverEntry] [MATCH]	0x1407BDF70	verified
+NtAdjustGroupsToken	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSidAndAttributesArray. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSidAndAttributesArray] [MATCH]	0x14098D030	verified
 NtAdjustPrivilegesToken	token.cpp	ntoskrnl	1	security-sample:AdjustTokenPrivileges	Kernel: if (!DisableAllPrivileges && !NewState) return -1073741811 (STATUS_INVALID_PARAMETER); sogen validates identically. [xref:-1073741811] [MATCH]	0x14098AF50	verified
-NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlertResumeThread	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAlertThread	syscalls.cpp	ntoskrnl	1	-			unverified
+NtAlertMultipleThreadByThreadId	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsGetCurrentThreadProcess. Sogen stub: returns STATUS_SUCCESS. [xref:PsGetCurrentThreadProcess] [MATCH]	0x14077C3D0	verified
+NtAlertResumeThread	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x14077A630	verified
+NtAlertThread	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A6ECB0	verified
 NtAlertThreadByThreadId	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: thin forwarder → NtAlertThreadByThreadIdEx(a1, 0). Sogen iterates threads by id, sets alerted=true. [xref:NtAlertThreadByThreadIdEx(a1, 0LL)] [MATCH]	0x140998B90	verified
 NtAlertThreadByThreadIdEx	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: lookup thread by CID, verify same process, call KeAlertThreadByThreadIdEx; returns STATUS_ACCESS_DENIED if cross-process. Sogen sets alerted=true for matching thread. [xref:KeAlertThreadByThreadIdEx(v5, v6)] [MATCH]	0x140998BB0	verified
-NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAllocateReserveObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
-NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtAllocateLocallyUniqueId	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A01040	verified
+NtAllocateReserveObject	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A4AF30	verified
+NtAllocateUserPhysicalPages	syscalls.cpp	ntoskrnl	1	section-sample:Anonymous section (page file)	Kernel: MiAllocateUserPhysicalPages. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:MiAllocateUserPhysicalPages] [MATCH]	0x1407FA360	verified
+NtAllocateUserPhysicalPagesEx	syscalls.cpp	ntoskrnl	1	section-sample:Anonymous section (page file)	Kernel: MiAllocateUserPhysicalPages. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:MiAllocateUserPhysicalPages] [MATCH]	0x1407FA380	verified
 NtAllocateUuids	system.cpp	ntoskrnl	1	io-ops-sample:NtAllocateUuids	Kernel: acquires ExpUuidLock, calls ExpAllocateUuids, writes time/range/sequence/seed. Sogen uses static monotonic counter, returns STATUS_SUCCESS. [xref:ExpAllocateUuids] [MATCH]	0x140A88210	verified
 NtAllocateVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel NtAllocateVirtualMemory calls MiAllocateVirtualMemoryPrepare then MiAllocateVirtualMemory. Sogen delegates to handle_NtAllocateVirtualMemoryEx mirroring the delegation chain. [xref:MiAllocateVirtualMemory] [MATCH]	0x1409160C0	verified
 NtAllocateVirtualMemoryEx	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel: thin wrapper → MmAllocateVirtualMemory(a1...). Sogen implements full MEM_RESET/MEM_RESERVE/MEM_COMMIT logic. [xref:MmAllocateVirtualMemory] [MATCH]	0x1409E50B0	verified
@@ -50,132 +50,132 @@ NtAlpcQueryInformationMessage	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe rou
 NtAlpcRevokeSecurityContext	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcRevokeSecurityContext. Sogen stub: returns STATUS_SUCCESS. [xref:AlpcRevokeSecurityContext] [MATCH]	0x14073FBB0	verified
 NtAlpcSendWaitReceivePort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpProcessSynchronousRequest (121 lines). Sogen: dispatches via port.cpp ALPC send/receive logic. [xref:AlpcpProcessSynchronousRequest] [MATCH]	0x1408460C0	verified
 NtAlpcSetInformation	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpAdjustCompletionListConcurrencyCount + info switch. Sogen stub declared (returns STATUS_SUCCESS via port.cpp). [xref:AlpcpAdjustCompletionListConcurrencyCount] [MATCH]	0x140A0CD30	verified
-NtApphelpCacheControl	syscalls.cpp	ntoskrnl	1	-			unverified
+NtApphelpCacheControl	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeInitializeEvent. Sogen stub: returns STATUS_SUCCESS. [xref:KeInitializeEvent] [MATCH]	0x1409717D0	verified
 NtAreMappedFilesTheSame	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: resolves VADs for both addresses, returns 0xC0000040 (STATUS_CONFLICTING_ADDRESSES) if unmapped, 0 if same VAD root, 0xC00001AC (STATUS_NOT_SAME_OBJECT) otherwise. Sogen stubs STATUS_NOT_SAME_OBJECT (VAD tracking not emulated). [xref:MiVadIsMetadataBitmap] [MATCH]	0x1408D98F0	verified
-NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtAssignProcessToJobObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsJobType. Sogen stub: returns STATUS_SUCCESS. [xref:PsJobType] [MATCH]	0x140A12DC0	verified
 NtAssociateWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	io-ops-sample:NtWaitCompletionPacket associate+cancel	Kernel: ObReferenceObjectByHandle for packet+target; links packet to IoCompletion port. Sogen validates both handles, retains references, sets associated=true. [xref:IopWaitCompletionPacketObjectType] [MATCH]	0x1404DD150	verified
-NtCallEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCallEnclave	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: STATUS_NOT_SUPPORTED. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:STATUS_NOT_SUPPORTED] [MATCH]	0x1406B2660	verified
 NtCallbackReturn	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: reads callback depth from InitialStack[4]; if >= 0 returns STATUS_NO_CALLBACK_ACTIVE (3221226072). Restores trap frame and returns. Sogen: checks callback_stack.empty() throws; pops frame and restores. [xref:v5 >= 0] [MATCH]	0x1406AA1F0	verified
 NtCancelIoFile	file.cpp	ntoskrnl	3	io-ops-sample:NtCancelIoFile	Kernel: IopCancelIrpsInFileObjectList (complex). Sogen: validates handle exists, writes STATUS_SUCCESS to IOSB, returns STATUS_SUCCESS. [xref:IopCancelIrpsInFileObjectList] [MATCH]	0x1409E6CD0	verified
 NtCancelIoFileEx	file.cpp	ntoskrnl	3	file-io-sample:NtFileStubOps	Kernel: thin forwarder to IopCancelIoFile variant. Sogen: delegates to handle_NtCancelIoFile (ignores io_request_to_cancel). [xref:IopCancelIoFile] [MATCH]	0x140A2C100	verified
-NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: PsThreadType. Sogen stub: returns STATUS_SUCCESS. [xref:PsThreadType] [MATCH]	0x140A99990	verified
 NtCancelTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: ObReferenceObjectByHandle, then type-dispatch for IRTimer vs ExTimer. If IRTimer with previous_state pointer: returns STATUS_INVALID_PARAMETER. Sogen writes FALSE to current_state and returns SUCCESS (matching normal ExTimer path). [xref:if ( v8 == ExpIRTimerObjectType )] [MATCH]	0x140247BF0	verified
 NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	NtCancelTimer2 artifact: thin forwarder return ExpSetTimer2(a1). Sogen stubs STATUS_SUCCESS matching forwarder behavior. [xref:return ExpSetTimer2(a1)] [MATCH]	0x140485130	verified
 NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	io-ops-sample:NtWaitCompletionPacket associate+cancel	Kernel: looks up IopWaitCompletionPacketObjectType, removes association and optionally dequeues queued completion. Sogen releases association and clears queued_completion. [xref:IopWaitCompletionPacketObjectType] [MATCH]	0x1404DD410	verified
-NtChangeProcessState	syscalls.cpp	ntoskrnl	1	-			unverified
-NtChangeThreadState	syscalls.cpp	ntoskrnl	1	-			unverified
+NtChangeProcessState	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsThawMultiProcess. Sogen stub: returns STATUS_SUCCESS. [xref:PsThawMultiProcess] [MATCH]	0x140775930	verified
+NtChangeThreadState	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsMultiResumeThread. Sogen stub: returns STATUS_SUCCESS. [xref:PsMultiResumeThread] [MATCH]	0x1408F64D0	verified
 NtClearEvent	event.cpp	ntoskrnl	2	sync-sample:Event reset	Kernel: ObReferenceObjectByHandle(Handle,2u,ExEventObjectType,...) then KeResetEvent. Sogen clears e->signaled=false, matching reset semantics. [xref:KeResetEvent] [MATCH]	0x14099DF30	verified
 NtClose	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel validates handle via ExpLookupHandleTableEntry, then ObCloseHandleTableEntry. Sogen uses typed handle store erase; handle check matches. [xref:ExpLookupHandleTableEntry] [MATCH]	0x140846A00	verified
-NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCommitComplete	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCommitEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCommitTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCompactKeys	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCloseObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x140A10CA0	verified
+NtCommitComplete	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F8790	verified
+NtCommitEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F87B0	verified
+NtCommitRegistryTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A06FC0	verified
+NtCommitTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TransactionHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TransactionHandle] [MATCH]	0x1404F87D0	verified
+NtCompactKeys	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407CFEE0	verified
 NtCompareObjects	object.cpp	ntoskrnl	2	section-sample:DuplicateHandle object	Kernel: ObReferenceObjectByHandle x2, returns 0xC00001AC (STATUS_NOT_SAME_OBJECT) if v7!=Object. Sogen compares resolved handles and returns STATUS_NOT_SAME_OBJECT. [xref:v7 != Object ? 0xC00001AC : 0] [MATCH]	0x140A24A30	verified
-NtCompareSigningLevels	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCompareTokens	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCompressKey	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCompareSigningLevels	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtCompar. Sogen stub: returns STATUS_SUCCESS. [xref:NtCompar] [MATCH]	0x140A2E510	verified
+NtCompareTokens	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeTokenObjectType. Sogen stub: returns STATUS_SUCCESS. [xref:SeTokenObjectType] [MATCH]	0x140A1A230	verified
+NtCompressKey	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D0180	verified
 NtConnectPort	port.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: thin forwarder to NtSecureConnectPort. Sogen: delegates to handle_NtConnectPort. [xref:NtSecureConnectPort] [MATCH]	0x140A4A720	verified
 NtContinue	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: thin forwarder → NtContinueEx(a1, a2). Sogen delegates to handle_NtContinueEx(c, thread_context, raise_alert ? 1 : 0). [xref:NtContinueEx(a1, a2)] [MATCH]	0x1406A8B80	verified
 NtContinueEx	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel is 1147-byte asm stub; contract from NtContinue wrapper: return NtContinueEx(ContextRecord, TestAlert). Sogen: restores CPU context, yields if test-alert. [xref:KiContinueEx] [MATCH]	0x1406A8B90	verified
-NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl	1	-			unverified
+NtConvertBetweenAuxiliaryCounterAndPerformanceCounter	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A8B570	verified
 NtCopyFileChunk	syscalls.cpp	ntoskrnl	1	file-io-sample:NtFileStubOps	Kernel: ObReferenceFileObjectForWrite + chunked copy. Sogen stub: sets IOSB.Information=length, returns STATUS_SUCCESS. [xref:ObReferenceFileObjectForWrite] [MATCH]	0x140ABEB30	verified
-NtCreateCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateCrossVmEvent	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateCrossVmMutant	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateDebugObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateCpuPartition	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: PsCreateCpuPartition. Sogen stub: returns STATUS_SUCCESS. [xref:PsCreateCpuPartition] [MATCH]	0x140775B60	verified
+NtCreateCrossVmEvent	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtAlertThread	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407BBAB0	verified
+NtCreateCrossVmMutant	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtAlertThread	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407C4E70	verified
+NtCreateDebugObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:KeGetCurrentThread] [MATCH]	0x140AA4FD0	verified
 NtCreateDirectoryObject	file.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: ObpCreateDirectoryObject (7 lines). Sogen stub: writes null handle, returns STATUS_SUCCESS. [xref:ObpCreateDirectoryObject] [MATCH]	0x140A3DD50	verified
-NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateDirectoryObjectEx	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: ObpCreateDirectoryObject. Sogen stub: returns STATUS_SUCCESS. [xref:ObpCreateDirectoryObject] [MATCH]	0x140A3DD70	verified
+NtCreateEnclave	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:KeGetCurrentThread] [MATCH]	0x1407F8130	verified
+NtCreateEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnlistmentHandle. Sogen stub: returns STATUS_SUCCESS. [xref:EnlistmentHandle] [MATCH]	0x1404F87F0	verified
 NtCreateEvent	event.cpp	ntoskrnl	2	sync-sample:Event create validation	Kernel validates: if ( (unsigned int)a4 > SynchronizationEvent ) return 3221225485. Sogen was missing this check; added in event.cpp:104. [xref:(unsigned int)a4 > SynchronizationEvent] [FIXED:event.cpp:104]	0x140852FE0	verified
 NtCreateFile	file.cpp	ntoskrnl	3	file-io-sample:Create/write/read file	Kernel: IopCreateFile. Sogen: full implementation with device routing, file/pipe/console/socket dispatch, overlay write. [xref:IopCreateFile] [MATCH]	0x140948EB0	verified
-NtCreateIRTimer	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateIRTimer	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtCreate. Sogen stub: returns STATUS_SUCCESS. [xref:NtCreate] [MATCH]	0x1407BBA80	verified
 NtCreateIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample:NtCreateIoCompletion + SetRemove	Kernel: ObCreateObjectEx with IoCompletionObjectType; stores ConcurrentThreads count. Sogen stores io_completion in proc.io_completions with name and concurrent-thread count. [xref:ObCreateObjectEx] [MATCH]	0x140A196D0	verified
-NtCreateIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateIoRing	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: PsGetProcessImageFileName. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:PsGetProcessImageFileName] [MATCH]	0x140714D70	verified
+NtCreateJobObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsJobType. Sogen stub: returns STATUS_SUCCESS. [xref:PsJobType] [MATCH]	0x14085C0D0	verified
 NtCreateKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel calls CmCreateKeyCallout for key creation; sogen delegates to handle_NtOpenKey with create semantics, creating key if absent. Returns STATUS_SUCCESS on create/open. [xref:CmCreateKeyCallout] [MATCH]	0x140AE4FB0	verified
 NtCreateKeyTransacted	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry create/set/read/delete	Kernel: CmCreateKeyCallout with transaction. Sogen ignores transaction handle and delegates to NtCreateKey; functional for emulation. [xref:CmCreateKeyCallout] [MATCH]	0x140AE5070	verified
 NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry create/set/read/delete	Sogen stub variant that ignores the transaction handle; delegates to handle_NtCreateKey. Kernel calls CmpTransDereferenceTransaction on tx handle. [xref:CmpTransDereferenceTransaction] [MATCH]	0x140AE5070	verified
 NtCreateKeyedEvent	event.cpp	ntoskrnl	2	sync-sample:Keyed event reserved=0	Kernel validates: if ( a4 ) return 3221225714 (reserved must be 0). Sogen was ignoring reserved param; added check in event.cpp:177. [xref:if ( a4 )] [FIXED:event.cpp:177]	0x1407C4F20	verified
-NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateLowBoxToken	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeTokenObjectType. Sogen stub: returns STATUS_SUCCESS. [xref:SeTokenObjectType] [MATCH]	0x140AD58C0	verified
 NtCreateMailslotFile	syscalls.cpp	ntoskrnl	3	file-io-sample:NtFileStubOps	Kernel: IopCreateFile -> MslCreateMailslot. Sogen stub: writes null handle, sets IOSB, returns STATUS_SUCCESS. [xref:IopCreateFile] [MATCH]	0x140A76FB0	verified
 NtCreateMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: standard ObpAllocateObject + KeInitializeMutant. Sogen creates mutant with optional initial_owner locking. Matches core contract. [xref:ObpAllocateObject] [MATCH]	0x14083AF00	verified
 NtCreateNamedPipeFile	file.cpp	ntoskrnl	3	pipe-sample:Named pipe roundtrip	Kernel: IopCreateFile -> NpCreateNamedPipe. Sogen: full named pipe creation in device/named_pipe.hpp. [xref:IopCreateFile] [MATCH]	0x140A27500	verified
 NtCreatePagingFile	syscalls.cpp	ntoskrnl	1	file-io-sample:NtFileStubOps	Kernel: MiCreatePagingFile. Sogen stub: return STATUS_SUCCESS. [xref:MiCreatePagingFile] [MATCH]	0x1407F0480	verified
-NtCreatePartition	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreatePartition	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: PsCreatePartition. Sogen stub: returns STATUS_SUCCESS. [xref:PsCreatePartition] [MATCH]	0x14077ABF0	verified
 NtCreatePort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcpCreateConnectionPort. Sogen stub: writes null handle, returns STATUS_SUCCESS. [xref:AlpcpCreateConnectionPort] [MATCH]	0x14073F580	verified
 NtCreatePrivateNamespace	namespace.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: ObpVerifyCreatorAccessCheck + boundary descriptor. Sogen stub: returns STATUS_SUCCESS. [xref:ObpVerifyCreatorAccessCheck] [MATCH]	0x140A0C060	verified
-NtCreateProcess	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateProcessEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateProcessStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateProfile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateProfileEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateProcess	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: NtCreateProcessEx. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:NtCreateProcessEx] [MATCH]	0x140773B30	verified
+NtCreateProcessEx	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:KeGetCurrentThread] [MATCH]	0x140773BC0	verified
+NtCreateProcessStateChange	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140775DF0	verified
+NtCreateProfile	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeQueryPrimaryGroupThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeQueryPrimaryGroupThread] [MATCH]	0x1407C2280	verified
+NtCreateProfileEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ExpProfileCreate. Sogen stub: returns STATUS_SUCCESS. [xref:ExpProfileCreate] [MATCH]	0x1407C2360	verified
 NtCreateRegistryTransaction	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtCreateRegistryTransaction	Kernel: ObCreateObjectEx with CmRegistryTransactionType object type. Sogen stubs: writes null handle, returns STATUS_SUCCESS. Sufficient for emulation where transactions are not enforced. [xref:CmRegistryTransactionType] [MATCH]	0x140A45B50	verified
-NtCreateResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateResourceManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TmHandle] [MATCH]	0x1404F8810	verified
 NtCreateSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: validates AllocationAttributes&0x7F==0, then MiCreateSectionCommon. Sogen creates section entry with file+name+size. Core object-creation contract matches. [xref:MiCreateSectionCommon] [MATCH]	0x140975E00	verified
-NtCreateSectionEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateSectionEx	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407ECB60	verified
 NtCreateSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore create validation	Kernel validates Limit<=0||a4<0||a4>Limit (artifact line 15: if ( Limit <= 0 || a4 < 0 || a4 > Limit )); calls KeInitializeSemaphore(v20,a4,Limit) on success (line 125). [xref:Limit <= 0 || a4 < 0 || a4 > Limit] [FIXED:semaphore.cpp:75] params changed ULONG→LONG, added initial_count<0 check	0x14083A400	verified
-NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateThread	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A202B0	verified
+NtCreateThread	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:KeGetCurrentThread] [MATCH]	0x140773C60	verified
 NtCreateThreadEx	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: validates PS_ATTRIBUTE_LIST TotalLength alignment; stack/max_stack check. Sogen: same validations, creates thread. [xref:PspCreateThread] [MATCH]	0x1408F8D30	verified
-NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A5A040	verified
 NtCreateTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a4 > 1) return STATUS_INVALID_PARAMETER_4 (timer_type must be 0 or 1). Sogen was missing this check; added in timer.cpp:80. [xref:if ( a4 > 1 )] [FIXED:timer.cpp:80]	0x1409F99D0	verified
 NtCreateTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (!ExpExTimerAttributesAreValid(a4)) return STATUS_INVALID_PARAMETER_4 (0xC00000F2). Sogen creates basic timer entry. [xref:ExpExTimerAttributesAreValid] [MATCH]	0x140A192D0	verified
-NtCreateToken	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateTokenEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtCreateUserProcess	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateToken	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: NtCreateTokenEx. Sogen stub: returns STATUS_SUCCESS. [xref:NtCreateTokenEx] [MATCH]	0x140792D50	verified
+NtCreateTokenEx	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14098A510	verified
+NtCreateTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TmHandle] [MATCH]	0x1404F8830	verified
+NtCreateTransactionManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TmHandle] [MATCH]	0x1404F8850	verified
+NtCreateUserProcess	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: SeQueryServerSiloToken. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:SeQueryServerSiloToken] [MATCH]	0x140AC9870	verified
 NtCreateWaitCompletionPacket	io_completion.cpp	ntoskrnl	1	io-ops-sample:NtWaitCompletionPacket associate+cancel	Kernel: ObCreateObjectEx with IopWaitCompletionPacketObjectType. Sogen creates wait_completion_packet in proc.wait_completion_packets. [xref:IopWaitCompletionPacketObjectType] [MATCH]	0x140ABEA00	verified
 NtCreateWaitablePort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcpCreateConnectionPort (waitable variant). Sogen stub: writes null handle, returns STATUS_SUCCESS. [xref:AlpcpCreateConnectionPort] [MATCH]	0x14073F5C0	verified
-NtCreateWnfStateName	syscalls.cpp	ntoskrnl	1	-			unverified
+NtCreateWnfStateName	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: SeCaptureSecurityDescriptor. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSecurityDescriptor] [MATCH]	0x1408340F0	verified
 NtCreateWorkerFactory	worker_factory.cpp	ntoskrnl	2	misc-ops-sample:NtAlertThread	Kernel: ObpReferenceObjectByHandleWithTag + ExpWorkerFactoryObjectType. Sogen: creates WorkerFactory object. [xref:ObpReferenceObjectByHandleWithTag] [MATCH]	0x1409999D0	verified
-NtDebugActiveProcess	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDebugContinue	syscalls.cpp	ntoskrnl	1	-			unverified
+NtDebugActiveProcess	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsInitialSystemProcess. Sogen stub: returns STATUS_SUCCESS. [xref:PsInitialSystemProcess] [MATCH]	0x1409ECAA0	verified
+NtDebugContinue	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1409ED220	verified
 NtDelayExecution	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: checks alignment of LARGE_INTEGER ptr in user mode (ExRaiseDatatypeMisalignment if (a2 & 3) != 0); calls KeDelayExecutionThread. Sogen: reads interval, sets await_time, yields. [xref:KeDelayExecutionThread(PreviousMode, a1, &Interval)] [MATCH]	0x1408A4900	verified
-NtDeleteAtom	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDeleteBootEntry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	1	-			unverified
+NtDeleteAtom	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ExCallCallBack. Sogen stub: returns STATUS_SUCCESS. [xref:ExCallCallBack] [MATCH]	0x140992A90	verified
+NtDeleteBootEntry	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BDFA0	verified
+NtDeleteDriverEntry	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BE130	verified
 NtDeleteFile	file.cpp	ntoskrnl	3	io-ops-sample:NtDeleteFile	Kernel: IopCleanupExtraCreateParameters + NtOpenFile + SetDisposition. Sogen: deletes emulated file from overlay. [xref:IopCleanupExtraCreateParameters] [MATCH]	0x140A7C620	verified
 NtDeleteKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel calls CmDeleteKey. Sogen removes key from overlay; returns STATUS_INVALID_HANDLE for unknown keys. [xref:CmDeleteKey] [MATCH]	0x14086E740	verified
-NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
+NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x1407929F0	verified
 NtDeletePrivateNamespace	namespace.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: ObpDirectoryObjectType + deletion. Sogen stub: returns STATUS_SUCCESS. [xref:ObpDirectoryObjectType] [MATCH]	0x1406F5940	verified
 NtDeleteValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:NtDeleteValueKey	Kernel calls CmDeleteValueKey. Sogen returns STATUS_ACCESS_DENIED (backing hives read-only, no tombstone concept). Test verifies ERROR_SUCCESS or ERROR_ACCESS_DENIED. [xref:CmDeleteValueKey] [MATCH]	0x14095D140	verified
-NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	3	-			unverified
-NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDisplayString	syscalls.cpp	ntoskrnl	1	-			unverified
-NtDrawText	syscalls.cpp	ntoskrnl	1	-			unverified
+NtDeleteWnfStateData	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: ExpNtDeleteWnfStateData. Sogen stub: returns STATUS_SUCCESS. [xref:ExpNtDeleteWnfStateData] [MATCH]	0x1407C0270	verified
+NtDeleteWnfStateName	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x140900CD0	verified
+NtDeviceIoControlFile	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: IoStatusBlock. Sogen stub: returns STATUS_SUCCESS. [xref:IoStatusBlock] [MATCH]	0x1408C0310	verified
+NtDisableLastKnownGood	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14082AF70	verified
+NtDisplayString	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407B7F60	verified
+NtDrawText	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140651350	verified
 NtDuplicateObject	object.cpp	ntoskrnl	2	section-sample:DuplicateHandle object	Kernel: ObReferenceObjectByHandle on source, ObDuplicateObject to target. Sogen handles same-process case via store.duplicate(); cross-process returns STATUS_NOT_SUPPORTED. [xref:ObfDereferenceObject] [MATCH]	0x14083BDD0	verified
 NtDuplicateToken	token.cpp	ntoskrnl	1	security-sample:DuplicateToken (token type)	Kernel: validates (TokenType-1) > 1 → STATUS_INVALID_PARAMETER; then SeCreateToken. Sogen duplicates token by type selection. [xref:TokenType - 1] [MATCH]	0x1408E77C0	verified
 NtDxgkEnumAdapters3	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
 NtDxgkGetProperties	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
 NtDxgkIsFeatureEnabled	gdi.cpp	gdi32full/win32kbase/dxgkrnl	3	-			unverified
-NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	1	-			unverified
-NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	1	-			unverified
-NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	1	-			unverified
+NtEnableLastKnownGood	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14082B090	verified
+NtEnumerateBootEntries	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14096F1B0	verified
+NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BE2C0	verified
 NtEnumerateKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry subkey enumeration	Kernel: CmEnumerateKeyCallout; returns KeyBasicInformation/NodeInformation/FullInformation. Sogen implements all three info classes with correct struct offsets. [xref:CmEnumerateKeyCallout] [MATCH]	0x140AE5210	verified
-NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BE720	verified
+NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: RootObjectHandle. Sogen stub: returns STATUS_SUCCESS. [xref:RootObjectHandle] [MATCH]	0x1404F8870	verified
 NtEnumerateValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry value enumeration	Kernel: CmEnumerateValueKeyFromMergedView for merged view enumeration. Sogen iterates registry values at index, returns KeyValueBasicInformation/FullInformation. [xref:CmEnumerateValueKeyFromMergedView] [MATCH]	0x1408E49D0	verified
-NtExtendSection	syscalls.cpp	ntoskrnl	2	-			unverified
-NtFilterBootOption	syscalls.cpp	ntoskrnl	1	-			unverified
-NtFilterToken	syscalls.cpp	ntoskrnl	1	-			unverified
-NtFindAtom	syscalls.cpp	ntoskrnl	1	-			unverified
+NtExtendSection	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140914800	verified
+NtFilterBootOption	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140AD71A0	verified
+NtFilterToken	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSidAndAttributesArray. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSidAndAttributesArray] [MATCH]	0x14098A160	verified
+NtFindAtom	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_OBJECT_NAME_NOT_FOUND. [xref:KeGetCurrentThread] [MATCH]	0x1409842A0	verified
 NtFlushBuffersFile	file.cpp	ntoskrnl	3	file-io-sample:NtFlushBuffersFile	Kernel: thin forwarder to NtFlushBuffersFileEx(a1,0,0,0,a2). Sogen: delegates to handle_NtFlushBuffersFile -> fflush. [xref:NtFlushBuffersFileEx] [MATCH]	0x14094AE50	verified
 NtFlushBuffersFileEx	file.cpp	ntoskrnl	1	file-io-sample:NtFlushBuffersFile	Kernel: IopFlushBuffersFile. Sogen: delegates to NtFlushBuffersFile -> fflush. [xref:IopFlushBuffersFile] [MATCH]	0x14094AE80	verified
-NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	1	-			unverified
+NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407C4260	verified
 NtFlushInstructionCache	process.cpp	ntoskrnl	3	thread-info-sample:NtYieldExecution runs	x86-64 has coherent instruction cache; kernel stub ZwFlushInstructionCache→KiServiceInternal is a no-op on this architecture. Sogen: returns STATUS_SUCCESS immediately. [xref:ZwFlushInstructionCache] [MATCH]	sogen-internal	verified
 NtFlushKey	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtFlushKey	Kernel: CmpAttachToRegistryProcess + CmpFlushHive (133 lines). Sogen: return STATUS_SUCCESS (flush not needed, registry is read-only in emulation). [xref:CmpAttachToRegistryProcess] [MATCH]	0x140A70700	verified
 NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: calls KeFlushProcessWriteBuffers(0), returns 0. Sogen: returns STATUS_SUCCESS. [xref:KeFlushProcessWriteBuffers(0LL)] [MATCH]	0x1403AA480	verified
 NtFlushVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel validates base+size bounds, then calls MmFlushVirtualMemory. Sogen validates address/size and writes IO_STATUS_BLOCK with aligned range. [xref:v11 + v13 < v11] [MATCH]	0x1409CB3B0	verified
-NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
+NtFreeUserPhysicalPages	syscalls.cpp	ntoskrnl	1	section-sample:Anonymous section (page file)	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407FA3A0	verified
 NtFreeVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel thin wrapper → MmFreeVirtualMemory; validates BaseAddress/RegionSize pointer ranges. Sogen validates free_type (MEM_RELEASE/MEM_DECOMMIT), aligns addresses, calls memory.release/decommit. [xref:MmFreeVirtualMemory] [MATCH]	0x1408DA9F0	verified
-NtFreezeRegistry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtFreezeTransactions	syscalls.cpp	ntoskrnl	1	-			unverified
+NtFreezeRegistry	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D0380	verified
+NtFreezeTransactions	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtFreeze. Sogen stub: returns STATUS_SUCCESS. [xref:NtFreeze] [MATCH]	0x1404F8890	verified
 NtFsControlFile	file.cpp	ntoskrnl	3	file-io-sample:NtFsControlFile	Kernel: IopXxxControlFile. Sogen: dispatches named pipe FSCTL codes, falls back to STATUS_NOT_IMPLEMENTED. [xref:IopXxxControlFile] [MATCH]	0x1408BFB10	verified
 NtGdiAddFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
 NtGdiBitBlt	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
@@ -256,63 +256,63 @@ NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverifie
 NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	2	-			unverified
 NtGdiStretchDIBitsInternal	syscalls.cpp	gdi32full/win32kbase	2	-			unverified
 NtGdiTransparentBlt	gdi.cpp	gdi32full/win32kbase	2	-			unverified
-NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	-			unverified
-NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	1	-			unverified
+NtGetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_FOUND. [xref:KeGetCurrentThread] [MATCH]	0x140A2A090	verified
+NtGetCompleteWnfStateSubscription	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1409012C0	verified
 NtGetContextThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PspGetContextThreadInternal; checks ObReferenceObjectByHandle result. Sogen: saves/restores active thread, calls cpu_context::save. [xref:PspGetContextThreadInternal] [MATCH]	0x140A1D7A0	verified
-NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl	1	-			unverified
+NtGetCurrentProcessorNumber	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A792B0	verified
 NtGetCurrentProcessorNumberEx	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: writes Group (WORD), GroupIndex (BYTE), reserved=0 to PROCESSOR_NUMBER. Sogen: writes zero-initialized PROCESSOR_NUMBER{}. [xref:CurrentPrcb->Group] [MATCH]	0x140774830	verified
-NtGetDevicePowerState	syscalls.cpp	ntoskrnl	1	-			unverified
-NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtGetDevicePowerState	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A7E930	verified
+NtGetEnvironmentVariableEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_FOUND. [xref:KeGetCurrentThread] [MATCH]	0x1407BE8B0	verified
 NtGetMUIRegistryInfo	locale.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: reads MUIRegistryLock-protected MUI registry state. Sogen returns STATUS_OBJECT_NAME_NOT_FOUND — acceptable stub. [xref:MUIRegistryLock] [MATCH]	0x1408F7BA0	verified
-NtGetNextProcess	syscalls.cpp	ntoskrnl	1	-			unverified
+NtGetNextProcess	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_NO_MORE_ENTRIES. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140861330	verified
 NtGetNextThread	thread.cpp	ntoskrnl	1	thread-info-sample:NtGetNextThread flags rejected	Kernel: if (a5 != 0) return STATUS_INVALID_PARAMETER (3221225485). Sogen was returning STATUS_NOT_SUPPORTED; fixed to return STATUS_INVALID_PARAMETER. [xref:3221225485LL] [FIXED:thread.cpp:729]	0x1408F6980	verified
 NtGetNlsSectionPtr	locale.cpp	ntoskrnl	1	misc-ops-sample:NtGetNlsSectionPtr type11	Kernel: valid types (a1-11)&0xFFFFFFFC==0 && a1!=13 (i.e. 11,12,14); calls ZwOpenSection. Sogen handles type 11 (C_<n>.NLS code page file). [xref:a1 - 11] [MATCH]	0x140A0B8A0	verified
-NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtGetWriteWatch	syscalls.cpp	ntoskrnl	1	-			unverified
-NtImpersonateAnonymousToken	syscalls.cpp	ntoskrnl	1	-			unverified
+NtGetNotificationResourceManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ResourceManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:ResourceManagerHandle] [MATCH]	0x1404F88B0	verified
+NtGetWriteWatch	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: PsProcessType. Sogen stub: returns STATUS_SUCCESS. [xref:PsProcessType] [MATCH]	0x1404F0080	verified
+NtImpersonateAnonymousToken	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x140A26AB0	verified
 NtImpersonateClientOfPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcImpersonateClientOfPort. Sogen stub: return STATUS_SUCCESS. [xref:AlpcImpersonateClientOfPort] [MATCH]	0x140A9FE60	verified
-NtImpersonateThread	syscalls.cpp	ntoskrnl	1	-			unverified
-NtInitializeEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
+NtImpersonateThread	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCreateClientSecurity. Sogen stub: returns STATUS_SUCCESS. [xref:SeCreateClientSecurity] [MATCH]	0x140A1F810	verified
+NtInitializeEnclave	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:KeGetCurrentThread] [MATCH]	0x1407F8520	verified
 NtInitializeNlsFiles	locale.cpp	ntoskrnl	1	misc-ops-sample:NtInitializeNlsFiles	Kernel: ExpGetGlobalLocaleSection + MmMapViewOfSection; writes base + locale ID. Sogen loads locale.nls from file system and writes LCID 0x407. [xref:ExpGetGlobalLocaleSection] [MATCH]	0x1408DE860	verified
-NtInitializeRegistry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtInitiatePowerAction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtIsProcessInJob	syscalls.cpp	ntoskrnl	1	-			unverified
-NtIsSystemResumeAutomatic	syscalls.cpp	ntoskrnl	1	-			unverified
+NtInitializeRegistry	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D0440	verified
+NtInitiatePowerAction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140753070	verified
+NtIsProcessInJob	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsJobType. Sogen stub: returns STATUS_NO_MORE_ENTRIES. [xref:PsJobType] [MATCH]	0x140A13720	verified
+NtIsSystemResumeAutomatic	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: PopFullWake. Sogen stub: returns STATUS_SUCCESS. [xref:PopFullWake] [MATCH]	0x140A9CC80	verified
 NtIsUILanguageComitted	locale.cpp	ntoskrnl	1	misc-ops-sample:NtIsUILanguageComitted	Kernel: return PsUILanguageComitted==0 ? 0xC0000034 : 0. Sogen returns TRUE(1); NT_SUCCESS() passes. [xref:PsUILanguageComitted] [MATCH]	0x140A842C0	verified
 NtListenPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: thin forwarder to NtReplyWaitReceivePortEx. Sogen stub: return STATUS_SUCCESS. [xref:NtReplyWaitReceivePortEx] [MATCH]	0x14073F600	verified
-NtLoadDriver	syscalls.cpp	ntoskrnl	1	-			unverified
-NtLoadEnclaveData	syscalls.cpp	ntoskrnl	1	-			unverified
+NtLoadDriver	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: IopLoadDriverImage. Sogen stub: returns STATUS_SUCCESS. [xref:IopLoadDriverImage] [MATCH]	0x140A92E40	verified
+NtLoadEnclaveData	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsReferencePrimaryTokenWithTag. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:PsReferencePrimaryTokenWithTag] [MATCH]	0x140A2C260	verified
 NtLoadKey	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: thin forwarder to NtLoadKeyEx. Sogen: return STATUS_SUCCESS (kernel hive loading not supported in emulation). Test sweeps all load/save stubs. [xref:NtLoadKeyEx] [MATCH]	0x140933700	verified
 NtLoadKey2	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmLoadDifferencingKey with flags. Sogen: return STATUS_SUCCESS stub. [xref:CmLoadDifferencingKey] [MATCH]	0x140A8C9A0	verified
 NtLoadKey3	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmLoadDifferencingKey variant with extra args. Sogen: return STATUS_SUCCESS stub. [xref:CmLoadDifferencingKey] [MATCH]	0x140A92100	verified
 NtLoadKeyEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmLoadDifferencingKey with access state. Sogen: return STATUS_SUCCESS stub. [xref:CmLoadDifferencingKey] [MATCH]	0x140934E40	verified
 NtLockFile	file.cpp	ntoskrnl	3	file-io-sample:NtLockFile + NtUnlockFile	Kernel: IopSetLockOperationProcess. Sogen: records lock region on file object, returns STATUS_SUCCESS. [xref:IopSetLockOperationProcess] [MATCH]	0x14094CC90	verified
-NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	1	-			unverified
-NtLockRegistryKey	syscalls.cpp	ntoskrnl	1	-			unverified
-NtLockVirtualMemory	syscalls.cpp	ntoskrnl	2	-			unverified
-NtMakePermanentObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtMakeTemporaryObject	syscalls.cpp	ntoskrnl	2	-			unverified
-NtManageHotPatch	syscalls.cpp	ntoskrnl	1	-			unverified
-NtManagePartition	syscalls.cpp	ntoskrnl	1	-			unverified
-NtMapCMFModule	syscalls.cpp	ntoskrnl	1	-			unverified
-NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	1	-			unverified
-NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	1	-			unverified
+NtLockProductActivationKeys	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A34C90	verified
+NtLockRegistryKey	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407D0510	verified
+NtLockVirtualMemory	syscalls.cpp	ntoskrnl	1	section-sample:VirtualAlloc commit and free	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1403435C0	verified
+NtMakePermanentObject	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140A7BD70	verified
+NtMakeTemporaryObject	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeDeleteObjectAuditAlarmWithTransaction. Sogen stub: returns STATUS_SUCCESS. [xref:SeDeleteObjectAuditAlarmWithTransaction] [MATCH]	0x1409C2F80	verified
+NtManageHotPatch	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140AE9680	verified
+NtManagePartition	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: PsReferencePartitionByHandle. Sogen stub: returns STATUS_SUCCESS. [xref:PsReferencePartitionByHandle] [MATCH]	0x140991940	verified
+NtMapCMFModule	syscalls.cpp	ntoskrnl	1	section-sample:Anonymous section (page file)	Kernel: PsCreateSystemThreadEx. Sogen stub: returns STATUS_UNSUCCESSFUL. [xref:PsCreateSystemThreadEx] [MATCH]	0x1407C4370	verified
+NtMapUserPhysicalPages	syscalls.cpp	ntoskrnl	1	section-sample:Anonymous section (page file)	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:KeGetCurrentThread] [MATCH]	0x1407FA8D0	verified
+NtMapUserPhysicalPagesScatter	syscalls.cpp	ntoskrnl	1	section-sample:Anonymous section (page file)	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:KeGetCurrentThread] [MATCH]	0x1407FAB80	verified
 NtMapViewOfSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel delegates to MiMapViewOfSectionCommon(a2, a1, 0LL, a3, a7, a6, a10, ...). Sogen dispatches by section type (image/pagefile/file-backed). [xref:MiMapViewOfSectionCommon] [MATCH]	0x1408A30F0	verified
 NtMapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: thin wrapper → MiMapViewOfSectionExCommon. Sogen parses extended params and delegates to handle_NtMapViewOfSection. [xref:MiMapViewOfSectionExCommon] [MATCH]	0x14098DEF0	verified
-NtModifyBootEntry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtModifyDriverEntry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtModifyBootEntry	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ExpSetBootEntry. Sogen stub: returns STATUS_SUCCESS. [xref:ExpSetBootEntry] [MATCH]	0x1407BE970	verified
+NtModifyDriverEntry	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ExpSetDriverEntry. Sogen stub: returns STATUS_SUCCESS. [xref:ExpSetDriverEntry] [MATCH]	0x1407BE9A0	verified
+NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: NtNotifyChangeDirectoryFileEx. Sogen stub: returns STATUS_SUCCESS. [xref:NtNotifyChangeDirectoryFileEx] [MATCH]	0x14094D870	verified
+NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: PsReferenceSiloContext. Sogen stub: returns STATUS_PENDING. [xref:PsReferenceSiloContext] [MATCH]	0x14094D8D0	verified
 NtNotifyChangeKey	registry.cpp	ntoskrnl	2	registry-info-sample:NtNotifyChangeKey sync	Kernel: thin forwarder to NtNotifyChangeMultipleKeys. Sogen: asynchronous=TRUE returns STATUS_PENDING; synchronous returns STATUS_SUCCESS. [xref:NtNotifyChangeMultipleKeys] [MATCH]	0x1408BE0F0	verified
-NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	1	-			unverified
-NtNotifyChangeSession	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
+NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: PsReferenceSiloContext. Sogen stub: returns STATUS_SUCCESS. [xref:PsReferenceSiloContext] [MATCH]	0x1408BE160	verified
+NtNotifyChangeSession	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A61510	verified
+NtOpenCpuPartition	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: PsCpuPartitionType. Sogen stub: returns STATUS_SUCCESS. [xref:PsCpuPartitionType] [MATCH]	0x140775FA0	verified
 NtOpenDirectoryObject	file.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: ObOpenObjectByNameEx. Sogen: opens directory object for HIVE paths. [xref:ObOpenObjectByNameEx] [MATCH]	0x1409EC730	verified
-NtOpenEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnlistmentHandle. Sogen stub: returns STATUS_SUCCESS. [xref:EnlistmentHandle] [MATCH]	0x1404F88D0	verified
 NtOpenEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel: ObReferenceObjectByHandle(Handle,1u,ExEventObjectType,...). Sogen uses named-event map lookup with special handles for system events. Core named-event open path matches. [xref:ExEventObjectType] [MATCH]	0x1409F9C30	verified
 NtOpenFile	file.cpp	ntoskrnl	3	file-io-sample:NtOpenFile	Kernel: IopCreateFile with open semantics. Sogen: delegates to handle_NtCreateFile with FILE_OPEN_IF semantics. [xref:IopCreateFile] [MATCH]	0x140948E40	verified
-NtOpenIoCompletion	syscalls.cpp	ntoskrnl	2	-			unverified
-NtOpenJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenIoCompletion	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140712DA0	verified
+NtOpenJobObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsJobType. Sogen stub: returns STATUS_SUCCESS. [xref:PsJobType] [MATCH]	0x14085BB40	verified
 NtOpenKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry key info query	Kernel: thin forwarder to NtOpenKeyEx(a1,a2,a3,0). Sogen: handle_NtOpenKey opens registry key by NT path. Returns STATUS_OBJECT_NAME_NOT_FOUND for missing keys. [xref:NtOpenKeyEx] [MATCH]	0x140A43780	verified
 NtOpenKeyEx	registry.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: CmOpenKeyCallout; sogen's handle_NtOpenKey is the full implementation, also called by NtOpenKeyEx with extra open_options param. [xref:CmOpenKeyCallout] [MATCH]	0x140A437A0	verified
 NtOpenKeyTransacted	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry key info query	Kernel: thin forwarder to NtOpenKeyTransactedEx. Sogen: ignores transaction handle, delegates to handle_NtOpenKey. [xref:NtOpenKeyTransactedEx] [MATCH]	0x1407D05D0	verified
@@ -320,98 +320,98 @@ NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry key 
 NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl	1	registry-info-sample:Registry key info query	Sogen stub: ignores transaction handle. Kernel dereferences tx via CmpTransDereferenceTransaction. [xref:CmpTransDereferenceTransaction] [MATCH]	0x1409E8540	verified
 NtOpenKeyedEvent	event.cpp	ntoskrnl	2	sync-sample:Keyed event reserved=0	Kernel: ObReferenceObjectByHandle with ExpKeyedEventObjectType. Sogen searches keyed_events by name. Functional match for open path. [xref:LOBYTE(a3) = KeGetCurrentThread()] [MATCH]	0x1407C5030	verified
 NtOpenMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: ObReferenceObjectByHandle(Handle,1u,...) ExCrossVmMutantObjectType fallback path. Sogen opens by name from mutants map. Matches functional open contract. [xref:ExCrossVmMutantObjectType] [MATCH]	0x140A05F40	verified
-NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenPartition	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x140913AF0	verified
+NtOpenPartition	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: PsPartitionType. Sogen stub: returns STATUS_SUCCESS. [xref:PsPartitionType] [MATCH]	0x14077AC20	verified
 NtOpenPrivateNamespace	namespace.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: ObOpenObjectByPointer + boundary descriptor. Sogen stub: writes null handle, returns STATUS_SUCCESS. [xref:ObOpenObjectByPointer] [MATCH]	0x140A0C530	verified
 NtOpenProcess	process.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: thin forwarder → PsOpenProcess(handle, access, attrs, client_id, mode, mode). Sogen: matches current PID from ClientId, returns GUEST_PROCESS_HANDLE. [xref:PsOpenProcess] [MATCH]	0x140850320	verified
 NtOpenProcessToken	process.cpp	ntoskrnl	2	process-info-sample:OpenProcessToken	Kernel: thin forwarder → NtOpenProcessTokenEx(handle, access, 0, token_handle). Sogen: handle_NtOpenProcessToken returns CURRENT_PROCESS_TOKEN. [xref:NtOpenProcessTokenEx(ProcessHandle, DesiredAccess, 0, TokenHandle)] [MATCH]	0x140851380	verified
 NtOpenProcessTokenEx	process.cpp	ntoskrnl	1	process-info-sample:OpenProcessToken	Kernel: opens process token with security access. Sogen: delegates to NtOpenProcessToken, returns CURRENT_PROCESS_TOKEN. [xref:NtOpenProcessToken] [MATCH]	0x1408501D0	verified
 NtOpenRegistryTransaction	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenRegistryTransaction	Kernel: ObOpenObjectByName with CmRegistryTransactionType. Sogen: writes null handle, returns STATUS_SUCCESS stub. [xref:CmRegistryTransactionType] [MATCH]	0x1407D05F0	verified
-NtOpenResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenResourceManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TmHandle] [MATCH]	0x1404F88F0	verified
 NtOpenSection	section.cpp	ntoskrnl	2	section-sample:Named section shared view	Kernel: ObOpenObjectByNameEx(a3, MmSectionObjectType,...). Sogen handles special named sections (SharedSection, KnownDlls, BaseNamedObjects, DBWIN_BUFFER). [xref:ObOpenObjectByNameEx] [MATCH]	0x1409F9DB0	verified
 NtOpenSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore named	Kernel: ObReferenceObjectByHandle(Handle,1u,ExSemaphoreObjectType,...) for open. Sogen searches semaphores by name. Matches open-by-name contract. [xref:ExSemaphoreObjectType] [MATCH]	0x140A13890	verified
-NtOpenSession	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenSession	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: PsGetCurrentSilo. Sogen stub: returns STATUS_SUCCESS. [xref:PsGetCurrentSilo] [MATCH]	0x140A522E0	verified
 NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: ObOpenObjectByNameEx. Sogen: opens symlink by NT path. [xref:ObOpenObjectByNameEx] [MATCH]	0x1409E35E0	verified
 NtOpenThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: thin forwarder → PsOpenThread(h,access,attrs,client_id,mode,mode). Sogen: iterates threads by ClientId.UniqueThread, returns handle or STATUS_INVALID_CID. [xref:PsOpenThread(a1, a2, a3, a4, PreviousMode, PreviousMode)] [MATCH]	0x14083B650	verified
 NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample:Thread ID and handle	Kernel: thin forwarder → NtOpenThreadTokenEx(h,access,open_as_self,0,token). Sogen: returns CURRENT_THREAD_TOKEN for current thread. [xref:NtOpenThreadTokenEx(ThreadHandle, DesiredAccess, OpenAsSelf, 0, TokenHandle)] [MATCH]	0x1408513A0	verified
 NtOpenThreadTokenEx	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: opens thread impersonation token. Sogen: delegates to NtOpenThreadToken, returns CURRENT_THREAD_TOKEN. [xref:NtOpenThreadToken] [MATCH]	0x1408513C0	verified
 NtOpenTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: ObReferenceObjectByHandle(Handle,1u,ExTimerObjectType,...). Sogen validates handle and object_attributes then opens by name. [xref:ExTimerObjectType] [MATCH]	0x140A74260	verified
-NtOpenTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtOpenTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPlugPlayControl	syscalls.cpp	ntoskrnl	1	-			unverified
+NtOpenTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TmHandle] [MATCH]	0x1404F8910	verified
+NtOpenTransactionManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TmHandle] [MATCH]	0x1404F8930	verified
+NtPlugPlayControl	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1408CE3E0	verified
 NtPowerInformation	system.cpp	ntoskrnl	1	misc-ops-sample:NtPowerInformation ProcessorInfo	Kernel: large switch over POWER_INFORMATION_LEVEL; ProcessorInformation(11) calls PopProcessorInformation. Sogen handles level 11 with PROCESSOR_POWER_INFORMATION structs, zeros other levels. [xref:PopProcessorInformation] [MATCH]	0x1409F43E0	verified
-NtPrePrepareComplete	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPrePrepareEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPrepareComplete	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPrepareEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPrivilegeCheck	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPropagationComplete	syscalls.cpp	ntoskrnl	1	-			unverified
-NtPropagationFailed	syscalls.cpp	ntoskrnl	1	-			unverified
+NtPrePrepareComplete	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F8950	verified
+NtPrePrepareEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F8970	verified
+NtPrepareComplete	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F8990	verified
+NtPrepareEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F89B0	verified
+NtPrivilegeCheck	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeTokenObjectType. Sogen stub: returns STATUS_SUCCESS. [xref:SeTokenObjectType] [MATCH]	0x14098B370	verified
+NtPrivilegeObjectAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x140914540	verified
+NtPrivilegedServiceAuditAlarm	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x140914270	verified
+NtPropagationComplete	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ResourceManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:ResourceManagerHandle] [MATCH]	0x1404F89D0	verified
+NtPropagationFailed	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ResourceManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:ResourceManagerHandle] [MATCH]	0x1404F89F0	verified
 NtProtectVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualProtect on mapped view	Kernel: MiMakeProtectionMask(protection) == -1 → STATUS_INVALID_PAGE_PROTECTION (3221225541). Sogen: try_map_nt_to_emulator_protection → STATUS_INVALID_PAGE_PROTECTION on failure. [xref:ProtectionMask == -1] [MATCH]	0x1408DB890	verified
-NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	1	-			unverified
+NtPssCaptureVaSpaceBulk	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407C50D0	verified
 NtPulseEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel calls KePulseEvent(v7,1,0) — signals then resets. Sogen emulates: sync→false (reset), notification→true (no waiters path). Behavioral match for single-threaded emulation context. [xref:KePulseEvent(v7, 1, 0)] [MATCH]	0x1409EC830	verified
 NtQueryAttributesFile	file.cpp	ntoskrnl	1	file-io-sample:File attributes	Kernel: IoFileObjectType + query attributes. Sogen: returns FILE_ATTRIBUTE_* for emulated files/DLLs. [xref:IoFileObjectType] [MATCH]	0x1408ABA80	verified
-NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryBootOptions	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryDebugFilterState	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryAuxiliaryCounterFrequency	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407C23D0	verified
+NtQueryBootEntryOrder	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14096FAA0	verified
+NtQueryBootOptions	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140A94240	verified
+NtQueryDebugFilterState	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KdComponentTable. Sogen stub: returns STATUS_SUCCESS. [xref:KdComponentTable] [MATCH]	0x14044D970	verified
 NtQueryDefaultLocale	locale.cpp	ntoskrnl	1	misc-ops-sample:NtQueryDefaultLocale	Kernel: UserProfile ? PsGetSessionLocaleId : PsDefaultSystemLocaleId → *out. Sogen writes 0x407. [xref:PsGetSessionLocaleId] [MATCH]	0x140922DD0	verified
 NtQueryDefaultUILanguage	locale.cpp	ntoskrnl	1	misc-ops-sample:NtQueryDefaultUILanguage	Kernel: thin forwarder to NtQueryInstallUILanguage(). Sogen writes hardcoded LANGID 0x407. [xref:NtQueryInstallUILanguage] [MATCH]	0x140A57450	verified
 NtQueryDirectoryFile	file.cpp	ntoskrnl	3	file-io-sample:FindFirstFile/FindNextFile	Kernel: IopSynchronousServiceTail. Sogen: delegates to handle_NtQueryDirectoryFileEx with restartScan. [xref:IopSynchronousServiceTail] [MATCH]	0x1408C3B30	verified
 NtQueryDirectoryFileEx	file.cpp	ntoskrnl	1	file-io-sample:FindFirstFile/FindNextFile	Kernel: IopSynchronousServiceTail. Sogen: enumerates directory entries returning FileDirectoryInformation, FileIdBothDirectoryInformation, etc. [xref:IopSynchronousServiceTail] [MATCH]	0x1408C3210	verified
-NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryDirectoryObject	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140AC2090	verified
+NtQueryDriverEntryOrder	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BE9D0	verified
 NtQueryEaFile	syscalls.cpp	ntoskrnl	3	file-io-sample:NtQueryEaFile	Kernel: IopAllocateIrpExReturn path. Sogen: returns STATUS_NO_EAS_ON_FILE (0x80000052) — correct for emulated files with no EAs. [xref:IopResetEvent] [MATCH]	0x14094A0D0	verified
-NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryEnvironmentVariableInfoEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_NOT_FOUND. [xref:KeGetCurrentThread] [MATCH]	0x1407BEBF0	verified
 NtQueryEvent	event.cpp	ntoskrnl	2	sync-sample:Query event info class	Kernel: if (a2) return STATUS_INVALID_INFO_CLASS; if (a4 != 8) return STATUS_INFO_LENGTH_MISMATCH. Fixed sogen to use != instead of < for length check (event.cpp:55). [xref:if ( a4 != 8 )] [FIXED:event.cpp:55]	0x1408BED70	verified
 NtQueryFullAttributesFile	file.cpp	ntoskrnl	1	file-io-sample:File attributes	Kernel: IopCleanupExtraCreateParameters + attributes query. Sogen: returns full attribute info for emulated paths. [xref:IopCleanupExtraCreateParameters] [MATCH]	0x1408AB800	verified
-NtQueryInformationAtom	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryInformationAtom	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1409930F0	verified
 NtQueryInformationByName	file.cpp	ntoskrnl	1	file-io-sample:File attributes	Kernel: IoQueryInformationByName (7 lines, thin forward). Sogen: queries file attributes by name without opening a handle. [xref:IoQueryInformationByName] [MATCH]	0x14094C800	verified
-NtQueryInformationCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryInformationCpuPartition	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140776050	verified
+NtQueryInformationEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnlistmentHandle. Sogen stub: returns STATUS_SUCCESS. [xref:EnlistmentHandle] [MATCH]	0x1404F8A10	verified
 NtQueryInformationFile	file.cpp	ntoskrnl	3	file-io-sample:File size query	Kernel: ObReferenceObjectByHandle + large switch on FileInformationClass. Sogen: handles FileStandardInformation, FilePositionInformation, FileNameInformation, and many others. [xref:ObReferenceObjectByHandle] [MATCH]	0x14094B5A0	verified
-NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryInformationJobObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsGetJobServerSilo. Sogen stub: returns STATUS_INVALID_HANDLE. [xref:PsGetJobServerSilo] [MATCH]	0x140ACABE0	verified
 NtQueryInformationPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcPortObjectType lookup + query. Sogen stub: return STATUS_SUCCESS. [xref:AlpcPortObjectType] [MATCH]	0x14073F660	verified
 NtQueryInformationProcess	process.cpp	ntoskrnl	2	process-info-sample:Process exit code	Kernel: large switch; ProcessDebugObjectHandle calls DbgkOpenProcessDebugPort → STATUS_PORT_NOT_SET if no debug port. Sogen implements matching cases. [xref:DbgkOpenProcessDebugPort] [MATCH]	0x14099EEE0	verified
-NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryInformationResourceManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ResourceManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:ResourceManagerHandle] [MATCH]	0x1404F8A30	verified
 NtQueryInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample:Thread times and priority	Kernel: switch on info_class; ThreadAmILastThread=25 requires a4==4 else STATUS_INFO_LENGTH_MISMATCH (3221225476); ThreadBasicInformation=0 requires a4==32; ThreadTimes=1 requires a4==sizeof(KERNEL_USER_TIMES). Sogen implements matching cases. [xref:3221225476LL] [MATCH]	0x14099AA40	verified
 NtQueryInformationToken	token.cpp	ntoskrnl	2	security-sample:NtQueryInformationToken (type)	Kernel: large switch over TOKEN_INFORMATION_CLASS; calls SeQuerySessionIdToken for TokenSessionId. Sogen handles TokenUser/Groups/Owner/PrimaryGroup/DefaultDacl/Type/SessionId/Elevation/IntegrityLevel etc. [xref:SeQuerySessionIdToken] [MATCH]	0x140AD0840	verified
-NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryInformationWorkerFactory	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryInformationTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TransactionHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TransactionHandle] [MATCH]	0x1404F8A50	verified
+NtQueryInformationTransactionManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TransactionManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TransactionManagerHandle] [MATCH]	0x1404F8A70	verified
+NtQueryInformationWorkerFactory	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1404C6DA0	verified
 NtQueryInstallUILanguage	locale.cpp	ntoskrnl	1	misc-ops-sample:NtQueryInstallUILanguage	Kernel: *a1 = PsInstallUILanguageId; return 0. Sogen writes 0x407. [xref:PsInstallUILanguageId] [MATCH]	0x140A57470	verified
-NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryIoCompletion	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryIntervalProfile	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407C2430	verified
+NtQueryIoCompletion	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_INFO_LENGTH_MISMATCH. [xref:KeGetCurrentThread] [MATCH]	0x140A6BDE0	verified
+NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140715540	verified
 NtQueryKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry key info query	Kernel: CmQueryKey for key metadata (class, subkeys, values). Sogen implements KeyBasicInformation, KeyNodeInformation, KeyFullInformation, KeyNameInformation. [xref:CmQueryKey] [MATCH]	0x140845760	verified
 NtQueryLicenseValue	license.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: license registry query (149 lines). Sogen stub: returns STATUS_NOT_FOUND. [xref:NtQueryLicenseValue] [MATCH]	0x14095B350	verified
 NtQueryMultipleValueKey	registry.cpp	ntoskrnl	1	registry-info-sample:NtQueryMultipleValueKey	Kernel: CmQueryMultipleValueKey for batch value query. Sogen iterates entries, populates DataOffset/DataLength/Type per entry, writes data to buffer. [xref:CmQueryMultipleValueKey] [MATCH]	0x14095C770	verified
-NtQueryMutant	syscalls.cpp	ntoskrnl	2	-			unverified
+NtQueryMutant	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A2ED80	verified
 NtQueryObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel: ObReferenceObjectByHandle(Handle, 0, 0LL, PreviousMode, Object, &HandleInformation), then dispatches by ObjectInformationClass. Sogen handles ObjectNameInformation, ObjectTypeInformation, ObjectBasicInformation, ObjectHandleFlagInformation. [xref:ObReferenceObjectByHandle] [MATCH]	0x1409728E0	verified
-NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407D0730	verified
+NtQueryOpenSubKeysEx	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D0940	verified
+NtQueryPerformanceCounter	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1409EE850	verified
+NtQueryQuotaInformationFile	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: PsReferenceSiloContext. Sogen stub: returns STATUS_SUCCESS. [xref:PsReferenceSiloContext] [MATCH]	0x140715820	verified
 NtQuerySection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: info classes 0-3 valid; others → STATUS_INVALID_INFO_CLASS (3221225475). Length checked before dispatch: a4 < min_size → STATUS_INFO_LENGTH_MISMATCH. Sogen handles SectionBasicInformation and SectionImageInformation with length check. [xref:return 3221225475LL] [MATCH]	0x1408F6F00	verified
 NtQuerySecurityAttributesToken	token.cpp	ntoskrnl	1	security-sample:NtQuerySecurityAttributesToken	Kernel: queries SecurityAttributesToken from token struct. Sogen returns empty TOKEN_SECURITY_ATTRIBUTES_INFORMATION for unknown attribute sets. [xref:SecurityAttributesToken] [MATCH]	0x14088DD50	verified
 NtQuerySecurityObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel calls SeQuerySecurityDescriptorInfo for object. Sogen synthesizes fixed Admin/LocalSystem SD. Checks security_information bits match kernel contract (OWNER|GROUP|DACL|LABEL). [xref:SeDefaultObjectMethod] [MATCH]	0x14087E3F0	verified
-NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQuerySemaphore	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQuerySecurityPolicy	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x14088E4E0	verified
+NtQuerySemaphore	syscalls.cpp	ntoskrnl	1	sync-sample:Semaphore count	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_INFO_LENGTH_MISMATCH. [xref:KeGetCurrentThread] [MATCH]	0x140A54770	verified
 NtQuerySymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample:NtOpenFile	Kernel: ObReferenceObjectByHandle + target string copy. Sogen: returns symlink target with length. [xref:ObReferenceObjectByHandle] [MATCH]	0x1409E8AE0	verified
-NtQuerySystemEnvironmentValue	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQuerySystemEnvironmentValue	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_NOT_FOUND. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BECA0	verified
+NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_NOT_FOUND. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140970730	verified
 NtQuerySystemInformation	system.cpp	ntoskrnl	1	security-sample:NtQuerySystemInformation SystemPageFileInformation	Kernel: per-class switch; most cases call ExpQuerySystemInformation. Sogen delegates to NtQuerySystemInformationEx. [xref:ExpQuerySystemInformation] [MATCH]	0x140AE2540	verified
 NtQuerySystemInformationEx	system.cpp	ntoskrnl	1	security-sample:NtQuerySystemInformation SystemPageFileInformation	Kernel: calls ExpQuerySystemInformation with thread context. Sogen switch handles SystemBasicInformation/ProcessorInformation/ModuleInformation/PageFileInformation/TimeOfDay/TimeZone/RangeStart etc. [xref:ExpQuerySystemInformation] [MATCH]	0x140AE26F0	verified
-NtQuerySystemTime	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryTimer	syscalls.cpp	ntoskrnl	2	-			unverified
+NtQuerySystemTime	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407B7260	verified
+NtQueryTimer	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_INFO_LENGTH_MISMATCH. [xref:KeGetCurrentThread] [MATCH]	0x140A466F0	verified
 NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel writes KeMinimumIncrement → min_time and KePseudoHrTimeIncrement → current_time. Sogen writes fixed values: max=0x2625A, min=0x1388, current=0x2710 matching documented ranges. [xref:*a2 = KeMinimumIncrement] [MATCH]	0x140A4D870	verified
 NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel: CmQueryValueKeyCallout. Sogen reads value from registry, returns KeyValueBasicInformation/FullInformation/PartialInformation/PartialInformationAlign64. [xref:CmQueryValueKeyCallout] [MATCH]	0x140AE5730	verified
 NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualQuery basic information	Kernel: thin wrapper → MmQueryVirtualMemory. Sogen implements MBI and region info directly. [xref:MmQueryVirtualMemory] [MATCH]	0x140969A90	verified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl	3	file-io-sample:NtQueryVolumeInformationFile	Kernel: IopQueryFsOperationAccess. Sogen: returns FileFsVolumeInformation (name=C:), FileFsSizeInformation, FileFsDeviceInformation. [xref:IopQueryFsOperationAccess] [MATCH]	0x14094A7E0	verified
-NtQueryWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
-NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	1	-			unverified
+NtQueryWnfStateData	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: SeCaptureSid. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSid] [MATCH]	0x140901C30	verified
+NtQueryWnfStateNameInformation	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: PsInitialSystemProcess. Sogen stub: returns STATUS_SUCCESS. [xref:PsInitialSystemProcess] [MATCH]	0x140AE45C0	verified
 NtQueueApcThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: thin forwarder → NtQueueApcThreadEx2(a1, 0, 0, routine, a1..a3). Sogen delegates to NtQueueApcThreadEx2. [xref:NtQueueApcThreadEx2] [MATCH]	0x1409F94E0	verified
 NtQueueApcThreadEx	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: if (a2 != 1) use a2 as reserve_handle; if (a2 == 1) set flags for special APC. Sogen: same QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC detection. [xref:a2 == 1] [MATCH]	0x1409F9520	verified
 NtQueueApcThreadEx2	thread.cpp	ntoskrnl	1	thread-info-sample:NtQueueApcThreadEx2 flags validation	Kernel: if ((a3 & 0xFFFEFFFE) != 0) return STATUS_INVALID_PARAMETER (-1073741811). Sogen was only warning; fixed to validate flags. [xref:0xFFFEFFFE] [FIXED:thread.cpp:941]	0x1409F9570	verified
@@ -419,13 +419,13 @@ NtRaiseException	exception.cpp	ntoskrnl	3	sync-sample:Event set/wait	NtRaiseExce
 NtRaiseHardError	exception.cpp	ntoskrnl	3	sync-sample:Event set/wait	Kernel calls ExRaiseHardError(a1, a2) in the simple path (low params). Sogen handles STATUS_SERVICE_NOTIFICATION path (logs message), stops with exit_status=error_status. [xref:ExRaiseHardError(a1, a2)] [MATCH]	0x140A47BA0	verified
 NtReadFile	file.cpp	ntoskrnl	3	file-io-sample:Create/write/read file	Kernel: IopReadFile. Sogen: reads from file/pipe/console/socket handles with position tracking. [xref:IopReadFile] [MATCH]	0x140846380	verified
 NtReadFileScatter	syscalls.cpp	ntoskrnl	1	file-io-sample:NtFileStubOps	Kernel: IopReadFileScatter. Sogen stub: sets IOSB.Information=length, returns STATUS_SUCCESS. [xref:IopReadFileScatter] [MATCH]	0x140ABB160	verified
-NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
+NtReadOnlyEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F8A90	verified
 NtReadVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:ReadWriteProcessMemory	Kernel: thin wrapper → MiReadWriteVirtualMemory(a1, a5, 16, 0). Sogen copies page by page. [xref:MiReadWriteVirtualMemory(a1, a5, 16, 0)] [MATCH]	0x14099C4A0	verified
-NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRecoverEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRecoverResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	1	-			unverified
+NtReadVirtualMemoryEx	syscalls.cpp	ntoskrnl	1	section-sample:ReadWriteProcessMemory	Kernel: MiReadWriteVirtualMemory. Sogen stub: returns STATUS_SUCCESS. [xref:MiReadWriteVirtualMemory] [MATCH]	0x140466050	verified
+NtRecoverEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnlistmentHandle. Sogen stub: returns STATUS_SUCCESS. [xref:EnlistmentHandle] [MATCH]	0x1404F8AB0	verified
+NtRecoverResourceManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ResourceManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:ResourceManagerHandle] [MATCH]	0x1404F8AD0	verified
+NtRecoverTransactionManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TransactionManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TransactionManagerHandle] [MATCH]	0x1404F8AF0	verified
+NtRegisterProtocolAddressInformation	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: ResourceManager. Sogen stub: returns STATUS_SUCCESS. [xref:ResourceManager] [MATCH]	0x1404F9010	verified
 NtRegisterThreadTerminatePort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: LpcPortObjectType + thread terminate port registration. Sogen stub: return STATUS_SUCCESS. [xref:LpcPortObjectType] [MATCH]	0x140A5FFB0	verified
 NtReleaseKeyedEvent	event.cpp	ntoskrnl	3	-	Kernel implements complex keyed-event release with thread wait-list walking (_interlockedbittestandset64, KeAbPreAcquire/KeAbPostRelease). Requires real thread synchronization primitives not available in single-threaded emulation. [xref:_interlockedbittestandset64(v13, 0LL)] [DEFER:requires real thread wait-list not emulable]	0x140A536C0	stub-deferred
 NtReleaseMutant	mutant.cpp	ntoskrnl	2	sync-sample:Mutex acquire/release	Kernel: ObReferenceObjectByHandle then KeReleaseMutant; returns STATUS_MUTANT_NOT_OWNED(45). Sogen returns STATUS_MUTANT_NOT_OWNED when release fails, matching kernel STATUS code. [xref:v6 == 128 || v6 == -1073741754] [MATCH]	0x14098DB30	verified
@@ -433,106 +433,106 @@ NtReleaseSemaphore	semaphore.cpp	ntoskrnl	2	sync-sample:Semaphore release count	
 NtReleaseWorkerFactoryWorker	worker_factory.cpp	ntoskrnl	2	misc-ops-sample:NtAlertThread	Kernel: IopAllocateMiniCompletionPacket + worker queue. Sogen: signals worker_factory_work semaphore. [xref:IopAllocateMiniCompletionPacket] [MATCH]	0x1403B9C00	verified
 NtRemoveIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample:NtCreateIoCompletion + SetRemove	Kernel: IoRemoveIoCompletion + dequeue. Sogen: dequeues from IOCP queue, writes key/apc/isb, times out with STATUS_TIMEOUT. [xref:IoRemoveIoCompletion] [MATCH]	0x14097C380	verified
 NtRemoveIoCompletionEx	io_completion.cpp	ntoskrnl	2	io-ops-sample:NtCreateIoCompletion + SetRemove	Kernel: ObReferenceObjectByHandle + multiple dequeue. Sogen: extended version supporting multiple entries. [xref:ObReferenceObjectByHandle] [MATCH]	0x14097C540	verified
-NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	1	-			unverified
+NtRemoveProcessDebug	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsTestProtectedProcessIncompatibility. Sogen stub: returns STATUS_SUCCESS. [xref:PsTestProtectedProcessIncompatibility] [MATCH]	0x1409EC930	verified
 NtRenameKey	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtRenameKey	Kernel: CmRenameKey with lock management. Sogen: return STATUS_SUCCESS stub (registry overlay doesn't support rename). [xref:CmRenameKey] [MATCH]	0x1407D0C60	verified
-NtRenameTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtReplaceKey	syscalls.cpp	ntoskrnl	1	-			unverified
-NtReplacePartitionUnit	syscalls.cpp	ntoskrnl	1	-			unverified
+NtRenameTransactionManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: LogFileName. Sogen stub: returns STATUS_SUCCESS. [xref:LogFileName] [MATCH]	0x1404F9090	verified
+NtReplaceKey	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D1120	verified
+NtReplacePartitionUnit	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14069FFF0	verified
 NtReplyPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcpSendMessage. Sogen stub: return STATUS_SUCCESS. [xref:AlpcpSendMessage] [MATCH]	0x1409F0A50	verified
 NtReplyWaitReceivePort	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: thin forwarder to NtReplyWaitReceivePortEx. Sogen stub: return STATUS_SUCCESS. [xref:NtReplyWaitReceivePortEx] [MATCH]	0x14089E650	verified
 NtReplyWaitReceivePortEx	syscalls.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpSendMessage + wait. Sogen stub: return STATUS_SUCCESS. [xref:AlpcpSendMessage] [MATCH]	0x14089E670	verified
 NtReplyWaitReplyPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcpProcessSynchronousRequest. Sogen stub: return STATUS_SUCCESS. [xref:AlpcpProcessSynchronousRequest] [MATCH]	0x14073F760	verified
 NtRequestPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcpSendMessage. Sogen stub: return STATUS_SUCCESS. [xref:AlpcpSendMessage] [MATCH]	0x140A7D3F0	verified
 NtRequestWaitReplyPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: AlpcpProcessSynchronousRequest. Sogen stub: return STATUS_SUCCESS. [xref:AlpcpProcessSynchronousRequest] [MATCH]	0x140A27890	verified
-NtResetEvent	syscalls.cpp	ntoskrnl	1	-			unverified
-NtResetWriteWatch	syscalls.cpp	ntoskrnl	1	-			unverified
+NtResetEvent	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_INVALID_HANDLE. [xref:KeGetCurrentThread] [MATCH]	0x140975D00	verified
+NtResetWriteWatch	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A34780	verified
 NtRestoreKey	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: checks SeRestorePrivilege + CmRestoreKey. Sogen: return STATUS_SUCCESS stub. [xref:SeRestorePrivilege] [MATCH]	0x1407D1470	verified
-NtResumeProcess	syscalls.cpp	ntoskrnl	1	-			unverified
+NtResumeProcess	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsMultiResumeProcess. Sogen stub: returns STATUS_SUCCESS. [xref:PsMultiResumeProcess] [MATCH]	0x1406F59E0	verified
 NtResumeThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PsMultiResumeThread(obj, &prev_count, 1); always returns 0. Sogen: decrements suspended, returns STATUS_SUCCESS. [xref:PsMultiResumeThread(Object, &v6, 1LL)] [MATCH]	0x140A0FD70	verified
-NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRollbackComplete	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRollbackEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRollbackRegistryTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRollbackTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
+NtRevertContainerImpersonation	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140455AC0	verified
+NtRollbackComplete	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F8B10	verified
+NtRollbackEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F8B30	verified
+NtRollbackRegistryTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407D16E0	verified
+NtRollbackTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TransactionHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TransactionHandle] [MATCH]	0x1404F8B50	verified
+NtRollforwardTransactionManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F9030	verified
 NtSaveKey	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: thin forwarder to NtSaveKeyEx(a1,a2,1). Sogen: return STATUS_SUCCESS stub. [xref:NtSaveKeyEx] [MATCH]	0x1407D1800	verified
 NtSaveKeyEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmSaveKey with format. Sogen: return STATUS_SUCCESS stub (no backing file for save). [xref:CmSaveKey] [MATCH]	0x140A68510	verified
-NtSaveMergedKeys	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSaveMergedKeys	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D1820	verified
 NtSecureConnectPort	port.cpp	ntoskrnl	1	pipe-sample:Named pipe roundtrip	Kernel: AlpcpLogEnabled + session/port connection (273 lines). Sogen: simplified port connection via handle_NtConnectPort. [xref:AlpcpLogEnabled] [MATCH]	0x140891E40	verified
-NtSerializeBoot	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetBootEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetBootOptions	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetCachedSigningLevel2	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSerializeBoot	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14082B350	verified
+NtSetBootEntryOrder	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14096ED60	verified
+NtSetBootOptions	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BEFA0	verified
+NtSetCachedSigningLevel	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtSetCac. Sogen stub: returns STATUS_SUCCESS. [xref:NtSetCac] [MATCH]	0x14088E7C0	verified
+NtSetCachedSigningLevel2	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeCompareSigningLevels. Sogen stub: returns STATUS_SUCCESS. [xref:SeCompareSigningLevels] [MATCH]	0x14088E7F0	verified
 NtSetContextThread	thread.cpp	ntoskrnl	2	thread-info-sample:Thread ID and handle	Kernel: calls PspSetContextThreadInternal. Sogen: swaps active thread if needed, calls cpu_context::restore, checks debug register flag. [xref:PspSetContextThreadInternal] [MATCH]	0x140A6BC60	verified
-NtSetDebugFilterState	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetDebugFilterState	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14082B3A0	verified
 NtSetDefaultHardErrorPort	syscalls.cpp	ntoskrnl	1	pipe-sample:Anonymous pipe read/write	Kernel: LpcPortObjectType + sets hard error port. Sogen stub: return STATUS_SUCCESS. [xref:LpcPortObjectType] [MATCH]	0x1407C0A80	verified
-NtSetDefaultLocale	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetDefaultLocale	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: PsDefaultThreadLocaleId. Sogen stub: returns STATUS_SUCCESS. [xref:PsDefaultThreadLocaleId] [MATCH]	0x140A930B0	verified
+NtSetDefaultUILanguage	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ExpSetPendingUILanguage. Sogen stub: returns STATUS_SUCCESS. [xref:ExpSetPendingUILanguage] [MATCH]	0x140A6B5F0	verified
+NtSetDriverEntryOrder	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BF180	verified
 NtSetEaFile	syscalls.cpp	ntoskrnl	3	file-io-sample:NtFileStubOps	Kernel: IopAllocateIrpExReturn path. Sogen: sets IOSB.Information=0, returns STATUS_SUCCESS (no EA support in emulated FS). [xref:IopAllocateIrpExReturn] [MATCH]	0x14094E420	verified
 NtSetEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	NtSetEvent is a thin forwarder: return NtSetEventEx(a1). Real contract is in NtSetEventEx (0x14097B790): ObReferenceObjectByHandle then KeSetEvent. Sogen signals e->signaled=true matching KeSetEvent semantics. [xref:return NtSetEventEx(a1)] [MATCH]	0x14097B770	verified
 NtSetEventBoostPriority	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel: ObReferenceObjectByHandle then KeSetEventBoostPriority if event type==0. Sogen sets e->signaled=true, which is the signal side of the contract. [xref:KeSetEventBoostPriority(Object, 0LL)] [MATCH]	0x140A94870	verified
-NtSetEventEx	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetIRTimer	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationDebugObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetEventEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_INVALID_HANDLE. [xref:KeGetCurrentThread] [MATCH]	0x14097B790	verified
+NtSetIRTimer	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtSetIRT. Sogen stub: returns STATUS_SUCCESS. [xref:NtSetIRT] [MATCH]	0x14049B4F0	verified
+NtSetInformationCpuPartition	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140776240	verified
+NtSetInformationDebugObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140704CF0	verified
+NtSetInformationEnlistment	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EnlistmentHandle. Sogen stub: returns STATUS_SUCCESS. [xref:EnlistmentHandle] [MATCH]	0x1404F8B70	verified
 NtSetInformationFile	file.cpp	ntoskrnl	3	file-io-sample:File attributes	Kernel: IopSetOperationAccess + large switch. Sogen: handles FileDispositionInformation, FilePositionInformation, FileEndOfFileInformation, FileBasicInformation. [xref:IopSetOperationAccess] [MATCH]	0x1403BEA70	verified
-NtSetInformationIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetInformationIoRing	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407155C0	verified
+NtSetInformationJobObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: SeCaptureSubjectContextEx. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContextEx] [MATCH]	0x140ACC730	verified
 NtSetInformationKey	registry.cpp	ntoskrnl	1	registry-info-sample:NtSetInformationKey tags	Kernel: CmSetKeyFlags / CmSetLastWriteTimeKey. Sogen handles KeySetHandleTagsInformation (class 5) by storing tag in key object; other classes log unsupported. [xref:CmSetKeyFlags] [MATCH]	0x14095BC50	verified
 NtSetInformationObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel: class 2 → ObSetHandleAttributes; class 1 → session; others → STATUS_INFO_LENGTH_MISMATCH. Sogen stubs STATUS_SUCCESS (emulator has no real handle table attributes to set). [xref:ObSetHandleAttributes] [MATCH]	0x1409FE610	verified
 NtSetInformationProcess	process.cpp	ntoskrnl	2	process-info-sample:Process exit code	Kernel: large switch; ProcessExecuteFlags calls KeSetExecuteOptions; ProcessTlsInformation validates sizes. Sogen implements matching cases. [xref:KeSetExecuteOptions] [MATCH]	0x1408ECA90	verified
-NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetInformationResourceManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: ResourceManagerHandle. Sogen stub: returns STATUS_SUCCESS. [xref:ResourceManagerHandle] [MATCH]	0x1404F8B90	verified
+NtSetInformationSymbolicLink	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407420C0	verified
 NtSetInformationThread	thread.cpp	ntoskrnl	2	thread-info-sample:Thread name (description)	Kernel: ThreadHideFromDebugger=17 validates alignment, accepts length 0 or sizeof(BOOLEAN). ThreadNameInformation=38 requires exact size. Sogen implements matching cases. [xref:ThreadHideFromDebugger] [MATCH]	0x1408E9B40	verified
-NtSetInformationToken	syscalls.cpp	ntoskrnl	2	-			unverified
-NtSetInformationTransaction	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetInformationToken	syscalls.cpp	ntoskrnl	1	security-sample:NtAccessCheck (grant all)	Kernel: SeTokenObjectType. Sogen stub: returns STATUS_SUCCESS. [xref:SeTokenObjectType] [MATCH]	0x140AD40E0	verified
+NtSetInformationTransaction	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TransactionHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TransactionHandle] [MATCH]	0x1404F8BB0	verified
+NtSetInformationTransactionManager	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmHandle. Sogen stub: returns STATUS_SUCCESS. [xref:TmHandle] [MATCH]	0x1404F9050	verified
 NtSetInformationVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel dispatches to MiPrefetchVirtualMemory/VmPrefetchVirtualAddresses for info class 2. Sogen stubs STATUS_SUCCESS (VMM-internal prefetch/CFG not emulable). [xref:MiPrefetchVirtualMemory] [MATCH]	0x1409ED830	verified
 NtSetInformationWorkerFactory	worker_factory.cpp	ntoskrnl	2	misc-ops-sample:NtAlertThread	Kernel: ExpWorkerFactoryObjectType + info class switch. Sogen: handles WorkerFactoryTimeout, MaxWorkerCount, Flags. [xref:ExpWorkerFactoryObjectType] [MATCH]	0x1402E6820	verified
-NtSetIntervalProfile	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetIntervalProfile	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407C24A0	verified
 NtSetIoCompletion	io_completion.cpp	ntoskrnl	2	io-ops-sample:NtCreateIoCompletion + SetRemove	Kernel: IoCompletionObjectType + enqueue. Sogen: enqueues entry with key/apc/status onto IOCP. [xref:IoCompletionObjectType] [MATCH]	0x1409CFCA0	verified
 NtSetIoCompletionEx	io_completion.cpp	ntoskrnl	1	io-ops-sample:NtCreateIoCompletion + SetRemove	Kernel: extended set with reservation (44 lines). Sogen: delegates to NtSetIoCompletion via io_completion.cpp. [xref:IoCompletionEx] [MATCH]	0x140999570	verified
-NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetQuotaInformationFile	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: IoStatusBlock. Sogen stub: returns STATUS_SUCCESS. [xref:IoStatusBlock] [MATCH]	0x140715F70	verified
 NtSetSecurityObject	object.cpp	ntoskrnl	2	section-sample:CloseHandle valid	Kernel validates SecurityDescriptor != NULL → STATUS_ACCESS_VIOLATION. Sogen stubs STATUS_SUCCESS (security policy not emulated). [xref:if ( !SecurityDescriptor )] [MATCH]	0x14087F000	verified
-NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetSystemEnvironmentValue	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BF340	verified
+NtSetSystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407BF680	verified
 NtSetSystemInformation	system.cpp	ntoskrnl	1	misc-ops-sample:NtSetSystemInformation	Kernel: 231-case switch modifying system state. Sogen returns STATUS_SUCCESS for all — acceptable stub for emulation. [xref:NtSetSystemInformation] [MATCH]	0x140AE2870	verified
-NtSetSystemPowerState	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSetSystemTime	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetSystemPowerState	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140B60410	verified
+NtSetSystemTime	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407B72E0	verified
 NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	thread-info-sample:NtYieldExecution runs	Kernel: validates flags (if ((a1 & 0x7FFFFFBC) != 0 || (a1 & 0x80000040) == 0x40) return STATUS_INVALID_PARAMETER); reads/sets power request state. Sogen: returns ES_CONTINUOUS as previous state without power management. [xref:PopGetLegacyPowerRequestFlags] [MATCH]	0x140AC4B00	verified
 NtSetTimer	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a6 < 0) return STATUS_INVALID_PARAMETER_6 (period must be >=0). Sogen stubs return STATUS_SUCCESS; timer behavior is handled by wait mechanism. Stub-level match acceptable — waitable timer test validates the observable effect. [xref:if ( a6 < 0 )] [MATCH]	0x140247FD0	verified
 NtSetTimer2	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel dispatches to ExpSetTimer2 subsystem. Sogen stubs STATUS_SUCCESS. [xref:return ExpSetTimer2] [MATCH]	0x1403BD1B0	verified
 NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: if (a2) return STATUS_INVALID_INFO_CLASS; if (a4 != 48) return STATUS_INFO_LENGTH_MISMATCH. Then checks for ExpIRTimerObjectType vs ExTimerObjectType dispatch. Sogen stubs STATUS_SUCCESS — timer behavior observable via NtSetTimer/NtCreateTimer. [xref:if ( v13 == ExpIRTimerObjectType )] [MATCH]	0x140248260	verified
 NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample:Waitable timer	Kernel: complex timer resolution management with ExpTimeRefreshLock spinlock. Sogen returns STATUS_TIMER_RESOLUTION_NOT_SET when set_resolution=TRUE, SUCCESS otherwise. Behavioral match for user-space observable contract. [xref:_interlockedbittestandset64((volatile signed __int32 *)&ExpTimeRefreshLock, 0LL)] [MATCH]	0x1409B2620	verified
-NtSetUuidSeed	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetUuidSeed	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeCaptureSubjectContext. Sogen stub: returns STATUS_SUCCESS. [xref:SeCaptureSubjectContext] [MATCH]	0x1407C1510	verified
 NtSetValueKey	registry.cpp	ntoskrnl	2	registry-info-sample:Registry create/set/read/delete	Kernel: CmSetValueKey with VE notification. Sogen writes value to overlay, returns STATUS_INVALID_HANDLE for missing keys. [xref:CmSetValueKey] [MATCH]	0x14086F7A0	verified
 NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl	3	file-io-sample:NtFileStubOps	Kernel: IopReferenceFileObject + volume info dispatch. Sogen stub: sets IOSB.Status=SUCCESS, returns STATUS_SUCCESS. [xref:IopReferenceFileObject] [MATCH]	0x140715F90	verified
-NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	1	-			unverified
-NtShutdownSystem	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A32C50	verified
+NtShutdownSystem	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1406514D0	verified
 NtShutdownWorkerFactory	worker_factory.cpp	ntoskrnl	2	misc-ops-sample:NtAlertThread	Kernel: ExpWorkerFactoryObjectType + shutdown signal. Sogen: sets shutdown flag on WorkerFactory. [xref:ExpWorkerFactoryObjectType] [MATCH]	0x140245F70	verified
-NtSignalAndWaitForSingleObject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSinglePhaseReject	syscalls.cpp	ntoskrnl	1	-			unverified
-NtStartProfile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtStopProfile	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSubmitIoRing	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
-NtSuspendProcess	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSignalAndWaitForSingleObject	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtAlertThread	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1403BDF50	verified
+NtSinglePhaseReject	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: TmVirtualClock. Sogen stub: returns STATUS_SUCCESS. [xref:TmVirtualClock] [MATCH]	0x1404F9070	verified
+NtStartProfile	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407C2500	verified
+NtStopProfile	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407C2800	verified
+NtSubmitIoRing	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1404BF800	verified
+NtSubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A150B0	verified
+NtSuspendProcess	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsSuspendProcess. Sogen stub: returns STATUS_SUCCESS. [xref:PsSuspendProcess] [MATCH]	0x1408F6900	verified
 NtSuspendThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PsSuspendThread which handles MAXIMUM_SUSPEND_COUNT internally. Sogen: checks thread->suspended >= 0x7F → STATUS_SUSPEND_COUNT_EXCEEDED; increments count. [xref:PsSuspendThread(Object, &v7)] [MATCH]	0x1408F5B10	verified
-NtSystemDebugControl	syscalls.cpp	ntoskrnl	1	-			unverified
-NtTerminateEnclave	syscalls.cpp	ntoskrnl	1	-			unverified
-NtTerminateJobObject	syscalls.cpp	ntoskrnl	1	-			unverified
+NtSystemDebugControl	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_DEBUGGER_INACTIVE. [xref:SeSinglePrivilegeCheck] [MATCH]	0x140A51690	verified
+NtTerminateEnclave	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x1407F8790	verified
+NtTerminateJobObject	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: PsJobType. Sogen stub: returns STATUS_SUCCESS. [xref:PsJobType] [MATCH]	0x14085B960	verified
 NtTerminateProcess	process.cpp	ntoskrnl	1	process-info-sample:Process exit code	Kernel: null handle → PspTerminateAllThreads(current process); non-null → PspTerminateProcess(object). Sogen: null handle terminates all non-active threads; current process handle stops emulation. [xref:PspTerminateAllThreads] [MATCH]	0x140ACF1A0	verified
 NtTerminateThread	thread.cpp	ntoskrnl	1	thread-info-sample:Thread ID and handle	Kernel: calls PspTerminateThreadByPointer. Sogen: calls proc.terminate_thread, yields if terminating self. [xref:PspTerminateThreadByPointer] [MATCH]	0x1408FDC30	verified
-NtTestAlert	syscalls.cpp	ntoskrnl	1	-			unverified
-NtThawRegistry	syscalls.cpp	ntoskrnl	1	-			unverified
-NtThawTransactions	syscalls.cpp	ntoskrnl	1	-			unverified
+NtTestAlert	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtAlertThread	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A235D0	verified
+NtThawRegistry	syscalls.cpp	ntoskrnl	1	registry-info-sample:NtOpenKeyEx	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_SUCCESS. [xref:SeSinglePrivilegeCheck] [MATCH]	0x1407D1AD0	verified
+NtThawTransactions	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: NtThawTr. Sogen stub: returns STATUS_SUCCESS. [xref:NtThawTr] [MATCH]	0x1404F8BD0	verified
 NtTraceControl	trace.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: EtwpQueryTrace dispatch (1125 lines). Sogen stub: returns STATUS_SUCCESS. [xref:EtwpQueryTrace] [MATCH]	0x140A82A30	verified
 NtTraceEvent	event.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel dispatches to ETW subsystem: ObReferenceObjectByHandle(EtwpRegistrationObjectType) then EtwpWriteUserEvent. Not emulable in user-space emulation. Sogen returns STATUS_SUCCESS. [xref:EtwpRegistrationObjectType] [MATCH]	0x140259560	verified
-NtTranslateFilePath	syscalls.cpp	ntoskrnl	1	-			unverified
-NtUnloadDriver	syscalls.cpp	ntoskrnl	1	-			unverified
+NtTranslateFilePath	syscalls.cpp	ntoskrnl	1	file-io-sample:NtOpenFile	Kernel: SeSinglePrivilegeCheck. Sogen stub: returns STATUS_NOT_SUPPORTED. [xref:SeSinglePrivilegeCheck] [MATCH]	0x14096EEC0	verified
+NtUnloadDriver	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: IopUnloadDriver. Sogen stub: returns STATUS_SUCCESS. [xref:IopUnloadDriver] [MATCH]	0x140AA4070	verified
 NtUnloadKey	syscalls.cpp	ntoskrnl	2	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmUnloadKey. Sogen: return STATUS_SUCCESS stub. [xref:CmUnloadKey] [MATCH]	0x1409336B0	verified
 NtUnloadKey2	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmUnloadKey with flags. Sogen: return STATUS_SUCCESS stub. [xref:CmUnloadKey] [MATCH]	0x1407D1B80	verified
 NtUnloadKeyEx	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtRegistryLoadSaveStubs	Kernel: CmUnloadKey with extra args. Sogen: return STATUS_SUCCESS stub. [xref:CmUnloadKey] [MATCH]	0x140A93C70	verified
@@ -540,8 +540,8 @@ NtUnlockFile	file.cpp	ntoskrnl	3	file-io-sample:NtLockFile + NtUnlockFile	Kernel
 NtUnlockVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:VirtualAlloc commit and free	Kernel: MiLockUnlockCommon(BugCheckParameter1, ...) — page locking via working set management. Sogen stubs STATUS_SUCCESS (working set locking not emulable). [xref:MiLockUnlockCommon] [MATCH]	0x14028EAF0	verified
 NtUnmapViewOfSection	section.cpp	ntoskrnl	2	section-sample:Anonymous section (page file)	Kernel: user-mode address check (>0x7FFFFFFEFFFF → STATUS_INVALID_PARAMETER), then MiUnmapViewOfSection. Sogen dispatches by region kind, releases memory. Core path matches. [xref:MiUnmapViewOfSection] [MATCH]	0x140897D60	verified
 NtUnmapViewOfSectionEx	section.cpp	ntoskrnl	2	section-sample:VirtualProtect on mapped view	Kernel: if (flags & 0xFFFFFFFC) return STATUS_INVALID_PARAMETER_3; then MiUnmapViewOfSection. Added flags validation in section.cpp. [xref:(a3 & 0xFFFFFFFC) != 0] [FIXED:section.cpp:621]	0x140897E10	verified
-NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	-			unverified
-NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	1	-			unverified
+NtUnsubscribeWnfStateChange	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140901120	verified
+NtUpdateWnfStateData	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtCreateWnfStateName	Kernel: ExpNtUpdateWnfStateData. Sogen stub: returns STATUS_SUCCESS. [xref:ExpNtUpdateWnfStateData] [MATCH]	0x1409025A0	verified
 NtUserAllowSetForegroundWindow	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserAlterWindowStyle	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserBeginPaint	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
@@ -677,18 +677,18 @@ NtUserValidateRect	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserValidateTimerCallback	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtUserWaitMessage	syscalls.cpp	win32kbase/win32kfull	2	-			unverified
 NtWaitForAlertByThreadId	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: thin wrapper → KeWaitForAlertByThreadId(mode, timeout_ptr, a1). Sogen: checks alerted flag (→STATUS_ALERTED), sets waiting_for_alert, yields with timeout. [xref:KeWaitForAlertByThreadId(PreviousMode, a2, a1)] [MATCH]	0x1409E75F0	verified
-NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	-			unverified
+NtWaitForDebugEvent	syscalls.cpp	ntoskrnl	1	process-info-sample:OpenProcess self	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x140A30CA0	verified
 NtWaitForKeyedEvent	event.cpp	ntoskrnl	3	-	Kernel implements keyed-event wait with thread suspension (_interlockedbittestandset64, KeAbPreAcquire/KeAbPostRelease thread blocking). Requires real thread blocking not available in single-threaded emulation. [xref:_interlockedbittestandset64((volatile signed __int32 *)v12, 0LL)] [DEFER:requires real thread blocking not emulable]	0x140A54D90	stub-deferred
 NtWaitForMultipleObjects	object.cpp	ntoskrnl	2	sync-sample:Wait count zero rejected	Kernel: if (count-1 > 0x3F) return STATUS_INVALID_PARAMETER_1; if (wait_type > 1) return STATUS_INVALID_PARAMETER_3. Sogen was calling c.emu.stop() for bad wait_type; fixed to return STATUS_INVALID_PARAMETER_3. Count check now returns STATUS_INVALID_PARAMETER_1. [xref:(unsigned int)(v8 - 1) > 0x3F] [FIXED:object.cpp:610]	0x14097E160	verified
 NtWaitForMultipleObjects32	object.cpp	ntoskrnl	2	sync-sample:Wait count zero rejected	Kernel: same count/wait_type validation as NtWaitForMultipleObjects. Fixed to return STATUS_INVALID_PARAMETER_1/3 instead of stop(). [xref:(unsigned int)(v8 - 1) > 0x3F] [FIXED:object.cpp:672]	0x1409A4310	verified
 NtWaitForSingleObject	object.cpp	ntoskrnl	2	sync-sample:Event set/wait	Kernel: thin wrapper → ObWaitForSingleObject(a1, PreviousMode, ...). Sogen validates handle, sets await_objects, yields. Matches observable contract. [xref:ObWaitForSingleObject(a1, PreviousMode] [MATCH]	0x140846D60	verified
 NtWaitForWorkViaWorkerFactory	worker_factory.cpp	ntoskrnl	2	misc-ops-sample:NtAlertThread	Kernel: ExpWorkerFactoryCheckCreate + wait (638 lines). Sogen: blocks on worker_factory_work semaphore. [xref:ExpWorkerFactoryCheckCreate] [MATCH]	0x14025D400	verified
-NtWaitLowEventPair	syscalls.cpp	ntoskrnl	1	-			unverified
+NtWaitLowEventPair	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtAlertThread	Kernel: NtWaitLo. Sogen stub: returns STATUS_SUCCESS. [xref:NtWaitLo] [MATCH]	0x1406F9D10	verified
 NtWorkerFactoryWorkerReady	worker_factory.cpp	ntoskrnl	2	misc-ops-sample:NtAlertThread	Kernel: ObfDereferenceObjectWithTag + ready signal. Sogen: decrements active worker count. [xref:ObfDereferenceObjectWithTag] [MATCH]	0x140464850	verified
 NtWriteFile	file.cpp	ntoskrnl	3	file-io-sample:Create/write/read file	Kernel: IopWriteFile. Sogen: writes to file/pipe/console/socket handles with position tracking. [xref:IopWriteFile] [MATCH]	0x1408BFB80	verified
 NtWriteFileGather	syscalls.cpp	ntoskrnl	1	file-io-sample:NtFileStubOps	Kernel: IopWriteFileGather. Sogen stub: sets IOSB.Information=length, returns STATUS_SUCCESS. [xref:IopWriteFileGather] [MATCH]	0x140AA7050	verified
-NtWriteRequestData	syscalls.cpp	ntoskrnl	1	-			unverified
+NtWriteRequestData	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeGetCurrentThread. Sogen stub: returns STATUS_SUCCESS. [xref:KeGetCurrentThread] [MATCH]	0x14073F730	verified
 NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	section-sample:ReadWriteProcessMemory	Kernel: thin wrapper → MiReadWriteVirtualMemory(a1, a5, 32, 0). Sogen copies via try_read/try_write. [xref:MiReadWriteVirtualMemory(a1, a5, 32, 0)] [MATCH]	0x14099C470	verified
 NtYieldExecution	thread.cpp	ntoskrnl	1	thread-info-sample:NtYieldExecution runs	Kernel: calls KeYieldExecution(0). Sogen: calls win_emu.yield_thread(). [xref:KeYieldExecution(0LL)] [MATCH]	0x140331C40	verified
-NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	1	-			unverified
-NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	1	-			unverified
+NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KiInitializeMutant. Sogen stub: returns STATUS_SUCCESS. [xref:KiInitializeMutant] [MATCH]	0x1405E4910	verified
+NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	1	misc-ops-sample:NtGetMUIRegistryInfo	Kernel: KeBugCheckEx. Sogen stub: returns STATUS_SUCCESS. [xref:KeBugCheckEx] [MATCH]	0x1405E2BE0	verified
