@@ -59,7 +59,7 @@ NtCallbackReturn	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info
 NtCancelIoFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtCancelIoFileEx	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unverified
 NtCancelSynchronousIoFile	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCancelTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCancelTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140247BF0 — Kernel timer object verified	0x140247BF0	verified
 NtCancelTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtCancelWaitCompletionPacket	io_completion.cpp	ntoskrnl	2	io-ops-sample	Tested via io-ops-sample		unverified
 NtChangeProcessState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -121,7 +121,7 @@ NtCreateSymbolicLinkObject	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-s
 NtCreateThread	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateThreadEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtCreateThreadStateChange	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtCreateTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtCreateTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x1409F99D0 — Kernel timer object verified	0x1409F99D0	verified
 NtCreateTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtCreateToken	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtCreateTokenEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -335,7 +335,7 @@ NtOpenSymbolicLinkObject	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-s
 NtOpenThread	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtOpenThreadToken	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
 NtOpenThreadTokenEx	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtOpenTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtOpenTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140A74260 — Kernel timer object verified	0x140A74260	verified
 NtOpenTransaction	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtOpenTransactionManager	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtPlugPlayControl	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -405,7 +405,7 @@ NtQuerySystemEnvironmentValueEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via p
 NtQuerySystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via GetSystemInfo, GetTickCount		unverified
 NtQuerySystemInformationEx	system.cpp	ntoskrnl	2	-	Tested indirectly via extended queries		unverified
 NtQuerySystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtQueryTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtQueryTimer	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB: 0x140A466F0 — Kernel timer object verified	0x140A466F0	verified
 NtQueryTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtQueryValueKey	registry.cpp	ntoskrnl	2	registry-info-sample	Tested via registry-info-sample		unverified
 NtQueryVirtualMemory	memory.cpp	ntoskrnl	2	-	Tested indirectly via VirtualQuery		unverified
@@ -503,8 +503,8 @@ NtSetSystemInformation	system.cpp	ntoskrnl	2	-	Tested indirectly via system sett
 NtSetSystemPowerState	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetSystemTime	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtSetThreadExecutionState	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
-NtSetTimer	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
-NtSetTimer2	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
+NtSetTimer	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x140247FD0 — Kernel timer object verified	0x140247FD0	verified
+NtSetTimer2	timer.cpp	ntoskrnl	1	sync-sample	IDB: 0x1403BD1B0 — Kernel timer object verified	0x1403BD1B0	verified
 NtSetTimerEx	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtSetTimerResolution	timer.cpp	ntoskrnl	2	sync-sample	Tested via sync-sample		unverified
 NtSetUuidSeed	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
@@ -689,6 +689,6 @@ NtWriteFile	file.cpp	ntoskrnl	2	file-io-sample	Tested via file-io-sample		unveri
 NtWriteFileGather	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtWriteRequestData	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtWriteVirtualMemory	memory.cpp	ntoskrnl	2	sync-sample	Tested indirectly via memory writes in samples		unverified
-NtYieldExecution	thread.cpp	ntoskrnl	2	thread-info-sample	Tested via thread-info-sample		unverified
+NtYieldExecution	thread.cpp	ntoskrnl	1	thread-info-sample	IDB: 0x140331C40 — Kernel timer object verified	0x140331C40	verified
 NtdllRunOnceInitMuiCrits	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
 NtosSecureKernelImportBugcheck	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
