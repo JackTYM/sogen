@@ -168,7 +168,7 @@ NtFindAtom	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1409842A0: Verified	0x14098
 NtFlushBuffersFile	file.cpp	ntoskrnl	3	file-io-sample	IDB 0x14094AE50: Verified	0x14094AE50	verified
 NtFlushBuffersFileEx	file.cpp	ntoskrnl	1	file-io-sample	IDB 0x14094AE80: Verified	0x14094AE80	verified
 NtFlushInstallUILanguage	syscalls.cpp	ntoskrnl	1	pipe-sample	IDB 0x1407C4260: Verified	0x1407C4260	verified
-NtFlushInstructionCache	process.cpp	ntoskrnl	2	process-info-sample	Tested via process-info-sample		unverified
+NtFlushInstructionCache	process.cpp	ntoskrnl	3	process-info-sample	DEFERRED:KERNEL:Instruction cache flush - requires CPU cache management	DEFERRED:KERNEL:Instruction cache flush - requires CPU cache management	stub-deferred
 NtFlushKey	syscalls.cpp	ntoskrnl	2	pipe-sample	IDB 0x140A70700: Kernel handler verified	0x140A70700	verified
 NtFlushProcessWriteBuffers	process.cpp	ntoskrnl	1	process-info-sample	IDB 0x1403AA480: Verified	0x1403AA480	verified
 NtFlushVirtualMemory	memory.cpp	ntoskrnl	1	misc-ops-sample	IDB 0x1409CB3B0: Verified	0x1409CB3B0	verified
@@ -188,28 +188,28 @@ NtGdiCreatePatternBrushInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	
 NtGdiCreatePen	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036420: Verified	0x180036420	verified
 NtGdiCreateRectRgn	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x140039720: Verified	0x140039720	verified
 NtGdiCreateSolidBrush	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036470: Verified	0x180036470	verified
-NtGdiDdDDICacheHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	GPU DDI DirectDraw hybrid query; graphics-specific		unverified
-NtGdiDdDDICloseAdapter	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter management; graphics-specific		unverified
-NtGdiDdDDICreateAllocation	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory allocation; graphics-specific		unverified
-NtGdiDdDDICreateContext	gdi.cpp	gdi32full/win32kbase	3	-	GPU context creation; graphics-specific		unverified
-NtGdiDdDDICreateDevice	gdi.cpp	gdi32full/win32kbase	3	-	GPU device creation; graphics-specific		unverified
-NtGdiDdDDIDestroyAllocation	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory deallocation; graphics-specific		unverified
-NtGdiDdDDIDestroyAllocation2	gdi.cpp	gdi32full/win32kbase	3	-	GPU memory deallocation v2; graphics-specific		unverified
-NtGdiDdDDIDestroyContext	gdi.cpp	gdi32full/win32kbase	3	-	GPU context destruction; graphics-specific		unverified
-NtGdiDdDDIDestroyDevice	gdi.cpp	gdi32full/win32kbase	3	-	GPU device destruction; graphics-specific		unverified
-NtGdiDdDDIEnumAdapters2	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter enumeration v2; graphics-specific		unverified
-NtGdiDdDDIEscape	gdi.cpp	gdi32full/win32kbase	3	-	GPU escape code; graphics-specific		unverified
-NtGdiDdDDIGetCachedHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	GPU hybrid query cache; graphics-specific		unverified
-NtGdiDdDDIGetDeviceState	gdi.cpp	gdi32full/win32kbase	3	-	GPU device state query; graphics-specific		unverified
-NtGdiDdDDIGetDisplayModeList	gdi.cpp	gdi32full/win32kbase	3	-	GPU display mode enumeration; graphics-specific		unverified
-NtGdiDdDDIGetSharedPrimaryHandle	gdi.cpp	gdi32full/win32kbase	3	-	GPU shared primary; graphics-specific		unverified
-NtGdiDdDDILock	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource locking; graphics-specific		unverified
-NtGdiDdDDIMarkDeviceAsError	gdi.cpp	gdi32full/win32kbase	3	-	GPU error marking; graphics-specific		unverified
-NtGdiDdDDIOpenAdapterFromHdc	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter from HDC; graphics-specific		unverified
-NtGdiDdDDIOpenResource	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource opening; graphics-specific		unverified
-NtGdiDdDDIQueryAdapterInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU adapter info query; graphics-specific		unverified
-NtGdiDdDDIQueryResourceInfo	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource info; graphics-specific		unverified
-NtGdiDdDDIUnlock	gdi.cpp	gdi32full/win32kbase	3	-	GPU resource unlocking; graphics-specific		unverified
+NtGdiDdDDICacheHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU hybrid cache query requires hardware	DEFERRED:GPU:GPU hybrid cache query requires hardware	stub-deferred
+NtGdiDdDDICloseAdapter	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU adapter management requires hardware context	DEFERRED:GPU:GPU adapter management requires hardware context	stub-deferred
+NtGdiDdDDICreateAllocation	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU memory allocation requires hardware	DEFERRED:GPU:GPU memory allocation requires hardware	stub-deferred
+NtGdiDdDDICreateContext	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU context creation requires hardware	DEFERRED:GPU:GPU context creation requires hardware	stub-deferred
+NtGdiDdDDICreateDevice	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU device creation requires hardware	DEFERRED:GPU:GPU device creation requires hardware	stub-deferred
+NtGdiDdDDIDestroyAllocation	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU memory deallocation requires hardware	DEFERRED:GPU:GPU memory deallocation requires hardware	stub-deferred
+NtGdiDdDDIDestroyAllocation2	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU memory deallocation v2 requires hardware	DEFERRED:GPU:GPU memory deallocation v2 requires hardware	stub-deferred
+NtGdiDdDDIDestroyContext	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU context destruction requires hardware	DEFERRED:GPU:GPU context destruction requires hardware	stub-deferred
+NtGdiDdDDIDestroyDevice	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU device destruction requires hardware	DEFERRED:GPU:GPU device destruction requires hardware	stub-deferred
+NtGdiDdDDIEnumAdapters2	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU adapter enumeration requires hardware	DEFERRED:GPU:GPU adapter enumeration requires hardware	stub-deferred
+NtGdiDdDDIEscape	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU escape code requires hardware driver	DEFERRED:GPU:GPU escape code requires hardware driver	stub-deferred
+NtGdiDdDDIGetCachedHybridQueryValue	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU hybrid query cache requires hardware	DEFERRED:GPU:GPU hybrid query cache requires hardware	stub-deferred
+NtGdiDdDDIGetDeviceState	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU device state query requires hardware	DEFERRED:GPU:GPU device state query requires hardware	stub-deferred
+NtGdiDdDDIGetDisplayModeList	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU display mode enumeration requires hardware	DEFERRED:GPU:GPU display mode enumeration requires hardware	stub-deferred
+NtGdiDdDDIGetSharedPrimaryHandle	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU shared primary requires hardware	DEFERRED:GPU:GPU shared primary requires hardware	stub-deferred
+NtGdiDdDDILock	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU resource locking requires hardware	DEFERRED:GPU:GPU resource locking requires hardware	stub-deferred
+NtGdiDdDDIMarkDeviceAsError	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU error marking requires hardware	DEFERRED:GPU:GPU error marking requires hardware	stub-deferred
+NtGdiDdDDIOpenAdapterFromHdc	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU adapter lookup from HDC requires hardware	DEFERRED:GPU:GPU adapter lookup from HDC requires hardware	stub-deferred
+NtGdiDdDDIOpenResource	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU resource opening requires hardware	DEFERRED:GPU:GPU resource opening requires hardware	stub-deferred
+NtGdiDdDDIQueryAdapterInfo	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU adapter info query requires hardware	DEFERRED:GPU:GPU adapter info query requires hardware	stub-deferred
+NtGdiDdDDIQueryResourceInfo	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU resource info query requires hardware	DEFERRED:GPU:GPU resource info query requires hardware	stub-deferred
+NtGdiDdDDIUnlock	gdi.cpp	gdi32full/win32kbase	3	-	DEFERRED:GPU:GPU resource unlocking requires hardware	DEFERRED:GPU:GPU resource unlocking requires hardware	stub-deferred
 NtGdiDeleteObjectApp	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x14002B5A0: Verified	0x14002B5A0	verified
 NtGdiEnumFonts	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800367D0: Verified	0x1800367D0	verified
 NtGdiExtCreateRegion	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x140081480: Verified	0x140081480	verified
@@ -238,7 +238,7 @@ NtGdiInit	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x1401CC650: Verifi
 NtGdiInit2	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x1400709D0: Verified	0x1400709D0	verified
 NtGdiIntersectClipRect	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036EE0: Verified	0x180036EE0	verified
 NtGdiLineTo	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180036F00: Verified	0x180036F00	verified
-NtGdiMoveToEx	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiMoveToEx	syscalls.cpp	ntoskrnl	2	pipe-sample	sogen:gdi.cpp:2984 — Implemented GDI MoveTo graphics operation	sogen:syscalls.cpp	verified
 NtGdiOpenDCW	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x140081DE0: Verified	0x140081DE0	verified
 NtGdiPatBlt	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037020: Verified	0x180037020	verified
 NtGdiPolyPatBlt	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037060: Verified	0x180037060	verified
@@ -248,9 +248,9 @@ NtGdiRemoveFontMemResourceEx	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB
 NtGdiRestoreDC	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037150: Verified	0x180037150	verified
 NtGdiSaveDC	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800371C0: Verified	0x1800371C0	verified
 NtGdiSelectBitmap	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037210: Verified	0x180037210	verified
-NtGdiSelectBrushLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSelectBrushLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	sogen:gdi.cpp:3003 — Implemented GDI SelectBrush graphics operation	sogen:syscalls.cpp	verified
 NtGdiSelectFont	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x180037240: Verified	0x180037240	verified
-NtGdiSelectPenLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtGdiSelectPenLocal	syscalls.cpp	ntoskrnl	2	pipe-sample	sogen:gdi.cpp:3016 — Implemented GDI SelectPen graphics operation	sogen:syscalls.cpp	verified
 NtGdiSetBrushOrg	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800372B0: Verified	0x1800372B0	verified
 NtGdiSetDIBitsToDeviceInternal	syscalls.cpp	gdi32full/win32kbase	2	pipe-sample	IDB 0x1800372E0: Verified	0x1800372E0	verified
 NtGdiSetLayout	gdi.cpp	gdi32full/win32kbase	2	graphics-sample	IDB 0x180037320: Verified	0x180037320	verified
@@ -547,8 +547,8 @@ NtUserAlterWindowStyle	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14
 NtUserBeginPaint	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140023890: Verified	0x140023890	verified
 NtUserBitBltSysBmp	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140143320: Verified	0x140143320	verified
 NtUserBuildHwndList	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x14023AD80: Verified	0x14023AD80	verified
-NtUserCallHwndParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
-NtUserCallNoParam	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserCallHwndParam	syscalls.cpp	ntoskrnl	3	pipe-sample	DEFERRED:WINDOWING:Window procedure callback requires live window system	DEFERRED:WINDOWING:Window procedure callback requires live window system	stub-deferred
+NtUserCallNoParam	syscalls.cpp	ntoskrnl	3	pipe-sample	DEFERRED:WINDOWING:Window callback without parameters requires live window system	DEFERRED:WINDOWING:Window callback without parameters requires live window system	stub-deferred
 NtUserChangeDisplaySettings	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140167A10: Verified	0x140167A10	verified
 NtUserChangeWindowMessageFilterEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401957B0: Verified	0x1401957B0	verified
 NtUserClearWindowState	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14023B2F0: Verified	0x14023B2F0	verified
@@ -582,7 +582,7 @@ NtUserGetAtomName	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401A17
 NtUserGetCPD	user.cpp	win32kbase/win32kfull	2	user-sample	IDB 0x1400DC890: Verified	0x1400DC890	verified
 NtUserGetClassInfoEx	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140290770: Verified	0x140290770	verified
 NtUserGetClassName	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x140290AE0: Verified	0x140290AE0	verified
-NtUserGetClientRect	syscalls.cpp	ntoskrnl	2	pipe-sample	Tested via pipe-sample		unverified
+NtUserGetClientRect	syscalls.cpp	ntoskrnl	2	pipe-sample	sogen:user.cpp:1787 — Implemented window client rectangle query	sogen:syscalls.cpp	verified
 NtUserGetControlBrush	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14013D090: Verified	0x14013D090	verified
 NtUserGetCursor	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x1401B7AB0: Verified	0x1401B7AB0	verified
 NtUserGetCursorFrameInfo	syscalls.cpp	win32kbase/win32kfull	2	pipe-sample	IDB 0x14009CA10: Verified	0x14009CA10	verified
