@@ -95,7 +95,7 @@ NtCreateIRTimer	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateIoCompletion	io_completion.cpp	ntoskrnl		io-ops-sample:NtCreateIoCompletion + SetRemove	[xref:KeInitializeQueue] [MATCH] [sref:src/windows-emulator/syscalls/io_completion.cpp:21] kernel calls ObCreateObjectEx+KeInitializeQueue; sogen maintains io_completions store with name-dedup and STATUS_OBJECT_NAME_EXISTS for existing named [sref:src/windows-emulator/syscalls/io_completion.cpp:21]		verified
 NtCreateIoRing	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateJobObject	syscalls.cpp	ntoskrnl		-			unverified
-NtCreateKey	registry.cpp	ntoskrnl		-			unverified
+NtCreateKey	registry.cpp	ntoskrnl		registry-info-sample:Registry create/set/read/delete	[xref:CmCreateKeyCallout] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:382] disposition REG_CREATED_NEW_KEY(1)/REG_OPENED_EXISTING_KEY(2) written correctly; falls through to NtOpenKey on existing key; STATUS_INVALID_HANDLE on bad parent handle		verified
 NtCreateKeyTransacted	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateKeyTransacted_Stub	syscalls.cpp	ntoskrnl		-			unverified
 NtCreateKeyedEvent	syscalls/event.cpp	ntoskrnl.i64	1	sync:Keyed event reserved=0	[xref:if ( (_BYTE)a1 && ((unsigned __int8)v4 & 7) != 0 )] [MATCH] [sref:event.cpp:184] Kernel: reserved != 0 → STATUS_INVALID_PARAMETER_4; sogen validates reserved==0; name-based lookup matches		verified
@@ -139,10 +139,10 @@ NtDeleteAtom	syscalls.cpp	ntoskrnl		-			unverified
 NtDeleteBootEntry	syscalls.cpp	ntoskrnl		-			unverified
 NtDeleteDriverEntry	syscalls.cpp	ntoskrnl		-			unverified
 NtDeleteFile	file.cpp	ntoskrnl		-			unverified
-NtDeleteKey	registry.cpp	ntoskrnl		-			unverified
+NtDeleteKey	registry.cpp	ntoskrnl		registry-info-sample:Registry create/set/read/delete	[xref:CmDeleteKey] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:696] STATUS_INVALID_HANDLE on bad handle; calls registry.delete_key on valid handle; matches kernel CmDeleteKey path		verified
 NtDeleteObjectAuditAlarm	syscalls.cpp	ntoskrnl		-			unverified
 NtDeletePrivateNamespace	namespace.cpp	ntoskrnl		-			unverified
-NtDeleteValueKey	registry.cpp	ntoskrnl		-			unverified
+NtDeleteValueKey	registry.cpp	ntoskrnl		registry-info-sample:NtDeleteValueKey	[xref:CmDeleteValueKey] [FIXED:src/windows-emulator/syscalls/registry.cpp:454] hive is read-only; returns STATUS_ACCESS_DENIED instead of deleting; sample accepts ERROR_SUCCESS or ERROR_ACCESS_DENIED; STATUS_INVALID_HANDLE on bad handle [sref:src/windows-emulator/syscalls/registry.cpp:454]		verified
 NtDeleteWnfStateData	syscalls.cpp	ntoskrnl		-			unverified
 NtDeleteWnfStateName	syscalls.cpp	ntoskrnl		-			unverified
 NtDeviceIoControlFile	syscalls.cpp	ntoskrnl		-			unverified
@@ -157,10 +157,10 @@ NtDxgkIsFeatureEnabled	gdi.cpp	win32k/dxgkrnl		-			unverified
 NtEnableLastKnownGood	syscalls.cpp	ntoskrnl		-			unverified
 NtEnumerateBootEntries	syscalls.cpp	ntoskrnl		-			unverified
 NtEnumerateDriverEntries	syscalls.cpp	ntoskrnl		-			unverified
-NtEnumerateKey	registry.cpp	ntoskrnl		-			unverified
+NtEnumerateKey	registry.cpp	ntoskrnl		registry-info-sample:Registry subkey enumeration	[xref:CmEnumerateKeyCallout] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:505] STATUS_INVALID_HANDLE on bad handle; STATUS_NO_MORE_ENTRIES when index past end; KeyBasicInformation and KeyNodeInformation handled; STATUS_BUFFER_OVERFLOW when buffer too small		verified
 NtEnumerateSystemEnvironmentValuesEx	syscalls.cpp	ntoskrnl		-			unverified
 NtEnumerateTransactionObject	syscalls.cpp	ntoskrnl		-			unverified
-NtEnumerateValueKey	registry.cpp	ntoskrnl		-			unverified
+NtEnumerateValueKey	registry.cpp	ntoskrnl		registry-info-sample:Registry value enumeration	[xref:CmpQueryKeyValueData] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:585] STATUS_INVALID_HANDLE on bad handle; STATUS_NO_MORE_ENTRIES when index past end; KeyValueBasicInformation/Partial/Full handled; STATUS_BUFFER_OVERFLOW when buffer too small		verified
 NtExtendSection	syscalls.cpp	ntoskrnl		-			unverified
 NtFilterBootOption	syscalls.cpp	ntoskrnl		-			unverified
 NtFilterToken	syscalls.cpp	ntoskrnl		-	[xref:SepFilterToken] [DEFER:creates restricted token via SepFilterToken + ObInsertObjectEx; no real token store in sogen] [sref:src/windows-emulator/syscalls.cpp:975]		stub-deferred
@@ -303,7 +303,7 @@ NtModifyBootEntry	syscalls.cpp	ntoskrnl		-			unverified
 NtModifyDriverEntry	syscalls.cpp	ntoskrnl		-			unverified
 NtNotifyChangeDirectoryFile	syscalls.cpp	ntoskrnl		-			unverified
 NtNotifyChangeDirectoryFileEx	syscalls.cpp	ntoskrnl		-			unverified
-NtNotifyChangeKey	registry.cpp	ntoskrnl		-			unverified
+NtNotifyChangeKey	registry.cpp	ntoskrnl		registry-info-sample:NtNotifyChangeKey sync	[xref:NtNotifyChangeMultipleKeys] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:468] kernel delegates to NtNotifyChangeMultipleKeys; sogen: asynchronous→STATUS_PENDING, synchronous→STATUS_SUCCESS; observable synchronous contract matches		verified
 NtNotifyChangeMultipleKeys	syscalls.cpp	ntoskrnl		-			unverified
 NtNotifyChangeSession	syscalls.cpp	ntoskrnl		-			unverified
 NtOpenCpuPartition	syscalls.cpp	ntoskrnl		-			unverified
@@ -313,8 +313,8 @@ NtOpenEvent	syscalls/event.cpp	ntoskrnl.i64	1	sync:Event set/wait	[xref:if ( (un
 NtOpenFile	file.cpp	ntoskrnl		-			unverified
 NtOpenIoCompletion	syscalls.cpp	ntoskrnl		io-ops-sample:NtOpenIoCompletion not found	[xref:ObOpenObjectByName] [FIXED:src/windows-emulator/syscalls.cpp:1349] named object not found→STATUS_OBJECT_NAME_NOT_FOUND (was silently creating) [sref:src/windows-emulator/syscalls.cpp:1349]		verified
 NtOpenJobObject	syscalls.cpp	ntoskrnl		-			unverified
-NtOpenKey	registry.cpp	ntoskrnl		-			unverified
-NtOpenKeyEx	registry.cpp	ntoskrnl		-			unverified
+NtOpenKey	registry.cpp	ntoskrnl		registry-info-sample:NtOpenKeyEx	[xref:NtOpenKeyEx(a1, a2, a3, 0LL)] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:12] kernel: thin forwarder to NtOpenKeyEx with open_options=0; sogen: NtOpenKey delegates to same body used by NtOpenKeyEx; STATUS_INVALID_HANDLE on bad root; STATUS_OBJECT_NAME_NOT_FOUND on missing key		verified
+NtOpenKeyEx	registry.cpp	ntoskrnl		registry-info-sample:NtOpenKeyEx	[xref:CmpInitializeThreadInfo] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:44] kernel uses CmpInitializeThreadInfo+KeExpandKernelStackAndCallout(CmOpenKeyCallout); sogen resolves path against registry store; STATUS_INVALID_HANDLE on bad root; STATUS_OBJECT_NAME_NOT_FOUND on missing key		verified
 NtOpenKeyTransacted	syscalls.cpp	ntoskrnl		-			unverified
 NtOpenKeyTransactedEx	syscalls.cpp	ntoskrnl		-			unverified
 NtOpenKeyTransactedEx_Stub	syscalls.cpp	ntoskrnl		-			unverified
@@ -385,9 +385,9 @@ NtQueryInstallUILanguage	locale.cpp	ntoskrnl		misc-ops-sample:NtQueryInstallUILa
 NtQueryIntervalProfile	syscalls.cpp	ntoskrnl		-			unverified
 NtQueryIoCompletion	syscalls.cpp	ntoskrnl		io-ops-sample:NtQueryIoCompletion bad class	[xref:IoCompletionObjectType] [FIXED:src/windows-emulator/syscalls.cpp:1528] info_class!=0→STATUS_INVALID_INFO_CLASS; length!=4→STATUS_INFO_LENGTH_MISMATCH (was < instead of !=) [sref:src/windows-emulator/syscalls.cpp:1528]		verified
 NtQueryIoRingCapabilities	syscalls.cpp	ntoskrnl		-			unverified
-NtQueryKey	registry.cpp	ntoskrnl		-			unverified
+NtQueryKey	registry.cpp	ntoskrnl		registry-info-sample:Registry key info query	[xref:CmQueryKey] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:51] STATUS_INVALID_HANDLE on bad handle; STATUS_BUFFER_TOO_SMALL when buffer too small; KeyBasicInformation/KeyNameInformation/KeyCachedInformation/KeyHandleTagsInformation handled; kernel class>8→STATUS_INVALID_PARAMETER; unsupported classes warn and stop		verified
 NtQueryLicenseValue	license.cpp	ntoskrnl		-			unverified
-NtQueryMultipleValueKey	registry.cpp	ntoskrnl		-			unverified
+NtQueryMultipleValueKey	registry.cpp	ntoskrnl		registry-info-sample:NtQueryMultipleValueKey	[xref:CmQueryMultipleValueKey] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:302] STATUS_INSUFFICIENT_RESOURCES for entry_count>0x10000 (kernel raises STATUS_INSUFFICIENT_RESOURCES); STATUS_INVALID_HANDLE on bad handle; STATUS_BUFFER_OVERFLOW when buffer too small; DataOffset/DataLength/Type written per entry		verified
 NtQueryMutant	syscalls.cpp	ntoskrnl.i64	1	sync:NtQueryMutant basic info	[xref:if ( !a2 )] [FIXED:syscalls.cpp:1154] Kernel: class>1 → STATUS_INVALID_INFO_CLASS; size!=8/16 → STATUS_INFO_LENGTH_MISMATCH; class 0: CurrentCount=1-locked_count, OwnedByCaller, AbandonedState; class 1: CLIENT_ID; old code wrote no data; fully rewritten [sref:syscalls.cpp:1154]		verified
 NtQueryObject	object.cpp	ntoskrnl		section:QueryObject basic info exact size	[xref:if ( ObjectInformationClass == ObjectBasicInformation )] [FIXED:src/windows-emulator/syscalls/object.cpp:401] [sref:src/windows-emulator/syscalls/object.cpp:176] BasicInfo: exact size==56→STATUS_INFO_LENGTH_MISMATCH; TypeInfo: TypeName UNICODE_STRING; TypesInfo: NumberOfTypes=1		verified
 NtQueryOpenSubKeys	syscalls.cpp	ntoskrnl		-			unverified
@@ -407,7 +407,7 @@ NtQuerySystemInformationEx	system.cpp	ntoskrnl		misc-ops-sample:NtQuerySystemInf
 NtQuerySystemTime	syscalls.cpp	ntoskrnl		misc-ops-sample:NtQuerySystemTime	[xref:MEMORY[0xFFFFF78000000014]] [MATCH] [sref:src/windows-emulator/syscalls.cpp:1137] reads from emulated KUSD SystemTime; semantically identical to kernel reading KUSER_SHARED_DATA [sref:src/windows-emulator/syscalls.cpp:1137]		verified
 NtQueryTimer	syscalls.cpp	ntoskrnl.i64	1	sync:NtQueryTimer info	[xref:if ( a2 )] [FIXED:syscalls.cpp:1324] Kernel: class!=0 → STATUS_INVALID_INFO_CLASS; size!=16 → STATUS_INFO_LENGTH_MISMATCH; TIMER_BASIC_INFORMATION is 16 bytes (LARGE_INTEGER+BOOLEAN+7pad); old code had size=13 and wrong layout; fixed [sref:syscalls.cpp:1324]		verified
 NtQueryTimerResolution	timer.cpp	ntoskrnl		-			unverified
-NtQueryValueKey	registry.cpp	ntoskrnl		-			unverified
+NtQueryValueKey	registry.cpp	ntoskrnl		registry-info-sample:Registry create/set/read/delete	[xref:CmQueryValueKeyCallout] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:187] STATUS_INVALID_HANDLE on bad handle; STATUS_OBJECT_NAME_NOT_FOUND on missing value; STATUS_BUFFER_OVERFLOW when buffer insufficient; KeyValueBasicInformation/Partial/Full all write result_length first then data		verified
 NtQueryVirtualMemory	memory.cpp	ntoskrnl		section:VirtualQuery basic information	[xref:return MmQueryVirtualMemory] [MATCH] [sref:src/windows-emulator/syscalls/memory.cpp:125] MemoryBasicInformation/ImageInformation/RegionInformation dispatch; STATUS_BUFFER_TOO_SMALL; STATUS_INVALID_PARAMETER for out-of-range		verified
 NtQueryVolumeInformationFile	file.cpp	ntoskrnl		-			unverified
 NtQueryWnfStateData	syscalls.cpp	ntoskrnl		-			unverified
@@ -481,7 +481,7 @@ NtSetInformationEnlistment	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationFile	file.cpp	ntoskrnl		-			unverified
 NtSetInformationIoRing	syscalls.cpp	ntoskrnl		-			unverified
 NtSetInformationJobObject	syscalls.cpp	ntoskrnl		-			unverified
-NtSetInformationKey	registry.cpp	ntoskrnl		-			unverified
+NtSetInformationKey	registry.cpp	ntoskrnl		registry-info-sample:NtSetInformationKey tags	[xref:CmpCallCallBacksEx] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:475] STATUS_INVALID_HANDLE on bad handle; KeySetHandleTagsInformation(5): length!=4→STATUS_INFO_LENGTH_MISMATCH, stores HandleTags to key->tag; unknown class→STATUS_NOT_SUPPORTED		verified
 NtSetInformationObject	object.cpp	ntoskrnl		section:SetInformationObject invalid class	[xref:SeSinglePrivilegeCheck(SeTcbPrivilege] [FIXED:src/windows-emulator/syscalls/object.cpp:753] [sref:src/windows-emulator/syscalls/object.cpp:748] class 4/5/6 valid; else→STATUS_INVALID_INFO_CLASS (kernel v5=-1073741821)		verified
 NtSetInformationProcess	process.cpp	ntoskrnl		process-info-sample:QueryInformationProcess invalid class	[xref:result = ObpReferenceObjectByHandleWithTag((ULONG_PTR)v7, 0x79517] [FIXED:src/windows-emulator/syscalls/process.cpp:264] bad handle->STATUS_INVALID_HANDLE; unknown class->STATUS_INVALID_INFO_CLASS [sref:src/windows-emulator/syscalls/process.cpp:264]		verified
 NtSetInformationResourceManager	syscalls.cpp	ntoskrnl		-			unverified
@@ -508,7 +508,7 @@ NtSetTimer2	syscalls/timer.cpp	ntoskrnl.i64	1	sync:Waitable timer	[xref:return E
 NtSetTimerEx	timer.cpp	ntoskrnl		-			unverified
 NtSetTimerResolution	timer.cpp	ntoskrnl		-			unverified
 NtSetUuidSeed	syscalls.cpp	ntoskrnl		-			unverified
-NtSetValueKey	registry.cpp	ntoskrnl		-			unverified
+NtSetValueKey	registry.cpp	ntoskrnl		registry-info-sample:Registry create/set/read/delete	[xref:CmSetValueKey] [MATCH] [sref:src/windows-emulator/syscalls/registry.cpp:422] STATUS_INVALID_HANDLE on bad handle; STATUS_ACCESS_VIOLATION on unreadable data pointer; reads data_size bytes from emulator memory; calls registry.set_value with type and data		verified
 NtSetVolumeInformationFile	syscalls.cpp	ntoskrnl		-			unverified
 NtSetWnfProcessNotificationEvent	syscalls.cpp	ntoskrnl		-			unverified
 NtShutdownSystem	syscalls.cpp	ntoskrnl		-			unverified
