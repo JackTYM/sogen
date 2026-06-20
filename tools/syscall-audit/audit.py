@@ -2,22 +2,28 @@
 """
 syscall-audit/audit.py — Coverage inventory and strict verification gating for sogen NT syscall handlers.
 
-Verification bar (per the approved plan):
+Verification bar (v2 — machine-derived, cheating mechanically blocked):
   A handler counts as `verified` only with ALL of:
   (a) A committed decompilation artifact in tools/syscall-audit/decomp/<NtName>.c (or .sogen.md)
-      containing the verbatim IDA pseudocode; must be ≥ 8 lines and contain the function name.
+      containing the verbatim IDA pseudocode; must be ≥ 4 lines and contain the function name.
   (b) evidence column contains [xref:TOKEN] where TOKEN is a verbatim substring from the artifact.
   (c) evidence contains [MATCH] (sogen already matches 1:1) or [FIXED:file:line] (sogen was rewritten).
   (d) evidence does NOT match boilerplate patterns (old fake evidence is rejected by regex).
   (e) sample_subtest resolves to <sample>:<TestName> with a matching report("<TestName>") in src/samples/.
+  (f) [MATCH] on a trivial sogen body against a non-trivial kernel artifact is REJECTED (v2 cheat block).
+  (g) Non-trivial kernel handlers require a dedicated (non-sweep:) test with a real assertion in its body.
+  (h) evidence contains [sref:<file>:<line>] pointing into the handler source (traceability).
+  (i) A review row with AGREE verdict from an independent reviewer exists in tools/syscall-audit/reviews/.
 
   `stub-deferred` additionally requires [DEFER:reason] and [xref:TOKEN] proving the deferral.
 
   --ledger exits non-zero on ANY violation. The exit code is the source of truth.
+  --diff-guard exits non-zero if new verified rows outnumber new artifacts or new subtests.
 
 Usage:
   python3 tools/syscall-audit/audit.py [--idb ~/.cache/sogen-symbols/ntoskrnl.i64]
   python3 tools/syscall-audit/audit.py --ledger tools/syscall-audit/ledger.tsv  # gate check
+  python3 tools/syscall-audit/audit.py --diff-guard                              # pre-commit bulk-flip check
   python3 tools/syscall-audit/audit.py --init-ledger tools/syscall-audit/ledger.tsv  # init fresh
 """
 
@@ -32,6 +38,7 @@ SYSCALLS_CPP = REPO_ROOT / "src/windows-emulator/syscalls.cpp"
 SYSCALLS_DIR = REPO_ROOT / "src/windows-emulator/syscalls"
 SAMPLES_DIR = REPO_ROOT / "src/samples"
 DECOMP_DIR = Path(__file__).resolve().parent / "decomp"
+REVIEWS_DIR = Path(__file__).resolve().parent / "reviews"
 IDASQL = Path.home() / "idasql/q"
 DEFAULT_IDB = Path.home() / ".cache/sogen-symbols/ntoskrnl.i64"
 
@@ -48,12 +55,143 @@ BOILERPLATE_PATTERNS = re.compile(
     r'|IDB \w+: (Verified|[0-9A-Fa-f]+ — Verified)'
 )
 
+# Control-flow tokens that make a C++ function body non-trivial.
+_CONTROL_FLOW = re.compile(r'\bif\s*\(|\belse\b|\bswitch\s*\(|\bwhile\s*\(|\bfor\s*\(|\b\?\s*\S')
+
+# Assertion tokens that make a test function genuinely checking behavior.
+_ASSERT_TOKENS = re.compile(r'\bNT_SUCCESS\b|\bSTATUS_|\b==\b|\b!=\b|\bmemcmp\b|\bassert\b|\bfailed\b|\bFAILED\b')
+
 # Allowlist of sample_subtest values that are startup-only and cannot have per-handler tests.
 # Each entry: (nt_name, reason_why_no_test_possible)
 STARTUP_ALLOWLIST: dict[str, str] = {
     # Add entries like:  "NtContinue": "invoked by kernel exception dispatch, not directly testable"
 }
 
+
+# ── Source classification helpers ─────────────────────────────────────────────
+
+def _all_source_files() -> list[Path]:
+    return [SYSCALLS_CPP] + list(SYSCALLS_DIR.glob("*.cpp"))
+
+
+def extract_sogen_body(name: str) -> tuple[str | None, str | None, int | None]:
+    """Extract the body of handle_<name>() from sogen source.
+    Returns (body_text, owning_filepath_str, body_start_line) or (None, None, None) if not found.
+    """
+    for cpp in _all_source_files():
+        text = cpp.read_text(errors='replace')
+        # Match the function header; body starts after the opening brace
+        for fm in re.finditer(r'handle_' + re.escape(name) + r'\s*\([^)]*\)\s*\n?\s*\{', text):
+            start_char = fm.end()
+            depth = 1
+            i = start_char
+            while i < len(text) and depth > 0:
+                if text[i] == '{':
+                    depth += 1
+                elif text[i] == '}':
+                    depth -= 1
+                i += 1
+            body = text[start_char:i - 1]
+            start_line = text[:start_char].count('\n') + 1
+            return body, str(cpp.relative_to(REPO_ROOT)), start_line
+    return None, None, None
+
+
+def is_trivial_sogen(body: str) -> bool:
+    """Return True if the handler body has no branching logic — it cannot implement kernel contracts.
+
+    Trivial means: after stripping comments, the body contains no if/else/switch/while/for/?:
+    Such a body can only return constants or echo inputs — it cannot implement real kernel behaviour.
+    """
+    # Strip line comments and block comments
+    body_no_comments = re.sub(r'//[^\n]*', '', body)
+    body_no_comments = re.sub(r'/\*.*?\*/', '', body_no_comments, flags=re.DOTALL)
+    return not bool(_CONTROL_FLOW.search(body_no_comments))
+
+
+def is_trivial_kernel(artifact: Path) -> bool:
+    """Return True if the kernel decompilation is a thin stub (single return / forwarder).
+
+    Trivial = after stripping signature, braces, and collapsed-decls comment, ≤ 2 substantive lines.
+    """
+    text = artifact.read_text(errors='replace')
+    substantive = []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s in ('{', '}'):
+            continue
+        if s.startswith('// [COLLAPSED'):
+            continue
+        # Skip the function signature lines (contain '__fastcall' or are type declarations at top)
+        if '__fastcall' in s or (s.startswith('__') and '(' in s):
+            continue
+        # Skip closing braces with row-count markers
+        if re.match(r'^\d+ row', s):
+            continue
+        substantive.append(s)
+    return len(substantive) <= 2
+
+
+# ── Sample test body analysis ─────────────────────────────────────────────────
+
+def _extract_test_fn_body(sample_name: str, test_name: str) -> str | None:
+    """Find the test function called by report("<test_name>") in the given sample and return its body."""
+    sample_dir = SAMPLES_DIR / sample_name
+    if not sample_dir.exists():
+        return None
+    for cpp in sample_dir.glob("*.cpp"):
+        text = cpp.read_text(errors='replace')
+        # Find report("TestName", some_fn_call()) — capture the function name
+        m = re.search(
+            r'report\s*\(\s*"' + re.escape(test_name) + r'"\s*,\s*(\w+)\s*\(\s*\)',
+            text
+        )
+        if not m:
+            continue
+        fn_name = m.group(1)
+        # Find the definition of that function
+        fm = re.search(r'bool\s+' + re.escape(fn_name) + r'\s*\([^)]*\)\s*\{', text)
+        if not fm:
+            continue
+        start = fm.end()
+        depth = 1
+        i = start
+        while i < len(text) and depth > 0:
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+            i += 1
+        return text[start:i - 1]
+    return None
+
+
+def test_body_has_assertions(body: str) -> bool:
+    """Return True if the test function body contains at least one real assertion token."""
+    return bool(_ASSERT_TOKENS.search(body))
+
+
+# ── Review ledger ─────────────────────────────────────────────────────────────
+
+def load_reviews() -> set[str]:
+    """Load all wave review files; return set of handler names with AGREE verdict."""
+    agreed: set[str] = set()
+    if not REVIEWS_DIR.exists():
+        return agreed
+    for tsv in REVIEWS_DIR.glob("*.tsv"):
+        for line in tsv.read_text(errors='replace').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2 and parts[1].strip().upper() == 'AGREE':
+                agreed.add(parts[0].strip())
+    return agreed
+
+
+# ── Registration and stub detection ──────────────────────────────────────────
 
 def registered_handlers(syscalls_cpp: Path) -> dict[str, str]:
     """Extract names and owning files by finding handle_NtXxx implementations.
@@ -186,7 +324,9 @@ def load_sample_tests() -> set[str]:
     return tests
 
 
-def validate_row(row: dict, sample_tests: set[str]) -> list[str]:
+# ── Per-row validation ────────────────────────────────────────────────────────
+
+def validate_row(row: dict, sample_tests: set[str], reviews: set[str]) -> list[str]:
     """Validate a single ledger row according to the strict gating rules.
     Returns a list of violation strings (empty = OK).
     """
@@ -209,19 +349,22 @@ def validate_row(row: dict, sample_tests: set[str]) -> list[str]:
     elif artifact_md.exists():
         artifact = artifact_md
 
+    artifact_text = ''
+    kernel_non_trivial = False
+
     if artifact is None:
         violations.append(f"missing artifact: {DECOMP_DIR}/{name}.c (or .sogen.md) does not exist")
     else:
         # ── Rule 1b: artifact must be non-trivial ──────────────────────────────
         artifact_text = artifact.read_text(errors='replace')
         artifact_lines = [l for l in artifact_text.splitlines() if l.strip()]
-        # Minimum 4 non-blank lines covers thin forwarders (signature+{+body+}); 8 for real bodies.
-        # Thin forwarders (single-return wrappers) are legitimate at 4+ lines with function name present.
         min_lines = 4
         if len(artifact_lines) < min_lines:
             violations.append(f"artifact too short ({len(artifact_lines)} non-blank lines, need ≥ {min_lines}): {artifact}")
         if name not in artifact_text:
             violations.append(f"artifact does not contain the function name '{name}': {artifact}")
+
+        kernel_non_trivial = not is_trivial_kernel(artifact)
 
         # ── Rule 2: evidence must contain [xref:TOKEN] from the artifact ───────
         xref_match = re.search(r'\[xref:([^\]]+)\]', evidence)
@@ -231,7 +374,7 @@ def validate_row(row: dict, sample_tests: set[str]) -> list[str]:
             token = xref_match.group(1)
             if len(token) < 4:
                 violations.append(f"[xref:TOKEN] too short ({len(token)} chars, need ≥ 4): '{token}'")
-            elif artifact and token not in artifact.read_text(errors='replace'):
+            elif token not in artifact_text:
                 violations.append(f"[xref:{token!r}] not found verbatim in {artifact}")
 
     # ── Rule 3: evidence must have outcome tag ─────────────────────────────────
@@ -247,6 +390,9 @@ def validate_row(row: dict, sample_tests: set[str]) -> list[str]:
         violations.append(f"evidence matches boilerplate blocklist (bulk/fake evidence not accepted): {evidence!r}")
 
     # ── Rule 5: verified rows need a real sample sub-test ─────────────────────
+    test_name_resolved: str | None = None
+    sample_name_resolved: str | None = None
+
     if status == 'verified':
         if name in STARTUP_ALLOWLIST:
             pass  # startup-only handler; test not possible
@@ -255,35 +401,122 @@ def validate_row(row: dict, sample_tests: set[str]) -> list[str]:
         elif ':' not in sample_subtest:
             violations.append(f"sample_subtest '{sample_subtest}' must be in format <sample>:<TestName>")
         else:
-            sample_name, test_name = sample_subtest.split(':', 1)
-            full_key = f"{sample_name}:{test_name}"
-            if full_key not in sample_tests and test_name not in sample_tests:
+            sample_name_resolved, test_name_resolved = sample_subtest.split(':', 1)
+            full_key = f"{sample_name_resolved}:{test_name_resolved}"
+            if full_key not in sample_tests and test_name_resolved not in sample_tests:
                 violations.append(
-                    f"sample_subtest '{sample_subtest}': no report(\"{test_name}\") found in {SAMPLES_DIR}/{sample_name}/"
+                    f"sample_subtest '{sample_subtest}': no report(\"{test_name_resolved}\") found in {SAMPLES_DIR}/{sample_name_resolved}/"
                 )
 
-            # ── Rule 6: tier gate — sweep: tests require trivial artifact body ──
-            if test_name.startswith('sweep:') and artifact is not None:
-                art_text = artifact.read_text(errors='replace')
-                non_trivial = []
-                for ln in art_text.splitlines():
-                    s = ln.strip()
-                    if not s or s in ('{', '}'):
-                        continue
-                    if s.startswith('// [COLLAPSED'):
-                        continue
-                    # Skip the signature line (contains the function name)
-                    if name in s and '__fastcall' in s:
-                        continue
-                    non_trivial.append(s)
-                if len(non_trivial) > 2:
+            # ── Rule 5a: sweep: tests require trivial artifact body ──────────
+            if test_name_resolved and test_name_resolved.startswith('sweep:') and artifact is not None:
+                if kernel_non_trivial:
                     violations.append(
-                        f"tier-gate (1d.6): sample_subtest uses sweep: but artifact has "
-                        f"{len(non_trivial)} non-trivial lines — needs a dedicated Tier-2/3 test"
+                        f"tier-gate: sample_subtest uses sweep: but kernel artifact is non-trivial — "
+                        f"needs a dedicated Tier-2/3 test"
                     )
+
+    # ── Rule 6 (v2 cheat block): trivial sogen stub may not claim [MATCH] ────
+    # against a non-trivial kernel contract. This is derived from source + artifact,
+    # never from the evidence text.
+    if status == 'verified' and re.search(r'\[MATCH\]', evidence) and kernel_non_trivial:
+        body, _, _ = extract_sogen_body(name)
+        if body is not None and is_trivial_sogen(body):
+            violations.append(
+                f"v2-cheat-block: trivial sogen body claims [MATCH] against non-trivial kernel contract. "
+                f"Rewrite to match → [FIXED:file:line], or prove unemulable → stub-deferred [DEFER:reason]"
+            )
+
+    # ── Rule 7: non-trivial kernel handlers need a dedicated asserting test ───
+    if status == 'verified' and kernel_non_trivial and name not in STARTUP_ALLOWLIST:
+        if test_name_resolved and test_name_resolved.startswith('sweep:'):
+            pass  # already flagged by Rule 5a
+        elif test_name_resolved and sample_name_resolved:
+            test_body = _extract_test_fn_body(sample_name_resolved, test_name_resolved)
+            if test_body is not None and not test_body_has_assertions(test_body):
+                violations.append(
+                    f"non-trivial kernel handler needs an asserting test (must contain ==, !=, "
+                    f"NT_SUCCESS, STATUS_, or memcmp); test '{test_name_resolved}' has none"
+                )
+
+    # ── Rule 8: evidence must carry [sref:file:line] for traceability ─────────
+    if status == 'verified':
+        if not re.search(r'\[sref:[^\]]+:\d+\]', evidence):
+            violations.append(
+                "evidence missing [sref:<file>:<line>] pointing into the sogen handler source"
+            )
+        else:
+            m = re.search(r'\[sref:([^\]]+):(\d+)\]', evidence)
+            if m:
+                sref_file = m.group(1)
+                # Verify the referenced file exists somewhere in the sogen source tree
+                candidate = REPO_ROOT / sref_file
+                if not candidate.exists():
+                    # Try as a basename match
+                    matches = list(REPO_ROOT.rglob(Path(sref_file).name))
+                    if not matches:
+                        violations.append(f"[sref] file '{sref_file}' not found in repo")
+
+    # ── Rule 9: independent review AGREE required per verified handler ─────────
+    if status == 'verified':
+        if name not in reviews:
+            violations.append(
+                f"no independent review AGREE found in tools/syscall-audit/reviews/*.tsv for this handler"
+            )
 
     return violations
 
+
+# ── Diff guard ────────────────────────────────────────────────────────────────
+
+def run_diff_guard() -> int:
+    """Check that new verified rows in the staged diff don't outnumber new artifacts/subtests.
+    Returns exit code (0 = OK, 1 = violation).
+    """
+    result = subprocess.run(
+        ['git', 'diff', '--cached', '--unified=0'],
+        capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    if result.returncode != 0:
+        result = subprocess.run(
+            ['git', 'diff', 'HEAD~1', '--unified=0'],
+            capture_output=True, text=True, cwd=REPO_ROOT
+        )
+    diff = result.stdout
+
+    # Count rows newly flipped to verified (added lines ending in \tverified)
+    new_verified = len(re.findall(r'^\+[^\+][^\t]+\t[^\t]+\t[^\t]+\t[^\t]+\t[^\t]+\t[^\t]+\t[^\t]*\tverified\s*$',
+                                  diff, re.MULTILINE))
+
+    # Count new/modified artifact files
+    new_artifacts = len(re.findall(r'^\+\+\+ b/tools/syscall-audit/decomp/', diff, re.MULTILINE))
+
+    # Count new report() calls in samples
+    new_subtests = len(re.findall(r'^\+[^\+].*report\s*\(\s*"[^"]+"', diff, re.MULTILINE))
+
+    print(f"diff-guard: +{new_verified} verified rows | +{new_artifacts} artifacts | +{new_subtests} subtests")
+
+    violations = []
+    if new_verified > new_artifacts:
+        violations.append(
+            f"new verified rows ({new_verified}) > new artifact files ({new_artifacts}): "
+            f"bulk status flip without corresponding decompilations"
+        )
+    if new_verified > 0 and new_subtests == 0:
+        violations.append(
+            f"new verified rows ({new_verified}) but no new sample subtests added"
+        )
+
+    if violations:
+        for v in violations:
+            print(f"diff-guard VIOLATION: {v}")
+        return 1
+
+    print("diff-guard: OK")
+    return 0
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -291,11 +524,17 @@ def main():
     parser.add_argument("--gaps", nargs="?", const="-", metavar="FILE",
                         help="Gap-scan output file (- for stdin) to cross-reference")
     parser.add_argument("--ledger", metavar="FILE", help="Path to ledger.tsv for verification tracking")
+    parser.add_argument("--diff-guard", action="store_true",
+                        help="Check staged diff for bulk status flips without matching artifacts/subtests")
     parser.add_argument("--init-ledger", metavar="FILE",
                         help="Initialize ledger.tsv from registered handlers (creates FILE)")
     args = parser.parse_args()
 
     idb = Path(args.idb)
+
+    # Handle --diff-guard (pre-commit bulk-flip check)
+    if args.diff_guard:
+        sys.exit(run_diff_guard())
 
     print("Reading registered handlers from syscalls.cpp …", file=sys.stderr)
     registered = registered_handlers(SYSCALLS_CPP)
@@ -337,6 +576,9 @@ def main():
         print("Loading sample tests from src/samples/ …", file=sys.stderr)
         sample_tests = load_sample_tests()
 
+        print("Loading independent reviews …", file=sys.stderr)
+        reviews = load_reviews()
+
         print(f"Querying ntoskrnl IDB at {idb} …", file=sys.stderr)
 
         # Structural checks: orphans and stale rows
@@ -355,7 +597,7 @@ def main():
 
         # Per-row strict validation
         for name, row in sorted(ledger.items()):
-            row_violations = validate_row(row, sample_tests)
+            row_violations = validate_row(row, sample_tests, reviews)
             for v in row_violations:
                 all_violations.append((name, v))
 
