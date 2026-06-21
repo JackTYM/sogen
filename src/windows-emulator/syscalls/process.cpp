@@ -55,6 +55,7 @@ namespace sogen
                                                                         });
             }
             case ProcessEnclaveInformation:
+            case ProcessTelemetryIdInformation:
                 return STATUS_NOT_SUPPORTED;
 
             case ProcessTimes:
@@ -143,8 +144,7 @@ namespace sogen
                 const auto init_basic_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
                     basic_info.ExitStatus = STATUS_PENDING;
                     basic_info.PebBaseAddress = c.proc.peb64.value();
-                    basic_info.AffinityMask = 1;
-                    basic_info.UniqueProcessId = 1;
+                    basic_info.UniqueProcessId = process_context::process_id;
                 };
 
                 switch (process_information_length)
@@ -274,6 +274,7 @@ namespace sogen
                 || info_class == ProcessDynamicFunctionTableInformation      //
                 || info_class == ProcessPriorityBoost                        //
                 || info_class == ProcessPriorityClassEx                      //
+                || info_class == ProcessQuotaLimits                          //
                 || info_class == ProcessPriorityClass || info_class == ProcessAffinityMask)
             {
                 return STATUS_SUCCESS;

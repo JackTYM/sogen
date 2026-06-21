@@ -9,6 +9,7 @@
 #include <cstring>
 #include <unordered_map>
 #include <vector>
+#include <ranges>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
@@ -162,6 +163,7 @@ namespace sogen
             PFN_vkGetPhysicalDeviceFormatProperties get_physical_device_format_properties{};
             PFN_vkGetPhysicalDeviceImageFormatProperties get_physical_device_image_format_properties{};
             PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queue_family_properties{};
+            PFN_vkGetPhysicalDeviceQueueFamilyProperties2 get_queue_family_properties2{};
             PFN_vkGetPhysicalDeviceMemoryProperties get_physical_device_memory_properties{};
             PFN_vkGetPhysicalDeviceMemoryProperties2 get_physical_device_memory_properties2{};
             PFN_vkGetPhysicalDeviceFeatures2 get_physical_device_features2{};
@@ -230,12 +232,14 @@ namespace sogen
             PFN_vkBindImageMemory bind_image_memory{};
             PFN_vkCmdPipelineBarrier cmd_pipeline_barrier{};
             PFN_vkCmdClearColorImage cmd_clear_color_image{};
+            PFN_vkCmdClearAttachments cmd_clear_attachments{};
             PFN_vkCmdClearDepthStencilImage cmd_clear_depth_stencil_image{};
             PFN_vkCmdCopyImageToBuffer cmd_copy_image_to_buffer{};
             PFN_vkCmdResolveImage cmd_resolve_image{};
             PFN_vkCmdUpdateBuffer cmd_update_buffer{};
             PFN_vkCmdCopyBufferToImage cmd_copy_buffer_to_image{};
             PFN_vkCmdCopyImage cmd_copy_image{};
+            PFN_vkCmdBlitImage cmd_blit_image{};
             PFN_vkCmdCopyBuffer cmd_copy_buffer{};
             PFN_vkCreateSampler create_sampler{};
             PFN_vkDestroySampler destroy_sampler{};
@@ -263,6 +267,7 @@ namespace sogen
             PFN_vkDestroyDescriptorSetLayout destroy_descriptor_set_layout{};
             PFN_vkCreateDescriptorPool create_descriptor_pool{};
             PFN_vkDestroyDescriptorPool destroy_descriptor_pool{};
+            PFN_vkResetDescriptorPool reset_descriptor_pool{};
             PFN_vkAllocateDescriptorSets allocate_descriptor_sets{};
             PFN_vkUpdateDescriptorSets update_descriptor_sets{};
             PFN_vkCmdBindDescriptorSets cmd_bind_descriptor_sets{};
@@ -302,6 +307,7 @@ namespace sogen
             PFN_vkCmdSetDepthWriteEnable cmd_set_depth_write_enable{};
             PFN_vkCmdSetDepthCompareOp cmd_set_depth_compare_op{};
             PFN_vkCmdSetDepthBoundsTestEnable cmd_set_depth_bounds_test_enable{};
+            PFN_vkCmdSetDepthClipEnableEXT cmd_set_depth_clip_enable{};
             PFN_vkCmdSetStencilTestEnable cmd_set_stencil_test_enable{};
             PFN_vkCmdSetRasterizerDiscardEnable cmd_set_rasterizer_discard_enable{};
             PFN_vkCmdSetDepthBiasEnable cmd_set_depth_bias_enable{};
@@ -333,9 +339,8 @@ namespace sogen
             VkCommandBuffer present_cmd{};
             VkFence present_fence{};
             uint32_t next_image{};
-            // Async present: the readback copy of the most recent frame is submitted but not waited on
-            // here; it is drained on the *next* present (by which point the GPU has finished it), so the
-            // host thread never blocks on vkQueueWaitIdle inline. Present is therefore one frame behind.
+            // The device work loop polls this copy so the frame can be displayed without waiting for
+            // another guest present.
             bool present_in_flight{};
         };
 
@@ -504,6 +509,26 @@ namespace sogen
         std::unordered_map<uint64_t, descriptor_pool_data> descriptor_pools;
         std::unordered_map<uint64_t, descriptor_set_data> descriptor_sets;
         uint64_t next_id{1};
+
+        static bool drain_readback(swapchain_data& sc, device_data& dev, vulkan_host::presented_frame& frame)
+        {
+            const auto readback_size = static_cast<VkDeviceSize>(sc.width) * sc.height * 4;
+            void* mapped = nullptr;
+            if (dev.map_memory(dev.handle, sc.readback_memory, 0, readback_size, 0, &mapped) != VK_SUCCESS || !mapped)
+            {
+                sc.present_in_flight = false;
+                return false;
+            }
+
+            frame.pixels.resize(static_cast<size_t>(readback_size));
+            std::memcpy(frame.pixels.data(), mapped, frame.pixels.size());
+            dev.unmap_memory(dev.handle, sc.readback_memory);
+            frame.width = sc.width;
+            frame.height = sc.height;
+            frame.hwnd = sc.hwnd;
+            sc.present_in_flight = false;
+            return true;
+        }
 
         // Picks the first memory type set in `type_bits` that has all `required` property flags, using
         // the memory properties of the device's physical device. Returns UINT32_MAX if none qualifies.
@@ -908,6 +933,8 @@ namespace sogen
             instance, "vkGetPhysicalDeviceImageFormatProperties");
         data.get_queue_family_properties = this->impl_->load_instance_proc<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
             instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+        data.get_queue_family_properties2 = this->impl_->load_instance_proc<PFN_vkGetPhysicalDeviceQueueFamilyProperties2>(
+            instance, "vkGetPhysicalDeviceQueueFamilyProperties2");
         data.get_physical_device_memory_properties =
             this->impl_->load_instance_proc<PFN_vkGetPhysicalDeviceMemoryProperties>(instance, "vkGetPhysicalDeviceMemoryProperties");
         data.get_physical_device_memory_properties2 =
@@ -1110,7 +1137,8 @@ namespace sogen
         return VK_SUCCESS;
     }
 
-    int32_t vulkan_host::get_queue_family_properties(uint64_t physical_device, void* out, size_t out_size, uint32_t& out_count)
+    int32_t vulkan_host::get_queue_family_properties(uint64_t physical_device, const bool query_ownership_transfer, void* out,
+                                                     size_t out_size, uint32_t& out_count)
     {
         out_count = 0;
 
@@ -1129,18 +1157,58 @@ namespace sogen
         uint32_t count = 0;
         instance->second.get_queue_family_properties(pd->second.handle, &count, nullptr);
 
-        std::vector<VkQueueFamilyProperties> families(count);
-        if (count > 0)
+        std::vector<gpu_bridge::queue_family_properties> wire_families(count);
+        if (query_ownership_transfer && instance->second.get_queue_family_properties2)
         {
-            instance->second.get_queue_family_properties(pd->second.handle, &count, families.data());
+            std::vector<VkQueueFamilyProperties2> families(count);
+            std::vector<VkQueueFamilyOwnershipTransferPropertiesKHR> ownership(count);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                families[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+                families[i].pNext = &ownership[i];
+                ownership[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_OWNERSHIP_TRANSFER_PROPERTIES_KHR;
+            }
+            instance->second.get_queue_family_properties2(pd->second.handle, &count, families.data());
+            wire_families.resize(count);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const auto& family = families[i].queueFamilyProperties;
+                wire_families[i] = {.queue_flags = family.queueFlags,
+                                    .queue_count = family.queueCount,
+                                    .timestamp_valid_bits = family.timestampValidBits,
+                                    .min_image_transfer_granularity_width = family.minImageTransferGranularity.width,
+                                    .min_image_transfer_granularity_height = family.minImageTransferGranularity.height,
+                                    .min_image_transfer_granularity_depth = family.minImageTransferGranularity.depth,
+                                    .optimal_image_transfer_to_queue_families = ownership[i].optimalImageTransferToQueueFamilies};
+            }
+        }
+        else
+        {
+            std::vector<VkQueueFamilyProperties> families(count);
+            if (count > 0)
+            {
+                instance->second.get_queue_family_properties(pd->second.handle, &count, families.data());
+            }
+            wire_families.resize(count);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const auto& family = families[i];
+                wire_families[i] = {.queue_flags = family.queueFlags,
+                                    .queue_count = family.queueCount,
+                                    .timestamp_valid_bits = family.timestampValidBits,
+                                    .min_image_transfer_granularity_width = family.minImageTransferGranularity.width,
+                                    .min_image_transfer_granularity_height = family.minImageTransferGranularity.height,
+                                    .min_image_transfer_granularity_depth = family.minImageTransferGranularity.depth,
+                                    .optimal_image_transfer_to_queue_families = 0};
+            }
         }
 
         out_count = count;
 
-        const size_t copy_bytes = std::min(out_size, families.size() * sizeof(VkQueueFamilyProperties));
+        const size_t copy_bytes = std::min(out_size, wire_families.size() * sizeof(gpu_bridge::queue_family_properties));
         if (copy_bytes > 0)
         {
-            std::memcpy(out, families.data(), copy_bytes);
+            std::memcpy(out, wire_families.data(), copy_bytes);
         }
 
         return VK_SUCCESS;
@@ -1559,12 +1627,14 @@ namespace sogen
             data.bind_image_memory = reinterpret_cast<PFN_vkBindImageMemory>(resolve("vkBindImageMemory"));
             data.cmd_pipeline_barrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(resolve("vkCmdPipelineBarrier"));
             data.cmd_clear_color_image = reinterpret_cast<PFN_vkCmdClearColorImage>(resolve("vkCmdClearColorImage"));
+            data.cmd_clear_attachments = reinterpret_cast<PFN_vkCmdClearAttachments>(resolve("vkCmdClearAttachments"));
             data.cmd_clear_depth_stencil_image = reinterpret_cast<PFN_vkCmdClearDepthStencilImage>(resolve("vkCmdClearDepthStencilImage"));
             data.cmd_copy_image_to_buffer = reinterpret_cast<PFN_vkCmdCopyImageToBuffer>(resolve("vkCmdCopyImageToBuffer"));
             data.cmd_resolve_image = reinterpret_cast<PFN_vkCmdResolveImage>(resolve("vkCmdResolveImage"));
             data.cmd_update_buffer = reinterpret_cast<PFN_vkCmdUpdateBuffer>(resolve("vkCmdUpdateBuffer"));
             data.cmd_copy_buffer_to_image = reinterpret_cast<PFN_vkCmdCopyBufferToImage>(resolve("vkCmdCopyBufferToImage"));
             data.cmd_copy_image = reinterpret_cast<PFN_vkCmdCopyImage>(resolve("vkCmdCopyImage"));
+            data.cmd_blit_image = reinterpret_cast<PFN_vkCmdBlitImage>(resolve("vkCmdBlitImage"));
             data.cmd_copy_buffer = reinterpret_cast<PFN_vkCmdCopyBuffer>(resolve("vkCmdCopyBuffer"));
             data.create_sampler = reinterpret_cast<PFN_vkCreateSampler>(resolve("vkCreateSampler"));
             data.destroy_sampler = reinterpret_cast<PFN_vkDestroySampler>(resolve("vkDestroySampler"));
@@ -1593,6 +1663,7 @@ namespace sogen
                 reinterpret_cast<PFN_vkDestroyDescriptorSetLayout>(resolve("vkDestroyDescriptorSetLayout"));
             data.create_descriptor_pool = reinterpret_cast<PFN_vkCreateDescriptorPool>(resolve("vkCreateDescriptorPool"));
             data.destroy_descriptor_pool = reinterpret_cast<PFN_vkDestroyDescriptorPool>(resolve("vkDestroyDescriptorPool"));
+            data.reset_descriptor_pool = reinterpret_cast<PFN_vkResetDescriptorPool>(resolve("vkResetDescriptorPool"));
             data.allocate_descriptor_sets = reinterpret_cast<PFN_vkAllocateDescriptorSets>(resolve("vkAllocateDescriptorSets"));
             data.update_descriptor_sets = reinterpret_cast<PFN_vkUpdateDescriptorSets>(resolve("vkUpdateDescriptorSets"));
             data.cmd_bind_descriptor_sets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(resolve("vkCmdBindDescriptorSets"));
@@ -1633,6 +1704,7 @@ namespace sogen
             data.cmd_set_depth_compare_op = reinterpret_cast<PFN_vkCmdSetDepthCompareOp>(resolve("vkCmdSetDepthCompareOp"));
             data.cmd_set_depth_bounds_test_enable =
                 reinterpret_cast<PFN_vkCmdSetDepthBoundsTestEnable>(resolve("vkCmdSetDepthBoundsTestEnable"));
+            data.cmd_set_depth_clip_enable = reinterpret_cast<PFN_vkCmdSetDepthClipEnableEXT>(resolve("vkCmdSetDepthClipEnableEXT"));
             data.cmd_set_stencil_test_enable = reinterpret_cast<PFN_vkCmdSetStencilTestEnable>(resolve("vkCmdSetStencilTestEnable"));
             data.cmd_set_rasterizer_discard_enable =
                 reinterpret_cast<PFN_vkCmdSetRasterizerDiscardEnable>(resolve("vkCmdSetRasterizerDiscardEnable"));
@@ -2914,6 +2986,35 @@ namespace sogen
         return VK_SUCCESS;
     }
 
+    int32_t vulkan_host::cmd_clear_attachments(uint64_t command_buffer, uint32_t attachment_count, uint32_t rect_count, const void* data,
+                                               size_t data_size)
+    {
+        const size_t attach_bytes = static_cast<size_t>(attachment_count) * sizeof(VkClearAttachment);
+        const size_t rect_bytes = static_cast<size_t>(rect_count) * sizeof(VkClearRect);
+        if (data_size < attach_bytes || data_size - attach_bytes < rect_bytes)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto cb = this->impl_->command_buffers.find(command_buffer);
+        if (cb == this->impl_->command_buffers.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        const auto dev = this->impl_->devices.find(cb->second.device_id);
+        if (dev == this->impl_->devices.end() || !dev->second.cmd_clear_attachments)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        // VkClearAttachment / VkClearRect carry no object handles, so the guest blob is forwarded verbatim.
+        const auto* attachments = reinterpret_cast<const VkClearAttachment*>(data);
+        const auto* rects = reinterpret_cast<const VkClearRect*>(static_cast<const uint8_t*>(data) + attach_bytes);
+        dev->second.cmd_clear_attachments(cb->second.handle, attachment_count, attachment_count ? attachments : nullptr, rect_count,
+                                          rect_count ? rects : nullptr);
+        return VK_SUCCESS;
+    }
+
     int32_t vulkan_host::cmd_clear_depth_stencil_image(uint64_t command_buffer, uint64_t image, uint32_t image_layout, float depth,
                                                        uint32_t stencil, const subresource_range& range)
     {
@@ -3086,6 +3187,42 @@ namespace sogen
 
         dev->second.cmd_copy_image(cb->second.handle, src->second.handle, translate_layout(src_layout), dst->second.handle,
                                    translate_layout(dst_layout), 1, &region);
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::cmd_blit_image(uint64_t command_buffer, uint64_t src_image, uint32_t src_layout, uint64_t dst_image,
+                                        uint32_t dst_layout, const image_blit_region& r)
+    {
+        const auto cb = this->impl_->command_buffers.find(command_buffer);
+        const auto src = this->impl_->images.find(src_image);
+        const auto dst = this->impl_->images.find(dst_image);
+        if (cb == this->impl_->command_buffers.end() || src == this->impl_->images.end() || dst == this->impl_->images.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev = this->impl_->devices.find(cb->second.device_id);
+        if (dev == this->impl_->devices.end() || !dev->second.cmd_blit_image)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkImageBlit region{};
+        region.srcSubresource = {.aspectMask = r.src_aspect_mask,
+                                 .mipLevel = r.src_mip_level,
+                                 .baseArrayLayer = r.src_base_array_layer,
+                                 .layerCount = r.src_layer_count ? r.src_layer_count : 1};
+        region.srcOffsets[0] = {.x = r.src_offset_x0, .y = r.src_offset_y0, .z = r.src_offset_z0};
+        region.srcOffsets[1] = {.x = r.src_offset_x1, .y = r.src_offset_y1, .z = r.src_offset_z1};
+        region.dstSubresource = {.aspectMask = r.dst_aspect_mask,
+                                 .mipLevel = r.dst_mip_level,
+                                 .baseArrayLayer = r.dst_base_array_layer,
+                                 .layerCount = r.dst_layer_count ? r.dst_layer_count : 1};
+        region.dstOffsets[0] = {.x = r.dst_offset_x0, .y = r.dst_offset_y0, .z = r.dst_offset_z0};
+        region.dstOffsets[1] = {.x = r.dst_offset_x1, .y = r.dst_offset_y1, .z = r.dst_offset_z1};
+
+        dev->second.cmd_blit_image(cb->second.handle, src->second.handle, translate_layout(src_layout), dst->second.handle,
+                                   translate_layout(dst_layout), 1, &region, static_cast<VkFilter>(r.filter));
         return VK_SUCCESS;
     }
 
@@ -3505,14 +3642,8 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
-        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(sc.width) * sc.height * 4;
-
-        // Async present, part 1: drain the copy submitted on the *previous* present and hand its pixels
-        // back to be shown now. A full guest frame has elapsed since it was submitted, so its fence is
-        // essentially always already signalled (the GPU did the copy while the guest rendered the next
-        // frame) -- only fall back to a blocking wait in the unlikely case it is not. The previous
-        // synchronous vkQueueWaitIdle here was ~25% of the emulated frame; deferring keeps it off the
-        // host thread's critical path. Present is therefore one frame behind, which is imperceptible.
+        // The work loop normally collects completed readbacks. If another present arrives first, reclaim
+        // the single readback slot here; waiting is only necessary when the guest outruns the GPU copy.
         if (sc.present_in_flight)
         {
             if (dev.get_fence_status(dev.handle, sc.present_fence) != VK_SUCCESS)
@@ -3520,22 +3651,16 @@ namespace sogen
                 dev.queue_wait_idle(queue_it->second.handle);
             }
 
-            void* mapped = nullptr;
-            if (dev.map_memory(dev.handle, sc.readback_memory, 0, readback_size, 0, &mapped) == VK_SUCCESS && mapped)
+            presented_frame frame{};
+            if (impl::drain_readback(sc, dev, frame))
             {
-                out_pixels.resize(static_cast<size_t>(readback_size));
-                std::memcpy(out_pixels.data(), mapped, out_pixels.size());
-                dev.unmap_memory(dev.handle, sc.readback_memory);
-                out_width = sc.width;
-                out_height = sc.height;
-                out_hwnd = sc.hwnd;
+                out_pixels = std::move(frame.pixels);
+                out_width = frame.width;
+                out_height = frame.height;
+                out_hwnd = frame.hwnd;
             }
-            sc.present_in_flight = false;
         }
 
-        // Async present, part 2: record + submit the copy for the *current* frame, but do not wait on it.
-        // It runs on the GPU while the guest proceeds; the next present drains it (above). The previous
-        // copy is guaranteed finished here (the drain checked its fence), so reusing present_cmd is safe.
         // Make the rendered image's writes visible to the copy, then copy it into the readback buffer.
         // The guest left the image in PRESENT_SRC, which the bridge mapped to TRANSFER_SRC_OPTIMAL.
         VkCommandBufferBeginInfo begin{};
@@ -3585,9 +3710,44 @@ namespace sogen
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
+        // Do not wait here. gpu_bridge_device::work publishes the frame as soon as this fence signals.
         sc.present_in_flight = true;
 
         return VK_SUCCESS;
+    }
+
+    std::vector<vulkan_host::presented_frame> vulkan_host::poll_presented_frames()
+    {
+        std::vector<presented_frame> frames{};
+
+        for (auto& sc : this->impl_->swapchains | std::views::values)
+        {
+            if (!sc.present_in_flight)
+            {
+                continue;
+            }
+
+            const auto dev_it = this->impl_->devices.find(sc.device_id);
+            if (dev_it == this->impl_->devices.end())
+            {
+                continue;
+            }
+            auto& dev = dev_it->second;
+            if (!dev.get_fence_status || !dev.map_memory || !dev.unmap_memory ||
+                dev.get_fence_status(dev.handle, sc.present_fence) != VK_SUCCESS)
+            {
+                continue;
+            }
+
+            auto& frame = frames.emplace_back();
+            if (!impl::drain_readback(sc, dev, frame))
+            {
+                frames.pop_back();
+                continue;
+            }
+        }
+
+        return frames;
     }
 
     int32_t vulkan_host::create_shader_module(uint64_t device, const void* code, size_t code_size, uint64_t& out_module)
@@ -4222,6 +4382,25 @@ namespace sogen
         return VK_SUCCESS;
     }
 
+    int32_t vulkan_host::reset_descriptor_pool(uint64_t device, uint64_t pool, uint32_t flags)
+    {
+        const auto dev = this->impl_->devices.find(device);
+        const auto it = this->impl_->descriptor_pools.find(pool);
+        if (dev == this->impl_->devices.end() || it == this->impl_->descriptor_pools.end() || !dev->second.reset_descriptor_pool)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const int32_t result =
+            dev->second.reset_descriptor_pool(dev->second.handle, it->second.handle, static_cast<VkDescriptorPoolResetFlags>(flags));
+        if (result == VK_SUCCESS)
+        {
+            // The reset implicitly frees every set allocated from this pool; drop their ids.
+            this->impl_->erase_owned(this->impl_->descriptor_sets, [&](const impl::descriptor_set_data& d) { return d.pool_id == pool; });
+        }
+        return result;
+    }
+
     void vulkan_host::destroy_descriptor_pool(uint64_t device, uint64_t pool)
     {
         const auto dev = this->impl_->devices.find(device);
@@ -4323,6 +4502,7 @@ namespace sogen
 
             const bool is_image =
                 (w.descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || w.descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+                 w.descriptor_type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || w.descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT ||
                  w.descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER);
             if (is_image)
             {
@@ -4383,9 +4563,9 @@ namespace sogen
                                                   uint64_t fragment_shader, uint32_t width, uint32_t height,
                                                   std::span<const vertex_binding> bindings, std::span<const vertex_attribute> attributes,
                                                   const depth_state& depth, std::span<const uint32_t> color_formats, uint32_t depth_format,
-                                                  uint32_t stencil_format, uint32_t rasterization_samples,
-                                                  std::span<const uint32_t> dynamic_states, const specialization& vs_spec,
-                                                  const specialization& fs_spec,
+                                                  uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
+                                                  uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
+                                                  const specialization& vs_spec, const specialization& fs_spec,
                                                   std::span<const color_blend_attachment> blend_attachments_in, uint64_t& out_pipeline)
     {
         out_pipeline = 0;
@@ -4475,7 +4655,8 @@ namespace sogen
 
         VkPipelineInputAssemblyStateCreateInfo input_assembly{};
         input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        input_assembly.topology = static_cast<VkPrimitiveTopology>(primitive_topology);
+        input_assembly.primitiveRestartEnable = primitive_restart_enable ? VK_TRUE : VK_FALSE;
 
         VkViewport viewport{};
         viewport.width = static_cast<float>(width);
@@ -5313,6 +5494,13 @@ namespace sogen
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
             dev->second.cmd_set_depth_bounds_test_enable(handle, value);
+            break;
+        case gpu_bridge::dynamic_state_u32::depth_clip_enable:
+            if (!dev->second.cmd_set_depth_clip_enable)
+            {
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+            dev->second.cmd_set_depth_clip_enable(handle, value);
             break;
         case gpu_bridge::dynamic_state_u32::stencil_test_enable:
             if (!dev->second.cmd_set_stencil_test_enable)

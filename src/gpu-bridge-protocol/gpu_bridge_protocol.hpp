@@ -168,6 +168,12 @@ namespace sogen::gpu_bridge
         invalidate_mapped_memory_direct = 0x883,
         cmd_copy_image = 0x884,
         get_physical_device_memory_budget = 0x885,
+        // Coalesced vkUpdateDescriptorSets: payload is a concatenation of update_descriptor_sets_request blobs
+        // (each a header + its descriptor_write[]), applied in issue order.
+        update_descriptor_sets_batch = 0x886,
+        cmd_blit_image = 0x887,
+        reset_descriptor_pool = 0x888,
+        cmd_clear_attachments = 0x889,
     };
 
     // Discriminator for cmd_set_dynamic_u32: the family of extended-dynamic-state setters that all take a
@@ -185,6 +191,7 @@ namespace sogen::gpu_bridge
         rasterizer_discard_enable = 8,
         depth_bias_enable = 9,
         primitive_restart_enable = 10,
+        depth_clip_enable = 11,
     };
 
     // Discriminator for cmd_set_stencil: which of the three single-value stencil dynamic states to set.
@@ -263,8 +270,10 @@ namespace sogen::gpu_bridge
         make_ioctl(static_cast<uint32_t>(command::destroy_descriptor_set_layout));
     inline constexpr uint32_t ioctl_create_descriptor_pool = make_ioctl(static_cast<uint32_t>(command::create_descriptor_pool));
     inline constexpr uint32_t ioctl_destroy_descriptor_pool = make_ioctl(static_cast<uint32_t>(command::destroy_descriptor_pool));
+    inline constexpr uint32_t ioctl_reset_descriptor_pool = make_ioctl(static_cast<uint32_t>(command::reset_descriptor_pool));
     inline constexpr uint32_t ioctl_allocate_descriptor_sets = make_ioctl(static_cast<uint32_t>(command::allocate_descriptor_sets));
     inline constexpr uint32_t ioctl_update_descriptor_sets = make_ioctl(static_cast<uint32_t>(command::update_descriptor_sets));
+    inline constexpr uint32_t ioctl_update_descriptor_sets_batch = make_ioctl(static_cast<uint32_t>(command::update_descriptor_sets_batch));
     inline constexpr uint32_t ioctl_create_sampler = make_ioctl(static_cast<uint32_t>(command::create_sampler));
     inline constexpr uint32_t ioctl_destroy_sampler = make_ioctl(static_cast<uint32_t>(command::destroy_sampler));
     inline constexpr uint32_t ioctl_enumerate_device_extension_properties =
@@ -359,14 +368,25 @@ namespace sogen::gpu_bridge
     {
         object_id physical_device;
         uint32_t max_count; // capacity (in entries) of the array following the response header
-        uint32_t reserved;
+        uint32_t query_ownership_transfer;
     };
 
-    // ioctl_get_queue_family_properties: out header, followed by `count` raw VkQueueFamilyProperties
+    // ioctl_get_queue_family_properties: out header, followed by queue_family_properties entries
     struct get_queue_family_properties_response
     {
         uint32_t count; // true number of queue families on the device
         uint32_t reserved;
+    };
+
+    struct queue_family_properties
+    {
+        uint32_t queue_flags;
+        uint32_t queue_count;
+        uint32_t timestamp_valid_bits;
+        uint32_t min_image_transfer_granularity_width;
+        uint32_t min_image_transfer_granularity_height;
+        uint32_t min_image_transfer_granularity_depth;
+        uint32_t optimal_image_transfer_to_queue_families;
     };
 
     struct enumerate_device_extension_properties_request
@@ -1103,6 +1123,38 @@ namespace sogen::gpu_bridge
     };
     static_assert(sizeof(cmd_copy_image_request) == 104, "wire layout drift");
 
+    struct cmd_blit_image_request
+    {
+        object_id command_buffer;
+        object_id src_image;
+        object_id dst_image;
+        uint32_t src_layout; // VkImageLayout
+        uint32_t dst_layout; // VkImageLayout
+        uint32_t src_aspect_mask;
+        uint32_t src_mip_level;
+        uint32_t src_base_array_layer;
+        uint32_t src_layer_count;
+        int32_t src_offset_x0;
+        int32_t src_offset_y0;
+        int32_t src_offset_z0;
+        int32_t src_offset_x1;
+        int32_t src_offset_y1;
+        int32_t src_offset_z1;
+        uint32_t dst_aspect_mask;
+        uint32_t dst_mip_level;
+        uint32_t dst_base_array_layer;
+        uint32_t dst_layer_count;
+        int32_t dst_offset_x0;
+        int32_t dst_offset_y0;
+        int32_t dst_offset_z0;
+        int32_t dst_offset_x1;
+        int32_t dst_offset_y1;
+        int32_t dst_offset_z1;
+        uint32_t filter; // VkFilter
+        uint32_t reserved;
+    };
+    static_assert(sizeof(cmd_blit_image_request) == 120, "wire layout drift");
+
     // Updates a buffer region inline from data that trails this header in the wire stream (vkCmdUpdateBuffer).
     struct cmd_update_buffer_request
     {
@@ -1462,6 +1514,8 @@ namespace sogen::gpu_bridge
         uint32_t attribute_count;                                    // number of vertex_input_attribute entries that follow the bindings
         uint32_t rasterization_samples;                              // VkSampleCountFlagBits the pipeline rasterizes at (1 = no MSAA)
         uint32_t dynamic_state_count;                                // number of uint32 VkDynamicState values that follow the attributes
+        uint32_t primitive_topology;
+        uint32_t primitive_restart_enable;
         // Per-stage specialization constants (DXVK bakes d3d9 render state into the shaders this way).
         uint32_t vs_spec_entry_count;
         uint32_t vs_spec_data_size;
@@ -1624,6 +1678,16 @@ namespace sogen::gpu_bridge
         object_id command_buffer;
         uint32_t count;
         uint32_t reserved;
+    };
+
+    // record payload (command::cmd_clear_attachments): header followed by `attachment_count` raw
+    // VkClearAttachment structs, then `rect_count` raw VkClearRect structs (both forwarded verbatim;
+    // no object ids are involved, so the host reinterprets the trailing bytes directly).
+    struct cmd_clear_attachments_request
+    {
+        object_id command_buffer;
+        uint32_t attachment_count;
+        uint32_t rect_count;
     };
 
     // One VkViewport. Trails cmd_set_viewport_request `count` times.
@@ -1798,6 +1862,15 @@ namespace sogen::gpu_bridge
         // descriptor_pool_size pool_sizes[pool_size_count];
     };
 
+    // ioctl_reset_descriptor_pool: out = result_response
+    struct reset_descriptor_pool_request
+    {
+        object_id device;
+        object_id descriptor_pool;
+        uint32_t flags; // VkDescriptorPoolResetFlags (reserved, must be 0)
+        uint32_t reserved;
+    };
+
     // ioctl_allocate_descriptor_sets: in header immediately followed by `set_count` object_id set-layout
     // ids; out = allocate_descriptor_sets_response header followed by `count` object_id set ids
     struct allocate_descriptor_sets_request
@@ -1919,6 +1992,7 @@ namespace sogen::gpu_bridge
     static_assert(sizeof(allocate_command_buffer_request) == 24, "wire layout drift");
     static_assert(sizeof(begin_command_buffer_request) == 40, "wire layout drift");
     static_assert(sizeof(cmd_execute_commands_request) == 16, "wire layout drift");
+    static_assert(sizeof(cmd_clear_attachments_request) == 16, "wire layout drift");
     static_assert(sizeof(viewport_entry) == 24, "wire layout drift");
     static_assert(sizeof(cmd_set_viewport_request) == 24, "wire layout drift");
     static_assert(sizeof(scissor_entry) == 16, "wire layout drift");
@@ -1934,6 +2008,7 @@ namespace sogen::gpu_bridge
     static_assert(sizeof(cmd_bind_descriptor_sets_request) == 32, "wire layout drift");
     static_assert(sizeof(create_sampler_request) == 64, "wire layout drift");
     static_assert(sizeof(enumerate_device_extension_properties_request) == 16, "wire layout drift");
+    static_assert(sizeof(queue_family_properties) == 28, "wire layout drift");
     static_assert(sizeof(enumerate_device_extension_properties_response) == 8, "wire layout drift");
     static_assert(sizeof(feature_chain_record) == 8, "wire layout drift");
     static_assert(sizeof(get_physical_device_features2_request) == 16, "wire layout drift");
@@ -1948,4 +2023,5 @@ namespace sogen::gpu_bridge
     static_assert(sizeof(reset_command_buffer_request) == 16, "wire layout drift");
     static_assert(sizeof(get_physical_device_image_format_properties_request) == 32, "wire layout drift");
     static_assert(sizeof(get_physical_device_image_format_properties_response) == 40, "wire layout drift");
+    static_assert(sizeof(reset_descriptor_pool_request) == 24, "wire layout drift");
 }

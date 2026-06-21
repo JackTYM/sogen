@@ -4,6 +4,8 @@
 #include "emulator_utils.hpp"
 #include "memory_manager.hpp"
 
+#include <functional>
+
 #include <utils/moved_marker.hpp>
 
 namespace sogen
@@ -301,6 +303,12 @@ namespace sogen
         std::optional<DWORD> await_msg_mask{};
         std::optional<pending_io_completion_wait> await_io_completion{};
 
+        // When set, the thread is parked until this host-side predicate returns true. Used by the GPU
+        // bridge to wait on a Vulkan semaphore cooperatively (other guest threads run while the GPU works)
+        // instead of blocking the single VP. Polled by is_thread_ready and completed via
+        // mark_as_ready(STATUS_SUCCESS). Not serialized: the only user (GPU bridge) is not snapshotable.
+        std::function<bool()> await_host_condition{};
+
         bool apc_alertable{false};
         std::vector<pending_apc> pending_apcs{};
 
@@ -329,6 +337,7 @@ namespace sogen
         std::map<user_timer_key, user_timer> user_timers{};
         uint64_t next_user_timer_id{1};
         std::vector<msg> message_queue;
+        DWORD current_message_time{};
         std::array<uint32_t, 32> message_queue_status_bit_counts{};
         uint32_t message_queue_status_bits{};
         uint32_t queue_status_changed_bits{};
@@ -350,16 +359,16 @@ namespace sogen
         user_timer& create_user_timer(process_context& process, hwnd hwnd, uint64_t timer_id, uint64_t timer_proc,
                                       std::chrono::milliseconds interval, std::chrono::steady_clock::time_point now);
         bool delete_user_timer(hwnd hwnd, uint64_t timer_id);
-        bool synthesize_due_user_timer(utils::clock& clock, hwnd hwnd_filter = 0, UINT filter_min = 0, UINT filter_max = 0);
+        bool synthesize_due_user_timer(windows_emulator& win_emu, hwnd hwnd_filter = 0, UINT filter_min = 0, UINT filter_max = 0);
 
-        uint32_t get_message_queue_status(utils::clock& clock);
-        std::optional<msg> peek_pending_message(const process_context& process, utils::clock& clock, hwnd hwnd_filter = 0,
-                                                UINT filter_min = 0, UINT filter_max = 0, bool remove = false);
-        void post_message(const msg& msg);
+        uint32_t get_message_queue_status(windows_emulator& win_emu);
+        std::optional<msg> peek_pending_message(windows_emulator& win_emu, hwnd hwnd_filter = 0, UINT filter_min = 0, UINT filter_max = 0,
+                                                bool remove = false);
+        void post_message(windows_emulator& win_emu, msg msg, bool try_coalesce = false);
 
         bool is_terminated() const;
 
-        bool is_thread_ready(process_context& process, utils::clock& clock);
+        bool is_thread_ready(windows_emulator& win_emu);
 
         void save(x86_64_emulator& emu)
         {
@@ -449,6 +458,7 @@ namespace sogen
             buffer.write_map(this->user_timers);
             buffer.write(this->next_user_timer_id);
             buffer.write_vector(this->message_queue);
+            buffer.write(this->current_message_time);
             buffer.write(this->message_queue_status_bit_counts);
             buffer.write(this->message_queue_status_bits);
             buffer.write(this->queue_status_changed_bits);
@@ -516,6 +526,7 @@ namespace sogen
             buffer.read_map(this->user_timers);
             buffer.read(this->next_user_timer_id);
             buffer.read_vector(this->message_queue);
+            buffer.read(this->current_message_time);
             buffer.read(this->message_queue_status_bit_counts);
             buffer.read(this->message_queue_status_bits);
             buffer.read(this->queue_status_changed_bits);
@@ -532,6 +543,8 @@ namespace sogen
         }
 
       private:
+        bool can_coalesce_message(const msg& msg) const;
+
         void setup_registers(x86_64_emulator& emu, const process_context& context) const;
         void refresh_execution_context(x86_64_emulator& emu) const;
 

@@ -62,9 +62,10 @@ namespace sogen
         int32_t get_physical_device_image_format_properties(uint64_t physical_device, uint32_t format, uint32_t type, uint32_t tiling,
                                                             uint32_t usage, uint32_t flags, image_format_properties& out);
 
-        // Writes the device's queue families as raw VkQueueFamilyProperties into out (sized in
-        // bytes). out_count always receives the true family count.
-        int32_t get_queue_family_properties(uint64_t physical_device, void* out, size_t out_size, uint32_t& out_count);
+        // Writes the device's queue families in the bridge wire format into out (sized in bytes).
+        // out_count always receives the true family count.
+        int32_t get_queue_family_properties(uint64_t physical_device, bool query_ownership_transfer, void* out, size_t out_size,
+                                            uint32_t& out_count);
 
         // Writes the device's real VkExtensionProperties array into out (sized in bytes); out_count
         // always receives the true device-extension count.
@@ -250,6 +251,8 @@ namespace sogen
         // Records vkCmdClearColorImage with an RGBA float clear color.
         int32_t cmd_clear_color_image(uint64_t command_buffer, uint64_t image, uint32_t image_layout, float r, float g, float b, float a,
                                       const subresource_range& range);
+        int32_t cmd_clear_attachments(uint64_t command_buffer, uint32_t attachment_count, uint32_t rect_count, const void* data,
+                                      size_t data_size);
         int32_t cmd_clear_depth_stencil_image(uint64_t command_buffer, uint64_t image, uint32_t image_layout, float depth, uint32_t stencil,
                                               const subresource_range& range);
         // Copies mip 0 / layer 0 of the image (tightly packed) into the buffer at offset 0.
@@ -298,8 +301,34 @@ namespace sogen
             uint32_t height;
             uint32_t depth;
         };
+        struct image_blit_region
+        {
+            uint32_t src_aspect_mask;
+            uint32_t src_mip_level;
+            uint32_t src_base_array_layer;
+            uint32_t src_layer_count;
+            int32_t src_offset_x0;
+            int32_t src_offset_y0;
+            int32_t src_offset_z0;
+            int32_t src_offset_x1;
+            int32_t src_offset_y1;
+            int32_t src_offset_z1;
+            uint32_t dst_aspect_mask;
+            uint32_t dst_mip_level;
+            uint32_t dst_base_array_layer;
+            uint32_t dst_layer_count;
+            int32_t dst_offset_x0;
+            int32_t dst_offset_y0;
+            int32_t dst_offset_z0;
+            int32_t dst_offset_x1;
+            int32_t dst_offset_y1;
+            int32_t dst_offset_z1;
+            uint32_t filter;
+        };
         int32_t cmd_copy_image(uint64_t command_buffer, uint64_t src_image, uint32_t src_layout, uint64_t dst_image, uint32_t dst_layout,
                                const image_copy_region& region);
+        int32_t cmd_blit_image(uint64_t command_buffer, uint64_t src_image, uint32_t src_layout, uint64_t dst_image, uint32_t dst_layout,
+                               const image_blit_region& region);
         // Resolves a multisampled source image into a single-sample destination (full image, mip 0 / layer 0).
         int32_t cmd_resolve_image(uint64_t command_buffer, uint64_t src_image, uint32_t src_layout, uint64_t dst_image, uint32_t dst_layout,
                                   uint32_t width, uint32_t height, uint32_t aspect_mask);
@@ -340,11 +369,23 @@ namespace sogen
         // render submit that waits on them can proceed (0 = none).
         int32_t acquire_next_image(uint64_t swapchain, uint64_t semaphore, uint64_t fence, uint32_t& out_index);
 
-        // Copies the presented image into the readback buffer (blocking on the queue), then fills
-        // out_pixels (BGRA, width*height*4) and reports the target window/extent so the caller can hand
-        // the pixels to the UI backend.
+        // Submits an asynchronous copy of the presented image into the readback buffer. If the previous
+        // copy has already completed, out_pixels receives that frame immediately; otherwise it is later
+        // returned by poll_presented_frames().
         int32_t queue_present(uint64_t queue, uint64_t swapchain, uint32_t image_index, std::vector<std::byte>& out_pixels,
                               uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd);
+
+        struct presented_frame
+        {
+            std::vector<std::byte> pixels{};
+            uint32_t width{};
+            uint32_t height{};
+            uint64_t hwnd{};
+        };
+
+        // Collects readbacks whose GPU fences have completed without waiting. This lets the host UI
+        // display a static final frame even when the guest does not issue another present.
+        std::vector<presented_frame> poll_presented_frames();
 
         // --- graphics pipeline (enough for a render-pass triangle) ---
 
@@ -416,6 +457,7 @@ namespace sogen
         int32_t create_descriptor_set_layout(uint64_t device, std::span<const descriptor_binding> bindings, uint64_t& out_layout);
         void destroy_descriptor_set_layout(uint64_t device, uint64_t layout);
         int32_t create_descriptor_pool(uint64_t device, uint32_t max_sets, std::span<const descriptor_pool_size> sizes, uint64_t& out_pool);
+        int32_t reset_descriptor_pool(uint64_t device, uint64_t pool, uint32_t flags);
         void destroy_descriptor_pool(uint64_t device, uint64_t pool);
         // Allocates one set per layout id; writes the allocated set ids into out_sets, out_count gets the
         // true count.
@@ -491,7 +533,8 @@ namespace sogen
                                          uint64_t fragment_shader, uint32_t width, uint32_t height,
                                          std::span<const vertex_binding> bindings, std::span<const vertex_attribute> attributes,
                                          const depth_state& depth, std::span<const uint32_t> color_formats, uint32_t depth_format,
-                                         uint32_t stencil_format, uint32_t rasterization_samples, std::span<const uint32_t> dynamic_states,
+                                         uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
+                                         uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                          const specialization& vs_spec, const specialization& fs_spec,
                                          std::span<const color_blend_attachment> blend_attachments, uint64_t& out_pipeline);
         int32_t create_compute_pipeline(uint64_t device, uint64_t pipeline_layout, uint64_t shader_module, uint64_t& out_pipeline);

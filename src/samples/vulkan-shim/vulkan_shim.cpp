@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,8 +45,18 @@ namespace
         return g_bridge;
     }
 
+    // Flushes the coalesced descriptor-set updates (see vkUpdateDescriptorSets); defined below.
+    void flush_descriptor_updates();
+
     bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len)
     {
+        // Every other bridge call may make the host observe descriptor state (record, submit, ...), so drain
+        // pending updates first to keep host state identical to the un-batched path.
+        if (code != gb::ioctl_update_descriptor_sets_batch)
+        {
+            flush_descriptor_updates();
+        }
+
         const HANDLE handle = bridge();
         if (handle == INVALID_HANDLE_VALUE)
         {
@@ -128,6 +139,32 @@ namespace
     // lock. Each record is a gb::command_record_header followed by that command's request payload.
     std::unordered_map<gb::object_id, std::vector<uint8_t>> g_command_streams;
 
+    // Pending coalesced vkUpdateDescriptorSets blobs (the hottest bridge call - DXVK updates per draw).
+    // Unlike the per-command-buffer streams (each synchronised to one thread by Vulkan), this global is
+    // touched by every DXVK thread, and the preemptive time-slice can interrupt a thread mid-append, so the
+    // mutex makes append and flush-swap atomic.
+    std::vector<uint8_t> g_pending_descriptor_updates;
+    std::mutex g_pending_descriptor_updates_mutex;
+
+    void flush_descriptor_updates()
+    {
+        // Hold the lock across the IOCTL so concurrent flushes stay ordered: releasing it after the swap lets a
+        // preempting thread append + flush and get its batch applied on the host before this (earlier) one. The
+        // batch IOCTL never re-enters flush_descriptor_updates (bridge_call skips the flush for it) and runs
+        // synchronously, so the lock cannot self-deadlock; a preempted appender just waits for this flush.
+        std::lock_guard<std::mutex> lock(g_pending_descriptor_updates_mutex);
+        if (g_pending_descriptor_updates.empty())
+        {
+            return;
+        }
+
+        std::vector<uint8_t> batch;
+        batch.swap(g_pending_descriptor_updates);
+
+        gb::result_response response{};
+        bridge_call(gb::ioctl_update_descriptor_sets_batch, batch.data(), static_cast<DWORD>(batch.size()), &response, sizeof(response));
+    }
+
     void record_command(gb::object_id command_buffer, gb::command command, const void* payload, size_t size)
     {
         auto& stream = g_command_streams[command_buffer];
@@ -145,6 +182,7 @@ namespace
         std::fputs(message, stdout);
         std::fflush(stdout);
     }
+
 }
 
 extern "C"
@@ -286,7 +324,7 @@ extern "C"
         request.max_count = pProperties ? *pCount : 0;
 
         std::vector<std::byte> buffer(sizeof(gb::get_queue_family_properties_response) +
-                                      static_cast<size_t>(request.max_count) * sizeof(VkQueueFamilyProperties));
+                                      static_cast<size_t>(request.max_count) * sizeof(gb::queue_family_properties));
         if (!bridge_call(gb::ioctl_get_queue_family_properties, &request, sizeof(request), buffer.data(),
                          static_cast<DWORD>(buffer.size())))
         {
@@ -304,10 +342,15 @@ extern "C"
 
         const uint32_t written = (response->count < *pCount) ? response->count : *pCount;
         const auto* families =
-            reinterpret_cast<const VkQueueFamilyProperties*>(buffer.data() + sizeof(gb::get_queue_family_properties_response));
+            reinterpret_cast<const gb::queue_family_properties*>(buffer.data() + sizeof(gb::get_queue_family_properties_response));
         for (uint32_t i = 0; i < written; ++i)
         {
-            pProperties[i] = families[i];
+            pProperties[i] = {.queueFlags = families[i].queue_flags,
+                              .queueCount = families[i].queue_count,
+                              .timestampValidBits = families[i].timestamp_valid_bits,
+                              .minImageTransferGranularity = {.width = families[i].min_image_transfer_granularity_width,
+                                                              .height = families[i].min_image_transfer_granularity_height,
+                                                              .depth = families[i].min_image_transfer_granularity_depth}};
         }
         *pCount = written;
     }
@@ -1770,6 +1813,11 @@ extern "C"
         record_set_dynamic_u32(commandBuffer, gb::dynamic_state_u32::depth_bounds_test_enable, depthBoundsTestEnable);
     }
 
+    __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthClipEnableEXT(VkCommandBuffer commandBuffer, VkBool32 depthClipEnable)
+    {
+        record_set_dynamic_u32(commandBuffer, gb::dynamic_state_u32::depth_clip_enable, depthClipEnable);
+    }
+
     __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilTestEnable(VkCommandBuffer commandBuffer, VkBool32 stencilTestEnable)
     {
         record_set_dynamic_u32(commandBuffer, gb::dynamic_state_u32::stencil_test_enable, stencilTestEnable);
@@ -2062,6 +2110,26 @@ extern "C"
         vkDestroyImage(device, image, nullptr);
     }
 
+    // VK_KHR_maintenance5 / core 1.4: query an image's subresource layout straight from its create-info,
+    // with no live VkImage. The bridge has no such query, so probe a throwaway image (same approach as
+    // vkGetDeviceImageMemoryRequirements above). DXVK calls this during resource setup.
+    __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSubresourceLayoutKHR(VkDevice device,
+                                                                                          const VkDeviceImageSubresourceInfo* pInfo,
+                                                                                          VkSubresourceLayout2* pLayout)
+    {
+        if (!pInfo || !pInfo->pCreateInfo || !pInfo->pSubresource || !pLayout)
+        {
+            return;
+        }
+        VkImage image = VK_NULL_HANDLE;
+        if (vkCreateImage(device, pInfo->pCreateInfo, nullptr, &image) != VK_SUCCESS)
+        {
+            return;
+        }
+        vkGetImageSubresourceLayout(device, image, &pInfo->pSubresource->imageSubresource, &pLayout->subresourceLayout);
+        vkDestroyImage(device, image, nullptr);
+    }
+
     __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory,
                                                                            VkDeviceSize memoryOffset)
     {
@@ -2194,6 +2262,31 @@ extern "C"
             request.color_a = pColor->float32[3];
             record_command(request.command_buffer, gb::command::cmd_clear_color_image, &request, sizeof(request));
         }
+    }
+
+    __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
+                                                                           const VkClearAttachment* pAttachments, uint32_t rectCount,
+                                                                           const VkClearRect* pRects)
+    {
+        const gb::object_id command_buffer = to_object_id(commandBuffer);
+        const size_t attach_bytes = static_cast<size_t>(attachmentCount) * sizeof(VkClearAttachment);
+        const size_t rect_bytes = static_cast<size_t>(rectCount) * sizeof(VkClearRect);
+
+        std::vector<uint8_t> message(sizeof(gb::cmd_clear_attachments_request) + attach_bytes + rect_bytes);
+        gb::cmd_clear_attachments_request header{};
+        header.command_buffer = command_buffer;
+        header.attachment_count = attachmentCount;
+        header.rect_count = rectCount;
+        std::memcpy(message.data(), &header, sizeof(header));
+        if (attach_bytes)
+        {
+            std::memcpy(message.data() + sizeof(header), pAttachments, attach_bytes);
+        }
+        if (rect_bytes)
+        {
+            std::memcpy(message.data() + sizeof(header) + attach_bytes, pRects, rect_bytes);
+        }
+        record_command(command_buffer, gb::command::cmd_clear_attachments, message.data(), message.size());
     }
 
     __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image,
@@ -2426,6 +2519,53 @@ extern "C"
             request.depth = r.extent.depth;
             record_command(request.command_buffer, gb::command::cmd_copy_image, &request, sizeof(request));
         }
+    }
+
+    __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdBlitImage2(VkCommandBuffer commandBuffer, const VkBlitImageInfo2* pBlitImageInfo)
+    {
+        if (!pBlitImageInfo)
+        {
+            return;
+        }
+
+        for (uint32_t i = 0; i < pBlitImageInfo->regionCount; ++i)
+        {
+            const VkImageBlit2& r = pBlitImageInfo->pRegions[i];
+            gb::cmd_blit_image_request request{};
+            request.command_buffer = to_object_id(commandBuffer);
+            request.src_image = to_object_id(pBlitImageInfo->srcImage);
+            request.dst_image = to_object_id(pBlitImageInfo->dstImage);
+            request.src_layout = static_cast<uint32_t>(pBlitImageInfo->srcImageLayout);
+            request.dst_layout = static_cast<uint32_t>(pBlitImageInfo->dstImageLayout);
+            request.src_aspect_mask = r.srcSubresource.aspectMask;
+            request.src_mip_level = r.srcSubresource.mipLevel;
+            request.src_base_array_layer = r.srcSubresource.baseArrayLayer;
+            request.src_layer_count = r.srcSubresource.layerCount;
+            request.src_offset_x0 = r.srcOffsets[0].x;
+            request.src_offset_y0 = r.srcOffsets[0].y;
+            request.src_offset_z0 = r.srcOffsets[0].z;
+            request.src_offset_x1 = r.srcOffsets[1].x;
+            request.src_offset_y1 = r.srcOffsets[1].y;
+            request.src_offset_z1 = r.srcOffsets[1].z;
+            request.dst_aspect_mask = r.dstSubresource.aspectMask;
+            request.dst_mip_level = r.dstSubresource.mipLevel;
+            request.dst_base_array_layer = r.dstSubresource.baseArrayLayer;
+            request.dst_layer_count = r.dstSubresource.layerCount;
+            request.dst_offset_x0 = r.dstOffsets[0].x;
+            request.dst_offset_y0 = r.dstOffsets[0].y;
+            request.dst_offset_z0 = r.dstOffsets[0].z;
+            request.dst_offset_x1 = r.dstOffsets[1].x;
+            request.dst_offset_y1 = r.dstOffsets[1].y;
+            request.dst_offset_z1 = r.dstOffsets[1].z;
+            request.filter = static_cast<uint32_t>(pBlitImageInfo->filter);
+            record_command(request.command_buffer, gb::command::cmd_blit_image, &request, sizeof(request));
+        }
+    }
+
+    __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdBlitImage2KHR(VkCommandBuffer commandBuffer,
+                                                                        const VkBlitImageInfo2* pBlitImageInfo)
+    {
+        vkCmdBlitImage2(commandBuffer, pBlitImageInfo);
     }
 
     __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
@@ -2737,12 +2877,50 @@ extern "C"
             return;
         }
 
-        std::vector<VkQueueFamilyProperties> families(*pCount);
-        uint32_t count = *pCount;
-        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, families.data());
+        gb::get_queue_family_properties_request request{};
+        request.physical_device = to_object_id(physicalDevice);
+        request.max_count = *pCount;
+        for (uint32_t i = 0; i < *pCount && request.query_ownership_transfer == 0; ++i)
+        {
+            for (const auto* next = reinterpret_cast<const VkBaseOutStructure*>(pProperties[i].pNext); next; next = next->pNext)
+            {
+                if (next->sType == VK_STRUCTURE_TYPE_QUEUE_FAMILY_OWNERSHIP_TRANSFER_PROPERTIES_KHR)
+                {
+                    request.query_ownership_transfer = 1;
+                    break;
+                }
+            }
+        }
+        std::vector<std::byte> buffer(sizeof(gb::get_queue_family_properties_response) +
+                                      static_cast<size_t>(request.max_count) * sizeof(gb::queue_family_properties));
+        if (!bridge_call(gb::ioctl_get_queue_family_properties, &request, sizeof(request), buffer.data(),
+                         static_cast<DWORD>(buffer.size())))
+        {
+            *pCount = 0;
+            return;
+        }
+
+        const auto* response = reinterpret_cast<const gb::get_queue_family_properties_response*>(buffer.data());
+        const uint32_t count = std::min(response->count, *pCount);
+        const auto* families =
+            reinterpret_cast<const gb::queue_family_properties*>(buffer.data() + sizeof(gb::get_queue_family_properties_response));
         for (uint32_t i = 0; i < count; ++i)
         {
-            pProperties[i].queueFamilyProperties = families[i];
+            pProperties[i].queueFamilyProperties = {
+                .queueFlags = families[i].queue_flags,
+                .queueCount = families[i].queue_count,
+                .timestampValidBits = families[i].timestamp_valid_bits,
+                .minImageTransferGranularity = {.width = families[i].min_image_transfer_granularity_width,
+                                                .height = families[i].min_image_transfer_granularity_height,
+                                                .depth = families[i].min_image_transfer_granularity_depth}};
+            for (auto* next = reinterpret_cast<VkBaseOutStructure*>(pProperties[i].pNext); next; next = next->pNext)
+            {
+                if (next->sType == VK_STRUCTURE_TYPE_QUEUE_FAMILY_OWNERSHIP_TRANSFER_PROPERTIES_KHR)
+                {
+                    reinterpret_cast<VkQueueFamilyOwnershipTransferPropertiesKHR*>(next)->optimalImageTransferToQueueFamilies =
+                        families[i].optimal_image_transfer_to_queue_families;
+                }
+            }
         }
         *pCount = count;
     }
@@ -3483,6 +3661,23 @@ extern "C"
         destroy_device_child(gb::ioctl_destroy_descriptor_pool, device, descriptorPool);
     }
 
+    __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL vkResetDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool,
+                                                                               VkDescriptorPoolResetFlags flags)
+    {
+        gb::reset_descriptor_pool_request request{};
+        request.device = to_object_id(device);
+        request.descriptor_pool = to_object_id(descriptorPool);
+        request.flags = flags;
+
+        gb::result_response response{};
+        if (!bridge_call(gb::ioctl_reset_descriptor_pool, &request, sizeof(request), &response, sizeof(response)) ||
+            response.vk_result != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        return VK_SUCCESS;
+    }
+
     __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(VkDevice device,
                                                                                   const VkDescriptorSetAllocateInfo* pAllocateInfo,
                                                                                   VkDescriptorSet* pDescriptorSets)
@@ -3561,15 +3756,16 @@ extern "C"
         header.device = to_object_id(device);
         header.write_count = static_cast<uint32_t>(writes.size());
 
-        std::vector<uint8_t> message(sizeof(header) + writes.size() * sizeof(gb::descriptor_write));
-        std::memcpy(message.data(), &header, sizeof(header));
+        // Append to the pending batch instead of issuing an IOCTL now (drained before the next bridge call).
+        const auto* header_bytes = reinterpret_cast<const uint8_t*>(&header);
+        const auto* write_bytes = reinterpret_cast<const uint8_t*>(writes.data());
+        std::lock_guard<std::mutex> lock(g_pending_descriptor_updates_mutex);
+        g_pending_descriptor_updates.insert(g_pending_descriptor_updates.end(), header_bytes, header_bytes + sizeof(header));
         if (!writes.empty())
         {
-            std::memcpy(message.data() + sizeof(header), writes.data(), writes.size() * sizeof(gb::descriptor_write));
+            g_pending_descriptor_updates.insert(g_pending_descriptor_updates.end(), write_bytes,
+                                                write_bytes + writes.size() * sizeof(gb::descriptor_write));
         }
-
-        gb::result_response response{};
-        bridge_call(gb::ioctl_update_descriptor_sets, message.data(), static_cast<DWORD>(message.size()), &response, sizeof(response));
     }
 
     // Descriptor update templates are lowered entirely inside the shim: the template definition is kept
@@ -3838,6 +4034,17 @@ extern "C"
             request.binding_count = binding_count;
             request.attribute_count = attribute_count;
             request.rasterization_samples = ci.pMultisampleState ? static_cast<uint32_t>(ci.pMultisampleState->rasterizationSamples) : 1u;
+
+            request.primitive_topology = static_cast<uint32_t>(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+
+            request.primitive_restart_enable = 0;
+
+            if (ci.pInputAssemblyState)
+            {
+                request.primitive_topology = static_cast<uint32_t>(ci.pInputAssemblyState->topology);
+
+                request.primitive_restart_enable = ci.pInputAssemblyState->primitiveRestartEnable ? 1u : 0u;
+            }
 
             // Forward the dynamic-state list verbatim. DXVK marks vertex-binding stride, cull, topology,
             // depth/stencil etc. dynamic and sets them via vkCmdSet*/vkCmdBindVertexBuffers2; if the host
@@ -4203,6 +4410,29 @@ extern "C"
         record_command(command_buffer, gb::command::cmd_bind_descriptor_sets, message.data(), message.size());
     }
 
+    __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2KHR(VkCommandBuffer commandBuffer,
+                                                                                 const VkBindDescriptorSetsInfo* pBindDescriptorSetsInfo)
+    {
+        if (!pBindDescriptorSetsInfo)
+        {
+            return;
+        }
+
+        const auto bind = [&](const VkPipelineBindPoint bind_point) {
+            vkCmdBindDescriptorSets(commandBuffer, bind_point, pBindDescriptorSetsInfo->layout, pBindDescriptorSetsInfo->firstSet,
+                                    pBindDescriptorSetsInfo->descriptorSetCount, pBindDescriptorSetsInfo->pDescriptorSets,
+                                    pBindDescriptorSetsInfo->dynamicOffsetCount, pBindDescriptorSetsInfo->pDynamicOffsets);
+        };
+        if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS)
+        {
+            bind(VK_PIPELINE_BIND_POINT_GRAPHICS);
+        }
+        if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
+        {
+            bind(VK_PIPELINE_BIND_POINT_COMPUTE);
+        }
+    }
+
     __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(VkCommandBuffer commandBuffer)
     {
         gb::cmd_end_render_pass_request request{};
@@ -4298,6 +4528,18 @@ extern "C"
             std::memcpy(message.data() + sizeof(header), pValues, size);
         }
         record_command(header.command_buffer, gb::command::cmd_push_constants, message.data(), message.size());
+    }
+
+    __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants2KHR(VkCommandBuffer commandBuffer,
+                                                                            const VkPushConstantsInfo* pPushConstantsInfo)
+    {
+        if (!pPushConstantsInfo)
+        {
+            return;
+        }
+
+        vkCmdPushConstants(commandBuffer, pPushConstantsInfo->layout, pPushConstantsInfo->stageFlags, pPushConstantsInfo->offset,
+                           pPushConstantsInfo->size, pPushConstantsInfo->pValues);
     }
 
     __declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice, const char* pName);
@@ -4458,6 +4700,10 @@ extern "C"
             {.name = "vkGetImageSubresourceLayout", .func = reinterpret_cast<PFN_vkVoidFunction>(vkGetImageSubresourceLayout)},
             {.name = "vkGetImageSubresourceLayout2KHR", .func = reinterpret_cast<PFN_vkVoidFunction>(vkGetImageSubresourceLayout2KHR)},
             {.name = "vkGetImageSubresourceLayout2EXT", .func = reinterpret_cast<PFN_vkVoidFunction>(vkGetImageSubresourceLayout2KHR)},
+            {.name = "vkGetDeviceImageSubresourceLayout",
+             .func = reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceImageSubresourceLayoutKHR)},
+            {.name = "vkGetDeviceImageSubresourceLayoutKHR",
+             .func = reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceImageSubresourceLayoutKHR)},
             {.name = "vkGetImageMemoryRequirements2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkGetImageMemoryRequirements2)},
             {.name = "vkGetImageMemoryRequirements2KHR", .func = reinterpret_cast<PFN_vkVoidFunction>(vkGetImageMemoryRequirements2)},
             {.name = "vkGetDeviceBufferMemoryRequirements",
@@ -4473,6 +4719,7 @@ extern "C"
             {.name = "vkCmdPipelineBarrier2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdPipelineBarrier2)},
             {.name = "vkCmdPipelineBarrier2KHR", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdPipelineBarrier2)},
             {.name = "vkCmdClearColorImage", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdClearColorImage)},
+            {.name = "vkCmdClearAttachments", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdClearAttachments)},
             {.name = "vkCmdClearDepthStencilImage", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdClearDepthStencilImage)},
             {.name = "vkCmdCopyImageToBuffer", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdCopyImageToBuffer)},
             {.name = "vkCmdCopyImageToBuffer2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdCopyImageToBuffer2)},
@@ -4512,6 +4759,7 @@ extern "C"
             {.name = "vkDestroyDescriptorSetLayout", .func = reinterpret_cast<PFN_vkVoidFunction>(vkDestroyDescriptorSetLayout)},
             {.name = "vkCreateDescriptorPool", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCreateDescriptorPool)},
             {.name = "vkDestroyDescriptorPool", .func = reinterpret_cast<PFN_vkVoidFunction>(vkDestroyDescriptorPool)},
+            {.name = "vkResetDescriptorPool", .func = reinterpret_cast<PFN_vkVoidFunction>(vkResetDescriptorPool)},
             {.name = "vkAllocateDescriptorSets", .func = reinterpret_cast<PFN_vkVoidFunction>(vkAllocateDescriptorSets)},
             {.name = "vkUpdateDescriptorSets", .func = reinterpret_cast<PFN_vkVoidFunction>(vkUpdateDescriptorSets)},
             {.name = "vkCreateDescriptorUpdateTemplate", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCreateDescriptorUpdateTemplate)},
@@ -4536,15 +4784,21 @@ extern "C"
             {.name = "vkCmdDraw", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdDraw)},
             {.name = "vkCmdDispatch", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdDispatch)},
             {.name = "vkCmdDispatchIndirect", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdDispatchIndirect)},
+            {.name = "vkCmdBlitImage2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBlitImage2)},
+            {.name = "vkCmdBlitImage2KHR", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBlitImage2KHR)},
             {.name = "vkCmdBindVertexBuffers", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindVertexBuffers)},
             {.name = "vkCmdBindVertexBuffers2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindVertexBuffers2)},
             {.name = "vkCmdBindVertexBuffers2EXT", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindVertexBuffers2)},
+            {.name = "vkCmdBindDescriptorSets2KHR", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindDescriptorSets2KHR)},
+            {.name = "vkCmdBindDescriptorSets2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindDescriptorSets2KHR)},
             {.name = "vkCmdBindIndexBuffer", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindIndexBuffer)},
             {.name = "vkCmdBindIndexBuffer2KHR", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindIndexBuffer2KHR)},
             {.name = "vkCmdBindIndexBuffer2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdBindIndexBuffer2KHR)},
             {.name = "vkCmdDrawIndexed", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdDrawIndexed)},
             {.name = "vkCmdEndRenderPass", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdEndRenderPass)},
             {.name = "vkCmdPushConstants", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdPushConstants)},
+            {.name = "vkCmdPushConstants2KHR", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdPushConstants2KHR)},
+            {.name = "vkCmdPushConstants2", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdPushConstants2KHR)},
             {.name = "vkCmdSetViewport", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetViewport)},
             {.name = "vkCmdSetViewportWithCount", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetViewportWithCount)},
             {.name = "vkCmdSetViewportWithCountEXT", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetViewportWithCount)},
@@ -4574,6 +4828,7 @@ extern "C"
             {.name = "vkCmdSetDepthCompareOpEXT", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetDepthCompareOp)},
             {.name = "vkCmdSetDepthBoundsTestEnable", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetDepthBoundsTestEnable)},
             {.name = "vkCmdSetDepthBoundsTestEnableEXT", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetDepthBoundsTestEnable)},
+            {.name = "vkCmdSetDepthClipEnableEXT", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetDepthClipEnableEXT)},
             {.name = "vkCmdSetStencilTestEnable", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetStencilTestEnable)},
             {.name = "vkCmdSetStencilTestEnableEXT", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetStencilTestEnable)},
             {.name = "vkCmdSetRasterizerDiscardEnable", .func = reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetRasterizerDiscardEnable)},
