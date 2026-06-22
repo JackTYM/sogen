@@ -24,7 +24,7 @@ namespace sogen
             c.emu.write_memory(base, locale_file.data(), locale_file.size());
 
             base_address.write(base);
-            default_locale_id.write(0x407);
+            default_locale_id.write(0x419);
 
             return STATUS_SUCCESS;
         }
@@ -32,7 +32,7 @@ namespace sogen
         NTSTATUS handle_NtQueryDefaultLocale(const syscall_context&, BOOLEAN /*user_profile*/,
                                              const emulator_object<LCID> default_locale_id)
         {
-            default_locale_id.write(0x407);
+            default_locale_id.write(0x419);
             return STATUS_SUCCESS;
         }
 
@@ -81,13 +81,13 @@ namespace sogen
 
         NTSTATUS handle_NtQueryDefaultUILanguage(const syscall_context&, const emulator_object<LANGID> language_id)
         {
-            language_id.write(0x407);
+            language_id.write(0x419);
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtQueryInstallUILanguage(const syscall_context&, const emulator_object<LANGID> language_id)
         {
-            language_id.write(0x407);
+            language_id.write(0x419);
             return STATUS_SUCCESS;
         }
     }

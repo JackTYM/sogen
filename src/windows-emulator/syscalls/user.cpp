@@ -1272,7 +1272,12 @@ namespace sogen
                 }
             }
 
-            return read_large_string(window_name);
+            auto result = read_large_string(window_name);
+            if (c.proc.ansi_code_page == 1251)
+            {
+                result = remap_cp1251(result);
+            }
+            return result;
         }
 
         hmenu ensure_system_menu(const syscall_context& c, window& win)
@@ -2494,6 +2499,10 @@ namespace sogen
             else
             {
                 win.name = read_large_string(window_name);
+                if (c.proc.ansi_code_page == 1251)
+                {
+                    win.name = remap_cp1251(win.name);
+                }
             }
             win.wnd_proc = wnd_class->lpfnWndProc;
 
