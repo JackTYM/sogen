@@ -947,6 +947,17 @@ namespace sogen
             }
 
             default: {
+                if (message == WM_PAINT) {
+                    if (FILE* f = fopen("/tmp/dispatch_paint_probe.txt", "a")) {
+                        fprintf(f, "[DISPATCH_PAINT] wnd=0x%llx wndproc=0x%llx xpfnProc=0x%llx pwnd=0x%llx wParam=0x%llx\n",
+                                static_cast<unsigned long long>(win.handle),
+                                static_cast<unsigned long long>(win.wnd_proc),
+                                static_cast<unsigned long long>(c.proc.dispatch_client_message),
+                                static_cast<unsigned long long>(win.guest.value()),
+                                static_cast<unsigned long long>(w_param));
+                        fclose(f);
+                    }
+                }
                 fn_dword_message args{};
                 args.pwnd = win.guest.value();
                 args.msg = message;
@@ -1520,6 +1531,16 @@ namespace sogen
                 c.proc.active_thread->win32k_thread_setup_done = true;
             }
 
+            // In WOW64, the 32-bit user32's pfn tables have 4-byte entries. Reading them
+            // with 8-byte stride (try_copy_client_pfn_array) would garble apfnClientW in
+            // USER_SERVERINFO, which is the same memory wow64win uses as apfnClientWKernel
+            // for its whcbfnDWORD scan. The ntdll64 bootstrap already wrote the correct
+            // 64-bit kernel-side addresses there, so we preserve them.
+            if (c.proc.is_wow64_process)
+            {
+                return STATUS_SUCCESS;
+            }
+
             if (!win32k_userconnect::try_update_client_pfn_arrays_from_addresses(c.win_emu.memory, c.proc, apfn_client_a, apfn_client_w,
                                                                                  apfn_client_worker))
             {
@@ -1855,6 +1876,10 @@ namespace sogen
 
         hdc handle_NtUserBeginPaint(const syscall_context& c, const hwnd window, const emulator_object<EMU_PAINTSTRUCT> paint_struct)
         {
+            if (FILE* f = fopen("/tmp/beginpaint_probe.txt", "a")) {
+                fprintf(f, "[BEGINPAINT] wnd=0x%llx\n", static_cast<unsigned long long>(window));
+                fclose(f);
+            }
             const auto* win = c.proc.windows.get(window);
             if (!win)
             {
@@ -3144,6 +3169,13 @@ namespace sogen
 
             if (pending_msg)
             {
+                if (FILE* f = fopen("/tmp/peek_probe.txt", "a")) {
+                    fprintf(f, "[PEEK] hwnd=0x%llx msg=0x%x wnd=0x%llx\n",
+                            static_cast<unsigned long long>(hwnd),
+                            static_cast<unsigned int>(pending_msg->message),
+                            static_cast<unsigned long long>(pending_msg->window));
+                    fclose(f);
+                }
                 message.write(*pending_msg);
                 t.current_message_time = pending_msg->time;
                 set_thread_window_context(c, pending_msg->window);
