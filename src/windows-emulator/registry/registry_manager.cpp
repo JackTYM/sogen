@@ -303,6 +303,12 @@ namespace sogen
 
         if (!entry)
         {
+            if (this->overlay_keys_.contains(normal_key))
+            {
+                registry_key overlay_key{};
+                overlay_key.hive = normal_key;
+                return {std::move(overlay_key)};
+            }
             return std::nullopt;
         }
 
@@ -375,14 +381,35 @@ namespace sogen
         value.data.assign(data.begin(), data.end());
     }
 
+    registry_key registry_manager::create_key(const utils::path_key& key)
+    {
+        const auto normal_key = this->normalize_path(key);
+        this->overlay_keys_.insert(normal_key);
+
+        registry_key reg_key{};
+        reg_key.hive = normal_key;
+        return reg_key;
+    }
+
+    void registry_manager::delete_key(const registry_key& key)
+    {
+        const auto full_path = registry_manager::get_full_key_path(key);
+        this->overlay_keys_.erase(full_path);
+        this->overlay_values_.erase(full_path);
+    }
+
     void registry_manager::serialize_runtime_state(utils::buffer_serializer& buffer) const
     {
         buffer.write_map(this->overlay_values_);
+        const std::vector<utils::path_key> keys_vec(this->overlay_keys_.begin(), this->overlay_keys_.end());
+        buffer.write_vector(keys_vec);
     }
 
     void registry_manager::deserialize_runtime_state(utils::buffer_deserializer& buffer)
     {
         buffer.read_map(this->overlay_values_);
+        const auto keys_vec = buffer.read_vector<utils::path_key>();
+        this->overlay_keys_.insert(keys_vec.begin(), keys_vec.end());
     }
 
     registry_manager::hive_map::iterator registry_manager::find_hive(const utils::path_key& key)

@@ -1,0 +1,5 @@
+# kct-wave-01.tsv — Independent review of wave 1 slots (blind: reviewer saw only artifacts + structs)
+# index	verdict	xref_token	notes
+2	AGREE	NtCallbackReturn(&Result, 0x18u, 0)	icall=0x28(xpfnProc); reads 0x00,0x08,0x10,0x18,0x20 — all covered by fn_dword_message static_asserts
+3	AGREE	RtlReleaseActivationContext(v3)	icall=0x28(xpfnProc); reads 0x00,0x08,0x10,0x18,0x20 — all covered by fn_dword_message; through-pointer *(*(a1)+224) excluded as HWND-object read
+10	AGREE	*(unsigned __int64 **)(a1 + 72)	icall=0xA0(dispatchFn); reads 0x08,0x18,0x20,0x28,0x30,0x38,0x40,0x48,0x80,0x88 — all covered by fn_in_lp_create_struct_message static_asserts (0x80=cs+0x38, 0x88=cs+0x40)

@@ -69,6 +69,19 @@ namespace sogen
                filename.starts_with(u"\\??\\pipe\\");
     }
 
+    // Canonicalise the Win32 \??\pipe\ prefix to \Device\NamedPipe\ so registry
+    // lookups always use the same key regardless of which NT path form was passed in.
+    inline std::u16string normalize_pipe_path(std::u16string filename)
+    {
+        constexpr std::u16string_view win32_prefix = u"\\??\\pipe\\";
+        constexpr std::u16string_view device_prefix = u"\\Device\\NamedPipe\\";
+        if (filename.starts_with(win32_prefix))
+        {
+            filename = std::u16string(device_prefix) + filename.substr(win32_prefix.size());
+        }
+        return filename;
+    }
+
     inline std::optional<uint32_t> extract_syscall_id(const exported_symbol& symbol, std::span<const std::byte> data)
     {
         if (!is_syscall(symbol.name))
@@ -177,7 +190,10 @@ namespace sogen
         const auto new_ip = c.emu.read_instruction_pointer();
         if ((initial_ip != new_ip || c.retrigger_syscall || c.run_callback) && !c.is_callback_completion)
         {
-            c.emu.reg(x86_register::rip, new_ip - 2);
+            if (c.emu.syscall_hook_requires_rip_compensation())
+            {
+                c.emu.reg(x86_register::rip, new_ip - 2);
+            }
         }
     }
 

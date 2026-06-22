@@ -167,4 +167,8 @@ page/public/64/linux-analyzer.wasm
 
 __pycache__/
 devdocs/
-dist_local/
+dist_local/.worktrees/
+
+# Microsoft Windows kernel binaries — copyrighted, never commit
+WindowsSystem.zip
+build/release/artifacts/root.zip

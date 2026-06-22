@@ -10,6 +10,9 @@
 #include <utils/io.hpp>
 #include <utils/compression.hpp>
 
+#include <algorithm>
+#include <cstring>
+
 namespace sogen
 {
 
@@ -56,6 +59,221 @@ namespace sogen
                 return buffer;
             }
 
+            struct extra_entry
+            {
+                std::u16string_view name;
+                std::u16string_view value;
+            };
+
+            static constexpr extra_entry k_gdi_forwarders[] = {
+                {u"ext-ms-win-gdi-internal-desktop-l1-1-0", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-internal-desktop-l1-1-1", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-internal-desktop-l1-1-2", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-internal-desktop-l1-1-3", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-dc-l1-2-0", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-dc-create-l1-1-0", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-draw-l1-1-0", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-draw-l1-1-1", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-draw-l1-1-2", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-font-l1-1-0", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-font-l1-1-1", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-font-l1-1-2", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-metafile-l1-1-0", u"gdi32full.dll"},
+                {u"ext-ms-win-gdi-metafile-l1-1-1", u"gdi32full.dll"},
+                {u"ext-ms-win-dx-d3dkmt-dxcore-l1-1-0", u"dxcore.dll"},
+            };
+
+            // Returns hashed byte length for an API set name: bytes up to (not including) the last
+            // '-' separator and version digit.
+            // E.g. "ext-ms-win-gdi-draw-l1-1-3" → hashed_length = len("ext-ms-win-gdi-draw-l1-1") * 2 = 48
+            static ULONG hashed_byte_length(std::u16string_view name)
+            {
+                const auto last_dash = name.rfind(u'-');
+                const auto hashed_chars = (last_dash != std::u16string_view::npos) ? last_dash : name.size();
+                return static_cast<ULONG>(hashed_chars * 2);
+            }
+
+            static ULONG compute_apiset_hash(std::u16string_view name, ULONG hashed_bytes, ULONG factor)
+            {
+                ULONG h = 0;
+                for (size_t i = 0; i < hashed_bytes / 2; ++i)
+                {
+                    h = h * factor + static_cast<ULONG>(name[i]);
+                }
+                return h;
+            }
+
+            // Rebuilds the API_SET_NAMESPACE binary with additional entries injected.
+            // Only entries not already present in the binary are added.
+            static void augment_apiset(std::vector<std::byte>& data, std::span<const extra_entry> extras)
+            {
+                constexpr ULONG entry_size = sizeof(API_SET_NAMESPACE_ENTRY);
+                constexpr ULONG value_size = sizeof(API_SET_VALUE_ENTRY);
+                constexpr ULONG hash_size = sizeof(API_SET_HASH_ENTRY);
+                constexpr ULONG header_size = sizeof(API_SET_NAMESPACE);
+
+                const auto& ns = *reinterpret_cast<const API_SET_NAMESPACE*>(data.data());
+                const ULONG orig_count = ns.Count;
+                const ULONG entry_offset = ns.EntryOffset;
+                const ULONG hash_offset = ns.HashOffset;
+                const ULONG hash_factor = ns.HashFactor;
+                const ULONG version = ns.Version;
+
+                std::unordered_set<std::u16string> existing;
+                for (ULONG i = 0; i < orig_count; ++i)
+                {
+                    const auto& e = *reinterpret_cast<const API_SET_NAMESPACE_ENTRY*>(data.data() + entry_offset + i * entry_size);
+                    const auto* name_ptr = reinterpret_cast<const char16_t*>(data.data() + e.NameOffset);
+                    existing.emplace(name_ptr, e.NameLength / 2);
+                }
+
+                std::vector<const extra_entry*> to_add;
+                for (const auto& ex : extras)
+                {
+                    if (!existing.count(std::u16string(ex.name)))
+                    {
+                        to_add.push_back(&ex);
+                    }
+                }
+                if (to_add.empty())
+                {
+                    return;
+                }
+
+                const ULONG n_extra = static_cast<ULONG>(to_add.size());
+                const ULONG new_count = orig_count + n_extra;
+
+                // Rebuild binary. Layout:
+                //   header  (header_size)
+                //   entry array  (new_count * entry_size)
+                //   string+value data for all entries
+                //   hash array  (new_count * hash_size, sorted)
+
+                std::vector<std::byte> out;
+                out.reserve(data.size() + n_extra * (entry_size + value_size + 80));
+
+                out.resize(header_size, std::byte{0});
+
+                const ULONG new_entry_offset = static_cast<ULONG>(out.size());
+                out.resize(new_entry_offset + new_count * entry_size, std::byte{0});
+
+                auto append_u16str = [&](const char16_t* str, ULONG char_count) -> ULONG {
+                    const ULONG off = static_cast<ULONG>(out.size());
+                    const auto* bytes = reinterpret_cast<const std::byte*>(str);
+                    out.insert(out.end(), bytes, bytes + char_count * 2);
+                    out.push_back(std::byte{0});
+                    out.push_back(std::byte{0});
+                    return off;
+                };
+
+                std::vector<API_SET_NAMESPACE_ENTRY> entry_records(new_count);
+                std::vector<std::pair<ULONG, ULONG>> hash_pairs;
+                hash_pairs.reserve(new_count);
+
+                // Build reverse map: entry_index -> hash
+                std::vector<ULONG> entry_hashes(orig_count);
+                for (ULONG i = 0; i < orig_count; ++i)
+                {
+                    const auto& he = *reinterpret_cast<const API_SET_HASH_ENTRY*>(data.data() + hash_offset + i * hash_size);
+                    entry_hashes[he.Index] = he.Hash;
+                }
+
+                for (ULONG i = 0; i < orig_count; ++i)
+                {
+                    const auto& src = *reinterpret_cast<const API_SET_NAMESPACE_ENTRY*>(data.data() + entry_offset + i * entry_size);
+                    auto& dst = entry_records[i];
+
+                    dst.Flags = src.Flags;
+                    dst.HashedLength = src.HashedLength;
+                    dst.NameLength = src.NameLength;
+                    dst.NameOffset = append_u16str(reinterpret_cast<const char16_t*>(data.data() + src.NameOffset), src.NameLength / 2);
+
+                    hash_pairs.push_back({entry_hashes[i], i});
+
+                    if (!src.ValueCount)
+                    {
+                        dst.ValueOffset = 0;
+                        dst.ValueCount = 0;
+                        continue;
+                    }
+
+                    dst.ValueOffset = static_cast<ULONG>(out.size());
+                    dst.ValueCount = src.ValueCount;
+                    out.resize(dst.ValueOffset + src.ValueCount * value_size, std::byte{0});
+
+                    for (ULONG j = 0; j < src.ValueCount; ++j)
+                    {
+                        const auto& sv = *reinterpret_cast<const API_SET_VALUE_ENTRY*>(data.data() + src.ValueOffset + j * value_size);
+                        API_SET_VALUE_ENTRY dv{};
+                        dv.Flags = sv.Flags;
+                        if (sv.ValueLength)
+                        {
+                            dv.ValueOffset =
+                                append_u16str(reinterpret_cast<const char16_t*>(data.data() + sv.ValueOffset), sv.ValueLength / 2);
+                            dv.ValueLength = sv.ValueLength;
+                        }
+                        if (sv.NameLength)
+                        {
+                            dv.NameOffset =
+                                append_u16str(reinterpret_cast<const char16_t*>(data.data() + sv.NameOffset), sv.NameLength / 2);
+                            dv.NameLength = sv.NameLength;
+                        }
+                        std::memcpy(out.data() + dst.ValueOffset + j * value_size, &dv, value_size);
+                    }
+                }
+
+                for (ULONG i = 0; i < n_extra; ++i)
+                {
+                    const ULONG idx = orig_count + i;
+                    const auto& ex = *to_add[i];
+                    auto& dst = entry_records[idx];
+
+                    dst.Flags = 0;
+                    dst.NameLength = static_cast<ULONG>(ex.name.size() * 2);
+                    dst.HashedLength = hashed_byte_length(ex.name);
+                    dst.NameOffset = append_u16str(ex.name.data(), static_cast<ULONG>(ex.name.size()));
+
+                    hash_pairs.push_back({compute_apiset_hash(ex.name, dst.HashedLength, hash_factor), idx});
+
+                    dst.ValueOffset = static_cast<ULONG>(out.size());
+                    dst.ValueCount = 1;
+                    out.resize(dst.ValueOffset + value_size, std::byte{0});
+
+                    API_SET_VALUE_ENTRY ve{};
+                    ve.ValueLength = static_cast<ULONG>(ex.value.size() * 2);
+                    ve.ValueOffset = append_u16str(ex.value.data(), static_cast<ULONG>(ex.value.size()));
+                    std::memcpy(out.data() + dst.ValueOffset, &ve, value_size);
+                }
+
+                const ULONG new_hash_offset = static_cast<ULONG>(out.size());
+                out.resize(new_hash_offset + new_count * hash_size, std::byte{0});
+
+                std::sort(hash_pairs.begin(), hash_pairs.end());
+                for (ULONG i = 0; i < new_count; ++i)
+                {
+                    API_SET_HASH_ENTRY he{.Hash = hash_pairs[i].first, .Index = hash_pairs[i].second};
+                    std::memcpy(out.data() + new_hash_offset + i * hash_size, &he, hash_size);
+                }
+
+                for (ULONG i = 0; i < new_count; ++i)
+                {
+                    std::memcpy(out.data() + new_entry_offset + i * entry_size, &entry_records[i], entry_size);
+                }
+
+                const ULONG total_size = static_cast<ULONG>(out.size());
+                API_SET_NAMESPACE new_ns{};
+                new_ns.Version = version;
+                new_ns.Size = total_size;
+                new_ns.Flags = 0;
+                new_ns.Count = new_count;
+                new_ns.EntryOffset = new_entry_offset;
+                new_ns.HashOffset = new_hash_offset;
+                new_ns.HashFactor = hash_factor;
+                std::memcpy(out.data(), &new_ns, header_size);
+
+                data = std::move(out);
+            }
+
             std::vector<std::byte> obtain_data(const location location, const std::filesystem::path& root)
             {
                 switch (location)
@@ -99,7 +317,12 @@ namespace sogen
 
         container obtain(const location location, const std::filesystem::path& root)
         {
-            return {.data = obtain_data(location, root)};
+            auto data = obtain_data(location, root);
+            if (location != location::host)
+            {
+                augment_apiset(data, k_gdi_forwarders);
+            }
+            return {.data = std::move(data)};
         }
 
         container obtain(const std::filesystem::path& root)

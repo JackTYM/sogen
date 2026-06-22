@@ -68,6 +68,78 @@ namespace sogen
                             c.io_status_block.write(block);
                         }
                     }
+                    else if (algorithm_name == u"SHA1" || algorithm_name == u"MD5" || algorithm_name == u"MD4" || algorithm_name == u"MD2")
+                    {
+                        // All hash algorithms share the same structure; only the name differs.
+                        std::array<std::uint8_t, sizeof(sha256_output_data)> hash_output_data{};
+                        std::ranges::copy(sha256_output_data, hash_output_data.begin());
+                        std::ranges::fill_n(hash_output_data.begin() + 0x50, 0x10, 0);
+                        std::memcpy(hash_output_data.data() + 0x50, algorithm_name.data(), algorithm_name.size() * sizeof(char16_t));
+
+                        win_emu.emu().write_memory(c.output_buffer, hash_output_data.data(), hash_output_data.size());
+
+                        if (c.io_status_block)
+                        {
+                            IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                            block.Information = hash_output_data.size();
+                            c.io_status_block.write(block);
+                        }
+                    }
+                    else if (algorithm_name == u"RSA")
+                    {
+                        // BCRYPT_ASYMMETRIC_ENCRYPTION_INTERFACE = 3
+                        // rng_output_data has an 8-byte name slot at 0x50 ("RNG\0") — safe for 3-char names.
+                        std::array<std::uint8_t, sizeof(rng_output_data)> rsa_output_data{};
+                        std::ranges::copy(rng_output_data, rsa_output_data.begin());
+                        rsa_output_data[0x18] = 0x03;
+                        constexpr char16_t rsa_name[] = u"RSA";
+                        std::memcpy(rsa_output_data.data() + 0x50, rsa_name, sizeof(rsa_name));
+
+                        win_emu.emu().write_memory(c.output_buffer, rsa_output_data.data(), rsa_output_data.size());
+
+                        if (c.io_status_block)
+                        {
+                            IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                            block.Information = rsa_output_data.size();
+                            c.io_status_block.write(block);
+                        }
+                    }
+                    else if (algorithm_name == u"DSA")
+                    {
+                        // BCRYPT_SIGNATURE_INTERFACE = 5
+                        std::array<std::uint8_t, sizeof(rng_output_data)> sig_output_data{};
+                        std::ranges::copy(rng_output_data, sig_output_data.begin());
+                        sig_output_data[0x18] = 0x05;
+                        constexpr char16_t dsa_name[] = u"DSA";
+                        std::memcpy(sig_output_data.data() + 0x50, dsa_name, sizeof(dsa_name));
+
+                        win_emu.emu().write_memory(c.output_buffer, sig_output_data.data(), sig_output_data.size());
+
+                        if (c.io_status_block)
+                        {
+                            IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                            block.Information = sig_output_data.size();
+                            c.io_status_block.write(block);
+                        }
+                    }
+                    else if (algorithm_name == u"AES" || algorithm_name == u"DES" || algorithm_name == u"RC2" || algorithm_name == u"RC4")
+                    {
+                        // BCRYPT_CIPHER_INTERFACE = 1
+                        std::array<std::uint8_t, sizeof(rng_output_data)> cipher_output_data{};
+                        std::ranges::copy(rng_output_data, cipher_output_data.begin());
+                        cipher_output_data[0x18] = 0x01;
+                        std::ranges::fill_n(cipher_output_data.begin() + 0x50, 0x08, 0);
+                        std::memcpy(cipher_output_data.data() + 0x50, algorithm_name.data(), algorithm_name.size() * sizeof(char16_t));
+
+                        win_emu.emu().write_memory(c.output_buffer, cipher_output_data.data(), cipher_output_data.size());
+
+                        if (c.io_status_block)
+                        {
+                            IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                            block.Information = cipher_output_data.size();
+                            c.io_status_block.write(block);
+                        }
+                    }
                     else
                     {
                         win_emu.emu().write_memory(c.output_buffer, rng_output_data);

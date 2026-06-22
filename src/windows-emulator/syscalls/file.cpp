@@ -969,6 +969,37 @@ namespace sogen
                 return ret(STATUS_SUCCESS, all_length);
             }
 
+            if (info_class == FileCompressionInformation)
+            {
+                struct file_compression_information
+                {
+                    LARGE_INTEGER CompressedFileSize;
+                    USHORT CompressionFormat;
+                    UCHAR CompressionUnitShift;
+                    UCHAR ChunkShift;
+                    UCHAR ClusterShift;
+                    UCHAR Reserved[3];
+                };
+
+                constexpr auto required_length = sizeof(file_compression_information);
+
+                if (length < required_length)
+                {
+                    return ret(STATUS_INFO_LENGTH_MISMATCH);
+                }
+
+                const emulator_object<file_compression_information> info{c.emu, file_information};
+                file_compression_information i{};
+
+                if (f->handle)
+                {
+                    i.CompressedFileSize.QuadPart = f->handle.size();
+                }
+
+                info.write(i);
+                return ret(STATUS_SUCCESS, required_length);
+            }
+
             c.win_emu.log.error("Unsupported query file info class: 0x%X\n", info_class);
             c.emu.stop();
 
@@ -1184,20 +1215,21 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
-                    if (!pipe->write_queue.empty())
+                    auto* rq = pipe->read_queue.get();
+                    if (rq && !rq->empty())
                     {
-                        std::string_view data = pipe->write_queue.front();
+                        std::string_view data = rq->front();
                         const size_t to_copy = std::min<size_t>(data.size(), length);
 
                         commit_file_data(data.substr(0, to_copy), c.emu, io_status_block, buffer);
 
                         if (to_copy == data.size())
                         {
-                            pipe->write_queue.pop_front();
+                            rq->pop_front();
                         }
                         else
                         {
-                            pipe->write_queue.front().erase(0, to_copy);
+                            rq->front().erase(0, to_copy);
                         }
 
                         return STATUS_SUCCESS;
@@ -1296,10 +1328,10 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
-                    (void)pipe; // For future use: suppressing compiler issues
-                    // TODO c.win_emu.callbacks.on_named_pipe_write(pipe->name, temp_buffer);
-
-                    // TODO pipe->write_queue.push_back(temp_buffer);
+                    if (pipe->write_queue)
+                    {
+                        pipe->write_queue->push_back(temp_buffer);
+                    }
 
                     if (io_status_block)
                     {
@@ -1606,35 +1638,66 @@ namespace sogen
             return std::nullopt;
         }
 
-        NTSTATUS handle_named_pipe_create(const syscall_context& c, const emulator_object<handle>& out_handle,
-                                          const std::u16string_view filename, const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes,
-                                          ACCESS_MASK desired_access)
+        NTSTATUS handle_named_pipe_create(const syscall_context& c, const emulator_object<handle>& out_handle, std::u16string filename,
+                                          const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes, ACCESS_MASK desired_access,
+                                          const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
         {
-            (void)attributes; // This isn't being consumed atm, suppressing errors
+            filename = normalize_pipe_path(std::move(filename));
+
+            // Resolve relative path via RootDirectory (same pattern as NtCreateNamedPipeFile).
+            if (!filename.starts_with(u"\\Device\\NamedPipe") && attributes.RootDirectory)
+            {
+                const auto* root = c.proc.devices.get(attributes.RootDirectory);
+                if (root)
+                {
+                    const auto* root_pipe = root->get_internal_device<named_pipe>();
+                    if (root_pipe)
+                    {
+                        std::u16string base = root_pipe->name;
+                        if (!base.empty() && base.back() == u'\\')
+                            base.pop_back();
+                        filename = base + u"\\" + filename;
+                    }
+                }
+            }
 
             c.win_emu.callbacks.on_generic_access("Creating/opening named pipe", filename);
 
             io_device_creation_data data{};
+            io_device_container container{u"NamedPipe", c.win_emu, data};
 
-            std::u16string device_name = u"NamedPipe";
-
-            io_device_container container{device_name, c.win_emu, data};
-
-            if (auto* pipe_device = container.get_internal_device<named_pipe>())
+            auto* pipe_device = container.get_internal_device<named_pipe>();
+            if (pipe_device)
             {
                 pipe_device->name = std::u16string(filename);
                 pipe_device->access = desired_access;
+
+                // Connect client end to existing server's shared buffers (client reads ab, writes ba).
+                auto it = c.proc.named_pipe_registry.find(std::u16string(filename));
+                if (it != c.proc.named_pipe_registry.end())
+                {
+                    pipe_device->read_queue = it->second.ab;
+                    pipe_device->write_queue = it->second.ba;
+                }
             }
 
-            const auto handle = c.proc.devices.store(std::move(container));
-            out_handle.write(handle);
+            const auto h = c.proc.devices.store(std::move(container));
+            out_handle.write(h);
+
+            if (io_status_block.value() != 0)
+            {
+                IO_STATUS_BLOCK<EmulatorTraits<Emu64>> iosb{};
+                iosb.Status = STATUS_SUCCESS;
+                iosb.Information = 1; // FILE_OPENED
+                io_status_block.write(iosb);
+            }
 
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCreateFile(const syscall_context& c, const emulator_object<handle> file_handle, ACCESS_MASK desired_access,
                                      const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                     const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> /*io_status_block*/,
+                                     const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
                                      const emulator_object<LARGE_INTEGER> /*allocation_size*/, ULONG /*file_attributes*/,
                                      ULONG /*share_access*/, ULONG create_disposition, ULONG create_options, uint64_t ea_buffer,
                                      ULONG ea_length)
@@ -1677,9 +1740,10 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (is_named_pipe_path(filename))
+            const auto* root_dev = attributes.RootDirectory ? c.proc.devices.get(attributes.RootDirectory) : nullptr;
+            if (is_named_pipe_path(filename) || (root_dev && root_dev->get_internal_device<named_pipe>()))
             {
-                return handle_named_pipe_create(c, file_handle, filename, attributes, desired_access);
+                return handle_named_pipe_create(c, file_handle, filename, attributes, desired_access, io_status_block);
             }
 
             auto printer = utils::finally([&] {
@@ -2111,7 +2175,25 @@ namespace sogen
             (void)create_options;
 
             const auto attributes = object_attributes.read();
-            const auto filename = read_unicode_string(c.emu, attributes.ObjectName);
+            auto filename = normalize_pipe_path(read_unicode_string(c.emu, attributes.ObjectName));
+
+            // Resolve relative path via RootDirectory (CreatePipe opens \Device\NamedPipe
+            // as a directory first, then uses relative names for the pipe handles).
+            if (!filename.starts_with(u"\\Device\\NamedPipe") && attributes.RootDirectory)
+            {
+                const auto* root = c.proc.devices.get(attributes.RootDirectory);
+                if (root)
+                {
+                    const auto* root_pipe = root->get_internal_device<named_pipe>();
+                    if (root_pipe)
+                    {
+                        std::u16string base = root_pipe->name;
+                        if (!base.empty() && base.back() == u'\\')
+                            base.pop_back();
+                        filename = base + u"\\" + filename;
+                    }
+                }
+            }
 
             if (!filename.starts_with(u"\\Device\\NamedPipe"))
             {
@@ -2123,28 +2205,33 @@ namespace sogen
             io_device_creation_data data{};
             io_device_container container{u"NamedPipe", c.win_emu, data};
 
-            if (auto* pipe_device = container.get_internal_device<named_pipe>())
-            {
-                pipe_device->name = filename;
-                pipe_device->pipe_type = named_pipe_type;
-                pipe_device->read_mode = read_mode;
-                pipe_device->completion_mode = completion_mode;
-                pipe_device->max_instances = maximum_instances;
-                pipe_device->inbound_quota = inbound_quota;
-                pipe_device->outbound_quota = outbound_quota;
-                pipe_device->default_timeout = default_timeout.read();
-            }
-            else
+            auto* pipe_device = container.get_internal_device<named_pipe>();
+            if (!pipe_device)
             {
                 return STATUS_NOT_SUPPORTED;
             }
+
+            pipe_device->name = filename;
+            pipe_device->pipe_type = named_pipe_type;
+            pipe_device->read_mode = read_mode;
+            pipe_device->completion_mode = completion_mode;
+            pipe_device->max_instances = maximum_instances;
+            pipe_device->inbound_quota = inbound_quota;
+            pipe_device->outbound_quota = outbound_quota;
+            pipe_device->default_timeout = default_timeout.read();
+
+            // Create shared buffers for this pipe (server=A end: writes to ab, reads from ba).
+            auto& entry = c.proc.named_pipe_registry[filename];
+            entry = process_context::named_pipe_shared_buffer{};
+            pipe_device->write_queue = entry.ab;
+            pipe_device->read_queue = entry.ba;
 
             handle pipe_handle = c.proc.devices.store(std::move(container));
             file_handle.write(pipe_handle);
 
             IO_STATUS_BLOCK<EmulatorTraits<Emu64>> iosb{};
             iosb.Status = STATUS_SUCCESS;
-            iosb.Information = 0;
+            iosb.Information = 2; // FILE_CREATED
             io_status_block.write(iosb);
 
             return STATUS_SUCCESS;
@@ -2207,6 +2294,67 @@ namespace sogen
 
             (void)fflush(f->handle);
             return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtFlushBuffersFileEx(const syscall_context& c, const handle file_handle, ULONG /*flags*/, uint64_t /*parameters*/,
+                                             ULONG /*parameters_size*/,
+                                             const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            return handle_NtFlushBuffersFile(c, file_handle, io_status_block);
+        }
+
+        NTSTATUS handle_NtDeleteFile(const syscall_context& c,
+                                     const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
+        {
+            if (!object_attributes)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto attributes = object_attributes.read();
+            if (!attributes.ObjectName)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto filename = read_unicode_string(c.emu, attributes.ObjectName);
+            const windows_path path{filename};
+            const auto host_path = c.win_emu.file_sys.translate(path);
+
+            std::error_code ec{};
+            if (!std::filesystem::exists(host_path, ec))
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            if (!std::filesystem::remove(host_path, ec))
+            {
+                return STATUS_ACCESS_DENIED;
+            }
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCancelIoFile(const syscall_context& c, const handle file_handle,
+                                       const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            if (!c.proc.files.get(file_handle) && file_handle != STDOUT_HANDLE)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            io_status_block.access([](IO_STATUS_BLOCK<EmulatorTraits<Emu64>>& isb) {
+                isb.Status = STATUS_SUCCESS;
+                isb.Information = 0;
+            });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCancelIoFileEx(const syscall_context& c, const handle file_handle, uint64_t /*io_request_to_cancel*/,
+                                         const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            return handle_NtCancelIoFile(c, file_handle, io_status_block);
         }
     }
 

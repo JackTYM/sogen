@@ -512,16 +512,16 @@ namespace sogen
         }
 
         NTSTATUS handle_NtOpenThreadToken(const syscall_context& c, const handle thread_handle, const ACCESS_MASK /*desired_access*/,
-                                          const BOOLEAN /*open_as_self*/, const emulator_object<handle> token_handle)
+                                          const BOOLEAN /*open_as_self*/, const emulator_object<handle> /*token_handle*/)
         {
             if (!c.proc.is_current_thread_handle(thread_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
-            token_handle.write(CURRENT_THREAD_TOKEN);
-
-            return STATUS_SUCCESS;
+            // Kernel: PsReferenceImpersonationToken; returns STATUS_NO_TOKEN when thread has
+            // no impersonation token set. Sogen doesn't track thread impersonation state.
+            return STATUS_NO_TOKEN;
         }
 
         NTSTATUS handle_NtOpenThreadTokenEx(const syscall_context& c, const handle thread_handle, const ACCESS_MASK desired_access,

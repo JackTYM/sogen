@@ -121,9 +121,12 @@ def parse_fn_offsets(artifact_text: str) -> dict:
     # Bare dereference at offset 0: *(...)(a1) without + N
     has_offset_zero = bool(re.search(r'\*\([^)]+\)\s*a1\b', artifact_text))
 
-    # Addr-of: a1 + N as a standalone expression (not preceded by *)
-    # These are offsets passed by address (e.g. WINDOWPOS struct passed by pointer).
-    addr_of_all = {int(m) for m in re.findall(r'\ba1 \+ (\d+)\b', artifact_text)}
+    # Addr-of: a1 + N used as an address expression (e.g. passed by pointer).
+    # Exclude `a1 + N` where a1 is immediately preceded by `)` — that pattern means
+    # `*(TYPE)a1 + N`, i.e. N is being added to the DEREFERENCED value of a1, not to
+    # the buffer base.  Example in __fnNCDESTROY: `*(void **)(*(_QWORD *)a1 + 224LL)`
+    # reads field 0xE0 of the HWND object, not a1[224].
+    addr_of_all = {int(m) for m in re.findall(r'(?<!\))\ba1 \+ (\d+)\b', artifact_text)}
 
     reads = {int(m) for m in deref_matches}
     if has_offset_zero:
@@ -138,6 +141,10 @@ def parse_fn_offsets(artifact_text: str) -> dict:
         'icall': icall,
         'reads': reads,
         'addr_of': addr_of,
+        # scalar_offsets: offsets where the real __fn* reads a typed scalar.
+        # Used for the sizeof lower-bound: struct must hold all scalar reads + icall field.
+        # addr_of is excluded because it may point to inline structs of unknown size here.
+        'scalar_offsets': reads | icall_set,
         'all_offsets': reads | addr_of | icall_set,
         'icall_ambiguous': len(icall_matches) != 1,
     }
@@ -194,16 +201,17 @@ def get_nested_base_offsets(user_cpp_text: str, outer_struct: str,
         raw = m.group(2)
         base = int(raw, 16) if raw.startswith('0x') else int(raw)
 
-        # Check if this field is a fn_* struct type (look for it in struct body)
-        # Pattern: TYPE field_name{}; inside the struct definition
+        # Check if this field is a fn_* struct type.
+        # Search the whole file for "NESTED_TYPE FIELD_NAME{" (member declaration with
+        # default-init brace).  Struct bodies contain `{}` initializers so a [^}]* span
+        # inside the struct block fails; a bare file-level search is sufficient because
+        # field names like `cs` only appear as a member of one fn_* struct.
         for nested_struct_name in struct_asserts:
             if nested_struct_name == outer_struct:
                 continue
-            # Look for "nested_struct_type field_name{}" inside the struct block
-            pattern = (r'struct\s+' + re.escape(outer_struct) +
-                       r'\s*\{[^}]*\b' + re.escape(nested_struct_name) +
+            pattern = (r'\b' + re.escape(nested_struct_name) +
                        r'\s+' + re.escape(field_name) + r'\s*\{')
-            if re.search(pattern, user_cpp_text, re.DOTALL):
+            if re.search(pattern, user_cpp_text):
                 nested[nested_struct_name] = base
                 break
 
@@ -228,16 +236,27 @@ def compute_absolute_covered(outer_struct: str, user_cpp_text: str,
 # ── Sample tests ──────────────────────────────────────────────────────────────
 
 def load_sample_tests() -> set[str]:
-    """Return set of 'sample-dir:TestName' and bare TestName strings from src/samples."""
+    """Return set of known test keys:
+    - 'sample-dir:TestName' and bare 'TestName' from report("TestName") calls in samples/
+    - 'SampleTest:TestName' from TEST(SampleTest, TestName) entries in sample_test.cpp
+    """
     tests: set[str] = set()
-    if not SAMPLES_DIR.exists():
-        return tests
-    for cpp in SAMPLES_DIR.rglob("*.cpp"):
-        sample_name = cpp.parent.name
-        text = cpp.read_text(errors='replace')
-        for m in re.finditer(r'report\s*\(\s*"([^"]+)"', text):
-            tests.add(f"{sample_name}:{m.group(1)}")
+
+    if SAMPLES_DIR.exists():
+        for cpp in SAMPLES_DIR.rglob("*.cpp"):
+            sample_name = cpp.parent.name
+            text = cpp.read_text(errors='replace')
+            for m in re.finditer(r'report\s*\(\s*"([^"]+)"', text):
+                tests.add(f"{sample_name}:{m.group(1)}")
+                tests.add(m.group(1))
+
+    sample_test_cpp = REPO_ROOT / "src/windows-emulator-test/sample_test.cpp"
+    if sample_test_cpp.exists():
+        text = sample_test_cpp.read_text(errors='replace')
+        for m in re.finditer(r'\bTEST\s*\(\s*SampleTest\s*,\s*(\w+)\s*\)', text):
+            tests.add(f"SampleTest:{m.group(1)}")
             tests.add(m.group(1))
+
     return tests
 
 
@@ -407,13 +426,15 @@ def validate_row(row: dict, apfn: dict[int, dict], user_cpp_text: str,
                     f"add the assert or it will wild-RIP"
                 )
 
-            # Gate B: struct must be large enough to hold all read offsets
+            # Gate B: struct must be large enough to hold all scalar reads and the icall field.
+            # Uses scalar_offsets (reads | icall_set), not all_offsets, because addr_of entries
+            # may point to inline sub-structs whose size is not encoded in the offset alone.
             if struct_sizeof is not None:
-                max_read = max(fn_offsets['all_offsets'], default=0)
+                max_read = max(fn_offsets['scalar_offsets'], default=0)
                 if struct_sizeof < max_read + 1:
                     violations.append(
                         f"sizeof({sogen_struct}) == 0x{struct_sizeof:X} is too small; "
-                        f"artifact reads up to offset 0x{max_read:X}, need sizeof ≥ 0x{max_read+1:X}"
+                        f"artifact reads scalars up to offset 0x{max_read:X}, need sizeof ≥ 0x{max_read+1:X}"
                     )
             else:
                 violations.append(

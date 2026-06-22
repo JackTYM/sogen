@@ -588,9 +588,23 @@ namespace sogen
             return handle_NtQuerySystemInformationEx(c, info_class, 0, 0, system_information, system_information_length, return_length);
         }
 
-        NTSTATUS handle_NtSetSystemInformation()
+        NTSTATUS handle_NtSetSystemInformation(const syscall_context& /*c*/, uint32_t /*system_info_class*/,
+                                               uint64_t /*system_information*/, ULONG /*system_information_length*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtAllocateUuids(const syscall_context& /*c*/, const emulator_object<ULARGE_INTEGER> time,
+                                        const emulator_object<ULONG> range, const emulator_object<ULONG> sequence,
+                                        const emulator_object<uint64_t> seed)
+        {
+            static uint64_t counter = 0x1234567890ABCDEFULL;
+            counter += 0x10001;
+            time.write_if_valid({.QuadPart = counter});
+            range.write_if_valid(0x100);
+            sequence.write_if_valid(static_cast<ULONG>(counter & 0xFFFF));
+            seed.write_if_valid(counter ^ 0xDEADBEEF);
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtPowerInformation(const syscall_context& c, const uint32_t information_level, const uint64_t /*input_buffer*/,

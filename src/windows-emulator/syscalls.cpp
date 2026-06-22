@@ -1121,22 +1121,16 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtCopyFileChunk(const syscall_context& /*c*/, handle /*source_handle*/, handle /*dest_handle*/,
-                                        emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block, ULONG length,
-                                        emulator_object<LARGE_INTEGER> /*source_offset*/, emulator_object<LARGE_INTEGER> /*dest_offset*/,
-                                        uint64_t /*resumable_key*/)
-        {
-            io_status_block.access([&](IO_STATUS_BLOCK<EmulatorTraits<Emu64>>& isb) {
-                isb.Status = STATUS_SUCCESS;
-                isb.Information = length;
-            });
-            return STATUS_SUCCESS;
-        }
-
-        NTSTATUS handle_NtCompareTokens(const syscall_context& /*c*/, handle /*first_token_handle*/, handle /*second_token_handle*/,
+        NTSTATUS handle_NtCompareTokens(const syscall_context& /*c*/, const handle first_token_handle, const handle second_token_handle,
                                         emulator_object<BOOLEAN> equal)
         {
-            equal.write(FALSE);
+            // Kernel: SeCompareTokens; invalid handle → STATUS_INVALID_HANDLE; same object → Equal=TRUE.
+            // Sogen pseudo-handles are always valid; compare by value for equality.
+            if (first_token_handle.bits == 0 || second_token_handle.bits == 0)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            equal.write(first_token_handle.bits == second_token_handle.bits ? TRUE : FALSE);
             return STATUS_SUCCESS;
         }
 
@@ -1170,6 +1164,11 @@ namespace sogen
 
         NTSTATUS handle_NtQuerySystemTime(const syscall_context& c, emulator_object<LARGE_INTEGER> system_time)
         {
+            // Kernel: user-mode path probes pointer for alignment and read access.
+            if (!system_time)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
             const auto& kusd = c.proc.kusd.get();
             system_time.access([&](LARGE_INTEGER& val) {
                 val.LowPart = kusd.SystemTime.LowPart;
@@ -1178,9 +1177,15 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetSystemTime(const syscall_context& /*c*/, emulator_object<LARGE_INTEGER> /*system_time*/,
+        NTSTATUS handle_NtSetSystemTime(const syscall_context& /*c*/, emulator_object<LARGE_INTEGER> new_system_time,
                                         emulator_object<LARGE_INTEGER> previous_system_time)
         {
+            // Kernel: requires SeSystemtimePrivilege; validates a1; updates system clock.
+            // Sogen: clock is read-only; write to previous is always zero; return success.
+            if (!new_system_time)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
             previous_system_time.write_if_valid({});
             return STATUS_SUCCESS;
         }
@@ -1381,7 +1386,7 @@ namespace sogen
         }
 
         NTSTATUS handle_NtOpenIoCompletion(const syscall_context& c, emulator_object<handle> io_completion_handle,
-                                           ACCESS_MASK desired_access,
+                                           ACCESS_MASK /*desired_access*/,
                                            emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
         {
             const auto attributes = object_attributes.read();
@@ -1395,7 +1400,7 @@ namespace sogen
                     return STATUS_SUCCESS;
                 }
             }
-            return handle_NtCreateIoCompletion(c, io_completion_handle, desired_access, object_attributes, 0);
+            return STATUS_OBJECT_NAME_NOT_FOUND;
         }
 
         NTSTATUS handle_NtPrivilegeCheck(const syscall_context& /*c*/, handle /*client_token*/, uint64_t /*required_privileges*/,
@@ -1559,13 +1564,18 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtQueryIoCompletion(const syscall_context& c, handle /*io_completion_handle*/,
-                                            uint32_t /*io_completion_info_class*/, uint64_t io_completion_info,
-                                            ULONG io_completion_info_length, emulator_object<ULONG> return_length)
+        NTSTATUS handle_NtQueryIoCompletion(const syscall_context& c, handle /*io_completion_handle*/, uint32_t io_completion_info_class,
+                                            uint64_t io_completion_info, ULONG io_completion_info_length,
+                                            emulator_object<ULONG> return_length)
         {
+            // Kernel: info_class != 0 → STATUS_INVALID_INFO_CLASS; length != 4 → STATUS_INFO_LENGTH_MISMATCH.
+            if (io_completion_info_class != 0)
+            {
+                return STATUS_INVALID_INFO_CLASS;
+            }
             constexpr ULONG info_size = sizeof(ULONG);
             return_length.write_if_valid(info_size);
-            if (io_completion_info_length < info_size)
+            if (io_completion_info_length != info_size)
             {
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
@@ -3020,13 +3030,121 @@ namespace sogen
             return STATUS_INVALID_HANDLE;
         }
 
-        NTSTATUS handle_NtAccessCheck(const syscall_context& /*c*/, const uint64_t /*security_descriptor*/, const handle /*client_token*/,
+        NTSTATUS handle_NtAccessCheck(const syscall_context& c, const uint64_t security_descriptor, const handle /*client_token*/,
                                       const ACCESS_MASK desired_access, const uint64_t /*generic_mapping*/,
                                       const uint64_t /*privilege_set*/, const emulator_object<ULONG> /*privilege_set_length*/,
                                       const emulator_object<ACCESS_MASK> granted_access, const emulator_object<NTSTATUS> access_status)
         {
-            granted_access.write(desired_access);
-            access_status.write(STATUS_SUCCESS);
+            // Kernel: NtAccessCheck → SeAccessCheckByType. Observable contracts:
+            //   - SE_DACL_PRESENT not set or Dacl == NULL → null DACL → grant all
+            //   - Dacl present with AceCount == 0 → empty DACL → deny all
+            //   - Otherwise walk ACEs (below)
+            constexpr uint16_t k_dacl_present = 0x0004;
+            constexpr uint16_t k_self_relative = 0x8000;
+
+#pragma pack(push, 1)
+            struct MinSD
+            {
+                uint8_t Revision;
+                uint8_t Sbz1;
+                uint16_t Control;
+                uint8_t _pad[4];
+                uint64_t Owner;
+                uint64_t Group;
+                uint64_t Sacl;
+                uint64_t Dacl;
+            };
+            static_assert(sizeof(MinSD) == 40, "SECURITY_DESCRIPTOR layout mismatch");
+            static_assert(offsetof(MinSD, Control) == 2);
+            static_assert(offsetof(MinSD, Dacl) == 32);
+
+            struct MinACL
+            {
+                uint8_t AclRevision;
+                uint8_t Sbz1;
+                uint16_t AclSize;
+                uint16_t AceCount;
+                uint16_t Sbz2;
+            };
+            static_assert(sizeof(MinACL) == 8, "ACL header layout mismatch");
+
+            struct MinACE
+            {
+                uint8_t AceType;
+                uint8_t AceFlags;
+                uint16_t AceSize;
+                uint32_t Mask;
+                uint32_t SidStart;
+            };
+#pragma pack(pop)
+
+            constexpr uint8_t ACCESS_DENIED_ACE_TYPE = 1;
+            constexpr uint8_t ACCESS_ALLOWED_ACE_TYPE = 0;
+
+            MinSD sd{};
+            if (!c.emu.try_read_memory(security_descriptor, &sd, sizeof(sd)))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            if ((sd.Control & k_dacl_present) == 0 || sd.Dacl == 0)
+            {
+                granted_access.write(desired_access);
+                access_status.write(STATUS_SUCCESS);
+                return STATUS_SUCCESS;
+            }
+
+            uint64_t dacl_ptr = sd.Dacl;
+            if ((sd.Control & k_self_relative) != 0)
+            {
+                dacl_ptr = security_descriptor + static_cast<uint32_t>(sd.Dacl);
+            }
+
+            MinACL acl{};
+            if (!c.emu.try_read_memory(dacl_ptr, &acl, sizeof(acl)))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            if (acl.AceCount == 0)
+            {
+                granted_access.write(0);
+                access_status.write(STATUS_ACCESS_DENIED);
+                return STATUS_SUCCESS;
+            }
+
+            ACCESS_MASK remaining = desired_access;
+            uint64_t ace_ptr = dacl_ptr + sizeof(MinACL);
+            for (uint16_t i = 0; i < acl.AceCount && remaining != 0; ++i)
+            {
+                MinACE ace{};
+                if (!c.emu.try_read_memory(ace_ptr, &ace, sizeof(ace)))
+                {
+                    break;
+                }
+                if (ace.AceType == ACCESS_DENIED_ACE_TYPE && (ace.Mask & desired_access) != 0)
+                {
+                    granted_access.write(0);
+                    access_status.write(STATUS_ACCESS_DENIED);
+                    return STATUS_SUCCESS;
+                }
+                if (ace.AceType == ACCESS_ALLOWED_ACE_TYPE)
+                {
+                    remaining &= ~ace.Mask;
+                }
+                ace_ptr += ace.AceSize;
+            }
+
+            if (remaining == 0)
+            {
+                granted_access.write(desired_access);
+                access_status.write(STATUS_SUCCESS);
+            }
+            else
+            {
+                granted_access.write(0);
+                access_status.write(STATUS_ACCESS_DENIED);
+            }
             return STATUS_SUCCESS;
         }
 
@@ -3314,7 +3432,6 @@ namespace sogen
         add_handler(NtLoadKey);
         add_handler(NtLoadKey2);
         add_handler(NtUnloadKey);
-        add_handler(NtCopyFileChunk);
         add_handler(NtCompareTokens);
         add_handler(NtOpenKeyTransacted);
         add_handler(NtCreateKeyTransacted);

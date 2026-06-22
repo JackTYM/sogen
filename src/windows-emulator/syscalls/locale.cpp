@@ -63,19 +63,20 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtGetMUIRegistryInfo()
+        NTSTATUS handle_NtGetMUIRegistryInfo(const syscall_context& /*c*/, ULONG /*flags*/, emulator_object<ULONG> /*data_size*/,
+                                             uint64_t /*data*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_OBJECT_NAME_NOT_FOUND;
         }
 
-        NTSTATUS handle_NtIsUILanguageComitted()
+        NTSTATUS handle_NtIsUILanguageComitted(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return TRUE;
         }
 
-        NTSTATUS handle_NtUserGetKeyboardLayout()
+        NTSTATUS handle_NtUserGetKeyboardLayout(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtQueryDefaultUILanguage(const syscall_context&, const emulator_object<LANGID> language_id)

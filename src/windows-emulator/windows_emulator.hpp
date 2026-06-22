@@ -305,6 +305,7 @@ namespace sogen
         bool use_relative_time_{false}; // TODO: Get rid of that
         bool instruction_precision_{true};
         std::atomic_bool should_stop{false};
+        uint64_t syscall_count_{0};
 
         std::unordered_map<uint16_t, uint16_t> port_mappings_{};
 

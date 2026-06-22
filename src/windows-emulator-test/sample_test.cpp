@@ -85,4 +85,11 @@ namespace sogen::test
         emu.start();
         ASSERT_TERMINATED_SUCCESSFULLY(emu);
     }
+
+    TEST(SampleTest, CustomPaintSamplePasses)
+    {
+        auto emu = create_app_emulator("C:\\custom-paint-sample.exe");
+        emu.start();
+        ASSERT_TERMINATED_SUCCESSFULLY(emu);
+    }
 } // namespace sogen::test

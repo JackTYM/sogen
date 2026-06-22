@@ -33,6 +33,14 @@ namespace sogen
         virtual bool has_violation() const = 0;
 
         virtual bool supports_instruction_counting() const = 0;
+
+        // Returns true if the backend's syscall hook fires before the SYSCALL instruction
+        // has advanced RIP, meaning write_syscall_result must subtract 2 from any new RIP
+        // to compensate for the backend's auto-advance. Unicorn auto-advances; KVM/WHP do not.
+        virtual bool syscall_hook_requires_rip_compensation() const
+        {
+            return false;
+        }
     };
 
 } // namespace sogen

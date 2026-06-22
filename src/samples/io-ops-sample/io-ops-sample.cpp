@@ -190,6 +190,51 @@ namespace
         CloseHandle(iocp);
         return NT_SUCCESS(st_assoc) && NT_SUCCESS(st_cancel);
     }
+
+    bool test_open_io_completion_not_found()
+    {
+        // NtOpenIoCompletion: kernel calls ObOpenObjectByName; named object not present →
+        // STATUS_OBJECT_NAME_NOT_FOUND (0xC0000034).
+        using NtOpenIoCompletionFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+        const auto ntdll = GetModuleHandleA("ntdll.dll");
+        const auto fn = reinterpret_cast<NtOpenIoCompletionFn>(GetProcAddress(ntdll, "NtOpenIoCompletion"));
+        if (!fn)
+            return false;
+        WCHAR name_buf[] = L"SogenNoSuchIoCompletion";
+        UNICODE_STRING ustr{};
+        ustr.Buffer = name_buf;
+        ustr.Length = static_cast<USHORT>(wcslen(name_buf) * sizeof(WCHAR));
+        ustr.MaximumLength = ustr.Length + sizeof(WCHAR);
+        OBJECT_ATTRIBUTES oa{};
+        InitializeObjectAttributes(&oa, &ustr, 0, nullptr, nullptr);
+        HANDLE h = nullptr;
+        const NTSTATUS st = fn(&h, IO_COMPLETION_ALL_ACCESS, &oa);
+        if (h)
+            CloseHandle(h);
+        return st == STATUS_OBJECT_NAME_NOT_FOUND; // STATUS_OBJECT_NAME_NOT_FOUND
+    }
+
+    bool test_query_io_completion_bad_class()
+    {
+        // NtQueryIoCompletion: kernel rejects info_class != 0 → STATUS_INVALID_INFO_CLASS (0xC0000003).
+        using NtCreateIoCompletionFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, ULONG);
+        using NtQueryIoCompletionFn = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+        const auto ntdll = GetModuleHandleA("ntdll.dll");
+        const auto create_fn = reinterpret_cast<NtCreateIoCompletionFn>(GetProcAddress(ntdll, "NtCreateIoCompletion"));
+        const auto query_fn = reinterpret_cast<NtQueryIoCompletionFn>(GetProcAddress(ntdll, "NtQueryIoCompletion"));
+        if (!create_fn || !query_fn)
+            return false;
+        OBJECT_ATTRIBUTES oa{};
+        InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
+        HANDLE h = nullptr;
+        if (!NT_SUCCESS(create_fn(&h, IO_COMPLETION_ALL_ACCESS, &oa, 0)))
+            return false;
+        ULONG val = 0;
+        ULONG ret = 0;
+        const NTSTATUS st = query_fn(h, 1 /*bad info_class*/, &val, sizeof(val), &ret);
+        CloseHandle(h);
+        return st == STATUS_INVALID_INFO_CLASS; // STATUS_INVALID_INFO_CLASS
+    }
 }
 
 int main()
@@ -201,5 +246,7 @@ int main()
     all_ok &= report("NtAllocateUuids", test_allocate_uuids());
     all_ok &= report("NtCreateIoCompletion + SetRemove", test_io_completion());
     all_ok &= report("NtWaitCompletionPacket associate+cancel", test_wait_completion_packet());
+    all_ok &= report("NtOpenIoCompletion not found", test_open_io_completion_not_found());
+    all_ok &= report("NtQueryIoCompletion bad class", test_query_io_completion_bad_class());
     return all_ok ? 0 : 1;
 }

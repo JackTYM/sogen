@@ -27,3 +27,9 @@ if (NOT MINGW AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     whp-emulator
   )
 endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+  target_link_libraries(backend-selection PRIVATE
+    kvm-emulator
+  )
+endif()

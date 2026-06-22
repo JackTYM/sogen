@@ -1,15 +1,15 @@
 # index	fn_name	category	sogen_struct	sogen_index_const	decompile_artifact	sample_subtest	evidence	wave	status
 0	__fnCOPYDATA	marshal-fn	-	-	-	-		-	unverified
 1	__fnCOPYGLOBALDATA	marshal-fn	-	-	-	-		-	unverified
-2	__fnDWORD	marshal-fn	fn_dword_message	k_fn_dword_callback_id	-	-		-	unverified
-3	__fnNCDESTROY	marshal-fn	fn_dword_message	k_fn_nc_destroy_callback_id	-	-		-	unverified
+2	__fnDWORD	marshal-fn	fn_dword_message	k_fn_dword_callback_id	__fnDWORD.c	SampleTest:CustomPaintSamplePasses	[xref:fastcall **)(_QWORD, _QWORD, _QWORD, _QWORD, _QWORD))(a1 + 40)] reads a1+{0,8,16,24,32} icall@0x28; fn_dword_message covers all via static_asserts [MATCH] [sref:src/windows-emulator/syscalls/user.cpp:67]	1	implemented
+3	__fnNCDESTROY	marshal-fn	fn_dword_message	k_fn_nc_destroy_callback_id	__fnNCDESTROY.c	SampleTest:CustomPaintSamplePasses	[xref:RtlReleaseActivationContext(v3)] same arg layout as __fnDWORD; *(*a1+224) reads HWND field, not arg buffer [MATCH] [sref:src/windows-emulator/syscalls/user.cpp:67]	1	implemented
 4	__fnDWORDOPTINLPMSG	marshal-fn	-	-	-	-		-	unverified
 5	__fnINOUTDRAG	marshal-fn	-	-	-	-		-	unverified
 6	__fnGETTEXTLENGTHS	marshal-fn	-	-	-	-		-	unverified
 7	__fnINCNTOUTSTRING	marshal-fn	-	-	-	-		-	unverified
 8	__fnINCNTOUTSTRINGNULL	marshal-fn	-	-	-	-		-	unverified
 9	__fnINLPCOMPAREITEMSTRUCT	marshal-fn	-	-	-	-		-	unverified
-10	__fnINLPCREATESTRUCT	marshal-fn	fn_in_lp_create_struct_message	k_fn_in_lp_create_struct_callback_id	-	-		-	unverified
+10	__fnINLPCREATESTRUCT	marshal-fn	fn_in_lp_create_struct_message	k_fn_in_lp_create_struct_callback_id	__fnINLPCREATESTRUCT.c	SampleTest:CustomPaintSamplePasses	[xref:fastcall **)(_QWORD, _QWORD, _QWORD))(a1 + 160)] icall@0xA0=dispatchFn; reads 0x8,0x18,0x20 via captureBuffer nesting; reads 0x28-0x40 via pwnd/msg/wParam/lParam asserts; 0x80/0x88 via cs.lpszName/lpszClass; all covered [MATCH] [sref:src/windows-emulator/syscalls/user.cpp:105]	1	implemented
 11	__fnINLPDELETEITEMSTRUCT	marshal-fn	-	-	-	-		-	unverified
 12	__fnINLPDRAWITEMSTRUCT	marshal-fn	-	-	-	-		-	unverified
 13	__fnINLPHELPINFOSTRUCT	marshal-fn	-	-	-	-		-	unverified

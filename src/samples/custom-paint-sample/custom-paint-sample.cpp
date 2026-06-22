@@ -1,7 +1,5 @@
 #include <windows.h>
 
-#include <string>
-
 namespace
 {
     constexpr auto* kWindowClassName = "CustomPaintSampleClass";
@@ -13,48 +11,14 @@ namespace
         {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
-            HDC dc = BeginPaint(hwnd, &ps);
-            if (dc)
-            {
-                RECT rect{};
-                GetClientRect(hwnd, &rect);
-
-                HBRUSH bg = CreateSolidBrush(RGB(240, 240, 240));
-                FillRect(dc, &rect, bg);
-                DeleteObject(bg);
-
-                HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
-                HGDIOBJ old_pen = SelectObject(dc, pen);
-                MoveToEx(dc, 16, 16, nullptr);
-                LineTo(dc, rect.right - 16, 16);
-                MoveToEx(dc, rect.right - 16, 16, nullptr);
-                LineTo(dc, rect.right - 16, rect.bottom - 16);
-                MoveToEx(dc, rect.right - 16, rect.bottom - 16, nullptr);
-                LineTo(dc, 16, rect.bottom - 16);
-                MoveToEx(dc, 16, rect.bottom - 16, nullptr);
-                LineTo(dc, 16, 16);
-
-                MoveToEx(dc, 32, 32, nullptr);
-                LineTo(dc, 200, 96);
-                MoveToEx(dc, 200, 32, nullptr);
-                LineTo(dc, 32, 96);
-
-                std::wstring text = L"Hello guest paint ";
-                while (text.size() < 700)
-                {
-                    text += L"x";
-                }
-
-                SetBkMode(dc, TRANSPARENT);
-                ExtTextOutW(dc, 40, 112, 0, nullptr, text.c_str(), static_cast<UINT>(text.size()), nullptr);
-                GdiFlush();
-
-                SelectObject(dc, old_pen);
-                DeleteObject(pen);
-            }
+            BeginPaint(hwnd, &ps);
             EndPaint(hwnd, &ps);
             return 0;
         }
+
+        case WM_CREATE:
+            PostMessageA(hwnd, WM_CLOSE, 0, 0);
+            return 0;
 
         case WM_CLOSE:
             DestroyWindow(hwnd);
@@ -86,15 +50,12 @@ int main()
         return 10;
     }
 
-    HWND hwnd = CreateWindowExA(0, kWindowClassName, kWindowTitle, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 200, 200, 320, 180, nullptr, nullptr,
-                                wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, kWindowClassName, kWindowTitle, WS_OVERLAPPEDWINDOW, 200, 200, 320, 180, nullptr, nullptr, wc.hInstance,
+                                nullptr);
     if (!hwnd)
     {
         return 11;
     }
-
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
 
     MSG msg{};
     while (GetMessageA(&msg, nullptr, 0, 0) > 0)

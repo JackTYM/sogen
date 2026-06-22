@@ -173,6 +173,24 @@ namespace sogen::test
         };
     }
 
+    inline windows_emulator create_app_emulator(const char* exe)
+    {
+        emulator_settings settings{.use_relative_time = true};
+        settings.emulation_root = get_emulator_root();
+
+        if (!settings.emulation_root.empty())
+        {
+            settings.path_mappings["C:\\a.txt"] =
+                std::filesystem::temp_directory_path() / ("emulator-test-file-" + std::to_string(getpid()) + ".txt");
+        }
+
+        return windows_emulator{
+            create_x86_64_emulator(),
+            application_settings{.application = exe},
+            std::move(settings),
+        };
+    }
+
     inline windows_emulator create_sample_emulator(const sample_configuration& config = {})
     {
         emulator_settings settings{

@@ -247,7 +247,6 @@ namespace sogen
             connect.he_entry_size = sizeof(USER_HANDLEENTRY);
             connect.disp_info_low = disp_info;
             connect.monitor_info_low = monitor_info;
-            std::ranges::fill(connect.wndmsg_table, uint8_t{0xFF});
             connect.wndmsg_count = k_wow64_wndmsg_count;
             connect.ime_msg_count = k_wow64_ime_msg_count;
 

@@ -476,7 +476,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             token_handle.write(CURRENT_PROCESS_TOKEN);

@@ -54,6 +54,10 @@ namespace sogen
             DWORD offPointers{};
             pointer pvVirtualAddress{};
         };
+        static_assert(offsetof(user_callback_capture_buffer, cCapturedPointers) == 0x08);
+        static_assert(offsetof(user_callback_capture_buffer, offPointers) == 0x18);
+        static_assert(offsetof(user_callback_capture_buffer, pvVirtualAddress) == 0x20);
+        static_assert(sizeof(user_callback_capture_buffer) == 0x28);
 
         struct fn_dword_message
         {
@@ -87,10 +91,12 @@ namespace sogen
             pointer lpszClass{};      // +0x40
             pointer xpfnProc{};       // +0x48: WndProc – dispatch_client_message reads [R9+0x48]
         };
-        static_assert(sizeof(fn_in_lp_create_struct_cs) == 0x50);
         static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnHint) == 0x28);
         static_assert(offsetof(fn_in_lp_create_struct_cs, dispatchPtr) == 0x30);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, lpszName) == 0x38);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, lpszClass) == 0x40);
         static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnProc) == 0x48);
+        static_assert(sizeof(fn_in_lp_create_struct_cs) == 0x50);
 
         struct fn_in_lp_create_struct_message
         {
@@ -103,8 +109,14 @@ namespace sogen
             uint64_t _xParam{};
             pointer dispatchFn{};
         };
+        static_assert(offsetof(fn_in_lp_create_struct_message, captureBuffer) == 0x00);
+        static_assert(offsetof(fn_in_lp_create_struct_message, pwnd) == 0x28);
+        static_assert(offsetof(fn_in_lp_create_struct_message, msg) == 0x30);
+        static_assert(offsetof(fn_in_lp_create_struct_message, wParam) == 0x38);
+        static_assert(offsetof(fn_in_lp_create_struct_message, lParam) == 0x40);
         static_assert(offsetof(fn_in_lp_create_struct_message, cs) == 0x48);
         static_assert(offsetof(fn_in_lp_create_struct_message, dispatchFn) == 0xA0);
+        static_assert(sizeof(fn_in_lp_create_struct_message) == 0xA8);
 
         struct fn_in_lp_window_pos_message
         {
@@ -2001,7 +2013,7 @@ namespace sogen
             return TRUE;
         }
 
-        NTSTATUS handle_NtUserFindExistingCursorIcon(const syscall_context& /*c*/)
+        NTSTATUS handle_NtUserFindExistingCursorIcon()
         {
             return STATUS_SUCCESS;
         }
@@ -4385,7 +4397,7 @@ namespace sogen
             return result;
         }
 
-        NTSTATUS handle_NtUserCreateAcceleratorTable(const syscall_context& /*c*/)
+        NTSTATUS handle_NtUserCreateAcceleratorTable()
         {
             return STATUS_SUCCESS;
         }

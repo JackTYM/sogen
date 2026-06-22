@@ -2788,12 +2788,12 @@ namespace sogen
             return required_size;
         }
 
-        NTSTATUS handle_NtGdiExtCreateRegion(const syscall_context& /*c*/)
+        NTSTATUS handle_NtGdiExtCreateRegion()
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiTransparentBlt(const syscall_context& /*c*/)
+        NTSTATUS handle_NtGdiTransparentBlt()
         {
             return STATUS_SUCCESS;
         }
@@ -4116,12 +4116,12 @@ namespace sogen
             return destroy_dxgk_allocations(c, destroy_allocation);
         }
 
-        NTSTATUS handle_NtGdiDdDDIDestroyContext(const syscall_context& /*c*/)
+        NTSTATUS handle_NtGdiDdDDIDestroyContext()
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDIDestroyDevice(const syscall_context& /*c*/)
+        NTSTATUS handle_NtGdiDdDDIDestroyDevice()
         {
             return STATUS_SUCCESS;
         }
