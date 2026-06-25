@@ -48,6 +48,10 @@ namespace sogen
             return results;
         }
 
+    }
+
+    namespace win32k_userconnect
+    {
         void refresh_dispatch_client_message(process_context& process)
         {
             uint64_t dispatch_client_message = 0;
@@ -65,6 +69,10 @@ namespace sogen
                 process.dispatch_client_message = dispatch_client_message;
             }
         }
+    }
+
+    namespace
+    {
 
         bool try_read_exact(memory_interface& memory, const uint64_t address, void* data, const size_t size)
         {
@@ -151,7 +159,7 @@ namespace sogen
             // Seed after the pfn copy: the worker-array fill above zeroes part of the MBStrings region.
             seed_messagebox_button_strings(memory, process.user_handles.get_server_info().value());
 
-            refresh_dispatch_client_message(process);
+            win32k_userconnect::refresh_dispatch_client_message(process);
             return true;
         }
 
@@ -207,80 +215,6 @@ namespace sogen
             }
 
             return narrow_wow64_address(destination64, destination);
-        }
-
-        NTSTATUS build_wow64_userconnect(const process_context& process, WIN32K_USERCONNECT32& connect)
-        {
-            connect = {};
-
-            uint32_t psi{};
-            uint32_t disp_info{};
-            uint32_t ahe_list{};
-            uint32_t monitor_info{};
-
-            auto status = narrow_wow64_address(process.user_handles.get_server_info().value(), psi);
-            if (status != STATUS_SUCCESS)
-            {
-                return status;
-            }
-
-            status = narrow_wow64_address(process.user_handles.get_display_info().value(), disp_info);
-            if (status != STATUS_SUCCESS)
-            {
-                return status;
-            }
-
-            status = narrow_wow64_address(process.user_handles.get_handle_table().value(), ahe_list);
-            if (status != STATUS_SUCCESS)
-            {
-                return status;
-            }
-
-            status = narrow_wow64_address(process.user_handles.get_display_info().value(), monitor_info);
-            if (status != STATUS_SUCCESS)
-            {
-                return status;
-            }
-
-            uint32_t wndmsg_bitmap{};
-            status = narrow_wow64_address(process.user_handles.get_wow64_wndmsg_bitmap(), wndmsg_bitmap);
-            if (status != STATUS_SUCCESS)
-            {
-                return status;
-            }
-
-            uint32_t ime_msg_bitmap{};
-            status = narrow_wow64_address(process.user_handles.get_wow64_ime_msg_bitmap(), ime_msg_bitmap);
-            if (status != STATUS_SUCCESS)
-            {
-                return status;
-            }
-
-            connect.psi = psi;
-            connect.ahe_list = ahe_list;
-            connect.he_entry_size = sizeof(USER_HANDLEENTRY);
-            connect.disp_info_low = disp_info;
-            connect.monitor_info_low = monitor_info;
-            connect.wndmsg_count = k_wow64_wndmsg_count;
-            connect.wndmsg_bits = wndmsg_bitmap;
-            connect.ime_msg_count = k_wow64_ime_msg_count;
-            connect.ime_msg_bits = ime_msg_bitmap;
-
-            return STATUS_SUCCESS;
-        }
-
-        bool try_write_wow64_userconnect(memory_interface& memory, const uint64_t destination, const WIN32K_USERCONNECT32& connect)
-        {
-            try
-            {
-                const emulator_object<WIN32K_USERCONNECT32> connect_obj{memory, destination};
-                connect_obj.write(connect);
-                return true;
-            }
-            catch (...)
-            {
-                return false;
-            }
         }
 
         void populate_user_shared_info(USER_SHAREDINFO& shared, const process_context& process)
@@ -357,6 +291,102 @@ namespace sogen
             }
 
             return try_update_client_pfn_arrays_from_addresses(win_emu.memory, win_emu.process, pointers[0], pointers[1], pointers[2]);
+        }
+
+        bool try_write_64bit_user_shared_info(windows_emulator& win_emu)
+        {
+            // gSharedInfo RVA in 64-bit user32.dll (IDB base 0x180000000):
+            //   gSharedInfo at IDB VA 0x1800B9030 → RVA 0xB9030
+            // awmControl starts at gSharedInfo+0x28; FNID_BUTTON (index 7) lands at +0x98,
+            // exactly where ButtonWndProcW reads its message bitmap gate.
+            static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x28);
+            constexpr uint64_t k_idb_base = 0x180000000ULL;
+            constexpr uint64_t k_gsharedinfo_idb = 0x1800B9030ULL;
+            constexpr uint64_t k_gsharedinfo_rva = k_gsharedinfo_idb - k_idb_base;
+
+            // gSharedInfo is a per-process mapping accessed by both 64-bit ntdll and user32 at the
+            // same RVA (0xB9030) relative to whichever module is loaded at 0x180000000. In sogen's
+            // WOW64 setup, 64-bit user32 is not loaded as a separate module; ntdll occupies that
+            // base address and its data section at this RVA is the live gSharedInfo the KCT stubs
+            // and initialisation paths read. Write through ntdll's image_base so the destination
+            // is always resolved correctly at runtime, regardless of ASLR.
+            const auto* ntdll = win_emu.mod_manager.ntdll;
+            if (!ntdll)
+            {
+                return false;
+            }
+
+            const uint64_t destination = ntdll->image_base + k_gsharedinfo_rva;
+            return try_write_user_shared_info(win_emu.memory, destination, win_emu.process);
+        }
+
+        bool try_populate_wow64win_client_tables(windows_emulator& win_emu)
+        {
+            const auto* wow64win = win_emu.mod_manager.wow64_modules_.wow64win_dll;
+            if (!wow64win)
+            {
+                return false;
+            }
+
+            // Global addresses from wow64win IDB (base 0x180000000):
+            //   apfnClientWClient       0x180078310  (whcbfnDWORD reads DWORD at 8*i from this)
+            //   apfnClientWKernel       0x180078318  (whcbfnDWORD scans for xpfnProc match)
+            //   apfnClientWorkerKernel  0x180078320
+            //   apfnClientAClient       0x180078328
+            //   apfnClientAKernel       0x180078578
+            //   apfnClientWorkerClient  0x180078588
+            constexpr uint64_t k_idb_base = 0x180000000ULL;
+            constexpr uint64_t k_client_w_idb = 0x180078310ULL;
+            constexpr uint64_t k_kernel_w_idb = 0x180078318ULL;
+            constexpr uint64_t k_kernel_worker_idb = 0x180078320ULL;
+            constexpr uint64_t k_client_a_idb = 0x180078328ULL;
+            constexpr uint64_t k_kernel_a_idb = 0x180078578ULL;
+            constexpr uint64_t k_worker_c_idb = 0x180078588ULL;
+
+            const uint64_t delta = wow64win->image_base - k_idb_base;
+            const uint64_t client_w_addr = k_client_w_idb + delta;
+            const uint64_t kernel_w_addr = k_kernel_w_idb + delta;
+            const uint64_t kernel_worker_addr = k_kernel_worker_idb + delta;
+            const uint64_t client_a_addr = k_client_a_idb + delta;
+            const uint64_t kernel_a_addr = k_kernel_a_idb + delta;
+            const uint64_t worker_c_addr = k_worker_c_idb + delta;
+
+
+            // Find ntdll32's NtUserPfn slot table (the .mrdata array written by 32-bit user32 at
+            // init time). Each slot is 8 bytes; the DWORD at slot[i] is the 32-bit wndproc address
+            // for FNID index i.  whcbfnDWORD reads apfnClient*Client with an 8-byte stride and
+            // extracts the DWORD at 8*i, so the layout matches exactly.
+            const auto* ntdll32 = win_emu.mod_manager.wow64_modules_.ntdll32;
+            if (!ntdll32)
+            {
+                return false;
+            }
+
+            // RVA 0x12b0c0 is the NtUserPfnArray table inside ntdll32's .mrdata section.
+            constexpr uint32_t k_mrdata_rva = 0x12b0c0;
+            const uint64_t mrdata_base = ntdll32->image_base + k_mrdata_rva;
+
+            // apfnClient*Client: point directly at the live .mrdata table so whcbfnDWORD reads
+            // the real 32-bit wndproc addresses that user32 writes at initialisation time.
+            win_emu.memory.write_memory(client_w_addr, &mrdata_base, sizeof(mrdata_base));
+            win_emu.memory.write_memory(client_a_addr, &mrdata_base, sizeof(mrdata_base));
+            win_emu.memory.write_memory(worker_c_addr, &mrdata_base, sizeof(mrdata_base));
+
+            // apfnClient*Kernel: 64-bit pfn tables that whcbfnDWORD scans for a match against the
+            // dispatched xpfnProc. NtWow64UserConnectHook copies USER_SERVERINFO into gSharedInfo at
+            // connect time and sets these pointers into gSharedInfo; however that snapshot is taken
+            // before try_bootstrap_client_pfn_arrays_from_ntdll populates the pfn arrays, leaving
+            // the kernel-side tables empty. Point them directly at the live USER_SERVERINFO arrays so
+            // whcbfnDWORD finds its match regardless of when the bootstrap runs.
+            const uint64_t server_info = win_emu.process.user_handles.get_server_info().value();
+            const uint64_t pfn_a_ptr = server_info + offsetof(USER_SERVERINFO, apfnClientA);
+            const uint64_t pfn_w_ptr = server_info + offsetof(USER_SERVERINFO, apfnClientW);
+            const uint64_t pfn_worker_ptr = server_info + offsetof(USER_SERVERINFO, apfnClientWorker);
+            win_emu.memory.write_memory(kernel_w_addr, &pfn_w_ptr, sizeof(pfn_w_ptr));
+            win_emu.memory.write_memory(kernel_a_addr, &pfn_a_ptr, sizeof(pfn_a_ptr));
+            win_emu.memory.write_memory(kernel_worker_addr, &pfn_worker_ptr, sizeof(pfn_worker_ptr));
+
+            return true;
         }
     }
 

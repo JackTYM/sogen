@@ -823,6 +823,15 @@ namespace sogen
             {
                 this->install_section_first_execution_hook(mod, i);
             }
+
+            if (mod.name == "wow64.dll")
+            {
+                this->mod_manager.wow64_modules_.wow64_dll = &mod;
+            }
+            else if (mod.name == "wow64win.dll")
+            {
+                this->mod_manager.wow64_modules_.wow64win_dll = &mod;
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {

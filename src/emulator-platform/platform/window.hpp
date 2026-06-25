@@ -175,6 +175,7 @@ namespace sogen
 #define WS_DISABLED          0x08000000L
 #define WS_CLIPSIBLINGS      0x04000000L
 #define WS_CLIPCHILDREN      0x02000000L
+#define WS_THICKFRAME        0x00040000L
 
 #define SWP_NOSIZE           0x0001
 #define SWP_NOMOVE           0x0002

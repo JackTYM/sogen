@@ -203,6 +203,17 @@ namespace sogen
                         this->set_window_active(this->resolve_guest(event.window.windowID), false);
                         break;
 
+                    case SDL_EVENT_WINDOW_RESIZED:
+                    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                        if (const auto guest = this->resolve_guest(event.window.windowID); guest != 0)
+                        {
+                            if (auto* state = this->resolve_window(guest); state && state->renderer)
+                            {
+                                render_window(*state);
+                            }
+                        }
+                        break;
+
                     case SDL_EVENT_KEY_DOWN:
                         if (!event.key.repeat)
                         {
@@ -242,9 +253,9 @@ namespace sogen
                         {
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
+                                const auto [gx, gy] = this->scale_to_guest(guest, event.button.x, event.button.y);
                                 this->set_window_active(guest, true);
-                                this->post_event(guest, WM_LBUTTONDOWN, MK_LBUTTON,
-                                                 pack_point(static_cast<int>(event.button.x), static_cast<int>(event.button.y)));
+                                this->post_event(guest, WM_LBUTTONDOWN, MK_LBUTTON, pack_point(gx, gy));
                             }
                         }
                         break;
@@ -254,8 +265,8 @@ namespace sogen
                         {
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
-                                this->post_event(guest, WM_LBUTTONUP, 0,
-                                                 pack_point(static_cast<int>(event.button.x), static_cast<int>(event.button.y)));
+                                const auto [gx, gy] = this->scale_to_guest(guest, event.button.x, event.button.y);
+                                this->post_event(guest, WM_LBUTTONUP, 0, pack_point(gx, gy));
                             }
                         }
                         break;
@@ -263,10 +274,10 @@ namespace sogen
                     case SDL_EVENT_MOUSE_MOTION:
                         if (const auto guest = this->resolve_guest(event.motion.windowID); guest != 0)
                         {
+                            const auto [gx, gy] = this->scale_to_guest(guest, event.motion.x, event.motion.y);
                             this->set_window_active(guest, true);
                             const uint64_t keys = (event.motion.state & SDL_BUTTON_LMASK) ? MK_LBUTTON : 0;
-                            this->post_event(guest, WM_MOUSEMOVE, keys,
-                                             pack_point(static_cast<int>(event.motion.x), static_cast<int>(event.motion.y)));
+                            this->post_event(guest, WM_MOUSEMOVE, keys, pack_point(gx, gy));
                         }
                         break;
 
@@ -302,7 +313,7 @@ namespace sogen
                 {
                     flags &= ~SDL_WINDOW_HIDDEN;
                 }
-                if ((desc.style & WS_CHILD) == 0)
+                if ((desc.style & WS_THICKFRAME) != 0)
                 {
                     flags |= SDL_WINDOW_RESIZABLE;
                 }
@@ -603,6 +614,8 @@ namespace sogen
                     return;
                 }
 
+                SDL_SetRenderLogicalPresentation(state.renderer, surface.width, surface.height,
+                                                 SDL_LOGICAL_PRESENTATION_STRETCH);
                 SDL_UpdateTexture(state.texture, nullptr, surface.pixels, surface.stride);
             }
 
@@ -653,6 +666,41 @@ namespace sogen
             {
                 const auto it = this->guest_by_window_id_.find(window_id);
                 return it == this->guest_by_window_id_.end() ? 0 : it->second;
+            }
+
+            // SDL mouse coordinates are in the SDL window's current pixel space, which may differ from the
+            // guest's logical coordinate space if the WM resized the window or DPI scaling is in effect.
+            // When logical presentation is active (SDL_SetRenderLogicalPresentation), SDL_RenderCoordinatesFromWindow
+            // handles the mapping correctly; otherwise fall back to manual scaling.
+            std::pair<int, int> scale_to_guest(const hwnd guest, const float sdl_x, const float sdl_y) const
+            {
+                const auto* state = this->resolve_window(guest);
+                if (!state || !state->window)
+                {
+                    return {static_cast<int>(sdl_x), static_cast<int>(sdl_y)};
+                }
+
+                if (state->renderer)
+                {
+                    float lx = sdl_x;
+                    float ly = sdl_y;
+                    SDL_RenderCoordinatesFromWindow(state->renderer, sdl_x, sdl_y, &lx, &ly);
+                    return {static_cast<int>(lx), static_cast<int>(ly)};
+                }
+
+                int sdl_w = 0;
+                int sdl_h = 0;
+                SDL_GetWindowSize(state->window, &sdl_w, &sdl_h);
+
+                const int guest_w = state->desc.rect.right - state->desc.rect.left;
+                const int guest_h = state->desc.rect.bottom - state->desc.rect.top;
+
+                if (sdl_w <= 0 || sdl_h <= 0 || guest_w <= 0 || guest_h <= 0)
+                {
+                    return {static_cast<int>(sdl_x), static_cast<int>(sdl_y)};
+                }
+
+                return {static_cast<int>(sdl_x * guest_w / sdl_w), static_cast<int>(sdl_y * guest_h / sdl_h)};
             }
 
             void set_window_active(const hwnd window, const bool active)

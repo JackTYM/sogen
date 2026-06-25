@@ -284,6 +284,10 @@ namespace sogen
             }
 
             (void)win32k_userconnect::try_bootstrap_client_pfn_arrays_from_ntdll(c.win_emu);
+            if (c.proc.is_wow64_process)
+            {
+                (void)win32k_userconnect::try_populate_wow64win_client_tables(c.win_emu);
+            }
 
             c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& server_info) {
                 if (normalized_name == u"Button")
@@ -844,6 +848,7 @@ namespace sogen
                 args.pwnd = win.guest.value();
                 args.msg = message;
                 args.wParam = w_param;
+                args.lParam = l_param;
                 if (l_param != 0)
                 {
                     EMU_CREATESTRUCT emu_cs{};
@@ -1062,8 +1067,8 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            user_shared_info_ptr = c.proc.base_allocator.reserve(sizeof(WIN32K_USERCONNECT32), alignof(WIN32K_USERCONNECT32));
-            std::array<std::byte, sizeof(WIN32K_USERCONNECT32)> zeros{};
+            user_shared_info_ptr = c.proc.base_allocator.reserve(sizeof(USER_SHAREDINFO), alignof(USER_SHAREDINFO));
+            std::array<std::byte, sizeof(USER_SHAREDINFO)> zeros{};
             c.emu.write_memory(user_shared_info_ptr, zeros.data(), zeros.size());
 
             uint32_t user_shared_info_ptr32{};
@@ -1474,14 +1479,11 @@ namespace sogen
                 return destination_status;
             }
 
-            WIN32K_USERCONNECT32 connect_info{};
-            const auto connect_status = win32k_userconnect::build_wow64_userconnect(c.proc, connect_info);
-            if (connect_status != STATUS_SUCCESS)
-            {
-                return connect_status;
-            }
-
-            if (!win32k_userconnect::try_write_wow64_userconnect(c.emu, connect_destination, connect_info))
+            // 32-bit user32 copies the connect buffer to gSharedInfo and reads awmControl fields
+            // at gSharedInfo+0x28 with 16-byte USER_WNDMSG entries (same layout as USER_SHAREDINFO).
+            // Writing WIN32K_USERCONNECT32 here would place awmControl at +0x40 with 8-byte entries,
+            // causing all window-class message bitmap gate checks to fail (including WM_PAINT for buttons).
+            if (!win32k_userconnect::try_write_user_shared_info(c.emu, connect_destination, c.proc))
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -1495,7 +1497,7 @@ namespace sogen
 
             if (user_shared_info_ptr != 0)
             {
-                if (!win32k_userconnect::try_write_wow64_userconnect(c.emu, user_shared_info_ptr, connect_info))
+                if (!win32k_userconnect::try_write_user_shared_info(c.emu, user_shared_info_ptr, c.proc))
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -1520,10 +1522,74 @@ namespace sogen
                 c.proc.active_thread->win32k_thread_setup_done = true;
             }
 
+            // In WOW64, the 32-bit user32's pfn tables have 4-byte entries so we cannot copy
+            // them into USER_SERVERINFO.apfnClientW (which uses 8-byte entries for the 64-bit
+            // ntdll stub addresses used by whcbfnDWORD as kernel-side scan targets).
+            // Instead, drive the wow64win table setup directly from the 32-bit KCT address
+            // (apfn_client_w) supplied here — this mirrors what win32k.sys does in real Windows
+            // by calling NtWow64UserConnectHook after NtUserInitializeClientPfnArrays.
+            if (c.proc.is_wow64_process)
+            {
+                (void)win32k_userconnect::try_bootstrap_client_pfn_arrays_from_ntdll(c.win_emu);
+                (void)win32k_userconnect::try_populate_wow64win_client_tables(c.win_emu);
+                return STATUS_SUCCESS;
+            }
+
+            std::array<uint64_t, FNID_ARRAY_SIZE> old_pfn_a{};
+            std::array<uint64_t, FNID_ARRAY_SIZE> old_pfn_w{};
+            c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& si) {
+                std::ranges::copy(si.apfnClientA, old_pfn_a.begin());
+                std::ranges::copy(si.apfnClientW, old_pfn_w.begin());
+            });
+
             if (!win32k_userconnect::try_update_client_pfn_arrays_from_addresses(c.win_emu.memory, c.proc, apfn_client_a, apfn_client_w,
                                                                                  apfn_client_worker))
             {
                 return STATUS_UNSUCCESSFUL;
+            }
+
+            // Build a map of old pfn address -> new pfn address so that any window classes and
+            // windows that were registered before user32 initialised (when only ntdll bootstrap
+            // addresses were available) get updated to the real client-side addresses now.
+            std::unordered_map<uint64_t, uint64_t> remap;
+            c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& si) {
+                for (size_t i = 0; i < FNID_ARRAY_SIZE; ++i)
+                {
+                    const auto old_a = old_pfn_a[i];
+                    const auto new_a = si.apfnClientA[i];
+                    if (old_a != 0 && new_a != 0 && old_a != new_a)
+                    {
+                        remap.emplace(old_a, new_a);
+                    }
+                    const auto old_w = old_pfn_w[i];
+                    const auto new_w = si.apfnClientW[i];
+                    if (old_w != 0 && new_w != 0 && old_w != new_w)
+                    {
+                        remap.emplace(old_w, new_w);
+                    }
+                }
+            });
+
+            if (remap.empty())
+            {
+                return STATUS_SUCCESS;
+            }
+
+            for (auto& [_, cls] : c.proc.classes)
+            {
+                if (const auto it = remap.find(cls.wnd_class.lpfnWndProc); it != remap.end())
+                {
+                    cls.wnd_class.lpfnWndProc = it->second;
+                }
+            }
+
+            for (auto& [_, win] : c.proc.windows)
+            {
+                if (const auto it = remap.find(win.wnd_proc); it != remap.end())
+                {
+                    win.wnd_proc = it->second;
+                    win.guest.access([&](USER_WINDOW& gw) { gw.lpfnWndProc = it->second; });
+                }
             }
 
             return STATUS_SUCCESS;
@@ -1860,7 +1926,6 @@ namespace sogen
             {
                 return 0;
             }
-
             const auto dc = handle_NtUserGetDCEx(c, window, 0, 0);
             if (!dc)
             {
@@ -2237,7 +2302,11 @@ namespace sogen
             const auto index = c.proc.add_or_find_atom(class_name_str);
 
             constexpr auto cls_size = static_cast<size_t>(page_align_up(sizeof(USER_CLASS)));
-            const auto cls_ptr = c.win_emu.memory.allocate_memory(cls_size, memory_permission::read);
+
+            const auto existing_it = c.proc.classes.find(class_name_str);
+            const auto cls_ptr = (existing_it != c.proc.classes.end())
+                                     ? existing_it->second.guest_obj_addr
+                                     : c.win_emu.memory.allocate_memory(cls_size, memory_permission::read);
 
             const auto wnd_class = wnd_class_ex.read();
             const auto entry = process_context::class_entry{cls_ptr, wnd_class, class_menu_name.read()};
@@ -2250,6 +2319,16 @@ namespace sogen
 
             c.proc.classes.insert_or_assign(class_name_str, entry);
             c.proc.classes.insert_or_assign(make_atom_class_name(index), entry);
+
+            const auto fnid = get_builtin_window_fnid(class_name_str);
+            if (fnid != 0 && wnd_class.lpfnWndProc != 0)
+            {
+                constexpr uint32_t fn_dword_threshold = 0x0318;
+                constexpr uint32_t fn_dword_dispatch_offset = 0x70;
+                const uint32_t wndproc32 = static_cast<uint32_t>(wnd_class.lpfnWndProc);
+                c.win_emu.memory.write_memory(cls_ptr + 0x0C, &fn_dword_threshold, sizeof(fn_dword_threshold));
+                c.win_emu.memory.write_memory(cls_ptr + fn_dword_dispatch_offset, &wndproc32, sizeof(wndproc32));
+            }
 
             return index;
         }
@@ -3068,6 +3147,7 @@ namespace sogen
             }
 
             const auto m = message.read();
+
             auto* win = m.window != 0 ? c.proc.windows.get(m.window) : nullptr;
             if (m.window != 0 && !win)
             {
