@@ -382,16 +382,41 @@ namespace sogen
         NTSTATUS handle_NtCreateKey(const syscall_context& c, const emulator_object<handle> key_handle, const ACCESS_MASK desired_access,
                                     const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                     const ULONG /*title_index*/, const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*class*/,
-                                    const ULONG /*create_options*/, const emulator_object<ULONG> /*disposition*/)
+                                    const ULONG /*create_options*/, const emulator_object<ULONG> disposition)
         {
             const auto result = handle_NtOpenKey(c, key_handle, desired_access, object_attributes);
 
-            if (result == STATUS_OBJECT_NAME_NOT_FOUND)
+            if (result != STATUS_OBJECT_NAME_NOT_FOUND)
             {
-                return STATUS_NOT_SUPPORTED;
+                if (NT_SUCCESS(result) && disposition)
+                {
+                    disposition.write(2u); // REG_OPENED_EXISTING_KEY
+                }
+                return result;
             }
 
-            return result;
+            const auto attributes = object_attributes.read();
+            auto key = read_unicode_string(c.emu, attributes.ObjectName);
+
+            if (attributes.RootDirectory)
+            {
+                const auto* parent_handle = c.proc.registry_keys.get(attributes.RootDirectory);
+                if (!parent_handle)
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                const std::filesystem::path full_path = parent_handle->hive.get() / parent_handle->path.get() / key;
+                key = full_path.u16string();
+            }
+
+            auto reg_key = c.win_emu.registry.create_key({key});
+            const auto h = c.proc.registry_keys.store(std::move(reg_key));
+            key_handle.write(h);
+            if (disposition)
+            {
+                disposition.write(1u); // REG_CREATED_NEW_KEY
+            }
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtSetValueKey(const syscall_context& c, const handle key_handle,
@@ -440,9 +465,11 @@ namespace sogen
             return STATUS_ACCESS_DENIED;
         }
 
-        NTSTATUS handle_NtNotifyChangeKey()
+        NTSTATUS handle_NtNotifyChangeKey(const syscall_context& /*c*/, handle /*key_handle*/, handle /*event*/, uint64_t /*apc_routine*/,
+                                          uint64_t /*apc_context*/, uint64_t /*io_status_block*/, ULONG /*completion_filter*/,
+                                          BOOLEAN /*watch_subtree*/, uint64_t /*buffer*/, ULONG /*buffer_size*/, BOOLEAN asynchronous)
         {
-            return STATUS_SUCCESS;
+            return asynchronous ? STATUS_PENDING : STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtSetInformationKey(const syscall_context& c, const handle key_handle,
@@ -664,6 +691,18 @@ namespace sogen
 
             c.win_emu.log.warn("Unsupported registry value enumeration class: %X\n", key_value_information_class);
             return STATUS_NOT_SUPPORTED;
+        }
+
+        NTSTATUS handle_NtDeleteKey(const syscall_context& c, const handle key_handle)
+        {
+            const auto* key = c.proc.registry_keys.get(key_handle);
+            if (!key)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            c.win_emu.registry.delete_key(*key);
+            return STATUS_SUCCESS;
         }
     }
 

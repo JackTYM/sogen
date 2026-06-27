@@ -1247,7 +1247,20 @@ namespace sogen
             }
         }
 
-        out_count = count;
+        // Inject VK_KHR_swapchain if absent: the bridge provides a virtual swapchain that
+        // doesn't require the host instance to have surface extensions.
+        const auto has_swapchain = std::any_of(extensions.begin(), extensions.end(), [](const VkExtensionProperties& e) {
+            return std::string_view{e.extensionName} == VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        });
+        if (!has_swapchain)
+        {
+            VkExtensionProperties ext{};
+            std::strncpy(ext.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE);
+            ext.specVersion = VK_KHR_SWAPCHAIN_SPEC_VERSION;
+            extensions.push_back(ext);
+        }
+
+        out_count = static_cast<uint32_t>(extensions.size());
 
         const size_t copy_bytes = std::min(out_size, extensions.size() * sizeof(VkExtensionProperties));
         if (copy_bytes > 0)
@@ -3381,7 +3394,6 @@ namespace sogen
         {
             VkImageCreateInfo info{};
             info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
             info.imageType = VK_IMAGE_TYPE_2D;
             info.format = vk_format;
             info.extent = {.width = width, .height = height, .depth = 1};

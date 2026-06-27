@@ -15,7 +15,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             const auto return_length_info = c.win_emu.memory.get_region_info(return_length.value());
@@ -23,7 +23,8 @@ namespace sogen
             switch (info_class)
             {
             case ProcessExecuteFlags:
-                return STATUS_NOT_SUPPORTED;
+                // Kernel returns STATUS_INVALID_PARAMETER for ProcessExecuteFlags queries on current process
+                return STATUS_INVALID_PARAMETER;
             case ProcessGroupInformation:
             case ProcessMitigationPolicy: {
                 // ProcessMitigationPolicy requires special handling because the caller
@@ -130,8 +131,18 @@ namespace sogen
                     c.emu, process_information, process_information_length, return_length,
                     [&](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = c.proc.peb32 ? c.proc.peb32->value() : 0; });
 
+            case ProcessHandleCount:
+                return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length, [](ULONG& count) {
+                    count = 10; //
+                });
+
+            case ProcessAffinityMask:
+                return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(c.emu, process_information, process_information_length, return_length,
+                                                                      [](EmulatorTraits<Emu64>::ULONG_PTR& mask) { mask = 1; });
+
             case ProcessBasicInformation: {
                 const auto init_basic_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
+                    basic_info.ExitStatus = STATUS_PENDING;
                     basic_info.PebBaseAddress = c.proc.peb64.value();
                     basic_info.UniqueProcessId = process_context::process_id;
                 };
@@ -242,10 +253,8 @@ namespace sogen
             }
 
             default:
-                c.win_emu.log.error("Unsupported process info class: %X\n", info_class);
-                c.emu.stop();
-
-                return STATUS_NOT_SUPPORTED;
+                c.win_emu.log.print(color::gray, "Unsupported process info class: %X\n", info_class);
+                return STATUS_INVALID_INFO_CLASS;
             }
         }
 
@@ -254,7 +263,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             if (info_class == ProcessSchedulerSharedData                     //
@@ -273,7 +282,9 @@ namespace sogen
 
             if (info_class == ProcessExecuteFlags)
             {
-                return STATUS_NOT_SUPPORTED;
+                // Kernel validates NX/execute flags at the MmSetExecuteOptions level;
+                // sogen doesn't track per-process execute options.
+                return STATUS_INVALID_PARAMETER;
             }
 
             if (info_class == ProcessTlsInformation)
@@ -430,15 +441,34 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported info process class: %X\n", info_class);
-            c.emu.stop();
-
-            return STATUS_NOT_SUPPORTED;
+            c.win_emu.log.print(color::gray, "Unsupported info process class: %X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
-        NTSTATUS handle_NtOpenProcess()
+        NTSTATUS handle_NtOpenProcess(const syscall_context& c, const emulator_object<handle> process_handle,
+                                      const ACCESS_MASK /*desired_access*/,
+                                      const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
+                                      const emulator_object<CLIENT_ID64> client_id)
         {
-            return STATUS_NOT_SUPPORTED;
+            uint64_t current_pid = 0;
+            if (c.proc.active_thread && c.proc.active_thread->teb64)
+            {
+                c.proc.active_thread->teb64->access([&](const TEB64& teb) { current_pid = teb.ClientId.UniqueProcess; });
+            }
+
+            if (client_id)
+            {
+                const auto id = client_id.read();
+                if (id.UniqueProcess != current_pid)
+                {
+                    // Kernel: PsOpenProcess delegates to ObpReferenceObjectByHandleWithTag;
+                    // a non-emulated PID has no handle in our store → STATUS_INVALID_HANDLE.
+                    return STATUS_INVALID_HANDLE;
+                }
+            }
+
+            process_handle.write(GUEST_PROCESS_HANDLE);
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtOpenProcessToken(const syscall_context& c, const handle process_handle, const ACCESS_MASK /*desired_access*/,
@@ -446,7 +476,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             token_handle.write(CURRENT_PROCESS_TOKEN);

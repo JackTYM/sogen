@@ -192,6 +192,31 @@ namespace sogen
         UINT32 PatchLocationListSize;
     };
 
+    struct EMU_D3DKMT_CREATEPAGINGQUEUE
+    {
+        UINT32 hDevice;
+        INT32  Priority;
+        UINT32 hPagingQueue;
+        UINT32 hSyncObject;
+        UINT64 FenceValueCPUVirtualAddress;
+        UINT32 PhysicalAdapterIndex;
+        UINT32 pad;
+    };
+
+    struct EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT
+    {
+        UINT32 hDevice;       // +0x00
+        UINT32 pad;           // +0x04
+        UINT32 InfoType;      // +0x08
+        UINT32 InfoFlags;     // +0x0C
+        UINT64 InfoData[8];   // +0x10 (64 bytes of union payload)
+        UINT32 InfoSharedHandle; // +0x50
+        UINT32 pad2;          // +0x54
+        UINT32 hSyncObject;   // +0x58
+        UINT32 pad3;          // +0x5C
+    };
+    static_assert(sizeof(EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT) == 0x60);
+
     struct EMU_D3DKMT_ESCAPE
     {
         UINT32 hAdapter;
@@ -297,6 +322,25 @@ namespace sogen
         UINT64 GpuVirtualAddress;
     };
 
+    struct EMU_D3DKMT_LOCK2
+    {
+        UINT32 hDevice;
+        UINT32 hAllocation;
+        UINT32 Flags;
+        UINT32 pad;
+        UINT64 pData;
+    };
+    static_assert(sizeof(EMU_D3DKMT_LOCK2) == 0x18);
+
+    struct EMU_CURRENT_DPI_INFO
+    {
+        UINT32 pad0[2];
+        UINT32 DpiX;
+        UINT32 DpiY;
+        UINT32 pad1[20];
+    };
+    static_assert(sizeof(EMU_CURRENT_DPI_INFO) == 0x60);
+
     struct EMU_D3DKMT_GETDEVICESTATE
     {
         UINT32 hDevice;
@@ -365,6 +409,13 @@ namespace sogen
         UINT32 DisplayOrientation;
         UINT32 DisplayFixedOutput;
         UINT32 Flags;
+    };
+
+    struct EMU_D3DKMT_CURRENTDISPLAYMODE
+    {
+        UINT32 hAdapter;
+        UINT32 VidPnSourceId;
+        EMU_D3DKMT_DISPLAYMODE DisplayModeInfo;
     };
 
     struct EMU_D3DKMT_GETDISPLAYMODELIST

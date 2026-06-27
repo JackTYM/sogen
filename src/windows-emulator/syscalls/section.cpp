@@ -566,7 +566,8 @@ namespace sogen
 
             if (!base_address)
             {
-                return STATUS_INVALID_PARAMETER;
+                // Kernel returns STATUS_NOT_MAPPED_VIEW for NULL base, not STATUS_INVALID_PARAMETER
+                return STATUS_NOT_MAPPED_VIEW;
             }
 
             if (c.proc.shared_section_address && base_address >= c.proc.shared_section_address &&
@@ -618,14 +619,19 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUnmapViewOfSectionEx(const syscall_context& c, const handle process_handle, const uint64_t base_address,
-                                               const ULONG /*flags*/)
+                                               const ULONG flags)
         {
+            // Kernel: if ( (flags & 0xFFFFFFFC) != 0 ) return STATUS_INVALID_PARAMETER_3
+            if ((flags & 0xFFFFFFFC) != 0)
+            {
+                return STATUS_INVALID_PARAMETER_3;
+            }
             return handle_NtUnmapViewOfSection(c, process_handle, base_address);
         }
 
-        NTSTATUS handle_NtAreMappedFilesTheSame()
+        NTSTATUS handle_NtAreMappedFilesTheSame(const syscall_context& /*c*/, uint64_t /*file1_address*/, uint64_t /*file2_address*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_NOT_SAME_OBJECT;
         }
 
         NTSTATUS handle_NtQuerySection(const syscall_context& c, const handle section_handle,
@@ -838,11 +844,11 @@ namespace sogen
             case SECTION_INFORMATION_CLASS::SectionRelocationInformation:
             case SECTION_INFORMATION_CLASS::SectionOriginalBaseInformation:
             case SECTION_INFORMATION_CLASS::SectionInternalImageInformation:
-                // These information classes are not implemented
                 return STATUS_NOT_SUPPORTED;
 
             default:
-                return STATUS_NOT_SUPPORTED;
+                // Kernel returns STATUS_INVALID_INFO_CLASS (0xC0000003) for unknown classes
+                return STATUS_INVALID_INFO_CLASS;
             }
         }
     }

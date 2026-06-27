@@ -12,6 +12,12 @@ namespace sogen
                                          const uint64_t parameters, const HARDERROR_RESPONSE_OPTION /*valid_response_option*/,
                                          const emulator_object<HARDERROR_RESPONSE> response)
         {
+            // Kernel: if ( a2 > 5 ) return 3221225712 = STATUS_INVALID_PARAMETER_2 (0xC00000F0)
+            if (number_of_parameters > 5)
+            {
+                return STATUS_INVALID_PARAMETER_2;
+            }
+
             if (response)
             {
                 response.try_write(ResponseAbort);
@@ -44,16 +50,33 @@ namespace sogen
         }
 
         NTSTATUS handle_NtRaiseException(const syscall_context& c,
-                                         const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>> /*exception_record*/,
+                                         const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>> exception_record,
                                          const emulator_object<CONTEXT64> /*thread_context*/, const BOOLEAN handle_exception)
         {
             if (handle_exception)
             {
-                c.win_emu.log.error("Unhandled exceptions not supported yet!\n");
+                NTSTATUS exception_code = STATUS_UNSUCCESSFUL;
+                if (exception_record)
+                {
+                    const auto record = exception_record.read();
+                    exception_code = static_cast<NTSTATUS>(record.ExceptionCode);
+                }
+
+                c.win_emu.log.error("Unhandled exception: 0x%X\n", static_cast<uint32_t>(exception_code));
+                c.proc.exit_status = exception_code;
+                c.win_emu.callbacks.on_exception();
                 c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_SUCCESS;
             }
 
+            NTSTATUS exception_code = STATUS_UNSUCCESSFUL;
+            if (exception_record)
+            {
+                const auto record = exception_record.read();
+                exception_code = static_cast<NTSTATUS>(record.ExceptionCode);
+            }
+
+            c.proc.exit_status = exception_code;
             c.win_emu.callbacks.on_exception();
             c.emu.stop();
 

@@ -18,6 +18,7 @@
 namespace sogen
 {
     constexpr auto MAX_INSTRUCTIONS_PER_TIME_SLICE = 0x20000;
+    constexpr auto MAX_SYSCALLS_PER_TIME_SLICE = 64;
 
     namespace
     {
@@ -840,6 +841,10 @@ namespace sogen
 
         this->emu().hook_instruction(x86_hookable_instructions::syscall, [&] {
             this->dispatcher.dispatch(*this);
+            if (!this->instruction_precision_ && !this->switch_thread_ && ++this->syscall_count_ % MAX_SYSCALLS_PER_TIME_SLICE == 0)
+            {
+                this->yield_thread();
+            }
             return instruction_hook_continuation::skip_instruction;
         });
 
@@ -900,11 +905,65 @@ namespace sogen
                 this->callbacks.on_suspicious_activity("Illegal instruction");
                 dispatch_illegal_instruction_violation(*this);
                 return;
-            case 41:
+            case 13:
+                this->callbacks.on_suspicious_activity("General protection fault");
+                {
+                    const auto rip = this->emu().read_instruction_pointer();
+                    const auto r11 = this->emu().reg(x86_register::r11);
+                    const auto sp = this->emu().reg(x86_register::rsp);
+                    const auto* rip_mod = this->mod_manager.find_by_address(rip);
+                    this->log.print(color::dark_gray, "GPF at RIP=0x%llx (%s+0x%llx) R11=0x%llx RSP=0x%llx\n",
+                                    static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                                    rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip,
+                                    static_cast<unsigned long long>(r11), static_cast<unsigned long long>(sp));
+                    uint64_t val_at_r11_68 = 0;
+                    this->emu().try_read_memory(r11 + 0x68, &val_at_r11_68, sizeof(val_at_r11_68));
+                    this->log.print(color::dark_gray, "  [R11+0x68]=0x%llx\n", static_cast<unsigned long long>(val_at_r11_68));
+                    for (int frame = 0; frame < 12; ++frame)
+                    {
+                        uint64_t ra = 0;
+                        if (!this->emu().try_read_memory(sp + static_cast<uint64_t>(frame) * 8, &ra, sizeof(ra)))
+                            break;
+                        const auto* ret_mod = this->mod_manager.find_by_address(ra);
+                        if (ret_mod)
+                        {
+                            this->log.print(color::dark_gray, "  [RSP+0x%02x]=0x%llx (%s+0x%llx)\n", frame * 8,
+                                            static_cast<unsigned long long>(ra), ret_mod->name.c_str(),
+                                            static_cast<unsigned long long>(ra - ret_mod->image_base));
+                        }
+                    }
+                }
+                dispatch_exception(*this, STATUS_ACCESS_VIOLATION, {0, this->emu().reg(x86_register::rip)});
+                return;
+            case 41: {
+                const auto ff_rip = this->emu().read_instruction_pointer();
+                const auto ff_r11 = this->emu().reg(x86_register::r11);
+                const auto ff_rax = this->emu().reg(x86_register::rax);
+                const auto ff_sp = this->emu().reg(x86_register::rsp);
+                const auto* ff_mod = this->mod_manager.find_by_address(ff_rip);
+                this->log.print(color::dark_gray, "FAST_FAIL at RIP=0x%llx (%s+0x%llx) ECX=0x%x RAX=0x%llx R11=0x%llx RSP=0x%llx\n",
+                                static_cast<unsigned long long>(ff_rip), ff_mod ? ff_mod->name.c_str() : "?",
+                                ff_mod ? static_cast<unsigned long long>(ff_rip - ff_mod->image_base) : ff_rip,
+                                this->emu().reg<uint32_t>(x86_register::ecx), static_cast<unsigned long long>(ff_rax),
+                                static_cast<unsigned long long>(ff_r11), static_cast<unsigned long long>(ff_sp));
+                for (int frame = 0; frame < 12; ++frame)
+                {
+                    uint64_t ra = 0;
+                    if (!this->emu().try_read_memory(ff_sp + static_cast<uint64_t>(frame) * 8, &ra, sizeof(ra)))
+                        break;
+                    const auto* ret_mod = this->mod_manager.find_by_address(ra);
+                    if (ret_mod)
+                    {
+                        this->log.print(color::dark_gray, "  FF[RSP+0x%02x]=0x%llx (%s+0x%llx)\n", frame * 8,
+                                        static_cast<unsigned long long>(ra), ret_mod->name.c_str(),
+                                        static_cast<unsigned long long>(ra - ret_mod->image_base));
+                    }
+                }
                 this->callbacks.on_fast_fail(this->emu().reg<uint32_t>(x86_register::ecx));
                 this->process.exit_status = STATUS_FAIL_FAST_EXCEPTION;
                 this->stop();
                 return;
+            }
             case 45:
                 this->callbacks.on_suspicious_activity("DbgPrint");
                 {
@@ -956,6 +1015,14 @@ namespace sogen
                 {
                     // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION
                     this->memory.protect_memory(region.allocation_base, region.length, region.permissions & ~memory_permission_ext::guard);
+                    {
+                        const auto rip = this->emu().read_instruction_pointer();
+                        const auto* rip_mod = this->mod_manager.find_by_address(rip);
+                        this->log.print(color::dark_gray, "Guard page at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
+                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
+                                        rip_mod ? rip_mod->name.c_str() : "?",
+                                        rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
+                    }
                     dispatch_guard_page_violation(*this, address, operation);
                 }
                 else
@@ -963,16 +1030,22 @@ namespace sogen
                     // A fault on a null/near-null address is almost always a call through a null function
                     // pointer (e.g. a Vulkan entry point the shim doesn't implement). Log the caller's
                     // return address so the missing function's call site can be identified.
-                    if (address < 0x1000)
                     {
-                        const auto sp = this->emu().reg<uint32_t>(x86_register::esp);
-                        uint32_t return_address = 0;
-                        if (this->emu().try_read_memory(sp, &return_address, sizeof(return_address)))
+                        const auto rip = this->emu().read_instruction_pointer();
+                        const auto* rip_mod = this->mod_manager.find_by_address(rip);
+                        if (address < 0x1000)
                         {
-                            const auto* mod = this->mod_manager.find_by_address(return_address);
-                            this->log.error("Null-pointer call to 0x%llx; caller return address 0x%x (%s+0x%llx)\n",
-                                            static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
-                                            mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
+                            this->log.error("Null-pointer access at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
+                                            static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
+                                            rip_mod ? rip_mod->name.c_str() : "?",
+                                            rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
+                        }
+                        else
+                        {
+                            this->log.print(color::dark_gray, "Access violation at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
+                                            static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
+                                            rip_mod ? rip_mod->name.c_str() : "?",
+                                            rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
                         }
                     }
 

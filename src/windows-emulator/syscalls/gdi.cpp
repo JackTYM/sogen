@@ -1466,21 +1466,42 @@ namespace sogen
             return resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
         }
 
-        NTSTATUS handle_NtDxgkIsFeatureEnabled()
+        NTSTATUS handle_NtDxgkIsFeatureEnabled(const syscall_context& /*c*/)
         {
-            // puts("NtDxgkIsFeatureEnabled not supported");
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtGdiInit(const syscall_context& c)
         {
-            if (ensure_gdi_shared_table(c) == 0)
+            const auto table = ensure_gdi_shared_table(c);
+            if (table == 0)
             {
                 return STATUS_UNSUCCESSFUL;
             }
 
             const auto cookie = ensure_gdi_cookie(c);
             seed_gdi_stock_objects(c);
+
+            const auto* gdi32 = c.win_emu.mod_manager.find_by_name("gdi32.dll");
+            if (gdi32)
+            {
+                const auto gcookie_addr = gdi32->find_export("gCookie");
+                const auto ptable_addr = gdi32->find_export("pGdiSharedHandleTable");
+                if (const auto addr = gdi32->find_export("gMaxGdiHandleCount"); addr != 0)
+                {
+                    constexpr uint32_t max_count = GDI_MAX_HANDLE_COUNT;
+                    c.emu.write_memory(addr, &max_count, sizeof(max_count));
+                }
+                if (gcookie_addr != 0)
+                {
+                    const auto cookie32 = static_cast<uint32_t>(cookie);
+                    c.emu.write_memory(gcookie_addr, &cookie32, sizeof(cookie32));
+                }
+                if (ptable_addr != 0)
+                {
+                    c.emu.write_memory(ptable_addr, &table, sizeof(table));
+                }
+            }
 
             return static_cast<NTSTATUS>(cookie);
         }
@@ -3257,12 +3278,12 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiSetLayout()
+        NTSTATUS handle_NtGdiSetLayout(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiGetDCObject()
+        NTSTATUS handle_NtGdiGetDCObject(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3376,7 +3397,7 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtGdiDdDDICloseAdapter()
+        NTSTATUS handle_NtGdiDdDDICloseAdapter(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3403,6 +3424,25 @@ namespace sogen
 
             switch (query.Type)
             {
+            case KMTQAITYPE::KMTQAITYPE_UMDRIVERPRIVATE: {
+                if (query.PrivateDriverDataSize < 12)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                struct EMU_UMDRIVERPRIVATE
+                {
+                    uint32_t version_lo;
+                    uint32_t version_hi;
+                    uint32_t caps_flags;
+                } private_data{};
+
+                private_data.version_hi = 0x3200;
+                private_data.caps_flags = 0x8;
+
+                return write_query_adapter_info(c, query, private_data);
+            }
+
             case KMTQAITYPE::KMTQAITYPE_UMDRIVERNAME: {
                 if (query.PrivateDriverDataSize < 520) // MAX_PATH * 2
                 {
@@ -3554,6 +3594,22 @@ namespace sogen
                 return write_query_adapter_info(c, query, unique_guid);
             }
 
+            case KMTQAITYPE::KMTQAITYPE_CURRENTDISPLAYMODE: {
+                const emulator_object<EMU_D3DKMT_CURRENTDISPLAYMODE> current_mode{c.emu, query.pPrivateDriverData};
+                current_mode.access([](EMU_D3DKMT_CURRENTDISPLAYMODE& m) {
+                    m.DisplayModeInfo.Width = k_default_width;
+                    m.DisplayModeInfo.Height = k_default_height;
+                    m.DisplayModeInfo.Format = 22;
+                    m.DisplayModeInfo.IntegerRefreshRate = 60;
+                    m.DisplayModeInfo.RefreshRate = {.Numerator = 60, .Denominator = 1};
+                    m.DisplayModeInfo.ScanLineOrdering = 1;
+                    m.DisplayModeInfo.DisplayOrientation = 1;
+                    m.DisplayModeInfo.DisplayFixedOutput = 0;
+                    m.DisplayModeInfo.Flags = 0;
+                });
+                return STATUS_SUCCESS;
+            }
+
             default: {
                 dxgk_warn(c, "NtGdiDdDDIQueryAdapterInfo: Unhandled query Type %d", static_cast<UINT32>(query.Type));
 
@@ -3587,6 +3643,46 @@ namespace sogen
 
                 dxgk_info(c, "NtGdiDdDDICreateDevice: Created Device Handle 0x%X on Adapter 0x%X", create_device.hDevice,
                           create_device.hAdapter);
+            });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDICreatePagingQueue(const syscall_context& c,
+                                                    const emulator_object<EMU_D3DKMT_CREATEPAGINGQUEUE> queue_desc)
+        {
+            constexpr uint32_t k_dxgk_paging_queue_handle = 0x8000;
+            constexpr uint32_t k_dxgk_paging_queue_sync_handle = 0x9000;
+
+            if (!queue_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            queue_desc.access([&](EMU_D3DKMT_CREATEPAGINGQUEUE& q) {
+                q.hPagingQueue = k_dxgk_paging_queue_handle;
+                q.hSyncObject = k_dxgk_paging_queue_sync_handle;
+                q.FenceValueCPUVirtualAddress = 0;
+                dxgk_info(c, "NtGdiDdDDICreatePagingQueue: Created PagingQueue 0x%X on Device 0x%X", q.hPagingQueue, q.hDevice);
+            });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDICreateSynchronizationObject(const syscall_context& c,
+                                                              const emulator_object<EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT> sync_desc)
+        {
+            constexpr uint32_t k_dxgk_sync_object_base = 0xA000;
+            static uint32_t sync_handle_counter = 0;
+
+            if (!sync_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            sync_desc.access([&](EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT& s) {
+                s.hSyncObject = k_dxgk_sync_object_base + (++sync_handle_counter);
+                dxgk_info(c, "NtGdiDdDDICreateSynchronizationObject: Type=%u hSyncObject=0x%X", s.InfoType, s.hSyncObject);
             });
 
             return STATUS_SUCCESS;
@@ -3969,6 +4065,48 @@ namespace sogen
             return status;
         }
 
+        NTSTATUS handle_NtGdiDdDDILock2(const syscall_context& c, const emulator_object<EMU_D3DKMT_LOCK2> lock_desc)
+        {
+            if (!lock_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            NTSTATUS status = STATUS_SUCCESS;
+
+            lock_desc.access([&](EMU_D3DKMT_LOCK2& lock) {
+                const auto* allocation = c.proc.dxgk.get_allocation(lock.hAllocation);
+                if (allocation == nullptr)
+                {
+                    dxgk_warn(c, "NtGdiDdDDILock2: Unknown allocation 0x%X", lock.hAllocation);
+                    status = STATUS_INVALID_HANDLE;
+                    return;
+                }
+
+                lock.pData = allocation->backing_memory;
+                dxgk_info(c, "NtGdiDdDDILock2: Handle 0x%X -> Address=0x%llX", lock.hAllocation, allocation->backing_memory);
+            });
+
+            return status;
+        }
+
+        NTSTATUS handle_NtGdiGetCurrentDpiInfo(const syscall_context& /*c*/, const uint64_t /*hDC*/,
+                                               const emulator_object<EMU_CURRENT_DPI_INFO> dpi_info)
+        {
+            if (!dpi_info)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            dpi_info.access([](EMU_CURRENT_DPI_INFO& info) {
+                info = {};
+                info.DpiX = 96;
+                info.DpiY = 96;
+            });
+
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtGdiDdDDIGetDisplayModeList(const syscall_context& c,
                                                      const emulator_object<EMU_D3DKMT_GETDISPLAYMODELIST> display_mode_list)
         {
@@ -4044,12 +4182,22 @@ namespace sogen
             }
 
             device_state.access([&](EMU_D3DKMT_GETDEVICESTATE& state) {
-                if (state.hDevice != k_dxgk_device_handle)
+                if (state.hDevice != k_dxgk_device_handle && state.hDevice != 0)
                 {
                     dxgk_warn(c, "NtGdiDdDDIGetDeviceState: Unknown device 0x%X", state.hDevice);
                 }
 
-                state.State = 0;
+                // StateType 3 = D3DKMT_DEVICESTATE_RESET: return 1 (no reset) for a healthy adapter.
+                // The kernel returns State=1 when no TDR reset has occurred; State=0 means "device was
+                // reset" which causes WARP to initiate a TDR recovery and tear down the device.
+                if (state.StateType == 3)
+                {
+                    state.ResetState = 1;
+                }
+                else
+                {
+                    state.State = 0;
+                }
             });
 
             return STATUS_SUCCESS;
@@ -4084,12 +4232,12 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDICacheHybridQueryValue()
+        NTSTATUS handle_NtGdiDdDDICacheHybridQueryValue(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDIUnlock()
+        NTSTATUS handle_NtGdiDdDDIUnlock(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -4123,7 +4271,6 @@ namespace sogen
             {
                 return STATUS_INVALID_PARAMETER;
             }
-
             open_adapter.access([](EMU_D3DKMT_OPENADAPTERFROMLUID& params) { //
                 params.hAdapter = k_dxgk_adapter_handle;
             });

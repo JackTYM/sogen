@@ -54,16 +54,49 @@ namespace sogen
             DWORD offPointers{};
             pointer pvVirtualAddress{};
         };
+        static_assert(offsetof(user_callback_capture_buffer, cCapturedPointers) == 0x08);
+        static_assert(offsetof(user_callback_capture_buffer, offPointers) == 0x18);
+        static_assert(offsetof(user_callback_capture_buffer, pvVirtualAddress) == 0x20);
+        static_assert(sizeof(user_callback_capture_buffer) == 0x28);
 
         struct fn_dword_message
         {
-            pointer pwnd{};
-            UINT msg{};
-            wparam wParam{};
-            lparam lParam{};
-            pointer xParam{};
-            pointer xpfnProc{};
+            pointer pwnd{};     // +0x00: RCX → dispatch fn 1st arg
+            UINT msg{};         // +0x08: RDX → dispatch fn 2nd arg
+            uint32_t _pad{};    // +0x0C
+            wparam wParam{};    // +0x10: R8 → dispatch fn 3rd arg
+            lparam lParam{};    // +0x18: R9 → dispatch fn 4th arg
+            pointer xParam{};   // +0x20: 5th arg (WndProc hint for creation path)
+            pointer xpfnProc{}; // +0x28: CFG call target (dispatch_client_message)
         };
+        static_assert(offsetof(fn_dword_message, pwnd) == 0x00);
+        static_assert(offsetof(fn_dword_message, msg) == 0x08);
+        static_assert(offsetof(fn_dword_message, wParam) == 0x10);
+        static_assert(offsetof(fn_dword_message, lParam) == 0x18);
+        static_assert(offsetof(fn_dword_message, xParam) == 0x20);
+        static_assert(offsetof(fn_dword_message, xpfnProc) == 0x28);
+        static_assert(sizeof(fn_dword_message) == 0x30);
+
+        struct fn_in_lp_create_struct_cs
+        {
+            pointer lpCreateParams{}; // +0x00: non-zero triggers SBCREATE dispatch path
+            pointer hInstance{};      // +0x08
+            pointer hMenu{};          // +0x10
+            pointer hwndParent{};     // +0x18
+            int cy{};                 // +0x20
+            int cx{};                 // +0x24
+            pointer xpfnHint{};       // +0x28: must be non-zero; use win.wnd_proc
+            pointer dispatchPtr{};    // +0x30: must = dispatch_client_message
+            pointer lpszName{};       // +0x38
+            pointer lpszClass{};      // +0x40
+            pointer xpfnProc{};       // +0x48: WndProc – dispatch_client_message reads [R9+0x48]
+        };
+        static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnHint) == 0x28);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, dispatchPtr) == 0x30);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, lpszName) == 0x38);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, lpszClass) == 0x40);
+        static_assert(offsetof(fn_in_lp_create_struct_cs, xpfnProc) == 0x48);
+        static_assert(sizeof(fn_in_lp_create_struct_cs) == 0x50);
 
         struct fn_in_lp_create_struct_message
         {
@@ -72,10 +105,18 @@ namespace sogen
             UINT msg{};
             wparam wParam{};
             lparam lParam{};
-            EMU_CREATESTRUCT cs{};
-            pointer xParam{};
-            pointer xpfnProc{};
+            fn_in_lp_create_struct_cs cs{};
+            uint64_t _xParam{};
+            pointer dispatchFn{};
         };
+        static_assert(offsetof(fn_in_lp_create_struct_message, captureBuffer) == 0x00);
+        static_assert(offsetof(fn_in_lp_create_struct_message, pwnd) == 0x28);
+        static_assert(offsetof(fn_in_lp_create_struct_message, msg) == 0x30);
+        static_assert(offsetof(fn_in_lp_create_struct_message, wParam) == 0x38);
+        static_assert(offsetof(fn_in_lp_create_struct_message, lParam) == 0x40);
+        static_assert(offsetof(fn_in_lp_create_struct_message, cs) == 0x48);
+        static_assert(offsetof(fn_in_lp_create_struct_message, dispatchFn) == 0xA0);
+        static_assert(sizeof(fn_in_lp_create_struct_message) == 0xA8);
 
         struct fn_in_lp_window_pos_message
         {
@@ -803,14 +844,32 @@ namespace sogen
                 args.pwnd = win.guest.value();
                 args.msg = message;
                 args.wParam = w_param;
-                args.lParam = l_param;
-                args.xParam = win.wnd_proc;
-                args.xpfnProc = c.proc.dispatch_client_message;
                 if (l_param != 0)
                 {
-                    c.emu.read_memory(l_param, &args.cs, sizeof(args.cs));
-                }
+                    EMU_CREATESTRUCT emu_cs{};
+                    c.emu.read_memory(l_param, &emu_cs, sizeof(emu_cs));
+                    args.cs.lpCreateParams = emu_cs.lpCreateParams;
+                    args.cs.hInstance = emu_cs.hInstance;
+                    args.cs.hMenu = emu_cs.hMenu;
+                    args.cs.hwndParent = emu_cs.hwndParent;
+                    args.cs.cy = emu_cs.cy;
+                    args.cs.cx = emu_cs.cx;
+                    args.cs.xpfnHint = win.wnd_proc;
+                    args.cs.dispatchPtr = c.proc.dispatch_client_message;
+                    args.cs.lpszName = emu_cs.lpszName;
+                    args.cs.lpszClass = emu_cs.lpszClass;
+                    args.cs.xpfnProc = c.proc.dispatch_client_message;
 
+                    // whcbfnINLPCREATESTRUCT reads lParam to find the CREATESTRUCT. The arg
+                    // buffer lands at align_down(RSP,16) - align_up(sizeof(args),16); cs sits
+                    // at offset 0x48 within that buffer.
+                    constexpr auto arg_size = user_callback_args_size<fn_in_lp_create_struct_message>();
+                    const uint64_t arg_buffer =
+                        align_down(c.emu.read_stack_pointer(), 16ULL) - align_up(static_cast<uint64_t>(arg_size), 16ULL);
+                    args.lParam = arg_buffer + offsetof(fn_in_lp_create_struct_message, cs);
+                }
+                args._xParam = win.wnd_proc;
+                args.dispatchFn = c.proc.dispatch_client_message;
                 dispatch_user_callback(c, id, k_fn_in_lp_create_struct_callback_id, std::forward<T>(state), args);
                 return;
             }
@@ -1221,7 +1280,12 @@ namespace sogen
                 }
             }
 
-            return read_large_string(window_name);
+            auto result = read_large_string(window_name);
+            if (c.proc.ansi_code_page == 1251)
+            {
+                result = remap_cp1251(result);
+            }
+            return result;
         }
 
         hmenu ensure_system_menu(const syscall_context& c, window& win)
@@ -1334,14 +1398,14 @@ namespace sogen
         gdi_bitmap_surface* get_dc_present_surface(const syscall_context& c, hdc dc, uint32_t& present_handle);
         void draw_system_button_glyph(const syscall_context& c, hdc dc, int x, int y, uint32_t index);
 
-        NTSTATUS handle_NtUserTraceLoggingSendMixedModeTelemetry()
+        NTSTATUS handle_NtUserTraceLoggingSendMixedModeTelemetry(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtUserRegisterWindowMessage()
+        NTSTATUS handle_NtUserRegisterWindowMessage(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         uint64_t handle_NtUserGetThreadState(const syscall_context& c, const ULONG routine)
@@ -1418,14 +1482,11 @@ namespace sogen
                 return destination_status;
             }
 
-            WIN32K_USERCONNECT32 connect_info{};
-            const auto connect_status = win32k_userconnect::build_wow64_userconnect(c.proc, connect_info);
-            if (connect_status != STATUS_SUCCESS)
-            {
-                return connect_status;
-            }
-
-            if (!win32k_userconnect::try_write_wow64_userconnect(c.emu, connect_destination, connect_info))
+            // 32-bit user32 copies this buffer verbatim to _gSharedInfo and reads awmControl at
+            // gSharedInfo+0x28 with 16-byte USER_WNDMSG entries (USER_SHAREDINFO layout). Writing
+            // WIN32K_USERCONNECT32 here would put awmControl at +0x40 with 8-byte entries, causing
+            // all window-class message bitmap gate checks to fail (including WM_PAINT for Button).
+            if (!win32k_userconnect::try_write_user_shared_info(c.emu, connect_destination, c.proc))
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -1439,7 +1500,7 @@ namespace sogen
 
             if (user_shared_info_ptr != 0)
             {
-                if (!win32k_userconnect::try_write_wow64_userconnect(c.emu, user_shared_info_ptr, connect_info))
+                if (!win32k_userconnect::try_write_user_shared_info(c.emu, user_shared_info_ptr, c.proc))
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -1959,7 +2020,7 @@ namespace sogen
 
         NTSTATUS handle_NtUserFindExistingCursorIcon()
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         BOOL handle_NtUserDestroyCursor(const syscall_context&, const hicon icon, const DWORD /*flags*/)
@@ -2300,14 +2361,14 @@ namespace sogen
             return static_cast<int>(copied_chars);
         }
 
-        NTSTATUS handle_NtUserSetWindowsHookEx()
+        NTSTATUS handle_NtUserSetWindowsHookEx(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtUserUnhookWindowsHookEx()
+        NTSTATUS handle_NtUserUnhookWindowsHookEx(const syscall_context& /*c*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, const DWORD ex_style, const emulator_object<LARGE_STRING> class_name,
@@ -2438,6 +2499,10 @@ namespace sogen
             else
             {
                 win.name = read_large_string(window_name);
+                if (c.proc.ansi_code_page == 1251)
+                {
+                    win.name = remap_cp1251(win.name);
+                }
             }
             win.wnd_proc = wnd_class->lpfnWndProc;
 
@@ -3294,7 +3359,7 @@ namespace sogen
                     // an interlaced mode.
                     dm = EMU_DEVMODEW{};
                     dm.dmSize = sizeof(EMU_DEVMODEW);
-                    dm.dmFields = 0x5C0000; // DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
+                    dm.dmFields = 0x7C0000; // DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_DISPLAYFLAGS
                     dm.dmPelsWidth = width;
                     dm.dmPelsHeight = height;
                     dm.dmBitsPerPel = 32;
@@ -3392,6 +3457,41 @@ namespace sogen
             return TRUE;
         }
 
+        // d3d9's EnumDisplayMonitors callback (fnEnum) calls GetMonitorInfoA with cbSize=72 (MONITORINFOEX)
+        // and strcmp-compares szDevice against the primary display name to find a monitor match.
+        BOOL handle_NtUserGetMonitorInfo(const syscall_context& c, const handle /*hmonitor*/, const emulator_pointer pmi)
+        {
+            if (!pmi)
+            {
+                return FALSE;
+            }
+
+            uint32_t cbSize{};
+            c.emu.read_memory(pmi, &cbSize, sizeof(cbSize));
+
+            if (cbSize != 40 && cbSize != 72)
+            {
+                return FALSE;
+            }
+
+            constexpr RECT rc = {0, 0, 1920, 1080};
+            constexpr uint32_t flags = 1;
+
+            c.emu.write_memory(pmi + 4, &rc, sizeof(rc));
+            c.emu.write_memory(pmi + 20, &rc, sizeof(rc));
+            c.emu.write_memory(pmi + 36, &flags, sizeof(flags));
+
+            if (cbSize >= 72)
+            {
+                char szDevice[32]{};
+                constexpr auto k_display_name = "\\\\.\\DISPLAY1";
+                std::copy_n(k_display_name, std::char_traits<char>::length(k_display_name), szDevice);
+                c.emu.write_memory(pmi + 40, szDevice, sizeof(szDevice));
+            }
+
+            return TRUE;
+        }
+
         emulator_pointer handle_NtUserMapDesktopObject(const syscall_context& c, handle handle)
         {
             if (handle.value.type == handle_types::desktop && !handle.value.is_pseudo)
@@ -3482,7 +3582,7 @@ namespace sogen
             return TRUE;
         }
 
-        NTSTATUS handle_NtUserSetForegroundWindow()
+        NTSTATUS handle_NtUserSetForegroundWindow(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3779,7 +3879,7 @@ namespace sogen
             return TRUE;
         }
 
-        NTSTATUS handle_NtUserGetCPD()
+        NTSTATUS handle_NtUserGetCPD(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -4160,6 +4260,7 @@ namespace sogen
 
                     fill_block(info.DisplayAdapter);
                     fill_block(info.RenderAdapter);
+                    info.MonitorLuid = info.adapterId;
                 });
 
                 return STATUS_SUCCESS;

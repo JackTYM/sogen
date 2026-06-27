@@ -20,16 +20,11 @@ namespace sogen
         NTSTATUS handle_NtSetTimerResolution(const syscall_context&, const ULONG /*desired_resolution*/, const BOOLEAN set_resolution,
                                              const emulator_object<ULONG> current_resolution)
         {
-            if (current_resolution)
-            {
-                current_resolution.write(0x0002625a);
-            }
-
-            if (set_resolution)
+            current_resolution.write_if_valid(0x0002625a);
+            if (!set_resolution)
             {
                 return STATUS_TIMER_RESOLUTION_NOT_SET;
             }
-
             return STATUS_SUCCESS;
         }
 
@@ -73,6 +68,11 @@ namespace sogen
         NTSTATUS handle_NtCreateTimer(const syscall_context& c, const emulator_object<handle> timer_handle, ACCESS_MASK desired_access,
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG timer_type)
         {
+            // Kernel validates: if ( a4 > 1 ) return 3221225714 (STATUS_INVALID_PARAMETER_4)
+            if (timer_type > 1)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
             return handle_NtCreateTimer2(c, timer_handle, 0, object_attributes, timer_type, desired_access);
         }
 
@@ -117,23 +117,43 @@ namespace sogen
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
 
-        NTSTATUS handle_NtSetTimer()
+        NTSTATUS handle_NtSetTimer(const syscall_context& /*c*/, handle /*timer_handle*/, uint64_t /*due_time*/, uint64_t /*apc_routine*/,
+                                   uint64_t /*apc_context*/, BOOLEAN /*resume_timer*/, LONG period,
+                                   const emulator_object<BOOLEAN> previous_state)
         {
+            // Kernel: period < 0 → STATUS_INVALID_PARAMETER_6 (0xC00000F4)
+            if (period < 0)
+            {
+                return STATUS_INVALID_PARAMETER_6;
+            }
+            previous_state.write_if_valid(FALSE);
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetTimer2()
+        NTSTATUS handle_NtSetTimer2(const syscall_context& /*c*/, handle /*timer_handle*/, uint64_t /*due_time*/, uint64_t /*period*/,
+                                    uint64_t parameters)
         {
+            // Kernel: if (!a2) → STATUS_INVALID_PARAMETER_2 (0xC00000F0 = 3221225712)
+            if (!parameters)
+            {
+                return STATUS_INVALID_PARAMETER_2;
+            }
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtSetTimerEx(const syscall_context& /*c*/, handle /*timer_handle*/, uint32_t /*timer_set_info_class*/,
                                      uint64_t /*timer_set_information*/, ULONG /*timer_set_information_length*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtCancelTimer()
+        NTSTATUS handle_NtCancelTimer(const syscall_context& /*c*/, handle /*timer_handle*/, const emulator_object<BOOLEAN> current_state)
+        {
+            current_state.write_if_valid(FALSE);
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCancelTimer2(const syscall_context& /*c*/, handle /*timer_handle*/, uint64_t /*parameters*/)
         {
             return STATUS_SUCCESS;
         }

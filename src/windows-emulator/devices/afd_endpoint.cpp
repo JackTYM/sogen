@@ -625,7 +625,9 @@ namespace sogen
 
                 auto data = win_emu.emu().read_memory(c.input_buffer, c.input_buffer_length);
 
-                constexpr auto address_offset = 24;
+                // AFD_CONNECT_INFO layout: BOOLEAN (padded to pointer-size) + Root + ConnectDataLength
+                // = 3 × sizeof(ULONG_PTR). For 64-bit = 24, for 32-bit = 12.
+                constexpr auto address_offset = 3 * sizeof(typename Traits::ULONG_PTR);
 
                 if (data.size() < address_offset)
                 {

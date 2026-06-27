@@ -118,6 +118,8 @@ namespace sogen
         registry_manager& operator=(const registry_manager&) = delete;
 
         std::optional<registry_key> get_key(const utils::path_key& key);
+        registry_key create_key(const utils::path_key& key);
+        void delete_key(const registry_key& key);
         std::optional<registry_value> get_value(const registry_key& key, std::string_view name);
         std::optional<registry_value> get_value(const registry_key& key, size_t index);
         void set_value(const registry_key& key, std::string name, uint32_t type, std::span<const std::byte> data);
@@ -168,6 +170,7 @@ namespace sogen
         hive_map hives_{};
         std::map<utils::path_key, utils::path_key> path_mapping_{};
         std::map<utils::path_key, overlay_bucket> overlay_values_{};
+        std::set<utils::path_key> overlay_keys_{};
 
         utils::path_key normalize_path(utils::path_key path) const;
         static utils::path_key get_full_key_path(const registry_key& key);

@@ -195,7 +195,8 @@ namespace sogen
             const emulator_object<FILE_IO_COMPLETION_INFORMATION<EmulatorTraits<Emu64>>> io_completion_information, const ULONG count,
             const emulator_object<ULONG> num_entries_removed, const emulator_object<LARGE_INTEGER> timeout, const BOOLEAN alertable)
         {
-            if (count == 0 || !io_completion_information)
+            // Kernel: (a3 - 1 > 0x7FFFFFE) catches count==0 and count>MaxWorkers.
+            if (count - 1 > 0x7FFFFFFu || !io_completion_information)
             {
                 return STATUS_INVALID_PARAMETER;
             }

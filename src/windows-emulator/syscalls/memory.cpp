@@ -337,6 +337,14 @@ namespace sogen
             const auto orig_start = base_address.read();
             const auto orig_length = bytes_to_protect.read();
 
+            // Kernel: zero size, wrap-around, or above user-space ceiling → STATUS_INVALID_PARAMETER
+            constexpr uint64_t user_space_ceiling = 0x7FFFFFFEFFFFULL;
+            if (orig_length == 0 || orig_start + orig_length - 1 < orig_start ||
+                orig_start + orig_length - 1 > user_space_ceiling)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
             const auto aligned_start = page_align_down(orig_start);
             const auto aligned_length = page_align_up(orig_start + orig_length) - aligned_start;
 
@@ -632,8 +640,8 @@ namespace sogen
         }
 
         NTSTATUS handle_NtReadVirtualMemory(const syscall_context& c, const handle process_handle, const emulator_pointer base_address,
-                                            const emulator_pointer buffer, const ULONG number_of_bytes_to_read,
-                                            const emulator_object<ULONG> number_of_bytes_read)
+                                            const emulator_pointer buffer, const uint64_t number_of_bytes_to_read,
+                                            const emulator_object<uint64_t> number_of_bytes_read)
         {
             number_of_bytes_read.try_write(0);
 
@@ -676,7 +684,7 @@ namespace sogen
                 bytes_read += chunk_size;
             }
 
-            number_of_bytes_read.try_write(static_cast<ULONG>(bytes_read));
+            number_of_bytes_read.try_write(static_cast<uint64_t>(bytes_read));
             if (bytes_read == number_of_bytes_to_read)
             {
                 return STATUS_SUCCESS;
@@ -686,8 +694,8 @@ namespace sogen
         }
 
         NTSTATUS handle_NtWriteVirtualMemory(const syscall_context& c, const handle process_handle, const emulator_pointer base_address,
-                                             const emulator_pointer buffer, const ULONG number_of_bytes_to_write,
-                                             const emulator_object<ULONG> number_of_bytes_write)
+                                             const emulator_pointer buffer, const uint64_t number_of_bytes_to_write,
+                                             const emulator_object<uint64_t> number_of_bytes_write)
         {
             number_of_bytes_write.try_write(0);
 
@@ -712,9 +720,11 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetInformationVirtualMemory()
+        NTSTATUS handle_NtSetInformationVirtualMemory(const syscall_context& /*c*/, handle /*process_handle*/, uint32_t /*vm_info_class*/,
+                                                      uint64_t /*number_of_entries*/, uint64_t /*virtual_addresses*/,
+                                                      uint64_t /*vm_information*/, ULONG /*vm_information_length*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         BOOL handle_NtLockVirtualMemory()
@@ -722,7 +732,9 @@ namespace sogen
             return TRUE;
         }
 
-        NTSTATUS handle_NtUnlockVirtualMemory()
+        NTSTATUS handle_NtUnlockVirtualMemory(const syscall_context& /*c*/, handle /*process_handle*/,
+                                              emulator_object<uint64_t> /*base_address*/, emulator_object<uint64_t> /*number_of_bytes*/,
+                                              ULONG /*lock_type*/)
         {
             return STATUS_SUCCESS;
         }

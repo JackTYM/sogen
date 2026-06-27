@@ -345,6 +345,8 @@ namespace sogen
         // WOW64 support flag - set during process setup based on executable architecture
         bool is_wow64_process{false};
 
+        uint16_t ansi_code_page{1252};
+
         callbacks* callbacks_{};
 
         std::vector<uint8_t> sid{};
@@ -426,10 +428,18 @@ namespace sogen
         handle default_monitor_handle{};
         handle default_desktop_window_handle{};
         handle_store<handle_types::event, event> events{};
+        handle_store<handle_types::keyed_event, keyed_event> keyed_events{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
         handle_store<handle_types::section, section> sections{};
         handle_store<handle_types::device, io_device_container> devices{};
+
+        struct named_pipe_shared_buffer
+        {
+            std::shared_ptr<std::deque<std::string>> ab = std::make_shared<std::deque<std::string>>();
+            std::shared_ptr<std::deque<std::string>> ba = std::make_shared<std::deque<std::string>>();
+        };
+        utils::insensitive_u16string_map<named_pipe_shared_buffer> named_pipe_registry{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
         handle_store<handle_types::io_completion, io_completion> io_completions{};
         handle_store<handle_types::wait_completion_packet, wait_completion_packet> wait_completion_packets{};

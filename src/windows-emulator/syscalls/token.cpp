@@ -488,9 +488,22 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAdjustPrivilegesToken()
+        NTSTATUS handle_NtAdjustPrivilegesToken(const syscall_context& /*c*/, const handle /*token_handle*/,
+                                                const BOOLEAN disable_all_privileges, const uint64_t new_state,
+                                                const ULONG /*buffer_length*/, const uint64_t /*previous_state*/,
+                                                const emulator_object<ULONG> return_length)
         {
-            return STATUS_NOT_SUPPORTED;
+            if (!disable_all_privileges && !new_state)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            if (return_length)
+            {
+                return_length.write(0);
+            }
+
+            return STATUS_SUCCESS;
         }
     }
 

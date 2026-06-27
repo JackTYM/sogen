@@ -12,6 +12,7 @@ namespace sogen
       public:
         static constexpr uint32_t MAX_HANDLES = 0xFFFF;
         static constexpr size_t CLIENT_MESSAGE_BITS_SIZE = 0xC8;
+        static constexpr size_t IME_MESSAGE_BITS_SIZE = 0x400;
         static constexpr size_t WND_MESSAGE_BITS_COUNT = FNID_ARRAY_SIZE + 2;
         static constexpr size_t DEF_WINDOW_MSGS_INDEX = FNID_ARRAY_SIZE;
         static constexpr size_t DEF_WINDOW_SPEC_MSGS_INDEX = FNID_ARRAY_SIZE + 1;
@@ -61,6 +62,14 @@ namespace sogen
                 memory_->write_memory(wnd_message_bits_cursor, WND_MESSAGE_BITS[i].bits.data(), byte_size);
                 wnd_message_bits_cursor += align_up(byte_size, alignof(uint32_t));
             }
+
+            if (is_wow64_process_)
+            {
+                wow64_wndmsg_bitmap_addr_ = this->allocate_memory(
+                    static_cast<size_t>(page_align_up(CLIENT_MESSAGE_BITS_SIZE)), memory_permission::read);
+                wow64_ime_msg_bitmap_addr_ = this->allocate_memory(
+                    static_cast<size_t>(page_align_up(IME_MESSAGE_BITS_SIZE)), memory_permission::read);
+            }
         }
 
         emulator_object<USER_SERVERINFO> get_server_info() const
@@ -86,6 +95,16 @@ namespace sogen
         emulator_object<USER_DISPINFO> get_display_info() const
         {
             return {*memory_, display_info_addr_};
+        }
+
+        uint64_t get_wow64_wndmsg_bitmap() const
+        {
+            return wow64_wndmsg_bitmap_addr_;
+        }
+
+        uint64_t get_wow64_ime_msg_bitmap() const
+        {
+            return wow64_ime_msg_bitmap_addr_;
         }
 
         USER_WNDMSG get_awm_control_message(const size_t index) const
@@ -150,6 +169,8 @@ namespace sogen
             buffer.write(handle_table_addr_);
             buffer.write(display_info_addr_);
             buffer.write(wnd_message_bits_addr_);
+            buffer.write(wow64_wndmsg_bitmap_addr_);
+            buffer.write(wow64_ime_msg_bitmap_addr_);
             buffer.write(wnd_message_bits_addrs_);
             buffer.write_vector(used_indices_);
             buffer.write(is_wow64_process_);
@@ -161,6 +182,8 @@ namespace sogen
             buffer.read(handle_table_addr_);
             buffer.read(display_info_addr_);
             buffer.read(wnd_message_bits_addr_);
+            buffer.read(wow64_wndmsg_bitmap_addr_);
+            buffer.read(wow64_ime_msg_bitmap_addr_);
             buffer.read(wnd_message_bits_addrs_);
             buffer.read_vector(used_indices_);
             buffer.read(is_wow64_process_);
@@ -300,6 +323,8 @@ namespace sogen
         uint64_t handle_table_addr_{};
         uint64_t display_info_addr_{};
         uint64_t wnd_message_bits_addr_{};
+        uint64_t wow64_wndmsg_bitmap_addr_{};
+        uint64_t wow64_ime_msg_bitmap_addr_{};
         std::array<uint64_t, WND_MESSAGE_BITS_COUNT> wnd_message_bits_addrs_{};
         std::vector<bool> used_indices_{};
         memory_manager* memory_{};

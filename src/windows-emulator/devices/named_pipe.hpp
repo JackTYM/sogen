@@ -20,15 +20,19 @@ namespace sogen
     {
       public:
         std::u16string name;
-        std::deque<std::string> write_queue;
         ACCESS_MASK access = 0;
-        ULONG pipe_type;
-        ULONG read_mode;
-        ULONG completion_mode;
-        ULONG max_instances;
-        ULONG inbound_quota;
-        ULONG outbound_quota;
-        LARGE_INTEGER default_timeout;
+        ULONG pipe_type{};
+        ULONG read_mode{};
+        ULONG completion_mode{};
+        ULONG max_instances{};
+        ULONG inbound_quota{};
+        ULONG outbound_quota{};
+        LARGE_INTEGER default_timeout{};
+
+        // Shared between server (A) and client (B) ends of the same pipe.
+        // server reads from ba, writes to ab; client reads from ab, writes to ba.
+        std::shared_ptr<std::deque<std::string>> read_queue{};
+        std::shared_ptr<std::deque<std::string>> write_queue{};
 
         void create(windows_emulator&, const io_device_creation_data&) override
         {
@@ -63,30 +67,33 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
+            auto* rq = read_queue.get();
             size_t available = 0;
-            for (const auto& chunk : this->write_queue)
+            if (rq)
             {
-                available += chunk.size();
+                for (const auto& chunk : *rq)
+                {
+                    available += chunk.size();
+                }
             }
 
-            // Peeking is non-destructive: copy as much queued data as the caller's buffer holds.
             const auto data_capacity = static_cast<size_t>(c.output_buffer_length - header_size);
             std::string data;
-            for (const auto& chunk : this->write_queue)
+            if (rq)
             {
-                if (data.size() >= data_capacity)
+                for (const auto& chunk : *rq)
                 {
-                    break;
+                    if (data.size() >= data_capacity)
+                        break;
+                    data.append(chunk, 0, std::min(data_capacity - data.size(), chunk.size()));
                 }
-
-                data.append(chunk, 0, std::min(data_capacity - data.size(), chunk.size()));
             }
 
             file_pipe_peek_buffer header{};
             header.named_pipe_state = FILE_PIPE_CONNECTED_STATE;
             header.read_data_available = static_cast<ULONG>(available);
             header.number_of_messages = 0;
-            header.message_length = this->write_queue.empty() ? 0 : static_cast<ULONG>(this->write_queue.front().size());
+            header.message_length = (rq && !rq->empty()) ? static_cast<ULONG>(rq->front().size()) : 0;
 
             auto& emu = win_emu.emu();
             emu.write_memory(c.output_buffer, &header, sizeof(header));

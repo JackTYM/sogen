@@ -663,7 +663,9 @@ namespace sogen
         EMU_DISPLAY_INFO_DEVICE_BLOCK DisplayAdapter;
         UINT8 padding_0338[0x340 - 0x338];
         EMU_DISPLAY_INFO_DEVICE_BLOCK RenderAdapter;
-        UINT8 padding_0664[2056 - 0x664];
+        UINT8 padding_0664[2044 - 0x664];
+        LUID MonitorLuid;   // offset 2044; d3d9 matches this against EnumAdapters2 results
+        UINT8 padding_07fc[2056 - 2052];
     };
 
     static_assert(sizeof(EMU_DISPLAY_INFO_DEVICE_BLOCK) == 0x324);
@@ -672,6 +674,7 @@ namespace sogen
     static_assert(offsetof(EMU_GET_DISPLAY_INFO, id) == 16);
     static_assert(offsetof(EMU_GET_DISPLAY_INFO, DisplayAdapter) == 0x14);
     static_assert(offsetof(EMU_GET_DISPLAY_INFO, RenderAdapter) == 0x340);
+    static_assert(offsetof(EMU_GET_DISPLAY_INFO, MonitorLuid) == 2044);
 
     struct EMU_GET_DISPLAY_INFO_EX
     {

@@ -137,6 +137,7 @@ namespace sogen
                 int texture_height{};
                 ui_surface_format texture_format{ui_surface_format::bgra8};
                 bool has_surface{};
+                SDL_FRect last_render_dst{0.0f, 0.0f, 0.0f, 0.0f};
             };
 #endif
             ~sdl_ui_backend() override
@@ -203,6 +204,16 @@ namespace sogen
                         this->set_window_active(this->resolve_guest(event.window.windowID), false);
                         break;
 
+                    case SDL_EVENT_WINDOW_RESIZED:
+                        if (const auto guest = this->resolve_guest(event.window.windowID); guest != 0)
+                        {
+                            if (auto* state = this->resolve_window(guest); state && state->renderer)
+                            {
+                                render_window(*state);
+                            }
+                        }
+                        break;
+
                     case SDL_EVENT_KEY_DOWN:
                         if (!event.key.repeat)
                         {
@@ -243,8 +254,8 @@ namespace sogen
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
                                 this->set_window_active(guest, true);
-                                this->post_event(guest, WM_LBUTTONDOWN, MK_LBUTTON,
-                                                 pack_point(static_cast<int>(event.button.x), static_cast<int>(event.button.y)));
+                                const auto [ex, ey] = this->unmap_mouse_coords(guest, event.button.x, event.button.y);
+                                this->post_event(guest, WM_LBUTTONDOWN, MK_LBUTTON, pack_point(ex, ey));
                             }
                         }
                         break;
@@ -254,8 +265,8 @@ namespace sogen
                         {
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
-                                this->post_event(guest, WM_LBUTTONUP, 0,
-                                                 pack_point(static_cast<int>(event.button.x), static_cast<int>(event.button.y)));
+                                const auto [ex, ey] = this->unmap_mouse_coords(guest, event.button.x, event.button.y);
+                                this->post_event(guest, WM_LBUTTONUP, 0, pack_point(ex, ey));
                             }
                         }
                         break;
@@ -265,8 +276,8 @@ namespace sogen
                         {
                             this->set_window_active(guest, true);
                             const uint64_t keys = (event.motion.state & SDL_BUTTON_LMASK) ? MK_LBUTTON : 0;
-                            this->post_event(guest, WM_MOUSEMOVE, keys,
-                                             pack_point(static_cast<int>(event.motion.x), static_cast<int>(event.motion.y)));
+                            const auto [ex, ey] = this->unmap_mouse_coords(guest, event.motion.x, event.motion.y);
+                            this->post_event(guest, WM_MOUSEMOVE, keys, pack_point(ex, ey));
                         }
                         break;
 
@@ -465,8 +476,18 @@ namespace sogen
                 const auto top = this->get_top_level_ancestor(window);
                 if (auto* state = this->resolve_window(top); state && state->window)
                 {
-                    SDL_WarpMouseInWindow(state->window, static_cast<float>(screen_x - state->desc.rect.left),
-                                          static_cast<float>(screen_y - state->desc.rect.top));
+                    const float local_x = static_cast<float>(screen_x - state->desc.rect.left);
+                    const float local_y = static_cast<float>(screen_y - state->desc.rect.top);
+                    float sdl_x = local_x;
+                    float sdl_y = local_y;
+                    if (state->last_render_dst.w > 0.0f && state->texture_width > 0)
+                    {
+                        const float scale_x = state->last_render_dst.w / static_cast<float>(state->texture_width);
+                        const float scale_y = state->last_render_dst.h / static_cast<float>(state->texture_height);
+                        sdl_x = local_x * scale_x + state->last_render_dst.x;
+                        sdl_y = local_y * scale_y + state->last_render_dst.y;
+                    }
+                    SDL_WarpMouseInWindow(state->window, sdl_x, sdl_y);
                 }
 #else
                 (void)window;
@@ -612,11 +633,20 @@ namespace sogen
                 {
                     SDL_SetRenderDrawColor(state.renderer, 0, 0, 0, 255);
                     SDL_RenderClear(state.renderer);
-                    SDL_RenderTexture(state.renderer, state.texture, nullptr, nullptr);
+
+                    int logical_w{};
+                    int logical_h{};
+                    SDL_GetWindowSize(state.window, &logical_w, &logical_h);
+
+                    const SDL_FRect dst{0.0f, 0.0f, static_cast<float>(logical_w), static_cast<float>(logical_h)};
+                    state.last_render_dst = dst;
+
+                    SDL_RenderTexture(state.renderer, state.texture, nullptr, &dst);
                     SDL_RenderPresent(state.renderer);
                     return;
                 }
 
+                state.last_render_dst = {0.0f, 0.0f, 0.0f, 0.0f};
                 SDL_SetRenderDrawColor(state.renderer, 224, 224, 224, 255);
                 SDL_RenderClear(state.renderer);
                 SDL_RenderPresent(state.renderer);
@@ -653,6 +683,21 @@ namespace sogen
             {
                 const auto it = this->guest_by_window_id_.find(window_id);
                 return it == this->guest_by_window_id_.end() ? 0 : it->second;
+            }
+
+            std::pair<int, int> unmap_mouse_coords(const hwnd guest, const float sdl_x, const float sdl_y) const
+            {
+                const auto* ws = this->resolve_window(guest);
+                if (!ws || ws->last_render_dst.w <= 0.0f || ws->last_render_dst.h <= 0.0f || ws->texture_width <= 0 ||
+                    ws->texture_height <= 0)
+                {
+                    return {static_cast<int>(sdl_x), static_cast<int>(sdl_y)};
+                }
+                const float scale_x = ws->last_render_dst.w / static_cast<float>(ws->texture_width);
+                const float scale_y = ws->last_render_dst.h / static_cast<float>(ws->texture_height);
+                const int emu_x = static_cast<int>((sdl_x - ws->last_render_dst.x) / scale_x);
+                const int emu_y = static_cast<int>((sdl_y - ws->last_render_dst.y) / scale_y);
+                return {emu_x, emu_y};
             }
 
             void set_window_active(const hwnd window, const bool active)
