@@ -807,6 +807,11 @@ namespace sogen::kvm
             {
                 return "Linux KVM";
             }
+
+            bool syscall_hook_requires_rip_compensation() const override
+            {
+                return true;
+            }
             void set_segment_base(x86_register base, pointer_type value) override
             {
                 auto sregs = this->get_sregs();

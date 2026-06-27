@@ -1163,6 +1163,18 @@ namespace sogen
         ctx.Rcx = this->start_address;
         ctx.Rdx = this->argument;
 
+        // The Windows kernel initializes R11 to pWow64PerThreadData (TEB64.TlsSlots[1])
+        // for WoW64 threads so ntdll's instrumentation-callback handler can find the
+        // per-thread 32-bit context via [R11+0x68]. Backends that fire their SYSCALL hook
+        // before the hardware instruction executes (Unicorn) preserve the value that
+        // wow64cpu.dll places in R11; backends that let hardware execute SYSCALL first (KVM)
+        // see R11=RFLAGS instead. Initialise R11 here so LdrInitializeThunk → NtContinue
+        // propagates the correct pointer into the thread's first 64-bit register context.
+        if (context.is_wow64_process && this->wow64_cpu_reserved.has_value())
+        {
+            ctx.R11 = this->wow64_cpu_reserved->value();
+        }
+
         const auto ctx_obj = allocate_object_on_stack<CONTEXT64>(emu);
         ctx_obj.write(ctx);
 
