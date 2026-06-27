@@ -292,6 +292,12 @@ namespace sogen
         std::u16string name{};
 
         std::optional<NTSTATUS> exit_status{};
+
+        // Circuit breaker: detect a thread wedged in an unhandled-exception loop.
+        // Incremented each time the same RIP faults consecutively; reset on any forward progress.
+        uint64_t consecutive_fault_rip{0};
+        uint32_t consecutive_fault_count{0};
+
         std::vector<handle> await_objects{};
         bool await_any{false};
         bool waiting_for_alert{false};

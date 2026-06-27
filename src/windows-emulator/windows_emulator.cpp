@@ -912,6 +912,40 @@ namespace sogen
                     const auto r11 = this->emu().reg(x86_register::r11);
                     const auto sp = this->emu().reg(x86_register::rsp);
                     const auto* rip_mod = this->mod_manager.find_by_address(rip);
+
+                    // Circuit breaker: if the same thread faults at the same RIP repeatedly
+                    // (exception dispatch re-executes the same bad instruction), terminate the
+                    // thread and yield rather than looping forever producing millions of lines.
+                    constexpr uint32_t max_consecutive_faults = 16;
+                    auto* active = this->process.active_thread;
+                    if (active)
+                    {
+                        if (active->consecutive_fault_rip == rip)
+                        {
+                            ++active->consecutive_fault_count;
+                        }
+                        else
+                        {
+                            active->consecutive_fault_rip = rip;
+                            active->consecutive_fault_count = 1;
+                        }
+
+                        if (active->consecutive_fault_count >= max_consecutive_faults)
+                        {
+                            this->log.print(color::red,
+                                            "Thread tid=%u wedged at RIP=0x%llx (%s+0x%llx) after %u consecutive faults — terminating thread\n",
+                                            active->id, static_cast<unsigned long long>(rip),
+                                            rip_mod ? rip_mod->name.c_str() : "?",
+                                            rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip,
+                                            active->consecutive_fault_count);
+                            this->log.print(color::dark_gray, "  RSP=0x%llx R11=0x%llx\n",
+                                            static_cast<unsigned long long>(sp), static_cast<unsigned long long>(r11));
+                            this->process.terminate_thread(*active, STATUS_UNSUCCESSFUL);
+                            this->yield_thread();
+                            return;
+                        }
+                    }
+
                     this->log.print(color::dark_gray, "GPF at RIP=0x%llx (%s+0x%llx) R11=0x%llx RSP=0x%llx\n",
                                     static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
                                     rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip,

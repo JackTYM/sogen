@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <utils/object.hpp>
+#include <segment_utils.hpp>
 
 #ifndef MSR_LSTAR
 #define MSR_LSTAR 0xC0000082
@@ -289,7 +290,7 @@ namespace sogen::kvm
             uint64_t sfmask{};
         };
 
-        kvm_segment make_segment(uint16_t selector, bool is_code, bool is_user);
+        kvm_segment make_segment(uint16_t selector, bool is_code, bool is_user, bool is_long_mode = true);
         register_mapping map_register(x86_register reg);
 
         class kvm_x86_64_emulator final : public x86_64_emulator
@@ -707,6 +708,18 @@ namespace sogen::kvm
                     if (xreg == x86_register::fs_base || xreg == x86_register::gs_base)
                     {
                         std::memcpy(&segment.base, value, (std::min)(size, sizeof(segment.base)));
+                    }
+                    else if (mapping.name == register_name::cs)
+                    {
+                        // Reconstruct full CS descriptor with correct L/D bits from the GDT.
+                        // A plain selector write would leave stale L/D bits (e.g., L=1 from a
+                        // prior 64-bit CS=0x33) causing the CPU to execute 32-bit code in 64-bit
+                        // mode after NtContinue restores CS=0x23.
+                        uint16_t selector = 0;
+                        std::memcpy(&selector, value, (std::min)(size, sizeof(selector)));
+                        const auto bitness = segment_utils::get_segment_bitness(*this, selector);
+                        const bool is_long = !bitness || *bitness == segment_utils::segment_bitness::bit64;
+                        segment = make_segment(selector, true, (selector & 3) == 3, is_long);
                     }
                     else
                     {
@@ -1637,8 +1650,12 @@ namespace sogen::kvm
                 regs.rflags = frame.rflags;
                 this->set_regs(regs);
 
+                const auto cs_selector = static_cast<uint16_t>(frame.cs);
+                const auto cs_bitness = segment_utils::get_segment_bitness(*this, cs_selector);
+                const bool cs_is_long = !cs_bitness || *cs_bitness == segment_utils::segment_bitness::bit64;
+
                 auto sregs = this->get_sregs();
-                sregs.cs = make_segment(static_cast<uint16_t>(frame.cs), true, (frame.cs & 3) == 3);
+                sregs.cs = make_segment(cs_selector, true, (frame.cs & 3) == 3, cs_is_long);
                 sregs.ss = make_segment(static_cast<uint16_t>(frame.ss), false, (frame.ss & 3) == 3);
                 this->set_sregs(sregs);
 
@@ -2027,7 +2044,8 @@ namespace sogen::kvm
             instruction_hook_entry* syscall_hook_ = nullptr;
         };
 
-        kvm_segment make_segment(const uint16_t selector, const bool is_code, const bool is_user)
+        kvm_segment make_segment(const uint16_t selector, const bool is_code, const bool is_user,
+                                 const bool is_long_mode)
         {
             kvm_segment segment{};
             segment.base = 0;
@@ -2036,9 +2054,9 @@ namespace sogen::kvm
             segment.type = is_code ? 0xB : 0x3;
             segment.present = 1;
             segment.dpl = is_user ? 3 : 0;
-            segment.db = is_code ? 0 : 1;
+            segment.db = is_code ? (is_long_mode ? 0 : 1) : 1;
             segment.s = 1;
-            segment.l = is_code ? 1 : 0;
+            segment.l = is_code && is_long_mode ? 1 : 0;
             segment.g = 1;
             segment.avl = 0;
             segment.unusable = 0;
