@@ -17,6 +17,8 @@ It's very slow, so only use it at the end:
 
 `cmake --build --preset=tidy`
 
+**Always run builds and analyzer invocations in the foreground** — never pass `run_in_background: true` to the Bash tool. Background runs leave lingering shells and the timeout mechanism doesn't work reliably for them. Use the Bash tool's built-in `timeout` parameter (milliseconds) instead of the shell `timeout` command, and always capture and read the output yourself rather than asking the user to run commands.
+
 ## Smoke tests
 
 Execute `analyzer.exe -s test-sample.exe` for smoke tests using the cmd in the directory of the built preset.

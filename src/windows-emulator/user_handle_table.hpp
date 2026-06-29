@@ -65,10 +65,10 @@ namespace sogen
 
             if (is_wow64_process_)
             {
-                wow64_wndmsg_bitmap_addr_ = this->allocate_memory(
-                    static_cast<size_t>(page_align_up(CLIENT_MESSAGE_BITS_SIZE)), memory_permission::read);
-                wow64_ime_msg_bitmap_addr_ = this->allocate_memory(
-                    static_cast<size_t>(page_align_up(IME_MESSAGE_BITS_SIZE)), memory_permission::read);
+                wow64_wndmsg_bitmap_addr_ =
+                    this->allocate_memory(static_cast<size_t>(page_align_up(CLIENT_MESSAGE_BITS_SIZE)), memory_permission::read);
+                wow64_ime_msg_bitmap_addr_ =
+                    this->allocate_memory(static_cast<size_t>(page_align_up(IME_MESSAGE_BITS_SIZE)), memory_permission::read);
             }
         }
 
@@ -237,7 +237,10 @@ namespace sogen
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},
-            {.max_msgs = 0x0000u, .bits = {}},
+            {.max_msgs = 0x0318u,
+             .bits = {0x00109406u, 0x00030000u, 0x00010000u, 0x00010000u, 0x00000086u, 0x0000000Au, 0x00000000u, 0x00000000u, 0x00080000u,
+                      0x00000100u, 0x00000000u, 0x000F0000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x0000000Au, 0x00000000u,
+                      0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x01000000u}},
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},

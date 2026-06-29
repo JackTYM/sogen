@@ -239,8 +239,8 @@ namespace sogen
     // avoids all of that.
     //
     // KiUserExceptionDispatcher32 entry (no return address on stack):
-    //   [ESP+0] = CONTEXT*          (32-bit pointer to the WOW64_CONTEXT below)
-    //   [ESP+4] = EXCEPTION_RECORD* (32-bit pointer to the 32-bit record below)
+    //   [ESP+0] = EXCEPTION_RECORD* (loaded into EBX → first arg to RtlDispatchException)
+    //   [ESP+4] = CONTEXT*          (loaded into ECX → second arg to RtlDispatchException)
     void dispatch_exception_32bit(windows_emulator& win_emu, const CONTEXT64& ctx, const exception_record& record)
     {
         auto& emu = win_emu.emu();
@@ -271,8 +271,8 @@ namespace sogen
         }
 
         // Frame layout on the 32-bit stack (below current ESP):
-        //   [new_esp+0]  : DWORD = ctx_ptr  (pointer to WOW64_CONTEXT)
-        //   [new_esp+4]  : DWORD = rec_ptr  (pointer to EXCEPTION_RECORD32)
+        //   [new_esp+0]  : DWORD = rec_ptr  (pointer to EXCEPTION_RECORD32)
+        //   [new_esp+4]  : DWORD = ctx_ptr  (pointer to WOW64_CONTEXT)
         //   [new_esp+8]  : WOW64_CONTEXT    (0x2CC bytes)
         //   [new_esp+8+sizeof(WOW64_CONTEXT)]: EXCEPTION_RECORD32
         constexpr auto ptr_pair_size = 2 * sizeof(DWORD);
@@ -282,8 +282,8 @@ namespace sogen
         const DWORD ctx_ptr = new_esp + static_cast<DWORD>(ptr_pair_size);
         const DWORD rec_ptr = ctx_ptr + static_cast<DWORD>(sizeof(wow64_ctx));
 
-        emu.write_memory(new_esp, &ctx_ptr, sizeof(ctx_ptr));
-        emu.write_memory(new_esp + 4, &rec_ptr, sizeof(rec_ptr));
+        emu.write_memory(new_esp, &rec_ptr, sizeof(rec_ptr));
+        emu.write_memory(new_esp + 4, &ctx_ptr, sizeof(ctx_ptr));
         emu.write_memory(ctx_ptr, &wow64_ctx, sizeof(wow64_ctx));
         emu.write_memory(rec_ptr, &record32, sizeof(record32));
 

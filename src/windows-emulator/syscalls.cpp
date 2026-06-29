@@ -607,6 +607,8 @@ namespace sogen
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
                                                       BOOL Ansi);
         uint32_t handle_NtUserSetWindowLong(const syscall_context& c, handle hWnd, int nIndex, uint32_t dwNewLong, BOOL Ansi);
+        emulator_pointer handle_NtUserGetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, BOOL Ansi);
+        uint32_t handle_NtUserGetWindowLong(const syscall_context& c, handle hWnd, int nIndex, BOOL Ansi);
         uint64_t handle_NtUserGetAncestor(const syscall_context& c, hwnd child_hwnd, UINT flags);
         BOOL handle_NtUserRedrawWindow(const syscall_context& c, hwnd hwnd, emulator_object<RECT> update_rect, uint64_t update_rgn,
                                        UINT flags);
@@ -621,12 +623,9 @@ namespace sogen
         BOOL handle_NtUserAllowSetForegroundWindow();
         ULONG handle_NtUserGetAtomName(const syscall_context& c, RTL_ATOM atom,
                                        emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> atom_name);
-        NTSTATUS handle_NtUserGetDisplayConfigBufferSizes(const syscall_context& c, UINT32 flags,
-                                                          emulator_object<UINT32> num_path_array_elements,
-                                                          emulator_object<UINT32> num_mode_info_array_elements);
-        NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, UINT32 flags, emulator_object<UINT32> num_path_array_elements,
-                                                 emulator_pointer path_array, emulator_object<UINT32> current_topology_id,
-                                                 emulator_pointer reserved);
+        NTSTATUS handle_NtUserGetDisplayConfigBufferSizes(const syscall_context& c, UINT32 flags, emulator_pointer counts_buffer);
+        NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, UINT32 flags, emulator_pointer num_path_array_elements,
+                                                 emulator_pointer path_buffer, emulator_pointer current_topology_id);
         NTSTATUS handle_NtUserDisplayConfigGetDeviceInfo(const syscall_context& c, emulator_pointer packet);
         uint64_t handle_NtUserInitThreadCoreMessagingIocp2(const syscall_context& c, handle window_handle,
                                                            emulator_object<uint32_t> completion_queue_index);
@@ -704,6 +703,7 @@ namespace sogen
         int handle_NtGdiGetDIBitsInternal(const syscall_context& c, hdc dc, handle bitmap, uint32_t start_scan, uint32_t scan_lines,
                                           emulator_pointer bits, emulator_pointer info, uint32_t usage, uint32_t max_bits,
                                           uint32_t max_info);
+        LONG handle_NtGdiGetBitmapBits(const syscall_context& c, handle bitmap, LONG cb_buffer, emulator_pointer bits);
         int handle_NtGdiStretchDIBitsInternal(const syscall_context& c, hdc dc, int x_dst, int y_dst, int dst_width, int dst_height,
                                               int x_src, int y_src, int src_width, int src_height, emulator_pointer bits,
                                               emulator_pointer info, uint32_t usage, uint32_t rop, uint32_t max_info, uint32_t max_bits,
@@ -743,6 +743,8 @@ namespace sogen
         COLORREF handle_NtGdiGetPixel(const syscall_context& c, hdc dc, int x, int y);
         BOOL handle_NtGdiBitBlt(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int width, int height, hdc src_dc, int x_src,
                                 int y_src, DWORD rop, DWORD cr_back_color, FLONG fl);
+        BOOL handle_NtGdiStretchBlt(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int w_dst, int h_dst, hdc src_dc, int x_src,
+                                    int y_src, int w_src, int h_src, DWORD rop, DWORD cr_back_color);
         BOOL handle_NtGdiPolyPatBlt(const syscall_context& c, hdc dc, DWORD rop, emulator_pointer poly, DWORD count, DWORD mode);
         BOOL handle_NtGdiExtTextOutW(const syscall_context& c, hdc dc, LONG x, LONG y, UINT options, emulator_pointer rect,
                                      emulator_pointer text, UINT count, emulator_pointer dx, DWORD code_page);
@@ -2842,11 +2844,43 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& /*c*/, handle /*port_handle*/, uint64_t /*message*/,
-                                                      uint32_t /*message_info_class*/, uint64_t /*message_info*/, ULONG /*length*/,
+        // rpcrt4's client-side system-handle unmarshal imports a handle delivered with an ALPC reply by
+        // calling NtAlpcQueryInformationMessage(AlpcMessageHandleInformation = 3, index). The output is an
+        // ALPC_MESSAGE_HANDLE_INFORMATION {ULONG Index; ULONG Reserved; ULONG Handle; ULONG ObjectType;
+        // ULONG GrantedAccess;} (0x14 bytes); rpcrt4 reads Handle@+8, ObjectType@+0xc, GrantedAccess@+0x10.
+        // We return the handle stashed by the matching NtAlpcSendWaitReceivePort reply.
+        NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& c, handle /*port_handle*/, uint64_t /*message*/,
+                                                      uint32_t message_info_class, uint64_t message_info, ULONG length,
                                                       emulator_object<ULONG> return_length)
         {
-            return_length.write_if_valid(0);
+            constexpr uint32_t alpc_message_handle_information = 3;
+            if (message_info_class != alpc_message_handle_information)
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            constexpr uint32_t info_size = 0x14;
+            if (!message_info || length < info_size)
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            // The caller passes the requested handle index in the first dword of the buffer.
+            const auto index = c.emu.read_memory<uint32_t>(message_info);
+            const auto& handles = c.proc.pending_alpc_message_handles;
+            if (index >= handles.size())
+            {
+                return STATUS_NO_MORE_ENTRIES;
+            }
+
+            const auto& h = handles[index];
+            emulator_object<uint32_t>{c.emu, message_info + 0x00}.write(index);
+            emulator_object<uint32_t>{c.emu, message_info + 0x04}.write(0);
+            emulator_object<uint32_t>{c.emu, message_info + 0x08}.write(static_cast<uint32_t>(h.handle));
+            emulator_object<uint32_t>{c.emu, message_info + 0x0c}.write(h.object_type);
+            emulator_object<uint32_t>{c.emu, message_info + 0x10}.write(h.desired_access);
+
+            return_length.write_if_valid(info_size);
             return STATUS_SUCCESS;
         }
 
@@ -3786,6 +3820,7 @@ namespace sogen
         add_handler(NtGdiCreateDIBitmapInternal);
         add_handler(NtGdiSetDIBitsToDeviceInternal);
         add_handler(NtGdiGetDIBitsInternal);
+        add_handler(NtGdiGetBitmapBits);
         add_handler(NtGdiStretchDIBitsInternal);
         add_handler(NtGdiDeleteObjectApp);
         add_handler(NtGdiSelectBitmap);
@@ -3811,6 +3846,7 @@ namespace sogen
         add_handler(NtGdiRectangle);
         add_handler(NtGdiPatBlt);
         add_handler(NtGdiBitBlt);
+        add_handler(NtGdiStretchBlt);
         add_handler(NtGdiPolyPatBlt);
         add_handler(NtGdiExtTextOutW);
         add_handler(NtGdiGetRealizationInfo);
@@ -4023,6 +4059,8 @@ namespace sogen
         add_handler(NtUserSetWindowLongPtr);
         add_handler(NtUserSetClassLongPtr);
         add_handler(NtUserSetWindowLong);
+        add_handler(NtUserGetWindowLongPtr);
+        add_handler(NtUserGetWindowLong);
         add_handler(NtUserGetAncestor);
         add_handler(NtUserPostMessage);
         add_handler(NtUserPostThreadMessage);

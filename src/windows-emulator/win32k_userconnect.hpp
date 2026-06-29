@@ -28,6 +28,10 @@ namespace sogen
         bool try_update_client_pfn_arrays_from_addresses(memory_interface& memory, process_context& process, uint64_t apfn_client_a,
                                                          uint64_t apfn_client_w, uint64_t apfn_client_worker);
         bool try_bootstrap_client_pfn_arrays_from_ntdll(windows_emulator& win_emu);
+        bool try_write_wow64_hybrid_userconnect(memory_interface& memory, uint64_t destination, const process_context& process);
+        bool try_write_64bit_user_shared_info(windows_emulator& win_emu);
+        bool try_populate_wow64win_client_tables(windows_emulator& win_emu);
+        void refresh_dispatch_client_message(process_context& process);
     }
 
 } // namespace sogen

@@ -205,6 +205,7 @@ namespace sogen
                         break;
 
                     case SDL_EVENT_WINDOW_RESIZED:
+                    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
                         if (const auto guest = this->resolve_guest(event.window.windowID); guest != 0)
                         {
                             if (auto* state = this->resolve_window(guest); state && state->renderer)
@@ -313,7 +314,7 @@ namespace sogen
                 {
                     flags &= ~SDL_WINDOW_HIDDEN;
                 }
-                if ((desc.style & WS_CHILD) == 0)
+                if ((desc.style & WS_THICKFRAME) != 0)
                 {
                     flags |= SDL_WINDOW_RESIZABLE;
                 }

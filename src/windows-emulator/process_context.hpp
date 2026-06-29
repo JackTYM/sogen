@@ -89,11 +89,22 @@ namespace sogen
         uint32_t height{};
         std::vector<uint32_t> pixels{};
 
+        // Set when backed by a DIB section (NtGdiCreateDIBSection). dib_bits is the guest
+        // virtual address of the raw pixel data; pixels[] is refreshed from it on each use.
+        uint64_t dib_bits{};
+        uint16_t dib_bit_count{};
+        bool dib_top_down{};
+        std::vector<uint32_t> dib_palette{}; // BGRA32 palette for ≤8-bpp DIBs
+
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->width);
             buffer.write(this->height);
             buffer.write_vector(this->pixels);
+            buffer.write(this->dib_bits);
+            buffer.write(this->dib_bit_count);
+            buffer.write(this->dib_top_down);
+            buffer.write_vector(this->dib_palette);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -101,6 +112,10 @@ namespace sogen
             buffer.read(this->width);
             buffer.read(this->height);
             buffer.read_vector(this->pixels);
+            buffer.read(this->dib_bits);
+            buffer.read(this->dib_bit_count);
+            buffer.read(this->dib_top_down);
+            buffer.read_vector(this->dib_palette);
         }
     };
 
@@ -471,6 +486,11 @@ namespace sogen
         uint32_t spawned_thread_count{0};
         handle_store<handle_types::thread, emulator_thread> threads{};
         emulator_thread* active_thread{nullptr};
+
+        // Handles delivered with the most recent ALPC reply message (NtAlpcSendWaitReceivePort). rpcrt4's
+        // system-handle import retrieves them via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation)
+        // rather than reading the handle attribute directly. Transient (valid only until the next reply).
+        std::vector<alpc_reply_handle> pending_alpc_message_handles{};
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx

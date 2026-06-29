@@ -25,8 +25,10 @@ if(NOT SOGEN_ENABLE_CLANG_TIDY)
   target_precompile_headers(windows-emulator PRIVATE std_include.hpp)
 endif()
 
+find_package(Freetype REQUIRED)
+
 target_link_libraries(windows-emulator PUBLIC emulator minidump)
-target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol vulkan-headers)
+target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol vulkan-headers Freetype::Freetype)
 
 if(TARGET SDL3::SDL3)
   target_link_libraries(windows-emulator PRIVATE SDL3::SDL3)

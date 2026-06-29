@@ -823,6 +823,15 @@ namespace sogen
             {
                 this->install_section_first_execution_hook(mod, i);
             }
+
+            if (mod.name == "wow64.dll")
+            {
+                this->mod_manager.wow64_modules_.wow64_dll = &mod;
+            }
+            else if (mod.name == "wow64win.dll")
+            {
+                this->mod_manager.wow64_modules_.wow64win_dll = &mod;
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
@@ -932,14 +941,14 @@ namespace sogen
 
                         if (active->consecutive_fault_count >= max_consecutive_faults)
                         {
-                            this->log.print(color::red,
-                                            "Thread tid=%u wedged at RIP=0x%llx (%s+0x%llx) after %u consecutive faults — terminating thread\n",
-                                            active->id, static_cast<unsigned long long>(rip),
-                                            rip_mod ? rip_mod->name.c_str() : "?",
-                                            rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip,
-                                            active->consecutive_fault_count);
-                            this->log.print(color::dark_gray, "  RSP=0x%llx R11=0x%llx\n",
-                                            static_cast<unsigned long long>(sp), static_cast<unsigned long long>(r11));
+                            this->log.print(
+                                color::red,
+                                "Thread tid=%u wedged at RIP=0x%llx (%s+0x%llx) after %u consecutive faults — terminating thread\n",
+                                active->id, static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                                rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip,
+                                active->consecutive_fault_count);
+                            this->log.print(color::dark_gray, "  RSP=0x%llx R11=0x%llx\n", static_cast<unsigned long long>(sp),
+                                            static_cast<unsigned long long>(r11));
                             this->process.terminate_thread(*active, STATUS_UNSUCCESSFUL);
                             this->yield_thread();
                             return;
@@ -950,22 +959,6 @@ namespace sogen
                                     static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
                                     rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip,
                                     static_cast<unsigned long long>(r11), static_cast<unsigned long long>(sp));
-                    uint64_t val_at_r11_68 = 0;
-                    this->emu().try_read_memory(r11 + 0x68, &val_at_r11_68, sizeof(val_at_r11_68));
-                    this->log.print(color::dark_gray, "  [R11+0x68]=0x%llx\n", static_cast<unsigned long long>(val_at_r11_68));
-                    for (int frame = 0; frame < 12; ++frame)
-                    {
-                        uint64_t ra = 0;
-                        if (!this->emu().try_read_memory(sp + static_cast<uint64_t>(frame) * 8, &ra, sizeof(ra)))
-                            break;
-                        const auto* ret_mod = this->mod_manager.find_by_address(ra);
-                        if (ret_mod)
-                        {
-                            this->log.print(color::dark_gray, "  [RSP+0x%02x]=0x%llx (%s+0x%llx)\n", frame * 8,
-                                            static_cast<unsigned long long>(ra), ret_mod->name.c_str(),
-                                            static_cast<unsigned long long>(ra - ret_mod->image_base));
-                        }
-                    }
                 }
                 dispatch_exception(*this, STATUS_ACCESS_VIOLATION, {0, this->emu().reg(x86_register::rip)});
                 return;
@@ -1338,6 +1331,37 @@ namespace sogen
         }
 
         thread->post_message(*this, m, true);
+
+        // The 32-bit ButtonWndProc tracks BST_PUSHED via direct memory access into tagWND at
+        // 32-bit offsets that don't match our 64-bit USER_WINDOW layout, so it never reads the
+        // pushed state back and therefore never calls ReleaseCapture or posts WM_COMMAND(BN_CLICKED).
+        // Synthesize both here when WM_LBUTTONUP arrives for a captured Button-class window.
+        if (m.message == WM_LBUTTONUP && this->process.mouse_capture_window == m.window)
+        {
+            const auto* btn_win = this->process.windows.get(m.window);
+            const auto& cn = btn_win ? btn_win->class_name : std::u16string{};
+            if (cn == u"Button" || cn == u"BUTTON" || cn == u"#1")
+            {
+                uint64_t button_id = 0;
+                btn_win->guest.access([&](const USER_WINDOW& gw) { button_id = gw.wID; });
+                const auto parent_hwnd = btn_win->parent_handle;
+
+                if (const auto* parent_win = this->process.windows.get(parent_hwnd))
+                {
+                    if (auto* parent_thread = get_thread_by_id(this->process, parent_win->thread_id))
+                    {
+                        msg cmd{};
+                        cmd.window = parent_hwnd;
+                        cmd.message = WM_COMMAND;
+                        cmd.wParam = button_id & 0xFFFF; // BN_CLICKED=0 in high word
+                        cmd.lParam = static_cast<uint32_t>(m.window);
+                        parent_thread->post_message(*this, cmd, true);
+                    }
+                }
+
+                this->process.mouse_capture_window = 0;
+            }
+        }
 
         if (event.message == WM_CLOSE || event.message == WM_COMMAND || event.message == WM_KEYDOWN || event.message == WM_LBUTTONDOWN ||
             event.message == WM_LBUTTONUP)

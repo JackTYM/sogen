@@ -96,15 +96,18 @@ namespace sogen
         uint32_t HeEntrySize;
         uint32_t pad_014;
         EMULATOR_CAST(uint64_t, USER_DISPINFO*) pDispInfo;
-        uint8_t pad_020[0x78];
+        uint64_t ulSharedDelta;
         USER_WNDMSG awmControl[FNID_ARRAY_SIZE];
+        uint8_t reserved_fnid_tail[0x70];
         USER_WNDMSG DefWindowMsgs;
         USER_WNDMSG DefWindowSpecMsgs;
     };
     static_assert(offsetof(USER_SHAREDINFO, pDispInfo) == 0x18);
-    static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x98);
+    static_assert(offsetof(USER_SHAREDINFO, ulSharedDelta) == 0x20);
+    static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x28);
     static_assert(offsetof(USER_SHAREDINFO, DefWindowMsgs) == 0x218);
     static_assert(offsetof(USER_SHAREDINFO, DefWindowSpecMsgs) == 0x228);
+    static_assert(sizeof(USER_SHAREDINFO) == 0x238);
 
     // user32 reads fields after copying 0x238 payload to _gSharedInfo
     struct WIN32K_USERCONNECT32

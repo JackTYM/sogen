@@ -2044,12 +2044,15 @@ namespace sogen::kvm
             instruction_hook_entry* syscall_hook_ = nullptr;
         };
 
-        kvm_segment make_segment(const uint16_t selector, const bool is_code, const bool is_user,
-                                 const bool is_long_mode)
+        kvm_segment make_segment(const uint16_t selector, const bool is_code, const bool is_user, const bool is_long_mode)
         {
             kvm_segment segment{};
             segment.base = 0;
-            segment.limit = 0xFFFFF;
+            // kvm_segment.limit is the byte-granular effective limit; KVM does not re-scale it by the
+            // granularity bit. Pair g=1 with the fully scaled 4 GiB value — a raw 0xFFFFF installs a
+            // 1 MiB limit, which long mode ignores but compatibility mode (CS.L=0) enforces, faulting
+            // the first fetch of any 32-bit code mapped above 1 MiB (e.g. WoW64 exception dispatch).
+            segment.limit = 0xFFFFFFFF;
             segment.selector = selector;
             segment.type = is_code ? 0xB : 0x3;
             segment.present = 1;

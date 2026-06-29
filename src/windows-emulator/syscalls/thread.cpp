@@ -703,6 +703,7 @@ namespace sogen
             }
 
             const auto context = thread_context.read();
+
             cpu_context::restore(c.emu, context);
 
             if (argument.ContinueFlags & KCONTINUE_FLAG_TEST_ALERT)

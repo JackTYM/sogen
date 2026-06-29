@@ -78,14 +78,7 @@ namespace sogen
                 return destination_status;
             }
 
-            WIN32K_USERCONNECT32 connect{};
-            const auto connect_status = win32k_userconnect::build_wow64_userconnect(win_emu.process, connect);
-            if (connect_status != STATUS_SUCCESS)
-            {
-                return connect_status;
-            }
-
-            if (!win32k_userconnect::try_write_wow64_userconnect(win_emu.memory, destination, connect))
+            if (!win32k_userconnect::try_write_user_shared_info(win_emu.memory, destination, win_emu.process))
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -137,6 +130,11 @@ namespace sogen
                     if (!win32k_userconnect::try_bootstrap_client_pfn_arrays_from_ntdll(win_emu))
                     {
                         win_emu.log.warn("ApiPort userconnect callback-table bootstrap failed\n");
+                    }
+
+                    if (!win32k_userconnect::try_write_64bit_user_shared_info(win_emu))
+                    {
+                        win_emu.log.warn("ApiPort WOW64 64-bit gSharedInfo write failed\n");
                     }
 
                     return {STATUS_SUCCESS, lpc_request_result::reply_in_place};

@@ -175,6 +175,7 @@ namespace sogen
 #define WS_DISABLED          0x08000000L
 #define WS_CLIPSIBLINGS      0x04000000L
 #define WS_CLIPCHILDREN      0x02000000L
+#define WS_THICKFRAME        0x00040000L
 
 #define SWP_NOSIZE           0x0001
 #define SWP_NOMOVE           0x0002
@@ -664,7 +665,7 @@ namespace sogen
         UINT8 padding_0338[0x340 - 0x338];
         EMU_DISPLAY_INFO_DEVICE_BLOCK RenderAdapter;
         UINT8 padding_0664[2044 - 0x664];
-        LUID MonitorLuid;   // offset 2044; d3d9 matches this against EnumAdapters2 results
+        LUID MonitorLuid; // offset 2044; d3d9 matches this against EnumAdapters2 results
         UINT8 padding_07fc[2056 - 2052];
     };
 

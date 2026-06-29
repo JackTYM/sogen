@@ -284,6 +284,10 @@ namespace sogen
             }
 
             (void)win32k_userconnect::try_bootstrap_client_pfn_arrays_from_ntdll(c.win_emu);
+            if (c.proc.is_wow64_process)
+            {
+                (void)win32k_userconnect::try_populate_wow64win_client_tables(c.win_emu);
+            }
 
             c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& server_info) {
                 if (normalized_name == u"Button")
@@ -844,6 +848,7 @@ namespace sogen
                 args.pwnd = win.guest.value();
                 args.msg = message;
                 args.wParam = w_param;
+                args.lParam = l_param;
                 if (l_param != 0)
                 {
                     EMU_CREATESTRUCT emu_cs{};
@@ -1070,8 +1075,8 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            user_shared_info_ptr = c.proc.base_allocator.reserve(sizeof(WIN32K_USERCONNECT32), alignof(WIN32K_USERCONNECT32));
-            std::array<std::byte, sizeof(WIN32K_USERCONNECT32)> zeros{};
+            user_shared_info_ptr = c.proc.base_allocator.reserve(sizeof(USER_SHAREDINFO), alignof(USER_SHAREDINFO));
+            std::array<std::byte, sizeof(USER_SHAREDINFO)> zeros{};
             c.emu.write_memory(user_shared_info_ptr, zeros.data(), zeros.size());
 
             uint32_t user_shared_info_ptr32{};
@@ -1525,10 +1530,74 @@ namespace sogen
                 c.proc.active_thread->win32k_thread_setup_done = true;
             }
 
+            // In WOW64, the 32-bit user32's pfn tables have 4-byte entries so we cannot copy
+            // them into USER_SERVERINFO.apfnClientW (which uses 8-byte entries for the 64-bit
+            // ntdll stub addresses used by whcbfnDWORD as kernel-side scan targets).
+            // Instead, drive the wow64win table setup directly from the 32-bit KCT address
+            // (apfn_client_w) supplied here — this mirrors what win32k.sys does in real Windows
+            // by calling NtWow64UserConnectHook after NtUserInitializeClientPfnArrays.
+            if (c.proc.is_wow64_process)
+            {
+                (void)win32k_userconnect::try_bootstrap_client_pfn_arrays_from_ntdll(c.win_emu);
+                (void)win32k_userconnect::try_populate_wow64win_client_tables(c.win_emu);
+                return STATUS_SUCCESS;
+            }
+
+            std::array<uint64_t, FNID_ARRAY_SIZE> old_pfn_a{};
+            std::array<uint64_t, FNID_ARRAY_SIZE> old_pfn_w{};
+            c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& si) {
+                std::ranges::copy(si.apfnClientA, old_pfn_a.begin());
+                std::ranges::copy(si.apfnClientW, old_pfn_w.begin());
+            });
+
             if (!win32k_userconnect::try_update_client_pfn_arrays_from_addresses(c.win_emu.memory, c.proc, apfn_client_a, apfn_client_w,
                                                                                  apfn_client_worker))
             {
                 return STATUS_UNSUCCESSFUL;
+            }
+
+            // Build a map of old pfn address -> new pfn address so that any window classes and
+            // windows that were registered before user32 initialised (when only ntdll bootstrap
+            // addresses were available) get updated to the real client-side addresses now.
+            std::unordered_map<uint64_t, uint64_t> remap;
+            c.proc.user_handles.get_server_info().access([&](const USER_SERVERINFO& si) {
+                for (size_t i = 0; i < FNID_ARRAY_SIZE; ++i)
+                {
+                    const auto old_a = old_pfn_a[i];
+                    const auto new_a = si.apfnClientA[i];
+                    if (old_a != 0 && new_a != 0 && old_a != new_a)
+                    {
+                        remap.emplace(old_a, new_a);
+                    }
+                    const auto old_w = old_pfn_w[i];
+                    const auto new_w = si.apfnClientW[i];
+                    if (old_w != 0 && new_w != 0 && old_w != new_w)
+                    {
+                        remap.emplace(old_w, new_w);
+                    }
+                }
+            });
+
+            if (remap.empty())
+            {
+                return STATUS_SUCCESS;
+            }
+
+            for (auto& [_, cls] : c.proc.classes)
+            {
+                if (const auto it = remap.find(cls.wnd_class.lpfnWndProc); it != remap.end())
+                {
+                    cls.wnd_class.lpfnWndProc = it->second;
+                }
+            }
+
+            for (auto& [_, win] : c.proc.windows)
+            {
+                if (const auto it = remap.find(win.wnd_proc); it != remap.end())
+                {
+                    win.wnd_proc = it->second;
+                    win.guest.access([&](USER_WINDOW& gw) { gw.lpfnWndProc = it->second; });
+                }
             }
 
             return STATUS_SUCCESS;
@@ -1865,7 +1934,6 @@ namespace sogen
             {
                 return 0;
             }
-
             const auto dc = handle_NtUserGetDCEx(c, window, 0, 0);
             if (!dc)
             {
@@ -2242,7 +2310,11 @@ namespace sogen
             const auto index = c.proc.add_or_find_atom(class_name_str);
 
             constexpr auto cls_size = static_cast<size_t>(page_align_up(sizeof(USER_CLASS)));
-            const auto cls_ptr = c.win_emu.memory.allocate_memory(cls_size, memory_permission::read);
+
+            const auto existing_it = c.proc.classes.find(class_name_str);
+            const auto cls_ptr = (existing_it != c.proc.classes.end())
+                                     ? existing_it->second.guest_obj_addr
+                                     : c.win_emu.memory.allocate_memory(cls_size, memory_permission::read);
 
             const auto wnd_class = wnd_class_ex.read();
             const auto entry = process_context::class_entry{cls_ptr, wnd_class, class_menu_name.read()};
@@ -2255,6 +2327,16 @@ namespace sogen
 
             c.proc.classes.insert_or_assign(class_name_str, entry);
             c.proc.classes.insert_or_assign(make_atom_class_name(index), entry);
+
+            const auto fnid = get_builtin_window_fnid(class_name_str);
+            if (fnid != 0 && wnd_class.lpfnWndProc != 0)
+            {
+                constexpr uint32_t fn_dword_threshold = 0x0318;
+                constexpr uint32_t fn_dword_dispatch_offset = 0x70;
+                const uint32_t wndproc32 = static_cast<uint32_t>(wnd_class.lpfnWndProc);
+                c.win_emu.memory.write_memory(cls_ptr + 0x0C, &fn_dword_threshold, sizeof(fn_dword_threshold));
+                c.win_emu.memory.write_memory(cls_ptr + fn_dword_dispatch_offset, &wndproc32, sizeof(wndproc32));
+            }
 
             return index;
         }
@@ -3073,6 +3155,7 @@ namespace sogen
             }
 
             const auto m = message.read();
+
             auto* win = m.window != 0 ? c.proc.windows.get(m.window) : nullptr;
             if (m.window != 0 && !win)
             {
@@ -3713,6 +3796,15 @@ namespace sogen
 
                     c.win_emu.memory.read_memory(targetAddress, &oldValue, sizeof(oldValue));
                     c.win_emu.memory.write_memory(targetAddress, &dwNewLong, sizeof(dwNewLong));
+
+                    if (dwNewLong != 0)
+                    {
+                        guest_win.bFlags |= 0x1;
+                    }
+                    else if (nIndex == 0)
+                    {
+                        guest_win.bFlags &= static_cast<uint8_t>(~0x1);
+                    }
                 }
                 else
                 {
@@ -3762,6 +3854,57 @@ namespace sogen
         {
             const auto oldValue = handle_NtUserSetWindowLongPtr(c, hWnd, nIndex, static_cast<emulator_pointer>(dwNewLong), Ansi);
             return static_cast<uint32_t>(oldValue);
+        }
+
+        emulator_pointer handle_NtUserGetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, BOOL /*Ansi*/)
+        {
+            const auto* win = c.proc.windows.get(hWnd);
+            if (!win)
+            {
+                return 0;
+            }
+
+            emulator_pointer value = 0;
+
+            win->guest.access([&](const USER_WINDOW& guest_win) {
+                if (nIndex >= 0)
+                {
+                    const auto offsetCorrection = guest_win.wndExtraOffset;
+                    const auto pBaseExtraBytes = guest_win.pExtraBytes;
+
+                    if (pBaseExtraBytes == 0)
+                    {
+                        return;
+                    }
+
+                    const auto targetAddress = pBaseExtraBytes + (nIndex - offsetCorrection);
+                    c.win_emu.memory.read_memory(targetAddress, &value, sizeof(value));
+                }
+                else
+                {
+                    switch (nIndex)
+                    {
+                    case GWLP_USERDATA:
+                        value = guest_win.userData;
+                        break;
+                    case GWLP_ID:
+                        value = guest_win.wID;
+                        break;
+                    case GWLP_WNDPROC:
+                        value = guest_win.lpfnWndProc;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            });
+
+            return value;
+        }
+
+        uint32_t handle_NtUserGetWindowLong(const syscall_context& c, handle hWnd, int nIndex, BOOL Ansi)
+        {
+            return static_cast<uint32_t>(handle_NtUserGetWindowLongPtr(c, hWnd, nIndex, Ansi));
         }
 
         uint64_t handle_NtUserGetAncestor(const syscall_context& c, const hwnd child_hwnd, const UINT flags)
@@ -4070,21 +4213,18 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUserGetDisplayConfigBufferSizes(const syscall_context& c, const UINT32 /*flags*/,
-                                                          const emulator_object<UINT32> num_path_array_elements,
-                                                          const emulator_object<UINT32> num_mode_info_array_elements)
+                                                          const emulator_pointer counts_buffer)
         {
-            if (!num_path_array_elements || !num_mode_info_array_elements)
+            if (!counts_buffer)
             {
                 return STATUS_INVALID_PARAMETER;
             }
 
-            // Use non-throwing writes: a failed guest write (e.g. a caller passing a bogus output pointer)
-            // must surface as an error to the caller, not abort the whole emulator with an unhandled
-            // host-side memory exception.
-            const UINT32 path_count = 1;
-            const UINT32 mode_count = 2;
-            if (!c.win_emu.memory.try_write_memory(num_path_array_elements.value(), &path_count, sizeof(path_count)) ||
-                !c.win_emu.memory.try_write_memory(num_mode_info_array_elements.value(), &mode_count, sizeof(mode_count)))
+            // wow64win marshals the two output counts (pNumPathArrayElements / pNumModeInfoArrayElements)
+            // into a single packed buffer: [0] = path count, [1] = mode count. A zero mode count makes
+            // callers (e.g. coloradapterclient) build an empty mode vector and dereference NULL.
+            const UINT32 counts[2] = {1, 2};
+            if (!c.win_emu.memory.try_write_memory(counts_buffer, counts, sizeof(counts)))
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -4093,57 +4233,22 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, const UINT32 /*flags*/,
-                                                 const emulator_object<UINT32> num_path_array_elements, const emulator_pointer path_array,
-                                                 const emulator_object<UINT32> current_topology_id, const emulator_pointer /*reserved*/)
+                                                 const emulator_pointer num_path_array_elements, const emulator_pointer /*path_buffer*/,
+                                                 const emulator_pointer current_topology_id)
         {
-            if (!num_path_array_elements)
+            // wow64win marshals the path/mode arrays into a private packed buffer; the mode table is sized
+            // by NtUserGetDisplayConfigBufferSizes. A single active internal display is enough for the
+            // color-management callers, which only need a non-empty mode table to avoid a NULL deref.
+            if (num_path_array_elements)
             {
-                return STATUS_INVALID_PARAMETER;
+                const UINT32 one = 1;
+                c.win_emu.memory.try_write_memory(num_path_array_elements, &one, sizeof(one));
             }
-
-            const auto num_paths = num_path_array_elements.read();
-
-            num_path_array_elements.write(1);
 
             if (current_topology_id)
             {
-                current_topology_id.write(0x1); // DISPLAYCONFIG_TOPOLOGY_INTERNAL
-            }
-
-            if (path_array && num_paths >= 1)
-            {
-                struct EMU_CCD_PATH_INFO
-                {
-                    UINT64 flags;
-                    UINT64 padding1;
-                    LUID adapterId;
-                    UINT32 sourceId;
-                    UINT32 targetId;
-                    EMU_DISPLAYCONFIG_VIDEO_SIGNAL_INFO targetSignalInfo;
-                    UINT32 outputTechnology;
-                    UINT8 padding2[40]; // NOLINT
-                    UINT32 sourceWidth;
-                    UINT32 sourceHeight;
-                    UINT8 padding3[84]; // NOLINT
-                } internal_path{};
-
-                internal_path.flags = 0x2000000000020003ULL;
-                internal_path.adapterId = {.LowPart = 0x1000, .HighPart = 0};
-                internal_path.sourceId = 0;
-                internal_path.targetId = 0;
-                internal_path.targetSignalInfo.pixelRate = 148500000;
-                internal_path.targetSignalInfo.hSyncFreq = {.Numerator = 67500, .Denominator = 1};
-                internal_path.targetSignalInfo.vSyncFreq = {.Numerator = 60, .Denominator = 1};
-                internal_path.targetSignalInfo.activeSize = {.cx = 1920, .cy = 1080};
-                internal_path.targetSignalInfo.totalSize = {.cx = 2200, .cy = 1125};
-                internal_path.targetSignalInfo.scanLineOrdering = 1; // PROGRESSIVE
-                internal_path.targetSignalInfo.u.videoStandard = 0;
-                internal_path.outputTechnology = 5; // HDMI
-                internal_path.padding2[17] = 1;
-                internal_path.sourceWidth = 1920;
-                internal_path.sourceHeight = 1080;
-
-                c.emu.write_memory(path_array, &internal_path, sizeof(internal_path));
+                const UINT32 topology = 0x1; // DISPLAYCONFIG_TOPOLOGY_INTERNAL
+                c.win_emu.memory.try_write_memory(current_topology_id, &topology, sizeof(topology));
             }
 
             return STATUS_SUCCESS;

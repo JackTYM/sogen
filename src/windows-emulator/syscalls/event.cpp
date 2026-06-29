@@ -336,6 +336,17 @@ namespace sogen
                 }
             }
 
+            // Kernel memory-pressure events always exist; emulate them as non-signaled
+            // (no memory pressure) so COM/clbcatq.dll initialization succeeds.
+            if (name.starts_with(u"\\KernelObjects\\"))
+            {
+                event e{};
+                e.type = NotificationEvent;
+                e.name = name;
+                event_handle.write(c.proc.events.store(std::move(e)).bits);
+                return STATUS_SUCCESS;
+            }
+
             return STATUS_NOT_FOUND;
         }
     }

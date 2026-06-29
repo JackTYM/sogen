@@ -535,6 +535,29 @@ namespace sogen
                     return false;
                 }
 
+                // Commit inter-section gaps as zero-filled read-only pages, matching
+                // Windows SEC_IMAGE semantics where the entire SizeOfImage range is committed.
+                // Without this, gap pages remain reserved-but-uncommitted and any read (e.g.
+                // ntdll32's KiUserExceptionDispatcher filter global) causes a fault.
+                {
+                    uint64_t committed_up_to = binary.image_base + headers_size;
+                    for (const auto& section : binary.sections)
+                    {
+                        if (section.region.start > committed_up_to)
+                        {
+                            memory.commit_image_memory(committed_up_to, static_cast<size_t>(section.region.start - committed_up_to),
+                                                       memory_permission::read);
+                        }
+                        committed_up_to = std::max(committed_up_to, section.region.start + section.region.length);
+                    }
+                    const uint64_t image_end = binary.image_base + image_size;
+                    if (image_end > committed_up_to)
+                    {
+                        memory.commit_image_memory(committed_up_to, static_cast<size_t>(image_end - committed_up_to),
+                                                   memory_permission::read);
+                    }
+                }
+
                 const auto image_base = static_cast<T>(binary.image_base);
                 const auto image_base_address = binary.image_base + nt_headers_offset + offsetof(PENTHeaders_t<T>, OptionalHeader) +
                                                 offsetof(PEOptionalHeader_t<T>, ImageBase);
