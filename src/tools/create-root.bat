@@ -32,11 +32,16 @@ REG SAVE HKLM\SYSTEM %EMU_REGDIR%\SYSTEM /Y
 COPY /B /Y C:\Users\Default\NTUSER.DAT "%EMU_REGDIR%\NTUSER.DAT"
 
 CALL :collect advapi32.dll
+CALL :collect audioeng.dll
+CALL :collect audiokse.dll
+CALL :collect audioses.dll
+CALL :collect avrt.dll
 CALL :collect bcrypt.dll
 CALL :collect bcryptprimitives.dll
 CALL :collect cabinet.dll
 CALL :collect cfgmgr32.dll
 CALL :collect ci.dll
+CALL :collect clbcatq.dll
 CALL :collect coloradapterclient.dll
 CALL :collect combase.dll
 CALL :collect comctl32.dll
@@ -53,6 +58,8 @@ CALL :collect d3dcompiler_43.dll
 CALL :collect d3dcompiler_47.dll
 CALL :collect dbghelp.dll
 CALL :collect dbgcore.dll
+CALL :collect dciman32.dll
+CALL :collect ddraw.dll
 CALL :collect devobj.dll
 CALL :collect diagnosticdatasettings.dll
 CALL :collect dinput8.dll
@@ -79,6 +86,7 @@ CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
+CALL :collect mmdevapi.dll
 CALL :collect mobilenetworking.dll
 CALL :collect mpr.dll
 CALL :collect msacm32.dll
