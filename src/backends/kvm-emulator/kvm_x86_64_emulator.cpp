@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include <utils/cpu_features.hpp>
 #include <utils/object.hpp>
 #include <segment_utils.hpp>
 
@@ -1219,10 +1220,18 @@ namespace sogen::kvm
                 sregs.fs = make_segment(0x53, false, true);
                 sregs.gs = make_segment(0x2B, false, true);
                 sregs.cr0 = 0x80000033ull; // PE | MP | ET | NE | PG
-                sregs.cr4 = 0x620ull;      // PAE | OSFXSR | OSXMMEXCPT
+                sregs.cr4 = 0x40620ull;    // PAE | OSFXSR | OSXMMEXCPT | OSXSAVE
                 sregs.cr3 = this->pml4_gpa_;
                 sregs.efer = (1ull << 0) | (1ull << 8) | (1ull << 10); // SCE | LME | LMA
                 this->set_sregs(sregs);
+
+                // Build-26100 ntdll restores thread context with XRSTOR, which #UDs unless XCR0 enables the
+                // saved state (and CR4.OSXSAVE is set, above). Mirror the WHP backend: x87 | SSE [| AVX].
+                kvm_xcrs xcrs{};
+                xcrs.nr_xcrs = 1;
+                xcrs.xcrs[0].xcr = 0;
+                xcrs.xcrs[0].value = 0x3ull | (utils::cpu_features::avx_enabled() ? 0x4ull : 0ull);
+                check_ioctl_result(::ioctl(this->vcpu_fd_.get(), KVM_SET_XCRS, &xcrs), "KVM_SET_XCRS");
 
                 auto regs = this->get_regs();
                 regs.rflags = 0x2ull;
