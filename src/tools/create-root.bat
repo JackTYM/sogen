@@ -132,6 +132,7 @@ CALL :collect slwga.dll
 CALL :collect sppc.dll
 CALL :collect srvcli.dll
 CALL :collect sspicli.dll
+CALL :collect twinapi.appcore.dll
 CALL :collect ucrtbase.dll
 CALL :collect ucrtbased.dll
 CALL :collect uiautomationcore.dll
