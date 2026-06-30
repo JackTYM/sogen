@@ -4233,16 +4233,69 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, const UINT32 /*flags*/,
-                                                 const emulator_pointer num_path_array_elements, const emulator_pointer /*path_buffer*/,
-                                                 const emulator_pointer current_topology_id)
+                                                 const emulator_pointer num_elements, const emulator_pointer path_array,
+                                                 const emulator_pointer mode_array, const emulator_pointer current_topology_id)
         {
-            // wow64win marshals the path/mode arrays into a private packed buffer; the mode table is sized
-            // by NtUserGetDisplayConfigBufferSizes. A single active internal display is enough for the
-            // color-management callers, which only need a non-empty mode table to avoid a NULL deref.
-            if (num_path_array_elements)
+            // NtUserQueryDisplayConfig is a 5-argument syscall (win32u stub returns $0x14). wow64win packs the
+            // two output counts (pNumPathArrayElements / pNumModeInfoArrayElements) into one buffer exactly like
+            // NtUserGetDisplayConfigBufferSizes: num_elements[0] = path count, num_elements[1] = mode count.
+            // We must populate the path and mode arrays self-consistently: the color-management path (mscms
+            // Modern Color / coloradapterclient) reads path[0].sourceInfo.sourceModeInfoIdx and indexes the mode
+            // array by it. Leaving the buffers uninitialized makes mscms read a garbage index and fault.
+            constexpr LUID adapter_id = {.LowPart = 0x1000, .HighPart = 0}; // Must match k_dxgk_adapter_luid!
+
+            if (path_array)
             {
-                const UINT32 one = 1;
-                c.win_emu.memory.try_write_memory(num_path_array_elements, &one, sizeof(one));
+                EMU_DISPLAYCONFIG_PATH_INFO path{};
+                path.sourceInfo.adapterId = adapter_id;
+                path.sourceInfo.id = 0;
+                path.sourceInfo.u.modeInfoIdx = 0;
+                path.sourceInfo.statusFlags = 0x1; // DISPLAYCONFIG_SOURCE_IN_USE
+                path.targetInfo.adapterId = adapter_id;
+                path.targetInfo.id = 0;
+                path.targetInfo.u.modeInfoIdx = 1;
+                path.targetInfo.outputTechnology = 5; // HDMI
+                path.targetInfo.rotation = 1;         // DISPLAYCONFIG_ROTATION_IDENTITY
+                path.targetInfo.scaling = 1;          // DISPLAYCONFIG_SCALING_IDENTITY
+                path.targetInfo.refreshRate = {.Numerator = 60, .Denominator = 1};
+                path.targetInfo.scanLineOrdering = 1; // DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE
+                path.targetInfo.targetAvailable = TRUE;
+                path.targetInfo.statusFlags = 0x1; // DISPLAYCONFIG_TARGET_IN_USE
+                path.flags = 0x1;                  // DISPLAYCONFIG_PATH_ACTIVE
+                c.win_emu.memory.try_write_memory(path_array, &path, sizeof(path));
+            }
+
+            if (mode_array)
+            {
+                EMU_DISPLAYCONFIG_MODE_INFO modes[2]{};
+
+                modes[0].infoType = 1; // DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+                modes[0].id = 0;
+                modes[0].adapterId = adapter_id;
+                modes[0].u.sourceMode.width = 1920;
+                modes[0].u.sourceMode.height = 1080;
+                modes[0].u.sourceMode.pixelFormat = 4; // DISPLAYCONFIG_PIXELFORMAT_32BPP
+                modes[0].u.sourceMode.position = {.x = 0, .y = 0};
+
+                modes[1].infoType = 2; // DISPLAYCONFIG_MODE_INFO_TYPE_TARGET
+                modes[1].id = 0;
+                modes[1].adapterId = adapter_id;
+                auto& vsi = modes[1].u.targetMode.targetVideoSignalInfo;
+                vsi.pixelRate = static_cast<UINT64>(1920) * 1080 * 60;
+                vsi.hSyncFreq = {.Numerator = 67500, .Denominator = 1};
+                vsi.vSyncFreq = {.Numerator = 60, .Denominator = 1};
+                vsi.activeSize = {.cx = 1920, .cy = 1080};
+                vsi.totalSize = {.cx = 1920, .cy = 1080};
+                vsi.u.videoStandard = 0;
+                vsi.scanLineOrdering = 1; // DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE
+
+                c.win_emu.memory.try_write_memory(mode_array, modes, sizeof(modes));
+            }
+
+            if (num_elements)
+            {
+                const UINT32 counts[2] = {1, 2};
+                c.win_emu.memory.try_write_memory(num_elements, counts, sizeof(counts));
             }
 
             if (current_topology_id)

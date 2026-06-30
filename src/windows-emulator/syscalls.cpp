@@ -624,8 +624,9 @@ namespace sogen
         ULONG handle_NtUserGetAtomName(const syscall_context& c, RTL_ATOM atom,
                                        emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> atom_name);
         NTSTATUS handle_NtUserGetDisplayConfigBufferSizes(const syscall_context& c, UINT32 flags, emulator_pointer counts_buffer);
-        NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, UINT32 flags, emulator_pointer num_path_array_elements,
-                                                 emulator_pointer path_buffer, emulator_pointer current_topology_id);
+        NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, UINT32 flags, emulator_pointer num_elements,
+                                                 emulator_pointer path_array, emulator_pointer mode_array,
+                                                 emulator_pointer current_topology_id);
         NTSTATUS handle_NtUserDisplayConfigGetDeviceInfo(const syscall_context& c, emulator_pointer packet);
         uint64_t handle_NtUserInitThreadCoreMessagingIocp2(const syscall_context& c, handle window_handle,
                                                            emulator_object<uint32_t> completion_queue_index);
