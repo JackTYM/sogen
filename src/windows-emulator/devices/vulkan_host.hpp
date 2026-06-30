@@ -578,6 +578,21 @@ namespace sogen
                                    uint32_t compare_op);
         int32_t cmd_set_dynamic_u32(uint64_t command_buffer, uint32_t state, uint32_t value);
 
+        // --- native render target (D3DKMT path; no swapchain / no surface) ---
+
+        // Creates a single DEVICE_LOCAL B8G8R8A8_UNORM image with COLOR_ATTACHMENT|TRANSFER_SRC usage,
+        // plus a host-visible readback buffer and the reusable command infrastructure needed to clear
+        // and read it back.  out_image receives a fresh object id.
+        int32_t create_render_target(uint64_t device, uint32_t width, uint32_t height, uint32_t format, uint64_t& out_image);
+
+        // Records a clear of the render-target image to `color` (RGBA, 0..1), submits, and waits
+        // synchronously.  The image is left in TRANSFER_SRC_OPTIMAL after the call.
+        int32_t submit_clear(uint64_t image, const float* color);
+
+        // Copies the render-target image into the readback buffer, waits, and copies the result into
+        // out_pixels (BGRA8, tightly packed).  out_width / out_height are set from the image dims.
+        int32_t readback_render_target(uint64_t image, std::vector<std::byte>& out_pixels, uint32_t& out_width, uint32_t& out_height);
+
       private:
         struct impl;
         std::unique_ptr<impl> impl_;

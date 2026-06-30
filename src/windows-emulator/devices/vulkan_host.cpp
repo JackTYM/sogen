@@ -201,6 +201,7 @@ namespace sogen
             PFN_vkDestroyFence destroy_fence{};
             PFN_vkResetFences reset_fences{};
             PFN_vkGetFenceStatus get_fence_status{};
+            PFN_vkWaitForFences wait_for_fences{};
             PFN_vkCreateEvent create_event{};
             PFN_vkDestroyEvent destroy_event{};
             PFN_vkGetEventStatus get_event_status{};
@@ -509,6 +510,24 @@ namespace sogen
         std::unordered_map<uint64_t, descriptor_pool_data> descriptor_pools;
         std::unordered_map<uint64_t, descriptor_set_data> descriptor_sets;
         uint64_t next_id{1};
+
+        // A standalone render target for the native D3DKMT present path (no swapchain / no surface).
+        struct render_target_data
+        {
+            uint64_t device_id{};
+            uint32_t width{};
+            uint32_t height{};
+            VkImage image{};
+            VkDeviceMemory image_memory{};
+            VkBuffer readback_buffer{};
+            VkDeviceMemory readback_memory{};
+            VkCommandPool pool{};
+            VkCommandBuffer cmd{};
+            VkFence fence{};
+            VkQueue queue{};
+            VkImageLayout current_layout{VK_IMAGE_LAYOUT_UNDEFINED};
+        };
+        std::unordered_map<uint64_t, render_target_data> render_targets;
 
         static bool drain_readback(swapchain_data& sc, device_data& dev, vulkan_host::presented_frame& frame)
         {
@@ -1617,6 +1636,7 @@ namespace sogen
             data.wait_semaphores = reinterpret_cast<PFN_vkWaitSemaphores>(resolve("vkWaitSemaphores"));
             data.get_buffer_device_address = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(resolve("vkGetBufferDeviceAddress"));
             data.get_fence_status = reinterpret_cast<PFN_vkGetFenceStatus>(resolve("vkGetFenceStatus"));
+            data.wait_for_fences = reinterpret_cast<PFN_vkWaitForFences>(resolve("vkWaitForFences"));
             data.queue_submit = reinterpret_cast<PFN_vkQueueSubmit>(resolve("vkQueueSubmit"));
             data.queue_submit2 = reinterpret_cast<PFN_vkQueueSubmit2>(resolve("vkQueueSubmit2"));
             data.allocate_memory = reinterpret_cast<PFN_vkAllocateMemory>(resolve("vkAllocateMemory"));
@@ -5546,6 +5566,324 @@ namespace sogen
         default:
             return VK_ERROR_INITIALIZATION_FAILED;
         }
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::create_render_target(const uint64_t device, const uint32_t width, const uint32_t height, const uint32_t /*format*/,
+                                              uint64_t& out_image)
+    {
+        out_image = 0;
+
+        const auto dev_it = this->impl_->devices.find(device);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.create_image || !dev.allocate_memory || !dev.bind_image_memory || !dev.create_buffer || !dev.bind_buffer_memory ||
+            !dev.create_command_pool || !dev.allocate_command_buffers || !dev.create_fence || !dev.get_device_queue)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        impl::render_target_data rt{};
+        rt.device_id = device;
+        rt.width = width;
+        rt.height = height;
+
+        const auto fail = [&]() -> int32_t {
+            if (rt.image && dev.destroy_image)
+            {
+                dev.destroy_image(dev.handle, rt.image, nullptr);
+            }
+            if (rt.image_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.image_memory, nullptr);
+            }
+            if (rt.readback_buffer && dev.destroy_buffer)
+            {
+                dev.destroy_buffer(dev.handle, rt.readback_buffer, nullptr);
+            }
+            if (rt.readback_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.readback_memory, nullptr);
+            }
+            if (rt.pool && dev.destroy_command_pool)
+            {
+                dev.destroy_command_pool(dev.handle, rt.pool, nullptr);
+            }
+            if (rt.fence && dev.destroy_fence)
+            {
+                dev.destroy_fence(dev.handle, rt.fence, nullptr);
+            }
+            return VK_ERROR_INITIALIZATION_FAILED;
+        };
+
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+        image_info.extent = {.width = width, .height = height, .depth = 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkMemoryRequirements image_reqs{};
+        dev.get_image_memory_requirements(dev.handle, rt.image, &image_reqs);
+        uint32_t image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (image_type == UINT32_MAX)
+        {
+            image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, 0);
+        }
+        VkMemoryAllocateInfo image_alloc{};
+        image_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        image_alloc.allocationSize = image_reqs.size;
+        image_alloc.memoryTypeIndex = image_type;
+        if (dev.allocate_memory(dev.handle, &image_alloc, nullptr, &rt.image_memory) != VK_SUCCESS)
+        {
+            return fail();
+        }
+        dev.bind_image_memory(dev.handle, rt.image, rt.image_memory, 0);
+
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * 4;
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = readback_size;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (dev.create_buffer(dev.handle, &buffer_info, nullptr, &rt.readback_buffer) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkMemoryRequirements buffer_reqs{};
+        dev.get_buffer_memory_requirements(dev.handle, rt.readback_buffer, &buffer_reqs);
+        uint32_t buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
+                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                                 VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        if (buffer_type == UINT32_MAX)
+        {
+            buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
+                                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
+        if (buffer_type == UINT32_MAX)
+        {
+            return fail();
+        }
+        VkMemoryAllocateInfo buffer_alloc{};
+        buffer_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        buffer_alloc.allocationSize = buffer_reqs.size;
+        buffer_alloc.memoryTypeIndex = buffer_type;
+        if (dev.allocate_memory(dev.handle, &buffer_alloc, nullptr, &rt.readback_memory) != VK_SUCCESS)
+        {
+            return fail();
+        }
+        dev.bind_buffer_memory(dev.handle, rt.readback_buffer, rt.readback_memory, 0);
+
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool_info.queueFamilyIndex = dev.queue_family_index;
+        if (dev.create_command_pool(dev.handle, &pool_info, nullptr, &rt.pool) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkCommandBufferAllocateInfo cb_info{};
+        cb_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cb_info.commandPool = rt.pool;
+        cb_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cb_info.commandBufferCount = 1;
+        if (dev.allocate_command_buffers(dev.handle, &cb_info, &rt.cmd) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (dev.create_fence(dev.handle, &fence_info, nullptr, &rt.fence) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        dev.get_device_queue(dev.handle, dev.queue_family_index, 0, &rt.queue);
+        if (!rt.queue)
+        {
+            return fail();
+        }
+
+        const uint64_t id = this->impl_->next_id++;
+        this->impl_->images.emplace(id, impl::image_data{.handle = rt.image, .device_id = device});
+        this->impl_->render_targets.emplace(id, std::move(rt));
+        out_image = id;
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::submit_clear(const uint64_t image, const float* color)
+    {
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::render_target_data& rt = rt_it->second;
+
+        const auto dev_it = this->impl_->devices.find(rt.device_id);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.begin_command_buffer || !dev.end_command_buffer || !dev.cmd_pipeline_barrier || !dev.cmd_clear_color_image ||
+            !dev.reset_fences || !dev.queue_submit || !dev.wait_for_fences)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (dev.begin_command_buffer(rt.cmd, &begin) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const VkImageSubresourceRange full_range{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
+
+        // Transition to TRANSFER_DST_OPTIMAL for the clear.
+        VkImageMemoryBarrier to_dst{};
+        to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_dst.srcAccessMask = 0;
+        to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_dst.oldLayout = rt.current_layout;
+        to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.image = rt.image;
+        to_dst.subresourceRange = full_range;
+        dev.cmd_pipeline_barrier(rt.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &to_dst);
+
+        VkClearColorValue clear_value{};
+        clear_value.float32[0] = color[0];
+        clear_value.float32[1] = color[1];
+        clear_value.float32[2] = color[2];
+        clear_value.float32[3] = color[3];
+        dev.cmd_clear_color_image(rt.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_value, 1, &full_range);
+
+        // Transition to TRANSFER_SRC_OPTIMAL ready for readback.
+        VkImageMemoryBarrier to_src{};
+        to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_src.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        to_src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.image = rt.image;
+        to_src.subresourceRange = full_range;
+        dev.cmd_pipeline_barrier(rt.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &to_src);
+
+        dev.end_command_buffer(rt.cmd);
+        dev.reset_fences(dev.handle, 1, &rt.fence);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &rt.cmd;
+        if (dev.queue_submit(rt.queue, 1, &submit, rt.fence) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        dev.wait_for_fences(dev.handle, 1, &rt.fence, VK_TRUE, UINT64_MAX);
+
+        rt.current_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::readback_render_target(const uint64_t image, std::vector<std::byte>& out_pixels, uint32_t& out_width,
+                                                uint32_t& out_height)
+    {
+        out_pixels.clear();
+        out_width = 0;
+        out_height = 0;
+
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::render_target_data& rt = rt_it->second;
+
+        if (rt.current_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev_it = this->impl_->devices.find(rt.device_id);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.begin_command_buffer || !dev.end_command_buffer || !dev.cmd_copy_image_to_buffer || !dev.reset_fences ||
+            !dev.queue_submit || !dev.wait_for_fences || !dev.map_memory || !dev.unmap_memory)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (dev.begin_command_buffer(rt.cmd, &begin) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {.x = 0, .y = 0, .z = 0};
+        region.imageExtent = {.width = rt.width, .height = rt.height, .depth = 1};
+        dev.cmd_copy_image_to_buffer(rt.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rt.readback_buffer, 1, &region);
+
+        dev.end_command_buffer(rt.cmd);
+        dev.reset_fences(dev.handle, 1, &rt.fence);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &rt.cmd;
+        if (dev.queue_submit(rt.queue, 1, &submit, rt.fence) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        dev.wait_for_fences(dev.handle, 1, &rt.fence, VK_TRUE, UINT64_MAX);
+
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(rt.width) * rt.height * 4;
+        void* mapped = nullptr;
+        if (dev.map_memory(dev.handle, rt.readback_memory, 0, readback_size, 0, &mapped) != VK_SUCCESS || !mapped)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        out_pixels.resize(static_cast<size_t>(readback_size));
+        std::memcpy(out_pixels.data(), mapped, out_pixels.size());
+        dev.unmap_memory(dev.handle, rt.readback_memory);
+
+        out_width = rt.width;
+        out_height = rt.height;
         return VK_SUCCESS;
     }
 }

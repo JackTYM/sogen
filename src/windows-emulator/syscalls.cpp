@@ -793,6 +793,8 @@ namespace sogen
         NTSTATUS handle_NtGdiDdDDIOpenAdapterFromLuid(const syscall_context& c,
                                                       emulator_object<EMU_D3DKMT_OPENADAPTERFROMLUID> open_adapter);
         NTSTATUS handle_NtGdiDdDDIOpenAdapterFromHdc(const syscall_context& c, emulator_object<EMU_D3DKMT_OPENADAPTERFROMHDC> open_adapter);
+        NTSTATUS handle_NtGdiDdDDISubmitCommand(const syscall_context& c, emulator_object<EMU_D3DKMT_SUBMITCOMMAND> submit_desc);
+        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, emulator_object<EMU_D3DKMT_PRESENT> present_desc);
 
         // syscalls/trace.cpp:
         NTSTATUS handle_NtTraceControl(const syscall_context& c, ULONG function_code, uint64_t input_buffer, ULONG input_buffer_length,
@@ -916,8 +918,22 @@ namespace sogen
             return device->execute_ioctl(c.win_emu, context);
         }
 
-        NTSTATUS handle_NtQueryWnfStateData(const syscall_context& /*c*/)
+        NTSTATUS handle_NtQueryWnfStateData(const syscall_context& c, uint64_t state_name, uint64_t /*type_id*/,
+                                            uint64_t /*explicit_scope*/, emulator_object<uint32_t> change_stamp, uint64_t /*buffer*/,
+                                            emulator_object<uint32_t> buffer_size)
         {
+            if (getenv("EMULATOR_LOG_RPC"))
+            {
+                c.win_emu.log.error("[wnf-dbg] NtQueryWnfStateData name=0x%llx\n", (unsigned long long)state_name);
+            }
+            if (change_stamp)
+            {
+                change_stamp.write(1);
+            }
+            if (buffer_size)
+            {
+                buffer_size.write(0);
+            }
             return STATUS_SUCCESS;
         }
 
@@ -3351,8 +3367,24 @@ namespace sogen
             return 0;
         }
 
-        NTSTATUS handle_NtSubscribeWnfStateChange(const syscall_context& /*c*/)
+        NTSTATUS handle_NtSubscribeWnfStateChange(const syscall_context& c, uint64_t state_name_ptr, uint64_t last_known_stamp,
+                                                  uint64_t state_data_type, uint64_t type_id, uint64_t scope,
+                                                  uint64_t subscription_handle_out, uint64_t callback, uint64_t callback_context)
         {
+            if (getenv("EMULATOR_LOG_RPC"))
+            {
+                uint64_t state_name_val = 0;
+                if (state_name_ptr)
+                {
+                    c.emu.read_memory(state_name_ptr, &state_name_val, sizeof(state_name_val));
+                }
+                c.win_emu.log.error("[wnf-dbg] NtSubscribeWnfStateChange ptr=0x%llx nameVal=0x%llx lastStamp=%llu "
+                                    "type=%llu typeId=%llu scope=%llu subHdl=0x%llx cb=0x%llx ctx=0x%llx\n",
+                                    (unsigned long long)state_name_ptr, (unsigned long long)state_name_val,
+                                    (unsigned long long)last_known_stamp, (unsigned long long)state_data_type, (unsigned long long)type_id,
+                                    (unsigned long long)scope, (unsigned long long)subscription_handle_out, (unsigned long long)callback,
+                                    (unsigned long long)callback_context);
+            }
             return STATUS_SUCCESS;
         }
 
@@ -4124,6 +4156,8 @@ namespace sogen
         add_handler(NtGdiOpenDCW);
         add_handler(NtGdiDdDDIOpenAdapterFromLuid);
         add_handler(NtGdiDdDDIOpenAdapterFromHdc);
+        add_handler(NtGdiDdDDISubmitCommand);
+        add_handler(NtGdiDdDDIPresent);
         add_handler(NtGdiSelectFont);
         add_handler(NtUserInitThreadCoreMessagingIocp2);
         add_handler(NtUserDrainThreadCoreMessagingCompletions2);

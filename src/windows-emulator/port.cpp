@@ -83,6 +83,14 @@ namespace sogen
             return create_service_control_port();
         }
 
+        if (port == u"\\RPC Control\\umpo")
+        {
+            // User Mode Power Object RPC port. The audio stack queries this to manage power policy
+            // for the audio endpoint (e.g. before activating a render stream). An empty success
+            // reply for all procedures is sufficient to let mmdevapi proceed to OpenStream.
+            return std::make_unique<noop_port>();
+        }
+
         return std::make_unique<dummy_port>(std::u16string(port));
     }
 
@@ -286,6 +294,19 @@ namespace sogen
 
         std::vector<alpc_reply_handle> reply_handles;
         const auto status = this->handle_rpc(win_emu, procedure_id, rpc_context, writer, reply_handles);
+
+        if (getenv("EMULATOR_LOG_RPC") && procedure_id == 0 && !payload.empty())
+        {
+            std::string hex;
+            hex.reserve(payload.size() * 3);
+            for (const auto b : payload)
+            {
+                char buf[4];
+                snprintf(buf, sizeof(buf), "%02x ", static_cast<unsigned char>(b));
+                hex += buf;
+            }
+            printf("[audiosrv-resp] opnum=0 reply (%zu bytes): %s\n", payload.size(), hex.c_str());
+        }
 
         lpc_request_result result{status, std::move(payload)};
         result.handles = std::move(reply_handles);

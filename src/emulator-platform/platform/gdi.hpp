@@ -446,6 +446,31 @@ namespace sogen
         LUID AdapterLuid;
         UINT32 hAdapter;
     };
+
+    // Minimal layout for NtGdiDdDDISubmitCommand (32-bit guest ABI).
+    // Fields at their real Windows offsets; unused tail fields are omitted.
+    struct EMU_D3DKMT_SUBMITCOMMAND
+    {
+        UINT64 Commands;              // +0x00 guest address of command data
+        UINT32 CommandLength;         // +0x08
+        UINT32 Flags;                 // +0x0C
+        UINT64 PresentHistoryToken;   // +0x10
+        UINT32 BroadcastContextCount; // +0x18
+        UINT32 pad0;                  // +0x1C alignment
+        UINT32 BroadcastContext[64];  // +0x20 .. +0x11F  (BroadcastContext[0] = hContext)
+        UINT32 pPrivateDriverData;    // +0x120 (32-bit ptr)
+        UINT32 PrivateDriverDataSize; // +0x124
+    };
+
+    // Minimal layout for NtGdiDdDDIPresent (32-bit guest ABI).
+    struct EMU_D3DKMT_PRESENT
+    {
+        UINT32 hDevice;       // +0x00 (hDevice / hContext union)
+        UINT32 hWindow;       // +0x04 (HWND in 32-bit)
+        UINT32 VidPnSourceId; // +0x08
+        UINT32 hSource;       // +0x0C render-target allocation to present
+        UINT32 hDestination;  // +0x10
+    };
 } // namespace sogen
 
 // NOLINTEND(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)

@@ -246,6 +246,33 @@ namespace sogen
                                machine / "SOFTWARE" / "RegisteredApplications");
 
         this->alias_remote_audio_endpoints(machine);
+
+        // Register MMDeviceEnumerator ({BCDE0395-E52F-467C-8E3D-C4579291692E}) as an in-process COM server
+        // backed by mmdevapi.dll. This CLSID is absent from the extracted hive; without it, dsound's
+        // CoCreateInstance call fails and it never gets an IMMDeviceEnumerator to activate an IAudioClient,
+        // causing it to retry its endpoint-activation loop until DSERR_PRIOLEVELNEEDED.
+        // The registration must exist in both the native and WOW6432Node subtrees so 32-bit WoW64
+        // dsound (which reads Wow6432Node) and any 64-bit callers both find it.
+        const auto register_mmdevice_enumerator = [&](const std::filesystem::path& classes_root) {
+            const std::string guid = "{BCDE0395-E52F-467C-8E3D-C4579291692E}";
+            const auto clsid_key = this->create_key(utils::path_key{classes_root / "CLSID" / guid});
+            const auto dll_name_bytes = []() {
+                const std::u16string dll_u16 = u"mmdevapi.dll";
+                const auto* ptr = reinterpret_cast<const std::byte*>(dll_u16.data());
+                return std::vector<std::byte>(ptr, ptr + (dll_u16.size() + 1) * sizeof(char16_t));
+            }();
+            const auto threading_bytes = []() {
+                const std::u16string tm = u"Both";
+                const auto* ptr = reinterpret_cast<const std::byte*>(tm.data());
+                return std::vector<std::byte>(ptr, ptr + (tm.size() + 1) * sizeof(char16_t));
+            }();
+            const auto inproc_key = this->create_key(utils::path_key{classes_root / "CLSID" / guid / "InprocServer32"});
+            this->set_value(inproc_key, "", 1 /* REG_SZ */, std::span<const std::byte>(dll_name_bytes));
+            this->set_value(inproc_key, "ThreadingModel", 1 /* REG_SZ */, std::span<const std::byte>(threading_bytes));
+            (void)clsid_key;
+        };
+        register_mmdevice_enumerator(machine / "SOFTWARE" / "Classes" / "Wow6432Node");
+        register_mmdevice_enumerator(machine / "SOFTWARE" / "Classes");
     }
 
     // On a headless/server host the local Render/Capture endpoint folders are empty, while an RDP session
@@ -330,6 +357,34 @@ namespace sogen
                     };
                     write_name("{a45c254e-df1c-4efd-8020-67d146a850e0},2", u"Sogen Audio");             // DeviceDesc
                     write_name("{a45c254e-df1c-4efd-8020-67d146a850e0},14", u"Speakers (Sogen Audio)"); // FriendlyName
+
+                    // Seed the endpoint Properties values that dsound polls during its render-engine activation
+                    // loop. Without these, dsound spins waiting for values the real audioses would write at
+                    // endpoint registration time, eventually timing out and returning DSERR_PRIOLEVELNEEDED.
+                    const auto write_dword = [&](const char* value_name, const uint32_t value) {
+                        const auto* bytes = reinterpret_cast<const std::byte*>(&value);
+                        this->set_value(*props_key, value_name, 4 /* REG_DWORD */,
+                                        std::span<const std::byte>(bytes, sizeof(value)));
+                    };
+                    // {9c119480-...},1: audio-engine activation counter. dsound reads this before and
+                    // after each GetMixFormat call; the real audioses increments it after processing.
+                    // Seed at 0 so the service-side increment in handle_get_mix_format produces a
+                    // visible change that lets dsound proceed without timing out.
+                    write_dword("{9c119480-ddc2-4954-a150-5bd240d454ad},1", 0);
+                    write_dword("{9c119480-ddc2-4954-a150-5bd240d454ad},6", 0);
+                    // {83da6326-...}: endpoint builder info (read once at device open).
+                    write_dword("{83da6326-97a6-4088-9453-a1923f573b29},6", 0);
+                    // {b3f8fa53-...}: audio endpoint speaker/channel properties.
+                    // pids 2 and 6 = KSAUDIO_SPEAKER_STEREO (FRONT_LEFT | FRONT_RIGHT).
+                    write_dword("{b3f8fa53-0004-438e-9003-51a46e139bfc},2", 3);
+                    write_dword("{b3f8fa53-0004-438e-9003-51a46e139bfc},6", 3);
+                    write_dword("{b3f8fa53-0004-438e-9003-51a46e139bfc},22", 0);
+                    write_dword("{b3f8fa53-0004-438e-9003-51a46e139bfc},26", 0);
+                    // {12d83bd7-...}: audio engine format negotiation properties (polled per retry).
+                    write_dword("{12d83bd7-cf12-46be-8540-812710d3021c},1", 0);
+                    write_dword("{12d83bd7-cf12-46be-8540-812710d3021c},4", 0);
+                    // {233164c8-...}: additional endpoint property (read once at device open).
+                    write_dword("{233164c8-1b2c-4c7d-bc68-b671687a2567},1", 0);
                 }
             }
 

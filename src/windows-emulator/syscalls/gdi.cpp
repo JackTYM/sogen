@@ -3,6 +3,8 @@
 #include "../font_renderer.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../devices/vulkan_host.hpp"
+#include <dxgk_command_protocol.hpp>
 
 #include <array>
 #include <bit>
@@ -3889,6 +3891,38 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
+            if (!c.proc.dxgk.vk_host)
+            {
+                c.proc.dxgk.vk_host = std::make_shared<vulkan_host>();
+                if (!c.proc.dxgk.vk_host->available())
+                {
+                    c.proc.dxgk.vk_host.reset();
+                    dxgk_warn(c, "NtGdiDdDDICreateDevice: host Vulkan not available");
+                }
+                else
+                {
+                    uint64_t instance = 0;
+                    c.proc.dxgk.vk_host->create_instance(instance);
+
+                    uint32_t phys_count = 0;
+                    std::array<uint64_t, 4> phys_ids{};
+                    c.proc.dxgk.vk_host->enumerate_physical_devices(instance, std::span{phys_ids}, phys_count);
+
+                    if (phys_count > 0)
+                    {
+                        uint64_t vk_device = 0;
+                        c.proc.dxgk.vk_host->create_device(phys_ids[0], nullptr, 0, nullptr, 0, 0, nullptr, 0, 0, vk_device);
+                        c.proc.dxgk.device_vk_ids[k_dxgk_device_handle] = vk_device;
+                        dxgk_info(c, "NtGdiDdDDICreateDevice: host Vulkan device id=0x%llX", vk_device);
+                    }
+                    else
+                    {
+                        c.proc.dxgk.vk_host.reset();
+                        dxgk_warn(c, "NtGdiDdDDICreateDevice: no host physical devices");
+                    }
+                }
+            }
+
             device_desc.access([&](EMU_D3DKMT_CREATEDEVICE& create_device) {
                 if (create_device.hAdapter != k_dxgk_adapter_handle)
                 {
@@ -4049,6 +4083,7 @@ namespace sogen
                 }
 
                 create_context.hContext = k_dxgk_context_handle;
+                c.proc.dxgk.context_device_handles[k_dxgk_context_handle] = create_context.hDevice;
 
                 const auto cmd_buffer_size = k_dxgk_command_buffer_size;
                 const auto cmd_buffer_ptr = c.win_emu.memory.allocate_memory(cmd_buffer_size, memory_permission::read_write);
@@ -4098,22 +4133,142 @@ namespace sogen
                         const emulator_object<EMU_D3DDDI_ALLOCATIONINFO> allocation_info{c.emu, current_info_ptr};
 
                         allocation_info.access([&](EMU_D3DDDI_ALLOCATIONINFO& alloc_info) {
-                            const uint64_t backing_size = infer_warp_allocation_size_from_private_data(c, alloc_info.pPrivateDriverData,
-                                                                                                       alloc_info.PrivateDriverDataSize);
+                            bool is_render_target = false;
+                            dxgk_cmd::render_target_desc rt_desc{};
+                            if (c.proc.dxgk.vk_host && alloc_info.pPrivateDriverData != 0 &&
+                                alloc_info.PrivateDriverDataSize >= sizeof(dxgk_cmd::render_target_desc))
+                            {
+                                c.emu.read_memory(alloc_info.pPrivateDriverData, &rt_desc, sizeof(rt_desc));
+                                is_render_target = (rt_desc.magic == dxgk_cmd::protocol_magic);
+                            }
+
+                            const uint64_t backing_size =
+                                is_render_target ? static_cast<uint64_t>(rt_desc.width) * rt_desc.height * 4
+                                                 : infer_warp_allocation_size_from_private_data(c, alloc_info.pPrivateDriverData,
+                                                                                                alloc_info.PrivateDriverDataSize);
 
                             alloc_info.hAllocation = c.proc.dxgk.create_allocation(c.win_emu.memory, create_alloc.hResource, backing_size);
 
-                            const auto* allocation = c.proc.dxgk.get_allocation(alloc_info.hAllocation);
-                            const auto actual_size = allocation ? allocation->backing_size : 0ull;
-                            const auto backing_memory = allocation ? allocation->backing_memory : 0ull;
-
-                            dxgk_info(c, "NtGdiDdDDICreateAllocation: Alloc %u/%u -> Handle 0x%X Size=0x%llX Address=0x%llX",
-                                      allocation_index + 1, create_alloc.NumAllocations, alloc_info.hAllocation, actual_size,
-                                      backing_memory);
+                            if (is_render_target)
+                            {
+                                const auto dev_it = c.proc.dxgk.device_vk_ids.find(create_alloc.hDevice);
+                                if (dev_it != c.proc.dxgk.device_vk_ids.end())
+                                {
+                                    uint64_t vk_image = 0;
+                                    const int32_t vk_res = c.proc.dxgk.vk_host->create_render_target(
+                                        dev_it->second, rt_desc.width, rt_desc.height, rt_desc.format, vk_image);
+                                    if (vk_res == 0 && vk_image != 0)
+                                    {
+                                        auto alloc_it = c.proc.dxgk.allocations.find(alloc_info.hAllocation);
+                                        if (alloc_it != c.proc.dxgk.allocations.end())
+                                        {
+                                            alloc_it->second.vk_image_id = vk_image;
+                                        }
+                                        dxgk_info(c, "NtGdiDdDDICreateAllocation: RT %ux%u -> Handle 0x%X vk_image=0x%llX", rt_desc.width,
+                                                  rt_desc.height, alloc_info.hAllocation, vk_image);
+                                    }
+                                    else
+                                    {
+                                        dxgk_warn(c, "NtGdiDdDDICreateAllocation: create_render_target failed (vk=%d)", vk_res);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                const auto* allocation = c.proc.dxgk.get_allocation(alloc_info.hAllocation);
+                                const auto actual_size = allocation ? allocation->backing_size : 0ull;
+                                const auto backing_memory = allocation ? allocation->backing_memory : 0ull;
+                                dxgk_info(c, "NtGdiDdDDICreateAllocation: Alloc %u/%u -> Handle 0x%X Size=0x%llX Address=0x%llX",
+                                          allocation_index + 1, create_alloc.NumAllocations, alloc_info.hAllocation, actual_size,
+                                          backing_memory);
+                            }
                         });
                     }
                 }
             });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDISubmitCommand(const syscall_context& c, const emulator_object<EMU_D3DKMT_SUBMITCOMMAND> submit_desc)
+        {
+            if (!submit_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto submit = submit_desc.read();
+
+            if (!c.proc.dxgk.vk_host || submit.pPrivateDriverData == 0 || submit.PrivateDriverDataSize < sizeof(dxgk_cmd::clear_command))
+            {
+                return STATUS_SUCCESS;
+            }
+
+            dxgk_cmd::clear_command cmd{};
+            c.emu.read_memory(submit.pPrivateDriverData, &cmd, sizeof(cmd));
+
+            if (cmd.magic != dxgk_cmd::protocol_magic || static_cast<dxgk_cmd::command_type>(cmd.type) != dxgk_cmd::command_type::clear)
+            {
+                dxgk_warn(c, "NtGdiDdDDISubmitCommand: unknown command magic=0x%X type=0x%X", cmd.magic, cmd.type);
+                return STATUS_SUCCESS;
+            }
+
+            const auto alloc_it = c.proc.dxgk.allocations.find(cmd.target_allocation);
+            if (alloc_it == c.proc.dxgk.allocations.end() || alloc_it->second.vk_image_id == 0)
+            {
+                dxgk_warn(c, "NtGdiDdDDISubmitCommand: allocation 0x%X has no GPU backing", cmd.target_allocation);
+                return STATUS_SUCCESS;
+            }
+
+            const int32_t vk_res = c.proc.dxgk.vk_host->submit_clear(alloc_it->second.vk_image_id, cmd.color.data());
+            dxgk_info(c, "NtGdiDdDDISubmitCommand: clear alloc=0x%X vk_image=0x%llX rgba=(%.2f,%.2f,%.2f,%.2f) vk=%d",
+                      cmd.target_allocation, alloc_it->second.vk_image_id, cmd.color[0], cmd.color[1], cmd.color[2], cmd.color[3], vk_res);
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, const emulator_object<EMU_D3DKMT_PRESENT> present_desc)
+        {
+            if (!present_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto present = present_desc.read();
+
+            if (!c.proc.dxgk.vk_host || present.hSource == 0)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            const auto alloc_it = c.proc.dxgk.allocations.find(present.hSource);
+            if (alloc_it == c.proc.dxgk.allocations.end() || alloc_it->second.vk_image_id == 0)
+            {
+                dxgk_warn(c, "NtGdiDdDDIPresent: hSource 0x%X has no GPU backing", present.hSource);
+                return STATUS_SUCCESS;
+            }
+
+            std::vector<std::byte> pixels;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            const int32_t vk_res = c.proc.dxgk.vk_host->readback_render_target(alloc_it->second.vk_image_id, pixels, width, height);
+            if (vk_res != 0 || pixels.empty() || width == 0 || height == 0)
+            {
+                dxgk_warn(c, "NtGdiDdDDIPresent: readback failed (vk=%d)", vk_res);
+                return STATUS_SUCCESS;
+            }
+
+            dxgk_info(c, "NtGdiDdDDIPresent: hwnd=0x%X src=0x%X %ux%u pixels=%zu", present.hWindow, present.hSource, width, height,
+                      pixels.size());
+
+            if (present.hWindow != 0)
+            {
+                c.win_emu.ui().present_surface(present.hWindow, ui_surface_desc{.width = static_cast<int>(width),
+                                                                                .height = static_cast<int>(height),
+                                                                                .stride = static_cast<int>(width * 4),
+                                                                                .format = ui_surface_format::bgra8,
+                                                                                .pixels = pixels.data()});
+            }
 
             return STATUS_SUCCESS;
         }

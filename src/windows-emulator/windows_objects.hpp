@@ -4,6 +4,7 @@
 #include "memory_manager.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <string_view>
 #include <serialization_helper.hpp>
 #include <utils/file_handle.hpp>
@@ -16,15 +17,18 @@ namespace sogen
     struct timer : ref_counted_object
     {
         std::u16string name{};
+        std::optional<std::chrono::steady_clock::time_point> signal_time{};
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
+            buffer.write_optional(this->signal_time);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->name);
+            buffer.read_optional(this->signal_time);
         }
     };
 

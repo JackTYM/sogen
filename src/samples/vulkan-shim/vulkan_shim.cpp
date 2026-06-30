@@ -359,6 +359,16 @@ extern "C"
                                                                         const VkDeviceCreateInfo* pCreateInfo, const VkAllocationCallbacks*,
                                                                         VkDevice* pDevice)
     {
+        {
+            HANDLE f = CreateFileA("c:\\mw2\\vk_create_device.txt", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+            if (f != INVALID_HANDLE_VALUE)
+            {
+                DWORD written = 0;
+                WriteFile(f, "vkCreateDevice called\n", 22, &written, nullptr);
+                CloseHandle(f);
+            }
+        }
+
         gb::create_device_request request{};
         request.physical_device = to_object_id(physicalDevice);
 

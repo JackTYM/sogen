@@ -1073,6 +1073,64 @@ namespace sogen
                                             static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
                                             rip_mod ? rip_mod->name.c_str() : "?",
                                             rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
+
+                            // BEGIN AV-STACKWALK DEBUG (removable)
+                            const auto esp = this->emu().reg<uint32_t>(x86_register::esp);
+                            {
+                                const auto eax = this->emu().reg<uint32_t>(x86_register::eax);
+                                const auto ebx = this->emu().reg<uint32_t>(x86_register::ebx);
+                                const auto ecx = this->emu().reg<uint32_t>(x86_register::ecx);
+                                const auto edx = this->emu().reg<uint32_t>(x86_register::edx);
+                                const auto esi = this->emu().reg<uint32_t>(x86_register::esi);
+                                const auto edi = this->emu().reg<uint32_t>(x86_register::edi);
+                                const auto ebp = this->emu().reg<uint32_t>(x86_register::ebp);
+                                this->log.print(color::dark_gray,
+                                                "AV-REGS eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x\n", eax,
+                                                ebx, ecx, edx, esi, edi, ebp);
+                                const auto dump_at = [&](const char* tag, uint32_t base) {
+                                    uint8_t buf[64] = {};
+                                    if (this->emu().try_read_memory(base, buf, sizeof(buf)))
+                                    {
+                                        std::string hex;
+                                        char t[4];
+                                        for (auto b : buf)
+                                        {
+                                            (void)snprintf(t, sizeof(t), "%02x ", b);
+                                            hex += t;
+                                        }
+                                        this->log.print(color::dark_gray, "AV-MEM %s @%08x: %s\n", tag, base, hex.c_str());
+                                    }
+                                    else
+                                    {
+                                        this->log.print(color::dark_gray, "AV-MEM %s @%08x: <unreadable>\n", tag, base);
+                                    }
+                                };
+                                // The faulting Miles call is `mov 0x1900(esi),eax; mov (eax),ecx; mov 0x8(ecx),edx; call edx`.
+                                // esi=object base; ecx=vtable; eax=object. Dump them to see if pointer/vtable are sane.
+                                dump_at("esi+18f0", esi + 0x18f0);
+                                dump_at("esi+1900", esi + 0x1900);
+                                dump_at("esi+1960", esi + 0x1960);
+                                dump_at("obj(eax)", eax);
+                                dump_at("vtbl(ecx)", ecx);
+                            }
+                            this->log.print(color::dark_gray, "AV-STACKWALK esp=0x%llx\n",
+                                            static_cast<unsigned long long>(esp));
+                            for (uint32_t i = 0; i < 64; ++i)
+                            {
+                                uint32_t ra = 0;
+                                if (!this->emu().try_read_memory(esp + i * 4u, &ra, sizeof(ra)))
+                                {
+                                    break;
+                                }
+                                const auto* m = this->mod_manager.find_by_address(ra);
+                                if (m && ra >= m->image_base)
+                                {
+                                    this->log.print(color::dark_gray, "AV-FRAME [%u] 0x%llx (%s+0x%llx)\n", i,
+                                                    static_cast<unsigned long long>(ra), m->name.c_str(),
+                                                    static_cast<unsigned long long>(ra - m->image_base));
+                                }
+                            }
+                            // END AV-STACKWALK DEBUG
                         }
                     }
 

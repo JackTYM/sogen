@@ -69,7 +69,8 @@ namespace sogen
             }
         }
 
-        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id)
+        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id,
+                                          const std::chrono::steady_clock::time_point now = {})
         {
             const auto type = h.value.type;
 
@@ -123,7 +124,16 @@ namespace sogen
             }
 
             case handle_types::timer: {
-                return wait_state::signaled; // TODO
+                const auto* t = c.timers.get(h);
+                if (!t || !t->signal_time.has_value())
+                {
+                    return wait_state::signaled;
+                }
+                if (now != std::chrono::steady_clock::time_point{} && now >= *t->signal_time)
+                {
+                    return wait_state::signaled;
+                }
+                break;
             }
 
             case handle_types::semaphore: {
@@ -920,11 +930,12 @@ namespace sogen
             if (!this->await_objects.empty())
             {
                 all_signaled = true;
+                const auto now = clock.steady_now();
                 for (uint32_t i = 0; i < this->await_objects.size(); ++i)
                 {
                     const auto& obj = this->await_objects[i];
 
-                    const auto state = observe_object_signal(process, obj, this->id);
+                    const auto state = observe_object_signal(process, obj, this->id, now);
                     const auto signaled = state != wait_state::not_signaled;
                     all_signaled &= signaled;
 

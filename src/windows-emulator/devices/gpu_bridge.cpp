@@ -28,6 +28,7 @@ namespace sogen
 
             NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
             {
+                win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
                 switch (context.io_control_code)
                 {
                 case gpu_bridge::ioctl_get_version:
@@ -404,6 +405,7 @@ namespace sogen
                 std::vector<uint64_t> ids(max_count);
                 uint32_t count = 0;
                 const int32_t result = this->vulkan_.enumerate_physical_devices(request.instance, std::span{ids}, count);
+                win_emu.log.warn("[gpu-trace] enumerate_physical_devices -> count=%u result=%d\n", count, result);
 
                 const response_t response{
                     .vk_result = result,
@@ -445,6 +447,17 @@ namespace sogen
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
+
+                uint32_t api_ver = 0, dev_type = 0;
+                if (properties.size() >= 20)
+                {
+                    std::memcpy(&api_ver, properties.data(), sizeof(api_ver));
+                    std::memcpy(&dev_type, properties.data() + 16, sizeof(dev_type));
+                }
+                win_emu.log.warn("[gpu-trace] device_properties: apiVersion=%u.%u.%u type=%u name=%s outlen=%u\n",
+                                 (api_ver >> 22) & 0x7F, (api_ver >> 12) & 0x3FF, api_ver & 0xFFF, dev_type,
+                                 properties.size() >= 276 ? reinterpret_cast<const char*>(properties.data() + 20) : "?",
+                                 static_cast<unsigned>(context.output_buffer_length));
 
                 win_emu.emu().write_memory(context.output_buffer, properties.data(), properties.size());
                 set_information(context, context.output_buffer_length);
@@ -519,6 +532,15 @@ namespace sogen
                 if (array_bytes > 0)
                 {
                     win_emu.emu().write_memory(context.output_buffer + sizeof(response_t), properties.data(), array_bytes);
+
+                    constexpr size_t ext_name_size = 256;
+                    constexpr size_t ext_entry_size = ext_name_size + sizeof(uint32_t);
+                    const uint32_t ext_count = std::min(count, static_cast<uint32_t>(properties.size() / ext_entry_size));
+                    for (uint32_t i = 0; i < ext_count; ++i)
+                    {
+                        const char* name = reinterpret_cast<const char*>(properties.data() + i * ext_entry_size);
+                        win_emu.log.warn("[gpu-trace] dev-ext: %s\n", name);
+                    }
                 }
 
                 set_information(context, static_cast<ULONG>(sizeof(response_t) + array_bytes));
@@ -547,6 +569,14 @@ namespace sogen
                 if (records_bytes > 0)
                 {
                     win_emu.emu().read_memory(context.input_buffer + sizeof(request_t), records.data(), records_bytes);
+                }
+
+                {
+                    const auto* rec = reinterpret_cast<const gpu_bridge::feature_chain_record*>(records.data());
+                    for (uint32_t i = 0; i < request.struct_count && i < records.size() / sizeof(*rec); ++i)
+                    {
+                        win_emu.log.warn("[gpu-trace] features2 stype=%u body=%u\n", rec[i].s_type, rec[i].body_size);
+                    }
                 }
 
                 std::vector<std::byte> blob;
@@ -988,6 +1018,7 @@ namespace sogen
                 uint32_t optimal = 0;
                 uint32_t buffer = 0;
                 this->vulkan_.get_physical_device_format_properties(request.physical_device, request.format, linear, optimal, buffer);
+                win_emu.log.warn("[gpu-trace] format_props fmt=%u lin=0x%X opt=0x%X buf=0x%X\n", request.format, linear, optimal, buffer);
                 return write_output(
                     win_emu, context,
                     gpu_bridge::get_physical_device_format_properties_response{

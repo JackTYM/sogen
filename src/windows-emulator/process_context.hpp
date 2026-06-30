@@ -18,8 +18,12 @@
 
 #include "apiset/apiset.hpp"
 
+#include <memory>
+#include <unordered_map>
+
 namespace sogen
 {
+    class vulkan_host;
 
     struct fake_environment_config;
 
@@ -198,6 +202,7 @@ namespace sogen
                 uint32_t resource_handle{};
                 uint64_t backing_memory{};
                 uint64_t backing_size{};
+                uint64_t vk_image_id{}; // runtime-only; 0 = no GPU backing
 
                 void serialize(utils::buffer_serializer& buffer) const
                 {
@@ -309,6 +314,11 @@ namespace sogen
                 buffer.read(this->next_allocation_handle);
                 buffer.read_map(this->allocations);
             }
+
+            // Runtime-only (snapshot/restore of a live GPU device is out of scope).
+            std::unordered_map<uint32_t, uint64_t> device_vk_ids{};
+            std::unordered_map<uint32_t, uint32_t> context_device_handles{};
+            std::shared_ptr<vulkan_host> vk_host{};
         };
 
         process_context(x86_64_emulator& emu, memory_manager& memory, utils::clock& clock, callbacks& cb)
