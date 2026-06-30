@@ -12,24 +12,20 @@ namespace sogen
 
     namespace
     {
-        // The Audiosrv ALPC port hosts several RPC interfaces whose opnums overlap, so we dispatch by the
-        // interface the client bound to.
-        //   {923F85B3-BBEE-4EDF-8059-F569FA64A027} v1.6 = MMDevice enumeration (mmdevapi).
-        //   {D574D111-6126-49D7-9B86-4DE6B650D4FC} v2.8 = "AudioClientRpc" / IAudioClient streaming (audioses).
-        constexpr std::array<uint8_t, 16> k_iface_mmdevice_enum = {0xb3, 0x85, 0x3f, 0x92, 0xee, 0xbb, 0xdf, 0x4e,
-                                                                   0x80, 0x59, 0xf5, 0x69, 0xfa, 0x64, 0xa0, 0x27};
-        constexpr std::array<uint8_t, 16> k_iface_audio_client = {0x11, 0xd1, 0x74, 0xd5, 0x26, 0x61, 0xd7, 0x49,
-                                                                  0x9b, 0x86, 0x4d, 0xe6, 0xb6, 0x50, 0xd4, 0xfc};
-
-        constexpr uint32_t k_audio_opnum_get_default_endpoint = 25; // {923F85B3}
-        constexpr uint32_t k_audio_opnum_get_mix_format = 0;        // {D574D111}
-        constexpr uint32_t k_audio_opnum_is_format_supported = 1;   // {D574D111} AudioServerIsFormatSupported
-        constexpr uint32_t k_audio_opnum_get_device_period = 2;     // {D574D111} AudioServerGetDevicePeriod
-        constexpr uint32_t k_audio_opnum_open_stream = 4;           // {D574D111} (Initialize prep)
-        constexpr uint32_t k_audio_opnum_create_stream = 7;         // {D574D111} CreateRemoteStream
-        constexpr uint32_t k_audio_opnum_destroy_stream = 13;       // {D574D111} AudioServerDestroyStream
-        constexpr uint32_t k_audio_opnum_post_create_a = 8;         // {D574D111} post-CreateRemoteStream (returns S_OK)
-        constexpr uint32_t k_audio_opnum_post_create_b = 9;         // {D574D111} post-CreateRemoteStream (returns S_OK)
+        // The audio RPC is split across two ALPC ports with overlapping opnums: \RPC Control\Audiosrv hosts the
+        // AudioEndpointBuilder / MMDevice-enumeration interface (GetDefaultAudioEndpoint), while
+        // \RPC Control\AudioClientRpc hosts the IAudioClient streaming interface (audioses). The concrete RPC
+        // interface GUIDs differ across Windows builds (e.g. {A3BE171F} v1.6 and {98B2C141} v2.8 on build 20348),
+        // so we dispatch by the bound port name rather than by a hardcoded interface GUID.
+        constexpr uint32_t k_audio_opnum_get_default_endpoint = 25; // Audiosrv
+        constexpr uint32_t k_audio_opnum_get_mix_format = 0;        // AudioClientRpc
+        constexpr uint32_t k_audio_opnum_is_format_supported = 1;   // AudioClientRpc AudioServerIsFormatSupported
+        constexpr uint32_t k_audio_opnum_get_device_period = 2;     // AudioClientRpc AudioServerGetDevicePeriod
+        constexpr uint32_t k_audio_opnum_open_stream = 4;           // AudioClientRpc (Initialize prep)
+        constexpr uint32_t k_audio_opnum_create_stream = 7;         // AudioClientRpc CreateRemoteStream
+        constexpr uint32_t k_audio_opnum_destroy_stream = 13;       // AudioClientRpc AudioServerDestroyStream
+        constexpr uint32_t k_audio_opnum_post_create_a = 8;         // AudioClientRpc post-CreateRemoteStream (returns S_OK)
+        constexpr uint32_t k_audio_opnum_post_create_b = 9;         // AudioClientRpc post-CreateRemoteStream (returns S_OK)
 
         constexpr NTSTATUS k_hr_ok = 0;
 
@@ -126,6 +122,10 @@ namespace sogen
 
         struct audio_service_port : rpc_port
         {
+            explicit audio_service_port(const bool is_audio_client) : is_audio_client_(is_audio_client)
+            {
+            }
+
             NTSTATUS handle_rpc(windows_emulator& win_emu, const uint32_t procedure_id, const lpc_request_context& c,
                                 utils::aligned_binary_writer& writer, std::vector<alpc_reply_handle>& reply_handles) override
             {
@@ -136,7 +136,7 @@ namespace sogen
                                       procedure_id, c.send_buffer_length);
                 }
 
-                if (iface == k_iface_audio_client)
+                if (this->is_audio_client_)
                 {
                     switch (procedure_id)
                     {
@@ -171,6 +171,10 @@ namespace sogen
             }
 
           private:
+            // True when this port instance serves \RPC Control\AudioClientRpc (the IAudioClient streaming
+            // interface); false for the Audiosrv / AudioSrvServiceRpc endpoint-enumeration interface.
+            bool is_audio_client_;
+
             static NTSTATUS log_unhandled(windows_emulator& win_emu, const char* iface, const uint32_t opnum, const lpc_request_context& c)
             {
                 win_emu.log.error("[audiosrv] UNHANDLED %s opnum=%u send_len=%u recv_len=%u req: %s\n", iface, opnum, c.send_buffer_length,
@@ -400,9 +404,9 @@ namespace sogen
         };
     }
 
-    std::unique_ptr<port> create_audio_service_port()
+    std::unique_ptr<port> create_audio_service_port(const std::u16string_view port_name)
     {
-        return std::make_unique<audio_service_port>();
+        return std::make_unique<audio_service_port>(port_name == u"\\RPC Control\\AudioClientRpc");
     }
 
 } // namespace sogen

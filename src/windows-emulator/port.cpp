@@ -62,7 +62,7 @@ namespace sogen
 
         if (port == u"\\RPC Control\\Audiosrv" || port == u"\\RPC Control\\AudioClientRpc" || port == u"\\RPC Control\\AudioSrvServiceRpc")
         {
-            return create_audio_service_port();
+            return create_audio_service_port(port);
         }
 
         if (port == u"\\WindowsErrorReportingServicePort")
