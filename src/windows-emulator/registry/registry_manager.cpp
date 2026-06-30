@@ -313,6 +313,24 @@ namespace sogen
                 const auto* protocol_bytes = reinterpret_cast<const std::byte*>(&protocol_local);
                 this->set_value(*endpoint_key, "Protocol", 4 /* REG_DWORD */,
                                 std::span<const std::byte>(protocol_bytes, sizeof(protocol_local)));
+
+                // mmdevapi/DirectSound resolve the endpoint's display name through SHLoadIndirectString. The
+                // RDP-redirected endpoint stores DeviceDesc/FriendlyName as indirect resource strings
+                // (@%SystemRoot%\system32\rdpendp.dll,-1001), but rdpendp.dll is not present in the emulation
+                // root, so resolution fails (STATUS_OBJECT_NAME_NOT_FOUND), mmdevapi tears the device down and
+                // DirectSoundCreate fails (DSERR_NODRIVER) - aborting Miles/DirectSound clients. Rewrite the two
+                // name properties to plain REG_SZ so no indirect-string DLL is required.
+                const auto props_key = this->get_key(utils::path_key{audio / remote / std::string(*name) / "Properties"});
+                if (props_key)
+                {
+                    const auto write_name = [&](const char* value_name, const std::u16string_view text) {
+                        const auto* text_bytes = reinterpret_cast<const std::byte*>(text.data());
+                        this->set_value(*props_key, value_name, 1 /* REG_SZ */,
+                                        std::span<const std::byte>(text_bytes, (text.size() + 1) * sizeof(char16_t)));
+                    };
+                    write_name("{a45c254e-df1c-4efd-8020-67d146a850e0},2", u"Sogen Audio");             // DeviceDesc
+                    write_name("{a45c254e-df1c-4efd-8020-67d146a850e0},14", u"Speakers (Sogen Audio)"); // FriendlyName
+                }
             }
 
             // Expose the remote endpoints under the local folder. mmdevapi/WASAPI resolves a device by
