@@ -509,7 +509,7 @@ namespace sogen
         this->gdi_bitmap_surfaces.clear();
         this->gdi_window_surfaces.clear();
         this->dxgk = {};
-        this->etw_notification_event.reset();
+        this->etw_notification_events.clear();
 
         const auto gdi_shared_table = this->base_allocator.reserve<GDI_SHARED_MEMORY64>();
         gdi_shared_table.access([](GDI_SHARED_MEMORY64& table) { memset(&table, 0, sizeof(table)); });
@@ -616,7 +616,7 @@ namespace sogen
         buffer.write_map(this->gdi_bitmap_surfaces);
         buffer.write_map(this->gdi_window_surfaces);
         buffer.write(this->dxgk);
-        buffer.write_optional(this->etw_notification_event);
+        buffer.write_vector(this->etw_notification_events);
         buffer.write(this->mouse_capture_window);
         buffer.write(this->foreground_window);
         buffer.write(this->cursor_x);
@@ -705,7 +705,7 @@ namespace sogen
         buffer.read_map(this->gdi_bitmap_surfaces);
         buffer.read_map(this->gdi_window_surfaces);
         buffer.read(this->dxgk);
-        buffer.read_optional(this->etw_notification_event);
+        buffer.read_vector(this->etw_notification_events);
         buffer.read(this->mouse_capture_window);
         buffer.read(this->foreground_window);
         buffer.read(this->cursor_x);

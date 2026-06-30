@@ -92,6 +92,15 @@ namespace sogen
 
         if (!c.receive_message)
         {
+            // A send with no reply buffer is a one-way ALPC datagram (e.g. rpcrt4's LRPC
+            // notification after a stream is created). Deliver it to the port for any side
+            // effects and acknowledge the send; there is nowhere to write a reply.
+            if (c.send_message)
+            {
+                this->port_->handle_message(win_emu, c);
+                return {.status = STATUS_SUCCESS};
+            }
+
             return {.status = STATUS_INVALID_PARAMETER};
         }
 

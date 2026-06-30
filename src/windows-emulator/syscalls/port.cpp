@@ -150,40 +150,53 @@ namespace sogen
                 return; // caller did not reserve space for a handle attribute
             }
 
+            // ALPC attribute structs differ by bitness: a 32-bit (WoW64) consumer parses pointer/handle-sized
+            // fields as 4 bytes, so per-attribute strides and the HANDLE field offsets are smaller than the
+            // 64-bit layout. A 64-bit-shaped attribute makes the 32-bit rpcrt4 read the handle COUNT from the
+            // wrong offset (0/garbage), fail its import gate, and never import the delivered section handle.
+            const bool wow64 = c.proc.is_wow64_process;
+            const uint64_t security_stride = wow64 ? 0x0c : 0x20;
+            const uint64_t view_stride = wow64 ? 0x10 : 0x20;
+            const uint64_t context_stride = wow64 ? 0x14 : 0x20;
+
             uint64_t offset = sizeof(ALPC_MESSAGE_ATTRIBUTES);
             if (header.AllocatedAttributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE)
             {
-                offset += 0x20;
+                offset += security_stride;
             }
             if (header.AllocatedAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)
             {
-                offset += 0x20;
+                offset += view_stride;
             }
             if (header.AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
             {
-                // ALPC_CONTEXT_ATTR is {PortContext; MessageContext; Sequence; MessageId; CallbackId} = 0x1c,
-                // padded to 0x20. rpcrt4's handle-import offset calc (rpcrt4!0x54180) uses 0x20 here, so the
-                // HANDLE attribute lands at header+VIEW+0x20; using 0x18 would mis-place it by 8 bytes.
-                offset += 0x20;
+                offset += context_stride;
             }
 
             // On a real ALPC receive the KERNEL (not the caller) fills the whole handle attribute: a non-zero
-            // Flags value that marks the slot as carrying a duplicated handle, then the Handle/ObjectType/
-            // GrantedAccess. A live capture of the audio CreateRemoteStream reply showed Flags=0x001243fb, so we
-            // replicate it to match the real kernel's receive layout. (Note: this alone does not yet make WASAPI
-            // Initialize succeed - rpcrt4's client-side LRPC system-handle table still does not reconstruct the
-            // delivered section handle into the unmarshalled NDR struct; see the audio-rpc notes.)
+            // Flags value that marks the slot as carrying a duplicated handle, then the Handle/Count/Access.
+            // A live capture of the audio CreateRemoteStream reply showed Flags=0x001243fb, so we replicate it.
+            // The COUNT field (not the Handle) is what rpcrt4 reads to gate the import, then it fetches each
+            // handle via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation).
             constexpr ULONG alpc_received_handle_flags = 0x001243fb & ~0x00040000u; // clear ALPC_HANDLEFLG_INDIRECT
             const auto& h = handles.front();
             const auto attr_base = attributes.value() + offset;
             emulator_object<ULONG>{c.emu, attr_base + 0}.write(alpc_received_handle_flags);
-            emulator_object<EmulatorTraits<Emu64>::HANDLE>{c.emu, attr_base + 8}.write(
-                static_cast<EmulatorTraits<Emu64>::HANDLE>(h.handle));
-            // rpcrt4's handle import (rpcrt4!0x919e0) reads attr+0x10 as the HANDLE COUNT and then fetches each
-            // handle via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation) - it does NOT read the
-            // Handle field above. So this field must be the number of delivered handles, not an object type.
-            emulator_object<ULONG>{c.emu, attr_base + 0x10}.write(static_cast<ULONG>(handles.size()));
-            emulator_object<ULONG>{c.emu, attr_base + 0x14}.write(h.desired_access);
+            if (wow64)
+            {
+                // 32-bit ALPC_HANDLE_ATTR: Flags+0, Handle+4, Count+8, DesiredAccess+0xc.
+                emulator_object<uint32_t>{c.emu, attr_base + 4}.write(static_cast<uint32_t>(h.handle));
+                emulator_object<ULONG>{c.emu, attr_base + 8}.write(static_cast<ULONG>(handles.size()));
+                emulator_object<ULONG>{c.emu, attr_base + 0x0c}.write(h.desired_access);
+            }
+            else
+            {
+                // 64-bit ALPC_HANDLE_ATTR: Flags+0, Handle+8, Count+0x10, DesiredAccess+0x14.
+                emulator_object<EmulatorTraits<Emu64>::HANDLE>{c.emu, attr_base + 8}.write(
+                    static_cast<EmulatorTraits<Emu64>::HANDLE>(h.handle));
+                emulator_object<ULONG>{c.emu, attr_base + 0x10}.write(static_cast<ULONG>(handles.size()));
+                emulator_object<ULONG>{c.emu, attr_base + 0x14}.write(h.desired_access);
+            }
 
             // Report exactly the attributes the reply carries (CONTEXT|HANDLE), matching the real kernel, rather
             // than OR-ing HANDLE onto whatever stale ValidAttributes the caller's buffer happened to contain.

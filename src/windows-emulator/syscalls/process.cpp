@@ -23,8 +23,18 @@ namespace sogen
             switch (info_class)
             {
             case ProcessExecuteFlags:
-                // Kernel returns STATUS_INVALID_PARAMETER for ProcessExecuteFlags queries on current process
-                return STATUS_INVALID_PARAMETER;
+                // Native 64-bit processes expose no per-process execute options (DEP is always on), so
+                // the kernel rejects the query. A WoW64 (32-bit) process does carry MEM_EXECUTE_OPTION
+                // flags; report DEP enabled so callers (GetProcessDEPPolicy / audioses IAudioClient
+                // Initialize) succeed instead of mapping the failure to E_INVALIDARG.
+                if (!c.proc.is_wow64_process)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                return handle_query<uint32_t>(c.emu, process_information, process_information_length, return_length,
+                                              [](uint32_t& flags) {
+                                                  flags = 0x1; // MEM_EXECUTE_OPTION_DISABLE (DEP enabled)
+                                              });
             case ProcessGroupInformation:
             case ProcessMitigationPolicy: {
                 // ProcessMitigationPolicy requires special handling because the caller

@@ -1408,6 +1408,11 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtUserCitSetInfo(const syscall_context& /*c*/)
+        {
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtUserRegisterWindowMessage(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;

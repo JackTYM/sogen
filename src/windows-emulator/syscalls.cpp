@@ -473,6 +473,7 @@ namespace sogen
 
         // syscalls/user.cpp:
         NTSTATUS handle_NtUserTraceLoggingSendMixedModeTelemetry(const syscall_context& c);
+        NTSTATUS handle_NtUserCitSetInfo(const syscall_context& c);
         NTSTATUS handle_NtUserRegisterWindowMessage(const syscall_context& c);
         uint64_t handle_NtUserGetThreadState(const syscall_context& c, ULONG routine);
         uint64_t handle_NtUserSetThreadState(const syscall_context& c, uint64_t value, uint64_t mask);
@@ -3864,6 +3865,7 @@ namespace sogen
         add_handler(NtUserGetThreadDesktop);
         add_handler(NtOpenKeyEx);
         add_handler(NtUserTraceLoggingSendMixedModeTelemetry);
+        add_handler(NtUserCitSetInfo);
         add_handler(NtUserDisplayConfigGetDeviceInfo);
         add_handler(NtOpenEvent);
         add_handler(NtGetMUIRegistryInfo);
