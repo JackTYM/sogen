@@ -2734,6 +2734,46 @@ extern "C"
         }
     }
 
+    // Behind the real Khronos loader, a VkSurfaceKHR is the loader's VkIcdSurfaceWin32* rather than an id we
+    // minted in vkCreateWin32SurfaceKHR. Extract the HWND it carries and lazily create a host surface for it
+    // (cached per HWND); for the legacy by-name path the handle is still our small object_id.
+    std::mutex g_surface_mutex;
+    std::unordered_map<uint64_t, gb::object_id> g_hwnd_surfaces;
+
+    gb::object_id host_surface_for(VkSurfaceKHR surface)
+    {
+        if (!surface)
+        {
+            return 0;
+        }
+        // Our own ids are small monotonic counters; a loader surface is a heap pointer to VkIcdSurfaceWin32.
+        if (reinterpret_cast<uintptr_t>(surface) < 0x10000)
+        {
+            return to_object_id(surface);
+        }
+        const auto* base = reinterpret_cast<const VkIcdSurfaceBase*>(surface);
+        if (base->platform != VK_ICD_WSI_PLATFORM_WIN32)
+        {
+            return to_object_id(surface);
+        }
+        const auto hwnd_value = reinterpret_cast<uint64_t>(reinterpret_cast<const VkIcdSurfaceWin32*>(surface)->hwnd);
+
+        std::lock_guard<std::mutex> lock(g_surface_mutex);
+        auto& id = g_hwnd_surfaces[hwnd_value];
+        if (id == 0)
+        {
+            gb::create_surface_request request{};
+            request.hwnd = hwnd_value;
+            gb::create_surface_response response{};
+            if (bridge_call(gb::ioctl_create_surface, &request, sizeof(request), &response, sizeof(response)) &&
+                response.vk_result == VK_SUCCESS)
+            {
+                id = response.surface;
+            }
+        }
+        return id;
+    }
+
     __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance, const VkWin32SurfaceCreateInfoKHR* pCreateInfo,
                                                                                  const VkAllocationCallbacks*, VkSurfaceKHR* pSurface)
     {
@@ -2761,7 +2801,7 @@ extern "C"
             return;
         }
         gb::destroy_surface_request request{};
-        request.surface = to_object_id(surface);
+        request.surface = host_surface_for(surface);
         bridge_call(gb::ioctl_destroy_surface, &request, sizeof(request), nullptr, 0);
     }
 
@@ -2776,7 +2816,7 @@ extern "C"
 
         gb::get_surface_capabilities_request request{};
         request.physical_device = to_object_id(physicalDevice);
-        request.surface = to_object_id(surface);
+        request.surface = host_surface_for(surface);
         if (!bridge_call(gb::ioctl_get_surface_capabilities, &request, sizeof(request), pSurfaceCapabilities,
                          sizeof(*pSurfaceCapabilities)))
         {
@@ -3422,7 +3462,7 @@ extern "C"
     {
         gb::create_swapchain_request request{};
         request.device = to_object_id(device);
-        request.surface = to_object_id(pCreateInfo->surface);
+        request.surface = host_surface_for(pCreateInfo->surface);
         request.format = static_cast<uint32_t>(pCreateInfo->imageFormat);
         request.width = pCreateInfo->imageExtent.width;
         request.height = pCreateInfo->imageExtent.height;
