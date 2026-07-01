@@ -16,9 +16,9 @@ namespace sogen
         //
         // Live Vulkan state cannot be serialized, so this device intentionally does not participate
         // in snapshots yet; restoring with an open GPU handle is an experimental limitation.
-        struct gpu_bridge_device : io_device
+        struct gpu_command_processor
         {
-            void work(windows_emulator& win_emu) override
+            void pump_presents(windows_emulator& win_emu)
             {
                 for (auto& frame : this->vulkan_.poll_presented_frames())
                 {
@@ -26,7 +26,7 @@ namespace sogen
                 }
             }
 
-            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
+            NTSTATUS dispatch(windows_emulator& win_emu, const io_device_context& context)
             {
                 win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
                 switch (context.io_control_code)
@@ -228,14 +228,6 @@ namespace sogen
                     win_emu.log.warn("[gpu-bridge] Unsupported IOCTL: 0x%X\n", static_cast<unsigned>(context.io_control_code));
                     return STATUS_NOT_SUPPORTED;
                 }
-            }
-
-            void serialize_object(utils::buffer_serializer&) const override
-            {
-            }
-
-            void deserialize_object(utils::buffer_deserializer&) override
-            {
             }
 
           private:
@@ -2962,6 +2954,32 @@ namespace sogen
                 set_information(context, context.output_buffer_length);
                 return STATUS_SUCCESS;
             }
+        };
+
+        // Thin io_device adapter over gpu_command_processor for the legacy \\.\SogenGpu path. The same
+        // processor is reused by the D3DKMT-Escape transport, so command handling lives in one place.
+        struct gpu_bridge_device : io_device
+        {
+            void work(windows_emulator& win_emu) override
+            {
+                processor_.pump_presents(win_emu);
+            }
+
+            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
+            {
+                return processor_.dispatch(win_emu, context);
+            }
+
+            void serialize_object(utils::buffer_serializer&) const override
+            {
+            }
+
+            void deserialize_object(utils::buffer_deserializer&) override
+            {
+            }
+
+          private:
+            gpu_command_processor processor_{};
         };
     }
 
