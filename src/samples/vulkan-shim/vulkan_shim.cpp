@@ -26,6 +26,7 @@
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan_win32.h>
+#include <vulkan/vk_icd.h>
 
 #include <gpu_bridge_protocol.hpp>
 #include <vk_feature_chain.hpp>
@@ -34,20 +35,68 @@ namespace gb = sogen::gpu_bridge;
 
 namespace
 {
-    HANDLE g_bridge = INVALID_HANDLE_VALUE;
-
-    HANDLE bridge()
+    // D3DKMT structs (mingw ships no d3dkmthk.h). Layout matches the host EMU_D3DKMT_* ABI, which stores
+    // pointers as UINT64 even for 32-bit (WOW64) guests, so pack to 8 and widen the private-data pointer.
+#pragma pack(push, 8)
+    struct kmt_open_adapter_from_luid
     {
-        if (g_bridge == INVALID_HANDLE_VALUE)
+        uint32_t luid_low;
+        int32_t luid_high;
+        uint32_t h_adapter;
+    };
+    struct kmt_escape
+    {
+        uint32_t h_adapter;
+        uint32_t h_device;
+        uint32_t type; // 0 = D3DKMT_ESCAPE_DRIVERPRIVATE
+        uint32_t flags;
+        uint64_t private_data;
+        uint32_t private_data_size;
+        uint32_t h_context;
+    };
+#pragma pack(pop)
+
+    using pfn_d3dkmt = LONG(WINAPI*)(void*);
+
+    pfn_d3dkmt load_win32u(const char* name)
+    {
+        HMODULE win32u = GetModuleHandleA("win32u.dll");
+        if (!win32u)
         {
-            g_bridge = CreateFileA(R"(\\.\SogenGpu)", GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            win32u = LoadLibraryA("win32u.dll");
         }
-        return g_bridge;
+        return win32u ? reinterpret_cast<pfn_d3dkmt>(GetProcAddress(win32u, name)) : nullptr;
+    }
+
+    uint32_t g_adapter = 0;
+
+    uint32_t ensure_adapter()
+    {
+        if (g_adapter != 0)
+        {
+            return g_adapter;
+        }
+        static pfn_d3dkmt open_adapter = load_win32u("NtGdiDdDDIOpenAdapterFromLuid");
+        if (!open_adapter)
+        {
+            return 0;
+        }
+        kmt_open_adapter_from_luid open{};
+        open.luid_low = 0x1000; // sogen's fixed virtual adapter LUID
+        open.luid_high = 0;
+        if (open_adapter(&open) != 0)
+        {
+            return 0;
+        }
+        g_adapter = open.h_adapter;
+        return g_adapter;
     }
 
     // Flushes the coalesced descriptor-set updates (see vkUpdateDescriptorSets); defined below.
     void flush_descriptor_updates();
 
+    // Carry one GPU command to the host over the D3DKMT Escape channel: [escape_command_header][in][out].
+    // A registered ICD reaches the host driver this way, so no \\.\SogenGpu character device is needed.
     bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len)
     {
         // Every other bridge call may make the host observe descriptor state (record, submit, ...), so drain
@@ -57,28 +106,113 @@ namespace
             flush_descriptor_updates();
         }
 
-        const HANDLE handle = bridge();
-        if (handle == INVALID_HANDLE_VALUE)
+        static pfn_d3dkmt escape = load_win32u("NtGdiDdDDIEscape");
+        const uint32_t adapter = ensure_adapter();
+        if (!escape || adapter == 0)
         {
             return false;
         }
 
-        DWORD returned = 0;
-        return DeviceIoControl(handle, code, const_cast<void*>(in), in_len, out, out_len, &returned, nullptr) != FALSE;
+        const uint32_t header_size = sizeof(gb::escape_command_header);
+        std::vector<uint8_t> buffer(header_size + in_len + out_len);
+        auto* header = reinterpret_cast<gb::escape_command_header*>(buffer.data());
+        header->magic = gb::escape_magic;
+        header->command_id = code;
+        header->input_offset = header_size;
+        header->input_size = in_len;
+        header->output_offset = header_size + in_len;
+        header->output_size = out_len;
+        header->result = 0;
+        header->reserved = 0;
+        if (in != nullptr && in_len != 0)
+        {
+            std::memcpy(buffer.data() + header_size, in, in_len);
+        }
+
+        kmt_escape esc{};
+        esc.h_adapter = adapter;
+        esc.type = 0;
+        esc.private_data = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(buffer.data()));
+        esc.private_data_size = static_cast<uint32_t>(buffer.size());
+        if (escape(&esc) != 0)
+        {
+            return false;
+        }
+
+        if (out != nullptr && out_len != 0)
+        {
+            std::memcpy(out, buffer.data() + header_size + in_len, out_len);
+        }
+        return header->result >= 0;
     }
 
-    // Vulkan handles come in two shapes: dispatchable handles (VkInstance, VkDevice, VkQueue,
-    // VkCommandBuffer, VkPhysicalDevice) are pointers -- pointer-sized, so 64-bit on x64 and 32-bit on
-    // x86/WOW64 -- while non-dispatchable handles (VkBuffer, VkImage, VkDeviceMemory, ...) are uint64_t on
-    // every platform. The bridge's object_id is a uint64 that always crosses the wire in full; store it
-    // directly in uint64 handles, and in the pointer value for dispatchable handles. Object ids are small
-    // monotonic counters, so they fit a 32-bit pointer without loss -- and a non-dispatchable handle keeps
-    // the full 64 bits regardless of guest bitness. This makes a 32-bit (WOW64) shim and a 64-bit host
-    // agree on the protocol, and vice versa.
+    // Handle representation, three cases:
+    //  - Dispatchable handles (VkInstance/PhysicalDevice/Device/Queue/CommandBuffer): the Khronos loader
+    //    owns the first pointer-sized word (its dispatch table) and dereferences it on entry, so each must
+    //    be a real allocation beginning with VK_LOADER_DATA. We map each bridge object_id to one such stable
+    //    allocation and recover the id (stored right after the loader word) on the way back.
+    //  - Non-dispatchable pointer handles (VkBuffer/VkImage/... under VK_USE_64_BIT_PTR_DEFINES): the loader
+    //    never dereferences them, so the small monotonic object_id is stored directly in the pointer value.
+    //  - Non-dispatchable uint64 handles (32-bit builds): the object_id is the handle value.
+    template <typename T>
+    struct is_dispatchable_handle : std::false_type
+    {
+    };
+    template <>
+    struct is_dispatchable_handle<VkInstance> : std::true_type
+    {
+    };
+    template <>
+    struct is_dispatchable_handle<VkPhysicalDevice> : std::true_type
+    {
+    };
+    template <>
+    struct is_dispatchable_handle<VkDevice> : std::true_type
+    {
+    };
+    template <>
+    struct is_dispatchable_handle<VkQueue> : std::true_type
+    {
+    };
+    template <>
+    struct is_dispatchable_handle<VkCommandBuffer> : std::true_type
+    {
+    };
+
+    struct dispatchable_object
+    {
+        VK_LOADER_DATA loader_data;
+        gb::object_id id;
+    };
+
+    std::mutex g_dispatchable_mutex;
+    std::unordered_map<gb::object_id, dispatchable_object*> g_dispatchables;
+
+    void* dispatchable_for_id(gb::object_id id)
+    {
+        if (id == 0)
+        {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(g_dispatchable_mutex);
+        auto& slot = g_dispatchables[id];
+        if (slot == nullptr)
+        {
+            slot = new dispatchable_object{};
+            set_loader_magic_value(slot);
+            slot->id = id;
+        }
+        return slot;
+    }
+
     template <typename Handle>
     gb::object_id to_object_id(Handle handle)
     {
-        if constexpr (std::is_pointer_v<Handle>)
+        if constexpr (is_dispatchable_handle<Handle>::value)
+        {
+            return handle ? reinterpret_cast<dispatchable_object*>(handle)->id : gb::object_id{0};
+        }
+        else if constexpr (std::is_pointer_v<Handle>)
         {
             return static_cast<gb::object_id>(reinterpret_cast<uintptr_t>(handle));
         }
@@ -91,7 +225,11 @@ namespace
     template <typename Handle>
     Handle to_handle(gb::object_id id)
     {
-        if constexpr (std::is_pointer_v<Handle>)
+        if constexpr (is_dispatchable_handle<Handle>::value)
+        {
+            return reinterpret_cast<Handle>(dispatchable_for_id(id));
+        }
+        else if constexpr (std::is_pointer_v<Handle>)
         {
             return reinterpret_cast<Handle>(static_cast<uintptr_t>(id));
         }
@@ -4871,9 +5009,42 @@ extern "C"
         return vkGetInstanceProcAddr(VK_NULL_HANDLE, pName);
     }
 
-    // Some loaders / probes bootstrap through the ICD-style export instead.
-    __declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName)
+    // Loader/ICD interface (registered ICD). These must be exported undecorated so the Khronos loader's
+    // GetProcAddress resolves them; extern "C" gives that on x64, and the .def / -Wl,--kill-at on x86.
+    extern "C" __declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance,
+                                                                                                        const char* pName)
     {
         return vkGetInstanceProcAddr(instance, pName);
+    }
+
+    // Physical-device-level query path (interface v4+); return null for non-physical-device functions so the
+    // loader routes them as instance-level.
+    extern "C" __declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInstance instance,
+                                                                                                              const char* pName)
+    {
+        if (std::strncmp(pName, "vkGetPhysicalDevice", 19) == 0 || std::strcmp(pName, "vkEnumerateDeviceExtensionProperties") == 0 ||
+            std::strcmp(pName, "vkCreateDevice") == 0)
+        {
+            return vkGetInstanceProcAddr(instance, pName);
+        }
+        return nullptr;
+    }
+
+    extern "C" __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion)
+    {
+        constexpr uint32_t our_max = 6; // v6 = vk_icdEnumerateAdapterPhysicalDevices (Windows adapter matching)
+        if (*pSupportedVersion > our_max)
+        {
+            *pSupportedVersion = our_max;
+        }
+        return VK_SUCCESS;
+    }
+
+    // Windows adapter matching: the loader passes the D3DKMT adapter LUID it enumerated (sogen's fake
+    // adapter); we return the same physical devices the host reports.
+    extern "C" __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL vk_icdEnumerateAdapterPhysicalDevices(
+        VkInstance instance, LUID /*adapterLUID*/, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices)
+    {
+        return vkEnumeratePhysicalDevices(instance, pPhysicalDeviceCount, pPhysicalDevices);
     }
 }
