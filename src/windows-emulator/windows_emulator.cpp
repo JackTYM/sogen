@@ -14,6 +14,7 @@
 
 #include "network/static_socket_factory.hpp"
 #include "memory_permission_ext.hpp"
+#include "devices/gpu_bridge.hpp"
 
 namespace sogen
 {
@@ -303,6 +304,12 @@ namespace sogen
             for (auto& dev : devices | std::views::values)
             {
                 dev.work(win_emu);
+            }
+
+            // Drive the D3DKMTEscape GPU processor's presents on the same cadence the SogenGpu io_device uses.
+            if (const auto& gpu_processor = win_emu.process.dxgk.gpu_processor)
+            {
+                pump_gpu_presents(gpu_processor.get(), win_emu);
             }
         }
 
