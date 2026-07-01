@@ -522,26 +522,63 @@ namespace sogen
         return v;
     }
 
+    std::vector<registry_value> registry_manager::collect_values(const registry_key& key)
+    {
+        // Overlay values (from set_value) are enumerated first and shadow hive values of the same name, so a
+        // synthetic value is visible to RegEnumValue / NtEnumerateValueKey, not only to a by-name lookup.
+        std::vector<registry_value> values;
+
+        const auto overlay_entry = this->overlay_values_.find(registry_manager::get_full_key_path(key));
+        const auto* overlay = overlay_entry != this->overlay_values_.end() ? &overlay_entry->second : nullptr;
+        if (overlay)
+        {
+            for (const auto& [name, val] : overlay->values)
+            {
+                registry_value v{};
+                v.type = val.type;
+                v.name = name;
+                v.data = val.data;
+                values.push_back(std::move(v));
+            }
+        }
+
+        if (const auto iterator = this->hives_.find(key.hive); iterator != this->hives_.end())
+        {
+            for (size_t i = 0;; ++i)
+            {
+                const auto* entry = iterator->second->get_value(key.path.get(), i);
+                if (!entry)
+                {
+                    break;
+                }
+                if (overlay && overlay->values.find(entry->name) != overlay->values.end())
+                {
+                    continue;
+                }
+                registry_value v{};
+                v.type = entry->type;
+                v.name = entry->name;
+                v.data = entry->data;
+                values.push_back(std::move(v));
+            }
+        }
+
+        return values;
+    }
+
     std::optional<registry_value> registry_manager::get_value(const registry_key& key, const size_t index)
     {
-        const auto iterator = this->hives_.find(key.hive);
-        if (iterator == this->hives_.end())
+        auto values = this->collect_values(key);
+        if (index >= values.size())
         {
             return std::nullopt;
         }
+        return std::move(values[index]);
+    }
 
-        const auto* entry = iterator->second->get_value(key.path.get(), index);
-        if (!entry)
-        {
-            return std::nullopt;
-        }
-
-        registry_value v{};
-        v.type = entry->type;
-        v.name = entry->name;
-        v.data = entry->data;
-
-        return v;
+    size_t registry_manager::get_value_count(const registry_key& key)
+    {
+        return this->collect_values(key).size();
     }
 
     void registry_manager::set_value(const registry_key& key, std::string name, const uint32_t type, const std::span<const std::byte> data)

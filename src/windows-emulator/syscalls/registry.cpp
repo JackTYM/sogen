@@ -135,7 +135,8 @@ namespace sogen
                 }
 
                 const auto hive_key = c.win_emu.registry.get_hive_key(*key);
-                if (!hive_key.has_value())
+                const auto value_count = c.win_emu.registry.get_value_count(*key);
+                if (!hive_key.has_value() && value_count == 0)
                 {
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
@@ -149,8 +150,8 @@ namespace sogen
                 }
 
                 KEY_CACHED_INFORMATION info{};
-                info.SubKeys = static_cast<ULONG>(hive_key->key.get_sub_key_count(hive_key->file));
-                info.Values = static_cast<ULONG>(hive_key->key.get_value_count(hive_key->file));
+                info.SubKeys = hive_key.has_value() ? static_cast<ULONG>(hive_key->key.get_sub_key_count(hive_key->file)) : 0;
+                info.Values = static_cast<ULONG>(value_count);
                 info.NameLength = static_cast<ULONG>(key_name.size() * 2);
                 info.MaxValueDataLen = 0x1000;
                 info.MaxValueNameLen = 0x1000;
