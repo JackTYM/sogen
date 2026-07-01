@@ -4,7 +4,9 @@
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
 #include "../devices/vulkan_host.hpp"
+#include "../devices/gpu_bridge.hpp"
 #include <dxgk_command_protocol.hpp>
+#include <gpu_bridge_protocol.hpp>
 
 #include <array>
 #include <bit>
@@ -3992,6 +3994,41 @@ namespace sogen
             if (escape.hAdapter != k_dxgk_adapter_handle)
             {
                 dxgk_warn(c, "NtGdiDdDDIEscape: Unknown Adapter 0x%X", escape.hAdapter);
+            }
+
+            // GPU command stream carried over the Escape channel: a registered ICD marshals a Vulkan
+            // command into pPrivateDriverData and the host routes it to the shared gpu_command_processor,
+            // so no custom \\.\SogenGpu character device is needed.
+            if (escape.Type == 0 && escape.pPrivateDriverData != 0 &&
+                escape.PrivateDriverDataSize >= sizeof(gpu_bridge::escape_command_header) &&
+                c.emu.read_memory<uint32_t>(escape.pPrivateDriverData) == gpu_bridge::escape_magic)
+            {
+                auto header = c.emu.read_memory<gpu_bridge::escape_command_header>(escape.pPrivateDriverData);
+
+                const uint64_t buffer_size = escape.PrivateDriverDataSize;
+                if (uint64_t{header.input_offset} + header.input_size > buffer_size ||
+                    uint64_t{header.output_offset} + header.output_size > buffer_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (!c.proc.dxgk.gpu_processor)
+                {
+                    c.proc.dxgk.gpu_processor = create_gpu_command_processor();
+                }
+
+                io_device_context ctx{c.emu};
+                ctx.io_control_code = header.command_id;
+                ctx.input_buffer = escape.pPrivateDriverData + header.input_offset;
+                ctx.input_buffer_length = header.input_size;
+                ctx.output_buffer = escape.pPrivateDriverData + header.output_offset;
+                ctx.output_buffer_length = header.output_size;
+
+                const NTSTATUS status = dispatch_gpu_command(c.proc.dxgk.gpu_processor.get(), c.win_emu, ctx);
+
+                header.result = static_cast<int32_t>(status);
+                c.emu.write_memory(escape.pPrivateDriverData, &header, sizeof(header));
+                return status;
             }
 
             if (escape.Type == 0 && escape.pPrivateDriverData != 0 && escape.PrivateDriverDataSize >= 4)

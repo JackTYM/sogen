@@ -446,8 +446,8 @@ namespace sogen
                     std::memcpy(&api_ver, properties.data(), sizeof(api_ver));
                     std::memcpy(&dev_type, properties.data() + 16, sizeof(dev_type));
                 }
-                win_emu.log.warn("[gpu-trace] device_properties: apiVersion=%u.%u.%u type=%u name=%s outlen=%u\n",
-                                 (api_ver >> 22) & 0x7F, (api_ver >> 12) & 0x3FF, api_ver & 0xFFF, dev_type,
+                win_emu.log.warn("[gpu-trace] device_properties: apiVersion=%u.%u.%u type=%u name=%s outlen=%u\n", (api_ver >> 22) & 0x7F,
+                                 (api_ver >> 12) & 0x3FF, api_ver & 0xFFF, dev_type,
                                  properties.size() >= 276 ? reinterpret_cast<const char*>(properties.data() + 20) : "?",
                                  static_cast<unsigned>(context.output_buffer_length));
 
@@ -2986,5 +2986,20 @@ namespace sogen
     std::unique_ptr<io_device> create_gpu_bridge()
     {
         return std::make_unique<gpu_bridge_device>();
+    }
+
+    std::shared_ptr<void> create_gpu_command_processor()
+    {
+        return std::make_shared<gpu_command_processor>();
+    }
+
+    NTSTATUS dispatch_gpu_command(void* processor, windows_emulator& win_emu, const io_device_context& context)
+    {
+        return static_cast<gpu_command_processor*>(processor)->dispatch(win_emu, context);
+    }
+
+    void pump_gpu_presents(void* processor, windows_emulator& win_emu)
+    {
+        static_cast<gpu_command_processor*>(processor)->pump_presents(win_emu);
     }
 }

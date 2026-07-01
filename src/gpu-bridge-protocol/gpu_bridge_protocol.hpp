@@ -32,6 +32,26 @@ namespace sogen::gpu_bridge
         return (device_type << 16) | (file_any_access << 14) | (function << 2) | method_buffered;
     }
 
+    // GPU commands can also be carried over the D3DKMT Escape channel (NtGdiDdDDIEscape) instead of the
+    // \\.\SogenGpu IOCTL device, so a properly-registered guest ICD needs no custom character device. The
+    // single bidirectional pPrivateDriverData buffer is laid out as:
+    //   [escape_command_header][input region][output region]
+    // The host reads the header, dispatches command_id (an IOCTL code from make_ioctl) with the two
+    // sub-regions as the input/output buffers, and writes result back into the header.
+    inline constexpr uint32_t escape_magic = 0x45475047; // 'GPGE'
+
+    struct escape_command_header
+    {
+        uint32_t magic;
+        uint32_t command_id;
+        uint32_t input_offset;
+        uint32_t input_size;
+        uint32_t output_offset;
+        uint32_t output_size;
+        int32_t result;
+        uint32_t reserved;
+    };
+
     enum class command : uint32_t
     {
         get_version = 0x800,

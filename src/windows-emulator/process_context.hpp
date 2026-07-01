@@ -319,6 +319,7 @@ namespace sogen
             std::unordered_map<uint32_t, uint64_t> device_vk_ids{};
             std::unordered_map<uint32_t, uint32_t> context_device_handles{};
             std::shared_ptr<vulkan_host> vk_host{};
+            std::shared_ptr<void> gpu_processor{}; // gpu_command_processor for the D3DKMTEscape ICD transport
         };
 
         process_context(x86_64_emulator& emu, memory_manager& memory, utils::clock& clock, callbacks& cb)
