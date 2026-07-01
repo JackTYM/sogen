@@ -50,7 +50,7 @@ namespace
         uint32_t h_device;
         uint32_t type; // 0 = D3DKMT_ESCAPE_DRIVERPRIVATE
         uint32_t flags;
-        uint64_t private_data;
+        void* private_data; // native D3DKMT_ESCAPE.pPrivateDriverData: 4 bytes on WoW64, 8 on x64
         uint32_t private_data_size;
         uint32_t h_context;
     };
@@ -132,7 +132,7 @@ namespace
         kmt_escape esc{};
         esc.h_adapter = adapter;
         esc.type = 0;
-        esc.private_data = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(buffer.data()));
+        esc.private_data = buffer.data();
         esc.private_data_size = static_cast<uint32_t>(buffer.size());
         if (escape(&esc) != 0)
         {
@@ -2746,17 +2746,20 @@ extern "C"
         {
             return 0;
         }
-        // Our own ids are small monotonic counters; a loader surface is a heap pointer to VkIcdSurfaceWin32.
-        if (reinterpret_cast<uintptr_t>(surface) < 0x10000)
+        // A VkSurfaceKHR is a pointer on x64 and a uint64 on 32-bit; either way the loader surface's address is
+        // carried in its bits (8 bytes on both). Our own by-name ids are small monotonic counters.
+        uint64_t bits = 0;
+        std::memcpy(&bits, &surface, sizeof(surface));
+        if (bits < 0x10000)
         {
             return to_object_id(surface);
         }
-        const auto* base = reinterpret_cast<const VkIcdSurfaceBase*>(surface);
+        const auto* base = reinterpret_cast<const VkIcdSurfaceBase*>(static_cast<uintptr_t>(bits));
         if (base->platform != VK_ICD_WSI_PLATFORM_WIN32)
         {
             return to_object_id(surface);
         }
-        const auto hwnd_value = reinterpret_cast<uint64_t>(reinterpret_cast<const VkIcdSurfaceWin32*>(surface)->hwnd);
+        const auto hwnd_value = reinterpret_cast<uint64_t>(reinterpret_cast<const VkIcdSurfaceWin32*>(static_cast<uintptr_t>(bits))->hwnd);
 
         std::lock_guard<std::mutex> lock(g_surface_mutex);
         auto& id = g_hwnd_surfaces[hwnd_value];
