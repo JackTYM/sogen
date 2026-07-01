@@ -582,6 +582,24 @@ namespace sogen
             this->map_port(mapping.first, mapping.second);
         }
 
+        // Register the sogen Vulkan ICD so a real Khronos loader in the guest discovers it via the standard
+        // HKLM\SOFTWARE\Khronos\Vulkan\Drivers key (native + WOW6432Node), no VK_DRIVER_FILES needed. Harmless
+        // if the guest runs the shim as vulkan-1.dll instead of a real loader, or if no registry hive exists.
+        try
+        {
+            const auto register_icd = [this](const char* drivers_key, const char* manifest_path) {
+                const auto key = this->registry.create_key({drivers_key});
+                constexpr uint32_t enabled = 0;
+                const auto* bytes = reinterpret_cast<const std::byte*>(&enabled);
+                this->registry.set_value(key, manifest_path, 4 /* REG_DWORD */, std::span<const std::byte>(bytes, sizeof(enabled)));
+            };
+            register_icd(R"(\Registry\Machine\Software\Khronos\Vulkan\Drivers)", R"(C:\Windows\System32\sogen_vk_icd.json)");
+            register_icd(R"(\Registry\Machine\Software\WOW6432Node\Khronos\Vulkan\Drivers)", R"(C:\Windows\SysWOW64\sogen_vk_icd.json)");
+        }
+        catch (const std::exception&)
+        {
+        }
+
         this->setup_hooks();
     }
 
