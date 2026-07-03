@@ -223,6 +223,48 @@ namespace
         return resp.resource;
     }
 
+    // Buffers (vertex/index) never call pfnCreateResource at all (RE-confirmed live), so their DDI
+    // handle -- a small runtime-internal number, live-observed to collide with resolve_resource_id's
+    // own sequential ids -- reaches pfnLock completely unregistered. pfnLock is the first (and only)
+    // call site that knows the buffer's real byte size (SizeToLock), so it's the right place to lazily
+    // register a correctly-sized/kinded resource instead of resolve_resource_id's texture-shaped
+    // fallback, which previously made every never-seen Lock() land on a wrong-kind 640x480 texture.
+    uint64_t resolve_buffer_resource_id(void* handle, uint32_t byte_size)
+    {
+        const auto raw = reinterpret_cast<uint64_t>(handle);
+        if (raw == 0)
+        {
+            return 0;
+        }
+
+        const auto it = g_resource_ids.find(raw);
+        if (it != g_resource_ids.end())
+        {
+            return it->second;
+        }
+
+        const d3d9c::create_resource_request req{
+            .kind = static_cast<uint32_t>(d3d9c::resource_kind::vertex_buffer),
+            .format = 0,
+            .width = byte_size != 0 ? byte_size : 64 * 1024, // SizeToLock==0 means "whole buffer"; no
+                                                              // real size is knowable here, so guess.
+            .height = 0,
+            .depth = 1,
+            .mip_levels = 1,
+            .usage = 0,
+            .pool = 0,
+        };
+        d3d9c::create_resource_response resp{};
+        bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
+        if (resp.hr != 0)
+        {
+            return raw;
+        }
+
+        g_resource_ids[raw] = resp.resource;
+        return resp.resource;
+    }
+
     void fill_d3d9caps(D3DCAPS9* caps)
     {
         std::memset(caps, 0, sizeof(*caps));
@@ -495,11 +537,16 @@ namespace
         {
             return S_OK;
         }
+        // Resolve through the same buffer lazy-bind Lock() uses -- the DDI vertex buffer handle is a
+        // small runtime-internal number (never registered via pfnCreateResource) that can otherwise
+        // collide with an unrelated resource id. By the time SetStreamSource runs the app has normally
+        // already Locked this buffer once (to write its data), so this is usually just a cache hit; a
+        // size of 0 here only matters on the rare truly-first-touch path, which falls back to a guess.
         d3d9c::set_stream_source_record req{.stream_number = pArgs->StreamNumber,
                                             .offset_bytes = pArgs->Offset,
                                             .stride_bytes = pArgs->Stride,
                                             .reserved = 0,
-                                            .vertex_buffer = reinterpret_cast<uint64_t>(pArgs->hVertexBuffer)};
+                                            .vertex_buffer = resolve_buffer_resource_id(pArgs->hVertexBuffer, 0)};
         bridge_call(gb::ioctl_d3d9_set_stream_source, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
@@ -521,7 +568,8 @@ namespace
         {
             return S_OK;
         }
-        d3d9c::set_indices_record req{.index_buffer = reinterpret_cast<uint64_t>(pArgs->hIndexBuffer),
+        // Same buffer lazy-bind reasoning as umd_SetStreamSource.
+        d3d9c::set_indices_record req{.index_buffer = resolve_buffer_resource_id(pArgs->hIndexBuffer, 0),
                                       .format = pArgs->Stride == 4 ? 1u : 0u,
                                       .reserved = 0};
         bridge_call(gb::ioctl_d3d9_set_indices, &req, sizeof(req), nullptr, 0);
@@ -674,7 +722,11 @@ namespace
         {
             return E_FAIL;
         }
-        const auto resource = resolve_resource_id(pArgs->hResource);
+        // Real render-target/texture handles are already registered by pfnCreateResource by the time
+        // Lock() reaches them (confirmed live), so the lazy-bind path below only ever fires for
+        // vertex/index buffers (which never call pfnCreateResource at all) -- safe to always resolve
+        // as a buffer here; already-registered handles hit the same early-return in either function.
+        const auto resource = resolve_buffer_resource_id(pArgs->hResource, pArgs->SizeToLock);
         d3d9c::lock_request req{.resource = resource,
                                 .subresource = 0,
                                 .offset = pArgs->OffsetToLock,

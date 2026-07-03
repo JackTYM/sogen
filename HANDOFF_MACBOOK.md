@@ -667,34 +667,74 @@ target+864` with a request struct, whose overall return is `>= 0` (success) yet 
 pointer is still null. That dispatch resolves (confirmed live) to the global `DdLockLH` function — a
 large DirectDraw-compatible ("LongHorn DDI") lock implementation that itself, at one specific call site,
 invokes a function pointer whose *value at that exact moment* resolves to our own `umd_Lock`'s real
-address (confirmed via objdump against our own compiled DLL). But `umd_Lock`'s own diagnostic log never
-fires in the actual (unhooked) `analyzer` CLI run — only when traced through the Python hook. This is
-either a genuine additional gate inside `DdLockLH` that only sometimes reaches that call (state-
-dependent branch not yet mapped), or an artifact of instrumentation changing execution (the hook itself
-sits on the call-site instruction and could perturb JIT/codegen timing) — not yet distinguished. Not
-resolved this session; the DevCaps fix is committed on its own merit, and this is a new, narrower,
-better-characterized follow-up (task tracker #15) than "solve vertex delivery" was at session start.
+address (confirmed via objdump against our own compiled DLL).
+
+**Ruled out the instrumentation-artifact hypothesis and found a second real bug (2026-07-03).** The
+Python-hook trace's finding needed independent confirmation without a hook potentially perturbing
+execution, so this used sogen's *other* debugger surface — the GDB stub (`analyzer -d --port 28960`) —
+connected via `lldb`'s `gdb-remote` support (no `gdb` binary on this Mac, but `lldb` speaks the same
+remote-serial protocol) and a small scripted continue-loop (`SBProcess.Continue()` in a Python command,
+since `lldb`'s own `-o` batch flags can't loop). Breakpoints set directly at real addresses (module base
++ RVA from the same idasql database used all session, cross-checked against a known-good address that
+fires 4 times as expected) confirm, with **zero** hooks anywhere near the call: `CDriverVertexBuffer::
+Lock` fires once for our real vertex buffer, its call to `DdLockLH`'s internal dispatch happens right
+after, and **`umd_Lock` genuinely does execute** — reading `pArgs->hResource` at that exact stop shows
+`9`, the same small "collision-prone" DDI handle value found live earlier this session (see the
+`resolve_resource_id` fallback described in §10.5/§10.6). Since `pfnCreateResource` never fires for
+vertex/index buffers (confirmed repeatedly), that handle was never registered — `resolve_resource_id`'s
+existing lazy-bind fallback creates a hardcoded 640×480 `D3DUSAGE_RENDERTARGET` **texture**, wrong kind
+and wrong size, for what is actually a 60-byte vertex buffer. **This, not the earlier
+instrumentation-artifact worry, is the real reason `Lock()` was returning garbage/null.**
+
+**Fixed**: added `resolve_buffer_resource_id(handle, byte_size)` — the same lazy-bind pattern, but
+correctly sized (from `D3DDDIARG_LOCK::SizeToLock`, which `pfnLock` is the one call site that actually
+knows) and correctly kinded (`resource_kind::vertex_buffer`). Wired into `umd_Lock` (the natural place —
+it's the first call site with a real size to lazy-bind from) and into `umd_SetStreamSource`/
+`umd_SetIndices` (so the same wire resource id gets reused consistently instead of the raw,
+collision-prone handle going straight onto the wire unresolved). `umd_Lock`'s call to this is safe for
+non-buffer resources too: render targets/textures are already registered via `pfnCreateResource` by the
+time `Lock()` reaches them (confirmed live), so the lazy-bind branch only ever fires for buffers in
+practice.
+
+**Still not a full fix.** Rebuilt, restaged, reran the real triangle test: no crash, no regression
+(smoke test still clean), but `vb->Lock()` still returns `S_OK` with a `NULL` data pointer, and the
+drawn pixel still reads the clear color (not the triangle). The resource-id fix is real and independently
+verifiable (the wrong-kind/wrong-size collision is objectively gone), but it wasn't the *only* problem.
+Given `umd_Lock` really does execute (GDB-confirmed) and its own logic is straightforward (bridge_call,
+check `resp->hr`, set `pArgs->pData`), the remaining gap is most likely **inside `DdLockLH` itself**: it
+builds its own local copy of the lock-args structure (`v28`/`v29`/`v30`/... in the decompile, a stack
+buffer distinct from `D3DDDIARG_LOCK`) before calling through to the driver, and the *returned* data
+pointer has to flow back out through that same local structure into `CDriverVertexBuffer::Lock`'s `v18`
+— a marshaling path that doesn't necessarily preserve `D3DDDIARG_LOCK`'s public offset-80 `pData`
+1:1. Not investigated further this session (this is the 7th+ layer of indirection reached through
+`d3d9.dll`'s internals); the concrete next step is tracing `DdLockLH`'s own local struct layout the same
+way `D3DDDIARG_LOCK`/`D3DDDIARG_PRESENT` were RE'd earlier — decompile it fully (rather than the partial
+read done here) and find where it reads back the data pointer after its internal dispatch call returns.
 
 ---
 
 ## 11. Immediate next steps (in order)
 
-1. **Solve the `DdLockLH`→`umd_Lock` non-dispatch gap (§10.6)** — the actual remaining blocker for a
-   genuine (non-diagnostic-injected) triangle, and now a much narrower question than at session start.
-   The `CVertexBuffer::Create` pool-routing bug is **fixed and verified** (the missing `DevCaps` bit
-   `0x02000000`, see §10.6). What remains: live-traced (sogen's own Python debugger API) that the real
-   dispatch chain is `CDriverVertexBuffer::Lock` → `DdLockLH` (a global DirectDraw-compatible lock
-   function) → a function pointer that, when read live, resolves to our own `umd_Lock`'s real address —
-   yet `umd_Lock` never actually executes in the unhooked `analyzer` CLI run (confirmed via a diagnostic
-   log that never fires). Next step: **use the GDB stub** (`analyzer -d --port 28960`, connect a real
-   GDB/IDA Pro session — no Python hook to potentially perturb execution) to single-step through
-   `DdLockLH` for this exact call and find the actual branch that skips the call, or confirms it's a
-   Python-hook artifact and the call really does happen (in which case the bug is downstream, inside
-   `umd_Lock` itself or the wire round-trip). This is the last blocker for milestone M1 (minus shader
-   translation, deferred to Part 4) — the render pipeline itself is already proven correct (§10.6).
-2. **(Lower priority, same root cause as #1) The `LockRect` → `pfnLock` gap (§10.5)** — same
-   `CDriverVertexBuffer`/cached-pointer mechanism; solving #1 should solve this for free. Host-side
-   diagnostics remain the proven, reliable verification method in the meantime.
+1. **Trace `DdLockLH`'s own local lock-args struct (§10.6)** — the actual remaining blocker for a
+   genuine (non-diagnostic-injected) triangle, now narrowed to one specific function. Two upstream bugs
+   are **fixed and verified** this session: the `CVertexBuffer::Create` pool-routing `DevCaps` bit
+   (`0x02000000`), and `umd_Lock`/`umd_SetStreamSource`/`umd_SetIndices`'s resource-id resolution (was
+   landing on a wrong-kind/wrong-size lazy-bound resource due to the same small-integer DDI handle
+   collision documented in §10.5; fixed via a size- and kind-aware `resolve_buffer_resource_id`).
+   GDB-stub-confirmed (real breakpoints, no Python hook) that `umd_Lock` now genuinely executes for our
+   real vertex buffer with the correct resolved resource id — yet the app-visible `Lock()` still returns
+   `NULL`. The dispatch path is `CDriverVertexBuffer::Lock` → global `DdLockLH` → (our) `umd_Lock`;
+   `DdLockLH` builds its own local stack copy of the lock-args (`v28`/`v29`/`v30`/... in the partial
+   decompile read so far) before/after the driver call, not necessarily 1:1 with `D3DDDIARG_LOCK`'s
+   public offset-80 `pData`. Next step: fully decompile `DdLockLH` (only partially read this session)
+   and find exactly where/how it reads the data pointer back out after its internal dispatch returns —
+   same RE method used successfully for `D3DDDIARG_LOCK`/`PRESENT` earlier, now pointed at this function.
+   This is the last blocker for milestone M1 (minus shader translation, deferred to Part 4) — the render
+   pipeline itself is already proven correct (§10.6).
+2. **(Lower priority, likely related to #1) The render-target `LockRect` → `pfnLock` gap (§10.5)** —
+   a different C++ class (`CSurface`, not `CDriverVertexBuffer`) but plausibly funnels through the same
+   `DdLockLH` dispatcher; solving #1 may solve this for free, or may not (not yet traced for surfaces
+   specifically). Host-side diagnostics remain the proven, reliable verification method in the meantime.
 3. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
    (host-side pixel readback sidesteps needing real pixels on screen), but needed before a literal
    "window shows a color" milestone. `D3DDDIARG_PRESENT`'s `hSrcResource`(offset 0) is RE-verified;
