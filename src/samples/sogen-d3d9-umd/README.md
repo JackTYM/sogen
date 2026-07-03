@@ -10,7 +10,8 @@ built with mingw-w64 and staged into the emulated filesystem.
 ```bash
 brew install mingw-w64   # x86_64-w64-mingw32-g++, i686-w64-mingw32-g++
 
-x86_64-w64-mingw32-g++ -shared -O2 -std=c++20 sogen_d3d9_umd.cpp sogen_d3d9_umd.def \
+x86_64-w64-mingw32-g++ -shared -O2 -std=c++20 -I../../d3d9-command-protocol -I../../gpu-bridge-protocol \
+    sogen_d3d9_umd.cpp sogen_d3d9_umd.def \
     -static -static-libgcc -static-libstdc++ -o sogen_d3d9um-x64.dll
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_spike_test.cpp \

@@ -535,7 +535,9 @@ namespace
             {
                 length = ((token >> 16) & 0x7FFF) + 1;
             }
-            else if (version >= 0xFFFE0200) // SM2.0+: length is bits [27:24] of the token
+            // Mask off the VS/PS sentinel (0xFFFE0000 vs 0xFFFF0000) before comparing major.minor,
+            // otherwise every PS version (0xFFFF....) reads as numerically >= every VS 2.0+ threshold.
+            else if ((version & 0x0000FFFF) >= 0x0200) // SM2.0+: length is bits [27:24] of the token
             {
                 length = ((token >> 24) & 0xF) + 1;
             }
@@ -561,6 +563,8 @@ namespace
                         length = 3;
                     else if (opcode == 17)
                         length = 4;
+                    else if (opcode == 18) // D3DSIO_LRP: dest + 3 src
+                        length = 5;
                     else if (opcode == 19)
                         length = 3;
                     else if (opcode >= 20 && opcode <= 24)
@@ -574,12 +578,12 @@ namespace
                         length = 1;
                     else if (opcode == 1)
                         length = 3;
-                    else if (opcode == 2 || opcode == 5)
+                    else if (opcode == 2 || opcode == 3 || opcode == 5) // ADD/SUB/MUL: dest + 2 src
                         length = 4;
                     else if (opcode == 4)
                         length = 5;
                     else
-                        return 0; // opcode == 3: unused/reserved
+                        return 0;
                 }
                 else
                     length = 3; // opcode 6 or 7
