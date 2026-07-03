@@ -317,27 +317,39 @@ only survived under the migration leftover path `~/old-claude/.claude/plans/`).
   the wire `resource_id`) since `pData` must stay valid until the matching `Unlock` — see
   `g_locked_buffers` in `sogen_d3d9_umd.cpp`.
 
-**⚠️ Major open question, found 2026-07-02 while chasing `CreateResource` — read before doing more DDI
-work:** tracing `CD3DDDIDX9::CreateVertexShaderDecl` → `CD3DDDIDX6::GetHalBufferPointer` showed the
-runtime does **not** call `pfnCreateVertexShaderDecl`/`pfnCreateVertexShaderFunc` at all for this
-codepath. Instead it writes a `D3DDP2OP_CREATEVERTEXSHADERDECL`-tagged record (`{DWORD Handle (assigned
-locally by the runtime, not the driver!); DWORD Count; D3DVERTEXELEMENT9 Elements[Count];}`) into an
-internal "HAL buffer" — the classic **D3DHAL_DP2COMMAND token-stream format**, the same mechanism WDDM
-D3D9 drivers have used since the XP-era DDI. `CD3DDDIDX6::SetRenderState`'s own "fast path" (traced
-earlier, before this was understood) does the same thing — writes `{tag=8, count=1, state, value}` into
-a similar internal buffer, **not** a direct `pfnSetRenderState(HANDLE, ARG*)` call as I originally
-assumed. Both eventually reach `CD3DDDIDX6::FlushStates` (found via its own vtable: `??_7CD3DDDIDX6@@6B@`
-+ 104 bytes = slot 13), which recurses through at least one more internal virtual call (slot 18, offset
-144) before reaching whatever actually submits to the driver — **not traced to the bottom**; that's the
-next investigation's first task (see §11.1). **Practical implication:** the 20 already-wired
-`D3DDDI_DEVICEFUNCS` marshaling functions (§10 above) may be structurally correct but might rarely or
-never fire under real usage, if this runtime's primary path for *all* state+draw is the DP2 token stream
-submitted via a single bulk entry point (candidates: `pfnDrawPrimitive2`/`pfnDrawIndexedPrimitive2`,
-which historically carry inline DP2 batches; not yet checked). Real D3D9 UMDs commonly support **both**
-mechanisms (individual DDI calls *and* DP2 batching, chosen by the runtime based on capability flags),
-so the 20 functions aren't necessarily dead work — but this must be resolved empirically (via a real
-`d3d9-triangle-test`, watching whether `[d3d9-host]` activity appears) before assuming Part 3 can just
-consume `d3d9_host`'s existing state-tracking maps.
+**✅ RESOLVED 2026-07-02 — the D3DHAL_DP2COMMAND token-stream question.** Full trace:
+`CD3DDDIDX9::CreateVertexShaderDecl`/`CD3DDDIDX6::SetRenderState`'s "fast path" write tagged records
+(`D3DDP2OP_*`-style: `{tag; ...payload}`) into an internal per-device "HAL buffer" via
+`CD3DDDIDX6::GetHalBufferPointer` / `CBatchFilterI::LHBatchXxx`, **not** a synchronous `pfnXxx(HANDLE,
+ARG*)` call — confirmed for `LHBatchDrawPrimitive2` (writes `{tag=28, ...12 bytes}`) and
+`CreateVertexShaderDecl` (writes a `D3DDP2OP_CREATEVERTEXSHADERDECL` record with a **locally-assigned**
+handle via `CHandleFactory::CreateNewHandle` — the driver never generates this handle). The buffer fills
+up on the app thread, then `CBatchFilterI::LHBatchXxx` calls `SubmitBatchToWorkerThread` /
+`FlushBatchWorkerThread`, which wake a **background worker thread** (`CBatchFilterI::LHBatchWorkerThread`)
+that calls `CBatchFilterI::ProcessBatch(this, pBatchBuffer, isWorkerThread)`.
+
+**`ProcessBatch` is the answer.** It's a big tag-dispatch loop (`switch` on the 1-byte/DWORD tag at the
+head of each record) that, for every tag, calls `(*((pfnptr**)this + N))(*((QWORD*)this + 14),
+recordPayloadPtr, ...)` — i.e. a function pointer read from a **fixed numeric slot embedded in the
+`CBatchFilterI` object itself** (a runtime-side cached copy of the driver's `D3DDDI_DEVICEFUNCS` table,
+populated once at `CreateDevice` time), called with `(hDevice, pArgs)` — **the exact same DDI calling
+convention as every other `pfnXxx` slot.** Confirmed concretely for two tags:
+- **tag 28 (`DrawPrimitive2`)** → object-slot **32**, `(hDevice, pArgs)`, 12-byte payload — matches
+  `LHBatchDrawPrimitive2`'s write exactly (16-byte record = 4-byte tag + 12-byte payload).
+- **tag 29 (`CreateVertexShaderDecl`)** → object-slot **26**, `(hDevice, pArgs)`.
+
+**Conclusion: DP2 batching is a d3d9.dll-internal fast-path optimization (defer + coalesce state/draw
+calls onto a worker thread to reduce per-call dispatch overhead), not an alternate wire protocol our UMD
+needs to speak.** Every DP2-tagged record still bottoms out in a call to the *same*
+`D3DDDI_DEVICEFUNCS` pfn slot a direct call would have used — our UMD's `pfnXxx` exports are still the
+complete and correct API surface to implement. The only real implications for us: (1) our `pfnXxx`
+exports may be invoked from a **different thread** than the app's main thread (the batch worker thread)
+— existing wire marshaling code has no per-thread state so this is fine as-is; (2) for
+`pfnCreateVertexShaderDecl`/`pfnCreateVertexShaderFunc`, the **HANDLE is pre-assigned by the runtime**
+before the driver is called (via `CHandleFactory::CreateNewHandle`), not returned by the driver — our
+`umd_CreateVertexShaderDecl`-style marshaling must treat the handle as an *input* to echo/accept, not an
+output to synthesize, when this gets wired for real. The 20 already-wired `D3DDDI_DEVICEFUNCS`
+marshaling functions (§10 above) are the right target; no DP2 token parser is needed on our side.
 
 **Deliberately deferred (device_stub, not real marshaling yet) — and why:**
 - `pfnCreateResource(2)`, `pfnOpenResource`, `pfnBlt`, `pfnColorFill`: **empirically, vertex/index buffer
@@ -351,12 +363,12 @@ consume `d3d9_host`'s existing state-tracking maps.
   WDK knowledge; find its real call site the way Lock/Unlock's was found once a texture-creation forcing
   function exists.
 - `pfnCreateVertexShaderFunc`, `pfnCreatePixelShader`, `pfnCreateVertexShaderDecl`,
-  `pfnSetVertexShaderFunc`(44, currently wired but likely dead per the DP2 finding above),
-  `pfnSetVertexShaderDecl`(47, same caveat), `pfnDeleteVertexShaderFunc`/`DeletePixelShader`: **do not
-  go through `D3DDDI_DEVICEFUNCS` at all** for this runtime — see the DP2 finding above. Drafted structs
-  in `d3d9_ddi.hpp` (`D3DDDIARG_CREATEVERTEXSHADERFUNC` etc.) are likely moot; the real mechanism needs
-  the DP2 investigation finished first, then a differently-shaped implementation (writing DP2 tokens
-  into a buffer, not calling a `pfnXxx` slot).
+  `pfnSetVertexShaderFunc`(44), `pfnSetVertexShaderDecl`(47), `pfnDeleteVertexShaderFunc`/
+  `DeletePixelShader`: **do still go through `D3DDDI_DEVICEFUNCS`** (per the DP2 resolution above) — just
+  invoked asynchronously from the batch worker thread instead of synchronously at the D3D9 API call site,
+  and for `CreateVertexShaderDecl`/`CreateVertexShaderFunc` the HANDLE arrives as an **input** (assigned
+  by `CHandleFactory`), not an output. The drafted structs in `d3d9_ddi.hpp` are still the right shape to
+  implement against; not yet RE-verified byte-for-byte the way `RENDERSTATE`/`LOCK`/`UNLOCK` were.
 - `pfnPresent`: **size-confirmed only** (`D3DDDIARG_PRESENT` is exactly 44 bytes, confirmed via
   `CBatchFilterI::GetBatchBufferPointer<_D3DDDIARG_PRESENT>`'s batch allocation size) — an initial
   field-layout guess (`hSrcResource`+`hDstResource`+`SrcRect`+`DstPoint`+`Flags`) didn't even satisfy the
@@ -384,36 +396,27 @@ consume `d3d9_host`'s existing state-tracking maps.
 
 ## 11. Immediate next steps (in order)
 
-1. **§10's DP2 token-stream question — resolve this FIRST, before writing more marshaling code.**
-   Trace `CD3DDDIDX6::FlushStates`'s recursive call at its own vtable slot 18 (offset 144) to find where
-   the internal "HAL buffer" actually gets submitted to the driver. Prime suspects:
-   `pfnDrawPrimitive2`/`pfnDrawIndexedPrimitive2` (check these FIRST — historically the classic DP2
-   batch-submission DDI entries) or a D3DKMT-level command-buffer render call. Use the same
-   `??_7CD3DDDIDX6@@6B@` vtable-address + `bytes.qword` lookup method that found `FlushStates` itself
-   (§7 has the exact recipe). **Why this blocks everything else:** if state+shader-creation+draws all
-   funnel through one DP2 batch call instead of the 20 individual slots already wired, a
-   `d3d9-triangle-test` would silently render nothing (no error, just an empty/no-op frame) — better to
-   know which mechanism is real before spending more time on either path.
+1. **`pfnCreateResource` and `pfnPresent` are the remaining resource/frame-delivery gaps.** For
+   `CreateResource`, first determine (per §10's finding) whether buffers even need it, or whether
+   textures are the only caller — a texture-creation test would be the forcing function to find its real
+   call site the way Lock/Unlock's was found. For `Present`, find a forcing function (gate 3's own
+   `d3d9-spike-test` never presents) — a real `d3d9-triangle-test` that calls `Present()` would pin its
+   field layout the same way Lock/Unlock's was RE-verified.
 2. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
    fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
    `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:
    `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Not required for M1.
-3. **`pfnLock`/`pfnUnlock` are done** (§10) — `pfnCreateResource` and `pfnPresent` are the remaining
-   resource/frame-delivery gaps. For `CreateResource`, first determine (per §10's finding) whether
-   buffers even need it, or whether textures are the only caller — a texture-creation test would be the
-   forcing function to find its real call site the way Lock/Unlock's was found. For `Present`, once #1
-   is resolved, that same investigation likely also reveals Present's real submission path.
-4. **Part 3 — the actual pipeline builder** (`d3d9_host`'s `execute_recorded` currently no-ops
+3. **Part 3 — the actual pipeline builder** (`d3d9_host`'s `execute_recorded` currently no-ops
    `set_viewport`/`clear`/`draw_*`): build a pipeline key from the tracked state, call
    `vulkan_host::create_graphics_pipeline` with `render_pass=0` (dynamic rendering — the plan explicitly
    says don't fix `vulkan_host`'s 1-color/1-depth render-pass gap, use dynamic rendering instead), and
-   actually execute draws. **Depends on #1** — if DP2 batching is the real mechanism, Part 3 needs a DP2
-   token parser feeding the same state-tracking structures, not just `execute_recorded`'s current
-   opcode-per-call model.
-5. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
+   actually execute draws. Now unblocked — §10's DP2 resolution confirms `execute_recorded`'s existing
+   opcode-per-call model (driven by our own wire protocol, not the D3D9 runtime's internal DP2 buffer) is
+   the right shape; no token-stream parser needed.
+4. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
    pipelines have real shader modules instead of a placeholder). Milestone M1 = programmable SM2/3
    triangle, pixel-diffed vs the DXVK oracle (`root_vkspike`).
-6. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
+5. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
    --no-edit -S' <base>`); verify with `git log --show-signature`.
 
 ---
