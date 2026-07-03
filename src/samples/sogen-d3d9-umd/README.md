@@ -70,23 +70,18 @@ and `CreatePixelShader hr=0x00000000`.
   `GuardBand{Left,Top,Right,Bottom}` to each satisfy `abs(value) >= 8192.0`. `fill_d3d9caps` now
   sets all of these, and `CreateDevice`/`GetDeviceCaps`/`GetCaps` succeed with real SM2.0 caps
   reported.
-- With the HAL-enable gate satisfied, `CreateDevice` and the fixed-function (`SetFVF`, no explicit
-  shader) draw path in `d3d9_triangle_test.cpp` still succeed end-to-end (`Present` returns
-  `S_OK` both times). `DrawPrimitive` itself now returns `E_OUTOFMEMORY` for the FVF-only draw
-  where it previously returned `S_OK`: live tracing shows d3d9.dll flushing pending device state
-  and then, now that VS2.0 is declared, calling one more still-unimplemented device-func slot
-  (currently `device_stub`) before `pfnDrawPrimitive` is ever reached — most likely lazily
-  creating/caching an internal fixed-function-emulation vertex shader or pipeline-state object now
-  that the driver claims real shader support. This is expected and was not a regression in that
-  task's scope (`CreateDevice`/`GetDeviceCaps`/`GetCaps`/`Present` all still succeed, and the smoke
-  test remains all-`Success`).
-- `d3d9_shader_test.cpp` (real `D3DCompile()`-produced `vs_2_0`/`ps_2_0` shaders, wired via the
-  DDI shader-creation slots added for the programmable pipeline) hits the exact same
-  `DrawPrimitive` → `E_OUTOFMEMORY` behavior as `d3d9_triangle_test.cpp`'s fixed-function path
-  above — `D3DCompile`, `CreateVertexShader`, and `CreatePixelShader` all return `hr=0x00000000`,
-  but `DrawPrimitive` never reaches `pfnDrawPrimitive` successfully. This confirms the gate is in
-  `d3d9.dll`'s own state-flush path (unrelated to shader translation or the DDI shader-creation
-  slots themselves, since shader creation succeeds either way) and is still open; tracked as
-  follow-up work in the vkd3d-shader de-risk plan.
+- With the HAL-enable gate satisfied, declaring VS2.0+ made `DrawPrimitive` start returning
+  `E_OUTOFMEMORY` for every draw, fixed-function or shader-bound alike (`CD3DBase::DrawPrimitive`'s
+  shared state-flush block calls into a per-draw shader-cache resolution path regardless of which
+  path drew). Root-caused to two DDI calling-convention bugs: `pfnCreateVertexShaderFunc`/
+  `pfnCreatePixelShader` are struct-pointer calls (`D3DDDIARG_CREATESHADERFUNC*`, with the
+  driver-written `ShaderHandle` at offset 8, not offset 0 as first assumed), and
+  `pfnSetPixelShader`/`pfnSetVertexShaderFunc` are direct-value `HANDLE` calls, not struct-pointer.
+  Both are now fixed; see `HANDOFF_MACBOOK.md` §15 for the full RE trace.
+- With both fixes in place, `d3d9_triangle_test.cpp` (fixed-function) and `d3d9_shader_test.cpp`
+  (programmable, real `D3DCompile()`-produced `vs_2_0`/`ps_2_0` shaders) both get
+  `DrawPrimitive hr=0x00000000` and `Present hr=0x00000000`. The shader test's rendered pixel was
+  verified against the hand-computed barycentric blend of the triangle's vertex colors, confirming
+  real SM2 shader translation end to end.
 - x64-only bring-up; the x86/WoW64 UMD needs typed `__stdcall` thunks per device-func slot instead
   of the generic caller-cleanup stub.
