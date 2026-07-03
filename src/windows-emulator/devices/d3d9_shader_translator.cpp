@@ -1,9 +1,6 @@
 #include "d3d9_shader_translator.hpp"
 
-extern "C"
-{
 #include <vkd3d_shader.h>
-}
 
 #include <cstring>
 
@@ -11,6 +8,8 @@ namespace sogen
 {
     namespace
     {
+        // out_output_or_input is a shallow copy aliasing info's heap-owned element array; info must stay
+        // alive (not be freed via vkd3d_shader_free_scan_signature_info) until the signature is done being used.
         bool scan_signature(const void* tokens, const size_t token_size_bytes, vkd3d_shader_scan_signature_info& info,
                             vkd3d_shader_signature& out_output_or_input, const bool want_output)
         {
@@ -105,7 +104,7 @@ namespace sogen
             return false;
         }
 
-        std::vector<vkd3d_shader_varying_map> varying_map(16);
+        std::vector<vkd3d_shader_varying_map> varying_map(ps_input.element_count);
         unsigned int varying_count = 0;
         vkd3d_shader_build_varying_map(&vs_output, &ps_input, &varying_count, varying_map.data());
         varying_map.resize(varying_count);
