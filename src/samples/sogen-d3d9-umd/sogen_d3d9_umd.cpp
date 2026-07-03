@@ -505,40 +505,125 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_CreateVertexShaderFunc(HANDLE /*hDevice*/, D3DDDIARG_CREATEVERTEXSHADERFUNC* pArgs)
+    // RE-verified live (real d3d9.dll, CD3DDDIDX10TL::CreateVertexShaderFunc /
+    // CD3DDDIDX10::CreatePixelShader): pfnCreateVertexShaderFunc/pfnCreatePixelShader are NOT
+    // `(HANDLE, D3DDDIARG_CREATE*SHADERFUNC*)` -- same direct-value-argument convention as
+    // pfnSetTexture. The real call is `(HANDLE hDevice, D3DDDI_HANDLE* pShaderHandle, CONST UINT*
+    // pFunction)`: RCX=hDevice, RDX=address of a runtime-owned local pre-populated with a
+    // CHandleFactory-assigned handle (in/out), R8=the raw SM1-3 token stream with no length
+    // argument at all. Since the DDI gives no length, the driver must parse the token stream itself
+    // to find the terminating D3DSIO_END (0x0000FFFF) token, exactly the way d3d9.dll's own
+    // CVertexShaderFunc::Init/GetInstructionLength does; the algorithm below is transcribed from
+    // GetInstructionLength's real decompiled table (idasql, address 0x180027D67 in the staged
+    // d3d9.dll) so it agrees with the runtime's own SM1.x fixed-length opcode table and SM2.0+'s
+    // bits[27:24] length field, rather than guessing.
+    UINT measure_shader_token_length_dwords(const uint32_t* tokens)
     {
-        if (pArgs == nullptr)
+        const uint32_t version = tokens[0];
+        size_t idx = 1;
+        for (;;)
+        {
+            const uint32_t token = tokens[idx];
+            if (token == 0x0000FFFF) // D3DSIO_END
+            {
+                return static_cast<UINT>(idx + 1);
+            }
+
+            const uint32_t opcode = token & 0xFFFF;
+            uint32_t length = 0;
+            if (opcode == 0xFFFE) // D3DSIO_COMMENT
+            {
+                length = ((token >> 16) & 0x7FFF) + 1;
+            }
+            else if (version >= 0xFFFE0200) // SM2.0+: length is bits [27:24] of the token
+            {
+                length = ((token >> 24) & 0xF) + 1;
+            }
+            else
+            {
+                // SM1.x fixed per-opcode length table (no generic length field pre-SM2.0).
+                if (opcode > 0x1F)
+                {
+                    if (opcode == 0x4E || opcode == 0x4F)
+                        length = 3;
+                    else if (opcode == 81)
+                        length = 6;
+                    else
+                        return 0; // unknown opcode for this shader version
+                }
+                else if (opcode == 31)
+                    length = 3;
+                else if (opcode > 7)
+                {
+                    if (opcode <= 13)
+                        length = 4;
+                    else if (opcode <= 16)
+                        length = 3;
+                    else if (opcode == 17)
+                        length = 4;
+                    else if (opcode == 19)
+                        length = 3;
+                    else if (opcode >= 20 && opcode <= 24)
+                        length = 4;
+                    else
+                        return 0;
+                }
+                else if (opcode < 6)
+                {
+                    if (opcode == 0)
+                        length = 1;
+                    else if (opcode == 1)
+                        length = 3;
+                    else if (opcode == 2 || opcode == 5)
+                        length = 4;
+                    else if (opcode == 4)
+                        length = 5;
+                    else
+                        return 0; // opcode == 3: unused/reserved
+                }
+                else
+                    length = 3; // opcode 6 or 7
+            }
+
+            if (length == 0)
+            {
+                return 0;
+            }
+            idx += length;
+        }
+    }
+
+    HRESULT create_shader_common(const uint32_t* pFunction, uint32_t opcode, HANDLE* pShaderHandle)
+    {
+        if (pFunction == nullptr)
         {
             return E_INVALIDARG;
         }
-        const UINT token_size_bytes = pArgs->Values[0];
-        const auto* tokens = reinterpret_cast<const uint8_t*>(pArgs + 1);
-
-        // TEMPORARY live-verification diagnostic (Task 4, vkd3d-shader de-risk plan) -- confirms the
-        // real runtime's D3DDDIARG_CREATEVERTEXSHADERFUNC field layout against captured bytes. Remove
-        // once the layout is confirmed.
-        log_line("[sogen-d3d9-umd][DIAG] CreateVertexShaderFunc pArgs=%p Values[0]=%u\n", static_cast<void*>(pArgs),
-                 token_size_bytes);
+        const UINT token_count = measure_shader_token_length_dwords(pFunction);
+        if (token_count == 0)
         {
-            char hex[3 * 32 + 1] = {};
-            const UINT dump_len = token_size_bytes < 32 ? token_size_bytes : 32;
-            for (UINT i = 0; i < dump_len; ++i)
-            {
-                snprintf(hex + i * 3, 4, "%02X ", tokens[i]);
-            }
-            log_line("[sogen-d3d9-umd][DIAG] CreateVertexShaderFunc tokens[0..%u]=%s\n", dump_len, hex);
+            return E_INVALIDARG;
         }
+        const UINT token_size_bytes = token_count * static_cast<UINT>(sizeof(uint32_t));
 
         std::vector<uint8_t> buf(sizeof(d3d9c::create_shader_request) + token_size_bytes);
         auto* req = reinterpret_cast<d3d9c::create_shader_request*>(buf.data());
         req->token_size_bytes = token_size_bytes;
         req->reserved = 0;
-        std::memcpy(buf.data() + sizeof(*req), tokens, token_size_bytes);
+        std::memcpy(buf.data() + sizeof(*req), pFunction, token_size_bytes);
 
         d3d9c::create_shader_response resp{};
-        bridge_call(gb::ioctl_d3d9_create_vertex_shader, buf.data(), static_cast<DWORD>(buf.size()), &resp, sizeof(resp));
-        pArgs->ShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.shader));
+        bridge_call(opcode, buf.data(), static_cast<DWORD>(buf.size()), &resp, sizeof(resp));
+        if (pShaderHandle != nullptr)
+        {
+            *pShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.shader));
+        }
         return resp.hr;
+    }
+
+    HRESULT APIENTRY umd_CreateVertexShaderFunc(HANDLE /*hDevice*/, HANDLE* pShaderHandle, CONST UINT* pFunction)
+    {
+        return create_shader_common(pFunction, gb::ioctl_d3d9_create_vertex_shader, pShaderHandle);
     }
 
     HRESULT APIENTRY umd_DeleteVertexShaderFunc(HANDLE /*hDevice*/, CONST D3DDDIARG_DELETEVERTEXSHADERFUNC* /*pArgs*/)
@@ -548,40 +633,9 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_CreatePixelShader(HANDLE /*hDevice*/, D3DDDIARG_CREATEPIXELSHADERFUNC* pArgs)
+    HRESULT APIENTRY umd_CreatePixelShader(HANDLE /*hDevice*/, HANDLE* pShaderHandle, CONST UINT* pFunction)
     {
-        if (pArgs == nullptr)
-        {
-            return E_INVALIDARG;
-        }
-        const UINT token_size_bytes = pArgs->CodeSize;
-        const auto* tokens = reinterpret_cast<const uint8_t*>(pArgs + 1);
-
-        // TEMPORARY live-verification diagnostic (Task 4, vkd3d-shader de-risk plan) -- confirms the
-        // real runtime's D3DDDIARG_CREATEPIXELSHADERFUNC field layout against captured bytes. Remove
-        // once the layout is confirmed.
-        log_line("[sogen-d3d9-umd][DIAG] CreatePixelShader pArgs=%p CodeSize=%u\n", static_cast<void*>(pArgs),
-                 token_size_bytes);
-        {
-            char hex[3 * 32 + 1] = {};
-            const UINT dump_len = token_size_bytes < 32 ? token_size_bytes : 32;
-            for (UINT i = 0; i < dump_len; ++i)
-            {
-                snprintf(hex + i * 3, 4, "%02X ", tokens[i]);
-            }
-            log_line("[sogen-d3d9-umd][DIAG] CreatePixelShader tokens[0..%u]=%s\n", dump_len, hex);
-        }
-
-        std::vector<uint8_t> buf(sizeof(d3d9c::create_shader_request) + token_size_bytes);
-        auto* req = reinterpret_cast<d3d9c::create_shader_request*>(buf.data());
-        req->token_size_bytes = token_size_bytes;
-        req->reserved = 0;
-        std::memcpy(buf.data() + sizeof(*req), tokens, token_size_bytes);
-
-        d3d9c::create_shader_response resp{};
-        bridge_call(gb::ioctl_d3d9_create_pixel_shader, buf.data(), static_cast<DWORD>(buf.size()), &resp, sizeof(resp));
-        pArgs->ShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.shader));
-        return resp.hr;
+        return create_shader_common(pFunction, gb::ioctl_d3d9_create_pixel_shader, pShaderHandle);
     }
 
     HRESULT APIENTRY umd_DeletePixelShader(HANDLE /*hDevice*/, CONST D3DDDIARG_DELETEPIXELSHADERFUNC* /*pArgs*/)

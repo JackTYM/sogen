@@ -358,17 +358,11 @@ typedef struct _D3DDDIRECT
     LONG bottom;
 } D3DDDIRECT;
 
-typedef struct _D3DDDIARG_CREATEVERTEXSHADERFUNC
-{
-    HANDLE ShaderHandle; // out
-    UINT Values[1];      // in: [0] = code size in bytes; the token DWORDs follow the struct in memory
-} D3DDDIARG_CREATEVERTEXSHADERFUNC;
-
-typedef struct _D3DDDIARG_CREATEPIXELSHADERFUNC
-{
-    HANDLE ShaderHandle; // out
-    UINT CodeSize;       // in: bytes; the token DWORDs follow the struct in memory
-} D3DDDIARG_CREATEPIXELSHADERFUNC;
+// pfnCreateVertexShaderFunc/pfnCreatePixelShader are NOT struct-pointer DDI calls (RE-verified live
+// against the real d3d9.dll's CD3DDDIDX10TL::CreateVertexShaderFunc / CD3DDDIDX10::CreatePixelShader):
+// the real signature is `(HANDLE hDevice, D3DDDI_HANDLE* pShaderHandle, CONST UINT* pFunction)`, the
+// same direct-value-argument convention as pfnSetTexture -- see umd_CreateVertexShaderFunc/
+// umd_CreatePixelShader in sogen_d3d9_umd.cpp.
 
 typedef struct _D3DDDIARG_SETPIXELSHADERFUNC
 {
