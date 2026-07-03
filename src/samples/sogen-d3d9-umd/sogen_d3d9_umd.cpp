@@ -142,19 +142,51 @@ namespace
         return S_OK;
     }
 
-    // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): pfnCreateResource's own args (D3DDDIARG_CREATERESOURCE)
-    // don't reliably reveal the runtime's resource identity by byte offset -- two independent attempts
-    // at reading a fixed offset each produced a value that looked plausible in isolation but didn't
-    // match what the SAME resource's handle turned out to be at Present/Lock time in a live run (the
-    // apparent match in a static hex dump didn't hold once a config detail, e.g.
-    // D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, changed). So pfnCreateResource itself is left on the generic
-    // no-op device_stub, and instead every call site that RECEIVES a resource handle in ITS OWN,
-    // reliably-typed args struct (SetRenderTarget's hRenderTarget, Lock's hResource, ...) lazily binds
-    // real GPU backing to that exact handle value the first time it's seen, via resolve_resource_id().
-    // This sidesteps needing to know CreateResource's real field layout at all for the render-target
-    // case; width/height/format are still a fixed guess (see resolve_resource_id's body) until a
-    // texture-creation forcing function can pin the real struct.
+    // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): D3DDDIARG_CREATERESOURCE's real field layout (width/
+    // height/usage/pool offsets) is not yet RE-verified -- only offset 0 (Format) and offset 48 (the
+    // output hResource field) are confirmed. Every call is therefore treated as a render-target 2D
+    // texture at the test's known backbuffer size (640x480) until the real struct is pinned; fine for
+    // the current fixed-size-window milestone, wrong in general.
+    //
+    // Offset 48 for hResource was found by writing a distinct, identifiable sentinel to every 8-byte-
+    // aligned offset (0..80) and observing which one came back unchanged in the very next
+    // SetRenderTarget call (0xAAAA000000000030, i.e. offset 0x30 = 48) -- direct proof, not inference
+    // from a static hex dump (two earlier single-offset guesses, 40 and 44, were each individually
+    // plausible-looking but empirically wrong).
+    //
+    // resolve_resource_id() also keeps a lazy-bind-at-first-use fallback (for any resource handle that
+    // somehow reaches SetRenderTarget/Lock without going through CreateResource) -- harmless dead code
+    // in the common case now that CreateResource populates the map directly.
     std::unordered_map<uint64_t, uint64_t> g_resource_ids;
+
+    HRESULT APIENTRY umd_CreateResource(HANDLE /*hDevice*/, void* pArgs)
+    {
+        auto* bytes = reinterpret_cast<unsigned char*>(pArgs);
+        uint32_t format = 0;
+        std::memcpy(&format, bytes, sizeof(format));
+
+        const d3d9c::create_resource_request req{
+            .kind = static_cast<uint32_t>(d3d9c::resource_kind::texture_2d),
+            .format = format,
+            .width = 640,
+            .height = 480,
+            .depth = 1,
+            .mip_levels = 1,
+            .usage = 0x1, // D3DUSAGE_RENDERTARGET (public, ABI-stable D3D9 constant, not RE'd)
+            .pool = 0,
+        };
+        d3d9c::create_resource_response resp{};
+        bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
+        if (resp.hr == 0)
+        {
+            // The runtime echoes this back unchanged in later calls (SetRenderTarget's hRenderTarget,
+            // Lock's hResource, ...), so no separate g_resource_ids entry is needed: resolve_resource_id
+            // already returns an unrecognized handle unchanged, which is correct here since the handle
+            // IS the wire resource_id once this write lands.
+            std::memcpy(bytes + 48, &resp.resource, sizeof(resp.resource));
+        }
+        return S_OK;
+    }
 
     uint64_t resolve_resource_id(void* handle)
     {
@@ -640,6 +672,7 @@ namespace
             slots[28] = reinterpret_cast<void*>(&umd_SetZRange);              // pfnSetZRange
             slots[35] = reinterpret_cast<void*>(&umd_Lock);                    // pfnLock
             slots[36] = reinterpret_cast<void*>(&umd_Unlock);                  // pfnUnlock
+            slots[37] = reinterpret_cast<void*>(&umd_CreateResource);          // pfnCreateResource
             slots[41] = reinterpret_cast<void*>(&umd_Flush);                  // pfnFlush
             slots[44] = reinterpret_cast<void*>(&umd_SetVertexShaderFunc);    // pfnSetVertexShaderFunc
             slots[47] = reinterpret_cast<void*>(&umd_SetVertexShaderDecl);    // pfnSetVertexShaderDecl

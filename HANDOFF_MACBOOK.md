@@ -447,49 +447,60 @@ clearing to `D3DCOLOR_XRGB(64,128,255)` produces `backing[0..3] == [FF 80 40 FF]
 correct, confirmed via two independent resource paths (the implicit backbuffer and an explicit
 `CreateRenderTarget` surface).
 
-**Resource identity: pfnCreateResource's args don't reliably reveal the runtime's resource identity**
-— two independent attempts at reading a fixed byte offset (40, then 44) both produced a value that
-looked plausible in a static hex dump but didn't hold up in a live run once a config detail changed
-(`D3DPRESENTFLAG_LOCKABLE_BACKBUFFER`). `pfnCreateResource` is therefore left on the generic
-`device_stub` (does nothing) — instead, **every call site that receives a resource handle in its own,
-reliably-typed args struct now lazily binds real GPU backing to that exact handle value the first time
-it's seen**, via `resolve_resource_id()` (`sogen_d3d9_umd.cpp`), scoped to `SetRenderTarget`/
-`SetDepthStencil`/`Lock`/`Unlock` (NOT `SetTexture`/`SetStreamSource`/`SetIndices`, which reference
-buffers/textures that don't go through `pfnCreateResource` at all per §10's finding — routing them
-through the same lazy-bind would wrongly treat buffer handles as render targets). Width/height/format
-are a fixed guess (640×480, `D3DFMT_X8R8G8B8`) inside `resolve_resource_id`, matching the current
-test's known dimensions — wrong in general until `D3DDDIARG_CREATERESOURCE`'s real layout is found.
+**✅ `pfnCreateResource`'s output field is RE-verified: offset 48.** Found via a sentinel-scan (not
+guessing): write a distinct, identifiable value to every 8-byte-aligned offset in the args, then check
+which one comes back unchanged in the very next `SetRenderTarget` call —
+`hRenderTarget=0xAAAA000000000030` (offset `0x30` = 48) landed exactly. This directly refuted two
+earlier single-offset guesses (40, then 44) that each looked plausible in a static hex dump but didn't
+hold up live once `D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` was added — a good example of why a sentinel
+scan beats guessing one offset at a time. `umd_CreateResource` (`sogen_d3d9_umd.cpp`) now writes the
+wire `resource_id` to offset 48 for real; the runtime echoes it back unchanged in
+`SetRenderTarget`/`Lock`/`Present`, so `resolve_resource_id()`'s lazy-bind-at-first-use logic is now
+mostly dead-code fallback (kept as a defensive safety net). Width/height/format are still a fixed guess
+(640×480, `D3DFMT_X8R8G8B8`) — wrong in general until the rest of `D3DDDIARG_CREATERESOURCE`'s layout
+is found (the class-hierarchy/xref search that worked for `RENDERSTATE`/`LOCK`/`CLEAR`/`PRESENT`
+doesn't turn up a builder function for this struct — see §11).
 
-**⚠️ Known gap: `LockRect()` never invokes `pfnLock` at all**, on either the implicit backbuffer or an
-explicit `CreateRenderTarget` surface — confirmed via DXGK/gpu-bridge tracing (no `ioctl_d3d9_lock` op
-ever appears) despite `LockRect` itself returning `S_OK` with `pBits=NULL, Pitch=0`. This is a D3D9
-runtime-behavior question, not a struct-layout one: plausibly the render target needs to be unbound
-(not the currently-active `SetRenderTarget` target) before `LockRect` will actually call into the
-driver, or some other precondition sogen's caps/state reporting doesn't satisfy. **Not yet resolved** —
-the `d3d9-triangle-test` guest test currently prints `FAIL: LockRect` for this reason, even though the
-underlying GPU clear+readback pipeline (verified via a temporary host-side diagnostic, since removed)
-is proven correct. Next investigation: try `SetRenderTarget` back to a *different* surface before
-locking the one just cleared, or RE the real runtime-side Lock precondition check.
+**⚠️ Known gap, now with more evidence: `LockRect()` never invokes `pfnLock` at all**, on the implicit
+backbuffer, an explicit `CreateRenderTarget` surface, *or a plain vertex buffer* — confirmed via
+DXGK/gpu-bridge tracing (no `ioctl_d3d9_lock` op ever appears) despite `LockRect`/`Lock` themselves
+often returning `S_OK`. Two things ruled out: (1) it's **not** about driver backing correctness — even
+after the offset-48 fix gave the resource a real, correctly-identified GPU-backed handle, `LockRect`
+still never reaches the driver; (2) it's **not** about the surface being the active render target —
+explicitly unbinding it first (`SetRenderTarget` back to the original backbuffer) before locking didn't
+change the outcome either. One genuinely new data point: `IDirect3DVertexBuffer9::Lock()` on a plain
+`D3DPOOL_DEFAULT` vertex buffer **does** return a real, non-null pointer (`data=0x103be1ce0` in one
+run) — but *also* without ever calling `pfnLock` (no `ioctl_d3d9_lock` in the trace either). This means
+the runtime is satisfying **all** Lock calls from its own memory, entirely independent of whether the
+driver "really" created anything — vertex buffers get valid data because the runtime just hands back
+its own linear-memory pointer; render targets get `NULL` because (unconfirmed) they're conceptually
+video-memory-only and the runtime has no equivalent fallback for them. **Not yet resolved.** Next
+investigation ideas: check `fill_d3d9caps` for a missing lockable-render-target capability bit the
+runtime might gate on before ever considering a driver call; or accept this as a structural limit of
+running against the real HAL runtime without genuine WDDM kernel cooperation, and rely on host-side
+diagnostics (proven reliable twice) for verification going forward instead.
 
 ---
 
 ## 11. Immediate next steps (in order)
 
-1. **Resolve the `LockRect` → `pfnLock` gap (§10.5)** — try unbinding the render target before lock, or
-   RE the runtime's own Lock precondition logic, so the `d3d9-triangle-test` can verify pixels via the
-   guest-side D3D9 API instead of a temporary host-side diagnostic.
+1. **Resolve the `LockRect` → `pfnLock` gap (§10.5)** — unbinding-before-lock was tried and refuted;
+   check `fill_d3d9caps` for a missing lockable-render-target capability bit, or accept host-side
+   diagnostics as the verification method going forward (proven reliable twice already) and stop
+   blocking on guest-side `LockRect` working.
 2. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
    (host-side pixel readback sidesteps needing real pixels on screen), but needed before a literal
    "window shows a color" milestone. `D3DDDIARG_PRESENT`'s `hSrcResource`(offset 0) is RE-verified;
    wiring it through `resolve_resource_id()` the same way `SetRenderTarget`/`Lock` now work is the
    natural next step once needed.
-3. **`pfnCreateResource`'s real field layout** (width/height/usage/pool offsets) is still unknown —
-   the lazy-bind-at-first-use design (§10.5) works around this for render targets, but textures and
-   other resource kinds will need the real struct eventually. Needs a texture-creation-specific forcing
-   function and a fresh RE pass (the class-hierarchy/xref search that worked for `RENDERSTATE`/`LOCK`/
-   `CLEAR`/`PRESENT` came up empty for `CreateResource`'s actual builder — try a different angle, e.g.
-   tracing from `CBaseDevice::CreateTexture`/`CSwapChain`'s constructor forward instead of searching by
-   struct name backward).
+3. **`pfnCreateResource`'s remaining field layout** (width/height/usage/pool offsets) is still unknown
+   — offset 0 (Format) and offset 48 (output `hResource`) ARE now RE-verified (§10.5). The current
+   fixed-guess width/height (640×480) works for this one test's window size but is wrong in general;
+   textures and other resource kinds will need the real struct eventually. Needs a texture-creation-
+   specific forcing function and a fresh RE pass (the class-hierarchy/xref search that worked for
+   `RENDERSTATE`/`LOCK`/`CLEAR`/`PRESENT` came up empty for `CreateResource`'s actual builder — try a
+   different angle, e.g. tracing from `CBaseDevice::CreateTexture`/`CSwapChain`'s constructor forward
+   instead of searching by struct name backward).
 4. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
    fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
    `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:

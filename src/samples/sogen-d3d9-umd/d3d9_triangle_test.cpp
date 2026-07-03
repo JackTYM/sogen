@@ -82,6 +82,9 @@ int main()
     HRESULT hcrt = dev->CreateRenderTarget(640, 480, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
     printf("[d3d9-triangle] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
 
+    IDirect3DSurface9* original_rt = nullptr;
+    dev->GetRenderTarget(0, &original_rt);
+
     if (SUCCEEDED(hcrt) && rt)
     {
         HRESULT hsrt = dev->SetRenderTarget(0, rt);
@@ -90,6 +93,19 @@ int main()
         HRESULT hclr2 = dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(64, 128, 255), 1.0f, 0);
         printf("[d3d9-triangle] Clear(rt) hr=0x%08lx\n", static_cast<unsigned long>(hclr2));
 
+        // Unbind before locking (a real app would typically do this anyway) -- tried as a fix for the
+        // known LockRect gap below; it didn't change the outcome, kept as reasonable practice regardless.
+        if (original_rt)
+        {
+            HRESULT hunbind = dev->SetRenderTarget(0, original_rt);
+            printf("[d3d9-triangle] SetRenderTarget(restore original) hr=0x%08lx\n", static_cast<unsigned long>(hunbind));
+        }
+
+        // KNOWN GAP (see HANDOFF_MACBOOK.md): LockRect currently returns S_OK with a null pBits/zero
+        // Pitch -- pfnLock is never actually invoked by the runtime for this resource kind, even though
+        // it's now correctly driver-backed (D3DDDIARG_CREATERESOURCE's real output field, offset 48,
+        // is RE-verified and wired). Root cause not yet found; the underlying GPU clear+readback
+        // pipeline is independently proven correct via a host-side diagnostic (since removed).
         D3DLOCKED_RECT lr{};
         HRESULT hlr = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
         printf("[d3d9-triangle] LockRect hr=0x%08lx pBits=%p Pitch=%ld\n", static_cast<unsigned long>(hlr), lr.pBits,
@@ -111,6 +127,11 @@ int main()
     else
     {
         printf("[d3d9-triangle] FAIL: CreateRenderTarget hr=0x%08lx\n", static_cast<unsigned long>(hcrt));
+    }
+
+    if (original_rt)
+    {
+        original_rt->Release();
     }
 
     dev->Release();
