@@ -58,6 +58,12 @@ namespace sogen
                     size_t out_capacity, uint32_t& out_data_size);
         int32_t unlock(uint64_t resource, uint32_t subresource, uint32_t offset, const void* data, size_t data_size);
 
+        // Copies the resource's current host-side pixel backing (BGRA8, kept in sync with its GPU
+        // image by every pfnClear/pfnDrawPrimitive) out for presentation. Returns false if the
+        // resource doesn't exist or has no GPU backing (not a render target).
+        bool snapshot_resource(uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
+                               uint32_t& out_height) const;
+
         int32_t create_vertex_shader(const void* tokens, size_t token_size_bytes, uint64_t& out_shader);
         int32_t create_pixel_shader(const void* tokens, size_t token_size_bytes, uint64_t& out_shader);
 

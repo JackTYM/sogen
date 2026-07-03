@@ -711,6 +711,18 @@ namespace
         return S_OK;
     }
 
+    HRESULT APIENTRY umd_Present(HANDLE /*hDevice*/, CONST D3DDDIARG_PRESENT* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
+        d3d9c::present_request req{.resource = resolve_resource_id(pArgs->hSrcResource)};
+        d3d9c::present_response resp{};
+        bridge_call(gb::ioctl_d3d9_present, &req, sizeof(req), &resp, sizeof(resp));
+        return resp.hr == 0 ? S_OK : E_FAIL;
+    }
+
     // D3DDDIARG_LOCK::pData must point to memory that stays valid until the matching Unlock (the app
     // writes vertex/index data directly through it), so each outstanding lock owns a persistent
     // heap buffer here instead of a call-local one. Keyed by the wire resource id (== hResource).
@@ -814,6 +826,7 @@ namespace
             slots[35] = reinterpret_cast<void*>(&umd_Lock);                    // pfnLock
             slots[36] = reinterpret_cast<void*>(&umd_Unlock);                  // pfnUnlock
             slots[37] = reinterpret_cast<void*>(&umd_CreateResource);          // pfnCreateResource
+            slots[40] = reinterpret_cast<void*>(&umd_Present);                // pfnPresent
             slots[41] = reinterpret_cast<void*>(&umd_Flush);                  // pfnFlush
             slots[44] = reinterpret_cast<void*>(&umd_SetVertexShaderFunc);    // pfnSetVertexShaderFunc
             slots[47] = reinterpret_cast<void*>(&umd_SetVertexShaderDecl);    // pfnSetVertexShaderDecl

@@ -1,9 +1,8 @@
 // D3D9-over-Vulkan de-risk slice (see .claude/plans/jazzy-giggling-cloud.md).
 //
-// Phase 1: force real backbuffer creation + a clear + a present, no draw yet -- this is the
-// forcing function for RE'ing D3DDDIARG_CREATERESOURCE (render-target case) and
-// D3DDDIARG_PRESENT's real layout, neither of which gate 3's d3d9_spike_test.cpp exercises.
-// Phase 4 will extend this file with a vertex buffer and DrawPrimitive.
+// Draws a real triangle (via the fixed-function D3DFVF_XYZRHW|D3DFVF_DIFFUSE path) to an off-screen
+// render target for analytic verification (LockRect readback), then draws the same triangle again to
+// the real swap-chain backbuffer and Present()s it so it's actually visible on screen.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -19,9 +18,11 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9triangle";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "triangle", WS_OVERLAPPEDWINDOW, 0, 0, 640, 480, nullptr, nullptr,
-                                wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "triangle", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480, nullptr,
+                                nullptr, wc.hInstance, nullptr);
     printf("[d3d9-triangle] hwnd=%p\n", static_cast<void*>(hwnd));
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
 
     IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
     printf("[d3d9-triangle] Direct3DCreate9=%p\n", static_cast<void*>(d3d));
@@ -131,6 +132,30 @@ int main()
             HRESULT hdp = dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1);
             printf("[d3d9-triangle] DrawPrimitive hr=0x%08lx\n", static_cast<unsigned long>(hdp));
 
+            HRESULT hes2 = dev->EndScene();
+            printf("[d3d9-triangle] EndScene(rt) hr=0x%08lx\n", static_cast<unsigned long>(hes2));
+
+            // Draw the same triangle again, this time onto the real backbuffer and Present() it, so the
+            // triangle actually shows up on screen (the earlier draw only ever reaches the off-screen
+            // surface read back by LockRect below).
+            if (original_rt)
+            {
+                HRESULT hunbind = dev->SetRenderTarget(0, original_rt);
+                printf("[d3d9-triangle] SetRenderTarget(restore original) hr=0x%08lx\n", static_cast<unsigned long>(hunbind));
+
+                HRESULT hbs3 = dev->BeginScene();
+                printf("[d3d9-triangle] BeginScene(backbuffer) hr=0x%08lx\n", static_cast<unsigned long>(hbs3));
+                dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(64, 128, 255), 1.0f, 0);
+                dev->SetFVF(kFvf);
+                dev->SetStreamSource(0, vb, 0, sizeof(FvfVertex));
+                HRESULT hdp2 = dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1);
+                printf("[d3d9-triangle] DrawPrimitive(backbuffer) hr=0x%08lx\n", static_cast<unsigned long>(hdp2));
+                dev->EndScene();
+
+                HRESULT hp2 = dev->Present(nullptr, nullptr, nullptr, nullptr);
+                printf("[d3d9-triangle] Present(triangle) hr=0x%08lx\n", static_cast<unsigned long>(hp2));
+            }
+
             vb->Release();
         }
         else
@@ -138,22 +163,6 @@ int main()
             printf("[d3d9-triangle] FAIL: CreateVertexBuffer hr=0x%08lx\n", static_cast<unsigned long>(hcvb));
         }
 
-        HRESULT hes2 = dev->EndScene();
-        printf("[d3d9-triangle] EndScene(rt) hr=0x%08lx\n", static_cast<unsigned long>(hes2));
-
-        // Unbind before locking (a real app would typically do this anyway) -- tried as a fix for the
-        // known LockRect gap below; it didn't change the outcome, kept as reasonable practice regardless.
-        if (original_rt)
-        {
-            HRESULT hunbind = dev->SetRenderTarget(0, original_rt);
-            printf("[d3d9-triangle] SetRenderTarget(restore original) hr=0x%08lx\n", static_cast<unsigned long>(hunbind));
-        }
-
-        // KNOWN GAP (see HANDOFF_MACBOOK.md): LockRect currently returns S_OK with a null pBits/zero
-        // Pitch -- pfnLock is never actually invoked by the runtime for this resource kind, even though
-        // it's now correctly driver-backed (D3DDDIARG_CREATERESOURCE's real output field, offset 48,
-        // is RE-verified and wired). Root cause not yet found; the underlying GPU clear+readback
-        // pipeline is independently proven correct via a host-side diagnostic (since removed).
         D3DLOCKED_RECT lr{};
         HRESULT hlr = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
         printf("[d3d9-triangle] LockRect hr=0x%08lx pBits=%p Pitch=%ld\n", static_cast<unsigned long>(hlr), lr.pBits,

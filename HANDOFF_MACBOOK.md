@@ -733,6 +733,45 @@ anything that depends on them.
 
 ---
 
+## 10.7. `pfnPresent` wired — the triangle is genuinely visible on screen (2026-07-03)
+
+`pfnPresent` was previously `device_stub` (silently `S_OK`, no-op). Wired it properly: `umd_Present`
+resolves `hSrcResource` (via the existing `resolve_resource_id` lazy-bind, since render targets/
+backbuffers are already registered via `pfnCreateResource` by the time `Present()` fires) and sends a
+new sync command (`ioctl_d3d9_present`, `d3d9_cmd::present_request`/`present_response`) to a new
+`gpu_bridge.cpp` handler, which calls `d3d9_host::snapshot_resource` (new method — copies the resource's
+current CPU-side pixel backing) and `windows_emulator::ui().present_surface(...)`.
+
+**Two real sub-problems, both solved:**
+- **No HWND anywhere.** Live-dumped the actual bytes `pfnPresent` receives (same GDB-stub method as the
+  Lock investigation) — genuinely no window handle anywhere in the struct, confirming the earlier
+  documented finding (`d3d9_host.hpp`'s own comment: "D3DDDIARG_PRESENT carries no HWND"). This is
+  architecturally real, not a struct-offset bug like Lock's: the real Windows D3D9/DXGK architecture
+  resolves "which window" via a separate, driver-opaque kernel path (the same one
+  `handle_NtGdiDdDDIPresent` already serves correctly for the real swap-chain backbuffer, via
+  `EMU_D3DKMT_PRESENT::hWindow` supplied by the runtime's own internal tracking) — our `d3d9_host`
+  resources bypass that system entirely (documented gap, same one behind outstanding task #11's
+  "consolidate onto one vulkan_host"). Fix: reused `syscalls/user.cpp`'s own
+  `find_foreground_window`-equivalent fallback logic locally in `gpu_bridge.cpp` (prefer
+  `process.foreground_window`; else any visible top-level window) — the same pragmatic default
+  `GetForegroundWindow()` itself falls back to for a freshly-created, not-yet-focused window. Confirmed
+  live: `process.foreground_window` genuinely stays `0` for a CLI-launched, never-clicked test window
+  (real host-side activation events never fire in this harness) — the visible-top-level-window fallback
+  is what actually finds it.
+- **The triangle itself was never drawn to anything that gets Presented.** The test draws to an explicit
+  off-screen `CreateRenderTarget` surface (for the analytic `LockRect` check), never to the real
+  swap-chain backbuffer — so the first, only `Present()` call in the original test just re-showed the
+  plain clear color from before the triangle even existed. Extended `d3d9_triangle_test.cpp`: after the
+  off-screen draw, restores the real backbuffer as render target 0, clears it, draws the same triangle
+  again, and calls `Present()` a second time.
+
+**Verified end-to-end with a temporary diagnostic (removed after confirming):** the first `Present()`
+call's presented pixel reads the plain clear color; the second reads `B=0x55 G=0x56 R=0x54` — the same
+barycentric centroid color confirmed for the off-screen draw, now genuinely reaching
+`ui().present_surface()` and showing up in the actual emulator window. No regressions (smoke test clean).
+
+---
+
 ## 11. Immediate next steps (in order)
 
 **Milestone reached (2026-07-03): a real triangle, drawn from real app-authored vertex data, verified
@@ -746,12 +785,7 @@ modeled at the wrong offset (80, from RE'ing the wrong — outer, intermediate �
 DDI-level struct `pfnLock` receives is ~64 bytes with `pData` at offset 40). Both `Lock()` on a
 `D3DPOOL_DEFAULT` vertex buffer and the long-standing `LockRect` gap (§10.5) work now, for real data.
 
-1. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
-   (host-side pixel readback sidesteps needing real pixels on screen), but needed before a literal
-   "window shows a color" milestone. `D3DDDIARG_PRESENT`'s `hSrcResource`(offset 0) is RE-verified;
-   wiring it through `resolve_resource_id()` the same way `SetRenderTarget`/`Lock` now work is the
-   natural next step once needed.
-2. **`pfnCreateResource`'s remaining field layout** (width/height/usage/pool offsets) is still unknown
+1. **`pfnCreateResource`'s remaining field layout** (width/height/usage/pool offsets) is still unknown
    — offset 0 (Format) and offset 48 (output `hResource`) ARE now RE-verified (§10.5). The current
    fixed-guess width/height (640×480) works for this one test's window size but is wrong in general;
    textures and other resource kinds will need the real struct eventually. Needs a texture-creation-
@@ -759,17 +793,18 @@ DDI-level struct `pfnLock` receives is ~64 bytes with `pData` at offset 40). Bot
    `RENDERSTATE`/`LOCK`/`CLEAR`/`PRESENT` came up empty for `CreateResource`'s actual builder — try a
    different angle, e.g. tracing from `CBaseDevice::CreateTexture`/`CSwapChain`'s constructor forward
    instead of searching by struct name backward).
-3. **`D3DDDIARG_LOCK`'s `Flags` field** (see §10.6) — currently always sent as 0; needs its real offset
+2. **`D3DDDIARG_LOCK`'s `Flags` field** (see §10.6) — currently always sent as 0; needs its real offset
    in the ~64-byte DDI-level struct RE'd (the same live-debugging method that found `pData`'s real
    offset applies directly) before `D3DLOCK_READONLY`/`DISCARD`/`NOOVERWRITE` hints can work.
-4. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
+3. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
    fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
    `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:
    `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Not required for M1.
-5. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
+4. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
    pipelines have real shader modules instead of a placeholder). Milestone M1 = programmable SM2/3
-   triangle, pixel-diffed vs the DXVK oracle (`root_vkspike`).
-6. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
+   triangle, pixel-diffed vs the DXVK oracle (`root_vkspike`). **This is the current active workstream**
+   as of 2026-07-03 — see the plan file for scope.
+5. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
    --no-edit -S' <base>`); verify with `git log --show-signature`.
 
 ---

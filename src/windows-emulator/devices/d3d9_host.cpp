@@ -480,6 +480,21 @@ namespace sogen
         this->resources_.erase(resource);
     }
 
+    bool d3d9_host::snapshot_resource(const uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
+                                      uint32_t& out_height) const
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end() || it->second.vk_image_id == 0 || it->second.backing.empty())
+        {
+            return false;
+        }
+
+        out_pixels = it->second.backing;
+        out_width = it->second.width;
+        out_height = it->second.height;
+        return true;
+    }
+
     int32_t d3d9_host::lock(const uint64_t resource, const uint32_t /*subresource*/, const uint32_t offset, const uint32_t size,
                             const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size)
     {

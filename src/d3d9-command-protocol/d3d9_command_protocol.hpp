@@ -149,6 +149,21 @@ namespace sogen::d3d9_cmd
         resource_id decl;
     };
 
+    // ioctl_d3d9_present: the real D3DDDIARG_PRESENT carries no HWND (RE-confirmed; the runtime
+    // presents through a separate, driver-opaque kernel path), so the host resolves which window to
+    // show this in on its own (see gpu_bridge.cpp's handler) -- this request only identifies which
+    // resource's current pixels to display.
+    struct present_request
+    {
+        resource_id resource;
+    };
+
+    struct present_response
+    {
+        int32_t hr;
+        uint32_t reserved;
+    };
+
     // ---------------------------------------------------------------------------------------------
     // Streamed commands: recorded per-device via gpu_bridge::command_record_header{command,size} and
     // flushed as one ioctl_record_commands escape on pfnFlush/pfnPresent. Each struct below is that

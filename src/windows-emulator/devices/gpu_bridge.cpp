@@ -242,6 +242,8 @@ namespace sogen
                     return handle_d3d9_create_pixel_shader(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_create_vertex_decl:
                     return handle_d3d9_create_vertex_decl(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_present:
+                    return handle_d3d9_present(win_emu, context);
 
                 case gpu_bridge::ioctl_d3d9_set_render_state:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_state);
@@ -2501,6 +2503,69 @@ namespace sogen
                 uint64_t decl = d3d9_cmd::null_resource;
                 const int32_t hr = this->d3d9_.create_vertex_decl(elements.data(), elements.size(), sizeof(d3d9_cmd::vertex_element), decl);
                 return write_output(win_emu, context, d3d9_cmd::create_vertex_decl_response{.hr = hr, .reserved = 0, .decl = decl});
+            }
+
+            // The real D3DDDIARG_PRESENT carries no HWND (RE-confirmed this session, live -- dumped the
+            // struct pfnPresent actually receives and it's genuinely absent; the runtime's actual
+            // on-screen presentation goes through a separate, driver-opaque kernel path, same as
+            // handle_NtGdiDdDDIPresent's own EMU_D3DKMT_PRESENT::hWindow, which our d3d9_host resources
+            // never participate in since they bypass the DXGK allocation system entirely). Mirrors
+            // syscalls/user.cpp's own find_foreground_window fallback (process.foreground_window is
+            // only ever set by a real host-side activation/focus event, which a freshly-created,
+            // never-clicked window won't have received yet): prefer the last-interacted-with window,
+            // falling back to any visible top-level window so a freshly-created single-window app like
+            // this project's own D3D9 samples still gets shown. Not a claim about how real drivers
+            // resolve this -- just the same pragmatic default GetForegroundWindow() already uses.
+            hwnd find_present_window(const windows_emulator& win_emu)
+            {
+                if (win_emu.process.foreground_window != 0 && win_emu.process.windows.get(win_emu.process.foreground_window) != nullptr)
+                {
+                    return win_emu.process.foreground_window;
+                }
+
+                for (const auto& [index, win] : win_emu.process.windows)
+                {
+                    if (win.parent_handle == 0 && (win.style & WS_VISIBLE) != 0)
+                    {
+                        return win.handle;
+                    }
+                }
+
+                return 0;
+            }
+
+            NTSTATUS handle_d3d9_present(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::present_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                constexpr int32_t d3derr_invalidcall = -2005530516; // D3DERR_INVALIDCALL
+
+                std::vector<std::byte> pixels;
+                uint32_t width = 0;
+                uint32_t height = 0;
+                int32_t hr = 0; // D3D_OK
+                if (this->d3d9_.snapshot_resource(request.resource, pixels, width, height))
+                {
+                    const auto window = find_present_window(win_emu);
+                    if (window != 0)
+                    {
+                        win_emu.ui().present_surface(window, ui_surface_desc{.width = static_cast<int>(width),
+                                                                              .height = static_cast<int>(height),
+                                                                              .stride = static_cast<int>(width * 4),
+                                                                              .format = ui_surface_format::bgra8,
+                                                                              .pixels = pixels.data()});
+                    }
+                }
+                else
+                {
+                    hr = d3derr_invalidcall;
+                }
+
+                return write_output(win_emu, context, d3d9_cmd::present_response{.hr = hr, .reserved = 0});
             }
 
             // Shared handler for every streamed D3D9 opcode sent as an individual sync Escape (see the
