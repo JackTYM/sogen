@@ -50,3 +50,6 @@
 	path = deps/Vulkan-Headers
 	url = https://github.com/KhronosGroup/Vulkan-Headers.git
 	shallow = true
+[submodule "deps/vkd3d"]
+	path = deps/vkd3d
+	url = https://gitlab.winehq.org/wine/vkd3d.git

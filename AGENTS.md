@@ -19,6 +19,8 @@ It's very slow, so only use it at the end:
 
 **Always run builds and analyzer invocations in the foreground** — never pass `run_in_background: true` to the Bash tool. Background runs leave lingering shells and the timeout mechanism doesn't work reliably for them. Use the Bash tool's built-in `timeout` parameter (milliseconds) instead of the shell `timeout` command, and always capture and read the output yourself rather than asking the user to run commands.
 
+- vkd3d-shader (host-only dependency, `deps/vkd3d` submodule) requires `perl` (with the `JSON` module), `flex`, `bison` (>= 2.5; macOS ships bison 2.3), GNU `libtool`, and a `widl` IDL compiler (shipped by `mingw-w64`) to build. Install via `brew install perl flex bison libtool mingw-w64 vulkan-headers spirv-headers` if missing. Like every other `deps/` dependency in this project, it only builds once something links against the `vkd3d-shader-bridge` CMake target — it is excluded from the default build until then.
+
 ## Smoke tests
 
 Execute `analyzer.exe -s test-sample.exe` for smoke tests using the cmd in the directory of the built preset.
