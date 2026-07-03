@@ -385,6 +385,11 @@ typedef struct _D3DDDIARG_SETVERTEXSHADERFUNC
     HANDLE ShaderHandle; // 0 selects the fixed-function pipeline
 } D3DDDIARG_SETVERTEXSHADERFUNC;
 
+typedef struct _D3DDDIARG_DELETEVERTEXSHADERFUNC
+{
+    HANDLE ShaderHandle;
+} D3DDDIARG_DELETEVERTEXSHADERFUNC;
+
 typedef struct _D3DDDIARG_SETVERTEXSHADERDECL
 {
     HANDLE ShaderHandle;

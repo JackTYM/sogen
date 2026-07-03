@@ -505,6 +505,90 @@ namespace
         return S_OK;
     }
 
+    HRESULT APIENTRY umd_CreateVertexShaderFunc(HANDLE /*hDevice*/, D3DDDIARG_CREATEVERTEXSHADERFUNC* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return E_INVALIDARG;
+        }
+        const UINT token_size_bytes = pArgs->Values[0];
+        const auto* tokens = reinterpret_cast<const uint8_t*>(pArgs + 1);
+
+        // TEMPORARY live-verification diagnostic (Task 4, vkd3d-shader de-risk plan) -- confirms the
+        // real runtime's D3DDDIARG_CREATEVERTEXSHADERFUNC field layout against captured bytes. Remove
+        // once the layout is confirmed.
+        log_line("[sogen-d3d9-umd][DIAG] CreateVertexShaderFunc pArgs=%p Values[0]=%u\n", static_cast<void*>(pArgs),
+                 token_size_bytes);
+        {
+            char hex[3 * 32 + 1] = {};
+            const UINT dump_len = token_size_bytes < 32 ? token_size_bytes : 32;
+            for (UINT i = 0; i < dump_len; ++i)
+            {
+                snprintf(hex + i * 3, 4, "%02X ", tokens[i]);
+            }
+            log_line("[sogen-d3d9-umd][DIAG] CreateVertexShaderFunc tokens[0..%u]=%s\n", dump_len, hex);
+        }
+
+        std::vector<uint8_t> buf(sizeof(d3d9c::create_shader_request) + token_size_bytes);
+        auto* req = reinterpret_cast<d3d9c::create_shader_request*>(buf.data());
+        req->token_size_bytes = token_size_bytes;
+        req->reserved = 0;
+        std::memcpy(buf.data() + sizeof(*req), tokens, token_size_bytes);
+
+        d3d9c::create_shader_response resp{};
+        bridge_call(gb::ioctl_d3d9_create_vertex_shader, buf.data(), static_cast<DWORD>(buf.size()), &resp, sizeof(resp));
+        pArgs->ShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.shader));
+        return resp.hr;
+    }
+
+    HRESULT APIENTRY umd_DeleteVertexShaderFunc(HANDLE /*hDevice*/, CONST D3DDDIARG_DELETEVERTEXSHADERFUNC* /*pArgs*/)
+    {
+        // No host-side shader-destroy wire call exists yet; adding one is out of scope for this task
+        // (same asymmetry precedent as elsewhere in this file where not every Create has a wired Delete).
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_CreatePixelShader(HANDLE /*hDevice*/, D3DDDIARG_CREATEPIXELSHADERFUNC* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return E_INVALIDARG;
+        }
+        const UINT token_size_bytes = pArgs->CodeSize;
+        const auto* tokens = reinterpret_cast<const uint8_t*>(pArgs + 1);
+
+        // TEMPORARY live-verification diagnostic (Task 4, vkd3d-shader de-risk plan) -- confirms the
+        // real runtime's D3DDDIARG_CREATEPIXELSHADERFUNC field layout against captured bytes. Remove
+        // once the layout is confirmed.
+        log_line("[sogen-d3d9-umd][DIAG] CreatePixelShader pArgs=%p CodeSize=%u\n", static_cast<void*>(pArgs),
+                 token_size_bytes);
+        {
+            char hex[3 * 32 + 1] = {};
+            const UINT dump_len = token_size_bytes < 32 ? token_size_bytes : 32;
+            for (UINT i = 0; i < dump_len; ++i)
+            {
+                snprintf(hex + i * 3, 4, "%02X ", tokens[i]);
+            }
+            log_line("[sogen-d3d9-umd][DIAG] CreatePixelShader tokens[0..%u]=%s\n", dump_len, hex);
+        }
+
+        std::vector<uint8_t> buf(sizeof(d3d9c::create_shader_request) + token_size_bytes);
+        auto* req = reinterpret_cast<d3d9c::create_shader_request*>(buf.data());
+        req->token_size_bytes = token_size_bytes;
+        req->reserved = 0;
+        std::memcpy(buf.data() + sizeof(*req), tokens, token_size_bytes);
+
+        d3d9c::create_shader_response resp{};
+        bridge_call(gb::ioctl_d3d9_create_pixel_shader, buf.data(), static_cast<DWORD>(buf.size()), &resp, sizeof(resp));
+        pArgs->ShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.shader));
+        return resp.hr;
+    }
+
+    HRESULT APIENTRY umd_DeletePixelShader(HANDLE /*hDevice*/, CONST D3DDDIARG_DELETEPIXELSHADERFUNC* /*pArgs*/)
+    {
+        return S_OK;
+    }
+
     HRESULT APIENTRY umd_SetVertexShaderDecl(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERDECL* pArgs)
     {
         // NULL pArgs crashed this function live (confirmed via a real access violation at the
@@ -848,6 +932,8 @@ namespace
             slots[37] = reinterpret_cast<void*>(&umd_CreateResource);          // pfnCreateResource
             slots[40] = reinterpret_cast<void*>(&umd_Present);                // pfnPresent
             slots[41] = reinterpret_cast<void*>(&umd_Flush);                  // pfnFlush
+            slots[42] = reinterpret_cast<void*>(&umd_CreateVertexShaderFunc); // pfnCreateVertexShaderFunc
+            slots[43] = reinterpret_cast<void*>(&umd_DeleteVertexShaderFunc); // pfnDeleteVertexShaderFunc
             slots[44] = reinterpret_cast<void*>(&umd_SetVertexShaderFunc);    // pfnSetVertexShaderFunc
             slots[47] = reinterpret_cast<void*>(&umd_SetVertexShaderDecl);    // pfnSetVertexShaderDecl
             slots[50] = reinterpret_cast<void*>(&umd_SetScissorRect);         // pfnSetScissorRect
@@ -855,6 +941,8 @@ namespace
             slots[52] = reinterpret_cast<void*>(&umd_SetStreamSourceFreq);    // pfnSetStreamSourceFreq
             slots[62] = reinterpret_cast<void*>(&umd_SetRenderTarget);        // pfnSetRenderTarget
             slots[63] = reinterpret_cast<void*>(&umd_SetDepthStencil);        // pfnSetDepthStencil
+            slots[67] = reinterpret_cast<void*>(&umd_CreatePixelShader);      // pfnCreatePixelShader
+            slots[68] = reinterpret_cast<void*>(&umd_DeletePixelShader);      // pfnDeletePixelShader
         }
         pArgs->hDevice = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xD9D90001));
         pArgs->CommandBuffer = 0; // no initial command buffer for this bring-up
