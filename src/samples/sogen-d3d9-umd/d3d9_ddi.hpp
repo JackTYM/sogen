@@ -293,6 +293,11 @@ typedef struct _D3DDDIARG_SAMPLERSTATE
     UINT Value;
 } D3DDDIARG_SAMPLERSTATE;
 
+// RE-verified live 2026-07-02: pfnSetTexture is NOT a (HANDLE, CONST ARG*) call -- it takes Stage and
+// hTexture as direct value arguments: HRESULT APIENTRY (HANDLE hDevice, UINT Stage, HANDLE hTexture).
+// The struct-pointer assumption below crashed the UMD live (Stage's small integer value, interpreted
+// as a pointer, is not a valid address). Kept only as a historical note; umd_SetTexture takes the real
+// 3-argument signature directly.
 typedef struct _D3DDDIARG_SETTEXTURE
 {
     UINT Stage;

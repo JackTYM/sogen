@@ -7,6 +7,7 @@
 // header comment); this .cpp mirrors that same "real Vulkan types stay out of the header" rule.
 #include <vulkan/vulkan_core.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <span>
@@ -292,10 +293,17 @@ namespace sogen
         }
         auto& rt = rt_it->second;
 
+        // Only trust a resource that was actually created as a vertex/index buffer. Runtime-assigned
+        // DDI handles for D3DPOOL_DEFAULT vertex buffers (see class comment) are small sequential values
+        // from a handle space independent of our own resource ids, and can coincidentally collide with
+        // an unrelated resource id -- without this guard that collision would silently draw garbage from
+        // whatever resource happens to share the number.
         const auto vb_it = this->resources_.find(this->state_.stream_sources[0]);
-        if (vb_it == this->resources_.end() || vb_it->second.backing.empty())
+        if (vb_it == this->resources_.end() || vb_it->second.backing.empty() ||
+            (vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
+             vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
         {
-            return d3d_ok; // no vertex data bound
+            return d3d_ok; // no real vertex data bound
         }
         const auto& vb_backing = vb_it->second.backing;
 
@@ -408,7 +416,7 @@ namespace sogen
         this->vulkan_.free_memory(device, vertex_memory);
 
         // Read the drawn frame back into the resource's backing store, same as pfnClear -- so pfnLock
-        // (and any future host-side diagnostic) sees the real drawn pixels.
+        // sees the real drawn pixels.
         std::vector<std::byte> pixels;
         uint32_t readback_width = 0;
         uint32_t readback_height = 0;

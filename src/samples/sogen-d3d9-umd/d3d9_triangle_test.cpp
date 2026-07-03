@@ -90,6 +90,11 @@ int main()
         HRESULT hsrt = dev->SetRenderTarget(0, rt);
         printf("[d3d9-triangle] SetRenderTarget hr=0x%08lx\n", static_cast<unsigned long>(hsrt));
 
+        // DrawPrimitive is only valid between BeginScene/EndScene -- the first pair (above) was already
+        // closed before Present(); this is a fresh scene for the render-target draw.
+        HRESULT hbs2 = dev->BeginScene();
+        printf("[d3d9-triangle] BeginScene(rt) hr=0x%08lx\n", static_cast<unsigned long>(hbs2));
+
         HRESULT hclr2 = dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(64, 128, 255), 1.0f, 0);
         printf("[d3d9-triangle] Clear(rt) hr=0x%08lx\n", static_cast<unsigned long>(hclr2));
 
@@ -132,6 +137,9 @@ int main()
         {
             printf("[d3d9-triangle] FAIL: CreateVertexBuffer hr=0x%08lx\n", static_cast<unsigned long>(hcvb));
         }
+
+        HRESULT hes2 = dev->EndScene();
+        printf("[d3d9-triangle] EndScene(rt) hr=0x%08lx\n", static_cast<unsigned long>(hes2));
 
         // Unbind before locking (a real app would typically do this anyway) -- tried as a fix for the
         // known LockRect gap below; it didn't change the outcome, kept as reasonable practice regardless.

@@ -386,6 +386,10 @@ namespace
 
     HRESULT APIENTRY umd_SetRenderState(HANDLE /*hDevice*/, CONST D3DDDIARG_RENDERSTATE* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         d3d9c::set_render_state_record req{.state = pArgs->State, .value = pArgs->Value};
         bridge_call(gb::ioctl_d3d9_set_render_state, &req, sizeof(req), nullptr, 0);
         return S_OK;
@@ -393,36 +397,48 @@ namespace
 
     HRESULT APIENTRY umd_SetTextureStageState(HANDLE /*hDevice*/, CONST D3DDDIARG_TEXTURESTAGESTATE* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         d3d9c::set_texture_stage_state_record req{.stage = pArgs->Stage, .state = pArgs->State, .value = pArgs->Value, .reserved = 0};
         bridge_call(gb::ioctl_d3d9_set_texture_stage_state, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetTexture(HANDLE /*hDevice*/, CONST D3DDDIARG_SETTEXTURE* pArgs)
+    HRESULT APIENTRY umd_SetTexture(HANDLE /*hDevice*/, UINT Stage, HANDLE hTexture)
     {
-        d3d9c::set_texture_record req{
-            .stage = pArgs->Stage, .reserved = 0, .texture = reinterpret_cast<uint64_t>(pArgs->hTexture)};
+        // RE-verified live: pfnSetTexture takes Stage/hTexture as direct value arguments, not a
+        // pointer to D3DDDIARG_SETTEXTURE -- a struct-pointer read crashed with the small Stage
+        // integer (e.g. 0x1) dereferenced as an address. 0 for hTexture means unbind.
+        d3d9c::set_texture_record req{.stage = Stage, .reserved = 0, .texture = reinterpret_cast<uint64_t>(hTexture)};
         bridge_call(gb::ioctl_d3d9_set_texture, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
 
     HRESULT APIENTRY umd_SetPixelShader(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERFUNC* pArgs)
     {
-        d3d9c::set_pixel_shader_record req{.shader = reinterpret_cast<uint64_t>(pArgs->ShaderHandle)};
+        // Same NULL-means-unbind convention confirmed live for SetVertexShaderFunc/Decl and SetTexture.
+        d3d9c::set_pixel_shader_record req{.shader = pArgs != nullptr ? reinterpret_cast<uint64_t>(pArgs->ShaderHandle) : 0};
         bridge_call(gb::ioctl_d3d9_set_pixel_shader, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
 
     HRESULT APIENTRY umd_SetVertexShaderFunc(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERFUNC* pArgs)
     {
-        d3d9c::set_vertex_shader_record req{.shader = reinterpret_cast<uint64_t>(pArgs->ShaderHandle)};
+        // NULL pArgs is a real, crash-causing case (found live): the runtime uses it to mean "no vertex
+        // shader / use fixed-function", e.g. when a D3DFVF_XYZRHW draw follows a shader-bound one.
+        d3d9c::set_vertex_shader_record req{.shader = pArgs != nullptr ? reinterpret_cast<uint64_t>(pArgs->ShaderHandle) : 0};
         bridge_call(gb::ioctl_d3d9_set_vertex_shader, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
 
     HRESULT APIENTRY umd_SetVertexShaderDecl(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERDECL* pArgs)
     {
-        d3d9c::set_vertex_decl_record req{.decl = reinterpret_cast<uint64_t>(pArgs->ShaderHandle)};
+        // NULL pArgs crashed this function live (confirmed via a real access violation at the
+        // dereference below) -- the runtime passes it for fixed-function (D3DFVF-only, no explicit
+        // vertex declaration) draws. 0 = no decl, matching umd_SetVertexShaderFunc's own convention.
+        d3d9c::set_vertex_decl_record req{.decl = pArgs != nullptr ? reinterpret_cast<uint64_t>(pArgs->ShaderHandle) : 0};
         bridge_call(gb::ioctl_d3d9_set_vertex_decl, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
@@ -431,6 +447,10 @@ namespace
     // (the runtime's own send buffer), matching d3d9_cmd::set_const_f_record's trailing-payload shape.
     HRESULT APIENTRY umd_SetVertexShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONST* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         const auto* values = reinterpret_cast<const float*>(pArgs + 1);
         const size_t float_count = static_cast<size_t>(pArgs->Count) * 4;
         std::vector<uint8_t> buf(sizeof(d3d9c::set_const_f_record) + float_count * sizeof(float));
@@ -444,6 +464,10 @@ namespace
 
     HRESULT APIENTRY umd_SetPixelShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONST* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         const auto* values = reinterpret_cast<const float*>(pArgs + 1);
         const size_t float_count = static_cast<size_t>(pArgs->Count) * 4;
         std::vector<uint8_t> buf(sizeof(d3d9c::set_const_f_record) + float_count * sizeof(float));
@@ -457,6 +481,10 @@ namespace
 
     HRESULT APIENTRY umd_SetStreamSource(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCE* pArgs)
     {
+        if (pArgs == nullptr) // unbind, same convention as the shader/texture slots
+        {
+            return S_OK;
+        }
         d3d9c::set_stream_source_record req{.stream_number = pArgs->StreamNumber,
                                             .offset_bytes = pArgs->Offset,
                                             .stride_bytes = pArgs->Stride,
@@ -468,6 +496,10 @@ namespace
 
     HRESULT APIENTRY umd_SetStreamSourceFreq(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCEFREQ* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         d3d9c::set_stream_source_freq_record req{.stream_number = pArgs->StreamNumber, .frequency = pArgs->Divider};
         bridge_call(gb::ioctl_d3d9_set_stream_source_freq, &req, sizeof(req), nullptr, 0);
         return S_OK;
@@ -475,6 +507,10 @@ namespace
 
     HRESULT APIENTRY umd_SetIndices(HANDLE /*hDevice*/, CONST D3DDDIARG_SETINDICES* pArgs)
     {
+        if (pArgs == nullptr) // unbind index buffer, same convention as the shader/texture slots
+        {
+            return S_OK;
+        }
         d3d9c::set_indices_record req{.index_buffer = reinterpret_cast<uint64_t>(pArgs->hIndexBuffer),
                                       .format = pArgs->Stride == 4 ? 1u : 0u,
                                       .reserved = 0};
@@ -484,6 +520,10 @@ namespace
 
     HRESULT APIENTRY umd_SetRenderTarget(HANDLE /*hDevice*/, CONST D3DDDIARG_SETRENDERTARGET* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         d3d9c::set_render_target_record req{.render_target_index = pArgs->RenderTargetIndex,
                                             .reserved = 0,
                                             .surface = resolve_resource_id(pArgs->hRenderTarget)};
@@ -493,6 +533,10 @@ namespace
 
     HRESULT APIENTRY umd_SetDepthStencil(HANDLE /*hDevice*/, CONST D3DDDIARG_SETDEPTHSTENCIL* pArgs)
     {
+        if (pArgs == nullptr) // unbind depth-stencil, same convention as the shader/texture slots
+        {
+            return S_OK;
+        }
         d3d9c::set_depth_stencil_record req{.surface = resolve_resource_id(pArgs->hZBuffer)};
         bridge_call(gb::ioctl_d3d9_set_depth_stencil, &req, sizeof(req), nullptr, 0);
         return S_OK;
@@ -518,6 +562,10 @@ namespace
 
     HRESULT APIENTRY umd_SetViewport(HANDLE /*hDevice*/, CONST D3DDDIARG_VIEWPORTINFO* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         g_viewport = *pArgs;
         send_viewport();
         return S_OK;
@@ -525,6 +573,10 @@ namespace
 
     HRESULT APIENTRY umd_SetZRange(HANDLE /*hDevice*/, CONST D3DDDIARG_ZRANGE* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         g_zrange = *pArgs;
         send_viewport();
         return S_OK;
@@ -532,6 +584,10 @@ namespace
 
     HRESULT APIENTRY umd_SetScissorRect(HANDLE /*hDevice*/, CONST D3DDDIRECT* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         d3d9c::set_scissor_record req{.left = pArgs->left, .top = pArgs->top, .right = pArgs->right, .bottom = pArgs->bottom};
         bridge_call(gb::ioctl_d3d9_set_scissor, &req, sizeof(req), nullptr, 0);
         return S_OK;
@@ -541,6 +597,10 @@ namespace
     // NumRect/pRect are separate parameters, not struct fields.
     HRESULT APIENTRY umd_Clear(HANDLE /*hDevice*/, CONST D3DDDIARG_CLEAR* pArgs, UINT NumRect, CONST D3DDDIRECT* pRect)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         std::vector<uint8_t> buf(sizeof(d3d9c::clear_record) + static_cast<size_t>(NumRect) * sizeof(d3d9c::set_scissor_record));
         auto* req = reinterpret_cast<d3d9c::clear_record*>(buf.data());
         req->flags = pArgs->Flags;
@@ -560,6 +620,10 @@ namespace
 
     HRESULT APIENTRY umd_DrawPrimitive(HANDLE /*hDevice*/, CONST D3DDDIARG_DRAWPRIMITIVE* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         d3d9c::draw_primitive_record req{.primitive_type = pArgs->PrimitiveType,
                                          .start_vertex = pArgs->VStart,
                                          .primitive_count = pArgs->PrimitiveCount,
@@ -570,6 +634,10 @@ namespace
 
     HRESULT APIENTRY umd_DrawIndexedPrimitive(HANDLE /*hDevice*/, CONST D3DDDIARG_DRAWINDEXEDPRIMITIVE* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         d3d9c::draw_indexed_primitive_record req{.primitive_type = pArgs->PrimitiveType,
                                                  .base_vertex_index = pArgs->BaseVertexIndex,
                                                  .min_vertex_index = pArgs->MinIndex,
@@ -592,6 +660,10 @@ namespace
 
     HRESULT APIENTRY umd_Lock(HANDLE /*hDevice*/, D3DDDIARG_LOCK* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return E_FAIL;
+        }
         const auto resource = resolve_resource_id(pArgs->hResource);
         d3d9c::lock_request req{.resource = resource,
                                 .subresource = 0,
@@ -623,6 +695,10 @@ namespace
 
     HRESULT APIENTRY umd_Unlock(HANDLE /*hDevice*/, D3DDDIARG_UNLOCK* pArgs)
     {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
         const auto resource = resolve_resource_id(pArgs->hResource);
         const auto it = g_locked_buffers.find(resource);
         if (it == g_locked_buffers.end())

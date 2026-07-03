@@ -511,36 +511,90 @@ scope:
   existing "no Vulkan types in the header" rule.
 - **Builds cleanly** (`cmake --build --preset=release`), no smoke-test regression.
 
-**⚠️ Not yet exercised end-to-end.** Extending `d3d9-triangle-test.cpp` with a real
-`CreateVertexBuffer`/`Lock`/write-3-vertices/`Unlock`/`SetFVF`/`SetStreamSource`/`DrawPrimitive`
-sequence (matching the shader's expected vertex layout) hits a **new** gate: `DrawPrimitive()` itself
-returns `D3DERR_INVALIDCALL` immediately, and — confirmed via gpu-bridge opcode tracing — **neither
-`SetStreamSource`'s nor `DrawPrimitive`'s wire ops ever fire**, meaning the runtime rejects the call
-before reaching our driver at all (same "pre-flight runtime rejection" pattern as the earlier
-`LockRect`-without-`D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` case, and the `NtUserHwndQueryRedirectionInfo`
-gate). Leading hypothesis: `CreateVertexBuffer` still doesn't call `pfnCreateResource` (confirmed in
-§10 for the pre-offset-48-fix runtime state), so the vertex buffer has no driver-recognized backing —
-and now that render targets genuinely *do* get real backing (the offset-48 fix), the runtime's own
-consistency checks may have become *stricter* about requiring valid backing on *every* resource
-involved in a draw, not just the render target. Not yet confirmed. Next step: RE whether
-`CreateVertexBuffer` calls `pfnCreateResource` under this exact runtime/caps configuration (it may
-differ from the isolated backbuffer-only test Phase 1 originally checked), and if not, find another way
-to get vertex data into `d3d9_host` (possible directions: make `umd_SetStreamSource` proactively bind
-GPU backing via the same lazy-bind pattern `resolve_resource_id` already uses for render targets, then
-figure out how to get the vertex bytes there without a working `pfnLock` round trip).
+**Update (2026-07-02, later same day): exercised end-to-end, pipeline builder proven correct.** The
+`D3DERR_INVALIDCALL` above was **not** a driver/runtime issue — the triangle-draw test code itself
+called `EndScene()` after the first (backbuffer) `Clear()` and never called `BeginScene()` again before
+the render-target draw sequence, a plain D3D9 API misuse (`DrawPrimitive` is only valid inside a
+scene). Self-found via careful reading of the diagnostic call sequence; fixed by adding a fresh
+`BeginScene()`/`EndScene()` pair around the render-target draw.
+
+That fix uncovered two real DDI marshaling bugs, both found via **crash-driven RE**: run the guest test,
+capture the emulator's own `Mapping violation: <addr> (<size>) - r-- at <RIP> (sogen_d3d9um.dll)`
+crash report, then `x86_64-w64-mingw32-objdump -d --start-address=<X> --stop-address=<Y>
+sogen_d3d9um-x64.dll` (mingw's export table resolves function symbols automatically) to see exactly
+which instruction faulted:
+1. **NULL `pArgs` crashes.** `umd_SetVertexShaderDecl` (and, once guarded, several other `umd_*`
+   marshaling functions) dereferenced `pArgs` unconditionally; the runtime legitimately passes `pArgs =
+   NULL` for several DDI calls to mean "unbind / use fixed-function" (e.g. `SetVertexShaderDecl(NULL)`
+   when a `D3DFVF_XYZRHW` draw follows a shader-bound one). Fixed by adding `if (pArgs == nullptr)
+   { return S_OK; }` guards (or NULL-safe ternaries where a real "unbind" wire message still needs to
+   go out) across essentially every `umd_*` function in `sogen_d3d9_umd.cpp`.
+2. **`pfnSetTexture`'s real signature.** After the NULL guards, `umd_SetTexture` kept crashing —
+   but now with `pArgs = 0x1` (not NULL), i.e. a *valid* small integer being read as a pointer. Root
+   cause: `pfnSetTexture` is **not** `(HANDLE hDevice, CONST D3DDDIARG_SETTEXTURE* pArgs)` — it's the
+   classic direct-value WDK form `(HANDLE hDevice, UINT Stage, HANDLE hTexture)`. RDX held `Stage` (0 or
+   1), not a struct pointer. Fixed by changing `umd_SetTexture`'s C++ signature to match and building
+   the wire record straight from the two value arguments — no struct, no NULL check needed.
+
+With both fixed, `DrawPrimitive()` returns `S_OK` and the full sequence
+(`CreateRenderTarget`→`SetRenderTarget`→`BeginScene`→`Clear`→`CreateVertexBuffer`→`Lock`/write/`Unlock`→
+`SetFVF`→`SetStreamSource`→`DrawPrimitive`→`EndScene`) runs with **no crash and no DDI rejection**.
+
+**But the triangle doesn't render — and that's a *different*, deeper, RE-confirmed gap, not a pipeline
+bug.** A host-side diagnostic (temporary, since removed) sampling the readback pixel at the triangle's
+centroid showed the *clear color*, not a blended triangle color. Tracing why: `d3d9_host`'s vertex
+buffer resource lookup (`this->state_.stream_sources[0]`) uses the DDI-level `hVertexBuffer` handle the
+runtime passes to `SetStreamSource` — but that handle is **not** one our driver ever created (confirmed:
+`CreateVertexBuffer` still never calls `pfnCreateResource`, exactly as §10 already found for the
+backbuffer-only case). It's a small sequential value from the *runtime's own internal* handle space
+(observed: `9`), which coincidentally collided with one of our own sequentially-numbered fake
+render-target resources (created by `resolve_resource_id`'s lazy-bind fallback) — so the draw was
+silently reading 1.2MB of zeroed texture backing as "vertex data", producing a degenerate (zero-area)
+triangle. **Fixed the collision specifically**: `execute_draw` now checks the found resource's `kind`
+is actually `vertex_buffer`/`index_buffer` before trusting it, so an accidental id collision cleanly
+no-ops the draw instead of reading garbage from an unrelated resource.
+
+The *real* underlying gap — why no genuine vertex data ever reaches the driver at all — was RE'd via
+idasql (`?Lock@CDriverVertexBuffer@@...`, `?LockVB@CD3DDDIDX6@@...`) down to a concrete mechanism:
+`CDriverVertexBuffer::Lock` branches on a "hal level" field read from the device object
+(`device[+72] < 10` in the decompile); when true (our case), it takes a **cached-system-memory fast
+path** — `app Lock() → cached pointer + offset`, entirely inside d3d9.dll, **never calling `pfnLock` at
+all**. This is not the same bug as the previously-documented "`LockRect` never calls `pfnLock`" gap in
+§10.5 — it's the same root mechanism, but now confirmed (via decompiled source, not just live
+observation) to also block **writing** app-authored data into any driver-visible location, not just
+**reading** it back. Getting real vertex/index data to the driver under our current negotiated DDI tier
+needs either negotiating a higher WDDM DDI interface level (a substantially larger change — different
+device-funcs table, possibly different struct layouts) or finding what specifically flips that `< 10`
+check for our driver; neither is solved yet.
+
+**The pipeline builder itself is proven correct**, isolated from that gap: with known-good vertex bytes
+(red/green/blue triangle, same coordinates the real test uses) substituted directly into `execute_draw`
+as a temporary diagnostic, the readback at the triangle's centroid `(320,280)` came back `B=0x55 G=0x56
+R=0x54` — the exact expected barycentric average of the three vertex colors (255/3 ≈ 0x55 per channel,
+matching to within readback rounding) — while a corner pixel `(10,10)` outside the triangle still read
+the clear color. Vertex fetch, the embedded shader pair's NDC transform, rasterization, per-vertex color
+interpolation, and the GPU→host readback are all byte-exact correct. This satisfies this plan's Phase 4
+success criterion (analytic host-side pixel verification of a real GPU-rendered triangle) **for the
+render pipeline**; the substitution was removed after confirming this, so the current committed state
+correctly no-ops on real (still-unreachable) vertex data rather than pretending it works.
 
 ---
 
 ## 11. Immediate next steps (in order)
 
-1. **Resolve the `DrawPrimitive` rejection gate (§10.6)** — the most valuable next step: RE whether
-   `CreateVertexBuffer` calls `pfnCreateResource` now (Phase 1's "buffers don't call it" finding may be
-   stale post-offset-48-fix), and get a real triangle actually drawing. This is the last blocker for
-   milestone M1 (minus shader translation, deferred to Part 4).
-2. **Resolve the `LockRect` → `pfnLock` gap (§10.5)** — unbinding-before-lock was tried and refuted;
-   check `fill_d3d9caps` for a missing lockable-render-target capability bit, or accept host-side
-   diagnostics as the verification method going forward (proven reliable twice already) and stop
-   blocking on guest-side `LockRect` working.
+1. **Solve real vertex/index data delivery to the driver (§10.6)** — the actual remaining blocker for a
+   genuine (non-diagnostic-injected) triangle. RE-confirmed root cause: `CDriverVertexBuffer::Lock`
+   takes a cached-system-memory fast path (`device[+72] < 10`) that never calls `pfnLock`, for both
+   render-target-style locks (§10.5's original finding) and vertex/index buffers. Two directions: (a)
+   find what specifically flips that `< 10` check — likely tied to a caps/DDI-level flag our driver
+   reports at `OpenAdapter`/`CreateDevice` time — or (b) negotiate a higher WDDM DDI interface level
+   (`SOGEN_D3D9_UMD_INTERFACE_VERSION` in `d3d9_ddi.hpp` currently targets Win7/0x2003; a WDDM1.3+/2.0+
+   tier may change this code path, but changes the device-funcs table shape too — bigger change, verify
+   via idasql before committing to it). This is the last blocker for milestone M1 (minus shader
+   translation, deferred to Part 4) — the render pipeline itself is already proven correct (§10.6).
+2. **(Lower priority, same root cause as #1) The `LockRect` → `pfnLock` gap (§10.5)** — same
+   `CDriverVertexBuffer`/cached-pointer mechanism; solving #1 should solve this for free. Host-side
+   diagnostics remain the proven, reliable verification method in the meantime.
 3. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
    (host-side pixel readback sidesteps needing real pixels on screen), but needed before a literal
    "window shows a color" milestone. `D3DDDIARG_PRESENT`'s `hSrcResource`(offset 0) is RE-verified;
