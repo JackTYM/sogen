@@ -1,0 +1,284 @@
+# Sogen D3D9 Shim-Free Graphics — MacBook Handoff
+
+> **Purpose:** Resume state for this work on the MacBook (M5 Pro, macOS/Apple Silicon).
+> Originally written 2026-07-01 for the Linux→Mac migration; updated 2026-07-02 after the migration,
+> macOS build bring-up, MoltenVK/WoW64 validation, and **gate 3 resolution** were completed. This version
+> focuses on current state and the next step: Stage 2 Part 2/3 (§10).
+
+---
+
+## 1. TL;DR — where we are
+
+Building **shim-free DirectX for sogen**: the Windows guest loads *official Microsoft* graphics DLLs,
+which reach the GPU via *standard graphics-device registration + D3DKMT kernel syscalls*, and **all
+API→Vulkan translation happens on the sogen host side** (targeting `vulkan_host` → a real Vulkan driver).
+
+- **Stage 1 (Vulkan→Vulkan): COMPLETE** — official Khronos loader + our registered ICD, validated x64 + WoW64.
+- **macOS port + MoltenVK: COMPLETE (2026-07-02).** Release build is green on Apple Clang; `vulkan_host`
+  creates a real device against MoltenVK (portability extensions negotiated); a batch of WoW64 DXGK
+  struct-thunking bugs (unrelated to gate 3) found and fixed. Verified end-to-end with
+  `native-gpu-clear-sample`: real clears + readback, pixel-correct, through MoltenVK on the M5 Pro GPU.
+  Committed in `a2088222` (build portability) and `9ee49a02` (MoltenVK/WoW64). Full details:
+  `memory/project_moltenvk_wow64_dxgk.md` and `memory/feedback_wow64_dxgk_struct_abi.md`.
+- **Stage 2 (D3D9): Spike B — DONE (2026-07-02).** Official `d3d9.dll` loads our thin WDDM user-mode
+  driver and successfully creates a real `IDirect3DDevice9`.
+  - **Gate 1 — `GetDeviceCaps(HAL)` → S_OK: DONE.**
+  - **Gate 2 — our DDI `pfnCreateDevice` reached + S_OK: DONE.**
+  - **Gate 3 — top-level `IDirect3D9::CreateDevice` → S_OK: DONE.** Root cause was a bug in **our own
+    UMD**, not sogen's kernel: `OpenAdapter` echoed the runtime's offered interface `Version` (`0xe000`)
+    back as `DriverVersion`, making the runtime believe our `D3DDDI_DEVICEFUNCS` table extended to
+    WDDM2.1+ slots (`pfnAcquireResource`/`pfnReleaseResource`) that our WIN7-sized table doesn't declare;
+    `ValidateUMDeviceFuncs` read uninitialized memory past the table and failed with exactly
+    `D3DERR_NOTAVAILABLE (0x8876086a)`. Fix: report our own implemented version
+    (`SOGEN_D3D9_UMD_INTERFACE_VERSION`) instead. Full RE trail: §6.
+
+**This work is entirely CPU/kernel-side and headless** (no GPU rendering needed for gate 3), so MoltenVK
+being done now is a bonus for Stage 2 Part 2/3, not something gate 3 depended on.
+
+---
+
+## 2. Project quick facts
+
+- **Repo:** `sogen` — C++20 Windows user-space emulator. Produces `analyzer` binary.
+- **Branch:** `feat/mw2-on-upstream` (main branch is `main`).
+- **Approved Stage-2 plan:** `.claude/plans/scalable-giggling-fern.md` (detailed; read it).
+- **Build (fast dev):** `cmake --build --preset=release`
+- **Build (final, slow, clang-tidy):** `cmake --build --preset=tidy` — only at the very end.
+- **CPU backends (`src/backends/`):** `kvm` (Linux+x86-64 only, hardware-fast), `unicorn` (software,
+  default, cross-platform), `icicle` (software, Rust, `EMULATOR_ICICLE=1`), `whp` (Windows).
+  Selection in `src/backend-selection/backend_selection.cpp`; default = **unicorn**; `EMULATOR_KVM=1`
+  forces KVM on Linux/x86.
+
+---
+
+## 3. Migration outcome (historical — migration is done)
+
+What actually happened, for context if something still seems missing: the transfer ran inconsistently —
+the working git tree (with uncommitted changes + untracked files) landed correctly at
+`~/Documents/Coding/C++/sogen`, but a *second*, separate full-tree copy also landed nested inside the
+repo at `sogen/sogen/` before being cleaned up. Two things were **confirmed permanently lost** and are
+not recoverable: the old Claude memory dir contents (`project_stage2_d3d9.md` etc.) and
+`scratchpad/spike_probe.log` (the gate-3 probe capture). The real `root/` guest filesystem (registry
+hives + licensed Windows DLLs incl. `d3d9.dll`) was recovered from that nested copy before it was deleted
+and is in place at `build/release/artifacts/root/`. IDA Pro + `idasql` are installed and working (macOS
+path: `/Applications/IDA Professional 9.0.app/Contents/MacOS/idasql`). `mingw-w64` (both x64/x86 cross
+compilers) is installed via Homebrew. Full account: `memory/project_macos_migration.md`.
+
+---
+
+## 4. Architecture (why the port is cheap)
+
+Guest (frozen, official DLLs only) → **thin sogen WDDM UMD** (`sogen_d3d9um.dll`, the vendor-driver slot)
+→ D3DKMT `NtGdiDdDDIEscape` → host `gpu_processor` → (future) D3D9 decoder → `vulkan_host` → real Vulkan.
+
+- The guest never changes regardless of host backend. Only the host's Vulkan *driver* swaps.
+- On Linux: RADV. **On macOS: MoltenVK** (or KosmicKrisp) as the Vulkan ICD — `vulkan_host` code unchanged.
+- This is why a Vulkan translation layer (MoltenVK) is the right call vs. a native Metal backend.
+
+---
+
+## 5. Current working-tree state (2026-07-02)
+
+`syscall_dispatcher.cpp` has one small, permanent, **off-by-default** diagnostic toggle
+(`// #define ENABLE_NTSTATUS_PROBE`, mirroring the existing `ENABLE_DXGK_LOGGING` idiom in `gdi.cpp`) —
+uncomment it to log every syscall return with the top two status bits set
+(`[NTSTATUS_PROBE] <name> -> 0x<status> (ip=0x<addr>)`). `gdi.cpp` is fully clean/committed (the gate-1/2
+fixes below were already committed in `9ee49a02`, not a leftover from this session).
+
+### 5a. `gdi.cpp` — D3D9 gate-1/2 fixes (committed in `9ee49a02`)
+1. **UMDRIVERNAME handler (~line 3748):** returns `u"sogen_d3d9um.dll"` for the DX9
+   KMTUMDVERSION (Version==0), else `u"d3d10warp.dll"`. This is how the official d3d9.dll loads our UMD.
+2. **`NtGdiDdDDIGetDeviceState` ResetState fix (~line 4707):** `state.ResetState = 0` for
+   StateType==3 (was `1`, semantics were inverted). Real sogen kernel bug; helps any D3D9 app incl. MW2.
+
+### 5b. `src/samples/sogen-d3d9-umd/` — the D3D9 UMD sample (source-only; see `README.md` there)
+- `sogen_d3d9_umd.cpp` — the thin UMD. Exports `OpenAdapter`; fills adapter funcs; `umd_GetCaps`
+  synthesizes `D3DCAPS9` + FORMATOP; `umd_CreateDevice` stubs the device-func table and reports
+  `DriverVersion = SOGEN_D3D9_UMD_INTERFACE_VERSION` (the gate-3 fix — see §6).
+- `d3d9_ddi.hpp` — hand-transcribed D3D9 UMD DDI (WDK layout; `#pragma pack(8)`; version-gated DEVICEFUNCS).
+- `sogen_d3d9_umd.def` — `LIBRARY sogen_d3d9um / EXPORTS OpenAdapter`.
+- `d3d9_spike_test.cpp` — guest test: window → `Direct3DCreate9` → `GetAdapterDisplayMode` →
+  `CheckDeviceType`/`CheckDeviceFormat` → `GetDeviceCaps` → `CreateDevice(HAL)`.
+- Built binaries (`sogen_d3d9um-x64.dll`, `d3d9-spike-test-x64.exe`) are **not** committed — regenerable,
+  see `README.md`'s exact mingw commands (also in §8).
+- Caps are currently fixed-function (`VertexShaderVersion`/`PixelShaderVersion = 0`) — restoring
+  `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed: even
+  `GetDeviceCaps` starts failing). Open follow-up, not blocking.
+
+> **Do NOT commit** the MS-copyrighted `d3dumddi.h` — `d3d9_ddi.hpp` is a clean hand-transcription and is
+> fine to keep.
+
+---
+
+## 6. GATE 3 — resolved (2026-07-02)
+
+**Symptom:** after our `pfnCreateDevice` returned S_OK, the top-level `IDirect3D9::CreateDevice(HAL,
+windowed, X8R8G8B8 640x480, no auto-depth)` returned `0x8876086a` (D3DERR_NOTAVAILABLE) and tore the
+device down, with **zero** DXGK/D3DKMT syscalls anywhere in the failure window — a strong early signal
+that the failure was purely usermode.
+
+**RE method that actually worked** (after several dead ends — see below): install a global, unaddressed
+`hook_memory_execution` in the CreateDevice syscall window that only logs the **transition** into
+`EAX == 0x8876086A` (not every instruction where the value merely persists — that produced dozens of
+false positives from unrelated code reusing the same register). The first transition's return address,
+cross-referenced against a fresh idasql analysis of the *exact staged* `d3d9.dll` (not a stale/assumed
+address list), pointed at `InternalDirectDrawCreate`'s failure return (`v32 - 2005530518`, i.e. exactly
+`0x8876086A` when `v32==0`).
+
+**Root cause — a bug in our own UMD, not sogen's kernel.** Call chain:
+`InternalDirectDrawCreate` → `D3D9CreateDirectDrawObject` → `CreateDeviceLHDDI` (the WDDM/"LongHorn"
+driver-model path) → after our own `pfnCreateDevice` call returns S_OK, `ValidateUMDeviceFuncs` checks
+the **negotiated `DriverVersion`** against WDDM thresholds (`>= 0x4002` WDDM1.3, `>= 0x6001` WDDM2.1) to
+decide which `D3DDDI_DEVICEFUNCS` slots must be non-null. Our `OpenAdapter` was echoing the runtime's
+offered `pArgs->Version` (observed as `0xe000`, far beyond WDDM2.1) straight back as `DriverVersion` —
+so the runtime believed our device-func table extended to WDDM2.1+ slots (`pfnAcquireResource`/
+`pfnReleaseResource`) that our `SOGEN_D3D9_UMD_INTERFACE_VERSION = WIN7`-sized `D3DDDI_DEVICEFUNCS`
+struct doesn't even declare. It read uninitialized memory past our table, found null, and failed —
+`ValidateUMDeviceFuncs` returns `0x80004005`, which propagates up through `CreateDeviceLHDDI` →
+`D3D9CreateDirectDrawObject` → `InternalDirectDrawCreate`'s `return v32 - 2005530518` (`v32=0`) →
+`0x8876086A` at the top level.
+
+**Fix (`sogen_d3d9_umd.cpp`, `OpenAdapter`):**
+```cpp
+pArgs->DriverVersion = SOGEN_D3D9_UMD_INTERFACE_VERSION;  // was: pArgs->Version
+```
+One line. Validated: `CreateDevice hr=0x00000000`, `SUCCESS: IDirect3DDevice9 created`, stable across
+repeated runs, smoke test still 26/26.
+
+**Dead ends worth recording** (all addresses were *individually verified correct* via idasql — `funcs`
+table exact match, xref confirmation from the real call site — yet none of these targeted
+`hook_memory_execution(address, ...)` calls ever fired, for reasons still unexplained):
+`NTStatusToHResult`, `CBaseDevice::Init`, `AllocateCB`, `CEnum::ValidateCreateDevice`,
+`CEnum::ValidatePresentParameters`. The original mechanism hypothesis (NTSTATUS_PROBE →
+`NTStatusToHResult(STATUS_ACCESS_DENIED)` → `CBaseDevice::Init`) from the pre-migration investigation was
+**wrong** — none of those three functions execute on this path at all. Direct API calls
+(`CheckDeviceType`/`CheckDeviceFormat`/`GetAdapterDisplayMode` from the guest test) all returned
+`S_OK`, ruling out format/caps validation entirely and narrowing the search before the transition-scan
+technique above found the real site. If precise `hook_memory_execution(address, ...)` targeting is
+needed again, budget for this kind of dead end and prefer the transition-scan method from the start.
+
+---
+
+## 7. RE tooling & key addresses
+
+- **idasql CLI (macOS):** `/Applications/IDA Professional 9.0.app/Contents/MacOS/idasql`. Recipe: copy
+  the `.i64` (or the raw binary — idasql auto-analyzes it) to a private path (avoids IDA lock/sidecar
+  clashes), then
+  `idasql -s copy.i64 -q "SELECT decompile(0xADDR);"` (warm ~0.5s). Use `INSERT INTO funcs(address)
+  VALUES(0xSTART); SELECT decompile(0xSTART);` to reconstruct functions across IDA analysis gaps.
+- **32-bit MS d3d9 DB:** `~/.cache/sogen-symbols/d3d9_wow64.i64` (imagebase 0x10000000). This is the
+  binary Stage-1/early Stage-2 RE used — but note the x64 test runs a *different* binary (below).
+- **64-bit MS d3d9 DB (the one that actually runs in the x64 test):** `~/.cache/sogen-symbols/d3d9_x64.dll`
+  + `.dll.i64` (regenerate by copying the staged `root/.../system32/d3d9.dll` there, then
+  `idasql -s d3d9_x64.dll -w -q "SELECT COUNT(*) FROM funcs;"`, ~7s; imagebase `0x180000000`, 4579 funcs).
+  Runtime→IDA map: d3d9 base = `0x104900000` (empirically re-confirmed 2026-07-02, deterministic — no
+  ASLR jitter observed across runs), so `IDA = 0x180000000 + (runtime - 0x104900000)`.
+- **Beware:** `root/.../syswow64/d3d9.dll` is **DXVK (7.3MB)**, not MS 32-bit d3d9 — a 32-bit spike would
+  load DXVK, not our UMD path. The MS 64-bit `system32/d3d9.dll` (1.73MB) is the real target.
+- **Lesson from the gate-3 investigation:** a `funcs`-table address that matches by name AND is
+  cross-ref-confirmed as the real call target can still silently fail to fire via
+  `hook_memory_execution(address, callback)` for unexplained reasons — this happened for 5 different,
+  individually-verified addresses in a row. Don't sink time re-verifying the address is "really right";
+  switch to a transition-scan (`hook_memory_execution(callback)` unaddressed, watching a register for the
+  target value's *first write*, not every instruction it merely persists in) — it found the real site in
+  one shot once used. `idasql`'s `bytes` table (`dword`/`qword` columns) is useful for checking whether a
+  decompiled constant is a real stored value vs. compiler-folded arithmetic — cross-check against
+  `instructions`/`instruction_operands` before trusting a raw byte-pattern match (unaligned mid-instruction
+  coincidences are common and will outnumber real hits).
+- Confirmed structural facts: d3d9's per-adapter "driver object" begins with a `D3DCAPS9` at offset 0
+  (+extra driver fields after byte 304, indexed as `a1[N]` where each `N` is `sizeof(D3DCAPS9)` bytes).
+  `memory/project_stage2_d3d9.md` (pre-migration notes) did not survive the migration (§3 in the original
+  version of this doc) — the facts above are what was re-derived this session.
+
+---
+
+## 8. Build / run / staging reference
+
+- **Build emulator:** `cmake --build --preset=release` from the repo root (artifacts in
+  `build/release/artifacts/`). **`root/` lives at `build/release/artifacts/root/`** — not a repo-top
+  `root/` — the real 64-bit `system32/d3d9.dll`, the spike test, and `sogen_d3d9um.dll` are all staged
+  there already.
+- **Run the D3D9 spike:** from `build/release/artifacts/`:
+  `./analyzer -e root -c c:/d3d9-spike-test.exe` — capture output; grep `[d3d9-spike]`,
+  `[sogen-d3d9-umd]`, `[diag]`/`[NTSTATUS_PROBE]` if those toggles are on.
+- **Smoke test:** `./analyzer -e root -s c:/test-sample.exe` from `build/release/artifacts/` (needs both
+  `-e root` AND the absolute guest path — a bare relative filename errors "Only absolute paths can be
+  translated"). 26/26 `Success` lines, no `fail`/`error` outside `[NTSTATUS_PROBE]` noise if that toggle
+  is on.
+- **Analyzer run rules:** ALWAYS foreground, never `run_in_background`; use the Bash tool's own timeout
+  parameter instead of shell `timeout` (no GNU coreutils `timeout` on macOS by default); capture+read
+  output yourself. `-e root` (relative to cwd) is required — there's no default; without it, `-r`/registry
+  also defaults relative to cwd, not to `-e`, so both need to point at `root/` explicitly.
+- **Guest toolchain (builds the UMD / ICD / test EXEs):** mingw-w64 — **installed** via
+  `brew install mingw-w64` (both `x86_64-w64-mingw32-g++` and `i686-w64-mingw32-g++` confirmed working).
+  Exact commands in `src/samples/sogen-d3d9-umd/README.md`.
+  - UMD (x64): `x86_64-w64-mingw32-g++ -shared -O2 -std=c++20 sogen_d3d9_umd.cpp sogen_d3d9_umd.def
+    -static -static-libgcc -static-libstdc++ -o sogen_d3d9um-x64.dll`
+  - Test (x64): `x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_spike_test.cpp -static -static-libgcc
+    -static-libstdc++ -o d3d9-spike-test-x64.exe -ld3d9`
+  - Stage: UMD → `build/release/artifacts/root/filesys/c/windows/system32/sogen_d3d9um.dll`; test →
+    `build/release/artifacts/root/filesys/c/d3d9-spike-test.exe`.
+  - x86/WoW64 UMD (later): `i686-w64-mingw32-g++ ... -Wl,--kill-at ...` (undecorated `__stdcall` exports).
+
+---
+
+## 9. macOS / Apple Silicon port strategy — DONE (2026-07-02)
+
+**Two axes — kept separate, both resolved:**
+- **CPU emulation:** no KVM on Apple Silicon (KVM is Linux+x86 only; no hardware x86-on-ARM virt exists).
+  sogen defaults to **unicorn** (software) — builds and runs on macOS. Cost is **speed** (~10–50× slower
+  than KVM); this is the real constraint for MW2-scale work, not graphics. `icicle` (Cranelift JIT,
+  `EMULATOR_ICICLE=1`) is available in-tree as a faster alternative backend if/when speed becomes the
+  bottleneck — not needed yet, gate 3 doesn't care about CPU speed.
+- **Graphics: MoltenVK confirmed working end-to-end.** `vulkan-loader` + `molten-vk` + `vulkan-tools`
+  installed via Homebrew; `vulkan_host` fixed to negotiate `VK_KHR_portability_enumeration`/
+  `VK_KHR_portability_subset` and to find the loader on Apple Silicon's `/opt/homebrew/lib`. Verified with
+  a real clear+present pipeline through `native-gpu-clear-sample`, pixel-correct, on the M5 Pro GPU. No
+  MoltenVK feature gaps hit so far. Details: `memory/project_moltenvk_wow64_dxgk.md`.
+
+**Do NOT run an x86 Linux VM on the Mac** — it's emulated (QEMU TCG) and KVM won't work inside it →
+double-slow, loses the fast path. For the fast path (KVM + real GPU Vulkan) at MW2 scale later, use a
+*real* x86 Linux box (physical or cloud) — not needed for gate 3.
+
+No architectural rewrite was needed — the guest stayed frozen throughout.
+
+---
+
+## 10. Immediate next steps (in order)
+
+Gate 3 is done (§1/§6). Two small, optional follow-ups before Stage 2 Part 2/3, then the real work:
+
+1. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
+   fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
+   `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:
+   `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Needs its own RE pass (likely a
+   different, additional caps field this gauntlet checks) before real shader support can be reported.
+   Not required for Stage 2 Part 2/3 to start, since M1 (a fixed-pipeline or minimal-shader triangle) can
+   proceed with the current caps.
+2. **Then Stage-2 Part 2/3:** the D3D9 command protocol + host `d3d9_host` decoder → `vulkan_host`
+   (see the approved plan, `.claude/plans/scalable-giggling-fern.md`). Milestone M1 = programmable SM2/3
+   triangle, pixel-diffed vs the DXVK oracle. MoltenVK being done means this can render for real on this
+   machine once reached — no more headless-only work after this point.
+3. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
+   --no-edit -S' <base>`); verify with `git log --show-signature`.
+
+---
+
+## 11. Outstanding tasks (from the tracker)
+- #15: Spike B-4 / gate 3 — **DONE** (this doc's former focus; see §1/§6). Stage 2 Part 2/3 is next.
+- #11 (deferred): delete `SogenGpu` io_device + consolidate onto one `vulkan_host`.
+- #5: investigate DXVK `Config` ctor C++ throw under sogen (MW2 blocker on the DXVK-oracle side).
+- #6: reproducible/CI provisioning of real MS `dxgi.dll` for the Vulkan path.
+
+---
+
+## 12. Global working rules (carry over)
+- Never commit `.claude/` or `.idea/`. Commit unsigned (`--no-gpg-sign`) while working; sign every commit
+  before pushing (`git rebase --exec 'git commit --amend --no-edit -S' <base>`); verify with
+  `git log --show-signature`.
+- Don't generate code comments unless they add non-deducible info. Run clang-format on changed files.
+- Prefer clean/idiomatic solutions; no shortcuts/workarounds.
+- **Set global git identity on any new machine before committing**: this Mac's `user.name`/`user.email`
+  were unset, so the first commit here landed as `Jack <jack@Jacks-MacBook-Pro.local>` instead of
+  `Jackson Yarger <jacksonkyarger@gmail.com>` — caught and fixed with `--amend --reset-author` since it
+  was still unpushed. `gh auth login` does *not* set this; it's a separate `git config --global` step.
