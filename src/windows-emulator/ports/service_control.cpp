@@ -28,7 +28,6 @@ namespace sogen
         constexpr uint32_t k_svcctl_open_sc_manager_w = 64; // ROpenSCManagerW (database string + access)
 
         constexpr uint32_t k_error_success = 0;
-        constexpr uint32_t k_error_access_denied = 5; // mmdevapi treats this from the subscribe as non-fatal
 
         // Fabricated SC_RPC_HANDLEs. The SCM is fully stubbed, so the bytes only need to round-trip: the client
         // stores the handle from Open* and hands it back on the follow-on Open/Close/Notify calls.
