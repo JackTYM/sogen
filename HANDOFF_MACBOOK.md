@@ -613,30 +613,85 @@ field additions account for (a genuinely bigger change than the struct diffs alo
 additional `GetCaps` query types, a different negotiation sequence, or caps fields we don't populate
 that this tier newly requires). Reverted immediately; not investigated further this session.
 
-**Conclusion for this session**: solving this for real needs either (a) live debugging (breakpoints in
-`d3d9.dll` to watch device+120/444/460 get populated and trace back to which caps bits feed them — not
-possible with idasql's static decompilation alone), or (b) a proper, dedicated investigation into what
-`CreateDevice` additionally requires at the WDDM1.3+ tier (not just the additive struct fields). Left as
-an open, well-scoped follow-up (task tracker #15) rather than continuing to guess blindly.
+**Update (2026-07-02, later same day): live debugging found and fixed the real root cause.** sogen has
+its own built-in debugger — a GDB remote-serial-protocol stub (`-d --port`, works with real IDA
+Pro/GDB) **and** a nanobind Python scripting API (`import sogen`) exposing `hook_memory_execution`/
+`hook_memory_write`/register and memory read/write against the *live* emulator, both documented in
+`docs/debugger/ARCHITECTURE.md`. Neither had been used yet this session — all RE up to this point was
+static idasql decompilation. Built it for a scratch dir (`cmake --preset release -B build/release-py
+-DSOGEN_ENABLE_PYTHON_BINDINGS=ON`, `cmake --build build/release-py --target sogen`) and used it to
+trace `d3d9.dll`'s live execution against RVAs pulled from the same idasql database used all session.
+
+Hooking `CVertexBuffer::Create`'s entry (reading `RCX`=device, and `dev+120`/`+444`/`+460` at the exact
+moment our test's real `CreateVertexBuffer(60, 0, D3DFVF_XYZRHW|D3DFVF_DIFFUSE, D3DPOOL_DEFAULT)` call
+reaches it) confirmed the earlier decompile's routing logic runs with `dev+460 = 0x00190600`, and
+replaying that exact decompiled logic by hand with this real value proves `v19` never gets remapped
+from its default (2 = sysmem) to the real requested pool, because `dev+460 & 0x02000000 == 0`. A
+`memory_write` watch on `dev+460` (widened after a narrow 4-byte watch caught nothing — the actual
+write is an 8-byte QWORD store) caught the exact write: an 8-byte memcpy destination inside
+`CBaseDevice::Init`, sourced from a `_D3D9_DEVICEDATA*` argument. Hooking *that* memcpy's call site
+(reading `RCX`/`RDX`/`R8` = dest/src/size right before the `call`) and dumping the source struct's
+bytes at offset 28 gave `0x00190600` again — then walking the call stack for a return address inside
+`d3d9.dll`'s own range, watching *that* address's owning function resolve as `GetDX8HALCaps` →
+`RegisterD3DCaps`, was a dead end (that call only *propagates* an already-populated value). The
+decisive step was re-arming the SAME narrow write-watch on the *source* struct's offset 28
+(`_D3D9_DEVICEDATA + 28`, address known from the memcpy hook) in a fresh run: the write's `RIP` landed
+**inside our own `sogen_d3d9um.dll`**, not `d3d9.dll` — specifically `umd_GetCaps+0x74`
+(`movups %xmm0,0x1c(%rcx)`, a 16-byte SSE store covering `D3DCAPS9::DevCaps`/`PrimitiveMiscCaps`/
+`RasterCaps`/`ZCmpCaps` in one instruction, loaded from a compile-time `.rdata` constant). `offset 0x1c
+== 28 == D3DCAPS9::DevCaps`. **`_D3D9_DEVICEDATA` and the buffer our own `pfnGetCaps` fills are the same
+memory** — the runtime reads `caps->DevCaps` back out of its own caps buffer at this internal offset.
+Objdump-ing the exact 16 `.rdata` bytes and decoding them against mingw's real (not memorized) 
+`D3DDEVCAPS_*` values confirmed `0x00190600` is exactly `HWTRANSFORMANDLIGHT|HWRASTERIZATION|
+PUREDEVICE|DRAWPRIMTLVERTEX|TEXTUREVIDEOMEMORY` — i.e. our own `fill_d3d9caps`'s current `DevCaps`
+value, byte-for-byte. **The missing bit, `0x02000000`, has no name in the public `D3DDEVCAPS_*` set**
+(the defined constants jump from `NPATCHES=0x1000000` straight past it) — an undocumented internal
+reuse by the runtime's pool-routing gate. Added it as a raw literal (`k_devcaps_driver_managed_pool`)
+to `fill_d3d9caps`'s `DevCaps` in `sogen_d3d9_umd.cpp`; a first attempt used the *wrong* constant
+(`D3DDEVCAPS_QUINTICRTPATCHES = 0x00200000`, one hex digit off from the needed `0x02000000` — caught by
+re-verifying `dev+460`'s live value after the fix and finding it still didn't have the target bit set).
+
+**Re-traced with the fix in place and confirmed it's real**: `dev+460` now reads `0x02190600`
+(bit 25 set), and hand-replaying `CVertexBuffer::Create`'s decompiled logic with this value proves
+`v21` (the routing decision) now resolves to `0` instead of `2` — i.e. `CreateDriverVertexBuffer` (the
+real, driver-backed path) instead of `CreateSysmemVertexBuffer`. This is a genuine, verified bug fix,
+independent of whether it alone completes the vertex-delivery chain (it doesn't, see below).
+
+**A second, deeper gate remains.** With the DevCaps fix in place, `Lock()` on the vertex buffer still
+returns `S_OK` with a `NULL` pointer (previously it returned a non-null but wrong pointer from the
+sysmem fast path). Live-tracing `CDriverVertexBuffer::Lock` (the class now actually constructed, thanks
+to the fix) shows its own separate "hal level" gate (`*(int*)(device+72)`, unrelated to `DevCaps`) reads
+`11` for our real device — *above* the `< 10` fast-path threshold this session's earlier notes assumed
+was always taken — meaning it takes the "real" branch, calling a function pointer at `device+72's
+target+864` with a request struct, whose overall return is `>= 0` (success) yet the resulting data
+pointer is still null. That dispatch resolves (confirmed live) to the global `DdLockLH` function — a
+large DirectDraw-compatible ("LongHorn DDI") lock implementation that itself, at one specific call site,
+invokes a function pointer whose *value at that exact moment* resolves to our own `umd_Lock`'s real
+address (confirmed via objdump against our own compiled DLL). But `umd_Lock`'s own diagnostic log never
+fires in the actual (unhooked) `analyzer` CLI run — only when traced through the Python hook. This is
+either a genuine additional gate inside `DdLockLH` that only sometimes reaches that call (state-
+dependent branch not yet mapped), or an artifact of instrumentation changing execution (the hook itself
+sits on the call-site instruction and could perturb JIT/codegen timing) — not yet distinguished. Not
+resolved this session; the DevCaps fix is committed on its own merit, and this is a new, narrower,
+better-characterized follow-up (task tracker #15) than "solve vertex delivery" was at session start.
 
 ---
 
 ## 11. Immediate next steps (in order)
 
-1. **Solve real vertex/index data delivery to the driver (§10.6)** — the actual remaining blocker for a
-   genuine (non-diagnostic-injected) triangle. RE-confirmed root cause: `CDriverVertexBuffer::Lock`
-   takes a cached-system-memory fast path (`device[+72] < 10`) that never calls `pfnLock`, for both
-   render-target-style locks (§10.5's original finding) and vertex/index buffers; separately,
-   `CVertexBuffer::Create` decides between the driver-backed/managed/sysmem creation paths based on
-   internal device-cached flags (`device+120`, `+444`, `+460`) whose caps provenance isn't pinned down.
-   Ruled out (§10.6): `D3DCAPS2_CANMANAGERESOURCE` alone, and `pfnDrawPrimitive2`-carries-inline-data
-   (that slot never fires for this test). Two directions remain: (a) live-debug `d3d9.dll` (breakpoints,
-   not static idasql decompilation) to trace exactly which caps bits populate those cached device
-   fields, or (b) negotiate a higher WDDM DDI interface level (`SOGEN_D3D9_UMD_INTERFACE_VERSION` in
-   `d3d9_ddi.hpp` currently targets Win7/0x2003; a WDDM1.3+/2.0+ tier may change this code path, but
-   changes the device-funcs table shape too — bigger change, verify via idasql before committing to it).
-   This is the last blocker for milestone M1 (minus shader translation, deferred to Part 4) — the render
-   pipeline itself is already proven correct (§10.6).
+1. **Solve the `DdLockLH`→`umd_Lock` non-dispatch gap (§10.6)** — the actual remaining blocker for a
+   genuine (non-diagnostic-injected) triangle, and now a much narrower question than at session start.
+   The `CVertexBuffer::Create` pool-routing bug is **fixed and verified** (the missing `DevCaps` bit
+   `0x02000000`, see §10.6). What remains: live-traced (sogen's own Python debugger API) that the real
+   dispatch chain is `CDriverVertexBuffer::Lock` → `DdLockLH` (a global DirectDraw-compatible lock
+   function) → a function pointer that, when read live, resolves to our own `umd_Lock`'s real address —
+   yet `umd_Lock` never actually executes in the unhooked `analyzer` CLI run (confirmed via a diagnostic
+   log that never fires). Next step: **use the GDB stub** (`analyzer -d --port 28960`, connect a real
+   GDB/IDA Pro session — no Python hook to potentially perturb execution) to single-step through
+   `DdLockLH` for this exact call and find the actual branch that skips the call, or confirms it's a
+   Python-hook artifact and the call really does happen (in which case the bug is downstream, inside
+   `umd_Lock` itself or the wire round-trip). This is the last blocker for milestone M1 (minus shader
+   translation, deferred to Part 4) — the render pipeline itself is already proven correct (§10.6).
 2. **(Lower priority, same root cause as #1) The `LockRect` → `pfnLock` gap (§10.5)** — same
    `CDriverVertexBuffer`/cached-pointer mechanism; solving #1 should solve this for free. Host-side
    diagnostics remain the proven, reliable verification method in the meantime.

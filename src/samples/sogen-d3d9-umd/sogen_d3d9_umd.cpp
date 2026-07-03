@@ -248,8 +248,18 @@ namespace
         // D3DERR_NOTAVAILABLE. STREAMOFFSET (bit0) satisfies the gate; d3d9 then re-derives DevCaps2.
         caps->DevCaps2 = D3DDEVCAPS2_STREAMOFFSET;
         caps->PresentationIntervals = D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE;
+        // DevCaps bit 0x02000000 has no name in the public D3DDEVCAPS_* set (the defined bits jump from
+        // D3DDEVCAPS_NPATCHES=0x1000000 straight past it) -- live-traced (via sogen's own Python
+        // debugger API, hooking CVertexBuffer::Create in d3d9.dll and watching the memcpy that seeds
+        // _D3D9_DEVICEDATA from this exact DevCaps DWORD) to be the exact gate CVertexBuffer::Create
+        // checks before letting a D3DPOOL_DEFAULT vertex/index buffer keep its real pool value; without
+        // it, every vertex buffer -- regardless of requested pool -- gets silently remapped to system
+        // memory (CreateSysmemVertexBuffer), and pfnCreateResource/pfnLock are never invoked for it.
+        // Undocumented internal reuse of this bit by the runtime's caps gauntlet -- same pattern as the
+        // DevCaps2 STREAMOFFSET gate above.
+        constexpr DWORD k_devcaps_driver_managed_pool = 0x02000000;
         caps->DevCaps = D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_PUREDEVICE |
-                        D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY;
+                        D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY | k_devcaps_driver_managed_pool;
         caps->PrimitiveMiscCaps = D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW |
                                   D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP | D3DPMISCCAPS_SEPARATEALPHABLEND;
         caps->RasterCaps = D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_SCISSORTEST | D3DPRASTERCAPS_DEPTHBIAS |
