@@ -696,51 +696,62 @@ non-buffer resources too: render targets/textures are already registered via `pf
 time `Lock()` reaches them (confirmed live), so the lazy-bind branch only ever fires for buffers in
 practice.
 
-**Still not a full fix.** Rebuilt, restaged, reran the real triangle test: no crash, no regression
-(smoke test still clean), but `vb->Lock()` still returns `S_OK` with a `NULL` data pointer, and the
-drawn pixel still reads the clear color (not the triangle). The resource-id fix is real and independently
-verifiable (the wrong-kind/wrong-size collision is objectively gone), but it wasn't the *only* problem.
-Given `umd_Lock` really does execute (GDB-confirmed) and its own logic is straightforward (bridge_call,
-check `resp->hr`, set `pArgs->pData`), the remaining gap is most likely **inside `DdLockLH` itself**: it
-builds its own local copy of the lock-args structure (`v28`/`v29`/`v30`/... in the decompile, a stack
-buffer distinct from `D3DDDIARG_LOCK`) before calling through to the driver, and the *returned* data
-pointer has to flow back out through that same local structure into `CDriverVertexBuffer::Lock`'s `v18`
-— a marshaling path that doesn't necessarily preserve `D3DDDIARG_LOCK`'s public offset-80 `pData`
-1:1. Not investigated further this session (this is the 7th+ layer of indirection reached through
-`d3d9.dll`'s internals); the concrete next step is tracing `DdLockLH`'s own local struct layout the same
-way `D3DDDIARG_LOCK`/`D3DDDIARG_PRESENT` were RE'd earlier — decompile it fully (rather than the partial
-read done here) and find where it reads back the data pointer after its internal dispatch call returns.
+**First fix wasn't the full story — one more struct-offset bug, then a genuine, complete, verified
+milestone.** Rebuilt, restaged, reran the real triangle test after the resource-id fix: no crash, no
+regression, but `vb->Lock()` still returned `S_OK` with a `NULL` data pointer, and the drawn pixel still
+read the clear color. Given `umd_Lock` really does execute (GDB-confirmed) with the correct resolved
+resource id, the remaining gap had to be in how the data pointer flows back out. Fully decompiled
+`DdLockLH` (only partially read before) and found it: `DdLockLH` builds its **own, separate, ~64-byte**
+local stack struct (`v28` through `v34` in the decompile, spanning `rsp+0x60`..`rsp+0xA0`) and passes
+`&v28` to the actual driver dispatch call — **not** the 104-byte struct `CDriverVertexBuffer::Lock`
+built and which was RE'd earlier as `D3DDDIARG_LOCK` (with `pData` at offset 80). That earlier RE
+characterized the *outer*, driver-agnostic struct `CDriverVertexBuffer::Lock` uses for its own
+bookkeeping — not what actually crosses the DDI boundary. `DdLockLH`'s own caller reads the resulting
+data pointer back from `*(QWORD*)((char*)&v32 + 4)`, where `v32` sits at `rsp+0x84` — offset 40 relative
+to `&v28`. **Moved `D3DDDIARG_LOCK::pData` from offset 80 to offset 40** in `d3d9_ddi.hpp` (kept the
+struct's overall 104-byte size for safety/compatibility, just repositioned the one field that matters
+based on hard evidence); stopped reading `Flags` at its old offset 96 (now known to be past the real
+~64-byte struct's bounds — `umd_Lock` sends `0` until that field's real offset gets its own RE pass).
+
+**Rebuilt and reran — full, genuine, end-to-end success.** `vb->Lock()` returns a real, non-null pointer;
+the app's own vertex writes land in it; `DrawPrimitive` uses the real data; a temporary host-side
+diagnostic (same pattern as Phase 3/4's earlier pipeline-only verification, removed after confirming)
+read the render target's centroid pixel back as `B=0x55 G=0x56 R=0x54` — the exact expected barycentric
+average of the triangle's red/green/blue vertex colors, from **genuine, guest-authored vertex data**,
+not an injected diagnostic substitute this time. The render-target's own `LockRect()` (the separate,
+long-documented §10.5 gap — CSurface-based, not CDriverVertexBuffer-based) started returning a real
+pointer too, for free, as a side effect of the same fix (both apparently funnel through `DdLockLH`).
+**This is the plan's literal Phase 4 goal, fully achieved**: a real GPU-rendered triangle, from real app
+vertex data, verified analytically — not the earlier pipeline-only version with substituted data.
+
+Not yet independently re-verified: `D3DDDIARG_LOCK`'s `OffsetToLock`/`SizeToLock` fields (offsets 16/20)
+were inherited from the old, now-known-imprecise RE and happened to still work correctly for this test's
+Lock pattern (offset 0, size = whole buffer) — worth confirming for partial-range locks before relying
+on them further. `Flags` genuinely isn't wired to anything yet (always sent as 0), so lock hints like
+`D3DLOCK_READONLY`/`D3DLOCK_DISCARD`/`D3DLOCK_NOOVERWRITE` have no effect — fine for this test, a gap for
+anything that depends on them.
 
 ---
 
 ## 11. Immediate next steps (in order)
 
-1. **Trace `DdLockLH`'s own local lock-args struct (§10.6)** — the actual remaining blocker for a
-   genuine (non-diagnostic-injected) triangle, now narrowed to one specific function. Two upstream bugs
-   are **fixed and verified** this session: the `CVertexBuffer::Create` pool-routing `DevCaps` bit
-   (`0x02000000`), and `umd_Lock`/`umd_SetStreamSource`/`umd_SetIndices`'s resource-id resolution (was
-   landing on a wrong-kind/wrong-size lazy-bound resource due to the same small-integer DDI handle
-   collision documented in §10.5; fixed via a size- and kind-aware `resolve_buffer_resource_id`).
-   GDB-stub-confirmed (real breakpoints, no Python hook) that `umd_Lock` now genuinely executes for our
-   real vertex buffer with the correct resolved resource id — yet the app-visible `Lock()` still returns
-   `NULL`. The dispatch path is `CDriverVertexBuffer::Lock` → global `DdLockLH` → (our) `umd_Lock`;
-   `DdLockLH` builds its own local stack copy of the lock-args (`v28`/`v29`/`v30`/... in the partial
-   decompile read so far) before/after the driver call, not necessarily 1:1 with `D3DDDIARG_LOCK`'s
-   public offset-80 `pData`. Next step: fully decompile `DdLockLH` (only partially read this session)
-   and find exactly where/how it reads the data pointer back out after its internal dispatch returns —
-   same RE method used successfully for `D3DDDIARG_LOCK`/`PRESENT` earlier, now pointed at this function.
-   This is the last blocker for milestone M1 (minus shader translation, deferred to Part 4) — the render
-   pipeline itself is already proven correct (§10.6).
-2. **(Lower priority, likely related to #1) The render-target `LockRect` → `pfnLock` gap (§10.5)** —
-   a different C++ class (`CSurface`, not `CDriverVertexBuffer`) but plausibly funnels through the same
-   `DdLockLH` dispatcher; solving #1 may solve this for free, or may not (not yet traced for surfaces
-   specifically). Host-side diagnostics remain the proven, reliable verification method in the meantime.
-3. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
+**Milestone reached (2026-07-03): a real triangle, drawn from real app-authored vertex data, verified
+analytically. §10.6 has the full story.** Three real bugs found and fixed this session via sogen's own
+built-in debugger (Python live-hooking API, then the GDB stub via `lldb`'s `gdb-remote` support) instead
+of static idasql decompilation alone: (1) an undocumented `DevCaps` bit (`0x02000000`) gating whether
+`CVertexBuffer::Create` honors the app's requested pool at all; (2) `umd_Lock`/`umd_SetStreamSource`/
+`umd_SetIndices` resolving vertex/index buffer DDI handles through the wrong (texture-shaped) lazy-bind
+path, now fixed via a size/kind-aware `resolve_buffer_resource_id`; (3) `D3DDDIARG_LOCK::pData` was
+modeled at the wrong offset (80, from RE'ing the wrong — outer, intermediate — struct; the real
+DDI-level struct `pfnLock` receives is ~64 bytes with `pData` at offset 40). Both `Lock()` on a
+`D3DPOOL_DEFAULT` vertex buffer and the long-standing `LockRect` gap (§10.5) work now, for real data.
+
+1. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
    (host-side pixel readback sidesteps needing real pixels on screen), but needed before a literal
    "window shows a color" milestone. `D3DDDIARG_PRESENT`'s `hSrcResource`(offset 0) is RE-verified;
    wiring it through `resolve_resource_id()` the same way `SetRenderTarget`/`Lock` now work is the
    natural next step once needed.
-4. **`pfnCreateResource`'s remaining field layout** (width/height/usage/pool offsets) is still unknown
+2. **`pfnCreateResource`'s remaining field layout** (width/height/usage/pool offsets) is still unknown
    — offset 0 (Format) and offset 48 (output `hResource`) ARE now RE-verified (§10.5). The current
    fixed-guess width/height (640×480) works for this one test's window size but is wrong in general;
    textures and other resource kinds will need the real struct eventually. Needs a texture-creation-
@@ -748,14 +759,17 @@ read done here) and find where it reads back the data pointer after its internal
    `RENDERSTATE`/`LOCK`/`CLEAR`/`PRESENT` came up empty for `CreateResource`'s actual builder — try a
    different angle, e.g. tracing from `CBaseDevice::CreateTexture`/`CSwapChain`'s constructor forward
    instead of searching by struct name backward).
-5. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
+3. **`D3DDDIARG_LOCK`'s `Flags` field** (see §10.6) — currently always sent as 0; needs its real offset
+   in the ~64-byte DDI-level struct RE'd (the same live-debugging method that found `pData`'s real
+   offset applies directly) before `D3DLOCK_READONLY`/`DISCARD`/`NOOVERWRITE` hints can work.
+4. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
    fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
    `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:
    `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Not required for M1.
-6. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
+5. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
    pipelines have real shader modules instead of a placeholder). Milestone M1 = programmable SM2/3
    triangle, pixel-diffed vs the DXVK oracle (`root_vkspike`).
-7. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
+6. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
    --no-edit -S' <base>`); verify with `git log --show-signature`.
 
 ---

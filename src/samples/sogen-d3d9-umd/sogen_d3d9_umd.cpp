@@ -727,11 +727,14 @@ namespace
         // vertex/index buffers (which never call pfnCreateResource at all) -- safe to always resolve
         // as a buffer here; already-registered handles hit the same early-return in either function.
         const auto resource = resolve_buffer_resource_id(pArgs->hResource, pArgs->SizeToLock);
+        // Flags's real offset in the true (smaller) DDI-level struct is unknown (see d3d9_ddi.hpp's
+        // D3DDDIARG_LOCK comment) -- reading it at the old, now-known-wrong offset would read past the
+        // real struct's bounds, so this always sends 0 (no lock hints) until that offset is RE'd.
         d3d9c::lock_request req{.resource = resource,
                                 .subresource = 0,
                                 .offset = pArgs->OffsetToLock,
                                 .size = pArgs->SizeToLock,
-                                .flags = pArgs->Flags,
+                                .flags = 0,
                                 .reserved = 0};
 
         // First call with no output buffer just to learn the true backing size via lock_response.
