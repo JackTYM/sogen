@@ -578,6 +578,37 @@ success criterion (analytic host-side pixel verification of a real GPU-rendered 
 render pipeline**; the substitution was removed after confirming this, so the current committed state
 correctly no-ops on real (still-unreachable) vertex data rather than pretending it works.
 
+**Deeper RE pass on the vertex-delivery gap (2026-07-02, same day, no fix yet).** Went looking for a
+surgical caps-bit fix (mirroring the offset-48 sentinel-scan precedent) instead of the "renegotiate a
+higher DDI tier" heavy option. Traced the real decision tree in `CVertexBuffer::Create` (idasql
+decompile): the pool argument gets remapped through several device-cached flag checks before deciding
+between `CreateDriverVertexBuffer` (real, driver-backed — what we want for `D3DPOOL_DEFAULT`),
+`CreateDriverManagedVertexBuffer` (needs `CBaseDevice::CanDriverManageResource()`, which directly
+checks `Caps2 & D3DCAPS2_CANMANAGERESOURCE`), and `CreateSysmemVertexBuffer` (pure system memory, no
+driver call ever). The routing depends on several *internal, device-cached* flag fields
+(`device+120`, `device+444`, `device+460`) whose provenance — which of our reported `D3DCAPS9` fields
+they're derived from, and by what transformation — could not be pinned down via static decompilation
+alone; the function(s) that populate them from raw `GetDeviceCaps()` output weren't found by name-based
+search (`CBaseDevice::Init`, `CBaseDevice::GetDeviceCaps` itself don't write them — they must be set in
+a caps-processing step not yet located).
+
+Two hypotheses tested empirically, both **ruled out**:
+- Adding `D3DCAPS2_CANMANAGERESOURCE` to `Caps2` alone: rebuilt, reran, `pfnCreateResource` still never
+  fires for `CreateVertexBuffer` (confirmed via a temporary spike log, since removed). Reverted.
+- `pfnDrawPrimitive2` (slot 14, not slot 32 as an earlier note in this doc guessed — recounted precisely
+  against `d3d9_ddi.hpp`'s field order and cross-checked against already-wired slot numbers) carrying
+  vertex data inline via DP2 batching instead of going through Lock at all: wired a temporary logging
+  probe to slot 14, reran the full triangle test — it never fires. Ruled out; the single `DrawPrimitive`
+  call in this test goes through the plain `pfnDrawPrimitive`/`pfnSetStreamSource` slots we already
+  have, not a DP2-batched path. Reverted.
+
+Neither of the fast, surgical options panned out. Solving this for real needs either (a) live
+debugging (breakpoints in `d3d9.dll` to watch device+120/444/460 get populated and trace back to which
+caps bits feed them — not possible with idasql's static decompilation alone), or (b) accepting the
+larger "negotiate a higher WDDM DDI interface tier" route and re-verifying the whole device-funcs
+table shape for that tier. Left as an open, well-scoped follow-up (task tracker #15) rather than
+continuing to guess caps bits blindly.
+
 ---
 
 ## 11. Immediate next steps (in order)
@@ -585,13 +616,17 @@ correctly no-ops on real (still-unreachable) vertex data rather than pretending 
 1. **Solve real vertex/index data delivery to the driver (§10.6)** — the actual remaining blocker for a
    genuine (non-diagnostic-injected) triangle. RE-confirmed root cause: `CDriverVertexBuffer::Lock`
    takes a cached-system-memory fast path (`device[+72] < 10`) that never calls `pfnLock`, for both
-   render-target-style locks (§10.5's original finding) and vertex/index buffers. Two directions: (a)
-   find what specifically flips that `< 10` check — likely tied to a caps/DDI-level flag our driver
-   reports at `OpenAdapter`/`CreateDevice` time — or (b) negotiate a higher WDDM DDI interface level
-   (`SOGEN_D3D9_UMD_INTERFACE_VERSION` in `d3d9_ddi.hpp` currently targets Win7/0x2003; a WDDM1.3+/2.0+
-   tier may change this code path, but changes the device-funcs table shape too — bigger change, verify
-   via idasql before committing to it). This is the last blocker for milestone M1 (minus shader
-   translation, deferred to Part 4) — the render pipeline itself is already proven correct (§10.6).
+   render-target-style locks (§10.5's original finding) and vertex/index buffers; separately,
+   `CVertexBuffer::Create` decides between the driver-backed/managed/sysmem creation paths based on
+   internal device-cached flags (`device+120`, `+444`, `+460`) whose caps provenance isn't pinned down.
+   Ruled out (§10.6): `D3DCAPS2_CANMANAGERESOURCE` alone, and `pfnDrawPrimitive2`-carries-inline-data
+   (that slot never fires for this test). Two directions remain: (a) live-debug `d3d9.dll` (breakpoints,
+   not static idasql decompilation) to trace exactly which caps bits populate those cached device
+   fields, or (b) negotiate a higher WDDM DDI interface level (`SOGEN_D3D9_UMD_INTERFACE_VERSION` in
+   `d3d9_ddi.hpp` currently targets Win7/0x2003; a WDDM1.3+/2.0+ tier may change this code path, but
+   changes the device-funcs table shape too — bigger change, verify via idasql before committing to it).
+   This is the last blocker for milestone M1 (minus shader translation, deferred to Part 4) — the render
+   pipeline itself is already proven correct (§10.6).
 2. **(Lower priority, same root cause as #1) The `LockRect` → `pfnLock` gap (§10.5)** — same
    `CDriverVertexBuffer`/cached-pointer mechanism; solving #1 should solve this for free. Host-side
    diagnostics remain the proven, reliable verification method in the meantime.
