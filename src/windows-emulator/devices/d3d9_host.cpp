@@ -260,6 +260,94 @@ namespace sogen
         return true;
     }
 
+    const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(const uint32_t color_format,
+                                                                                           const uint32_t width,
+                                                                                           const uint32_t height)
+    {
+        const uint64_t key = (this->state_.vertex_shader << 32) | this->state_.pixel_shader;
+        const auto cached = this->programmable_pipelines_.find(key);
+        if (cached != this->programmable_pipelines_.end())
+        {
+            return &cached->second;
+        }
+
+        const auto vs_it = this->shaders_.find(this->state_.vertex_shader);
+        const auto ps_it = this->shaders_.find(this->state_.pixel_shader);
+        if (vs_it == this->shaders_.end() || ps_it == this->shaders_.end())
+        {
+            return nullptr;
+        }
+
+        shader_pair_spirv spirv{};
+        if (!translate_d3d9_shader_pair(vs_it->second.tokens.data(), vs_it->second.tokens.size() * sizeof(uint32_t),
+                                        ps_it->second.tokens.data(), ps_it->second.tokens.size() * sizeof(uint32_t), spirv))
+        {
+            return nullptr;
+        }
+
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0)
+        {
+            return nullptr;
+        }
+
+        programmable_pipeline_entry entry{};
+        if (this->vulkan_.create_shader_module(device, spirv.vertex_spirv.data(),
+                                               spirv.vertex_spirv.size() * sizeof(uint32_t), entry.vs_module) != 0 ||
+            entry.vs_module == 0)
+        {
+            return nullptr;
+        }
+        if (this->vulkan_.create_shader_module(device, spirv.pixel_spirv.data(),
+                                               spirv.pixel_spirv.size() * sizeof(uint32_t), entry.fs_module) != 0 ||
+            entry.fs_module == 0)
+        {
+            return nullptr;
+        }
+
+        uint64_t layout = 0;
+        if (this->vulkan_.create_pipeline_layout(device, 0, 0, {}, layout) != 0 || layout == 0)
+        {
+            return nullptr;
+        }
+
+        // D3DFVF_XYZ|D3DFVF_DIFFUSE: 12-byte {x,y,z} clip-space position + 4-byte D3DCOLOR diffuse,
+        // stride 16 -- this slice's one supported programmable vertex format (position+color
+        // passthrough only, see the design spec's Non-Goals).
+        const std::array<vulkan_host::vertex_binding, 1> bindings{
+            {{.binding = 0, .stride = 16, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX}}};
+        const std::array<vulkan_host::vertex_attribute, 2> attributes{{
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 12},
+        }};
+        const std::array<uint32_t, 1> color_formats{color_format};
+        const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        const vulkan_host::depth_state depth{.test_enable = 0, .write_enable = 0, .compare_op = 0};
+        const std::array<vulkan_host::color_blend_attachment, 1> blend{{{
+            .blend_enable = 0,
+            .src_color_blend_factor = 0,
+            .dst_color_blend_factor = 0,
+            .color_blend_op = 0,
+            .src_alpha_blend_factor = 0,
+            .dst_alpha_blend_factor = 0,
+            .alpha_blend_op = 0,
+            .color_write_mask = 0xF,
+        }}};
+        const vulkan_host::specialization empty_spec{};
+
+        const int32_t result = this->vulkan_.create_graphics_pipeline(
+            device, /*render_pass=*/0, layout, entry.vs_module, entry.fs_module, width, height, bindings, attributes,
+            depth, color_formats, /*depth_format=*/0, /*stencil_format=*/0, /*rasterization_samples=*/1,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec,
+            blend, entry.pipeline);
+        if (result != 0 || entry.pipeline == 0)
+        {
+            return nullptr;
+        }
+
+        return &this->programmable_pipelines_.emplace(key, entry).first->second;
+    }
+
     namespace
     {
         // VkPhysicalDeviceMemoryProperties parsing helper for execute_draw's vertex buffer upload --
@@ -308,9 +396,24 @@ namespace sogen
         const auto& vb_backing = vb_it->second.backing;
 
         const uint64_t device = this->ensure_vk_device();
-        if (device == 0 || !this->ensure_draw_infra() || !this->ensure_pipeline(VK_FORMAT_B8G8R8A8_UNORM, rt.width, rt.height))
+        if (device == 0 || !this->ensure_draw_infra())
         {
             return d3d_ok; // GPU unavailable; degrade silently like the rest of this host does
+        }
+
+        const bool use_programmable = this->state_.vertex_shader != 0 && this->state_.pixel_shader != 0;
+        const programmable_pipeline_entry* programmable = nullptr;
+        if (use_programmable)
+        {
+            programmable = this->ensure_programmable_pipeline(VK_FORMAT_B8G8R8A8_UNORM, rt.width, rt.height);
+            if (programmable == nullptr)
+            {
+                return d3d_ok; // translation/pipeline failure; degrade silently
+            }
+        }
+        else if (!this->ensure_pipeline(VK_FORMAT_B8G8R8A8_UNORM, rt.width, rt.height))
+        {
+            return d3d_ok;
         }
 
         if (rt.vk_image_view_id == 0)
@@ -379,7 +482,8 @@ namespace sogen
         this->vulkan_.cmd_begin_rendering(this->command_buffer_, 0, 0, rt.width, rt.height, 1, 0, 0, color_attachments, nullptr,
                                           nullptr);
 
-        this->vulkan_.cmd_bind_pipeline(this->command_buffer_, this->pipeline_, VK_PIPELINE_BIND_POINT_GRAPHICS);
+        this->vulkan_.cmd_bind_pipeline(this->command_buffer_, use_programmable ? programmable->pipeline : this->pipeline_,
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS);
 
         const std::array<vulkan_host::viewport_entry, 1> viewports{
             {{.x = 0, .y = 0, .width = static_cast<float>(rt.width), .height = static_cast<float>(rt.height), .min_depth = 0.0f,
@@ -389,9 +493,12 @@ namespace sogen
             {{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height}}};
         this->vulkan_.cmd_set_scissor(this->command_buffer_, 0, false, scissors);
 
-        const std::array<float, 2> viewport_size{static_cast<float>(rt.width), static_cast<float>(rt.height)};
-        this->vulkan_.cmd_push_constants(this->command_buffer_, this->pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                                         sizeof(viewport_size), viewport_size.data());
+        if (!use_programmable)
+        {
+            const std::array<float, 2> viewport_size{static_cast<float>(rt.width), static_cast<float>(rt.height)};
+            this->vulkan_.cmd_push_constants(this->command_buffer_, this->pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                             sizeof(viewport_size), viewport_size.data());
+        }
 
         const uint64_t vb_offset = 0;
         this->vulkan_.cmd_bind_vertex_buffers(this->command_buffer_, 0, 1, &vertex_buffer, &vb_offset);

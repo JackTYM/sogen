@@ -1,5 +1,6 @@
 #pragma once
 
+#include "d3d9_shader_translator.hpp"
 #include "vulkan_host.hpp"
 
 #include <array>
@@ -155,12 +156,26 @@ namespace sogen
         uint64_t pipeline_{};
         bool pipeline_ready_{false};
 
+        struct programmable_pipeline_entry
+        {
+            uint64_t vs_module{};
+            uint64_t fs_module{};
+            uint64_t pipeline{};
+        };
+
+        // Keyed by (vertex_shader_id << 32 | pixel_shader_id) -- translation is lazy, on first draw
+        // with both shaders bound, since SM1-3 requires the VS/PS pair together to build the
+        // inter-stage varying map (see d3d9_shader_translator.hpp).
+        std::unordered_map<uint64_t, programmable_pipeline_entry> programmable_pipelines_{};
+
         uint64_t allocate_id();
         // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
         // Returns 0 on failure.
         uint64_t ensure_vk_device();
         bool ensure_draw_infra();
         bool ensure_pipeline(uint32_t color_format, uint32_t width, uint32_t height);
+        const programmable_pipeline_entry* ensure_programmable_pipeline(uint32_t color_format, uint32_t width,
+                                                                         uint32_t height);
         int32_t execute_draw(uint32_t vertex_count, uint32_t first_vertex);
     };
 } // namespace sogen
