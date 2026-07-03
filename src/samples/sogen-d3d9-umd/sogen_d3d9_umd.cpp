@@ -449,11 +449,9 @@ namespace
     // (hTexture, hVertexBuffer, ...) hold exactly the uint64 resource_id pfnCreateResource returned,
     // reinterpreted as a HANDLE -- no separate guest-side handle table is needed.
     //
-    // Scope: resource/shader creation, Lock/Unlock, and Present stay on device_stub for now -- their
-    // real D3DDDIARG_* shapes are large/uncertain without a WDK reference and need their own
-    // RE-verification pass (see the d3d9-command-protocol wire format for what the host side already
-    // expects once those are wired up). Everything below is the higher-confidence, higher-frequency
-    // per-draw state path.
+    // Resource/shader creation, Lock/Unlock, and Present are all wired and RE-verified (see the
+    // pfnCreateResource/pfnLock/pfnPresent/pfnCreateVertexShaderFunc/pfnCreatePixelShader functions
+    // below). Everything below is the higher-confidence, higher-frequency per-draw state path.
     // ---------------------------------------------------------------------------------------------
 
     HRESULT APIENTRY umd_SetRenderState(HANDLE /*hDevice*/, CONST D3DDDIARG_RENDERSTATE* pArgs)

@@ -30,12 +30,13 @@ namespace sogen
     // Part 3 (the real draw path -- ensure_draw_infra/ensure_pipeline/execute_draw) is implemented: a
     // single hardcoded fixed-function shader pair (D3DFVF_XYZRHW|D3DFVF_DIFFUSE), a cached pipeline,
     // real vertex buffer upload, dynamic rendering with explicit layout barriers, and readback into the
-    // render target's backing store, mirroring pfnClear's own pattern. Not yet exercised end-to-end via
-    // the guest D3D9 API: DrawPrimitive() itself is currently rejected by the runtime
-    // (D3DERR_INVALIDCALL) before ever reaching pfnDrawPrimitive -- see HANDOFF_MACBOOK.md for the
-    // current understanding (likely related to vertex buffers never being driver-backed via
-    // pfnCreateResource, unlike render targets since the offset-48 fix). Shader translation via
-    // vkd3d-shader is Part 4.
+    // render target's backing store, mirroring pfnClear's own pattern. Verified end-to-end via the
+    // guest D3D9 API -- DrawPrimitive()/Present() both succeed, pixel readback matches expected.
+    //
+    // Part 4 (programmable shaders) is also implemented: ensure_programmable_pipeline lazily
+    // translates a bound vertex+pixel shader pair via vkd3d-shader (d3d9_shader_translator.hpp) into a
+    // second, cached Vulkan pipeline, selected by execute_draw whenever both shaders are bound.
+    // Verified end-to-end with real D3DCompile()-produced SM2 bytecode -- see HANDOFF_MACBOOK.md §15.
     class d3d9_host
     {
       public:
