@@ -30,15 +30,20 @@ deferred** to a follow-on slice once this one proves the plumbing.
 
 ## Goal
 
-A real SM2 vertex+pixel shader pair, hand-assembled (no HLSL compiler in this slice), translated by
-real `vkd3d-shader` into SPIR-V, rendering a triangle functionally identical to the existing
-fixed-function triangle (position + diffuse-color passthrough) — verified via the same host-side
-analytic pixel readback pattern used for the FF triangle (no DXVK oracle needed for this slice).
+A real SM2 vertex+pixel shader pair, compiled from a tiny HLSL source string at guest runtime via
+`D3DCompile()` (real Microsoft `d3dcompiler_43.dll`, already staged in `root/filesys/c/windows/
+system32/` — a runtime call to an already-present guest DLL, not a new host build dependency; no
+hand-encoded bytecode, avoiding the risk of getting the D3D9 shader token/opcode encoding wrong from
+memory), translated by real `vkd3d-shader` into SPIR-V, rendering a triangle functionally identical
+to the existing fixed-function triangle (position + diffuse-color passthrough) — verified via the
+same host-side analytic pixel readback pattern used for the FF triangle (no DXVK oracle needed for
+this slice).
 
 ## Non-Goals (explicitly deferred)
 
-- HLSL-to-SM2 compilation (fxc/d3dcompiler or an open alternative) — a separate, later toolchain
-  decision.
+- A *host-side* HLSL compilation toolchain (fxc/d3dcompiler as a build-time dependency) — this slice
+  uses the already-staged guest `d3dcompiler_43.dll` at runtime instead, which needs no new host
+  dependency at all.
 - Textures, samplers, or more than one constant register/UBO.
 - The DXVK oracle (`root_vkspike`) and pixel-diff harness.
 - The general pipeline-key/dynamic-state caching system from the original Part 3 design — this slice
@@ -126,15 +131,14 @@ programmable pipeline/modules; otherwise fall back to the existing FF path uncha
 `if`/`else` at the top of the pipeline-selection logic, not a rewrite of `execute_draw`'s existing
 vertex-upload/barrier/draw/readback sequence, which is shader-path-agnostic already.
 
-**Constant-buffer binding contract (the one piece of "the binding contract" this slice actually
-exercises).** One UBO at a fixed `(set, binding)`, sized generously enough for a handful of `c#`
-registers (e.g. 16 `float4` = 256 bytes, matching a modest constant-register budget — exact count
-not critical for this slice since the test shader uses at most one), populated per-draw from
-`state_.vs_const_f` (already tracked via `set_vs_const_f`, currently written but never read anywhere)
-via `create_buffer` + `upload_memory`, mirroring the existing per-draw vertex-buffer upload pattern in
-`execute_draw`. The SPIR-V `vkd3d_shader_compile()` produces must declare its constant-register UBO
-at this same fixed binding — pinned once, matching the original plan's §4.2 warning that a mismatch
-here is wrong pixels, not a crash (exactly why this slice's own analytic pixel check matters).
+**No constant buffer in this slice.** Per the brainstorming decision ("position + color passthrough
+only," not the "include one float constant register" alternative), the test shader reads no `c#`
+registers, so there is no UBO, no descriptor set, and `state_.vs_const_f`/`ps_const_f` stay unread —
+same as today. The full binding contract (constant UBO at a fixed binding, textures/samplers) is
+deferred to a follow-on slice; this one is scoped to proving translation + a real, working
+(descriptor-set-free) pipeline. `create_graphics_pipeline`'s pipeline layout for the programmable path
+therefore needs no descriptor set layout at all — simpler than the FF path's own push-constant layout,
+not more.
 
 No sampler/texture descriptor sets in this slice (Non-Goals).
 
@@ -160,39 +164,43 @@ opcodes, currently unused by any caller) → `d3d9_host::create_vertex_shader`/`
 `d3d9-shader-test.exe` via the same standalone mingw recipe as the existing FF test) — deliberately
 **separate** from `d3d9_triangle_test.cpp` so the FF triangle stays a working regression baseline
 throughout this slice's development, not modified in place. Same window/device/render-target setup as
-the FF test; the only difference is `CreateVertexShader`/`CreatePixelShader` with hand-assembled SM2
-bytecode instead of `SetFVF`. **Hand-assembled bytecode, not HLSL-compiled** (Non-Goal): a minimal SM2
-vertex shader that transforms/passes through a pre-transformed screen-space position (matching the
-existing `D3DFVF_XYZRHW`-style input the FF path already uses) and passes through a per-vertex
-diffuse color, and a pixel shader that outputs that color unchanged — functionally identical to the
-FF shader pair, so translation correctness is the only new variable under test, not shader behavior.
-Token-level assembly follows the D3D9 shader bytecode format directly (version token, `dcl_*`
-declarations, `mov`/`dp4`-family instructions) — no external assembler tool, hand-written DWORD
-arrays in the test source, matching this session's own hand-computed SPIR-V constant-array pattern for
-the FF shaders.
+the FF test; the difference is `CreateVertexShader`/`CreatePixelShader` with real SM2 bytecode instead
+of `SetFVF`. **The bytecode comes from `D3DCompile()`** (declared in mingw-w64's own
+`d3dcompiler.h`/`libd3dcompiler_43.a` import stub, calling the real `d3dcompiler_43.dll` already
+staged at `root/filesys/c/windows/system32/d3dcompiler_43.dll`) compiling a tiny HLSL source string
+embedded in the test, at guest runtime — not hand-encoded token DWORDs, avoiding the real risk of
+getting the D3D9 shader opcode/parameter-token encoding wrong from memory. To sidestep replicating
+`D3DFVF_XYZRHW`'s screen-space-to-clip-space semantics inside a programmable vertex shader (a
+different, more involved transform than the fixed-function pipeline's own pretransformed-vertex
+handling), this test uses a plain (non-`RHW`) vertex format with position authored directly in clip
+space (`[-1, 1]` range) and a diffuse color, so the HLSL is pure passthrough: `output.pos =
+input.pos; output.color = input.color;` for the vertex shader, `return input.color;` for the pixel
+shader. Simpler than the FF shader pair, not equivalent to it — this slice tests translation
+correctness, not XYZRHW-transform equivalence.
 
 ---
 
 ## Data Flow (one draw call, programmable path)
 
-1. Guest: `CreateVertexShader(vsTokens, &vs)` → `umd_CreateVertexShaderFunc` marshals tokens →
-   `ioctl_d3d9_create_vertex_shader` → `d3d9_host::create_vertex_shader` → `translate_d3d9_shader`
-   (real vkd3d-shader call) → SPIR-V bytes → `vulkan_host::create_shader_module` → `shader_entry`
-   stored, wire shader id returned. Same for `CreatePixelShader`.
-2. Guest: `SetVertexShader(vs)`/`SetPixelShader(ps)` → already-wired `umd_SetVertexShaderFunc`/
+1. Guest: `D3DCompile(hlslSource, ..., &vsBlob, ...)` (real `d3dcompiler_43.dll`) produces real SM2
+   vertex shader bytecode; same for the pixel shader. Pure host-Windows-API calls, no sogen
+   involvement yet.
+2. Guest: `CreateVertexShader(vsBlob->GetBufferPointer(), &vs)` → `umd_CreateVertexShaderFunc`
+   marshals the token blob → `ioctl_d3d9_create_vertex_shader` → `d3d9_host::create_vertex_shader` →
+   `translate_d3d9_shader` (real vkd3d-shader call) → SPIR-V bytes → `vulkan_host::create_shader_module`
+   → `shader_entry` stored, wire shader id returned. Same for `CreatePixelShader`.
+3. Guest: `SetVertexShader(vs)`/`SetPixelShader(ps)` → already-wired `umd_SetVertexShaderFunc`/
    `umd_SetPixelShader` → `state_.vertex_shader`/`pixel_shader` updated (existing code path,
    unchanged).
-3. Guest: `SetVertexShaderConstantF(0, color, 1)` → already-wired `umd_SetVertexShaderConst` →
-   `state_.vs_const_f` updated (existing code path, unchanged — currently unread downstream; this
-   slice adds the reader).
 4. Guest: `DrawPrimitive(...)` → `execute_draw` → sees both shaders bound → `ensure_pipeline`'s
    programmable branch (build-or-reuse cached programmable pipeline from the two real shader
-   modules) → upload `state_.vs_const_f` into the fixed-binding UBO → bind pipeline + UBO descriptor
-   + vertex buffer → draw → readback into the render target's backing (existing pattern, unchanged).
+   modules, no descriptor sets) → bind pipeline + vertex buffer → draw → readback into the render
+   target's backing (existing pattern, unchanged).
 5. Host-side temporary diagnostic (same pattern as the FF triangle's verification, removed after
-   confirming): read back the centroid pixel, compare against the same hand-computed barycentric
-   color average used for the FF triangle (the test shader is functionally identical, so the expected
-   value is identical too).
+   confirming): read back the centroid pixel, compare against the hand-computed barycentric color
+   average for this test's own vertex colors (same technique as the FF triangle's verification, not
+   necessarily the same numeric expected value, since this test's vertex positions/colors don't have
+   to numerically match the FF test's).
 
 ---
 
@@ -206,11 +214,9 @@ the FF shaders.
   back to the existing FF path (the `&&` condition in the selection logic) rather than attempting a
   mixed programmable/fixed-function pipeline, which real D3D9 doesn't support either (VS+PS are
   bound as a pair for the programmable pipeline in real hardware terms).
-- Constant buffer smaller than what the shader declares (e.g. app never called
-  `SetVertexShaderConstantF` for a register the shader reads): `state_.vs_const_f` stays whatever
-  size it was last resized to (existing behavior, unchanged by this slice) — out-of-range reads in
-  the shader read zero-initialized UBO memory, not a host-side crash, since the UBO is sized
-  generously up front (256 bytes) regardless of how much of it the app has actually written.
+- `D3DCompile()` failure (malformed HLSL, wrong target profile string, etc.): surfaces as a normal
+  `HRESULT` failure at the D3D9-API level inside the guest test itself, before any sogen-specific code
+  runs — the same as it would for any real D3D9 app; no special handling needed on sogen's side.
 
 ---
 
@@ -220,8 +226,9 @@ Same analytic host-side pixel-readback pattern as the FF triangle (no new test i
 1. Build `d3d9-shader-test.exe`, stage it into `root/filesys/c/`.
 2. `cd build/release/artifacts && ./analyzer -e root -c c:/d3d9-shader-test.exe`.
 3. Temporary host-side diagnostic (added to `d3d9_host.cpp`'s draw-readback path, removed once
-   confirmed) prints the centroid pixel; compare against the same hand-computed expected barycentric
-   color average as the FF triangle (identical shader behavior, so identical expected value).
+   confirmed) prints the centroid pixel; compare against the hand-computed expected barycentric color
+   average for this test's own three vertex colors (same verification technique as the FF triangle,
+   computed fresh for this test's own vertex data).
 4. `analyzer -e root -s c:/test-sample.exe` (smoke test) stays green throughout — no regression to
    the existing FF path, confirmed by also re-running `d3d9-triangle-test.exe` (unmodified) after
    this slice's changes land.
@@ -245,7 +252,7 @@ Same analytic host-side pixel-readback pattern as the FF triangle (no new test i
   field.
 - `src/windows-emulator/devices/d3d9_host.cpp` — `create_vertex_shader`/`create_pixel_shader`
   translate immediately; `ensure_pipeline` gains the programmable branch; `execute_draw` gains the
-  FF-vs-programmable selection and the constant-UBO upload.
+  FF-vs-programmable pipeline selection.
 - `src/samples/sogen-d3d9-umd/sogen_d3d9_umd.cpp` — new `umd_CreateVertexShaderFunc`/
   `umd_DeleteVertexShaderFunc`/`umd_CreatePixelShader`/`umd_DeletePixelShader`, wired at slots
   42/43/67/68.
