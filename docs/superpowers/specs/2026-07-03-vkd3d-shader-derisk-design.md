@@ -68,17 +68,27 @@ canonical vkd3d-shader source location — confirm exact URL when adding the sub
 `libvkd3d-shader` is built (the `d3dbc` SM1-3 bytecode front-end + SPIR-V back-end); the full
 vkd3d runtime (D3D12-on-Vulkan) is not needed and not built.
 
-**Build integration:** `deps/CMakeLists.txt` gains an `ExternalProject_Add` target invoking
-`meson setup` + `ninja` as a subprocess, mirroring the existing `icicle-rust-project` pattern (a Rust
-crate built via `cargo` through the same `ExternalProject_Add` mechanism) — same shape, different
-underlying build tool. Produces a static library (`libvkd3d-shader.a`) and its public headers,
-consumed by the new translator module below. Never linked into any guest-shipped binary (UMD or
-guest test) — host-only, matching the "guest ships official MS DLLs + our thin UMD only" architecture
-decision already locked in the original Stage 2 plan.
+**Build integration (corrected 2026-07-03):** the real vkd3d source tree (confirmed by cloning it
+read-only for inspection) builds with **autotools** (`autogen.sh`/`configure`/`make`), not meson —
+there is no `meson.build` anywhere in the tree. `deps/CMakeLists.txt` gains an `ExternalProject_Add`
+target running `./autogen.sh && ./configure --disable-tests --disable-demos` then
+`make libvkd3d-shader.la`, mirroring the existing `icicle-rust-project` pattern's shape (an
+`ExternalProject_Add` wrapping a non-CMake build tool) but with autotools instead of meson/ninja.
+`libs/vkd3d-shader` is a genuinely separate library target (`lib_LTLIBRARIES = libvkd3d-shader.la
+libvkd3d.la libvkd3d-utils.la` in `Makefile.am`) — only it is built; the full vkd3d runtime
+(D3D12-on-Vulkan) is not needed and not built. Produces `.libs/libvkd3d-shader.a` and the public
+headers under `include/` (`vkd3d_shader.h` + `vkd3d_types.h`), consumed by the new translator module
+below. Never linked into any guest-shipped binary (UMD or guest test) — host-only, matching the
+"guest ships official MS DLLs + our thin UMD only" architecture decision already locked in the
+original Stage 2 plan.
 
-**New build prerequisite:** `meson` (already installed this session via `brew install meson`;
-`ninja` was already present). Document in `README.md`/`CLAUDE.md`'s build prerequisites list
-alongside the existing mingw/glslang/etc. entries.
+**Build prerequisites (confirmed present):** `perl` (with the required `JSON` module — checked via
+`perl -MJSON -e 1`, present), `flex`, `bison` all already present on this Mac. `widl` (the Wine IDL
+compiler) is missing but only gates building header files from `.idl` sources for the full vkd3d D3D12
+API surface, which this integration never touches (`vkd3d_shader.h` is a plain header, not
+IDL-generated) — `configure` warns, does not fail, without it. `meson` (installed earlier this session
+via `brew install meson`) turned out to be unnecessary for this dependency; leave it installed (no
+value in uninstalling) but do not document it as a vkd3d-shader prerequisite.
 
 ### 2. `d3d9_shader_translator.{hpp,cpp}` (new, host-only)
 
@@ -88,43 +98,72 @@ to a clean operation set" discipline `vulkan_host.hpp`'s own header comment alre
 that this session's `d3d9_host.cpp` already follows for real Vulkan types via
 `#include <vulkan/vulkan_core.h>` staying out of the header).
 
-**Public API** (exact signature to be finalized once the vendored `vkd3d_shader.h` is available to
-read directly — this is the intended shape):
+**Public API (corrected 2026-07-03 — confirmed against the real `vkd3d_shader.h` and vkd3d's own
+`tests/shader_runner_vulkan.c` reference integration):** legacy SM1-3 bytecode
+(`VKD3D_SHADER_SOURCE_D3D_BYTECODE`) has no semantic-based VS→PS linking — that's an SM4+ feature —
+so the VS and PS must be scanned (`vkd3d_shader_scan`) to obtain their I/O signatures, linked with
+`vkd3d_shader_build_varying_map()`, and only then compiled. This means a shader can't be translated in
+isolation; the API is a pair, not two independent single-shader calls:
 
 ```cpp
 namespace sogen
 {
-    // Translates raw SM1-3 shader bytecode (the DDI's pFunction/pCode token blob, a DWORD-tagged
-    // stream starting with the version token) into SPIR-V bytes vulkan_host::create_shader_module
-    // can consume directly. Returns false on translation failure (malformed/unsupported bytecode);
-    // out_spirv is left empty in that case.
-    bool translate_d3d9_shader(const void* tokens, size_t token_size_bytes, std::vector<uint32_t>& out_spirv);
+    struct shader_pair_spirv
+    {
+        std::vector<uint32_t> vertex_spirv;
+        std::vector<uint32_t> pixel_spirv;
+    };
+
+    // Translates a raw SM1-3 vertex+pixel shader pair (the DDI's pFunction/pCode token blobs, each a
+    // DWORD-tagged stream starting with the version token) into SPIR-V bytes
+    // vulkan_host::create_shader_module can consume directly. Both shaders are required together
+    // because SM1-3 has no semantic-based inter-stage linking; vkd3d-shader instead requires an
+    // explicit varying map built from both shaders' scanned signatures. Returns false on translation
+    // failure (malformed/unsupported bytecode, or scan/link failure); out is left empty in that case.
+    bool translate_d3d9_shader_pair(const void* vs_tokens, size_t vs_token_size_bytes, const void* ps_tokens,
+                                    size_t ps_token_size_bytes, shader_pair_spirv& out);
 }
 ```
 
-Internally calls `vkd3d_shader_compile()` (or the current vkd3d-shader public entry point — confirm
-exact function/struct names against the vendored header; the original architecture plan's §4.1
-already asserts this shape from earlier research, treat as a starting point to verify, not a fact to
-assume blind) with a `d3dbc`-shaped input descriptor and a `SPIRV_BINARY` output target.
+Internal pipeline (real, confirmed sequence — not all chained structs below are mandatory; the ones
+omitted use documented safe defaults, see the Data Flow section):
+1. `vkd3d_shader_scan()` on the VS tokens (`source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE`, `next`
+   chains a `vkd3d_shader_scan_signature_info`) → VS output signature.
+2. `vkd3d_shader_scan()` on the PS tokens the same way → PS input signature.
+3. `vkd3d_shader_build_varying_map(&vs_output_signature, &ps_input_signature, &varying_count,
+   varying_map)` → the VS→PS register mapping.
+4. `vkd3d_shader_compile()` for the VS: `source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE`,
+   `target_type = VKD3D_SHADER_TARGET_SPIRV_BINARY`, `next` chains
+   `vkd3d_shader_varying_map_info` (built in step 3) → `vkd3d_shader_spirv_target_info`.
+5. `vkd3d_shader_compile()` for the PS the same way, but with `next` chaining straight to
+   `vkd3d_shader_spirv_target_info` (no varying map needed on the consuming side).
+6. Free everything: `vkd3d_shader_free_scan_signature_info()` (x2), `vkd3d_shader_free_shader_code()`
+   (x2 on success), `vkd3d_shader_free_messages()` (whenever non-null, success or failure).
+
+`vkd3d_shader_interface_info` (descriptor bindings) and `vkd3d_shader_d3dbc_source_info` (texture
+dimensions) are both optional with documented safe defaults (sequential binding-0 mapping; 2D texture
+dimension) and are omitted entirely — this slice has no textures or constant buffers to describe.
 
 ### 3. `d3d9_host.cpp`/`.hpp` changes
 
-**`create_vertex_shader`/`create_pixel_shader`** (currently: just stash the raw token blob into a
-`shader_entry{tokens}`, translated by nothing, never read by `execute_draw`) now call
-`translate_d3d9_shader` immediately at creation time, and on success additionally call
-`vulkan_host::create_shader_module` to get a real Vulkan shader module id, stored alongside the raw
-tokens in `shader_entry` (new field, e.g. `uint64_t vk_module_id{}`). On translation failure, the
-wire response's `hr` is a failure code and no module is created — the shader id still exists (for
-API-level symmetry with the app's shader-handle lifetime) but can never be successfully bound for a
-programmable draw.
+**`create_vertex_shader`/`create_pixel_shader` are unchanged** (corrected 2026-07-03): since
+translation now requires the VS and PS *together* (they're scanned and linked as a pair, see above),
+translating at creation time is no longer possible — the app creates each shader independently, often
+long before the other half of the pair exists or is bound. `create_vertex_shader`/`create_pixel_shader`
+keep stashing raw tokens into `shader_entry{tokens}` exactly as they do today; no new field, no
+behavior change.
 
-**New programmable pipeline path.** `ensure_pipeline` currently builds and caches exactly one
-pipeline (the hardcoded FF pair, `pipeline_`/`pipeline_ready_`). Add a second, parallel cached slot
-(`programmable_pipeline_`/`programmable_pipeline_ready_`, plus its own `pipeline_layout_`-equivalent
-if the binding contract needs a different layout — see below) built from the *real* translated VS/PS
-modules bound via `state_.vertex_shader`/`state_.pixel_shader`, instead of `vs_module_`/`fs_module_`.
-Still a single cached instance (no pipeline-key system yet, matching this slice's deferred scope) —
-correctness for this slice's one shader pair, not generality across arbitrary shader combinations.
+**Translation happens lazily, at first draw with both shaders bound**, inside the new programmable
+pipeline path. `ensure_pipeline` currently builds and caches exactly one pipeline (the hardcoded FF
+pair, `pipeline_`/`pipeline_ready_`). Add a second cache keyed by `(vertex_shader_id, pixel_shader_id)`
+→ `{uint64_t vs_module; uint64_t fs_module; uint64_t pipeline;}` (an `std::unordered_map`, not a single
+slot — trivial to key correctly since the shader ids are already stable, and avoids re-translating on
+every draw once a pair has been seen once). On a cache miss for the currently-bound
+`(state_.vertex_shader, state_.pixel_shader)` pair, look up both `shader_entry::tokens` and call
+`translate_d3d9_shader_pair`; on success, create two shader modules via `vulkan_host::create_shader_module`
+and one pipeline via `create_graphics_pipeline`, then cache the triplet. On any failure (translation or
+pipeline creation), do not cache a bad entry — fall through to "no draw" (`d3d_ok`, silently degrade)
+the same way the rest of `d3d9_host` already handles GPU-unavailable conditions.
 
 **Selection in `execute_draw`:** if `state_.vertex_shader != 0 && state_.pixel_shader != 0`, use the
 programmable pipeline/modules; otherwise fall back to the existing FF path unchanged. This is an
@@ -153,12 +192,29 @@ No sampler/texture descriptor sets in this slice (Non-Goals).
   side (note the DDI's own naming asymmetry: `...VertexShaderFunc` vs. plain `...PixelShader`, already
   reflected in `d3d9_ddi.hpp`'s field names).
 
-Marshaling shape: `D3DDDIARG_CREATEVERTEXSHADERFUNC`/`D3DDDIARG_CREATEPIXELSHADER`-equivalent structs
-(carry the raw token blob pointer + size — exact struct layout needs the same "hand-define against
-WDK/Wine `d3dumddi.h`, cross-check via idasql if the layout doesn't dispatch correctly" methodology
-already used successfully for `D3DDDIARG_LOCK`/`PRESENT` this session) → `bridge_call` with
-`ioctl_d3d9_create_vertex_shader`/`ioctl_d3d9_create_pixel_shader` (both already defined as wire
-opcodes, currently unused by any caller) → `d3d9_host::create_vertex_shader`/`create_pixel_shader`.
+Marshaling shape (corrected 2026-07-03): `D3DDDIARG_CREATEVERTEXSHADERFUNC`/`D3DDDIARG_CREATEPIXELSHADERFUNC`
+**already exist** in `d3d9_ddi.hpp` (added during the original Stage 2 Part 2 DDI scaffolding, lines
+361-371) — no new struct definitions needed. Neither has been RE-verified against a live forcing
+function yet (unlike `D3DDDIARG_LOCK`/`PRESENT`, which were), so Task 5 still applies this session's
+"verify empirically, don't trust blindly" methodology, just as a confirmation pass on an existing
+struct rather than authoring a new one:
+```c
+typedef struct _D3DDDIARG_CREATEVERTEXSHADERFUNC { HANDLE ShaderHandle; UINT Values[1]; } D3DDDIARG_CREATEVERTEXSHADERFUNC;
+typedef struct _D3DDDIARG_CREATEPIXELSHADERFUNC { HANDLE ShaderHandle; UINT CodeSize; } D3DDDIARG_CREATEPIXELSHADERFUNC;
+```
+`ShaderHandle` is an out-parameter; `Values[0]`/`CodeSize` is the token blob size in bytes, with the
+token DWORDs themselves following the struct in memory — the same trailing-payload convention already
+proven correct for `D3DDDIARG_SETVERTEXSHADERCONST` (`umd_SetVertexShaderConst`, reads
+`reinterpret_cast<const float*>(pArgs + 1)`), so this is a well-precedented shape, not a blind guess —
+still confirmed live (not assumed) before being trusted, per Task 5.
+`D3DDDIARG_DELETEVERTEXSHADERFUNC` does **not** yet exist and needs a trivial one-field definition
+(`{HANDLE ShaderHandle;}`), matching the existing `D3DDDIARG_DELETEPIXELSHADERFUNC`.
+The wire side needs no new opcodes or structs at all: `ioctl_d3d9_create_vertex_shader`/
+`ioctl_d3d9_create_pixel_shader` and `d3d9_cmd::create_shader_request`/`create_shader_response` are
+already fully wired end-to-end on the host side (`gpu_bridge.cpp`'s `handle_d3d9_create_vertex_shader`/
+`handle_d3d9_create_pixel_shader` already call `d3d9_host::create_vertex_shader`/`create_pixel_shader`)
+— only the UMD-side marshaling functions (`umd_CreateVertexShaderFunc`/`umd_CreatePixelShaderFunc`)
+and their `bridge_call` sites are missing.
 
 **New guest test** (`src/samples/sogen-d3d9-umd/d3d9_shader_test.cpp`, compiled to
 `d3d9-shader-test.exe` via the same standalone mingw recipe as the existing FF test) — deliberately
@@ -186,16 +242,19 @@ correctness, not XYZRHW-transform equivalence.
    vertex shader bytecode; same for the pixel shader. Pure host-Windows-API calls, no sogen
    involvement yet.
 2. Guest: `CreateVertexShader(vsBlob->GetBufferPointer(), &vs)` → `umd_CreateVertexShaderFunc`
-   marshals the token blob → `ioctl_d3d9_create_vertex_shader` → `d3d9_host::create_vertex_shader` →
-   `translate_d3d9_shader` (real vkd3d-shader call) → SPIR-V bytes → `vulkan_host::create_shader_module`
-   → `shader_entry` stored, wire shader id returned. Same for `CreatePixelShader`.
+   marshals the token blob → `ioctl_d3d9_create_vertex_shader` → `d3d9_host::create_vertex_shader`
+   → tokens stashed in `shader_entry`, wire shader id returned, **no translation yet** (corrected
+   2026-07-03 — translation needs both shaders together, see Architecture §3). Same for
+   `CreatePixelShader`.
 3. Guest: `SetVertexShader(vs)`/`SetPixelShader(ps)` → already-wired `umd_SetVertexShaderFunc`/
    `umd_SetPixelShader` → `state_.vertex_shader`/`pixel_shader` updated (existing code path,
    unchanged).
 4. Guest: `DrawPrimitive(...)` → `execute_draw` → sees both shaders bound → `ensure_pipeline`'s
-   programmable branch (build-or-reuse cached programmable pipeline from the two real shader
-   modules, no descriptor sets) → bind pipeline + vertex buffer → draw → readback into the render
-   target's backing (existing pattern, unchanged).
+   programmable branch: on cache miss for `(state_.vertex_shader, state_.pixel_shader)`, calls
+   `translate_d3d9_shader_pair` (real vkd3d-shader scan+link+compile call) on both `shader_entry`
+   token blobs, then `vulkan_host::create_shader_module` x2 and `create_graphics_pipeline`, caches the
+   triplet — build-or-reuse cached programmable pipeline, no descriptor sets → bind pipeline + vertex
+   buffer → draw → readback into the render target's backing (existing pattern, unchanged).
 5. Host-side temporary diagnostic (same pattern as the FF triangle's verification, removed after
    confirming): read back the centroid pixel, compare against the hand-computed barycentric color
    average for this test's own vertex colors (same technique as the FF triangle's verification, not
@@ -206,10 +265,13 @@ correctness, not XYZRHW-transform equivalence.
 
 ## Error Handling
 
-- Translation failure (`translate_d3d9_shader` returns false): `create_vertex_shader`/
-  `create_pixel_shader`'s wire response carries a failure `hr`; the UMD's marshaling function
-  returns the corresponding `HRESULT` up to the app (matching the existing pattern for other
-  `create_*` wire calls). No partial/corrupt shader module is ever created.
+- Translation failure (`translate_d3d9_shader_pair` returns false, discovered lazily at first draw
+  with both shaders bound, not at `CreateVertexShader`/`CreatePixelShader` time — corrected
+  2026-07-03): `ensure_pipeline`'s programmable branch does not cache an entry and `execute_draw`
+  degrades to a no-op draw (`d3d_ok`, matching every other GPU-unavailable path in `d3d9_host`) rather
+  than returning a failure `HRESULT` to the app — `DrawPrimitive` itself has already returned `S_OK`
+  to the guest by the time this is discovered (the draw is asynchronous from the app's perspective,
+  recorded and flushed later), so there is no app-visible `HRESULT` slot left to fail through.
 - Draw with one shader bound but not the other (e.g. VS set, PS still fixed-function/null): falls
   back to the existing FF path (the `&&` condition in the selection logic) rather than attempting a
   mixed programmable/fixed-function pipeline, which real D3D9 doesn't support either (VS+PS are
@@ -244,35 +306,37 @@ Same analytic host-side pixel-readback pattern as the FF triangle (no new test i
 - `src/samples/sogen-d3d9-umd/d3d9_shader_test.cpp`
 
 **Modify:**
-- `deps/CMakeLists.txt` — new `ExternalProject_Add` target for `libvkd3d-shader` (meson/ninja).
+- `deps/CMakeLists.txt` — new `ExternalProject_Add` target for `libvkd3d-shader` (autotools: `autogen.sh`/`configure`/`make`).
 - `src/windows-emulator/CMakeLists.txt` (or wherever `windows-emulator`'s target sources/link
   libraries are declared) — add the new translator `.cpp`, link `libvkd3d-shader`.
-- `src/windows-emulator/devices/d3d9_host.hpp` — new private members for the programmable pipeline
-  slot (module ids, pipeline/layout ids, readiness flag); `shader_entry` gains a `vk_module_id`
-  field.
-- `src/windows-emulator/devices/d3d9_host.cpp` — `create_vertex_shader`/`create_pixel_shader`
-  translate immediately; `ensure_pipeline` gains the programmable branch; `execute_draw` gains the
-  FF-vs-programmable pipeline selection.
+- `src/windows-emulator/devices/d3d9_host.hpp` — new private `std::unordered_map` cache keyed by
+  `(vertex_shader_id, pixel_shader_id)` for the programmable pipeline (module ids, pipeline id); no
+  change to `shader_entry` (it stays token-only).
+- `src/windows-emulator/devices/d3d9_host.cpp` — `ensure_pipeline` gains the programmable branch
+  (lazy pair-translate-and-cache on first draw with both shaders bound); `execute_draw` gains the
+  FF-vs-programmable pipeline selection. `create_vertex_shader`/`create_pixel_shader` are unchanged.
 - `src/samples/sogen-d3d9-umd/sogen_d3d9_umd.cpp` — new `umd_CreateVertexShaderFunc`/
   `umd_DeleteVertexShaderFunc`/`umd_CreatePixelShader`/`umd_DeletePixelShader`, wired at slots
   42/43/67/68.
-- `src/samples/sogen-d3d9-umd/d3d9_ddi.hpp` — new `D3DDDIARG_CREATEVERTEXSHADERFUNC`/
-  `D3DDDIARG_CREATEPIXELSHADER`-equivalent struct definitions (hand-defined, RE-verified against a
-  real forcing function the same way `D3DDDIARG_LOCK`/`PRESENT` were this session — do not guess the
-  layout and ship it unverified).
-- `README.md`/`CLAUDE.md` — document `meson` as a new build prerequisite.
+- `src/samples/sogen-d3d9-umd/d3d9_ddi.hpp` — new `D3DDDIARG_DELETEVERTEXSHADERFUNC` (trivial,
+  `D3DDDIARG_CREATEVERTEXSHADERFUNC`/`CREATEPIXELSHADERFUNC` already exist and only need live
+  RE-verification, not authoring — do not trust the existing, never-exercised layout blind, matching
+  this session's established methodology (the `D3DDDIARG_LOCK` struct guessed from WDK-adjacent docs
+  turned out wrong; live verification is what actually worked).
+- `README.md`/`CLAUDE.md` — document `perl`/`flex`/`bison` (autotools build deps for vkd3d-shader;
+  all confirmed already present on this Mac) — do not document `meson`, it is not needed for this
+  dependency after all.
 
 ---
 
-## Open Questions to Resolve During Implementation (not blocking design approval)
+## Open Questions — resolved 2026-07-03 during plan-writing
 
-- Exact vkd3d-shader public API shape (`vkd3d_shader_compile()` or current equivalent) — confirm
-  against the vendored header once the submodule is added, before writing
-  `d3d9_shader_translator.cpp` against assumed signatures.
-- Exact `D3DDDIARG_CREATEVERTEXSHADERFUNC`/`CREATEPIXELSHADER` struct layouts — RE via a forcing
-  function (this test's own `CreateVertexShader`/`CreatePixelShader` calls), not guessed from WDK
-  docs alone, matching this session's established methodology (the `D3DDDIARG_LOCK` struct guessed
-  from WDK-adjacent docs turned out wrong; live verification is what actually worked).
-- vkd3d submodule's exact upstream URL/pinned commit — confirm current canonical location when adding
-  the submodule (Wine's GitLab mirror is the most likely candidate as of this project's other
-  vkd3d-shader references, but verify before pinning).
+- ~~Exact vkd3d-shader public API shape~~ — resolved by cloning the real vkd3d repo read-only for
+  inspection: `vkd3d_shader_compile()`/`vkd3d_shader_scan()`/`vkd3d_shader_build_varying_map()`, see
+  Architecture §2's revised pipeline.
+- ~~Exact `D3DDDIARG_CREATEVERTEXSHADERFUNC`/`CREATEPIXELSHADERFUNC` struct layouts~~ — these structs
+  already exist in `d3d9_ddi.hpp` (added during Part 2, never exercised). Still requires the Task 5
+  live-verification pass (never trust an unexercised struct), but authoring is not needed.
+- ~~vkd3d submodule's exact upstream URL~~ — resolved: `https://gitlab.winehq.org/wine/vkd3d.git`,
+  confirmed reachable and cloneable.
+- ~~Build system (meson vs. something else)~~ — resolved: autotools, not meson (see Architecture §1).
