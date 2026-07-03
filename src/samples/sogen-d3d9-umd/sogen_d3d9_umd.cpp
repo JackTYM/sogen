@@ -11,6 +11,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include <d3d9_command_protocol.hpp>
@@ -502,6 +503,64 @@ namespace
         return S_OK;
     }
 
+    // D3DDDIARG_LOCK::pData must point to memory that stays valid until the matching Unlock (the app
+    // writes vertex/index data directly through it), so each outstanding lock owns a persistent
+    // heap buffer here instead of a call-local one. Keyed by the wire resource id (== hResource).
+    std::unordered_map<uint64_t, std::vector<uint8_t>> g_locked_buffers;
+
+    HRESULT APIENTRY umd_Lock(HANDLE /*hDevice*/, D3DDDIARG_LOCK* pArgs)
+    {
+        const auto resource = reinterpret_cast<uint64_t>(pArgs->hResource);
+        d3d9c::lock_request req{.resource = resource,
+                                .subresource = 0,
+                                .offset = pArgs->OffsetToLock,
+                                .size = pArgs->SizeToLock,
+                                .flags = pArgs->Flags,
+                                .reserved = 0};
+
+        // First call with no output buffer just to learn the true backing size via lock_response.
+        d3d9c::lock_response probe{};
+        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe));
+
+        auto& buffer = g_locked_buffers[resource];
+        buffer.assign(probe.data_size, 0);
+
+        std::vector<uint8_t> out_buf(sizeof(d3d9c::lock_response) + buffer.size());
+        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), out_buf.data(), static_cast<DWORD>(out_buf.size()));
+        const auto* resp = reinterpret_cast<const d3d9c::lock_response*>(out_buf.data());
+        if (resp->hr != 0)
+        {
+            g_locked_buffers.erase(resource);
+            pArgs->pData = nullptr;
+            return E_FAIL;
+        }
+        std::memcpy(buffer.data(), out_buf.data() + sizeof(*resp), buffer.size());
+        pArgs->pData = buffer.data();
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_Unlock(HANDLE /*hDevice*/, D3DDDIARG_UNLOCK* pArgs)
+    {
+        const auto resource = reinterpret_cast<uint64_t>(pArgs->hResource);
+        const auto it = g_locked_buffers.find(resource);
+        if (it == g_locked_buffers.end())
+        {
+            return S_OK; // nothing to write back (e.g. a failed Lock)
+        }
+
+        std::vector<uint8_t> buf(sizeof(d3d9c::unlock_request) + it->second.size());
+        auto* req = reinterpret_cast<d3d9c::unlock_request*>(buf.data());
+        req->resource = resource;
+        req->subresource = 0;
+        req->offset = 0;
+        req->data_size = static_cast<uint32_t>(it->second.size());
+        std::memcpy(buf.data() + sizeof(*req), it->second.data(), it->second.size());
+        bridge_call(gb::ioctl_d3d9_unlock, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+
+        g_locked_buffers.erase(it);
+        return S_OK;
+    }
+
     HRESULT APIENTRY umd_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE* pArgs)
     {
         log_line("[sogen-d3d9-umd] CreateDevice reached Interface=0x%x Version=0x%x pDeviceFuncs=%p Flags=0x%x\n",
@@ -529,6 +588,8 @@ namespace
             slots[24] = reinterpret_cast<void*>(&umd_SetVertexShaderConst);   // pfnSetVertexShaderConst
             slots[27] = reinterpret_cast<void*>(&umd_SetViewport);            // pfnSetViewport
             slots[28] = reinterpret_cast<void*>(&umd_SetZRange);              // pfnSetZRange
+            slots[35] = reinterpret_cast<void*>(&umd_Lock);                    // pfnLock
+            slots[36] = reinterpret_cast<void*>(&umd_Unlock);                  // pfnUnlock
             slots[41] = reinterpret_cast<void*>(&umd_Flush);                  // pfnFlush
             slots[44] = reinterpret_cast<void*>(&umd_SetVertexShaderFunc);    // pfnSetVertexShaderFunc
             slots[47] = reinterpret_cast<void*>(&umd_SetVertexShaderDecl);    // pfnSetVertexShaderDecl

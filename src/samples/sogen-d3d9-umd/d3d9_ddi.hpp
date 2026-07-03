@@ -465,11 +465,49 @@ typedef struct _D3DDDIARG_DRAWINDEXEDPRIMITIVE
     UINT PrimitiveCount;
 } D3DDDIARG_DRAWINDEXEDPRIMITIVE;
 
+// RE-verified against the real staged d3d9.dll (CDriverVertexBuffer::Lock, ddi.cpp) -- NOT guessed.
+// hResource@0 and Reserved0@8 (8 bytes each), OffsetToLock@16, SizeToLock@20, a BOOL@24 (set from
+// "SizeToLock != 0"; exact name/meaning unconfirmed), then a ~52-byte gap (offset 28..79) that stays
+// zero for vertex/index-buffer locks -- likely SubResourceIndex/Box/Face fields relevant only to
+// texture/volume locks, not independently confirmed. pData(out)@80 (8 bytes) IS confirmed: it's the
+// pointer CDriverVertexBuffer::Lock returns to its caller. Flags@96 (4 bytes) confirmed. Total size
+// 104 bytes confirmed via the memset call bounding the struct. Only correctness-verified for the
+// buffer-lock case; texture/surface locks may need the unconfirmed middle fields filled in.
+typedef struct _D3DDDIARG_LOCK
+{
+    HANDLE hResource;    // 0 -- confirmed
+    UINT64 Reserved0;    // 8 -- present, purpose unconfirmed
+    UINT OffsetToLock;   // 16 -- confirmed
+    UINT SizeToLock;     // 20 -- confirmed
+    UINT Reserved1;       // 24 -- present (BOOL-shaped), purpose unconfirmed
+    BYTE Reserved2[52];  // 28..79 -- unconfirmed, zero for buffer locks
+    VOID* pData;         // 80 -- confirmed (output)
+    BYTE Reserved3[8];   // 88..95 -- unconfirmed
+    UINT Flags;          // 96 -- confirmed
+    BYTE Reserved4[4];   // 100..103 -- trailing padding to reach the confirmed 104-byte total
+} D3DDDIARG_LOCK;
+
+// RE-verified against the real staged d3d9.dll (CDriverVertexBuffer::Unlock, ddi.cpp) -- NOT guessed.
+// Exactly 2 QWORDS, matching D3DDDIARG_LOCK's first two fields.
+typedef struct _D3DDDIARG_UNLOCK
+{
+    HANDLE hResource; // 0 -- confirmed
+    UINT64 Reserved0; // 8 -- confirmed present (same field as D3DDDIARG_LOCK's Reserved0)
+} D3DDDIARG_UNLOCK;
+
+// Size-confirmed ONLY (44 bytes, via CBatchFilterI::GetBatchBufferPointer<_D3DDDIARG_PRESENT>'s batch
+// allocation) -- field-level layout is NOT verified (an initial {hSrcResource,hDstResource,SrcRect,
+// DstPoint,Flags} guess didn't even satisfy the 44-byte total under natural alignment, a sign it's
+// wrong). Not wired to any device-func slot yet (pfnPresent stays on device_stub); do not add field
+// accesses here until independently RE-verified the same way LOCK/UNLOCK were.
 typedef struct _D3DDDIARG_PRESENT
 {
-    HANDLE hSrcResource;
-    HANDLE hDstResource;
+    BYTE Reserved[44];
 } D3DDDIARG_PRESENT;
+
+static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll RE");
+static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
+static_assert(sizeof(D3DDDIARG_PRESENT) == 44, "size confirmed via real d3d9.dll RE; field layout is inferred");
 
 #pragma pack(pop)
 
