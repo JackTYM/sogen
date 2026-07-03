@@ -1,9 +1,11 @@
 #include "../std_include.hpp"
 #include "gpu_bridge.hpp"
 #include "vulkan_host.hpp"
+#include "d3d9_host.hpp"
 #include "../windows_emulator.hpp"
 
 #include <gpu_bridge_protocol.hpp>
+#include <d3d9_command_protocol.hpp>
 
 namespace sogen
 {
@@ -224,6 +226,62 @@ namespace sogen
                 case gpu_bridge::ioctl_destroy_sampler:
                     return handle_destroy_sampler(win_emu, context);
 
+                case gpu_bridge::ioctl_d3d9_marker:
+                    return handle_d3d9_marker(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_resource:
+                    return handle_d3d9_create_resource(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_destroy_resource:
+                    return handle_d3d9_destroy_resource(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_lock:
+                    return handle_d3d9_lock(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_unlock:
+                    return handle_d3d9_unlock(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_vertex_shader:
+                    return handle_d3d9_create_vertex_shader(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_pixel_shader:
+                    return handle_d3d9_create_pixel_shader(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_vertex_decl:
+                    return handle_d3d9_create_vertex_decl(win_emu, context);
+
+                case gpu_bridge::ioctl_d3d9_set_render_state:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_state);
+                case gpu_bridge::ioctl_d3d9_set_texture_stage_state:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_texture_stage_state);
+                case gpu_bridge::ioctl_d3d9_set_sampler_state:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_sampler_state);
+                case gpu_bridge::ioctl_d3d9_set_texture:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_texture);
+                case gpu_bridge::ioctl_d3d9_set_stream_source:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_stream_source);
+                case gpu_bridge::ioctl_d3d9_set_stream_source_freq:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_stream_source_freq);
+                case gpu_bridge::ioctl_d3d9_set_indices:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_indices);
+                case gpu_bridge::ioctl_d3d9_set_vertex_decl:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vertex_decl);
+                case gpu_bridge::ioctl_d3d9_set_vertex_shader:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vertex_shader);
+                case gpu_bridge::ioctl_d3d9_set_pixel_shader:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_pixel_shader);
+                case gpu_bridge::ioctl_d3d9_set_vs_const_f:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vs_const_f);
+                case gpu_bridge::ioctl_d3d9_set_ps_const_f:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_ps_const_f);
+                case gpu_bridge::ioctl_d3d9_set_render_target:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_target);
+                case gpu_bridge::ioctl_d3d9_set_depth_stencil:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_depth_stencil);
+                case gpu_bridge::ioctl_d3d9_set_viewport:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_viewport);
+                case gpu_bridge::ioctl_d3d9_set_scissor:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_scissor);
+                case gpu_bridge::ioctl_d3d9_clear:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_clear);
+                case gpu_bridge::ioctl_d3d9_draw_primitive:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_draw_primitive);
+                case gpu_bridge::ioctl_d3d9_draw_indexed_primitive:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_draw_indexed_primitive);
+
                 default:
                     win_emu.log.warn("[gpu-bridge] Unsupported IOCTL: 0x%X\n", static_cast<unsigned>(context.io_control_code));
                     return STATUS_NOT_SUPPORTED;
@@ -232,6 +290,7 @@ namespace sogen
 
           private:
             vulkan_host vulkan_{};
+            d3d9_host d3d9_{};
 
             // VkDeviceMemory aliased directly into the guest address space (see handle_map_memory_direct),
             // keyed by memory object id, so unmap can release the guest range and the host mapping.
@@ -2297,6 +2356,168 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            // D3D9 UMD <-> host d3d9_host bridge sync commands (see d3d9-command-protocol/
+            // d3d9_command_protocol.hpp for the payload structs). Dispatched below the same way as the
+            // Vulkan handlers above.
+
+            NTSTATUS handle_d3d9_marker(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::marker_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                win_emu.log.info("[d3d9-host] marker stage=%u\n", request.stage);
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_d3d9_create_resource(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_resource_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t resource = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_resource(request.kind, request.format, request.width, request.height,
+                                                               request.depth, request.mip_levels, request.usage, request.pool, resource);
+                return write_output(win_emu, context, d3d9_cmd::create_resource_response{.hr = hr, .reserved = 0, .resource = resource});
+            }
+
+            NTSTATUS handle_d3d9_destroy_resource(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::destroy_resource_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                this->d3d9_.destroy_resource(request.resource);
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_d3d9_lock(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::lock_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto out_capacity = context.output_buffer_length > sizeof(d3d9_cmd::lock_response)
+                                             ? context.output_buffer_length - sizeof(d3d9_cmd::lock_response)
+                                             : 0;
+                std::vector<std::byte> data(out_capacity);
+                uint32_t data_size = 0;
+                const int32_t hr = this->d3d9_.lock(request.resource, request.subresource, request.offset, request.size, request.flags,
+                                                    data.data(), data.size(), data_size);
+
+                if (!context.output_buffer || context.output_buffer_length < sizeof(d3d9_cmd::lock_response))
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+                const auto copy_bytes = std::min<size_t>(data.size(), data_size);
+                emulator_object<d3d9_cmd::lock_response>{win_emu.emu(), context.output_buffer}.write(
+                    d3d9_cmd::lock_response{.hr = hr, .data_size = data_size});
+                if (copy_bytes > 0)
+                {
+                    win_emu.emu().write_memory(context.output_buffer + sizeof(d3d9_cmd::lock_response), data.data(), copy_bytes);
+                }
+                set_information(context, static_cast<ULONG>(sizeof(d3d9_cmd::lock_response) + copy_bytes));
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_d3d9_unlock(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::unlock_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<std::byte> data;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.data_size, data))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const int32_t hr =
+                    this->d3d9_.unlock(request.resource, request.subresource, request.offset, data.data(), data.size());
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+
+            NTSTATUS handle_d3d9_create_vertex_shader(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_shader_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<std::byte> tokens;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.token_size_bytes, tokens))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t shader = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_vertex_shader(tokens.data(), tokens.size(), shader);
+                return write_output(win_emu, context, d3d9_cmd::create_shader_response{.hr = hr, .reserved = 0, .shader = shader});
+            }
+
+            NTSTATUS handle_d3d9_create_pixel_shader(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_shader_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<std::byte> tokens;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.token_size_bytes, tokens))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t shader = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_pixel_shader(tokens.data(), tokens.size(), shader);
+                return write_output(win_emu, context, d3d9_cmd::create_shader_response{.hr = hr, .reserved = 0, .shader = shader});
+            }
+
+            NTSTATUS handle_d3d9_create_vertex_decl(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_vertex_decl_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<d3d9_cmd::vertex_element> elements;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.element_count, elements))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t decl = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_vertex_decl(elements.data(), elements.size(), sizeof(d3d9_cmd::vertex_element), decl);
+                return write_output(win_emu, context, d3d9_cmd::create_vertex_decl_response{.hr = hr, .reserved = 0, .decl = decl});
+            }
+
+            // Shared handler for every streamed D3D9 opcode sent as an individual sync Escape (see the
+            // ioctl_d3d9_set_render_state-and-friends block in gpu_bridge_protocol.hpp): forwards the
+            // whole input buffer verbatim to d3d9_host, which is agnostic to whether a record arrived
+            // this way or via a future batched ioctl_record_commands replay.
+            NTSTATUS handle_d3d9_streamed(windows_emulator& win_emu, const io_device_context& context, gpu_bridge::command opcode)
+            {
+                std::vector<std::byte> payload(context.input_buffer_length);
+                if (!payload.empty())
+                {
+                    win_emu.emu().read_memory(context.input_buffer, payload.data(), payload.size());
+                }
+                const int32_t hr = this->d3d9_.execute_recorded(static_cast<uint32_t>(opcode), payload.data(), payload.size());
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+
             // Executes one recorded command-buffer command from a batch (see ioctl_record_commands). The
             // payload is the command's normal request struct; this is the per-command core shared with the
             // (legacy) individual command IOCTL handlers. Returns the VkResult.
@@ -2875,6 +3096,14 @@ namespace sogen
                                                            static_cast<uint32_t>(data_bytes));
                 }
                 default:
+                    // D3D9 streamed opcodes (gpu_bridge::command's 0x900 block) all forward to the same
+                    // d3d9_host entry point rather than getting one case each here -- see
+                    // d3d9-command-protocol/d3d9_command_protocol.hpp for what each opcode's payload means.
+                    if (command >= static_cast<uint32_t>(gpu_bridge::command::d3d9_marker) &&
+                        command <= static_cast<uint32_t>(gpu_bridge::command::d3d9_draw_indexed_primitive_up))
+                    {
+                        return this->d3d9_.execute_recorded(command, payload, size);
+                    }
                     win_emu.log.warn("[gpu-bridge] record_commands: unsupported command 0x%X\n", command);
                     return vk_error_initialization_failed;
                 }

@@ -1,10 +1,9 @@
 // sogen thin Direct3D9 WDDM user-mode driver (the vendor-driver slot the official d3d9.dll loads).
 //
-// Spike-B scope: prove the official Microsoft d3d9.dll loads this DLL via KMTQAITYPE_UMDRIVERNAME,
-// calls OpenAdapter, negotiates caps, and reaches CreateDevice. No host GPU work happens here yet —
-// OpenAdapter/GetCaps/CreateDevice are pure negotiation, so we only synthesize caps and log via
-// OutputDebugStringA (which the sogen analyzer captures). The real D3D9-DDI marshalling over D3DKMT
-// is added once the gate passes.
+// OpenAdapter/GetCaps/CreateDevice are pure negotiation with the runtime and stay local. The
+// device-function table marshals real D3D9 DDI calls across the D3DKMT Escape channel to the host
+// d3d9_host decoder (see d3d9-command-protocol/d3d9_command_protocol.hpp for the wire protocol) --
+// the same bridge_call pattern vulkan-shim.cpp uses for its own guest ICD.
 
 #include "d3d9_ddi.hpp"
 
@@ -12,6 +11,13 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <vector>
+
+#include <d3d9_command_protocol.hpp>
+#include <gpu_bridge_protocol.hpp>
+
+namespace gb = sogen::gpu_bridge;
+namespace d3d9c = sogen::d3d9_cmd;
 
 namespace
 {
@@ -25,9 +31,111 @@ namespace
         OutputDebugStringA(buf);
     }
 
-    // Generic device-function stub. On x64 the calling convention is caller-cleanup, so one stub can
-    // back every slot of D3DDDI_DEVICEFUNCS regardless of the real arity — sufficient for the gate
-    // (the runtime does not drive rendering during CreateDevice). The x86 port needs typed thunks.
+    // D3DKMT structs (mingw ships no d3dkmthk.h). Layout matches the host EMU_D3DKMT_* ABI, which
+    // stores pointers as UINT64 even for 32-bit (WoW64) guests, so pack to 8 and widen the
+    // private-data pointer -- same discipline as vulkan_shim.cpp's own copy of these structs.
+#pragma pack(push, 8)
+    struct kmt_open_adapter_from_luid
+    {
+        uint32_t luid_low;
+        int32_t luid_high;
+        uint32_t h_adapter;
+    };
+    struct kmt_escape
+    {
+        uint32_t h_adapter;
+        uint32_t h_device;
+        uint32_t type; // 0 = D3DKMT_ESCAPE_DRIVERPRIVATE
+        uint32_t flags;
+        void* private_data; // native D3DKMT_ESCAPE.pPrivateDriverData: 4 bytes on WoW64, 8 on x64
+        uint32_t private_data_size;
+        uint32_t h_context;
+    };
+#pragma pack(pop)
+
+    using pfn_d3dkmt = LONG(WINAPI*)(void*);
+
+    pfn_d3dkmt load_win32u(const char* name)
+    {
+        HMODULE win32u = GetModuleHandleA("win32u.dll");
+        if (!win32u)
+        {
+            win32u = LoadLibraryA("win32u.dll");
+        }
+        return win32u ? reinterpret_cast<pfn_d3dkmt>(GetProcAddress(win32u, name)) : nullptr;
+    }
+
+    uint32_t g_adapter = 0;
+
+    uint32_t ensure_adapter()
+    {
+        if (g_adapter != 0)
+        {
+            return g_adapter;
+        }
+        static pfn_d3dkmt open_adapter = load_win32u("NtGdiDdDDIOpenAdapterFromLuid");
+        if (!open_adapter)
+        {
+            return 0;
+        }
+        kmt_open_adapter_from_luid open{};
+        open.luid_low = 0x1000; // sogen's fixed virtual adapter LUID
+        open.luid_high = 0;
+        if (open_adapter(&open) != 0)
+        {
+            return 0;
+        }
+        g_adapter = open.h_adapter;
+        return g_adapter;
+    }
+
+    // Carries one D3D9 command to the host over the D3DKMT Escape channel:
+    // [escape_command_header][in][out]. Mirrors vulkan_shim.cpp's bridge_call.
+    bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len)
+    {
+        static pfn_d3dkmt escape = load_win32u("NtGdiDdDDIEscape");
+        const uint32_t adapter = ensure_adapter();
+        if (!escape || adapter == 0)
+        {
+            return false;
+        }
+
+        const uint32_t header_size = sizeof(gb::escape_command_header);
+        std::vector<uint8_t> buffer(header_size + in_len + out_len);
+        auto* header = reinterpret_cast<gb::escape_command_header*>(buffer.data());
+        header->magic = gb::escape_magic;
+        header->command_id = code;
+        header->input_offset = header_size;
+        header->input_size = in_len;
+        header->output_offset = header_size + in_len;
+        header->output_size = out_len;
+        header->result = 0;
+        header->reserved = 0;
+        if (in != nullptr && in_len != 0)
+        {
+            std::memcpy(buffer.data() + header_size, in, in_len);
+        }
+
+        kmt_escape esc{};
+        esc.h_adapter = adapter;
+        esc.type = 0;
+        esc.private_data = buffer.data();
+        esc.private_data_size = static_cast<uint32_t>(buffer.size());
+        if (escape(&esc) != 0)
+        {
+            return false;
+        }
+
+        if (out != nullptr && out_len != 0)
+        {
+            std::memcpy(out, buffer.data() + header_size + in_len, out_len);
+        }
+        return header->result >= 0;
+    }
+
+    // Generic device-function stub, still backing every slot D3D9 marshaling below doesn't implement
+    // yet. On x64 the calling convention is caller-cleanup, so one stub can back every slot of
+    // D3DDDI_DEVICEFUNCS regardless of the real arity. The x86 port needs typed thunks.
     HRESULT APIENTRY device_stub()
     {
         return S_OK;
@@ -181,6 +289,219 @@ namespace
         return S_OK;
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Real per-DDI marshaling: the streamed state/draw functions, sent as individual sync Escape
+    // calls (bridge_call) carrying the matching d3d9_cmd wire record. Resource-handle DDI fields
+    // (hTexture, hVertexBuffer, ...) hold exactly the uint64 resource_id pfnCreateResource returned,
+    // reinterpreted as a HANDLE -- no separate guest-side handle table is needed.
+    //
+    // Scope: resource/shader creation, Lock/Unlock, and Present stay on device_stub for now -- their
+    // real D3DDDIARG_* shapes are large/uncertain without a WDK reference and need their own
+    // RE-verification pass (see the d3d9-command-protocol wire format for what the host side already
+    // expects once those are wired up). Everything below is the higher-confidence, higher-frequency
+    // per-draw state path.
+    // ---------------------------------------------------------------------------------------------
+
+    HRESULT APIENTRY umd_SetRenderState(HANDLE /*hDevice*/, CONST D3DDDIARG_RENDERSTATE* pArgs)
+    {
+        d3d9c::set_render_state_record req{.state = pArgs->State, .value = pArgs->Value};
+        bridge_call(gb::ioctl_d3d9_set_render_state, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetTextureStageState(HANDLE /*hDevice*/, CONST D3DDDIARG_TEXTURESTAGESTATE* pArgs)
+    {
+        d3d9c::set_texture_stage_state_record req{.stage = pArgs->Stage, .state = pArgs->State, .value = pArgs->Value, .reserved = 0};
+        bridge_call(gb::ioctl_d3d9_set_texture_stage_state, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetTexture(HANDLE /*hDevice*/, CONST D3DDDIARG_SETTEXTURE* pArgs)
+    {
+        d3d9c::set_texture_record req{
+            .stage = pArgs->Stage, .reserved = 0, .texture = reinterpret_cast<uint64_t>(pArgs->hTexture)};
+        bridge_call(gb::ioctl_d3d9_set_texture, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetPixelShader(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERFUNC* pArgs)
+    {
+        d3d9c::set_pixel_shader_record req{.shader = reinterpret_cast<uint64_t>(pArgs->ShaderHandle)};
+        bridge_call(gb::ioctl_d3d9_set_pixel_shader, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetVertexShaderFunc(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERFUNC* pArgs)
+    {
+        d3d9c::set_vertex_shader_record req{.shader = reinterpret_cast<uint64_t>(pArgs->ShaderHandle)};
+        bridge_call(gb::ioctl_d3d9_set_vertex_shader, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetVertexShaderDecl(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERDECL* pArgs)
+    {
+        d3d9c::set_vertex_decl_record req{.decl = reinterpret_cast<uint64_t>(pArgs->ShaderHandle)};
+        bridge_call(gb::ioctl_d3d9_set_vertex_decl, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    // pArgs points at the fixed header; the vector4 float data immediately follows it in memory
+    // (the runtime's own send buffer), matching d3d9_cmd::set_const_f_record's trailing-payload shape.
+    HRESULT APIENTRY umd_SetVertexShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONST* pArgs)
+    {
+        const auto* values = reinterpret_cast<const float*>(pArgs + 1);
+        const size_t float_count = static_cast<size_t>(pArgs->Count) * 4;
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_const_f_record) + float_count * sizeof(float));
+        auto* req = reinterpret_cast<d3d9c::set_const_f_record*>(buf.data());
+        req->start_register = pArgs->Register;
+        req->vector4_count = pArgs->Count;
+        std::memcpy(buf.data() + sizeof(*req), values, float_count * sizeof(float));
+        bridge_call(gb::ioctl_d3d9_set_vs_const_f, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetPixelShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONST* pArgs)
+    {
+        const auto* values = reinterpret_cast<const float*>(pArgs + 1);
+        const size_t float_count = static_cast<size_t>(pArgs->Count) * 4;
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_const_f_record) + float_count * sizeof(float));
+        auto* req = reinterpret_cast<d3d9c::set_const_f_record*>(buf.data());
+        req->start_register = pArgs->Register;
+        req->vector4_count = pArgs->Count;
+        std::memcpy(buf.data() + sizeof(*req), values, float_count * sizeof(float));
+        bridge_call(gb::ioctl_d3d9_set_ps_const_f, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetStreamSource(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCE* pArgs)
+    {
+        d3d9c::set_stream_source_record req{.stream_number = pArgs->StreamNumber,
+                                            .offset_bytes = pArgs->Offset,
+                                            .stride_bytes = pArgs->Stride,
+                                            .reserved = 0,
+                                            .vertex_buffer = reinterpret_cast<uint64_t>(pArgs->hVertexBuffer)};
+        bridge_call(gb::ioctl_d3d9_set_stream_source, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetStreamSourceFreq(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCEFREQ* pArgs)
+    {
+        d3d9c::set_stream_source_freq_record req{.stream_number = pArgs->StreamNumber, .frequency = pArgs->Divider};
+        bridge_call(gb::ioctl_d3d9_set_stream_source_freq, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetIndices(HANDLE /*hDevice*/, CONST D3DDDIARG_SETINDICES* pArgs)
+    {
+        d3d9c::set_indices_record req{.index_buffer = reinterpret_cast<uint64_t>(pArgs->hIndexBuffer),
+                                      .format = pArgs->Stride == 4 ? 1u : 0u,
+                                      .reserved = 0};
+        bridge_call(gb::ioctl_d3d9_set_indices, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetRenderTarget(HANDLE /*hDevice*/, CONST D3DDDIARG_SETRENDERTARGET* pArgs)
+    {
+        d3d9c::set_render_target_record req{.render_target_index = pArgs->RenderTargetIndex,
+                                            .reserved = 0,
+                                            .surface = reinterpret_cast<uint64_t>(pArgs->hRenderTarget)};
+        bridge_call(gb::ioctl_d3d9_set_render_target, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetDepthStencil(HANDLE /*hDevice*/, CONST D3DDDIARG_SETDEPTHSTENCIL* pArgs)
+    {
+        d3d9c::set_depth_stencil_record req{.surface = reinterpret_cast<uint64_t>(pArgs->hZBuffer)};
+        bridge_call(gb::ioctl_d3d9_set_depth_stencil, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    // The DDI exposes viewport geometry (pfnSetViewport) and depth range (pfnSetZRange) as two
+    // separate calls, but the wire protocol's set_viewport_record bundles both -- track the latest of
+    // each locally and resend the combined record from whichever call lands second (steady state:
+    // both are always known once a device has rendered at least one frame).
+    D3DDDIARG_VIEWPORTINFO g_viewport{};
+    D3DDDIARG_ZRANGE g_zrange{.MinZ = 0.0f, .MaxZ = 1.0f};
+
+    void send_viewport()
+    {
+        d3d9c::set_viewport_record req{.x = static_cast<float>(g_viewport.X),
+                                       .y = static_cast<float>(g_viewport.Y),
+                                       .width = static_cast<float>(g_viewport.Width),
+                                       .height = static_cast<float>(g_viewport.Height),
+                                       .min_z = g_zrange.MinZ,
+                                       .max_z = g_zrange.MaxZ};
+        bridge_call(gb::ioctl_d3d9_set_viewport, &req, sizeof(req), nullptr, 0);
+    }
+
+    HRESULT APIENTRY umd_SetViewport(HANDLE /*hDevice*/, CONST D3DDDIARG_VIEWPORTINFO* pArgs)
+    {
+        g_viewport = *pArgs;
+        send_viewport();
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetZRange(HANDLE /*hDevice*/, CONST D3DDDIARG_ZRANGE* pArgs)
+    {
+        g_zrange = *pArgs;
+        send_viewport();
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetScissorRect(HANDLE /*hDevice*/, CONST D3DDDIRECT* pArgs)
+    {
+        d3d9c::set_scissor_record req{.left = pArgs->left, .top = pArgs->top, .right = pArgs->right, .bottom = pArgs->bottom};
+        bridge_call(gb::ioctl_d3d9_set_scissor, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_Clear(HANDLE /*hDevice*/, CONST D3DDDIARG_CLEAR* pArgs)
+    {
+        const auto* rects = reinterpret_cast<const D3DDDIRECT*>(pArgs + 1);
+        std::vector<uint8_t> buf(sizeof(d3d9c::clear_record) + static_cast<size_t>(pArgs->NumRect) * sizeof(d3d9c::set_scissor_record));
+        auto* req = reinterpret_cast<d3d9c::clear_record*>(buf.data());
+        req->flags = pArgs->Flags;
+        req->color_argb = pArgs->Color;
+        req->z = pArgs->Z;
+        req->stencil = pArgs->Stencil;
+        req->rect_count = pArgs->NumRect;
+        auto* wire_rects = reinterpret_cast<d3d9c::set_scissor_record*>(buf.data() + sizeof(*req));
+        for (UINT i = 0; i < pArgs->NumRect; ++i)
+        {
+            wire_rects[i] = d3d9c::set_scissor_record{
+                .left = rects[i].left, .top = rects[i].top, .right = rects[i].right, .bottom = rects[i].bottom};
+        }
+        bridge_call(gb::ioctl_d3d9_clear, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_DrawPrimitive(HANDLE /*hDevice*/, CONST D3DDDIARG_DRAWPRIMITIVE* pArgs)
+    {
+        d3d9c::draw_primitive_record req{.primitive_type = pArgs->PrimitiveType,
+                                         .start_vertex = pArgs->VStart,
+                                         .primitive_count = pArgs->PrimitiveCount,
+                                         .reserved = 0};
+        bridge_call(gb::ioctl_d3d9_draw_primitive, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_DrawIndexedPrimitive(HANDLE /*hDevice*/, CONST D3DDDIARG_DRAWINDEXEDPRIMITIVE* pArgs)
+    {
+        d3d9c::draw_indexed_primitive_record req{.primitive_type = pArgs->PrimitiveType,
+                                                 .base_vertex_index = pArgs->BaseVertexIndex,
+                                                 .min_vertex_index = pArgs->MinIndex,
+                                                 .num_vertices = pArgs->NumVertices,
+                                                 .start_index = pArgs->StartIndex,
+                                                 .primitive_count = pArgs->PrimitiveCount};
+        bridge_call(gb::ioctl_d3d9_draw_indexed_primitive, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_Flush(HANDLE /*hDevice*/)
+    {
+        return S_OK;
+    }
+
     HRESULT APIENTRY umd_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE* pArgs)
     {
         log_line("[sogen-d3d9-umd] CreateDevice reached Interface=0x%x Version=0x%x pDeviceFuncs=%p Flags=0x%x\n",
@@ -193,6 +514,29 @@ namespace
             {
                 slots[i] = reinterpret_cast<void*>(&device_stub);
             }
+
+            // Real per-DDI marshaling (see the block above) for the state/draw path -- indices match
+            // D3DDDI_DEVICEFUNCS's field order exactly (d3d9_ddi.hpp).
+            slots[0] = reinterpret_cast<void*>(&umd_SetRenderState);          // pfnSetRenderState
+            slots[3] = reinterpret_cast<void*>(&umd_SetTextureStageState);    // pfnSetTextureStageState
+            slots[4] = reinterpret_cast<void*>(&umd_SetTexture);              // pfnSetTexture
+            slots[5] = reinterpret_cast<void*>(&umd_SetPixelShader);          // pfnSetPixelShader
+            slots[6] = reinterpret_cast<void*>(&umd_SetPixelShaderConst);     // pfnSetPixelShaderConst
+            slots[8] = reinterpret_cast<void*>(&umd_SetIndices);              // pfnSetIndices
+            slots[10] = reinterpret_cast<void*>(&umd_DrawPrimitive);          // pfnDrawPrimitive
+            slots[11] = reinterpret_cast<void*>(&umd_DrawIndexedPrimitive);   // pfnDrawIndexedPrimitive
+            slots[21] = reinterpret_cast<void*>(&umd_Clear);                  // pfnClear
+            slots[24] = reinterpret_cast<void*>(&umd_SetVertexShaderConst);   // pfnSetVertexShaderConst
+            slots[27] = reinterpret_cast<void*>(&umd_SetViewport);            // pfnSetViewport
+            slots[28] = reinterpret_cast<void*>(&umd_SetZRange);              // pfnSetZRange
+            slots[41] = reinterpret_cast<void*>(&umd_Flush);                  // pfnFlush
+            slots[44] = reinterpret_cast<void*>(&umd_SetVertexShaderFunc);    // pfnSetVertexShaderFunc
+            slots[47] = reinterpret_cast<void*>(&umd_SetVertexShaderDecl);    // pfnSetVertexShaderDecl
+            slots[50] = reinterpret_cast<void*>(&umd_SetScissorRect);         // pfnSetScissorRect
+            slots[51] = reinterpret_cast<void*>(&umd_SetStreamSource);        // pfnSetStreamSource
+            slots[52] = reinterpret_cast<void*>(&umd_SetStreamSourceFreq);    // pfnSetStreamSourceFreq
+            slots[62] = reinterpret_cast<void*>(&umd_SetRenderTarget);        // pfnSetRenderTarget
+            slots[63] = reinterpret_cast<void*>(&umd_SetDepthStencil);        // pfnSetDepthStencil
         }
         pArgs->hDevice = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xD9D90001));
         pArgs->CommandBuffer = 0; // no initial command buffer for this bring-up

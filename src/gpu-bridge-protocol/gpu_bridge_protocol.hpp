@@ -194,6 +194,45 @@ namespace sogen::gpu_bridge
         cmd_blit_image = 0x887,
         reset_descriptor_pool = 0x888,
         cmd_clear_attachments = 0x889,
+
+        // D3D9 UMD <-> host d3d9_host bridge (see d3d9-command-protocol/d3d9_command_protocol.hpp for
+        // the payload structs). Dispatched through this same escape_command_header/command_record_header
+        // transport as the Vulkan block above -- no new gdi.cpp Escape code needed.
+        d3d9_marker = 0x900,
+        d3d9_create_resource = 0x901,
+        d3d9_destroy_resource = 0x902,
+        d3d9_lock = 0x903,
+        d3d9_unlock = 0x904,
+        d3d9_create_vertex_shader = 0x905,
+        d3d9_create_pixel_shader = 0x906,
+        d3d9_create_vertex_decl = 0x907,
+
+        // Streamed (recorded via command_record_header, flushed as one ioctl_record_commands escape).
+        d3d9_set_render_state = 0x920,
+        d3d9_set_texture_stage_state = 0x921,
+        d3d9_set_sampler_state = 0x922,
+        d3d9_set_texture = 0x923,
+        d3d9_set_stream_source = 0x924,
+        d3d9_set_stream_source_freq = 0x925,
+        d3d9_set_indices = 0x926,
+        d3d9_set_vertex_decl = 0x927,
+        d3d9_set_vertex_shader = 0x928,
+        d3d9_set_pixel_shader = 0x929,
+        d3d9_set_vs_const_f = 0x92A,
+        d3d9_set_vs_const_i = 0x92B,
+        d3d9_set_vs_const_b = 0x92C,
+        d3d9_set_ps_const_f = 0x92D,
+        d3d9_set_ps_const_i = 0x92E,
+        d3d9_set_ps_const_b = 0x92F,
+        d3d9_set_render_target = 0x930,
+        d3d9_set_depth_stencil = 0x931,
+        d3d9_set_viewport = 0x932,
+        d3d9_set_scissor = 0x933,
+        d3d9_clear = 0x934,
+        d3d9_draw_primitive = 0x935,
+        d3d9_draw_indexed_primitive = 0x936,
+        d3d9_draw_primitive_up = 0x937,
+        d3d9_draw_indexed_primitive_up = 0x938,
     };
 
     // Discriminator for cmd_set_dynamic_u32: the family of extended-dynamic-state setters that all take a
@@ -333,6 +372,40 @@ namespace sogen::gpu_bridge
         make_ioctl(static_cast<uint32_t>(command::invalidate_mapped_memory_direct));
     inline constexpr uint32_t ioctl_get_physical_device_memory_budget =
         make_ioctl(static_cast<uint32_t>(command::get_physical_device_memory_budget));
+
+    inline constexpr uint32_t ioctl_d3d9_marker = make_ioctl(static_cast<uint32_t>(command::d3d9_marker));
+    inline constexpr uint32_t ioctl_d3d9_create_resource = make_ioctl(static_cast<uint32_t>(command::d3d9_create_resource));
+    inline constexpr uint32_t ioctl_d3d9_destroy_resource = make_ioctl(static_cast<uint32_t>(command::d3d9_destroy_resource));
+    inline constexpr uint32_t ioctl_d3d9_lock = make_ioctl(static_cast<uint32_t>(command::d3d9_lock));
+    inline constexpr uint32_t ioctl_d3d9_unlock = make_ioctl(static_cast<uint32_t>(command::d3d9_unlock));
+    inline constexpr uint32_t ioctl_d3d9_create_vertex_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_create_vertex_shader));
+    inline constexpr uint32_t ioctl_d3d9_create_pixel_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_create_pixel_shader));
+    inline constexpr uint32_t ioctl_d3d9_create_vertex_decl = make_ioctl(static_cast<uint32_t>(command::d3d9_create_vertex_decl));
+
+    // Streamed D3D9 opcodes, sent one at a time as individual sync Escape calls for now (record-batch
+    // replay via ioctl_record_commands is a pure perf optimization for later -- d3d9_host's
+    // execute_recorded is agnostic to which path delivered it).
+    inline constexpr uint32_t ioctl_d3d9_set_render_state = make_ioctl(static_cast<uint32_t>(command::d3d9_set_render_state));
+    inline constexpr uint32_t ioctl_d3d9_set_texture_stage_state =
+        make_ioctl(static_cast<uint32_t>(command::d3d9_set_texture_stage_state));
+    inline constexpr uint32_t ioctl_d3d9_set_sampler_state = make_ioctl(static_cast<uint32_t>(command::d3d9_set_sampler_state));
+    inline constexpr uint32_t ioctl_d3d9_set_texture = make_ioctl(static_cast<uint32_t>(command::d3d9_set_texture));
+    inline constexpr uint32_t ioctl_d3d9_set_stream_source = make_ioctl(static_cast<uint32_t>(command::d3d9_set_stream_source));
+    inline constexpr uint32_t ioctl_d3d9_set_stream_source_freq =
+        make_ioctl(static_cast<uint32_t>(command::d3d9_set_stream_source_freq));
+    inline constexpr uint32_t ioctl_d3d9_set_indices = make_ioctl(static_cast<uint32_t>(command::d3d9_set_indices));
+    inline constexpr uint32_t ioctl_d3d9_set_vertex_decl = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vertex_decl));
+    inline constexpr uint32_t ioctl_d3d9_set_vertex_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vertex_shader));
+    inline constexpr uint32_t ioctl_d3d9_set_pixel_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_set_pixel_shader));
+    inline constexpr uint32_t ioctl_d3d9_set_vs_const_f = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vs_const_f));
+    inline constexpr uint32_t ioctl_d3d9_set_ps_const_f = make_ioctl(static_cast<uint32_t>(command::d3d9_set_ps_const_f));
+    inline constexpr uint32_t ioctl_d3d9_set_render_target = make_ioctl(static_cast<uint32_t>(command::d3d9_set_render_target));
+    inline constexpr uint32_t ioctl_d3d9_set_depth_stencil = make_ioctl(static_cast<uint32_t>(command::d3d9_set_depth_stencil));
+    inline constexpr uint32_t ioctl_d3d9_set_viewport = make_ioctl(static_cast<uint32_t>(command::d3d9_set_viewport));
+    inline constexpr uint32_t ioctl_d3d9_set_scissor = make_ioctl(static_cast<uint32_t>(command::d3d9_set_scissor));
+    inline constexpr uint32_t ioctl_d3d9_clear = make_ioctl(static_cast<uint32_t>(command::d3d9_clear));
+    inline constexpr uint32_t ioctl_d3d9_draw_primitive = make_ioctl(static_cast<uint32_t>(command::d3d9_draw_primitive));
+    inline constexpr uint32_t ioctl_d3d9_draw_indexed_primitive = make_ioctl(static_cast<uint32_t>(command::d3d9_draw_indexed_primitive));
 
     // Opaque identifier handed to the guest in place of a host Vulkan handle. The host keeps the
     // real VkInstance / VkPhysicalDevice / ... in a table and the guest only ever sees this id, so

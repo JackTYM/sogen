@@ -31,9 +31,14 @@ API→Vulkan translation happens on the sogen host side** (targeting `vulkan_hos
     `ValidateUMDeviceFuncs` read uninitialized memory past the table and failed with exactly
     `D3DERR_NOTAVAILABLE (0x8876086a)`. Fix: report our own implemented version
     (`SOGEN_D3D9_UMD_INTERFACE_VERSION`) instead. Full RE trail: §6.
+- **Stage 2 Part 2 (D3D9 DDI → sogen command stream): IN PROGRESS (2026-07-02).** Wire protocol, guest
+  UMD ↔ host transport, and real marshaling for the highest-frequency per-draw state/draw DDI functions
+  are done and compile/smoke-test clean. Resource creation, Lock/Unlock, and Present are still
+  `device_stub` (need their own struct-layout verification pass — see §10). Full details: §10.
 
-**This work is entirely CPU/kernel-side and headless** (no GPU rendering needed for gate 3), so MoltenVK
-being done now is a bonus for Stage 2 Part 2/3, not something gate 3 depended on.
+**This work is entirely CPU/kernel-side and headless** (no GPU rendering needed for gate 3 or Part 2's
+transport bring-up), so MoltenVK being done now is a bonus for Part 3's actual draw execution, not
+something either of these depended on.
 
 ---
 
@@ -189,6 +194,16 @@ needed again, budget for this kind of dead end and prefer the transition-scan me
   (+extra driver fields after byte 304, indexed as `a1[N]` where each `N` is `sizeof(D3DCAPS9)` bytes).
   `memory/project_stage2_d3d9.md` (pre-migration notes) did not survive the migration (§3 in the original
   version of this doc) — the facts above are what was re-derived this session.
+- **DDI arg-struct verification method (used for `D3DDDIARG_RENDERSTATE`, needed for the rest of §10's
+  deferred list):** search `funcs` for names containing the target struct verbatim, e.g.
+  `SELECT address, name FROM funcs WHERE name LIKE '%SetRenderState%'` turned up
+  `?LHBatchSetRenderState@CBatchFilterI@@KAJPEAXPEBU_D3DDDIARG_RENDERSTATE@@@Z` — the mangled name
+  itself names `_D3DDDIARG_RENDERSTATE` as the parameter type. Decompiling that function showed it
+  copying exactly one QWORD out of `*pArg` into its internal batch buffer, confirming the struct is
+  8 bytes (`{UINT State; UINT Value;}`) without needing the WDK header at all. Repeat per struct:
+  `LIKE '%SetTexture%'`, `LIKE '%CreateResource%'`, `LIKE '%Lock%'`, `LIKE '%Present%'`, etc., then read
+  what the decompiled body actually does with the pointer (field-by-field offsets, copied byte counts)
+  rather than trusting the struct *name* alone.
 
 ---
 
@@ -244,35 +259,117 @@ No architectural rewrite was needed — the guest stayed frozen throughout.
 
 ---
 
-## 10. Immediate next steps (in order)
+## 10. STAGE 2 PART 2 — D3D9 DDI → sogen command stream (2026-07-02, in progress)
 
-Gate 3 is done (§1/§6). Two small, optional follow-ups before Stage 2 Part 2/3, then the real work:
+Following the approved plan (`.claude/plans/scalable-giggling-fern.md` Part 2 — also restored into this
+repo's `.claude/plans/` this session, since `.claude/` wasn't gitignored before and the original copy
+only survived under the migration leftover path `~/old-claude/.claude/plans/`).
+
+**Done, compiles clean, smoke-test + gate-3 spike still green:**
+- **`src/d3d9-command-protocol/d3d9_command_protocol.hpp`** (+ CMakeLists, wired into
+  `src/CMakeLists.txt`): dependency-free wire protocol for sync commands (marker, create/destroy
+  resource, lock/unlock, create vertex/pixel shader, create vertex decl) and streamed per-draw records
+  (render state, texture stage state, sampler state, texture/stream/index/decl/shader binds, VS/PS
+  float constants, render target/depth-stencil, viewport, scissor, clear, draw (indexed) primitive).
+  `#include`s `gpu_bridge_protocol.hpp` for the shared `object_id`/`escape_command_header` transport
+  types rather than duplicating them — matches the plan's explicit "transport reuse, zero new gdi.cpp
+  Escape code" instruction. Every struct has a `static_assert` size pin.
+- **Transport wiring**, zero new `gdi.cpp` code as planned: a `0x900-0x9FF` D3D9 opcode block added to
+  `gpu_bridge::command` (`gpu_bridge_protocol.hpp`); `gpu_command_processor::dispatch()`
+  (`devices/gpu_bridge.cpp`) routes the 7 sync opcodes to individual handlers and the ~18 streamed
+  opcodes to one shared `handle_d3d9_streamed` forwarder; `execute_recorded_command`'s `default:` case
+  also forwards the same streamed range, so a future batched `ioctl_record_commands` replay path (not
+  yet built — see below) will work with zero d3d9_host changes.
+- **`src/windows-emulator/devices/d3d9_host.{hpp,cpp}`**: host-side decoder, owned by
+  `gpu_command_processor` alongside `vulkan_host` (same "no emulated-Windows types" rule as
+  `vulkan_host.hpp` states explicitly). Real resource lifetime (host-side shadow-copy backing, not yet
+  real GPU images — that's Part 3) and full per-device render/sampler/texture-stage-state,
+  stream/index/decl/shader-binding, and VS/PS float-constant tracking. `execute_recorded` parses and
+  stores every streamed opcode; `set_viewport`/`set_scissor`/`clear`/`draw_*` currently
+  parse-validate-and-no-op (real draw execution against `vulkan_host` is Part 3's pipeline builder).
+- **UMD guest side** (`src/samples/sogen-d3d9-umd/sogen_d3d9_umd.cpp`): `bridge_call`/`ensure_adapter`
+  copied from `vulkan_shim.cpp`'s proven pattern (D3DKMT Escape carrying
+  `[escape_command_header][in][out]`, adapter opened via `NtGdiDdDDIOpenAdapterFromLuid` with the fixed
+  LUID `{0x1000,0}`). **20 real DDI marshaling functions** now back their `D3DDDI_DEVICEFUNCS` slots
+  (indices confirmed against the struct's own field order in `d3d9_ddi.hpp`): `pfnSetRenderState`(0),
+  `pfnSetTextureStageState`(3), `pfnSetTexture`(4), `pfnSetPixelShader`(5), `pfnSetPixelShaderConst`(6),
+  `pfnSetIndices`(8), `pfnDrawPrimitive`(10), `pfnDrawIndexedPrimitive`(11), `pfnClear`(21),
+  `pfnSetVertexShaderConst`(24), `pfnSetViewport`(27), `pfnSetZRange`(28), `pfnFlush`(41),
+  `pfnSetVertexShaderFunc`(44), `pfnSetVertexShaderDecl`(47), `pfnSetScissorRect`(50),
+  `pfnSetStreamSource`(51), `pfnSetStreamSourceFreq`(52), `pfnSetRenderTarget`(62),
+  `pfnSetDepthStencil`(63). Everything else stays on the original generic `device_stub` (S_OK, no
+  marshaling) — see the follow-up list below for why.
+- **`D3DDDIARG_RENDERSTATE`'s `{State,Value}` shape is RE-verified**, not guessed, against the actual
+  staged `d3d9.dll` (`CBatchFilterI::LHBatchSetRenderState` copies exactly one QWORD out of `*pArg`,
+  confirming an 8-byte `{UINT,UINT}` struct) — see §7 for the idasql method. The other 19 structs in
+  `d3d9_ddi.hpp` follow the same well-established WDK `(HANDLE, CONST D3DDDIARG_X*)` Set-family
+  convention but were **not** individually RE-verified the same way (that would have meant re-doing the
+  gate-3-scale investigation ~19 more times in one session) — if M1 hits a garbled-state bug, suspect
+  one of these first and RE-verify it the same way `RENDERSTATE` was.
+
+**Deliberately deferred (device_stub, not real marshaling yet) — and why:**
+- `pfnCreateResource(2)`, `pfnLock`, `pfnUnlock`, `pfnOpenResource`, `pfnBlt`, `pfnColorFill`: the real
+  `D3DDDIARG_CREATERESOURCE` is a large, multi-field struct (format/pool/multisample/mip/dimensions/
+  surface-list/flags — dozens of fields) that public WDK knowledge alone isn't confident enough to
+  hand-transcribe correctly; Lock's real signature likely returns a `pData`/pitch pair inside its own
+  arg struct that also needs verification. Same risk class as gate-3's landmine — verify via idasql
+  (the `LHBatchSetRenderState`-style method in §7) before implementing, not from memory.
+- `pfnCreateVertexShaderFunc`, `pfnCreatePixelShader`, `pfnCreateVertexShaderDecl`,
+  `pfnDeleteVertexShaderFunc`/`DeletePixelShader`: struct shapes are drafted in `d3d9_ddi.hpp`
+  (`D3DDDIARG_CREATEVERTEXSHADERFUNC` etc.) but not RE-verified or wired to a slot yet.
+- `pfnPresent`: not yet marshaled; gate 3's own `d3d9-spike-test` never calls it (`dev->Release()`
+  without presenting), so there's been no forcing function to nail its exact struct/behavior yet.
+- `pfnDrawPrimitive2`/`pfnDrawIndexedPrimitive2` (the `*UM`/inline-vertex-data variants),
+  `pfnSetStreamSourceUm`/`pfnSetIndicesUm`, `pfnSetSamplerState`: **no separate `pfnSetSamplerState`
+  slot exists in this D3DDDI_DEVICEFUNCS at all** — re-confirmed by re-reading the struct while doing
+  this work; D3D9's real DDI folds sampler state into `pfnSetTextureStageState` via extended `State`
+  values instead. The wire opcode/struct (`d3d9_set_sampler_state`) is defined and harmless but unused
+  — figure out the real TSS/sampler-state boundary before wiring it to anything.
+- `pfnSetVertexShaderConstI/B`, `pfnSetPixelShaderConstI/B`: lower priority for a first triangle (which
+  only needs float constants); wire opcodes intentionally not even added for these yet.
+- **Batched/recorded streamed commands**: currently every streamed DDI call is sent as its own
+  individual sync Escape (simpler to get right first), not accumulated into a `command_record_header`
+  batch and flushed via `ioctl_record_commands` the way the plan describes for performance. The host
+  side (`execute_recorded_command`'s default case) already forwards that path to `d3d9_host` too, so
+  adding batching later is a guest-side-only change with no host/wire-format impact.
+
+---
+
+## 11. Immediate next steps (in order)
 
 1. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
    fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
    `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:
-   `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Needs its own RE pass (likely a
-   different, additional caps field this gauntlet checks) before real shader support can be reported.
-   Not required for Stage 2 Part 2/3 to start, since M1 (a fixed-pipeline or minimal-shader triangle) can
-   proceed with the current caps.
-2. **Then Stage-2 Part 2/3:** the D3D9 command protocol + host `d3d9_host` decoder → `vulkan_host`
-   (see the approved plan, `.claude/plans/scalable-giggling-fern.md`). Milestone M1 = programmable SM2/3
-   triangle, pixel-diffed vs the DXVK oracle. MoltenVK being done means this can render for real on this
-   machine once reached — no more headless-only work after this point.
-3. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
+   `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Not required for M1.
+2. **RE-verify (idasql method, §7) and implement `pfnCreateResource`, `pfnLock`, `pfnUnlock`,
+   `pfnPresent`** — these are the biggest remaining gaps before a real triangle can allocate buffers,
+   upload vertex data, and show a frame. Do this BEFORE writing a `d3d9-triangle-test` guest program,
+   since that test needs all four to do anything visible.
+3. **`pfnCreateVertexShaderFunc`/`pfnCreatePixelShader`/`pfnCreateVertexShaderDecl`**: wire the already
+   -drafted structs to slots 42/45/67 and RE-verify them the same way.
+4. **Part 3 — the actual pipeline builder** (`d3d9_host`'s `execute_recorded` currently no-ops
+   `set_viewport`/`clear`/`draw_*`): build a pipeline key from the tracked state, call
+   `vulkan_host::create_graphics_pipeline` with `render_pass=0` (dynamic rendering — the plan explicitly
+   says don't fix `vulkan_host`'s 1-color/1-depth render-pass gap, use dynamic rendering instead), and
+   actually execute draws.
+5. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
+   pipelines have real shader modules instead of a placeholder). Milestone M1 = programmable SM2/3
+   triangle, pixel-diffed vs the DXVK oracle (`root_vkspike`).
+6. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
    --no-edit -S' <base>`); verify with `git log --show-signature`.
 
 ---
 
-## 11. Outstanding tasks (from the tracker)
-- #15: Spike B-4 / gate 3 — **DONE** (this doc's former focus; see §1/§6). Stage 2 Part 2/3 is next.
+## 12. Outstanding tasks (from the tracker)
+- #15: Spike B-4 / gate 3 — **DONE** (see §1/§6). Stage 2 Part 2 transport/state-marshaling — **IN
+  PROGRESS** (see §10/§11).
 - #11 (deferred): delete `SogenGpu` io_device + consolidate onto one `vulkan_host`.
 - #5: investigate DXVK `Config` ctor C++ throw under sogen (MW2 blocker on the DXVK-oracle side).
 - #6: reproducible/CI provisioning of real MS `dxgi.dll` for the Vulkan path.
 
 ---
 
-## 12. Global working rules (carry over)
+## 13. Global working rules (carry over)
 - Never commit `.claude/` or `.idea/`. Commit unsigned (`--no-gpg-sign`) while working; sign every commit
   before pushing (`git rebase --exec 'git commit --amend --no-edit -S' <base>`); verify with
   `git log --show-signature`.

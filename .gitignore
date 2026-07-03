@@ -170,3 +170,6 @@ devdocs/
 dist_local/
 
 .worktrees/
+
+.claude/
+.idea/

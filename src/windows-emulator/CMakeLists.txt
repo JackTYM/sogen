@@ -28,7 +28,7 @@ endif()
 find_package(Freetype REQUIRED)
 
 target_link_libraries(windows-emulator PUBLIC emulator minidump)
-target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol vulkan-headers Freetype::Freetype)
+target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers Freetype::Freetype)
 
 if(TARGET SDL3::SDL3)
   target_link_libraries(windows-emulator PRIVATE SDL3::SDL3)

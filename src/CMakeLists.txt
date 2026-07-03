@@ -1,6 +1,7 @@
 add_subdirectory(common)
 add_subdirectory(gpu-bridge-protocol)
 add_subdirectory(dxgk-command-protocol)
+add_subdirectory(d3d9-command-protocol)
 add_subdirectory(vulkan-bridge-marshal)
 add_subdirectory(emulator-platform)
 add_subdirectory(disassembler)

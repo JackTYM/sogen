@@ -268,6 +268,209 @@ typedef struct _D3DDDIARG_OPENADAPTER
 
 typedef HRESULT(APIENTRY* PFND3DDDI_OPENADAPTER)(D3DDDIARG_OPENADAPTER*);
 
+// --- Device-function DDI args (WDK d3dumddi.h layout; only the subset sogen's D3D9 UMD marshals) --
+// D3DDDIARG_RENDERSTATE's {State,Value} shape is confirmed against the real staged d3d9.dll (see
+// CBatchFilterI::LHBatchSetRenderState, which copies exactly 8 bytes -- one QWORD -- out of *pArg).
+// The rest follow the same well-established WDK Set*-family convention (HANDLE, CONST ARG*).
+
+typedef struct _D3DDDIARG_RENDERSTATE
+{
+    UINT State; // D3DDDIRENDERSTATETYPE
+    UINT Value;
+} D3DDDIARG_RENDERSTATE;
+
+typedef struct _D3DDDIARG_TEXTURESTAGESTATE
+{
+    UINT Stage;
+    UINT State; // D3DDDITEXTURESTAGESTATETYPE
+    UINT Value;
+} D3DDDIARG_TEXTURESTAGESTATE;
+
+typedef struct _D3DDDIARG_SAMPLERSTATE
+{
+    UINT Sampler;
+    UINT State; // D3DDDISAMPLERSTATETYPE
+    UINT Value;
+} D3DDDIARG_SAMPLERSTATE;
+
+typedef struct _D3DDDIARG_SETTEXTURE
+{
+    UINT Stage;
+    HANDLE hTexture; // 0 unbinds; matches whatever pfnCreateResource returned
+} D3DDDIARG_SETTEXTURE;
+
+typedef struct _D3DDDIARG_SETSTREAMSOURCE
+{
+    UINT StreamNumber;
+    HANDLE hVertexBuffer;
+    UINT Offset;
+    UINT Stride;
+} D3DDDIARG_SETSTREAMSOURCE;
+
+typedef struct _D3DDDIARG_SETSTREAMSOURCEFREQ
+{
+    UINT StreamNumber;
+    UINT Divider;
+} D3DDDIARG_SETSTREAMSOURCEFREQ;
+
+typedef struct _D3DDDIARG_SETINDICES
+{
+    HANDLE hIndexBuffer;
+    UINT Stride; // 2 = 16-bit indices, 4 = 32-bit indices
+} D3DDDIARG_SETINDICES;
+
+typedef struct _D3DDDIARG_SETRENDERTARGET
+{
+    UINT RenderTargetIndex;
+    HANDLE hRenderTarget; // 0 unbinds
+} D3DDDIARG_SETRENDERTARGET;
+
+typedef struct _D3DDDIARG_SETDEPTHSTENCIL
+{
+    HANDLE hZBuffer; // 0 = no depth-stencil
+} D3DDDIARG_SETDEPTHSTENCIL;
+
+typedef struct _D3DDDIARG_VIEWPORTINFO
+{
+    UINT X;
+    UINT Y;
+    UINT Width;
+    UINT Height;
+} D3DDDIARG_VIEWPORTINFO;
+
+typedef struct _D3DDDIARG_ZRANGE
+{
+    FLOAT MinZ;
+    FLOAT MaxZ;
+} D3DDDIARG_ZRANGE;
+
+// Matches RECT's field order/widths exactly.
+typedef struct _D3DDDIRECT
+{
+    LONG left;
+    LONG top;
+    LONG right;
+    LONG bottom;
+} D3DDDIRECT;
+
+typedef struct _D3DDDIARG_CREATEVERTEXSHADERFUNC
+{
+    HANDLE ShaderHandle; // out
+    UINT Values[1];      // in: [0] = code size in bytes; the token DWORDs follow the struct in memory
+} D3DDDIARG_CREATEVERTEXSHADERFUNC;
+
+typedef struct _D3DDDIARG_CREATEPIXELSHADERFUNC
+{
+    HANDLE ShaderHandle; // out
+    UINT CodeSize;       // in: bytes; the token DWORDs follow the struct in memory
+} D3DDDIARG_CREATEPIXELSHADERFUNC;
+
+typedef struct _D3DDDIARG_SETPIXELSHADERFUNC
+{
+    HANDLE ShaderHandle;
+} D3DDDIARG_SETPIXELSHADERFUNC;
+
+typedef struct _D3DDDIARG_DELETEPIXELSHADERFUNC
+{
+    HANDLE ShaderHandle;
+} D3DDDIARG_DELETEPIXELSHADERFUNC;
+
+typedef struct _D3DDDIARG_SETVERTEXSHADERFUNC
+{
+    HANDLE ShaderHandle; // 0 selects the fixed-function pipeline
+} D3DDDIARG_SETVERTEXSHADERFUNC;
+
+typedef struct _D3DDDIARG_SETVERTEXSHADERDECL
+{
+    HANDLE ShaderHandle;
+} D3DDDIARG_SETVERTEXSHADERDECL;
+
+typedef struct _D3DDDIARG_CREATEVERTEXSHADERDECL
+{
+    HANDLE ShaderHandle; // out
+    UINT NumVertexElements;
+    // D3DDDIVERTEXELEMENT elements[NumVertexElements] follow the struct in memory
+} D3DDDIARG_CREATEVERTEXSHADERDECL;
+
+// Matches D3DVERTEXELEMENT9's real 8-byte layout.
+typedef struct _D3DDDIVERTEXELEMENT
+{
+    WORD Stream;
+    WORD Offset;
+    BYTE Type;
+    BYTE Method;
+    BYTE Usage;
+    BYTE UsageIndex;
+} D3DDDIVERTEXELEMENT;
+
+typedef struct _D3DDDIARG_SETVERTEXSHADERCONST
+{
+    UINT Register;
+    UINT Count; // number of 4-float vectors; the float data follows the struct in memory
+} D3DDDIARG_SETVERTEXSHADERCONST;
+
+typedef struct _D3DDDIARG_SETPIXELSHADERCONST
+{
+    UINT Register;
+    UINT Count;
+} D3DDDIARG_SETPIXELSHADERCONST;
+
+typedef struct _D3DDDIARG_SETVERTEXSHADERCONSTI
+{
+    UINT Register;
+    UINT Count; // number of int4 vectors; the int32 data follows the struct in memory
+} D3DDDIARG_SETVERTEXSHADERCONSTI;
+
+typedef struct _D3DDDIARG_SETPIXELSHADERCONSTI
+{
+    UINT Register;
+    UINT Count;
+} D3DDDIARG_SETPIXELSHADERCONSTI;
+
+typedef struct _D3DDDIARG_SETVERTEXSHADERCONSTB
+{
+    UINT Register;
+    UINT Count; // number of BOOLs (4 bytes each); the data follows the struct in memory
+} D3DDDIARG_SETVERTEXSHADERCONSTB;
+
+typedef struct _D3DDDIARG_SETPIXELSHADERCONSTB
+{
+    UINT Register;
+    UINT Count;
+} D3DDDIARG_SETPIXELSHADERCONSTB;
+
+typedef struct _D3DDDIARG_CLEAR
+{
+    UINT Flags; // D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL
+    UINT Color;
+    FLOAT Z;
+    UINT Stencil;
+    UINT NumRect; // D3DDDIRECT rects[NumRect] follow the struct in memory; 0 = whole target
+} D3DDDIARG_CLEAR;
+
+typedef struct _D3DDDIARG_DRAWPRIMITIVE
+{
+    UINT PrimitiveType; // D3DDDIPRIMITIVETYPE
+    UINT VStart;
+    UINT PrimitiveCount;
+} D3DDDIARG_DRAWPRIMITIVE;
+
+typedef struct _D3DDDIARG_DRAWINDEXEDPRIMITIVE
+{
+    UINT PrimitiveType;
+    INT BaseVertexIndex;
+    UINT MinIndex;
+    UINT NumVertices;
+    UINT StartIndex;
+    UINT PrimitiveCount;
+} D3DDDIARG_DRAWINDEXEDPRIMITIVE;
+
+typedef struct _D3DDDIARG_PRESENT
+{
+    HANDLE hSrcResource;
+    HANDLE hDstResource;
+} D3DDDIARG_PRESENT;
+
 #pragma pack(pop)
 
 // Layout pins: catch any accidental drift from the WDK ABI at compile time (x64 sizes).
