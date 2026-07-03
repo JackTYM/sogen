@@ -1,5 +1,7 @@
 #include "d3d9_host.hpp"
 
+#include "d3d9_shader_translator.hpp"
+
 #include <d3d9_command_protocol.hpp>
 
 // Real Vulkan enum/type values (VK_FORMAT_*, VK_PRIMITIVE_TOPOLOGY_*, ...), used only for their
@@ -302,18 +304,21 @@ namespace sogen
                                                spirv.pixel_spirv.size() * sizeof(uint32_t), entry.fs_module) != 0 ||
             entry.fs_module == 0)
         {
+            this->vulkan_.destroy_shader_module(device, entry.vs_module);
             return nullptr;
         }
 
         uint64_t layout = 0;
         if (this->vulkan_.create_pipeline_layout(device, 0, 0, {}, layout) != 0 || layout == 0)
         {
+            this->vulkan_.destroy_shader_module(device, entry.vs_module);
+            this->vulkan_.destroy_shader_module(device, entry.fs_module);
             return nullptr;
         }
 
-        // D3DFVF_XYZ|D3DFVF_DIFFUSE: 12-byte {x,y,z} clip-space position + 4-byte D3DCOLOR diffuse,
-        // stride 16 -- this slice's one supported programmable vertex format (position+color
-        // passthrough only, see the design spec's Non-Goals).
+        // D3DFVF_XYZ|D3DFVF_DIFFUSE: 12-byte {x,y,z} object-space (pre-transform) position + 4-byte
+        // D3DCOLOR diffuse, stride 16 -- this slice's one supported programmable vertex format
+        // (position+color passthrough only, see the design spec's Non-Goals).
         const std::array<vulkan_host::vertex_binding, 1> bindings{
             {{.binding = 0, .stride = 16, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX}}};
         const std::array<vulkan_host::vertex_attribute, 2> attributes{{
@@ -342,8 +347,16 @@ namespace sogen
             blend, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
         {
+            this->vulkan_.destroy_shader_module(device, entry.vs_module);
+            this->vulkan_.destroy_shader_module(device, entry.fs_module);
+            this->vulkan_.destroy_pipeline_layout(device, layout);
             return nullptr;
         }
+
+        // The pipeline layout is not referenced after pipeline creation (this path uses no push
+        // constants or descriptor sets, unlike ensure_pipeline's fixed-function pipeline_layout_), so
+        // it does not need to outlive the pipeline it built -- destroy it now rather than leaking it.
+        this->vulkan_.destroy_pipeline_layout(device, layout);
 
         return &this->programmable_pipelines_.emplace(key, entry).first->second;
     }
