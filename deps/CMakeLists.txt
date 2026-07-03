@@ -121,3 +121,7 @@ add_subdirectory(capstone)
 
 include(googletest.cmake)
 include(zstd.cmake)
+
+##########################################
+
+add_subdirectory(vkd3d-shader-bridge)

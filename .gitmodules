@@ -54,3 +54,6 @@
 	path = deps/CLI11
 	url = https://github.com/CLIUtils/CLI11.git
 	shallow = true
+[submodule "deps/vkd3d"]
+	path = deps/vkd3d
+	url = https://gitlab.winehq.org/wine/vkd3d.git
