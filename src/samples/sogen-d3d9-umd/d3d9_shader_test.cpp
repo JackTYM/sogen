@@ -45,10 +45,12 @@ int main()
     RegisterClassA(&wc);
     HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "shader-triangle", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480,
                                 nullptr, nullptr, wc.hInstance, nullptr);
+    printf("[d3d9-shader-test] hwnd=%p\n", static_cast<void*>(hwnd));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
     IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
+    printf("[d3d9-shader-test] Direct3DCreate9=%p\n", static_cast<void*>(d3d));
     if (!d3d)
     {
         printf("[d3d9-shader-test] FAIL: Direct3DCreate9 returned null\n");
@@ -66,9 +68,10 @@ int main()
 
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-shader-test] CreateDevice hr=0x%08lx\n", static_cast<unsigned long>(hr));
+    printf("[d3d9-shader-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
+        printf("[d3d9-shader-test] FAIL: CreateDevice hr=0x%08lx\n", static_cast<unsigned long>(hr));
         d3d->Release();
         return 1;
     }
@@ -83,7 +86,10 @@ int main()
         if (vs_errors)
         {
             printf("[d3d9-shader-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
+            vs_errors->Release();
         }
+        dev->Release();
+        d3d->Release();
         return 1;
     }
 
@@ -97,7 +103,11 @@ int main()
         if (ps_errors)
         {
             printf("[d3d9-shader-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
+            ps_errors->Release();
         }
+        vs_blob->Release();
+        dev->Release();
+        d3d->Release();
         return 1;
     }
 
@@ -109,8 +119,19 @@ int main()
     HRESULT hcps = dev->CreatePixelShader(static_cast<const DWORD*>(ps_blob->GetBufferPointer()), &ps);
     printf("[d3d9-shader-test] CreatePixelShader hr=0x%08lx\n", static_cast<unsigned long>(hcps));
 
+    vs_blob->Release();
+    ps_blob->Release();
+
     if (FAILED(hcvs) || FAILED(hcps))
     {
+        if (vs)
+        {
+            vs->Release();
+        }
+        if (ps)
+        {
+            ps->Release();
+        }
         dev->Release();
         d3d->Release();
         return 1;
@@ -123,7 +144,8 @@ int main()
     };
     constexpr DWORD kFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
     IDirect3DVertexBuffer9* vb = nullptr;
-    dev->CreateVertexBuffer(3 * sizeof(Vertex), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
+    HRESULT hcvb = dev->CreateVertexBuffer(3 * sizeof(Vertex), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
+    printf("[d3d9-shader-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
     if (vb)
     {
         Vertex* verts = nullptr;
