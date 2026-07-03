@@ -456,21 +456,22 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_Clear(HANDLE /*hDevice*/, CONST D3DDDIARG_CLEAR* pArgs)
+    // RE-verified real pfnClear signature (see D3DDDIARG_CLEAR's own comment in d3d9_ddi.hpp):
+    // NumRect/pRect are separate parameters, not struct fields.
+    HRESULT APIENTRY umd_Clear(HANDLE /*hDevice*/, CONST D3DDDIARG_CLEAR* pArgs, UINT NumRect, CONST D3DDDIRECT* pRect)
     {
-        const auto* rects = reinterpret_cast<const D3DDDIRECT*>(pArgs + 1);
-        std::vector<uint8_t> buf(sizeof(d3d9c::clear_record) + static_cast<size_t>(pArgs->NumRect) * sizeof(d3d9c::set_scissor_record));
+        std::vector<uint8_t> buf(sizeof(d3d9c::clear_record) + static_cast<size_t>(NumRect) * sizeof(d3d9c::set_scissor_record));
         auto* req = reinterpret_cast<d3d9c::clear_record*>(buf.data());
         req->flags = pArgs->Flags;
         req->color_argb = pArgs->Color;
         req->z = pArgs->Z;
         req->stencil = pArgs->Stencil;
-        req->rect_count = pArgs->NumRect;
+        req->rect_count = NumRect;
         auto* wire_rects = reinterpret_cast<d3d9c::set_scissor_record*>(buf.data() + sizeof(*req));
-        for (UINT i = 0; i < pArgs->NumRect; ++i)
+        for (UINT i = 0; i < NumRect; ++i)
         {
             wire_rects[i] = d3d9c::set_scissor_record{
-                .left = rects[i].left, .top = rects[i].top, .right = rects[i].right, .bottom = rects[i].bottom};
+                .left = pRect[i].left, .top = pRect[i].top, .right = pRect[i].right, .bottom = pRect[i].bottom};
         }
         bridge_call(gb::ioctl_d3d9_clear, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
         return S_OK;

@@ -351,17 +351,26 @@ before the driver is called (via `CHandleFactory::CreateNewHandle`), not returne
 output to synthesize, when this gets wired for real. The 20 already-wired `D3DDDI_DEVICEFUNCS`
 marshaling functions (§10 above) are the right target; no DP2 token parser is needed on our side.
 
-**Deliberately deferred (device_stub, not real marshaling yet) — and why:**
-- `pfnCreateResource(2)`, `pfnOpenResource`, `pfnBlt`, `pfnColorFill`: **empirically, vertex/index buffer
-  creation does NOT call `pfnCreateResource` at all** — traced both `CVertexBuffer`'s and
-  `CDriverVertexBuffer`'s (the video-memory-backed variant) constructors end-to-end; neither calls into
-  the driver. Buffer backing is either allocated lazily on first `Lock` (plausible, given
-  `CDriverVertexBuffer::Lock`'s own complex allocate-on-miss branch) or via the kernel
-  `D3DKMTCreateAllocation` path directly (bypassing the UMD's `pfnCreateResource` slot entirely) — not
-  yet determined which. `pfnCreateResource` may only be relevant for textures/surfaces, which do need
-  immediate GPU-visible dimensions. Don't assume the real `D3DDDIARG_CREATERESOURCE` shape from public
-  WDK knowledge; find its real call site the way Lock/Unlock's was found once a texture-creation forcing
-  function exists.
+**✅ `pfnCreateResource` IS called for the backbuffer/swapchain surfaces — confirmed 2026-07-02 via a
+real `d3d9-triangle-test` forcing function** (see `.claude/plans/jazzy-giggling-cloud.md` Phase 1; the
+prior "empirically doesn't get called" note above was correct only for plain vertex/index buffers, not
+render-target surfaces). A real `IDirect3DDevice9::CreateDevice()` call — before it even returns —
+issues **5 synchronous, non-batched `pfnCreateResource` calls** (confirmed via `CBatchFilterI::
+LHBatchCreateResource`'s decompile: it's a direct passthrough, `(hDevice, pArgs)`, not routed through
+the DP2 token buffer). Captured via a temporary `NtGdiDdDDICreateAllocation` hex-dump + a diagnostic
+UMD stub on slot 37 (both since reverted — see the plan for the exact instrumentation if this needs
+re-capturing). Raw payload evidence (first call, distinct from the other 4):
+`16 00 00 00 03 00 00 00 00 00 00 00 00 00 00 00 [8-byte ptr] 01 00 00 00 [20 zero bytes] [8-byte ptr]
+81 10 00 00 01 00 00 00` — offset 0 = `0x16` = **22 = `D3DFMT_X8R8G8B8`, matching the test's
+`BackBufferFormat` exactly** (strong, non-coincidental evidence offset 0 is `Format`). The other 4 calls
+share an identical prefix (`offset 0 = 0x64`, `offset 4 = 1`) differing only in a trailing pointer +
+2 bytes — likely a 4-entry mip/surface array for a second resource, not yet explained. **Not yet
+individually field-verified** (`D3DDDIARG_CREATERESOURCE` is NOT drafted in `d3d9_ddi.hpp` yet) — the
+next RE step is finding the actual *builder* of these args (not the passthrough `LHBatchCreateResource`,
+which reveals nothing — its 3 callers found via xref were `StartThreading` (just wires the vtable slot,
+not a builder) and two addresses with no enclosing `funcs` entry, suggesting a stripped/local builder
+function; needs a different search angle, e.g. tracing from `CBaseDevice::Init`/swapchain setup).
+- `pfnOpenResource`, `pfnBlt`, `pfnColorFill`: still deferred, not exercised by this forcing function.
 - `pfnCreateVertexShaderFunc`, `pfnCreatePixelShader`, `pfnCreateVertexShaderDecl`,
   `pfnSetVertexShaderFunc`(44), `pfnSetVertexShaderDecl`(47), `pfnDeleteVertexShaderFunc`/
   `DeletePixelShader`: **do still go through `D3DDDI_DEVICEFUNCS`** (per the DP2 resolution above) — just
@@ -369,13 +378,30 @@ marshaling functions (§10 above) are the right target; no DP2 token parser is n
   and for `CreateVertexShaderDecl`/`CreateVertexShaderFunc` the HANDLE arrives as an **input** (assigned
   by `CHandleFactory`), not an output. The drafted structs in `d3d9_ddi.hpp` are still the right shape to
   implement against; not yet RE-verified byte-for-byte the way `RENDERSTATE`/`LOCK`/`UNLOCK` were.
-- `pfnPresent`: **size-confirmed only** (`D3DDDIARG_PRESENT` is exactly 44 bytes, confirmed via
-  `CBatchFilterI::GetBatchBufferPointer<_D3DDDIARG_PRESENT>`'s batch allocation size) — an initial
-  field-layout guess (`hSrcResource`+`hDstResource`+`SrcRect`+`DstPoint`+`Flags`) didn't even satisfy the
-  44-byte total under natural 8-byte alignment (came out 48), a clear sign the guessed fields are wrong.
-  Currently a 44-byte opaque `BYTE[44]` placeholder, not wired to any slot. Gate 3's own
-  `d3d9-spike-test` never calls Present (`dev->Release()` without presenting), so there's been no
-  forcing function to pin this yet.
+- `pfnPresent`: **size corrected + first field confirmed 2026-07-02** via `CBatchFilterI::
+  LHBatchPresent`'s decompile (not the earlier `GetBatchBufferPointer` allocation-size method, which
+  conflated the DP2 token's 4-byte tag header with the struct itself). The real struct is **40 bytes**,
+  not 44: `LHBatchPresent` copies exactly one OWORD (offset 0-15) + one OWORD (16-31) + one QWORD
+  (32-39) into the batch token. `hSrcResource` is confirmed at offset 0 (`*(void**)a2` is passed
+  straight to `CBatchFilterI::ReferenceResource` as a HANDLE) — matches classic D3D9 DDI convention. A
+  flags-like byte at offset 28 is tested for bit `0x4` by the runtime before choosing the batched vs.
+  immediate-dispatch path. Fields beyond `hSrcResource` are still unconfirmed (`d3d9_ddi.hpp` reflects
+  this: `HANDLE hSrcResource; BYTE Reserved[32];`, 40 bytes total). Still not wired to any device-func
+  slot. A real windowed `Present()` call doesn't fully complete under sogen yet — it hits an
+  **unrelated, genuinely unimplemented syscall**, `NtUserHwndQueryRedirectionInfo` (a DWM/compositor
+  redirection-info query), deep inside `d3d9.dll`'s pre-flight window-state check, before it would reach
+  `pfnPresent`. Implementing that syscall (or finding a present path that avoids it) is out of scope for
+  this plan — see `.claude/plans/jazzy-giggling-cloud.md`'s "explicitly out of scope" list; it's a
+  separate DWM/window-management gap, not a D3D9 DDI one.
+- **Bonus fix, found by the same forcing function:** `D3DDDIARG_CLEAR` had a real bug —
+  `umd_Clear`/the struct definition assumed `NumRect` and the rect array were struct fields (trailing
+  inline data), but RE via `CBatchFilterI::LHBatchClear`'s decompile (`this, pClear, NumRect, pRect` —
+  4 separate parameters, `pClear` copied as exactly one OWORD/16 bytes) showed `pfnClear`'s real
+  signature is `(HANDLE, CONST D3DDDIARG_CLEAR*, UINT NumRect, CONST RECT*)`. The old assumption caused
+  a real crash (`umd_Clear` walking off the end of a heap allocation reading a garbage `NumRect`) the
+  first time a real `Clear()` call was exercised — gate 3's spike test never called `Clear` either, so
+  this was undiscovered until now. Fixed: `D3DDDIARG_CLEAR` is 16 bytes (`Flags,Color,Z,Stencil` only),
+  `umd_Clear` takes `NumRect`/`pRect` as separate parameters.
 - `pfnDrawPrimitive2`/`pfnDrawIndexedPrimitive2` (the `*UM`/inline-vertex-data variants) — now the
   **prime suspect** for where DP2 token batches actually get submitted; investigate these BEFORE
   `pfnSetStreamSourceUm`/`pfnSetIndicesUm`.

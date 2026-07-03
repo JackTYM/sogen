@@ -439,14 +439,18 @@ typedef struct _D3DDDIARG_SETPIXELSHADERCONSTB
     UINT Count;
 } D3DDDIARG_SETPIXELSHADERCONSTB;
 
+// RE-verified against the real d3d9.dll (CBatchFilterI::LHBatchClear, which copies exactly one
+// OWORD i.e. 16 bytes from the caller's D3DDDIARG_CLEAR*): NumRect/the rect array are NOT struct
+// fields -- pfnClear's real signature is (HANDLE, CONST D3DDDIARG_CLEAR*, UINT NumRect, CONST
+// RECT* pRect), matching LHBatchClear's own (this, pClear, NumRect, pRect) parameters exactly.
 typedef struct _D3DDDIARG_CLEAR
 {
     UINT Flags; // D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL
     UINT Color;
     FLOAT Z;
     UINT Stencil;
-    UINT NumRect; // D3DDDIRECT rects[NumRect] follow the struct in memory; 0 = whole target
 } D3DDDIARG_CLEAR;
+static_assert(sizeof(D3DDDIARG_CLEAR) == 16);
 
 typedef struct _D3DDDIARG_DRAWPRIMITIVE
 {
@@ -495,19 +499,23 @@ typedef struct _D3DDDIARG_UNLOCK
     UINT64 Reserved0; // 8 -- confirmed present (same field as D3DDDIARG_LOCK's Reserved0)
 } D3DDDIARG_UNLOCK;
 
-// Size-confirmed ONLY (44 bytes, via CBatchFilterI::GetBatchBufferPointer<_D3DDDIARG_PRESENT>'s batch
-// allocation) -- field-level layout is NOT verified (an initial {hSrcResource,hDstResource,SrcRect,
-// DstPoint,Flags} guess didn't even satisfy the 44-byte total under natural alignment, a sign it's
-// wrong). Not wired to any device-func slot yet (pfnPresent stays on device_stub); do not add field
-// accesses here until independently RE-verified the same way LOCK/UNLOCK were.
+// RE-verified via CBatchFilterI::LHBatchPresent (which copies exactly 40 bytes -- one OWORD at
+// offset 0, one OWORD at offset 16, one QWORD at offset 32 -- into the batch token): the raw struct
+// is 40 bytes, not 44; the earlier 44-byte figure measured the DP2 token's total footprint (4-byte
+// tag + 40-byte payload), not the struct alone. hSrcResource is confirmed at offset 0 (LHBatchPresent
+// passes *(void**)a2 straight to CBatchFilterI::ReferenceResource as a HANDLE). A flags-like byte at
+// offset 28 is tested by the runtime for bit 0x4 before deciding batch vs. immediate dispatch. Fields
+// beyond hSrcResource are not yet individually pinned -- do not add accessors here until a forcing
+// function (Present() actually completing, or Phase 1's follow-up) RE-verifies them the way LOCK was.
 typedef struct _D3DDDIARG_PRESENT
 {
-    BYTE Reserved[44];
+    HANDLE hSrcResource; // 0, confirmed
+    BYTE Reserved[32];   // 8..39, size-confirmed region; individual fields not yet pinned
 } D3DDDIARG_PRESENT;
 
 static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
-static_assert(sizeof(D3DDDIARG_PRESENT) == 44, "size confirmed via real d3d9.dll RE; field layout is inferred");
+static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll RE (LHBatchPresent copy pattern)");
 
 #pragma pack(pop)
 
