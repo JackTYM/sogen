@@ -3545,6 +3545,11 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserHwndQueryRedirectionInfo(const syscall_context& /*c*/, const hwnd /*window*/)
+        {
+            return FALSE;
+        }
+
         // d3d9's EnumDisplayMonitors callback (fnEnum) calls GetMonitorInfoA with cbSize=72 (MONITORINFOEX)
         // and strcmp-compares szDevice against the primary display name to find a monitor match.
         BOOL handle_NtUserGetMonitorInfo(const syscall_context& c, const handle /*hmonitor*/, const emulator_pointer pmi)

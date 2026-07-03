@@ -595,6 +595,10 @@ namespace sogen
         BOOL completion_NtUserEnumDisplayMonitors(const syscall_context& c, hdc hdc_in, uint64_t clip_rect_ptr, uint64_t callback,
                                                   uint64_t param);
         BOOL handle_NtUserGetHDevName(const syscall_context& c, handle hdev, emulator_pointer device_name);
+        // Minimal stub: DWM/compositor redirection-info query, undocumented signature. Always reports
+        // "not redirected" (FALSE) -- real d3d9.dll (Present's pre-flight window-state check) treats
+        // this as a benign fallback to the non-composited path. Real args beyond hwnd are unread.
+        BOOL handle_NtUserHwndQueryRedirectionInfo(const syscall_context& c, hwnd window);
         BOOL handle_NtUserGetMonitorInfo(const syscall_context& c, handle hmonitor, emulator_pointer pmi);
         emulator_pointer handle_NtUserMapDesktopObject(const syscall_context& c, handle handle);
         BOOL handle_NtUserTransformRect(const syscall_context& c, emulator_object<RECT> rect, hwnd hwnd, uint32_t type, uint64_t unknown);
@@ -4057,6 +4061,7 @@ namespace sogen
         add_handler(NtQueryInformationByName);
         add_handler(NtUserSetCursor);
         add_handler(NtUserGetCursor);
+        add_handler(NtUserHwndQueryRedirectionInfo);
         add_handler(NtOpenMutant);
         add_handler(NtOpenTimer);
         add_handler(NtCreateTimer);

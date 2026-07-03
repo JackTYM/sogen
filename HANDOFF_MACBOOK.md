@@ -387,12 +387,21 @@ function; needs a different search angle, e.g. tracing from `CBaseDevice::Init`/
   flags-like byte at offset 28 is tested for bit `0x4` by the runtime before choosing the batched vs.
   immediate-dispatch path. Fields beyond `hSrcResource` are still unconfirmed (`d3d9_ddi.hpp` reflects
   this: `HANDLE hSrcResource; BYTE Reserved[32];`, 40 bytes total). Still not wired to any device-func
-  slot. A real windowed `Present()` call doesn't fully complete under sogen yet — it hits an
-  **unrelated, genuinely unimplemented syscall**, `NtUserHwndQueryRedirectionInfo` (a DWM/compositor
-  redirection-info query), deep inside `d3d9.dll`'s pre-flight window-state check, before it would reach
-  `pfnPresent`. Implementing that syscall (or finding a present path that avoids it) is out of scope for
-  this plan — see `.claude/plans/jazzy-giggling-cloud.md`'s "explicitly out of scope" list; it's a
-  separate DWM/window-management gap, not a D3D9 DDI one.
+  slot. **✅ A real windowed `Present()` now completes end-to-end (2026-07-02)** — it was blocked by an
+  unrelated, genuinely unimplemented syscall, `NtUserHwndQueryRedirectionInfo` (a DWM/compositor
+  redirection-info query), deep inside `d3d9.dll`'s pre-flight window-state check. Added a minimal
+  permanent stub (`handle_NtUserHwndQueryRedirectionInfo`, `syscalls/user.cpp`) that always reports
+  "not redirected" (`FALSE`); real args beyond `hwnd` are unread (signature is undocumented). This makes
+  `d3d9.dll` fall back to its legacy GDI blit-to-window-DC present path — confirmed by re-running with
+  `NtGdiDdDDICreateAllocation` hex-dump logging enabled: **it is never called** for the backbuffer in
+  this path, even after the stub unblocks execution. This means the "swapchain surface needs a real
+  D3DKMT kernel allocation" assumption doesn't hold for a bare windowed `Clear`+`Present` — `d3d9.dll`
+  earlier calls `AllocateCB` → a global OS-thunk function pointer
+  (`pfnOsThunkDDICreateAllocation`/`...2`, not a driver-supplied device callback) that *would* reach
+  `NtGdiDdDDICreateAllocation`, but that path isn't exercised here. Practical implication for Part 3:
+  **our own `pfnCreateResource`/`pfnPresent` are what need to produce real pixels** — the real d3d9.dll
+  won't hand us a kernel-backed surface for free via this path; don't build Part 3 around waiting for a
+  `NtGdiDdDDICreateAllocation` call that may never come for the common windowed case.
 - **Bonus fix, found by the same forcing function:** `D3DDDIARG_CLEAR` had a real bug —
   `umd_Clear`/the struct definition assumed `NumRect` and the rect array were struct fields (trailing
   inline data), but RE via `CBatchFilterI::LHBatchClear`'s decompile (`this, pClear, NumRect, pRect` —
