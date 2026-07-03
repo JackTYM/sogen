@@ -1341,7 +1341,14 @@ namespace sogen
             void dxgk_info(const syscall_context& c, const char* fmt, Args&&... args)
             {
 #ifdef ENABLE_DXGK_LOGGING
-                c.win_emu.log.info(fmt, std::forward<Args>(args)...);
+                if constexpr (sizeof...(Args) == 0)
+                {
+                    c.win_emu.log.info("%s", fmt);
+                }
+                else
+                {
+                    c.win_emu.log.info(fmt, std::forward<Args>(args)...);
+                }
 #else
                 (void)c;
                 (void)fmt;
@@ -1353,7 +1360,14 @@ namespace sogen
             void dxgk_warn(const syscall_context& c, const char* fmt, Args&&... args)
             {
 #ifdef ENABLE_DXGK_LOGGING
-                c.win_emu.log.warn(fmt, std::forward<Args>(args)...);
+                if constexpr (sizeof...(Args) == 0)
+                {
+                    c.win_emu.log.warn("%s", fmt);
+                }
+                else
+                {
+                    c.win_emu.log.warn(fmt, std::forward<Args>(args)...);
+                }
 #else
                 (void)c;
                 (void)fmt;
@@ -1365,7 +1379,14 @@ namespace sogen
             void dxgk_error(const syscall_context& c, const char* fmt, Args&&... args)
             {
 #ifdef ENABLE_DXGK_LOGGING
-                c.win_emu.log.error(fmt, std::forward<Args>(args)...);
+                if constexpr (sizeof...(Args) == 0)
+                {
+                    c.win_emu.log.error("%s", fmt);
+                }
+                else
+                {
+                    c.win_emu.log.error(fmt, std::forward<Args>(args)...);
+                }
 #else
                 (void)c;
                 (void)fmt;
@@ -3717,7 +3738,19 @@ namespace sogen
                     char16_t UhDriverName[260]; // NOLINT
                 } driver_name{};
 
-                utils::string::copy(driver_name.UhDriverName, u"d3d10warp.dll");
+                // The runtime sets Version to the KMTUMDVERSION it wants (DX9=0, DX10=1, DX11=2, DX12=3).
+                driver_name.Version = c.emu.read_memory<uint32_t>(query.pPrivateDriverData);
+
+                // Hand the official D3D9 runtime the sogen D3D9 UMD (the vendor-driver slot); other DDI
+                // generations fall back to WARP until their host decoder exists.
+                if (driver_name.Version == 0 /* KMTUMDVERSION_DX9 */)
+                {
+                    utils::string::copy(driver_name.UhDriverName, u"sogen_d3d9um.dll");
+                }
+                else
+                {
+                    utils::string::copy(driver_name.UhDriverName, u"d3d10warp.dll");
+                }
 
                 c.emu.write_memory(query.pPrivateDriverData, &driver_name, sizeof(driver_name));
                 return STATUS_SUCCESS;
@@ -4234,7 +4267,21 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
-            const auto submit = submit_desc.read();
+            auto submit = submit_desc.read();
+
+            if (c.proc.is_wow64_process)
+            {
+                // The real (emulated) wow64win.dll thunk lands pPrivateDriverData/PrivateDriverDataSize
+                // 8 bytes later than this struct's native-x64 layout declares (0x128/0x12C, not
+                // 0x120/0x124) — verified against the actual thunked bytes, since an extra field this
+                // struct doesn't model sits between BroadcastContext and pPrivateDriverData on WoW64.
+                uint32_t wow64_private_driver_data = 0;
+                uint32_t wow64_private_driver_data_size = 0;
+                c.emu.read_memory(submit_desc.value() + 0x128, &wow64_private_driver_data, sizeof(wow64_private_driver_data));
+                c.emu.read_memory(submit_desc.value() + 0x12C, &wow64_private_driver_data_size, sizeof(wow64_private_driver_data_size));
+                submit.pPrivateDriverData = wow64_private_driver_data;
+                submit.PrivateDriverDataSize = wow64_private_driver_data_size;
+            }
 
             if (!c.proc.dxgk.vk_host || submit.pPrivateDriverData == 0 || submit.PrivateDriverDataSize < sizeof(dxgk_cmd::clear_command))
             {
@@ -4271,7 +4318,21 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
-            const auto present = present_desc.read();
+            auto present = present_desc.read();
+
+            if (c.proc.is_wow64_process)
+            {
+                // The real (emulated) wow64win.dll thunk individually widens hWindow to a full
+                // 8-byte slot (it's treated as a genuine pointer-sized handle), which shifts every
+                // field after it by 4 bytes relative to this struct's native-x64, tightly-packed
+                // layout: hWindow moves from +0x04 to +0x08, hSource from +0x0C to +0x14.
+                uint32_t wow64_hwindow = 0;
+                uint32_t wow64_hsource = 0;
+                c.emu.read_memory(present_desc.value() + 0x08, &wow64_hwindow, sizeof(wow64_hwindow));
+                c.emu.read_memory(present_desc.value() + 0x14, &wow64_hsource, sizeof(wow64_hsource));
+                present.hWindow = wow64_hwindow;
+                present.hSource = wow64_hsource;
+            }
 
             if (!c.proc.dxgk.vk_host || present.hSource == 0)
             {
@@ -4637,12 +4698,13 @@ namespace sogen
                     dxgk_warn(c, "NtGdiDdDDIGetDeviceState: Unknown device 0x%X", state.hDevice);
                 }
 
-                // StateType 3 = D3DKMT_DEVICESTATE_RESET: return 1 (no reset) for a healthy adapter.
-                // The kernel returns State=1 when no TDR reset has occurred; State=0 means "device was
-                // reset" which causes WARP to initiate a TDR recovery and tear down the device.
+                // StateType 3 = D3DKMT_DEVICESTATE_RESET: a healthy adapter reports the ResetState reset/
+                // desktop-switched bit (bit0) CLEAR. The D3D9 runtime's device-state check treats
+                // (ResetState & 1) == 0 as "no reset -> proceed with driver/caps init"; a set bit0 makes it
+                // mark the driver disabled and skip caps/format enumeration, so CreateDevice(HAL) fails.
                 if (state.StateType == 3)
                 {
-                    state.ResetState = 1;
+                    state.ResetState = 0;
                 }
                 else
                 {

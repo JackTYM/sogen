@@ -8,16 +8,20 @@
 // ---------------------------------------------------------------------------
 // D3DKMT kernel-facing struct definitions.
 //
-// These mirror the EMU_ struct layouts from gdi.hpp (the layout the host
-// handler reads via emulator_object<>). We call NtGdiDdDDI* directly from
-// win32u.dll so there is no gdi32 thunking — the bytes we write here are
-// exactly what the host handler reads.
+// This sample only runs as a 32-bit (WoW64) guest. A 32-bit guest's actual
+// NtGdiDdDDI* call arguments are the tightly-packed, all-32-bit-field "wire"
+// layout below — real Microsoft wow64win.dll code (genuinely emulated, not
+// sogen's own) widens every pointer-ish field to a naturally-aligned 64-bit
+// slot before the syscall reaches the host handler, and narrows the result
+// back on return. That widened shape is what gdi.hpp's EMU_D3DKMT_* structs
+// describe; it is NOT the shape a 32-bit guest should construct itself.
+// Verified against wow64win.dll's whNtGdiDdDDICreateDevice/CreateContext/
+// CreateAllocation thunks via IDA.
 //
-// packing(8) forces 8-byte alignment for 64-bit fields on 32-bit x86,
-// matching the 64-bit host's natural struct layout.
+// SUBMITCOMMAND/PRESENT are the exception: gdi.hpp declares their pointer
+// fields as UINT32 unconditionally (no widening), so their wire shape here
+// already matches what the host handler reads directly.
 // ---------------------------------------------------------------------------
-
-#pragma pack(push, 8)
 
 namespace d3dkmt
 {
@@ -32,19 +36,17 @@ namespace d3dkmt
 
     struct CREATEDEVICE
     {
-        unsigned long long hAdapter{};
+        unsigned int hAdapter{};
         unsigned int Flags{};
         unsigned int hDevice{};
-        unsigned long long pCommandBuffer{};
+        unsigned int pCommandBuffer{};
         unsigned int CommandBufferSize{};
-        unsigned int pad0{};
-        unsigned long long pAllocationList{};
+        unsigned int pAllocationList{};
         unsigned int AllocationListSize{};
-        unsigned int pad1{};
-        unsigned long long pPatchLocationList{};
+        unsigned int pPatchLocationList{};
         unsigned int PatchLocationListSize{};
-        unsigned int pad2{};
     };
+    static_assert(sizeof(CREATEDEVICE) == 0x24);
 
     struct CREATECONTEXT
     {
@@ -52,54 +54,49 @@ namespace d3dkmt
         unsigned int NodeOrdinal{};
         unsigned int EngineAffinity{};
         unsigned int Flags{};
-        unsigned long long pPrivateDriverData{};
+        unsigned int pPrivateDriverData{};
         unsigned int PrivateDriverDataSize{};
         unsigned int ClientHint{};
         unsigned int hContext{};
-        unsigned int pad0{};
-        unsigned long long pCommandBuffer{};
+        unsigned int pCommandBuffer{};
         unsigned int CommandBufferSize{};
-        unsigned int pad1{};
-        unsigned long long pAllocationList{};
+        unsigned int pAllocationList{};
         unsigned int AllocationListSize{};
-        unsigned int pad2{};
-        unsigned long long pPatchLocationList{};
+        unsigned int pPatchLocationList{};
         unsigned int PatchLocationListSize{};
-        unsigned int pad3{};
-        unsigned long long CommandBuffer{};
+        unsigned long long CommandBuffer{}; // real Windows keeps this field 64-bit even on WoW64
     };
+    static_assert(sizeof(CREATECONTEXT) == 0x40);
 
     struct ALLOCATIONINFO
     {
         unsigned int hAllocation{};
-        unsigned int pad0{};
-        unsigned long long pSystemMem{};
-        unsigned long long pPrivateDriverData{};
+        unsigned int pSystemMem{};
+        unsigned int pPrivateDriverData{};
         unsigned int PrivateDriverDataSize{};
         unsigned int VidPnSourceId{};
         unsigned int Flags{};
-        unsigned int pad1{};
     };
+    static_assert(sizeof(ALLOCATIONINFO) == 0x18);
 
     struct CREATEALLOCATION
     {
         unsigned int hDevice{};
         unsigned int hResource{};
         unsigned int hGlobalShare{};
-        unsigned int pad0{};
-        unsigned long long pPrivateRuntimeData{};
+        unsigned int pPrivateRuntimeData{};
         unsigned int PrivateRuntimeDataSize{};
-        unsigned int pad1{};
-        unsigned long long pPrivateDriverData{};
+        unsigned int pPrivateDriverData{};
         unsigned int PrivateDriverDataSize{};
         unsigned int NumAllocations{};
-        unsigned long long pAllocationInfo{};
+        unsigned int pAllocationInfo{};
         unsigned int Flags{};
-        unsigned int pad2{};
-        unsigned long long hPrivateRuntimeResourceHandle{};
+        unsigned int hPrivateRuntimeResourceHandle{};
     };
+    static_assert(sizeof(CREATEALLOCATION) == 0x2C);
 
-    // Matches EMU_D3DKMT_SUBMITCOMMAND exactly.
+    // Matches EMU_D3DKMT_SUBMITCOMMAND exactly (host declares this struct's
+    // pointer fields as 32-bit unconditionally — see comment above).
     struct SUBMITCOMMAND
     {
         unsigned long long Commands{};
@@ -124,8 +121,6 @@ namespace d3dkmt
     };
 
 } // namespace d3dkmt
-
-#pragma pack(pop)
 
 namespace
 {
@@ -350,7 +345,15 @@ int main()
         }
 
         // Present: readback the GPU image and push to the SDL window.
-        d3dkmt::PRESENT present{};
+        //
+        // The real D3DKMT_PRESENT structure is far larger than the 5 fields sogen's host
+        // handler reads (wow64win.dll's thunk touches offsets past 1400 bytes, for present
+        // region arrays / private data the host doesn't use). A struct sized to only what the
+        // host reads leaves wow64win.dll reading uninitialized stack memory beyond it as if it
+        // were real fields, which crashes when it finds garbage "pointers"/"counts" there. Back
+        // it with a large zeroed buffer so those unused fields read as harmless zero/null.
+        alignas(d3dkmt::PRESENT) unsigned char present_storage[4096]{};
+        auto& present = *reinterpret_cast<d3dkmt::PRESENT*>(present_storage);
         present.hDevice = h_device;
         present.hWindow = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(hwnd));
         present.hSource = h_rt;

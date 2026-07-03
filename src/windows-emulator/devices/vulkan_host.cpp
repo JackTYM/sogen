@@ -71,7 +71,12 @@ namespace sogen
         }
 
 #if defined(__APPLE__)
-        constexpr std::array<const char*, 3> vulkan_loader_names{"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib"};
+        // Bare names rely on the dynamic linker's default search path, which covers Intel
+        // Homebrew's /usr/local/lib but not Apple Silicon Homebrew's /opt/homebrew/lib unless
+        // DYLD_LIBRARY_PATH is set; the absolute paths below are a fallback for that case.
+        constexpr std::array<const char*, 5> vulkan_loader_names{
+            "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib", "/opt/homebrew/lib/libvulkan.1.dylib",
+            "/opt/homebrew/lib/libMoltenVK.dylib"};
 #else
         constexpr std::array<const char*, 2> vulkan_loader_names{"libvulkan.so.1", "libvulkan.so"};
 #endif
@@ -153,6 +158,7 @@ namespace sogen
         PFN_vkGetInstanceProcAddr get_instance_proc_addr{};
         PFN_vkCreateInstance create_instance{};
         PFN_vkEnumerateInstanceVersion enumerate_instance_version{};
+        PFN_vkEnumerateInstanceExtensionProperties enumerate_instance_extension_properties{};
 
         struct instance_data
         {
@@ -860,6 +866,8 @@ namespace sogen
             this->create_instance = reinterpret_cast<PFN_vkCreateInstance>(this->get_instance_proc_addr(nullptr, "vkCreateInstance"));
             this->enumerate_instance_version =
                 reinterpret_cast<PFN_vkEnumerateInstanceVersion>(this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceVersion"));
+            this->enumerate_instance_extension_properties = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+                this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceExtensionProperties"));
         }
 
         ~impl()
@@ -928,9 +936,37 @@ namespace sogen
         app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app_info.apiVersion = api_version;
 
+        // Non-conformant "portability" ICDs (MoltenVK on macOS, KosmicKrisp, ...) are only
+        // enumerated by loaders when VK_KHR_portability_enumeration is requested; enabling it
+        // is a no-op on loaders/platforms that don't advertise the extension.
+        std::vector<const char*> instance_extensions;
+        VkInstanceCreateFlags instance_flags = 0;
+        if (this->impl_->enumerate_instance_extension_properties)
+        {
+            uint32_t ext_count = 0;
+            if (this->impl_->enumerate_instance_extension_properties(nullptr, &ext_count, nullptr) == VK_SUCCESS && ext_count > 0)
+            {
+                std::vector<VkExtensionProperties> available(ext_count);
+                if (this->impl_->enumerate_instance_extension_properties(nullptr, &ext_count, available.data()) == VK_SUCCESS)
+                {
+                    const auto has_portability = std::any_of(available.begin(), available.end(), [](const VkExtensionProperties& e) {
+                        return std::string_view{e.extensionName} == VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+                    });
+                    if (has_portability)
+                    {
+                        instance_extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                        instance_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                    }
+                }
+            }
+        }
+
         VkInstanceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        create_info.flags = instance_flags;
         create_info.pApplicationInfo = &app_info;
+        create_info.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
+        create_info.ppEnabledExtensionNames = instance_extensions.empty() ? nullptr : instance_extensions.data();
 
         VkInstance instance{};
         const VkResult result = this->impl_->create_instance(&create_info, nullptr, &instance);
@@ -1526,6 +1562,34 @@ namespace sogen
                 }
                 extensions.push_back(cursor);
                 cursor = terminator + 1;
+            }
+        }
+
+        // Non-conformant "portability" ICDs (MoltenVK, ...) require VK_KHR_portability_subset to be
+        // explicitly enabled whenever the physical device advertises it; the guest driver has no
+        // notion of this host-only extension, so it must be force-added here rather than requested.
+        if (instance->second.enumerate_device_extension_properties)
+        {
+            uint32_t count = 0;
+            if (instance->second.enumerate_device_extension_properties(pd->second.handle, nullptr, &count, nullptr) == VK_SUCCESS &&
+                count > 0)
+            {
+                std::vector<VkExtensionProperties> available(count);
+                if (instance->second.enumerate_device_extension_properties(pd->second.handle, nullptr, &count, available.data()) ==
+                    VK_SUCCESS)
+                {
+                    const auto has_portability_subset =
+                        std::any_of(available.begin(), available.end(), [](const VkExtensionProperties& e) {
+                            return std::string_view{e.extensionName} == "VK_KHR_portability_subset";
+                        });
+                    const auto already_requested = std::any_of(extensions.begin(), extensions.end(), [](const char* name) {
+                        return std::string_view{name} == "VK_KHR_portability_subset";
+                    });
+                    if (has_portability_subset && !already_requested)
+                    {
+                        extensions.push_back("VK_KHR_portability_subset");
+                    }
+                }
             }
         }
 
