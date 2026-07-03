@@ -273,11 +273,8 @@ namespace
         // d3d9's aggregate HAL validator rejects the adapter as non-HAL if TextureCaps or FVFCaps is 0
         // (before it ever looks at formats/shaders), so FVFCaps must be nonzero.
         caps->FVFCaps = D3DFVFCAPS_PSIZE | 8; // 0x00100008: PSIZE + 8 texcoord sets
-        // Report a fixed-function device (no VS/PS) to sidestep the VS2.0+ HAL-disable caps gauntlet.
-        // Restoring D3DVS/PS_VERSION(3,0) here re-triggers that gauntlet elsewhere (confirmed: GetDeviceCaps
-        // itself starts failing) and needs its own follow-up investigation before SM3.0 can be reported.
-        caps->VertexShaderVersion = 0;
-        caps->PixelShaderVersion = 0;
+        caps->VertexShaderVersion = D3DVS_VERSION(2, 0);
+        caps->PixelShaderVersion = D3DPS_VERSION(2, 0);
         caps->MaxVertexShaderConst = 256;
         caps->PixelShader1xMaxValue = 8.0f;
         caps->DeclTypes = D3DDTCAPS_UBYTE4 | D3DDTCAPS_UBYTE4N | D3DDTCAPS_SHORT2N | D3DDTCAPS_SHORT4N |
@@ -302,13 +299,30 @@ namespace
         constexpr DWORD k_devcaps_driver_managed_pool = 0x02000000;
         caps->DevCaps = D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_PUREDEVICE |
                         D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY | k_devcaps_driver_managed_pool;
-        caps->PrimitiveMiscCaps = D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW |
-                                  D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP | D3DPMISCCAPS_SEPARATEALPHABLEND;
-        caps->RasterCaps = D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_SCISSORTEST | D3DPRASTERCAPS_DEPTHBIAS |
-                           D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS | D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ANISOTROPY;
+        // PrimitiveMiscCaps bit 0x2000 has no name in the public D3DPMISCCAPS_* set (the defined bits jump
+        // from D3DPMISCCAPS_NULLREFERENCE=0x1000 straight past it to D3DPMISCCAPS_INDEPENDENTWRITEMASKS=
+        // 0x4000) -- found via objdump disassembly of d3d9.dll's VS/PS-2.0+ HAL-enable validator (the
+        // function GetCaps type=13's own buffer feeds straight back into, confirmed live via sogen's Python
+        // debugger API watching reads of D3DCAPS9::VertexShaderVersion): once VertexShaderVersion >=
+        // D3DVS_VERSION(2,0), the validator requires this bit set (`test [caps+0x20],0x2000; je <fail>`)
+        // plus D3DPMISCCAPS_MASKZ, alongside the already-public bits below (`and eax,0x2882; cmp
+        // eax,0x2882; jne <fail>` -- 0x2882 == MASKZ|COLORWRITEENABLE|BLENDOP|this bit). Same undocumented-
+        // internal-reuse pattern as the DevCaps/DevCaps2 gates above.
+        constexpr DWORD k_primitivemisc_vs20_gate = 0x00002000;
+        caps->PrimitiveMiscCaps = D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW |
+                                  D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP |
+                                  D3DPMISCCAPS_SEPARATEALPHABLEND | k_primitivemisc_vs20_gate;
+        // The same validator also requires D3DPRASTERCAPS_FOGVERTEX (0x80) once VertexShaderVersion >= 2.0
+        // (`test [caps+0x24+3],0x80` i.e. the RasterCaps low byte's sign bit, via objdump on the same
+        // function).
+        caps->RasterCaps = D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_SCISSORTEST |
+                           D3DPRASTERCAPS_DEPTHBIAS | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS |
+                           D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ANISOTROPY;
         caps->ZCmpCaps = 0xFF;
-        caps->SrcBlendCaps = 0x1FFF;
-        caps->DestBlendCaps = 0x1FFF;
+        // The validator also requires D3DPBLENDCAPS_BLENDFACTOR (0x2000, a real documented bit) set in both
+        // Src/DestBlendCaps once VertexShaderVersion >= 2.0 (`and eax,0x3fff/0x23ff; cmp; jne <fail>`).
+        caps->SrcBlendCaps = 0x1FFF | D3DPBLENDCAPS_BLENDFACTOR;
+        caps->DestBlendCaps = 0x1FFF | D3DPBLENDCAPS_BLENDFACTOR;
         caps->AlphaCmpCaps = 0xFF;
         caps->ShadeCaps = D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_ALPHAGOURAUDBLEND;
         caps->TextureCaps = D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_CUBEMAP |
@@ -320,6 +334,9 @@ namespace
         caps->MaxTextureRepeat = 8192;
         caps->MaxTextureAspectRatio = 8192;
         caps->MaxAnisotropy = 16;
+        // The VS2.0+ HAL-enable validator also requires |GuardBand{Left,Top,Right,Bottom}| >= 8192.0 (the
+        // exact float constant it compares against, read from d3d9.dll's own .rdata via objdump); these
+        // were previously left at the memset-to-0 default, which fails that check once VS/PS report 2.0.
         caps->MaxVertexIndex = 0x00FFFFFF;
         caps->MaxStreams = 16;
         caps->MaxStreamStride = 255;
@@ -333,6 +350,10 @@ namespace
         caps->VertexProcessingCaps = D3DVTXPCAPS_TEXGEN | D3DVTXPCAPS_MATERIALSOURCE7 | D3DVTXPCAPS_DIRECTIONALLIGHTS |
                                      D3DVTXPCAPS_POSITIONALLIGHTS | D3DVTXPCAPS_LOCALVIEWER;
         caps->MaxVertexW = 1e10f;
+        caps->GuardBandLeft = -8192.0f;
+        caps->GuardBandTop = -8192.0f;
+        caps->GuardBandRight = 8192.0f;
+        caps->GuardBandBottom = 8192.0f;
         caps->MaxPointSize = 256.0f;
         caps->VS20Caps.Caps = D3DVS20CAPS_PREDICATION;
         caps->VS20Caps.DynamicFlowControlDepth = D3DVS20_MAX_DYNAMICFLOWCONTROLDEPTH;
@@ -347,8 +368,8 @@ namespace
         caps->VertexTextureFilterCaps = 0x03000300;
         caps->MaxVShaderInstructionsExecuted = 0xFFFFFFFF;
         caps->MaxPShaderInstructionsExecuted = 0xFFFFFFFF;
-        // With VS/PS reported as fixed-function (0, below vs_3_0/ps_3_0), d3d9's aggregate HAL validator
-        // rejects the adapter unless the SM3.0 instruction-slot caps are 0.
+        // With VS/PS reported as SM2.0 (below vs_3_0/ps_3_0), d3d9's aggregate HAL validator rejects the
+        // adapter unless the SM3.0 instruction-slot caps are 0.
         caps->MaxVertexShader30InstructionSlots = 0;
         caps->MaxPixelShader30InstructionSlots = 0;
     }
