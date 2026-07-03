@@ -37,10 +37,26 @@ namespace sogen
         }
 
         bool compile_stage(const void* tokens, const size_t token_size_bytes,
-                           const vkd3d_shader_varying_map_info* varying_map_info, std::vector<uint32_t>& out_spirv)
+                           vkd3d_shader_varying_map_info* varying_map_info,
+                           const vkd3d_shader_visibility shader_visibility, const unsigned int descriptor_set,
+                           std::vector<uint32_t>& out_spirv)
         {
             vkd3d_shader_spirv_target_info spirv_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO};
             spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
+
+            const vkd3d_shader_resource_binding const_buffer_binding{
+                .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
+                .register_space = 0,
+                .register_index = VKD3D_SHADER_D3DBC_FLOAT_CONSTANT_REGISTER,
+                .shader_visibility = shader_visibility,
+                .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
+                .binding = {.set = descriptor_set, .binding = 0, .count = 1},
+            };
+
+            vkd3d_shader_interface_info interface_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_INTERFACE_INFO};
+            interface_info.next = &spirv_info;
+            interface_info.bindings = &const_buffer_binding;
+            interface_info.binding_count = 1;
 
             vkd3d_shader_compile_info compile_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO};
             compile_info.source.code = tokens;
@@ -51,12 +67,12 @@ namespace sogen
 
             if (varying_map_info != nullptr)
             {
+                varying_map_info->next = &interface_info;
                 compile_info.next = varying_map_info;
-                // varying_map_info->next is set by the caller to chain onward to spirv_info.
             }
             else
             {
-                compile_info.next = &spirv_info;
+                compile_info.next = &interface_info;
             }
 
             vkd3d_shader_code out{};
@@ -112,19 +128,17 @@ namespace sogen
         vkd3d_shader_free_scan_signature_info(&vs_scan);
         vkd3d_shader_free_scan_signature_info(&ps_scan);
 
-        vkd3d_shader_spirv_target_info vs_spirv_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO};
-        vs_spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
-
         vkd3d_shader_varying_map_info varying_map_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_VARYING_MAP_INFO};
-        varying_map_info.next = &vs_spirv_info;
         varying_map_info.varying_map = varying_map.data();
         varying_map_info.varying_count = varying_count;
 
-        if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, out.vertex_spirv))
+        if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, VKD3D_SHADER_VISIBILITY_VERTEX, 0,
+                            out.vertex_spirv))
         {
             return false;
         }
-        if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, out.pixel_spirv))
+        if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, VKD3D_SHADER_VISIBILITY_PIXEL, 1,
+                            out.pixel_spirv))
         {
             out.vertex_spirv.clear();
             return false;
