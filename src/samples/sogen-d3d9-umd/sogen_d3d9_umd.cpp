@@ -488,127 +488,48 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetPixelShader(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERFUNC* pArgs)
+    HRESULT APIENTRY umd_SetPixelShader(HANDLE /*hDevice*/, HANDLE hShader)
     {
-        // Same NULL-means-unbind convention confirmed live for SetVertexShaderFunc/Decl and SetTexture.
-        d3d9c::set_pixel_shader_record req{.shader = pArgs != nullptr ? reinterpret_cast<uint64_t>(pArgs->ShaderHandle) : 0};
+        // RE-verified live (crash-driven, same pattern as pfnSetTexture in §10.6): pfnSetPixelShader
+        // takes the shader handle as a direct value argument, not a pointer to
+        // D3DDDIARG_SETPIXELSHADERFUNC -- once a real (non-null) driver shader handle started flowing
+        // through (after the create_shader_common ShaderHandle-offset fix), a struct-pointer read
+        // crashed dereferencing the small handle value (e.g. 0xB) as an address. 0 means unbind.
+        d3d9c::set_pixel_shader_record req{.shader = reinterpret_cast<uint64_t>(hShader)};
         bridge_call(gb::ioctl_d3d9_set_pixel_shader, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetVertexShaderFunc(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERFUNC* pArgs)
+    HRESULT APIENTRY umd_SetVertexShaderFunc(HANDLE /*hDevice*/, HANDLE hShader)
     {
-        // NULL pArgs is a real, crash-causing case (found live): the runtime uses it to mean "no vertex
-        // shader / use fixed-function", e.g. when a D3DFVF_XYZRHW draw follows a shader-bound one.
-        d3d9c::set_vertex_shader_record req{.shader = pArgs != nullptr ? reinterpret_cast<uint64_t>(pArgs->ShaderHandle) : 0};
+        // Same direct-value convention as umd_SetPixelShader above (not D3DDDIARG_SETVERTEXSHADERFUNC*).
+        // 0 means "no vertex shader / use fixed-function", e.g. when a D3DFVF_XYZRHW draw follows a
+        // shader-bound one.
+        d3d9c::set_vertex_shader_record req{.shader = reinterpret_cast<uint64_t>(hShader)};
         bridge_call(gb::ioctl_d3d9_set_vertex_shader, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
 
-    // RE-verified live (real d3d9.dll, CD3DDDIDX10TL::CreateVertexShaderFunc /
-    // CD3DDDIDX10::CreatePixelShader): pfnCreateVertexShaderFunc/pfnCreatePixelShader are NOT
-    // `(HANDLE, D3DDDIARG_CREATE*SHADERFUNC*)` -- same direct-value-argument convention as
-    // pfnSetTexture. The real call is `(HANDLE hDevice, D3DDDI_HANDLE* pShaderHandle, CONST UINT*
-    // pFunction)`: RCX=hDevice, RDX=address of a runtime-owned local pre-populated with a
-    // CHandleFactory-assigned handle (in/out), R8=the raw SM1-3 token stream with no length
-    // argument at all. Since the DDI gives no length, the driver must parse the token stream itself
-    // to find the terminating D3DSIO_END (0x0000FFFF) token, exactly the way d3d9.dll's own
-    // CVertexShaderFunc::Init/GetInstructionLength does; the algorithm below is transcribed from
-    // GetInstructionLength's real decompiled table (idasql, address 0x180027D67 in the staged
-    // d3d9.dll) so it agrees with the runtime's own SM1.x fixed-length opcode table and SM2.0+'s
-    // bits[27:24] length field, rather than guessing.
-    UINT measure_shader_token_length_dwords(const uint32_t* tokens)
+    // RE-verified live (real d3d9.dll, CD3DDDIDX10TL::CreateVertexShaderFunc / CD3DDDIDX10::
+    // CreatePixelShader, via sogen's own Python debugger API breakpointed directly on the device-func-
+    // table call instruction): pfnCreateVertexShaderFunc/pfnCreatePixelShader ARE struct-pointer DDI
+    // calls, `(HANDLE hDevice, D3DDDIARG_CREATESHADERFUNC* pArgs, CONST UINT* pFunction)` -- an earlier
+    // RE pass mis-identified this as a 3-direct-value-argument convention (no length, self-measured
+    // token stream) matching pfnSetTexture; that was wrong; `pArgs->CodeSize` is the real, authoritative
+    // byte length supplied by the runtime, and `pArgs->ShaderHandle` (offset 8, not offset 0) is where
+    // the driver must write the resulting handle. The previous convention silently corrupted the
+    // runtime's own shader-handle bookkeeping (wrote 8 bytes at pArgs+0, never touching the real
+    // ShaderHandle slot at pArgs+8), which is what caused DrawPrimitive's internal shader-cache flush
+    // (ff2ps::CConverterToPixelShader::PrepareToDraw / ff2vs::CConverterToVertexShader::PrepareToDraw)
+    // to see a null cached shader and fail with E_OUTOFMEMORY on every draw, fixed-function or
+    // programmable alike.
+    HRESULT create_shader_common(const uint32_t* pFunction, D3DDDIARG_CREATESHADERFUNC* pArgs, uint32_t opcode)
     {
-        const uint32_t version = tokens[0];
-        size_t idx = 1;
-        for (;;)
-        {
-            const uint32_t token = tokens[idx];
-            if (token == 0x0000FFFF) // D3DSIO_END
-            {
-                return static_cast<UINT>(idx + 1);
-            }
-
-            const uint32_t opcode = token & 0xFFFF;
-            uint32_t length = 0;
-            if (opcode == 0xFFFE) // D3DSIO_COMMENT
-            {
-                length = ((token >> 16) & 0x7FFF) + 1;
-            }
-            // Mask off the VS/PS sentinel (0xFFFE0000 vs 0xFFFF0000) before comparing major.minor,
-            // otherwise every PS version (0xFFFF....) reads as numerically >= every VS 2.0+ threshold.
-            else if ((version & 0x0000FFFF) >= 0x0200) // SM2.0+: length is bits [27:24] of the token
-            {
-                length = ((token >> 24) & 0xF) + 1;
-            }
-            else
-            {
-                // SM1.x fixed per-opcode length table (no generic length field pre-SM2.0).
-                if (opcode > 0x1F)
-                {
-                    if (opcode == 0x4E || opcode == 0x4F)
-                        length = 3;
-                    else if (opcode == 81)
-                        length = 6;
-                    else
-                        return 0; // unknown opcode for this shader version
-                }
-                else if (opcode == 31)
-                    length = 3;
-                else if (opcode > 7)
-                {
-                    if (opcode <= 13)
-                        length = 4;
-                    else if (opcode <= 16)
-                        length = 3;
-                    else if (opcode == 17)
-                        length = 4;
-                    else if (opcode == 18) // D3DSIO_LRP: dest + 3 src
-                        length = 5;
-                    else if (opcode == 19)
-                        length = 3;
-                    else if (opcode >= 20 && opcode <= 24)
-                        length = 4;
-                    else
-                        return 0;
-                }
-                else if (opcode < 6)
-                {
-                    if (opcode == 0)
-                        length = 1;
-                    else if (opcode == 1)
-                        length = 3;
-                    else if (opcode == 2 || opcode == 3 || opcode == 5) // ADD/SUB/MUL: dest + 2 src
-                        length = 4;
-                    else if (opcode == 4)
-                        length = 5;
-                    else
-                        return 0;
-                }
-                else
-                    length = 3; // opcode 6 or 7
-            }
-
-            if (length == 0)
-            {
-                return 0;
-            }
-            idx += length;
-        }
-    }
-
-    HRESULT create_shader_common(const uint32_t* pFunction, uint32_t opcode, HANDLE* pShaderHandle)
-    {
-        if (pFunction == nullptr)
+        if (pFunction == nullptr || pArgs == nullptr)
         {
             return E_INVALIDARG;
         }
-        const UINT token_count = measure_shader_token_length_dwords(pFunction);
-        if (token_count == 0)
-        {
-            return E_INVALIDARG;
-        }
-        const UINT token_size_bytes = token_count * static_cast<UINT>(sizeof(uint32_t));
+        const UINT token_size_bytes = pArgs->CodeSize;
 
         std::vector<uint8_t> buf(sizeof(d3d9c::create_shader_request) + token_size_bytes);
         auto* req = reinterpret_cast<d3d9c::create_shader_request*>(buf.data());
@@ -618,16 +539,13 @@ namespace
 
         d3d9c::create_shader_response resp{};
         bridge_call(opcode, buf.data(), static_cast<DWORD>(buf.size()), &resp, sizeof(resp));
-        if (pShaderHandle != nullptr)
-        {
-            *pShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.shader));
-        }
+        pArgs->ShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.shader));
         return resp.hr;
     }
 
-    HRESULT APIENTRY umd_CreateVertexShaderFunc(HANDLE /*hDevice*/, HANDLE* pShaderHandle, CONST UINT* pFunction)
+    HRESULT APIENTRY umd_CreateVertexShaderFunc(HANDLE /*hDevice*/, D3DDDIARG_CREATESHADERFUNC* pArgs, CONST UINT* pFunction)
     {
-        return create_shader_common(pFunction, gb::ioctl_d3d9_create_vertex_shader, pShaderHandle);
+        return create_shader_common(pFunction, pArgs, gb::ioctl_d3d9_create_vertex_shader);
     }
 
     HRESULT APIENTRY umd_DeleteVertexShaderFunc(HANDLE /*hDevice*/, CONST D3DDDIARG_DELETEVERTEXSHADERFUNC* /*pArgs*/)
@@ -637,9 +555,9 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_CreatePixelShader(HANDLE /*hDevice*/, HANDLE* pShaderHandle, CONST UINT* pFunction)
+    HRESULT APIENTRY umd_CreatePixelShader(HANDLE /*hDevice*/, D3DDDIARG_CREATESHADERFUNC* pArgs, CONST UINT* pFunction)
     {
-        return create_shader_common(pFunction, gb::ioctl_d3d9_create_pixel_shader, pShaderHandle);
+        return create_shader_common(pFunction, pArgs, gb::ioctl_d3d9_create_pixel_shader);
     }
 
     HRESULT APIENTRY umd_DeletePixelShader(HANDLE /*hDevice*/, CONST D3DDDIARG_DELETEPIXELSHADERFUNC* /*pArgs*/)

@@ -828,3 +828,187 @@ DDI-level struct `pfnLock` receives is ~64 bytes with `pData` at offset 40). Bot
   were unset, so the first commit here landed as `Jack <jack@Jacks-MacBook-Pro.local>` instead of
   `Jackson Yarger <jacksonkyarger@gmail.com>` — caught and fixed with `--amend --reset-author` since it
   was still unpushed. `gh auth login` does *not* set this; it's a separate `git config --global` step.
+
+---
+
+## 14. vkd3d-shader de-risk Task 4 — DDI wiring done, root cause found and fixed (2026-07-03)
+
+`pfnCreateVertexShaderFunc`/`pfnCreatePixelShader`/`pfnDeleteVertexShaderFunc`/`pfnDeletePixelShader`
+are now wired (slots 42/43/67/68, `umd_CreateVertexShaderFunc`/`umd_CreatePixelShader`/... in
+`sogen_d3d9_umd.cpp`), marshaling into the already-existing `create_shader_request`/`create_shader_response`
+wire protocol. `D3DDDIARG_DELETEVERTEXSHADERFUNC` was added to `d3d9_ddi.hpp`. Builds clean, no
+regression (`d3d9-triangle-test` and the 26/26 smoke test are unchanged).
+
+**Update (2026-07-03, later same day): the earlier BLOCKED status was premature — not a caps gate at
+all, a real DDI calling-convention bug in our own UMD, found via a much more targeted live-tracing pass
+and fixed.** The requesting agent (suspecting a sixth undocumented Task-0-style caps gate) asked for a
+fresh, surgical RE pass instead of another blanket basic-block dump. idasql decompilation of the real
+staged `d3d9.dll` (`CD3DBase::CreateVertexShader`/`CreatePixelShader`) plus live breakpoints (sogen's
+Python debugger API, `app.hooks.memory_execution_at`) at each successive branch point — the `this+76`
+device-flags gate, the shader-bytecode validator (`ValidateVertexShaderInternal`/`GetNewVSValidator`),
+`CVertexShaderFunc::Init`'s token-stream parse, `CVertexShaderFunc::InitHW`'s two internal gates
+(`this+0x60` bit 0, `device+0x4028==1`) — **ruled out every one of them live**: all pass cleanly for a
+real `D3DCompile()`-produced `vs_1_1`/`ps_2_0` shader pair. The actual failure was one level deeper:
+`InitHW`'s real driver dispatch (`CD3DDDIDX10TL::CreateVertexShaderFunc`/`CD3DDDIDX10::CreatePixelShader`)
+calls **our own UMD's `pfnCreateVertexShaderFunc`/`pfnCreatePixelShader`** (confirmed live — the call
+target resolved to an in-module d3d9.dll thunk that itself calls the device-func-table slot 42/67
+function pointer, i.e. our driver), which was returning a failure `HRESULT`; d3d9.dll's own wrapper then
+converts any negative return into a thrown `E_FAIL`/`D3DERR_INVALIDCALL` C++ exception.
+
+**Root cause: same class of bug as the already-documented `pfnSetTexture` fix (§10.6) — an assumed
+struct-pointer DDI calling convention that isn't real.** `pfnCreateVertexShaderFunc`/`pfnCreatePixelShader`
+are **not** `(HANDLE, D3DDDIARG_CREATE*SHADERFUNC*)`; RE of the real call site
+(`CD3DDDIDX10TL::CreateVertexShaderFunc`/`CD3DDDIDX10::CreatePixelShader`) shows three direct-value
+arguments: `(HANDLE hDevice, D3DDDI_HANDLE* pShaderHandle /* in/out, CHandleFactory-preassigned */,
+CONST UINT* pFunction /* raw SM1-3 token stream, no length param at all */)`. Since the DDI gives no
+length, a real driver must parse the token stream itself to find the terminating `D3DSIO_END`
+(`0x0000FFFF`) token — the same thing d3d9.dll's own `CVertexShaderFunc::Init`/`GetInstructionLength`
+does. `GetInstructionLength`'s real per-opcode length table (SM1.x has no generic length field; SM2.0+
+encodes it in token bits `[27:24]`) was RE'd via idasql decompile and transcribed faithfully into a new
+`measure_shader_token_length_dwords` helper in `sogen_d3d9_umd.cpp`, replacing the old (wrong)
+`D3DDDIARG_CREATEVERTEXSHADERFUNC::Values[0]`/`CodeSize` struct-field reads. `umd_CreateVertexShaderFunc`/
+`umd_CreatePixelShader` now take `(HANDLE, HANDLE* pShaderHandle, CONST UINT* pFunction)` directly,
+matching the real DDI; the old, now-provably-wrong `D3DDDIARG_CREATEVERTEXSHADERFUNC`/
+`D3DDDIARG_CREATEPIXELSHADERFUNC` struct typedefs were removed from `d3d9_ddi.hpp` (dead code, and
+actively misleading now that the real convention is known).
+
+**Verified end-to-end**, rebuilt UMD + rerun via the same throwaway `D3DCompile()`-based diagnostic test
+(`scratchpad/d3d9_shader_diag_test_task4.cpp`) through sogen's Python debugger harness (not just
+`analyzer -e root -c`, since that CLI's default trace verbosity doesn't surface guest stdout text):
+`CreateVertexShader hr=0x00000000` (real non-null handle) and `CreatePixelShader hr=0x00000000` (real
+non-null handle), for genuine `D3DCompile()`-produced `vs_1_1`/`ps_2_0` bytecode (116/140 bytes). No
+regressions: `d3d9-triangle-test` unchanged (`DrawPrimitive hr=0x8007000e` for the FVF-only path is the
+same pre-existing, already-documented, unrelated gap — see §11 item 3/§10.6's closing notes), smoke test
+still 26/26. `clang-format` was not available on this machine to run per the repo's own convention;
+worth running before this lands anywhere it matters.
+
+Task 5 (real `D3DCompile()` passthrough triangle test) can now proceed on solid ground — shader creation
+genuinely reaches and succeeds against our own driver, not just an internal null-shader probe.
+
+**Earlier investigation (superseded by the fix above).** Before the DDI calling-convention bug was
+found, `CreateVertexShader`/`CreatePixelShader` calls never reached the driver at all: neither a
+hand-assembled minimal vs_2_0/ps_2_0 shader nor real `D3DCompile()`-produced `vs_2_0`/`ps_2_0`/`vs_1_1`
+bytecode got past `D3DERR_INVALIDCALL`/`E_FAIL` in the runtime, and a basic-block trace of the failure
+window (sogen's Python `app.hooks.basic_block` API) didn't isolate the exact failure point — it landed
+on a tight synchronization spin loop and a helper-call tail that `objdump` showed returning `S_OK`, not
+the error the API ultimately reported. That investigation was chasing a caps/device-state gate (in the
+spirit of Task 0's `DevCaps`/`DevCaps2`/`PrimitiveMiscCaps` bits) on the assumption that the DDI used the
+`D3DDDIARG_CREATEVERTEXSHADERFUNC`/`D3DDDIARG_CREATEPIXELSHADERFUNC` struct-pointer convention (the
+now-removed struct typedefs in `d3d9_ddi.hpp`). The real cause was the wrong calling convention
+entirely, found only once the fresh, targeted live-tracing pass described above ruled out every gate one
+by one and traced the failure to our own UMD's return value. The throwaway diagnostic guest test used
+during this investigation is saved at `scratchpad/d3d9_shader_diag_test_task4.cpp` in that session's
+Claude Code scratchpad.
+
+---
+
+## 15. vkd3d-shader de-risk Task 6 — DrawPrimitive/E_OUTOFMEMORY gate root-caused and fixed; real SM2
+    shader translation verified end-to-end by pixel readback (2026-07-03)
+
+**Milestone: this is the plan's terminal goal, achieved.** The full chain — `D3DCompile()` →
+`CreateVertexShader`/`CreatePixelShader` → vkd3d-shader SM1-3→SPIR-V translation → a real programmable
+Vulkan pipeline → `DrawPrimitive` → `Present` — now runs end to end and produces an analytically-verified
+triangle. `d3d9-shader-test.exe`: `DrawPrimitive hr=0x00000000`, `Present hr=0x00000000`. The unmodified
+`d3d9-triangle-test.exe` (fixed-function) baseline **also** now gets `DrawPrimitive hr=0x00000000` on
+both its draws (previously `E_OUTOFMEMORY`), confirming the gate was shared, not shader-path-specific.
+
+### Root cause: Task 4's DDI calling-convention fix for `pfnCreateVertexShaderFunc`/`pfnCreatePixelShader`
+was itself subtly wrong, and a second, previously-unreachable bug in `pfnSetPixelShader`/
+`pfnSetVertexShaderFunc` was masked behind it
+
+Investigation used the same live-tracing methodology as every other gate this session, but doubled down
+on precision: sogen's Python debugger API (`import sogen`, `app.hooks.memory_execution_at`,
+`app.read_register`/`read_memory`), breakpointed directly on individual real instructions in the staged
+`d3d9.dll` (addresses cross-checked against a fresh idasql decompile of `d3d9_x64.dll.i64`), rather than
+a broad basic-block sweep. Chain of evidence, each step confirmed live before moving to the next:
+
+1. **`CD3DBase::DrawPrimitive`'s own body always returns 0 on its normal path** — the observed
+   `E_OUTOFMEMORY` had to come from a C++ exception thrown somewhere inside its state-flush block and
+   caught by an outer wrapper. idasql decompile of `CD3DBase::DrawPrimitive` (`0x1800226B0`) showed a
+   large "flush pending state" block that calls `ff2vs::CConverterToVertexShader::PrepareToDraw` and
+   `ff2ps::CConverterToPixelShader::PrepareToDraw` — **this runs for every draw, FVF-only or
+   shader-bound alike**, not just the fixed-function-emulation case the name suggests; it's the general
+   per-draw shader-cache resolution path.
+2. **`ff2ps::CConverterToPixelShader::PrepareToDraw` (`0x1800238F0`) has a hardcoded
+   `return 2147942414LL;` (`0x8007000E` = `E_OUTOFMEMORY`)** at its failure convergence point
+   (`0x1800239FE`), reached whenever `GenerateShader()` returns null OR the driver-create callback
+   returns a null handle. Breakpointing that exact instruction (`trace_ps_prepare.py` in this session's
+   scratchpad) confirmed it fires for the FF triangle test's draw; `GenerateShader` itself succeeds
+   (non-null), so the failure is the driver-create callback returning null.
+3. **Traced the callback dispatch three layers deep, reading the real call target out of RAX at each
+   `__guard_xfg_dispatch_icall_fptr` site** (CFG-hardened indirect calls, so the target has to be read
+   from the register right before the call, not inferred from static analysis):
+   `ff2ps::PrepareToDraw`'s callback (`CPSConverterCallbacksLddm::CreatePixelShader`, `d3d9+0x44360`) →
+   `CD3DDDIDX10::CreatePixelShader` (`d3d9+0x42930`, the exact same function Task 4 already RE'd) → our
+   own `umd_CreatePixelShader` (`sogen_d3d9um.dll+0x24d0`). Confirmed **the same DDI slot 67 dispatch
+   Task 4 wired is genuinely reached and returns `hr=0x0`** — so the bug is not a missing/unwired slot,
+   it's what happens with a *successful* call's output.
+4. **The real args at the final call site (`d3d9+0x180042995`) are `(HANDLE hDevice, D3DDDIARG_
+   CREATESHADERFUNC* pArgs, CONST UINT* pFunction)`, not the 3-direct-value convention Task 4 concluded.**
+   Reading the struct at `pArgs` live showed `CodeSize` at offset 0 (`0x44` = 68, the real token byte
+   length — the runtime already knows this and hands it to the driver, no self-parsing needed) and a
+   `ShaderHandle` output slot at offset 8. `CD3DDDIDX10::CreatePixelShader`'s own decompile confirms it:
+   `*a4 = v9;` where `v9` lives at `pArgs+8`, never `pArgs+0`. Task 4's `umd_CreatePixelShader` wrote the
+   resulting handle to `*pShaderHandle` at **offset 0** (overwriting `CodeSize`, never touching offset 8)
+   — so every caller reading the handle back from offset 8 saw it stay zero forever, `hr=0x0` or not.
+   `ff2ps::PrepareToDraw` (and `ff2vs::PrepareToDraw`, same struct, same bug, confirmed via
+   `CD3DDDIDX10TL::CreateVertexShaderFunc`'s identical decompile) treats a null returned handle as
+   creation failure and falls into the hardcoded `E_OUTOFMEMORY`.
+5. **Fixed**: added back `D3DDDIARG_CREATESHADERFUNC` (`{UINT CodeSize; HANDLE ShaderHandle;}`) to
+   `d3d9_ddi.hpp`; `create_shader_common` now takes `CodeSize` straight from `pArgs->CodeSize` (no
+   self-measurement) and writes the result to `pArgs->ShaderHandle` (offset 8); `umd_CreateVertexShaderFunc`/
+   `umd_CreatePixelShader` signatures updated to `(HANDLE, D3DDDIARG_CREATESHADERFUNC*, CONST UINT*)`.
+   **This also makes `measure_shader_token_length_dwords` (and the ps.1.x `D3DSIO_TEXCOORD`..
+   `D3DSIO_CMP` opcode-table gap Task 4's review flagged in it) moot** — the function is now dead code
+   and was removed, since the runtime supplies `CodeSize` directly and self-parsing is never needed.
+   This closes that deferred item; it wasn't a real bug that would ever have fired at this call site,
+   it was only a workaround for the earlier (wrong) no-length calling-convention theory.
+6. **A second, previously-unreachable bug surfaced immediately after fixing #5**: with a real non-null
+   shader handle now flowing correctly for the first time, `d3d9-triangle-test.exe` started **crashing**
+   (`Mapping violation: 0xb (8) - r-- at sogen_d3d9um.dll+0x23eb`, i.e. dereferencing the small integer
+   handle value `0xB` as a pointer) inside `umd_SetPixelShader`. `pfnSetPixelShader`/
+   `pfnSetVertexShaderFunc` were implemented as `(HANDLE, CONST D3DDDIARG_SETPIXELSHADERFUNC* pArgs)`
+   struct-pointer calls — the exact same wrong-convention mistake `pfnSetTexture` had (see §10.6), just
+   never exercised before because no call site had ever handed them a genuine non-null handle to bind.
+   Fixed the same way as `pfnSetTexture`: both are direct-value calls, `(HANDLE hDevice, HANDLE
+   hShader)`; removed the now-dead `D3DDDIARG_SETPIXELSHADERFUNC`/`D3DDDIARG_SETVERTEXSHADERFUNC`
+   structs.
+
+**Verified end to end.** Rebuilt the UMD (`x86_64-w64-mingw32-g++ ... -o sogen_d3d9um-x64.dll`), staged
+it, rebuilt `cmake --build --preset=release`:
+- `d3d9-triangle-test.exe`: both `DrawPrimitive` calls now `hr=0x00000000` (previously `E_OUTOFMEMORY`),
+  no crash, `pixel[0]=B=FF G=80 R=40 A=FF` unchanged (still correct) — genuine regression fix, not a
+  behavior change.
+- `d3d9-shader-test.exe`: `DrawPrimitive hr=0x00000000`, `Present hr=0x00000000`.
+- **Pixel-level proof of real SM2 shader translation.** A temporary diagnostic in `d3d9_host.cpp`'s
+  `execute_draw` (added and removed within this task, net zero diff) sampled the programmable-pipeline
+  render target's centroid pixel `(320, 240)` right after `readback_render_target`. Task 5's triangle has
+  vertices `A=(0,0.5)` red, `B=(0.5,-0.5)` green, `C=(-0.5,-0.5)` blue; the barycentric weights of NDC
+  `(0,0)` against those vertices are `w_A=0.5, w_B=0.25, w_C=0.25`, giving expected color
+  `R=0x80, G=0x40, B=0x40, A=0xFF`. **Actual captured output: `[d3d9_host][DIAG] centroid B=3F G=40 R=80
+  A=FF`** — G/R/A exact, B off by one (`0x3F` vs `0x40`, well inside the ±2/channel rounding tolerance).
+  This is genuine evidence the whole chain is correct: `D3DCompile`'s real bytecode, vkd3d-shader's
+  SM1-3→SPIR-V translation, the inter-stage varying map, vertex attribute layout, rasterization, and
+  per-pixel color interpolation all agree with hand-computed ground truth.
+- `analyzer -e root -s c:/test-sample.exe`: 26/26 `Success`, unchanged.
+- `clang-format` remains unavailable on this machine (as in Task 4's note) — worth running before this
+  lands anywhere it matters.
+
+### Deferred work (unchanged scope, now on solid footing)
+
+- **Constant buffers / uniform buffers.** No `D3DDDIARG_SETVERTEXSHADERCONST`/`SETPIXELSHADERCONST` →
+  UBO wiring for the programmable pipeline yet; Task 5's shader is a pure position+color passthrough
+  with no constants.
+- **Textures/samplers** in the programmable pipeline — completely out of scope for this slice.
+- **SM3.0** — `fill_d3d9caps` still reports SM2.0 (`vs_2_0`/`ps_2_0`); restoring 3.0 needs its own caps
+  gauntlet pass (see §11 item 3).
+- **WoW64/x86 shader path** — this UMD is x64-only; the 32-bit `sogen_d3d9um` (`syswow64`) DLL needs
+  typed `__stdcall` thunks per device-func slot instead of the generic caller-cleanup stub before any of
+  this session's shader-DDI work applies there.
+- **Pipeline-key system beyond one shader pair at a time.** `ensure_programmable_pipeline`'s cache
+  (`programmable_pipelines_`, keyed by `(vertex_shader_id << 32 | pixel_shader_id)`) is already a real
+  per-pair cache — it does not need a rework, it just hasn't been exercised with more than one distinct
+  VS/PS pair in a single run yet.
+- The ps.1.x texture-opcode gap in `measure_shader_token_length_dwords` (flagged during Task 4's review)
+  is now **moot, not just deferred** — see point 5 above; the function that had the gap was removed
+  because the real DDI convention never needed self-measured token length in the first place.

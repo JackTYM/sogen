@@ -358,26 +358,30 @@ typedef struct _D3DDDIRECT
     LONG bottom;
 } D3DDDIRECT;
 
-// pfnCreateVertexShaderFunc/pfnCreatePixelShader are NOT struct-pointer DDI calls (RE-verified live
-// against the real d3d9.dll's CD3DDDIDX10TL::CreateVertexShaderFunc / CD3DDDIDX10::CreatePixelShader):
-// the real signature is `(HANDLE hDevice, D3DDDI_HANDLE* pShaderHandle, CONST UINT* pFunction)`, the
-// same direct-value-argument convention as pfnSetTexture -- see umd_CreateVertexShaderFunc/
-// umd_CreatePixelShader in sogen_d3d9_umd.cpp.
+// pfnCreateVertexShaderFunc/pfnCreatePixelShader ARE struct-pointer DDI calls after all -- an earlier
+// RE pass (see d3d9-shader-test's original DrawPrimitive/E_OUTOFMEMORY investigation) mis-identified
+// the convention. Live tracing of the real call sites (CD3DDDIDX10TL::CreateVertexShaderFunc's call
+// through its device-func table at +336 bytes = slot 42*8, and CD3DDDIDX10::CreatePixelShader's at
+// +536 bytes = slot 67*8) shows three real arguments: `(HANDLE hDevice, D3DDDIARG_CREATESHADERFUNC*
+// pArgs, CONST UINT* pFunction)`. `pArgs` is a small in/out struct: `CodeSize` (in, the token stream's
+// byte length -- the runtime already knows this, no self-parsing needed) at offset 0, `ShaderHandle`
+// (out) at offset 8. `pFunction` is a separate pointer to the raw token stream. See
+// umd_CreateVertexShaderFunc/umd_CreatePixelShader/create_shader_common in sogen_d3d9_umd.cpp.
 
-typedef struct _D3DDDIARG_SETPIXELSHADERFUNC
+typedef struct _D3DDDIARG_CREATESHADERFUNC
 {
-    HANDLE ShaderHandle;
-} D3DDDIARG_SETPIXELSHADERFUNC;
+    UINT CodeSize;       // in: token stream size in bytes
+    HANDLE ShaderHandle; // out: driver-assigned shader handle
+} D3DDDIARG_CREATESHADERFUNC;
+
+// pfnSetPixelShader/pfnSetVertexShaderFunc are direct-value calls, `(HANDLE hDevice, HANDLE hShader)`
+// -- same crash-driven RE finding as pfnSetTexture (see umd_SetPixelShader/umd_SetVertexShaderFunc in
+// sogen_d3d9_umd.cpp); no D3DDDIARG_SET*SHADERFUNC struct exists on the wire for these two slots.
 
 typedef struct _D3DDDIARG_DELETEPIXELSHADERFUNC
 {
     HANDLE ShaderHandle;
 } D3DDDIARG_DELETEPIXELSHADERFUNC;
-
-typedef struct _D3DDDIARG_SETVERTEXSHADERFUNC
-{
-    HANDLE ShaderHandle; // 0 selects the fixed-function pipeline
-} D3DDDIARG_SETVERTEXSHADERFUNC;
 
 typedef struct _D3DDDIARG_DELETEVERTEXSHADERFUNC
 {
