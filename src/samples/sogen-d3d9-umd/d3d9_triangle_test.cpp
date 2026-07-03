@@ -33,7 +33,8 @@ int main()
 
     D3DPRESENT_PARAMETERS pp{};
     pp.Windowed = TRUE;
-    pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    pp.SwapEffect = D3DSWAPEFFECT_COPY;
+    pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER; // required for LockRect on the backbuffer at all
     pp.BackBufferFormat = D3DFMT_X8R8G8B8;
     pp.BackBufferWidth = 640;
     pp.BackBufferHeight = 480;
@@ -72,6 +73,44 @@ int main()
     else
     {
         printf("[d3d9-triangle] FAIL: Present hr=0x%08lx\n", static_cast<unsigned long>(hp));
+    }
+
+    // Verify Clear reaches real GPU backing directly, via an explicit off-swapchain render target
+    // (CreateRenderTarget -> SetRenderTarget -> Clear -> LockRect) -- avoids the implicit backbuffer's
+    // swapchain/present-entangled Lock semantics entirely, so this is a clean, standard D3D9 pattern.
+    IDirect3DSurface9* rt = nullptr;
+    HRESULT hcrt = dev->CreateRenderTarget(640, 480, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-triangle] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
+
+    if (SUCCEEDED(hcrt) && rt)
+    {
+        HRESULT hsrt = dev->SetRenderTarget(0, rt);
+        printf("[d3d9-triangle] SetRenderTarget hr=0x%08lx\n", static_cast<unsigned long>(hsrt));
+
+        HRESULT hclr2 = dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(64, 128, 255), 1.0f, 0);
+        printf("[d3d9-triangle] Clear(rt) hr=0x%08lx\n", static_cast<unsigned long>(hclr2));
+
+        D3DLOCKED_RECT lr{};
+        HRESULT hlr = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
+        printf("[d3d9-triangle] LockRect hr=0x%08lx pBits=%p Pitch=%ld\n", static_cast<unsigned long>(hlr), lr.pBits,
+               static_cast<long>(lr.Pitch));
+
+        if (SUCCEEDED(hlr) && lr.pBits)
+        {
+            const auto* pixel = static_cast<const unsigned char*>(lr.pBits);
+            printf("[d3d9-triangle] pixel[0]=B=%02X G=%02X R=%02X A=%02X (expected B=FF G=80 R=40)\n", pixel[0], pixel[1],
+                   pixel[2], pixel[3]);
+            rt->UnlockRect();
+        }
+        else
+        {
+            printf("[d3d9-triangle] FAIL: LockRect hr=0x%08lx\n", static_cast<unsigned long>(hlr));
+        }
+        rt->Release();
+    }
+    else
+    {
+        printf("[d3d9-triangle] FAIL: CreateRenderTarget hr=0x%08lx\n", static_cast<unsigned long>(hcrt));
     }
 
     dev->Release();

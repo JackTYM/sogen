@@ -290,7 +290,7 @@ namespace sogen
 
           private:
             vulkan_host vulkan_{};
-            d3d9_host d3d9_{};
+            d3d9_host d3d9_{this->vulkan_};
 
             // VkDeviceMemory aliased directly into the guest address space (see handle_map_memory_direct),
             // keyed by memory object id, so unmap can release the guest range and the host mapping.

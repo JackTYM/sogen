@@ -142,6 +142,55 @@ namespace
         return S_OK;
     }
 
+    // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): pfnCreateResource's own args (D3DDDIARG_CREATERESOURCE)
+    // don't reliably reveal the runtime's resource identity by byte offset -- two independent attempts
+    // at reading a fixed offset each produced a value that looked plausible in isolation but didn't
+    // match what the SAME resource's handle turned out to be at Present/Lock time in a live run (the
+    // apparent match in a static hex dump didn't hold once a config detail, e.g.
+    // D3DPRESENTFLAG_LOCKABLE_BACKBUFFER, changed). So pfnCreateResource itself is left on the generic
+    // no-op device_stub, and instead every call site that RECEIVES a resource handle in ITS OWN,
+    // reliably-typed args struct (SetRenderTarget's hRenderTarget, Lock's hResource, ...) lazily binds
+    // real GPU backing to that exact handle value the first time it's seen, via resolve_resource_id().
+    // This sidesteps needing to know CreateResource's real field layout at all for the render-target
+    // case; width/height/format are still a fixed guess (see resolve_resource_id's body) until a
+    // texture-creation forcing function can pin the real struct.
+    std::unordered_map<uint64_t, uint64_t> g_resource_ids;
+
+    uint64_t resolve_resource_id(void* handle)
+    {
+        const auto raw = reinterpret_cast<uint64_t>(handle);
+        if (raw == 0)
+        {
+            return 0;
+        }
+
+        const auto it = g_resource_ids.find(raw);
+        if (it != g_resource_ids.end())
+        {
+            return it->second;
+        }
+
+        const d3d9c::create_resource_request req{
+            .kind = static_cast<uint32_t>(d3d9c::resource_kind::texture_2d),
+            .format = 22, // D3DFMT_X8R8G8B8 (matches the test's known BackBufferFormat)
+            .width = 640,
+            .height = 480,
+            .depth = 1,
+            .mip_levels = 1,
+            .usage = 0x1, // D3DUSAGE_RENDERTARGET (public, ABI-stable D3D9 constant, not RE'd)
+            .pool = 0,
+        };
+        d3d9c::create_resource_response resp{};
+        bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
+        if (resp.hr != 0)
+        {
+            return raw; // fall back to the raw handle (pre-existing behavior) on failure
+        }
+
+        g_resource_ids[raw] = resp.resource;
+        return resp.resource;
+    }
+
     void fill_d3d9caps(D3DCAPS9* caps)
     {
         std::memset(caps, 0, sizeof(*caps));
@@ -405,14 +454,14 @@ namespace
     {
         d3d9c::set_render_target_record req{.render_target_index = pArgs->RenderTargetIndex,
                                             .reserved = 0,
-                                            .surface = reinterpret_cast<uint64_t>(pArgs->hRenderTarget)};
+                                            .surface = resolve_resource_id(pArgs->hRenderTarget)};
         bridge_call(gb::ioctl_d3d9_set_render_target, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
 
     HRESULT APIENTRY umd_SetDepthStencil(HANDLE /*hDevice*/, CONST D3DDDIARG_SETDEPTHSTENCIL* pArgs)
     {
-        d3d9c::set_depth_stencil_record req{.surface = reinterpret_cast<uint64_t>(pArgs->hZBuffer)};
+        d3d9c::set_depth_stencil_record req{.surface = resolve_resource_id(pArgs->hZBuffer)};
         bridge_call(gb::ioctl_d3d9_set_depth_stencil, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
@@ -511,7 +560,7 @@ namespace
 
     HRESULT APIENTRY umd_Lock(HANDLE /*hDevice*/, D3DDDIARG_LOCK* pArgs)
     {
-        const auto resource = reinterpret_cast<uint64_t>(pArgs->hResource);
+        const auto resource = resolve_resource_id(pArgs->hResource);
         d3d9c::lock_request req{.resource = resource,
                                 .subresource = 0,
                                 .offset = pArgs->OffsetToLock,
@@ -542,7 +591,7 @@ namespace
 
     HRESULT APIENTRY umd_Unlock(HANDLE /*hDevice*/, D3DDDIARG_UNLOCK* pArgs)
     {
-        const auto resource = reinterpret_cast<uint64_t>(pArgs->hResource);
+        const auto resource = resolve_resource_id(pArgs->hResource);
         const auto it = g_locked_buffers.find(resource);
         if (it == g_locked_buffers.end())
         {

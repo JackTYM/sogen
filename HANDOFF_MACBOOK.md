@@ -429,29 +429,80 @@ function; needs a different search angle, e.g. tracing from `CBaseDevice::Init`/
 
 ---
 
+## 10.5. De-risk slice — real GPU clear + readback wired end-to-end (2026-07-02)
+
+See `.claude/plans/jazzy-giggling-cloud.md` for the full plan; this is the outcome summary.
+
+**✅ `d3d9_host` now owns real GPU backing.** Constructor takes a `vulkan_host&` (the same instance
+`gpu_command_processor` already owns as a sibling member — no second GPU connection, no cross-file
+signature threading needed, since `d3d9_host` and `vulkan_host` live in the same struct). It lazily
+creates a bare Vulkan instance + device on first render-target-kind resource creation
+(`d3d9_host::ensure_vk_device()`, mirroring `handle_NtGdiDdDDICreateDevice`'s own lazy-init pattern).
+`create_resource` calls `vulkan_host::create_render_target` for `texture_2d` resources with the
+`D3DUSAGE_RENDERTARGET`/`DEPTHSTENCIL` usage bits set (public D3D9 constants, not RE'd), storing the
+resulting `vk_image_id` on the `resource_entry`. `execute_recorded`'s `d3d9_clear` case does a **real**
+`vulkan_host::submit_clear` + `readback_render_target`, writing the result into the resource's
+`backing` (the same buffer `pfnLock` already hands back to the app) — **verified working end-to-end**:
+clearing to `D3DCOLOR_XRGB(64,128,255)` produces `backing[0..3] == [FF 80 40 FF]` (BGRA8), exactly
+correct, confirmed via two independent resource paths (the implicit backbuffer and an explicit
+`CreateRenderTarget` surface).
+
+**Resource identity: pfnCreateResource's args don't reliably reveal the runtime's resource identity**
+— two independent attempts at reading a fixed byte offset (40, then 44) both produced a value that
+looked plausible in a static hex dump but didn't hold up in a live run once a config detail changed
+(`D3DPRESENTFLAG_LOCKABLE_BACKBUFFER`). `pfnCreateResource` is therefore left on the generic
+`device_stub` (does nothing) — instead, **every call site that receives a resource handle in its own,
+reliably-typed args struct now lazily binds real GPU backing to that exact handle value the first time
+it's seen**, via `resolve_resource_id()` (`sogen_d3d9_umd.cpp`), scoped to `SetRenderTarget`/
+`SetDepthStencil`/`Lock`/`Unlock` (NOT `SetTexture`/`SetStreamSource`/`SetIndices`, which reference
+buffers/textures that don't go through `pfnCreateResource` at all per §10's finding — routing them
+through the same lazy-bind would wrongly treat buffer handles as render targets). Width/height/format
+are a fixed guess (640×480, `D3DFMT_X8R8G8B8`) inside `resolve_resource_id`, matching the current
+test's known dimensions — wrong in general until `D3DDDIARG_CREATERESOURCE`'s real layout is found.
+
+**⚠️ Known gap: `LockRect()` never invokes `pfnLock` at all**, on either the implicit backbuffer or an
+explicit `CreateRenderTarget` surface — confirmed via DXGK/gpu-bridge tracing (no `ioctl_d3d9_lock` op
+ever appears) despite `LockRect` itself returning `S_OK` with `pBits=NULL, Pitch=0`. This is a D3D9
+runtime-behavior question, not a struct-layout one: plausibly the render target needs to be unbound
+(not the currently-active `SetRenderTarget` target) before `LockRect` will actually call into the
+driver, or some other precondition sogen's caps/state reporting doesn't satisfy. **Not yet resolved** —
+the `d3d9-triangle-test` guest test currently prints `FAIL: LockRect` for this reason, even though the
+underlying GPU clear+readback pipeline (verified via a temporary host-side diagnostic, since removed)
+is proven correct. Next investigation: try `SetRenderTarget` back to a *different* surface before
+locking the one just cleared, or RE the real runtime-side Lock precondition check.
+
+---
+
 ## 11. Immediate next steps (in order)
 
-1. **`pfnCreateResource` and `pfnPresent` are the remaining resource/frame-delivery gaps.** For
-   `CreateResource`, first determine (per §10's finding) whether buffers even need it, or whether
-   textures are the only caller — a texture-creation test would be the forcing function to find its real
-   call site the way Lock/Unlock's was found. For `Present`, find a forcing function (gate 3's own
-   `d3d9-spike-test` never presents) — a real `d3d9-triangle-test` that calls `Present()` would pin its
-   field layout the same way Lock/Unlock's was RE-verified.
-2. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
+1. **Resolve the `LockRect` → `pfnLock` gap (§10.5)** — try unbinding the render target before lock, or
+   RE the runtime's own Lock precondition logic, so the `d3d9-triangle-test` can verify pixels via the
+   guest-side D3D9 API instead of a temporary host-side diagnostic.
+2. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
+   (host-side pixel readback sidesteps needing real pixels on screen), but needed before a literal
+   "window shows a color" milestone. `D3DDDIARG_PRESENT`'s `hSrcResource`(offset 0) is RE-verified;
+   wiring it through `resolve_resource_id()` the same way `SetRenderTarget`/`Lock` now work is the
+   natural next step once needed.
+3. **`pfnCreateResource`'s real field layout** (width/height/usage/pool offsets) is still unknown —
+   the lazy-bind-at-first-use design (§10.5) works around this for render targets, but textures and
+   other resource kinds will need the real struct eventually. Needs a texture-creation-specific forcing
+   function and a fresh RE pass (the class-hierarchy/xref search that worked for `RENDERSTATE`/`LOCK`/
+   `CLEAR`/`PRESENT` came up empty for `CreateResource`'s actual builder — try a different angle, e.g.
+   tracing from `CBaseDevice::CreateTexture`/`CSwapChain`'s constructor forward instead of searching by
+   struct name backward).
+4. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
    fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
    `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:
    `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Not required for M1.
-3. **Part 3 — the actual pipeline builder** (`d3d9_host`'s `execute_recorded` currently no-ops
-   `set_viewport`/`clear`/`draw_*`): build a pipeline key from the tracked state, call
-   `vulkan_host::create_graphics_pipeline` with `render_pass=0` (dynamic rendering — the plan explicitly
-   says don't fix `vulkan_host`'s 1-color/1-depth render-pass gap, use dynamic rendering instead), and
-   actually execute draws. Now unblocked — §10's DP2 resolution confirms `execute_recorded`'s existing
-   opcode-per-call model (driven by our own wire protocol, not the D3D9 runtime's internal DP2 buffer) is
-   the right shape; no token-stream parser needed.
-4. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
+5. **Part 3 — the actual pipeline builder** (`d3d9_host`'s `execute_recorded` still no-ops
+   `set_viewport`/`draw_*`; `clear` is now real per §10.5): build a pipeline key from the tracked state,
+   call `vulkan_host::create_graphics_pipeline` with `render_pass=0` (dynamic rendering — the plan
+   explicitly says don't fix `vulkan_host`'s 1-color/1-depth render-pass gap, use dynamic rendering
+   instead), and actually execute draws.
+6. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
    pipelines have real shader modules instead of a placeholder). Milestone M1 = programmable SM2/3
    triangle, pixel-diffed vs the DXVK oracle (`root_vkspike`).
-5. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
+7. **When ready to push:** sign every unsigned commit first (`git rebase --exec 'git commit --amend
    --no-edit -S' <base>`); verify with `git log --show-signature`.
 
 ---

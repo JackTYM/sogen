@@ -2,7 +2,9 @@
 
 #include <d3d9_command_protocol.hpp>
 
+#include <array>
 #include <cstring>
+#include <span>
 
 namespace sogen
 {
@@ -10,6 +12,10 @@ namespace sogen
     {
         constexpr int32_t d3derr_invalidcall = -2005530516; // D3DERR_INVALIDCALL
         constexpr int32_t d3d_ok = 0;
+
+        // Public, ABI-stable D3D9 API constants (d3d9types.h), not RE'd DDI internals.
+        constexpr uint32_t d3dusage_rendertarget = 0x00000001;
+        constexpr uint32_t d3dusage_depthstencil = 0x00000002;
 
         uint64_t tss_key(const uint32_t stage, const uint32_t state)
         {
@@ -34,6 +40,41 @@ namespace sogen
         return this->next_id_++;
     }
 
+    uint64_t d3d9_host::ensure_vk_device()
+    {
+        if (this->vk_device_ != 0)
+        {
+            return this->vk_device_;
+        }
+        if (!this->vulkan_.available())
+        {
+            return 0;
+        }
+
+        uint64_t instance = 0;
+        if (this->vulkan_.create_instance(instance) != 0 || instance == 0)
+        {
+            return 0;
+        }
+
+        std::array<uint64_t, 4> phys_ids{};
+        uint32_t phys_count = 0;
+        this->vulkan_.enumerate_physical_devices(instance, std::span{phys_ids}, phys_count);
+        if (phys_count == 0)
+        {
+            return 0;
+        }
+
+        uint64_t device = 0;
+        if (this->vulkan_.create_device(phys_ids[0], nullptr, 0, nullptr, 0, 0, nullptr, 0, 0, device) != 0 || device == 0)
+        {
+            return 0;
+        }
+
+        this->vk_device_ = device;
+        return device;
+    }
+
     int32_t d3d9_host::create_resource(const uint32_t kind, const uint32_t format, const uint32_t width, const uint32_t height,
                                        const uint32_t depth, const uint32_t mip_levels, const uint32_t usage, const uint32_t pool,
                                        uint64_t& out_resource)
@@ -41,11 +82,14 @@ namespace sogen
         out_resource = 0;
 
         // Buffers (vertex/index) size their backing store directly from `width` (the byte count, per
-        // d3d9_cmd::create_resource_request's convention); textures get one mip's worth for now --
-        // multi-mip/array backing is Part 3 once real GPU images replace this host shadow copy.
+        // d3d9_cmd::create_resource_request's convention). Render-target/depth-stencil 2D textures get
+        // real GPU backing (see the class comment); other texture kinds still get a plain host-side
+        // shadow sized for one mip's worth, no GPU backing yet.
         const bool is_buffer = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) ||
                                kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer);
-        const size_t backing_size = is_buffer ? width : 0;
+        const bool is_render_target = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) &&
+                                      (usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
+        const size_t backing_size = is_buffer ? width : (is_render_target ? static_cast<size_t>(width) * height * 4 : 0);
 
         resource_entry entry{
             .kind = kind,
@@ -58,6 +102,19 @@ namespace sogen
             .pool = pool,
             .backing = std::vector<std::byte>(backing_size),
         };
+
+        if (is_render_target)
+        {
+            const uint64_t device = this->ensure_vk_device();
+            if (device != 0)
+            {
+                uint64_t vk_image = 0;
+                if (this->vulkan_.create_render_target(device, width, height, format, vk_image) == 0 && vk_image != 0)
+                {
+                    entry.vk_image_id = vk_image;
+                }
+            }
+        }
 
         const uint64_t id = this->allocate_id();
         this->resources_.emplace(id, std::move(entry));
@@ -324,7 +381,35 @@ namespace sogen
         }
         case gpu_bridge::command::d3d9_clear: {
             d3d9_cmd::clear_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+
+            // Real GPU clear + readback into the bound render target's backing store, so pfnLock
+            // (already wired) hands the app real pixels -- see the class comment for why this
+            // sidesteps needing to know how the real d3d9.dll gets pixels onto an actual window.
+            const auto it = this->resources_.find(this->state_.render_targets[0]);
+            if (it != this->resources_.end() && it->second.vk_image_id != 0 && (req.flags & 1) != 0 /* D3DCLEAR_TARGET */)
+            {
+                // D3DCOLOR is 0xAARRGGBB.
+                const std::array<float, 4> color{
+                    static_cast<float>((req.color_argb >> 16) & 0xFF) / 255.0f,
+                    static_cast<float>((req.color_argb >> 8) & 0xFF) / 255.0f,
+                    static_cast<float>(req.color_argb & 0xFF) / 255.0f,
+                    static_cast<float>((req.color_argb >> 24) & 0xFF) / 255.0f,
+                };
+                this->vulkan_.submit_clear(it->second.vk_image_id, color.data());
+
+                std::vector<std::byte> pixels;
+                uint32_t readback_width = 0;
+                uint32_t readback_height = 0;
+                if (this->vulkan_.readback_render_target(it->second.vk_image_id, pixels, readback_width, readback_height) == 0)
+                {
+                    it->second.backing = std::move(pixels);
+                }
+            }
+            return d3d_ok;
         }
         case gpu_bridge::command::d3d9_draw_primitive: {
             d3d9_cmd::draw_primitive_record req{};

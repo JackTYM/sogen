@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vulkan_host.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -13,18 +15,27 @@ namespace sogen
     // d3d9_command_protocol.hpp) here after reading guest memory into plain buffers.
     //
     // This interface is deliberately free of emulator/guest-Windows types, same rule as vulkan_host:
-    // Part 3/4 will build real GPU resources and draw here, sharing the vulkan_host already created
-    // for the device (see handle_NtGdiDdDDICreateDevice), and mixing emulated-Windows definitions
-    // into that path is exactly what vulkan_host.hpp's own comment warns against.
+    // mixing emulated-Windows definitions into this path is exactly what vulkan_host.hpp's own comment
+    // warns against.
     //
-    // Current scope (Part 2 -- transport bring-up): resource lifetime and per-device render-state
-    // tracking, enough to prove the D3D9 UMD <-> host transport end-to-end. Building a pipeline key
-    // from that state and actually drawing against vulkan_host is Part 3; shader translation via
-    // vkd3d-shader is Part 4.
+    // Render-target/depth-stencil-kind resources get real GPU backing (a lazily-created Vulkan
+    // instance/device on the injected vulkan_host, then vulkan_host::create_render_target) so pfnClear
+    // can do a real clear+readback into the resource's host-side shadow copy -- which is what
+    // pfnLock/pfnUnlock (already wired) hand back to the app. This deliberately sidesteps needing to
+    // know how the real d3d9.dll gets pixels onto an actual window (RE'd to be genuinely opaque to the
+    // driver -- D3DDDIARG_PRESENT carries no HWND): whatever mechanism the runtime uses to display the
+    // backbuffer, it goes through Lock to read pixels back from the driver first.
+    //
+    // Building a full pipeline key + real triangle drawing against vulkan_host is Part 3; shader
+    // translation via vkd3d-shader is Part 4.
     class d3d9_host
     {
       public:
-        d3d9_host() = default;
+        // vulkan is the same instance the gpu_command_processor already owns (a sibling member) --
+        // shared, not a second GPU connection. Its instance/device are created lazily, on first
+        // render-target-kind resource creation, mirroring handle_NtGdiDdDDICreateDevice's own
+        // lazy-init pattern for the DXGK path.
+        explicit d3d9_host(vulkan_host& vulkan) : vulkan_(vulkan) {}
 
         // ---------------------------------------------------------------------------------------
         // Sync commands
@@ -67,7 +78,8 @@ namespace sogen
             uint32_t mip_levels;
             uint32_t usage;
             uint32_t pool;
-            std::vector<std::byte> backing; // host-side shadow copy; real GPU backing lands in Part 3
+            std::vector<std::byte> backing; // host-side shadow copy; kept in sync with vk_image below
+            uint64_t vk_image_id{};         // 0 = no GPU backing (plain buffer); set for render targets
         };
 
         struct shader_entry
@@ -106,6 +118,12 @@ namespace sogen
         std::unordered_map<uint64_t, vertex_decl_entry> vertex_decls_{};
         device_state state_{};
 
+        vulkan_host& vulkan_;
+        uint64_t vk_device_{}; // 0 until lazily created
+
         uint64_t allocate_id();
+        // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
+        // Returns 0 on failure.
+        uint64_t ensure_vk_device();
     };
 } // namespace sogen
