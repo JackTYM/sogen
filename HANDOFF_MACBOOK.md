@@ -602,12 +602,22 @@ Two hypotheses tested empirically, both **ruled out**:
   call in this test goes through the plain `pfnDrawPrimitive`/`pfnSetStreamSource` slots we already
   have, not a DP2-batched path. Reverted.
 
-Neither of the fast, surgical options panned out. Solving this for real needs either (a) live
-debugging (breakpoints in `d3d9.dll` to watch device+120/444/460 get populated and trace back to which
-caps bits feed them — not possible with idasql's static decompilation alone), or (b) accepting the
-larger "negotiate a higher WDDM DDI interface tier" route and re-verifying the whole device-funcs
-table shape for that tier. Left as an open, well-scoped follow-up (task tracker #15) rather than
-continuing to guess caps bits blindly.
+Neither of the fast, surgical options panned out. Also tried option (b) directly, empirically rather
+than by further static analysis: rebuilt the UMD with `SOGEN_D3D9_UMD_INTERFACE_VERSION` bumped to
+`SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM1_3` (via `-D`, not committed) — the additive struct/table changes
+this unlocks in `d3d9_ddi.hpp` are all `#if`-gated extra fields defaulting to `device_stub`, so this
+looked like it should be a safe, purely-additive experiment. It's not: `CreateDevice` itself starts
+failing with `D3DERR_INVALIDCALL` (`0x8876086a`), before any resource/draw code even runs. Something
+about how the runtime validates or marshals args at this tier differs beyond what our simple `#if`-gated
+field additions account for (a genuinely bigger change than the struct diffs alone suggest — possibly
+additional `GetCaps` query types, a different negotiation sequence, or caps fields we don't populate
+that this tier newly requires). Reverted immediately; not investigated further this session.
+
+**Conclusion for this session**: solving this for real needs either (a) live debugging (breakpoints in
+`d3d9.dll` to watch device+120/444/460 get populated and trace back to which caps bits feed them — not
+possible with idasql's static decompilation alone), or (b) a proper, dedicated investigation into what
+`CreateDevice` additionally requires at the WDDM1.3+ tier (not just the additive struct fields). Left as
+an open, well-scoped follow-up (task tracker #15) rather than continuing to guess blindly.
 
 ---
 
