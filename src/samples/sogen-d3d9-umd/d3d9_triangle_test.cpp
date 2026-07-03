@@ -93,6 +93,46 @@ int main()
         HRESULT hclr2 = dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(64, 128, 255), 1.0f, 0);
         printf("[d3d9-triangle] Clear(rt) hr=0x%08lx\n", static_cast<unsigned long>(hclr2));
 
+        // Part 3 pipeline-builder smoke test: a real triangle, D3DFVF_XYZRHW|D3DFVF_DIFFUSE (pre-
+        // transformed screen-space position + per-vertex color, matching d3d9_host's hardcoded
+        // fixed-function shader pair).
+        struct FvfVertex
+        {
+            float x, y, z, rhw;
+            DWORD color;
+        };
+        constexpr DWORD kFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
+        IDirect3DVertexBuffer9* vb = nullptr;
+        HRESULT hcvb = dev->CreateVertexBuffer(3 * sizeof(FvfVertex), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
+        printf("[d3d9-triangle] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
+
+        if (SUCCEEDED(hcvb) && vb)
+        {
+            FvfVertex* verts = nullptr;
+            HRESULT hvblock = vb->Lock(0, 3 * sizeof(FvfVertex), reinterpret_cast<void**>(&verts), 0);
+            printf("[d3d9-triangle] VB Lock hr=0x%08lx data=%p\n", static_cast<unsigned long>(hvblock), static_cast<void*>(verts));
+            if (SUCCEEDED(hvblock) && verts)
+            {
+                verts[0] = {320.0f, 120.0f, 0.5f, 1.0f, D3DCOLOR_XRGB(255, 0, 0)};
+                verts[1] = {480.0f, 360.0f, 0.5f, 1.0f, D3DCOLOR_XRGB(0, 255, 0)};
+                verts[2] = {160.0f, 360.0f, 0.5f, 1.0f, D3DCOLOR_XRGB(0, 0, 255)};
+                vb->Unlock();
+            }
+
+            HRESULT hsfvf = dev->SetFVF(kFvf);
+            printf("[d3d9-triangle] SetFVF hr=0x%08lx\n", static_cast<unsigned long>(hsfvf));
+            HRESULT hsss = dev->SetStreamSource(0, vb, 0, sizeof(FvfVertex));
+            printf("[d3d9-triangle] SetStreamSource hr=0x%08lx\n", static_cast<unsigned long>(hsss));
+            HRESULT hdp = dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1);
+            printf("[d3d9-triangle] DrawPrimitive hr=0x%08lx\n", static_cast<unsigned long>(hdp));
+
+            vb->Release();
+        }
+        else
+        {
+            printf("[d3d9-triangle] FAIL: CreateVertexBuffer hr=0x%08lx\n", static_cast<unsigned long>(hcvb));
+        }
+
         // Unbind before locking (a real app would typically do this anyway) -- tried as a fix for the
         // known LockRect gap below; it didn't change the outcome, kept as reasonable practice regardless.
         if (original_rt)

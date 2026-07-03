@@ -2,6 +2,11 @@
 
 #include <d3d9_command_protocol.hpp>
 
+// Real Vulkan enum/type values (VK_FORMAT_*, VK_PRIMITIVE_TOPOLOGY_*, ...), used only for their
+// stable, public numeric constants -- vulkan_host's own API surface stays plain-integer (see its
+// header comment); this .cpp mirrors that same "real Vulkan types stay out of the header" rule.
+#include <vulkan/vulkan_core.h>
+
 #include <array>
 #include <cstring>
 #include <span>
@@ -16,6 +21,76 @@ namespace sogen
         // Public, ABI-stable D3D9 API constants (d3d9types.h), not RE'd DDI internals.
         constexpr uint32_t d3dusage_rendertarget = 0x00000001;
         constexpr uint32_t d3dusage_depthstencil = 0x00000002;
+
+        // Minimal fixed-function passthrough shader pair for D3DFVF_XYZRHW|D3DFVF_DIFFUSE (see
+        // devices/shaders/ff_triangle.{vert,frag} for the GLSL source this was compiled from with
+        // glslangValidator). Not a placeholder for missing vkd3d-shader translation -- Vulkan has no
+        // true fixed-function pipeline either way, so this hardcoded pair is the correct, permanent
+        // implementation for this one case; general FVF/render-state shader synthesis is the separate,
+        // future M4 milestone.
+        // clang-format off
+        constexpr std::array<uint32_t, 351> k_ff_vertex_shader_spirv = {
+            0x07230203u, 0x00010000u, 0x0008000bu, 0x00000030u, 0x00000000u, 0x00020011u, 0x00000001u, 0x0006000bu,
+            0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u,
+            0x0009000fu, 0x00000000u, 0x00000004u, 0x6e69616du, 0x00000000u, 0x0000000cu, 0x00000022u, 0x0000002du,
+            0x0000002eu, 0x00030003u, 0x00000002u, 0x000001c2u, 0x00040005u, 0x00000004u, 0x6e69616du, 0x00000000u,
+            0x00030005u, 0x00000009u, 0x0063646eu, 0x00060005u, 0x0000000cu, 0x6f506e69u, 0x69746973u, 0x68526e6fu,
+            0x00000077u, 0x00060005u, 0x0000000fu, 0x68737550u, 0x736e6f43u, 0x746e6174u, 0x00000073u, 0x00070006u,
+            0x0000000fu, 0x00000000u, 0x77656976u, 0x74726f70u, 0x657a6953u, 0x00000000u, 0x00030005u, 0x00000011u,
+            0x00006370u, 0x00060005u, 0x00000020u, 0x505f6c67u, 0x65567265u, 0x78657472u, 0x00000000u, 0x00060006u,
+            0x00000020u, 0x00000000u, 0x505f6c67u, 0x7469736fu, 0x006e6f69u, 0x00070006u, 0x00000020u, 0x00000001u,
+            0x505f6c67u, 0x746e696fu, 0x657a6953u, 0x00000000u, 0x00070006u, 0x00000020u, 0x00000002u, 0x435f6c67u,
+            0x4470696cu, 0x61747369u, 0x0065636eu, 0x00070006u, 0x00000020u, 0x00000003u, 0x435f6c67u, 0x446c6c75u,
+            0x61747369u, 0x0065636eu, 0x00030005u, 0x00000022u, 0x00000000u, 0x00050005u, 0x0000002du, 0x67617266u,
+            0x6f6c6f43u, 0x00000072u, 0x00040005u, 0x0000002eu, 0x6f436e69u, 0x00726f6cu, 0x00040047u, 0x0000000cu,
+            0x0000001eu, 0x00000000u, 0x00030047u, 0x0000000fu, 0x00000002u, 0x00050048u, 0x0000000fu, 0x00000000u,
+            0x00000023u, 0x00000000u, 0x00030047u, 0x00000020u, 0x00000002u, 0x00050048u, 0x00000020u, 0x00000000u,
+            0x0000000bu, 0x00000000u, 0x00050048u, 0x00000020u, 0x00000001u, 0x0000000bu, 0x00000001u, 0x00050048u,
+            0x00000020u, 0x00000002u, 0x0000000bu, 0x00000003u, 0x00050048u, 0x00000020u, 0x00000003u, 0x0000000bu,
+            0x00000004u, 0x00040047u, 0x0000002du, 0x0000001eu, 0x00000000u, 0x00040047u, 0x0000002eu, 0x0000001eu,
+            0x00000001u, 0x00020013u, 0x00000002u, 0x00030021u, 0x00000003u, 0x00000002u, 0x00030016u, 0x00000006u,
+            0x00000020u, 0x00040017u, 0x00000007u, 0x00000006u, 0x00000002u, 0x00040020u, 0x00000008u, 0x00000007u,
+            0x00000007u, 0x00040017u, 0x0000000au, 0x00000006u, 0x00000004u, 0x00040020u, 0x0000000bu, 0x00000001u,
+            0x0000000au, 0x0004003bu, 0x0000000bu, 0x0000000cu, 0x00000001u, 0x0003001eu, 0x0000000fu, 0x00000007u,
+            0x00040020u, 0x00000010u, 0x00000009u, 0x0000000fu, 0x0004003bu, 0x00000010u, 0x00000011u, 0x00000009u,
+            0x00040015u, 0x00000012u, 0x00000020u, 0x00000001u, 0x0004002bu, 0x00000012u, 0x00000013u, 0x00000000u,
+            0x00040020u, 0x00000014u, 0x00000009u, 0x00000007u, 0x0004002bu, 0x00000006u, 0x00000018u, 0x40000000u,
+            0x0004002bu, 0x00000006u, 0x0000001au, 0x3f800000u, 0x00040015u, 0x0000001du, 0x00000020u, 0x00000000u,
+            0x0004002bu, 0x0000001du, 0x0000001eu, 0x00000001u, 0x0004001cu, 0x0000001fu, 0x00000006u, 0x0000001eu,
+            0x0006001eu, 0x00000020u, 0x0000000au, 0x00000006u, 0x0000001fu, 0x0000001fu, 0x00040020u, 0x00000021u,
+            0x00000003u, 0x00000020u, 0x0004003bu, 0x00000021u, 0x00000022u, 0x00000003u, 0x0004002bu, 0x0000001du,
+            0x00000024u, 0x00000002u, 0x00040020u, 0x00000025u, 0x00000001u, 0x00000006u, 0x00040020u, 0x0000002bu,
+            0x00000003u, 0x0000000au, 0x0004003bu, 0x0000002bu, 0x0000002du, 0x00000003u, 0x0004003bu, 0x0000000bu,
+            0x0000002eu, 0x00000001u, 0x00050036u, 0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u,
+            0x00000005u, 0x0004003bu, 0x00000008u, 0x00000009u, 0x00000007u, 0x0004003du, 0x0000000au, 0x0000000du,
+            0x0000000cu, 0x0007004fu, 0x00000007u, 0x0000000eu, 0x0000000du, 0x0000000du, 0x00000000u, 0x00000001u,
+            0x00050041u, 0x00000014u, 0x00000015u, 0x00000011u, 0x00000013u, 0x0004003du, 0x00000007u, 0x00000016u,
+            0x00000015u, 0x00050088u, 0x00000007u, 0x00000017u, 0x0000000eu, 0x00000016u, 0x0005008eu, 0x00000007u,
+            0x00000019u, 0x00000017u, 0x00000018u, 0x00050050u, 0x00000007u, 0x0000001bu, 0x0000001au, 0x0000001au,
+            0x00050083u, 0x00000007u, 0x0000001cu, 0x00000019u, 0x0000001bu, 0x0003003eu, 0x00000009u, 0x0000001cu,
+            0x0004003du, 0x00000007u, 0x00000023u, 0x00000009u, 0x00050041u, 0x00000025u, 0x00000026u, 0x0000000cu,
+            0x00000024u, 0x0004003du, 0x00000006u, 0x00000027u, 0x00000026u, 0x00050051u, 0x00000006u, 0x00000028u,
+            0x00000023u, 0x00000000u, 0x00050051u, 0x00000006u, 0x00000029u, 0x00000023u, 0x00000001u, 0x00070050u,
+            0x0000000au, 0x0000002au, 0x00000028u, 0x00000029u, 0x00000027u, 0x0000001au, 0x00050041u, 0x0000002bu,
+            0x0000002cu, 0x00000022u, 0x00000013u, 0x0003003eu, 0x0000002cu, 0x0000002au, 0x0004003du, 0x0000000au,
+            0x0000002fu, 0x0000002eu, 0x0003003eu, 0x0000002du, 0x0000002fu, 0x000100fdu, 0x00010038u,
+        };
+
+        constexpr std::array<uint32_t, 95> k_ff_fragment_shader_spirv = {
+            0x07230203u, 0x00010000u, 0x0008000bu, 0x0000000du, 0x00000000u, 0x00020011u, 0x00000001u, 0x0006000bu,
+            0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u,
+            0x0007000fu, 0x00000004u, 0x00000004u, 0x6e69616du, 0x00000000u, 0x00000009u, 0x0000000bu, 0x00030010u,
+            0x00000004u, 0x00000007u, 0x00030003u, 0x00000002u, 0x000001c2u, 0x00040005u, 0x00000004u, 0x6e69616du,
+            0x00000000u, 0x00050005u, 0x00000009u, 0x4374756fu, 0x726f6c6fu, 0x00000000u, 0x00050005u, 0x0000000bu,
+            0x67617266u, 0x6f6c6f43u, 0x00000072u, 0x00040047u, 0x00000009u, 0x0000001eu, 0x00000000u, 0x00040047u,
+            0x0000000bu, 0x0000001eu, 0x00000000u, 0x00020013u, 0x00000002u, 0x00030021u, 0x00000003u, 0x00000002u,
+            0x00030016u, 0x00000006u, 0x00000020u, 0x00040017u, 0x00000007u, 0x00000006u, 0x00000004u, 0x00040020u,
+            0x00000008u, 0x00000003u, 0x00000007u, 0x0004003bu, 0x00000008u, 0x00000009u, 0x00000003u, 0x00040020u,
+            0x0000000au, 0x00000001u, 0x00000007u, 0x0004003bu, 0x0000000au, 0x0000000bu, 0x00000001u, 0x00050036u,
+            0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u, 0x00000005u, 0x0004003du, 0x00000007u,
+            0x0000000cu, 0x0000000bu, 0x0003003eu, 0x00000009u, 0x0000000cu, 0x000100fdu, 0x00010038u,
+        };
+        // clang-format on
 
         uint64_t tss_key(const uint32_t stage, const uint32_t state)
         {
@@ -71,8 +146,278 @@ namespace sogen
             return 0;
         }
 
+        this->vk_instance_ = instance;
+        this->vk_physical_device_ = phys_ids[0];
         this->vk_device_ = device;
         return device;
+    }
+
+    bool d3d9_host::ensure_draw_infra()
+    {
+        if (this->draw_infra_ready_)
+        {
+            return true;
+        }
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0)
+        {
+            return false;
+        }
+
+        // A single queue family (index 0) is the same assumption vulkan_host::create_device and
+        // create_render_target's own internal command pool already make for this simple, single-GPU-
+        // queue setup.
+        if (this->vulkan_.get_device_queue(device, 0, 0, this->queue_) != 0 || this->queue_ == 0)
+        {
+            return false;
+        }
+        if (this->vulkan_.create_command_pool(device, 0, 0, this->command_pool_) != 0 || this->command_pool_ == 0)
+        {
+            return false;
+        }
+        if (this->vulkan_.allocate_command_buffer(device, this->command_pool_, 0, this->command_buffer_) != 0 ||
+            this->command_buffer_ == 0)
+        {
+            return false;
+        }
+        if (this->vulkan_.create_fence(device, 0, this->fence_) != 0 || this->fence_ == 0)
+        {
+            return false;
+        }
+
+        this->draw_infra_ready_ = true;
+        return true;
+    }
+
+    bool d3d9_host::ensure_pipeline(const uint32_t color_format, const uint32_t width, const uint32_t height)
+    {
+        if (this->pipeline_ready_)
+        {
+            return true;
+        }
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0)
+        {
+            return false;
+        }
+
+        if (this->vulkan_.create_shader_module(device, k_ff_vertex_shader_spirv.data(),
+                                               k_ff_vertex_shader_spirv.size() * sizeof(uint32_t), this->vs_module_) != 0 ||
+            this->vs_module_ == 0)
+        {
+            return false;
+        }
+        if (this->vulkan_.create_shader_module(device, k_ff_fragment_shader_spirv.data(),
+                                               k_ff_fragment_shader_spirv.size() * sizeof(uint32_t), this->fs_module_) != 0 ||
+            this->fs_module_ == 0)
+        {
+            return false;
+        }
+
+        // One push-constant range (vec2 viewportSize) in the vertex stage, no descriptor sets -- this
+        // minimal shader pair needs neither textures nor uniform buffers.
+        if (this->vulkan_.create_pipeline_layout(device, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 2, {},
+                                                 this->pipeline_layout_) != 0 ||
+            this->pipeline_layout_ == 0)
+        {
+            return false;
+        }
+
+        // D3DFVF_XYZRHW|D3DFVF_DIFFUSE: 16-byte {x,y,z,rhw} position + 4-byte D3DCOLOR diffuse, stride 20.
+        const std::array<vulkan_host::vertex_binding, 1> bindings{
+            {{.binding = 0, .stride = 20, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX}}};
+        const std::array<vulkan_host::vertex_attribute, 2> attributes{{
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 16},
+        }};
+        const std::array<uint32_t, 1> color_formats{color_format};
+        const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        const vulkan_host::depth_state depth{.test_enable = 0, .write_enable = 0, .compare_op = 0};
+        const std::array<vulkan_host::color_blend_attachment, 1> blend{{{
+            .blend_enable = 0,
+            .src_color_blend_factor = 0,
+            .dst_color_blend_factor = 0,
+            .color_blend_op = 0,
+            .src_alpha_blend_factor = 0,
+            .dst_alpha_blend_factor = 0,
+            .alpha_blend_op = 0,
+            .color_write_mask = 0xF,
+        }}};
+        const vulkan_host::specialization empty_spec{};
+
+        const int32_t result = this->vulkan_.create_graphics_pipeline(
+            device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings,
+            attributes, depth, color_formats, /*depth_format=*/0, /*stencil_format=*/0, /*rasterization_samples=*/1,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend,
+            this->pipeline_);
+        if (result != 0 || this->pipeline_ == 0)
+        {
+            return false;
+        }
+
+        this->pipeline_ready_ = true;
+        return true;
+    }
+
+    namespace
+    {
+        // VkPhysicalDeviceMemoryProperties parsing helper for execute_draw's vertex buffer upload --
+        // vulkan_host keeps its own equivalent private (find_memory_type in vulkan_host.cpp), so this
+        // mirrors it locally using the real Vulkan struct (already included above for the enum values).
+        uint32_t find_memory_type_index(vulkan_host& vulkan, const uint64_t physical_device, const uint32_t type_bits,
+                                        const VkMemoryPropertyFlags required)
+        {
+            VkPhysicalDeviceMemoryProperties props{};
+            if (vulkan.get_physical_device_memory_properties(physical_device, &props, sizeof(props)) != 0)
+            {
+                return UINT32_MAX;
+            }
+            for (uint32_t i = 0; i < props.memoryTypeCount; ++i)
+            {
+                if ((type_bits & (1u << i)) != 0 && (props.memoryTypes[i].propertyFlags & required) == required)
+                {
+                    return i;
+                }
+            }
+            return UINT32_MAX;
+        }
+    } // namespace
+
+    int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex)
+    {
+        const auto rt_it = this->resources_.find(this->state_.render_targets[0]);
+        if (rt_it == this->resources_.end() || rt_it->second.vk_image_id == 0)
+        {
+            return d3d_ok; // no bound render target with GPU backing -- nothing to draw into yet
+        }
+        auto& rt = rt_it->second;
+
+        const auto vb_it = this->resources_.find(this->state_.stream_sources[0]);
+        if (vb_it == this->resources_.end() || vb_it->second.backing.empty())
+        {
+            return d3d_ok; // no vertex data bound
+        }
+        const auto& vb_backing = vb_it->second.backing;
+
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0 || !this->ensure_draw_infra() || !this->ensure_pipeline(VK_FORMAT_B8G8R8A8_UNORM, rt.width, rt.height))
+        {
+            return d3d_ok; // GPU unavailable; degrade silently like the rest of this host does
+        }
+
+        if (rt.vk_image_view_id == 0)
+        {
+            if (this->vulkan_.create_image_view(device, rt.vk_image_id, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT,
+                                                VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                VK_COMPONENT_SWIZZLE_IDENTITY, rt.vk_image_view_id) != 0 ||
+                rt.vk_image_view_id == 0)
+            {
+                return d3d_ok;
+            }
+        }
+
+        // Upload the current vertex buffer contents fresh every draw -- simplest correct model for a
+        // first triangle; no persistent GPU vertex buffer / dirty tracking yet.
+        uint64_t vertex_buffer = 0;
+        if (this->vulkan_.create_buffer(device, vb_backing.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertex_buffer) != 0 ||
+            vertex_buffer == 0)
+        {
+            return d3d_ok;
+        }
+        uint64_t vb_mem_size = 0;
+        uint64_t vb_mem_align = 0;
+        uint32_t vb_mem_type_bits = 0;
+        this->vulkan_.get_buffer_memory_requirements(device, vertex_buffer, vb_mem_size, vb_mem_align, vb_mem_type_bits);
+        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, vb_mem_type_bits,
+                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (memory_type == UINT32_MAX)
+        {
+            this->vulkan_.destroy_buffer(device, vertex_buffer);
+            return d3d_ok;
+        }
+        uint64_t vertex_memory = 0;
+        if (this->vulkan_.allocate_memory(device, vb_mem_size, memory_type, vertex_memory) != 0 || vertex_memory == 0)
+        {
+            this->vulkan_.destroy_buffer(device, vertex_buffer);
+            return d3d_ok;
+        }
+        this->vulkan_.bind_buffer_memory(device, vertex_buffer, vertex_memory, 0);
+        this->vulkan_.upload_memory(device, vertex_memory, 0, vb_backing.size(), vb_backing.data(), vb_backing.size());
+
+        this->vulkan_.reset_fence(device, this->fence_);
+        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+
+        // Assumes Clear always runs before the first Draw (true for this test's flow), which leaves
+        // the image in TRANSFER_SRC_OPTIMAL (submit_clear's own documented post-state) -- transition to
+        // COLOR_ATTACHMENT_OPTIMAL for rendering, then back for the readback below.
+        const vulkan_host::subresource_range color_range{
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
+
+        const vulkan_host::rendering_attachment color_attachment{
+            .image_view = rt.vk_image_view_id,
+            .resolve_image_view = 0,
+            .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .resolve_image_layout = 0,
+            .resolve_mode = 0,
+            .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .store_op = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+        const std::array<vulkan_host::rendering_attachment, 1> color_attachments{color_attachment};
+        this->vulkan_.cmd_begin_rendering(this->command_buffer_, 0, 0, rt.width, rt.height, 1, 0, 0, color_attachments, nullptr,
+                                          nullptr);
+
+        this->vulkan_.cmd_bind_pipeline(this->command_buffer_, this->pipeline_, VK_PIPELINE_BIND_POINT_GRAPHICS);
+
+        const std::array<vulkan_host::viewport_entry, 1> viewports{
+            {{.x = 0, .y = 0, .width = static_cast<float>(rt.width), .height = static_cast<float>(rt.height), .min_depth = 0.0f,
+              .max_depth = 1.0f}}};
+        this->vulkan_.cmd_set_viewport(this->command_buffer_, 0, false, viewports);
+        const std::array<vulkan_host::scissor_entry, 1> scissors{
+            {{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height}}};
+        this->vulkan_.cmd_set_scissor(this->command_buffer_, 0, false, scissors);
+
+        const std::array<float, 2> viewport_size{static_cast<float>(rt.width), static_cast<float>(rt.height)};
+        this->vulkan_.cmd_push_constants(this->command_buffer_, this->pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                         sizeof(viewport_size), viewport_size.data());
+
+        const uint64_t vb_offset = 0;
+        this->vulkan_.cmd_bind_vertex_buffers(this->command_buffer_, 0, 1, &vertex_buffer, &vb_offset);
+        this->vulkan_.cmd_draw(this->command_buffer_, vertex_count, 1, first_vertex, 0);
+
+        this->vulkan_.cmd_end_rendering(this->command_buffer_);
+
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                           VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+
+        this->vulkan_.end_command_buffer(this->command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+
+        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
+        {
+            // Synchronous wait, matching create_render_target's own submit_clear/readback pattern.
+        }
+
+        this->vulkan_.destroy_buffer(device, vertex_buffer);
+        this->vulkan_.free_memory(device, vertex_memory);
+
+        // Read the drawn frame back into the resource's backing store, same as pfnClear -- so pfnLock
+        // (and any future host-side diagnostic) sees the real drawn pixels.
+        std::vector<std::byte> pixels;
+        uint32_t readback_width = 0;
+        uint32_t readback_height = 0;
+        if (this->vulkan_.readback_render_target(rt.vk_image_id, pixels, readback_width, readback_height) == 0)
+        {
+            rt.backing = std::move(pixels);
+        }
+
+        return d3d_ok;
     }
 
     int32_t d3d9_host::create_resource(const uint32_t kind, const uint32_t format, const uint32_t width, const uint32_t height,
@@ -413,7 +758,13 @@ namespace sogen
         }
         case gpu_bridge::command::d3d9_draw_primitive: {
             d3d9_cmd::draw_primitive_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            // The pipeline is hardcoded to VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST (see ensure_pipeline);
+            // primitive_type is not yet consulted -- D3DPT_TRIANGLELIST only for this milestone.
+            return this->execute_draw(req.primitive_count * 3, req.start_vertex);
         }
         case gpu_bridge::command::d3d9_draw_indexed_primitive: {
             d3d9_cmd::draw_indexed_primitive_record req{};

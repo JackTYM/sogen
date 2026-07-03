@@ -482,18 +482,71 @@ diagnostics (proven reliable twice) for verification going forward instead.
 
 ---
 
+## 10.6. Part 3 — the real pipeline builder is implemented, not yet exercised end-to-end (2026-07-02)
+
+`d3d9_host::execute_recorded`'s `d3d9_draw_primitive` case now does real work
+(`ensure_draw_infra`/`ensure_pipeline`/`execute_draw` in `d3d9_host.cpp`), matching the plan's Part 3
+scope:
+- **The one hardcoded fixed-function shader pair** for `D3DFVF_XYZRHW|D3DFVF_DIFFUSE` (pre-transformed
+  screen-space position + per-vertex diffuse color) — GLSL source in `src/windows-emulator/devices/shaders/ff_triangle.
+  {vert,frag}`, compiled with `glslangValidator` (available via `brew install glslang`; `glslc` is not
+  installed on this machine), embedded as `constexpr std::array<uint32_t,...>` SPIR-V in `d3d9_host.cpp`.
+  This is the correct, permanent implementation for this one fixed-function case (Vulkan has no true
+  fixed-function pipeline either way) — not a stand-in for missing vkd3d-shader translation. General
+  FVF/render-state shader synthesis remains the separate, future M4 milestone.
+- **A cached pipeline** (`ensure_pipeline`): shader modules, a pipeline layout (one push-constant range
+  for `vec2 viewportSize`, no descriptor sets needed), vertex bindings/attributes for the 20-byte FVF
+  stride (`VK_FORMAT_R32G32B32A32_SFLOAT` position + `VK_FORMAT_B8G8R8A8_UNORM` diffuse), dynamic
+  viewport/scissor, `render_pass=0` (dynamic rendering, per the plan's explicit instruction).
+- **Real per-draw work** (`execute_draw`): uploads the current vertex buffer's backing bytes fresh
+  every draw (simplest correct model for a first triangle, no persistent GPU vertex buffer / dirty
+  tracking yet), records explicit `cmd_pipeline_barrier` layout transitions (`TRANSFER_SRC_OPTIMAL` ↔
+  `COLOR_ATTACHMENT_OPTIMAL`, since `submit_clear`/`readback_render_target` leave the image in
+  `TRANSFER_SRC_OPTIMAL` — this assumes Clear always runs before the first Draw, true for the current
+  test flow but not enforced), binds/draws, then reads the result back into the render target's
+  `backing` the same way `pfnClear` already does.
+- `d3d9_host.cpp` now `#include <vulkan/vulkan_core.h>` directly (linked via the existing
+  `vulkan-headers` target) for the real, stable public `VK_*` enum values — mirroring `vulkan_host.cpp`'s
+  own precedent, not a new architectural decision; `d3d9_host.hpp` itself stays plain-integer per its
+  existing "no Vulkan types in the header" rule.
+- **Builds cleanly** (`cmake --build --preset=release`), no smoke-test regression.
+
+**⚠️ Not yet exercised end-to-end.** Extending `d3d9-triangle-test.cpp` with a real
+`CreateVertexBuffer`/`Lock`/write-3-vertices/`Unlock`/`SetFVF`/`SetStreamSource`/`DrawPrimitive`
+sequence (matching the shader's expected vertex layout) hits a **new** gate: `DrawPrimitive()` itself
+returns `D3DERR_INVALIDCALL` immediately, and — confirmed via gpu-bridge opcode tracing — **neither
+`SetStreamSource`'s nor `DrawPrimitive`'s wire ops ever fire**, meaning the runtime rejects the call
+before reaching our driver at all (same "pre-flight runtime rejection" pattern as the earlier
+`LockRect`-without-`D3DPRESENTFLAG_LOCKABLE_BACKBUFFER` case, and the `NtUserHwndQueryRedirectionInfo`
+gate). Leading hypothesis: `CreateVertexBuffer` still doesn't call `pfnCreateResource` (confirmed in
+§10 for the pre-offset-48-fix runtime state), so the vertex buffer has no driver-recognized backing —
+and now that render targets genuinely *do* get real backing (the offset-48 fix), the runtime's own
+consistency checks may have become *stricter* about requiring valid backing on *every* resource
+involved in a draw, not just the render target. Not yet confirmed. Next step: RE whether
+`CreateVertexBuffer` calls `pfnCreateResource` under this exact runtime/caps configuration (it may
+differ from the isolated backbuffer-only test Phase 1 originally checked), and if not, find another way
+to get vertex data into `d3d9_host` (possible directions: make `umd_SetStreamSource` proactively bind
+GPU backing via the same lazy-bind pattern `resolve_resource_id` already uses for render targets, then
+figure out how to get the vertex bytes there without a working `pfnLock` round trip).
+
+---
+
 ## 11. Immediate next steps (in order)
 
-1. **Resolve the `LockRect` → `pfnLock` gap (§10.5)** — unbinding-before-lock was tried and refuted;
+1. **Resolve the `DrawPrimitive` rejection gate (§10.6)** — the most valuable next step: RE whether
+   `CreateVertexBuffer` calls `pfnCreateResource` now (Phase 1's "buffers don't call it" finding may be
+   stale post-offset-48-fix), and get a real triangle actually drawing. This is the last blocker for
+   milestone M1 (minus shader translation, deferred to Part 4).
+2. **Resolve the `LockRect` → `pfnLock` gap (§10.5)** — unbinding-before-lock was tried and refuted;
    check `fill_d3d9caps` for a missing lockable-render-target capability bit, or accept host-side
    diagnostics as the verification method going forward (proven reliable twice already) and stop
    blocking on guest-side `LockRect` working.
-2. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
+3. **`pfnPresent` is still on `device_stub`** — not required for the current verification approach
    (host-side pixel readback sidesteps needing real pixels on screen), but needed before a literal
    "window shows a color" milestone. `D3DDDIARG_PRESENT`'s `hSrcResource`(offset 0) is RE-verified;
    wiring it through `resolve_resource_id()` the same way `SetRenderTarget`/`Lock` now work is the
    natural next step once needed.
-3. **`pfnCreateResource`'s remaining field layout** (width/height/usage/pool offsets) is still unknown
+4. **`pfnCreateResource`'s remaining field layout** (width/height/usage/pool offsets) is still unknown
    — offset 0 (Format) and offset 48 (output `hResource`) ARE now RE-verified (§10.5). The current
    fixed-guess width/height (640×480) works for this one test's window size but is wrong in general;
    textures and other resource kinds will need the real struct eventually. Needs a texture-creation-
@@ -501,15 +554,10 @@ diagnostics (proven reliable twice) for verification going forward instead.
    `RENDERSTATE`/`LOCK`/`CLEAR`/`PRESENT` came up empty for `CreateResource`'s actual builder — try a
    different angle, e.g. tracing from `CBaseDevice::CreateTexture`/`CSwapChain`'s constructor forward
    instead of searching by struct name backward).
-4. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
+5. **(Optional, low priority) SM3.0 caps follow-up.** `fill_d3d9caps` currently reports a
    fixed-function device (VS/PS version 0) as a deliberate workaround — restoring
    `D3DVS/PS_VERSION(3, 0)` re-triggers d3d9's SM2.0+ HAL-disable gauntlet elsewhere (confirmed:
    `GetDeviceCaps` itself starts failing with the same `0x8876086a`). Not required for M1.
-5. **Part 3 — the actual pipeline builder** (`d3d9_host`'s `execute_recorded` still no-ops
-   `set_viewport`/`draw_*`; `clear` is now real per §10.5): build a pipeline key from the tracked state,
-   call `vulkan_host::create_graphics_pipeline` with `render_pass=0` (dynamic rendering — the plan
-   explicitly says don't fix `vulkan_host`'s 1-color/1-depth render-pass gap, use dynamic rendering
-   instead), and actually execute draws.
 6. **Part 4 — vkd3d-shader integration** for SM1-3 token → SPIR-V translation (needed before Part 3's
    pipelines have real shader modules instead of a placeholder). Milestone M1 = programmable SM2/3
    triangle, pixel-diffed vs the DXVK oracle (`root_vkspike`).

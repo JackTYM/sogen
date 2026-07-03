@@ -26,8 +26,15 @@ namespace sogen
     // driver -- D3DDDIARG_PRESENT carries no HWND): whatever mechanism the runtime uses to display the
     // backbuffer, it goes through Lock to read pixels back from the driver first.
     //
-    // Building a full pipeline key + real triangle drawing against vulkan_host is Part 3; shader
-    // translation via vkd3d-shader is Part 4.
+    // Part 3 (the real draw path -- ensure_draw_infra/ensure_pipeline/execute_draw) is implemented: a
+    // single hardcoded fixed-function shader pair (D3DFVF_XYZRHW|D3DFVF_DIFFUSE), a cached pipeline,
+    // real vertex buffer upload, dynamic rendering with explicit layout barriers, and readback into the
+    // render target's backing store, mirroring pfnClear's own pattern. Not yet exercised end-to-end via
+    // the guest D3D9 API: DrawPrimitive() itself is currently rejected by the runtime
+    // (D3DERR_INVALIDCALL) before ever reaching pfnDrawPrimitive -- see HANDOFF_MACBOOK.md for the
+    // current understanding (likely related to vertex buffers never being driver-backed via
+    // pfnCreateResource, unlike render targets since the offset-48 fix). Shader translation via
+    // vkd3d-shader is Part 4.
     class d3d9_host
     {
       public:
@@ -80,6 +87,7 @@ namespace sogen
             uint32_t pool;
             std::vector<std::byte> backing; // host-side shadow copy; kept in sync with vk_image below
             uint64_t vk_image_id{};         // 0 = no GPU backing (plain buffer); set for render targets
+            uint64_t vk_image_view_id{};    // 0 until first drawn to; lazily created, cached per resource
         };
 
         struct shader_entry
@@ -119,11 +127,34 @@ namespace sogen
         device_state state_{};
 
         vulkan_host& vulkan_;
-        uint64_t vk_device_{}; // 0 until lazily created
+        uint64_t vk_instance_{};        // 0 until lazily created
+        uint64_t vk_physical_device_{}; // 0 until lazily created
+        uint64_t vk_device_{};          // 0 until lazily created
+
+        // Lazily created once per device: a single command pool/buffer/fence/queue reused for every
+        // draw, submitted and waited on synchronously (simplest correct model for a first triangle --
+        // no double-buffering/pipelining yet).
+        uint64_t queue_{};
+        uint64_t command_pool_{};
+        uint64_t command_buffer_{};
+        uint64_t fence_{};
+        bool draw_infra_ready_{false};
+
+        // The one hardcoded fixed-function shader pair (see execute_draw's comment) and its pipeline,
+        // lazily created and cached -- valid for every draw in this milestone since nothing about the
+        // pipeline shape varies yet.
+        uint64_t vs_module_{};
+        uint64_t fs_module_{};
+        uint64_t pipeline_layout_{};
+        uint64_t pipeline_{};
+        bool pipeline_ready_{false};
 
         uint64_t allocate_id();
         // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
         // Returns 0 on failure.
         uint64_t ensure_vk_device();
+        bool ensure_draw_infra();
+        bool ensure_pipeline(uint32_t color_format, uint32_t width, uint32_t height);
+        int32_t execute_draw(uint32_t vertex_count, uint32_t first_vertex);
     };
 } // namespace sogen
