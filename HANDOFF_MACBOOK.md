@@ -994,21 +994,12 @@ it, rebuilt `cmake --build --preset=release`:
 - `clang-format` remains unavailable on this machine (as in Task 4's note) — worth running before this
   lands anywhere it matters.
 
-### Deferred work (unchanged scope, now on solid footing)
+### Deferred work
 
-- **Constant buffers / uniform buffers.** No `D3DDDIARG_SETVERTEXSHADERCONST`/`SETPIXELSHADERCONST` →
-  UBO wiring for the programmable pipeline yet; Task 5's shader is a pure position+color passthrough
-  with no constants.
-- **Textures/samplers** in the programmable pipeline — completely out of scope for this slice.
-- **SM3.0** — `fill_d3d9caps` still reports SM2.0 (`vs_2_0`/`ps_2_0`); restoring 3.0 needs its own caps
-  gauntlet pass (see §11 item 3).
-- **WoW64/x86 shader path** — this UMD is x64-only; the 32-bit `sogen_d3d9um` (`syswow64`) DLL needs
-  typed `__stdcall` thunks per device-func slot instead of the generic caller-cleanup stub before any of
-  this session's shader-DDI work applies there.
-- **Pipeline-key system beyond one shader pair at a time.** `ensure_programmable_pipeline`'s cache
-  (`programmable_pipelines_`, keyed by `(vertex_shader_id << 32 | pixel_shader_id)`) is already a real
-  per-pair cache — it does not need a rework, it just hasn't been exercised with more than one distinct
-  VS/PS pair in a single run yet.
-- The ps.1.x texture-opcode gap in `measure_shader_token_length_dwords` (flagged during Task 4's review)
-  is now **moot, not just deferred** — see point 5 above; the function that had the gap was removed
-  because the real DDI convention never needed self-measured token length in the first place.
+Consolidated into `docs/d3d9-roadmap.md` — that's now the single tracking doc for remaining D3D9
+work (textures, int/bool constant registers, SM3.0, WoW64/x86, M3 coverage items, etc.), kept
+up to date at the end of every slice. Don't re-scatter deferred items back into this file; update
+the roadmap doc instead.
+
+Constant buffers/UBOs (the item this section used to list first) are done as of the very next slice
+after this one — see `docs/d3d9-roadmap.md`'s M1.5 entry.
