@@ -57,7 +57,12 @@ if(NOT VKD3D_SHADER_VULKAN_INCLUDE_DIR OR NOT VKD3D_SHADER_SPIRV_INCLUDE_DIR)
                          "Install via 'brew install vulkan-headers spirv-headers'.")
 endif()
 
+# MSYS2/mingw-w64 ships the Vulkan loader import lib as libvulkan.dll.a, which an MSVC-generator
+# CMake (CMAKE_FIND_LIBRARY_SUFFIXES defaults to .lib only) won't match without this.
+set(_vkd3d_shader_saved_lib_suffixes ${CMAKE_FIND_LIBRARY_SUFFIXES})
+list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES ".dll.a" ".a")
 find_library(VKD3D_SHADER_LIBVULKAN NAMES vulkan HINTS /opt/homebrew/lib /usr/local/lib)
+set(CMAKE_FIND_LIBRARY_SUFFIXES ${_vkd3d_shader_saved_lib_suffixes})
 if(NOT VKD3D_SHADER_LIBVULKAN)
     message(FATAL_ERROR "vkd3d-shader's configure needs to link a Vulkan loader. "
                          "Install via 'brew install vulkan-loader'.")
