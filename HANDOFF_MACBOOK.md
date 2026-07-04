@@ -1138,6 +1138,15 @@ With both fixed: `ib_diag_test.cpp`'s round trip shows the app's own second-Lock
 genuinely differs from the first (proving a real driver round trip, not the runtime's cache) and the
 host-side backing correctly shows the written pattern after `Unlock()`.
 
+**Open, permanent limitation, not just an unfinished detail:** this fix makes every `Lock()` on a
+vertex/index buffer a whole-buffer lock, unconditionally — `OffsetToLock`/`SizeToLock` are never read at
+all now, not "read from a best-guess offset." A real game that locks only the newly-appended tail of a
+growing dynamic buffer (the common `D3DLOCK_NOOVERWRITE` pattern) will silently get whole-buffer
+semantics under this driver today, with no error or signal that partial-lock semantics weren't honored.
+Supporting real partial locks would need per-routing-path struct detection (distinguishing the
+sysmem-routed shape from the driver-routed `LockI` shape at the `pfnLock` call site itself, since the two
+structs genuinely differ and can't be told apart by content alone) — not yet attempted.
+
 ### 16.2. Depth-stencil resource-id resolution — real root cause
 
 Live-traced (temporary `log_line` in `umd_CreateResource`/`umd_SetDepthStencil`, `ds_diag_test.cpp`

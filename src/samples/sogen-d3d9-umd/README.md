@@ -149,6 +149,10 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
     `d3d9_ddi.hpp`'s own comment for the full byte-level capture). `umd_Lock`/`umd_Unlock` now always
     treat every lock as an implicit whole-buffer lock (offset 0, size unknown) instead of trying to
     read either field, which both sidesteps the ambiguity and is what actually fixes the round-trip.
+    **This is a permanent limitation, not a stopgap**: partial-range locks (e.g. the common
+    `D3DLOCK_NOOVERWRITE` growing-buffer pattern) silently get whole-buffer semantics instead of an
+    error -- a real game relying on partial locks will see incorrect behavior. See `HANDOFF_MACBOOK.md`
+    §16.1 for what real per-path fix would require.
 - **Depth-stencil surface resource-id resolution, RE'd and fixed (2026-07-04).** `CreateDepthStencilSurface`
   does call `pfnCreateResource` (confirmed: `Format=75`/`D3DFMT_D24S8` correctly captured), but its
   DDI handle does not reach `pfnSetDepthStencil`'s `hZBuffer` as the same value -- `SetDepthStencil`
