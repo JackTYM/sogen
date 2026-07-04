@@ -489,8 +489,9 @@ namespace sogen
         }};
         // Binding 1 (combined image sampler, texture stage/sampler 0) is declared here unconditionally --
         // Vulkan allows a pipeline layout to declare more bindings than a given shader module statically
-        // uses, so this is safe even before the shader translator (Task 7) emits a SPIR-V sampler that
-        // references it. execute_draw only writes this descriptor when a texture is actually bound.
+        // uses, so this is safe for a PS that never samples (d3d9_shader_translator.cpp only emits a
+        // SPIR-V sampler variable for a PS that actually reads register s0). execute_draw only writes
+        // this descriptor when a texture is actually bound.
         const std::array<vulkan_host::descriptor_binding, 2> ps_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
@@ -971,7 +972,10 @@ namespace sogen
             // single-texture scope -- see ensure_programmable_pipeline's ps_bindings comment). Only
             // written into the descriptor set when a real, GPU-backed texture is actually bound; Vulkan
             // permits an allocated descriptor set to leave a binding unwritten as long as no bound
-            // pipeline's shader statically accesses it (still true until Task 7 wires the SPIR-V side).
+            // pipeline's shader statically accesses it -- true for every PS in the current test suite
+            // that doesn't sample (d3d9_shader_translator.cpp only emits a SPIR-V sampler variable for a
+            // PS that actually reads register s0), but a real gap for a PS that does sample with no
+            // texture bound (not exercised by any guest test yet).
             const auto tex_it = this->state_.bound_textures.find(0);
             if (tex_it != this->state_.bound_textures.end() && tex_it->second != 0 &&
                 this->ensure_texture_uploaded(tex_it->second))
@@ -1312,8 +1316,8 @@ namespace sogen
         // last call. Tracking staleness would mean setting a flag from unlock() (touching the
         // already-correct, resource-kind-agnostic Lock/Unlock path this task must leave alone), so this
         // is the deliberately simpler alternative -- correct in every case, just not the cheapest one.
-        // Whichever draw path first calls this (Task 3/7) can add its own caching if re-uploading every
-        // draw turns out to matter.
+        // execute_draw (the only caller so far) can add its own caching if re-uploading every draw turns
+        // out to matter.
         uint64_t staging_buffer = 0;
         if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
             staging_buffer == 0)

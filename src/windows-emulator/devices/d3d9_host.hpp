@@ -69,9 +69,9 @@ namespace sogen
         // Uploads a plain sampled texture_2d resource's current `backing` shadow into its real
         // vk_image_id via a staging buffer, so it's ready to be sampled by a draw. No dirty tracking --
         // every call re-uploads unconditionally (see d3d9_host.cpp's comment on this method for why).
-        // Meant to be called by whatever future draw path first binds/samples this texture (Task 3/7);
-        // not wired into execute_draw yet. Returns false (no-op) if the resource isn't a texture with
-        // real GPU backing, or its backing doesn't yet hold a full mip-0 image's worth of pixel data.
+        // Called by execute_draw whenever a real, GPU-backed texture is bound at stage 0. Returns false
+        // (no-op) if the resource isn't a texture with real GPU backing, or its backing doesn't yet hold
+        // a full mip-0 image's worth of pixel data.
         bool ensure_texture_uploaded(uint64_t resource);
 
         int32_t create_vertex_shader(const void* tokens, size_t token_size_bytes, uint64_t& out_shader);
@@ -116,7 +116,11 @@ namespace sogen
             std::vector<std::byte> elements; // raw d3d9_cmd::vertex_element entries
         };
 
-        // Per-device fixed-function/DDI state, tracked but not yet consumed by a pipeline builder.
+        // Per-device fixed-function/DDI state. Most of this is now consumed by execute_draw and the
+        // pipeline builders (render_state, bound_textures, sampler_state, index_buffer, stream_sources/
+        // strides, vertex_decl, vs/ps_const_f, render_targets, depth_stencil); texture_stage_state (the
+        // non-sampler TSS values, e.g. D3DTSS_COLOROP) and stream_frequencies are still write-only,
+        // tracked for fixed-function texture combining and instancing respectively, neither in scope yet.
         struct device_state
         {
             std::unordered_map<uint32_t, uint32_t> render_state{};
