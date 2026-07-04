@@ -32,6 +32,9 @@ i686-w64-mingw32-g++ -shared -O2 -std=c++20 -I../../d3d9-command-protocol -I../.
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_triangle_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-triangle-test-x86.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_shader_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-shader-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, and `d3d9_texture_test.cpp` are guest-runtime tests,
@@ -50,13 +53,15 @@ cp d3d9-const-test-x64.exe <root>/filesys/c/d3d9-const-test.exe
 cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
+cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
 shader, const, and texture tests. For the x86/WoW64 UMD, the real 32-bit Microsoft `d3d9.dll` must
-already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`.
+already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_43.dll` must exist at
+`<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86 shader test.
 
 ## Run
 
@@ -65,6 +70,7 @@ already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`.
 ./analyzer -e <root> -c c:/d3d9-shader-test.exe
 ./analyzer -e <root> -c c:/d3d9-const-test.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test.exe
+./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -140,8 +146,12 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   lookup table) instead of x64's generic zero-arg caller-cleanup stub, since x86 `__stdcall` is
   callee-cleanup and would desync the stack otherwise. Proven end-to-end: `d3d9-triangle-test-x86.exe`
   reaches the x86 UMD through real WoW64 against the genuine 32-bit Microsoft `d3d9.dll` and reads back
-  the same pixel as the x64 triangle test. Only the triangle test has been ported to x86 so far --
-  `d3d9-shader-test`, `d3d9-const-test`, and `d3d9-texture-test` remain x64-only.
+  the same pixel as the x64 triangle test. `d3d9-shader-test-x86.exe` (position+color passthrough
+  VS/PS pair, real `D3DCompile()`-produced `vs_2_0`/`ps_2_0`) also reaches the x86 UMD through real
+  WoW64 with all HRESULTs (`D3DCompile` x2, `CreateVertexShader`, `CreatePixelShader`, `DrawPrimitive`,
+  `Present`) coming back `0x00000000`, proving the shader-create/shader-set DDI slots
+  (`pfnCreateVertexShaderFunc`, `pfnCreatePixelShader`, `pfnSetVertexShaderFunc`, `pfnSetPixelShader`)
+  and the programmable draw path on x86. `d3d9-const-test` and `d3d9-texture-test` remain x64-only.
 - **5 of the 143 device-func-table slots have unverified arities on x86** (`pfnCheckCounter`,
   `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) -- a simple triangle-draw
   app never calls them, so their assumed byte counts haven't been checked against the real 32-bit
