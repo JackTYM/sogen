@@ -374,16 +374,20 @@ namespace
 #endif // !_WIN64
 
     // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): D3DDDIARG_CREATERESOURCE's real field layout (width/
-    // height/usage/pool offsets) is not yet RE-verified -- only offset 0 (Format) and offset 48 (the
-    // output hResource field) are confirmed. Every call is therefore treated as a render-target 2D
-    // texture at the test's known backbuffer size (640x480) until the real struct is pinned; fine for
-    // the current fixed-size-window milestone, wrong in general.
+    // height/usage/pool offsets) is not yet RE-verified -- only offset 0 (Format) and the output
+    // hResource field (48 on x64, 44 on x86 -- see umd_CreateResource's own comment) are confirmed.
+    // Every call is therefore treated as a render-target 2D texture at the test's known backbuffer
+    // size (640x480) until the real struct is pinned; fine for the current fixed-size-window
+    // milestone, wrong in general.
     //
-    // Offset 48 for hResource was found by writing a distinct, identifiable sentinel to every 8-byte-
-    // aligned offset (0..80) and observing which one came back unchanged in the very next
+    // Offset 48 for hResource (x64) was found by writing a distinct, identifiable sentinel to every
+    // 8-byte-aligned offset (0..80) and observing which one came back unchanged in the very next
     // SetRenderTarget call (0xAAAA000000000030, i.e. offset 0x30 = 48) -- direct proof, not inference
     // from a static hex dump (two earlier single-offset guesses, 40 and 44, were each individually
     // plausible-looking but empirically wrong).
+    //
+    // x86 note: the x64 offset does NOT carry over unchanged -- see umd_CreateResource's own comment
+    // for the live sentinel-scan RE that found the real x86 offset is 44, not 48.
     //
     // resolve_resource_id() also keeps a lazy-bind-at-first-use fallback (for any resource handle that
     // somehow reaches SetRenderTarget/Lock without going through CreateResource) -- harmless dead code
@@ -450,9 +454,29 @@ namespace
         };
         d3d9c::create_resource_response resp{};
         bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
+        // Output-handle offset: 48 on x64 (see the KNOWN LIMITATION comment above this function's own
+        // enclosing comment block). RE-verified live to be 44 on x86 (Task 3b, 2026-07-04, real 32-bit
+        // d3d9.dll via WoW64): umd_CreateResource temporarily wrote a distinct, offset-encoding
+        // sentinel (0xAAAA0000 | offset) to every 4-byte-aligned offset 0..48 for a real
+        // D3DFMT_A8R8G8B8 texture create (d3d9_texture_test.cpp's CreateTexture), instead of the real
+        // resource id; the very next Lock() call's D3DDDIARG_LOCK::hResource (independently RE-
+        // verified at offset 0 on x86 -- see d3d9_ddi.hpp) came back exactly 0xAAAA002C, i.e. offset
+        // 0x2C = 44 -- unambiguous, since every scanned offset carries a distinct value. Reproduced
+        // identically (same resource id, same 0xAAAA002C readback) across two independent runs.
+        // Consistent with the same single-pointer-field-shrinks-by-4 shift already confirmed for every
+        // other x86 DDI struct fixed so far (SETSTREAMSOURCE/SETINDICES/SETRENDERTARGET/
+        // SETDEPTHSTENCIL/CREATESHADERFUNC all shift by exactly 4 for exactly one preceding pointer
+        // field: 48-4=44) -- not the wholesale field-reordering D3DDDIARG_LOCK's x86 layout turned out
+        // to need (a single clean shift fully explains this finding; no second, conflicting offset was
+        // ever observed).
+#ifdef _WIN64
+        constexpr size_t k_create_resource_hresource_offset = 48;
+#else
+        constexpr size_t k_create_resource_hresource_offset = 44;
+#endif
         if (resp.hr == 0)
         {
-            std::memcpy(bytes + 48, &resp.resource, sizeof(resp.resource));
+            std::memcpy(bytes + k_create_resource_hresource_offset, &resp.resource, sizeof(resp.resource));
             // The runtime echoes this back unchanged as the handle in later calls (SetRenderTarget's
             // hRenderTarget, Lock's hResource, SetTexture's hTexture, ...), so the numeric handle value
             // IS the wire resource_id from here on. Recorded in g_created_resource_ids (a SEPARATE map
