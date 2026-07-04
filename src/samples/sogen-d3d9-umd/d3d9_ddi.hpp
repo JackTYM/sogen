@@ -311,6 +311,13 @@ typedef struct _D3DDDIARG_SETSTREAMSOURCE
     UINT Offset;
     UINT Stride;
 } D3DDDIARG_SETSTREAMSOURCE;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_SETSTREAMSOURCE) == 24, "D3DDDIARG_SETSTREAMSOURCE x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (hVertexBuffer shrinks from 8 to 4 bytes,
+// pulling Offset/Stride in behind it); compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_SETSTREAMSOURCE) == 16, "D3DDDIARG_SETSTREAMSOURCE x86 layout");
+#endif
 
 typedef struct _D3DDDIARG_SETSTREAMSOURCEFREQ
 {
@@ -323,17 +330,38 @@ typedef struct _D3DDDIARG_SETINDICES
     HANDLE hIndexBuffer;
     UINT Stride; // 2 = 16-bit indices, 4 = 32-bit indices
 } D3DDDIARG_SETINDICES;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_SETINDICES) == 16, "D3DDDIARG_SETINDICES x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (hIndexBuffer shrinks from 8 to 4 bytes);
+// compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_SETINDICES) == 8, "D3DDDIARG_SETINDICES x86 layout");
+#endif
 
 typedef struct _D3DDDIARG_SETRENDERTARGET
 {
     UINT RenderTargetIndex;
     HANDLE hRenderTarget; // 0 unbinds
 } D3DDDIARG_SETRENDERTARGET;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_SETRENDERTARGET) == 16, "D3DDDIARG_SETRENDERTARGET x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (hRenderTarget shrinks from 8 to 4 bytes);
+// compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_SETRENDERTARGET) == 8, "D3DDDIARG_SETRENDERTARGET x86 layout");
+#endif
 
 typedef struct _D3DDDIARG_SETDEPTHSTENCIL
 {
     HANDLE hZBuffer; // 0 = no depth-stencil
 } D3DDDIARG_SETDEPTHSTENCIL;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_SETDEPTHSTENCIL) == 8, "D3DDDIARG_SETDEPTHSTENCIL x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (hZBuffer shrinks from 8 to 4 bytes);
+// compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_SETDEPTHSTENCIL) == 4, "D3DDDIARG_SETDEPTHSTENCIL x86 layout");
+#endif
 
 typedef struct _D3DDDIARG_VIEWPORTINFO
 {
@@ -373,6 +401,13 @@ typedef struct _D3DDDIARG_CREATESHADERFUNC
     UINT CodeSize;       // in: token stream size in bytes
     HANDLE ShaderHandle; // out: driver-assigned shader handle
 } D3DDDIARG_CREATESHADERFUNC;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_CREATESHADERFUNC) == 16, "D3DDDIARG_CREATESHADERFUNC x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (ShaderHandle shrinks from 8 to 4 bytes);
+// compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_CREATESHADERFUNC) == 8, "D3DDDIARG_CREATESHADERFUNC x86 layout");
+#endif
 
 // pfnSetPixelShader/pfnSetVertexShaderFunc are direct-value calls, `(HANDLE hDevice, HANDLE hShader)`
 // -- same crash-driven RE finding as pfnSetTexture (see umd_SetPixelShader/umd_SetVertexShaderFunc in
@@ -382,16 +417,37 @@ typedef struct _D3DDDIARG_DELETEPIXELSHADERFUNC
 {
     HANDLE ShaderHandle;
 } D3DDDIARG_DELETEPIXELSHADERFUNC;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_DELETEPIXELSHADERFUNC) == 8, "D3DDDIARG_DELETEPIXELSHADERFUNC x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (ShaderHandle shrinks from 8 to 4 bytes);
+// compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_DELETEPIXELSHADERFUNC) == 4, "D3DDDIARG_DELETEPIXELSHADERFUNC x86 layout");
+#endif
 
 typedef struct _D3DDDIARG_DELETEVERTEXSHADERFUNC
 {
     HANDLE ShaderHandle;
 } D3DDDIARG_DELETEVERTEXSHADERFUNC;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_DELETEVERTEXSHADERFUNC) == 8, "D3DDDIARG_DELETEVERTEXSHADERFUNC x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (ShaderHandle shrinks from 8 to 4 bytes);
+// compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_DELETEVERTEXSHADERFUNC) == 4, "D3DDDIARG_DELETEVERTEXSHADERFUNC x86 layout");
+#endif
 
 typedef struct _D3DDDIARG_SETVERTEXSHADERDECL
 {
     HANDLE ShaderHandle;
 } D3DDDIARG_SETVERTEXSHADERDECL;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_SETVERTEXSHADERDECL) == 8, "D3DDDIARG_SETVERTEXSHADERDECL x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (ShaderHandle shrinks from 8 to 4 bytes);
+// compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_SETVERTEXSHADERDECL) == 4, "D3DDDIARG_SETVERTEXSHADERDECL x86 layout");
+#endif
 
 typedef struct _D3DDDIARG_CREATEVERTEXSHADERDECL
 {
@@ -542,9 +598,21 @@ typedef struct _D3DDDIARG_PRESENT
     BYTE Reserved[32];   // 8..39, size-confirmed region; individual fields not yet pinned
 } D3DDDIARG_PRESENT;
 
+#ifdef _WIN64
 static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll RE (LHBatchPresent copy pattern)");
+#else
+// x86 layout, hand-recomputed from the RE-confirmed x64 layout above; compiler-verified via
+// i686-w64-mingw32-g++ (both sizeof and offsetof of hResource/pData). D3DDDIARG_LOCK and
+// D3DDDIARG_UNLOCK's totals are UNCHANGED from x64: each struct's UINT64 Reserved0 field forces
+// 8-byte struct alignment, and that alignment padding exactly absorbs the 4 bytes the HANDLE/pData
+// fields shrink by -- hResource stays at offset 0 and pData stays at offset 40 in D3DDDIARG_LOCK,
+// identical to x64. D3DDDIARG_PRESENT has no such 8-byte-aligned field, so its total does shrink.
+static_assert(sizeof(D3DDDIARG_LOCK) == 104, "D3DDDIARG_LOCK x86 layout (size unchanged from x64)");
+static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "D3DDDIARG_UNLOCK x86 layout (size unchanged from x64)");
+static_assert(sizeof(D3DDDIARG_PRESENT) == 36, "D3DDDIARG_PRESENT x86 layout");
+#endif
 
 #pragma pack(pop)
 
@@ -553,4 +621,12 @@ static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll
 static_assert(sizeof(D3DDDIARG_OPENADAPTER) == 40, "D3DDDIARG_OPENADAPTER x64 layout");
 static_assert(sizeof(D3DDDI_ADAPTERFUNCS) == 24, "D3DDDI_ADAPTERFUNCS x64 layout");
 static_assert(sizeof(D3DDDIARG_GETCAPS) == 32, "D3DDDIARG_GETCAPS x64 layout");
+static_assert(sizeof(D3DDDIARG_CREATEDEVICE) == 96, "D3DDDIARG_CREATEDEVICE x64 layout");
+#else
+// x86 layout, hand-recomputed from the x64 layout above (every HANDLE/pointer field shrinks from 8 to
+// 4 bytes, shifting every subsequent field); compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_OPENADAPTER) == 24, "D3DDDIARG_OPENADAPTER x86 layout");
+static_assert(sizeof(D3DDDI_ADAPTERFUNCS) == 12, "D3DDDI_ADAPTERFUNCS x86 layout");
+static_assert(sizeof(D3DDDIARG_GETCAPS) == 16, "D3DDDIARG_GETCAPS x86 layout");
+static_assert(sizeof(D3DDDIARG_CREATEDEVICE) == 56, "D3DDDIARG_CREATEDEVICE x86 layout");
 #endif
