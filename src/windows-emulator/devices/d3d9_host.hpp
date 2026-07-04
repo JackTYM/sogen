@@ -156,7 +156,20 @@ namespace sogen
         // one of those unrelated, never-registered handles -- see g_created_resource_ids' comment in
         // sogen_d3d9_umd.cpp for the real, live-hit collision (twice, at two different numeric ranges)
         // this is fixing at its actual source instead of chasing further symptomatic guest-side patches.
-        uint64_t next_id_{1ULL << 32};
+        //
+        // MUST stay below 2^32: every id allocated here is round-tripped through the guest UMD as a
+        // HANDLE (e.g. create_shader_common's `pArgs->ShaderHandle = reinterpret_cast<HANDLE>(
+        // static_cast<uintptr_t>(resp.shader))`), and HANDLE/uintptr_t are only 32 bits wide on an x86
+        // (WoW64) guest. An id starting at 1ULL<<32 silently truncates to its low 32 bits there (e.g.
+        // 4294967301 -> 5), which the app then echoes back via SetVertexShaderFunc/SetPixelShader --
+        // looking exactly like an unrelated small runtime-internal handle and making shaders_.find()
+        // miss, so ensure_programmable_pipeline silently returns nullptr and every draw silently no-ops.
+        // Root-caused 2026-07-04 via d3d9-const-test-x86.exe's pixel-exact failure (the first x86 test
+        // to actually verify rendered output); x64's 64-bit HANDLE never truncated so this was invisible
+        // there, and d3d9-shader-test-x86.exe never caught it either since it only checks HRESULTs, not
+        // pixels. 0x10000 keeps ~65000x headroom over the documented "few hundred" runtime handles while
+        // comfortably fitting in 32 bits.
+        uint64_t next_id_{0x10000};
         std::unordered_map<uint64_t, resource_entry> resources_{};
         std::unordered_map<uint64_t, shader_entry> shaders_{};
         std::unordered_map<uint64_t, vertex_decl_entry> vertex_decls_{};
