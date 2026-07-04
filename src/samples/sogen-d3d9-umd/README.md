@@ -38,6 +38,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_shader_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-const-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-texture-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, and `d3d9_texture_test.cpp` are guest-runtime tests,
@@ -58,6 +61,7 @@ cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
 cp d3d9-const-test-x86.exe <root>/filesys/c/d3d9-const-test-x86.exe
+cp d3d9-texture-test-x86.exe <root>/filesys/c/d3d9-texture-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -65,7 +69,7 @@ cp d3d9-const-test-x86.exe <root>/filesys/c/d3d9-const-test-x86.exe
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
 shader, const, and texture tests. For the x86/WoW64 UMD, the real 32-bit Microsoft `d3d9.dll` must
 already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_43.dll` must exist at
-`<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86 shader test.
+`<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86 shader, const, and texture tests.
 
 ## Run
 
@@ -76,6 +80,7 @@ already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_
 ./analyzer -e <root> -c c:/d3d9-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -156,7 +161,7 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   WoW64 with all HRESULTs (`D3DCompile` x2, `CreateVertexShader`, `CreatePixelShader`, `DrawPrimitive`,
   `Present`) coming back `0x00000000`, proving the shader-create/shader-set DDI slots
   (`pfnCreateVertexShaderFunc`, `pfnCreatePixelShader`, `pfnSetVertexShaderFunc`, `pfnSetPixelShader`)
-  and the programmable draw path on x86. `d3d9-texture-test` remains x64-only.
+  and the programmable draw path on x86.
 - **`d3d9-const-test-x86.exe` FAILS on real WoW64 -- root-caused and fixed (2026-07-04), and it was NOT
   a constant-register timing/ordering bug.** The pixel-A check (must show the exact PS constant `c0`
   color) failed, reading back the background clear color instead -- the triangle never rasterized at
@@ -177,6 +182,28 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   starting `next_id_` at `0x10000` instead -- still ~100-300x above the documented "few hundred"
   runtime-handle range, but small enough to survive a 32-bit `HANDLE` round-trip on any guest
   architecture. See `d3d9_host.hpp`'s own comment on `next_id_` for the full account.
+- **`d3d9-texture-test-x86.exe` CRASHES on real WoW64 with STATUS_ACCESS_VIOLATION (0xC0000005) --
+  a new, real x86-specific bug, distinct from the shader-id truncation class fixed above.** The crash
+  happens inside the test's own texture-upload loop (`d3d9_texture_test.cpp`'s `LockRect` fill), writing
+  past the end of the buffer `pArgs->pData` points at. Root-caused via temporary host-side logging
+  (not committed) added to `umd_CreateResource`/`umd_Lock`: `CreateResource` for the real 640x480
+  `D3DFMT_A8R8G8B8` texture succeeds and mints a correctly-shaped host resource, but the very next
+  `Lock()` call's `hResource` does **not** carry that resource's id back from the runtime -- it's some
+  other, unrelated small handle -- so `resolve_buffer_resource_id` never finds it in
+  `g_created_resource_ids` and falls through to its generic lazy-bind fallback, minting a brand new,
+  wrong-shape 64 KiB vertex-buffer-like resource instead of the real ~1.2 MB texture. The app then
+  writes a full 640x480x4 texture into a 64 KiB buffer and overruns it. This means `umd_CreateResource`'s
+  hardcoded `bytes + 48` write-back of the output resource id into `D3DDDIARG_CREATERESOURCE` (see its
+  own KNOWN LIMITATION comment) -- RE'd and confirmed only against the **x64** struct layout -- lands on
+  the wrong field for the **x86** struct, whose preceding pointer-sized members are 4 bytes instead of 8;
+  the real 32-bit runtime's own resource-handle field is very likely at a different offset. This never
+  surfaced on `d3d9-shader-test-x86.exe`/`d3d9-const-test-x86.exe` because neither creates a real,
+  non-buffer resource via `pfnCreateResource` (their render targets happen to hit the same 64 KiB-or-
+  larger lazy-bind shape coincidentally, or aren't Locked at all). **Not fixed in this pass** -- this
+  bug is outside a test-porting task's scope and needs its own live x86 RE pass (same method as the
+  already-documented `D3DDDIARG_LOCK` 48-byte x86 layout finding) to find the real offset. All three of
+  this test's analytic checks are therefore unverified on x86; the x64 test remains the only proof of the
+  full M2 feature set (textures, indexed draws, depth, blend) together.
 - **5 of the 143 device-func-table slots have unverified arities on x86** (`pfnCheckCounter`,
   `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) -- a simple triangle-draw
   app never calls them, so their assumed byte counts haven't been checked against the real 32-bit
