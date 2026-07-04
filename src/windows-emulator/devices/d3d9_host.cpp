@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
 #include <cstring>
 #include <span>
 
@@ -543,9 +542,7 @@ namespace sogen
         this->vulkan_.bind_buffer_memory(device, vertex_buffer, vertex_memory, 0);
         this->vulkan_.upload_memory(device, vertex_memory, 0, vb_backing.size(), vb_backing.data(), vb_backing.size());
 
-        // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps): fixed
-        // UBO sizes regardless of how many registers the app actually set -- unset registers read as
-        // 0, matching real D3D9 semantics (see create_and_upload_ubo's zero-padding).
+        // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
         constexpr size_t ps_ubo_size = 32 * 4 * sizeof(float);
         uint64_t vs_ubo = 0;
@@ -555,12 +552,6 @@ namespace sogen
         std::array<uint64_t, 2> descriptor_sets{};
         if (use_programmable)
         {
-            // TEMPORARY bring-up diagnostic (Task 4) -- confirms real constant data set by the guest via
-            // SetVertexShaderConstantF/SetPixelShaderConstantF actually reaches execute_draw, populated,
-            // at the right time relative to the DrawPrimitive state-flush gate. Remove once verified.
-            std::fprintf(stderr, "[d3d9_host] execute_draw: vs_const_f.size()=%zu ps_const_f.size()=%zu\n",
-                        this->state_.vs_const_f.size(), this->state_.ps_const_f.size());
-
             if (!create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, vs_ubo_size, this->state_.vs_const_f,
                                        vs_ubo, vs_ubo_memory) ||
                 !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, ps_ubo_size, this->state_.ps_const_f,
@@ -572,10 +563,6 @@ namespace sogen
                 {
                     this->vulkan_.destroy_buffer(device, vs_ubo);
                     this->vulkan_.free_memory(device, vs_ubo_memory);
-                }
-                if (ps_ubo != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, ps_ubo);
                 }
                 return d3d_ok;
             }
