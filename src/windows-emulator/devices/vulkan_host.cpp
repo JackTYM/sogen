@@ -1,5 +1,7 @@
 #include "vulkan_host.hpp"
 
+#include "d3d9_format.hpp"
+
 #include <address_utils.hpp>
 
 #include <algorithm>
@@ -5633,10 +5635,16 @@ namespace sogen
         return VK_SUCCESS;
     }
 
-    int32_t vulkan_host::create_render_target(const uint64_t device, const uint32_t width, const uint32_t height, const uint32_t /*format*/,
+    int32_t vulkan_host::create_render_target(const uint64_t device, const uint32_t width, const uint32_t height, const uint32_t format,
                                               uint64_t& out_image)
     {
         out_image = 0;
+
+        uint32_t vk_format = 0;
+        if (!d3d9_format_to_vulkan(format, vk_format))
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
 
         const auto dev_it = this->impl_->devices.find(device);
         if (dev_it == this->impl_->devices.end())
@@ -5686,7 +5694,7 @@ namespace sogen
         VkImageCreateInfo image_info{};
         image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         image_info.imageType = VK_IMAGE_TYPE_2D;
-        image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+        image_info.format = static_cast<VkFormat>(vk_format);
         image_info.extent = {.width = width, .height = height, .depth = 1};
         image_info.mipLevels = 1;
         image_info.arrayLayers = 1;
