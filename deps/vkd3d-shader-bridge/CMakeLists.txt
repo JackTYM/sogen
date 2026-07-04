@@ -58,10 +58,18 @@ if(NOT VKD3D_SHADER_VULKAN_INCLUDE_DIR OR NOT VKD3D_SHADER_SPIRV_INCLUDE_DIR)
 endif()
 
 # MSYS2/mingw-w64 ships the Vulkan loader import lib as libvulkan.dll.a, which an MSVC-generator
-# CMake (CMAKE_FIND_LIBRARY_SUFFIXES defaults to .lib only) won't match without this.
+# CMake (CMAKE_FIND_LIBRARY_PREFIXES "", CMAKE_FIND_LIBRARY_SUFFIXES .lib only) won't match
+# without both the "lib" prefix and the .dll.a/.a suffixes added.
+set(_vkd3d_shader_saved_lib_prefixes ${CMAKE_FIND_LIBRARY_PREFIXES})
 set(_vkd3d_shader_saved_lib_suffixes ${CMAKE_FIND_LIBRARY_SUFFIXES})
+list(APPEND CMAKE_FIND_LIBRARY_PREFIXES "lib")
 list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES ".dll.a" ".a")
-find_library(VKD3D_SHADER_LIBVULKAN NAMES vulkan HINTS /opt/homebrew/lib /usr/local/lib)
+find_library(VKD3D_SHADER_LIBVULKAN NAMES vulkan-1 vulkan HINTS /opt/homebrew/lib /usr/local/lib)
+if(NOT VKD3D_SHADER_LIBVULKAN)
+    message(STATUS "vkd3d-shader: searched CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH} "
+                    "prefixes=${CMAKE_FIND_LIBRARY_PREFIXES} suffixes=${CMAKE_FIND_LIBRARY_SUFFIXES}")
+endif()
+set(CMAKE_FIND_LIBRARY_PREFIXES ${_vkd3d_shader_saved_lib_prefixes})
 set(CMAKE_FIND_LIBRARY_SUFFIXES ${_vkd3d_shader_saved_lib_suffixes})
 if(NOT VKD3D_SHADER_LIBVULKAN)
     message(FATAL_ERROR "vkd3d-shader's configure needs to link a Vulkan loader. "
