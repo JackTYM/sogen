@@ -127,6 +127,8 @@ namespace sogen
         varying_map_info.varying_map = varying_map.data();
         varying_map_info.varying_count = varying_count;
 
+        // No combined-sampler binding for VS in this milestone -- d3d9_host.cpp's vs_bindings (set 0) has no
+        // sampler slot at all; vertex-shader texture fetch (SM3.0) is out of scope, not merely unwired here.
         if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, VKD3D_SHADER_VISIBILITY_VERTEX, 0,
                             nullptr, 0, out.vertex_spirv))
         {
@@ -143,6 +145,9 @@ namespace sogen
             .sampler_space = 0,
             .sampler_index = 0,
             .shader_visibility = VKD3D_SHADER_VISIBILITY_PIXEL,
+            // Must be IMAGE, not BUFFER (unlike the CBV binding above): vkd3d matches this bitwise against
+            // the shader's own declared resource dimension and silently drops the binding on a mismatch --
+            // the sampler variable then never resolves and vkd3d-shader crashes when the shader references it.
             .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
             .binding = {.set = 1, .binding = 1, .count = 1},
         };
