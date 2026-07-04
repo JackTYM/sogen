@@ -470,6 +470,35 @@ namespace sogen
             }
         }
 
+        // Creates a host-visible buffer sized exactly for `data` and uploads it -- shared by
+        // execute_draw's per-draw vertex and index buffer uploads (simplest correct model for a first
+        // triangle; no persistent GPU buffer / dirty tracking yet, same as the rest of this file).
+        bool create_and_upload_gpu_buffer(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device,
+                                          const uint32_t usage, const std::vector<std::byte>& data, uint64_t& out_buffer,
+                                          uint64_t& out_memory)
+        {
+            if (vulkan.create_buffer(device, data.size(), usage, out_buffer) != 0 || out_buffer == 0)
+            {
+                return false;
+            }
+            uint64_t mem_size = 0;
+            uint64_t mem_align = 0;
+            uint32_t mem_type_bits = 0;
+            vulkan.get_buffer_memory_requirements(device, out_buffer, mem_size, mem_align, mem_type_bits);
+            const uint32_t memory_type = find_memory_type_index(
+                vulkan, physical_device, mem_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (memory_type == UINT32_MAX || vulkan.allocate_memory(device, mem_size, memory_type, out_memory) != 0 ||
+                out_memory == 0)
+            {
+                vulkan.destroy_buffer(device, out_buffer);
+                out_buffer = 0;
+                return false;
+            }
+            vulkan.bind_buffer_memory(device, out_buffer, out_memory, 0);
+            vulkan.upload_memory(device, out_memory, 0, data.size(), data.data(), data.size());
+            return true;
+        }
+
         // Creates a host-visible UBO of exactly `size` bytes and uploads `data` zero-padded to that
         // size -- the fixed D3D9 constant-register cap (VS=4096B/256 float4 regs, PS=512B/32 float4
         // regs) regardless of how many registers the app actually set, matching real D3D9 semantics
@@ -573,7 +602,7 @@ namespace sogen
                out_sampler != 0;
     }
 
-    int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex)
+    int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex, const indexed_draw* const indexed)
     {
         const auto rt_it = this->resources_.find(this->state_.render_targets[0]);
         if (rt_it == this->resources_.end() || rt_it->second.vk_image_id == 0)
@@ -595,6 +624,22 @@ namespace sogen
             return d3d_ok; // no real vertex data bound
         }
         const auto& vb_backing = vb_it->second.backing;
+
+        const resource_entry* ib_entry = nullptr;
+        if (indexed != nullptr)
+        {
+            const auto ib_it = this->resources_.find(indexed->index_buffer);
+            // Same vertex_buffer/index_buffer kind ambiguity as the stream_sources[0] guard above --
+            // the UMD's resolve_buffer_resource_id resolves every buffer (vertex or index) with kind
+            // vertex_buffer, so index buffers are only ever seen with that kind in practice.
+            if (ib_it == this->resources_.end() || ib_it->second.backing.empty() ||
+                (ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
+                 ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+            {
+                return d3d_ok; // no real index data bound
+            }
+            ib_entry = &ib_it->second;
+        }
 
         const uint64_t device = this->ensure_vk_device();
         if (device == 0 || !this->ensure_draw_infra())
@@ -632,30 +677,23 @@ namespace sogen
         // Upload the current vertex buffer contents fresh every draw -- simplest correct model for a
         // first triangle; no persistent GPU vertex buffer / dirty tracking yet.
         uint64_t vertex_buffer = 0;
-        if (this->vulkan_.create_buffer(device, vb_backing.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertex_buffer) != 0 ||
-            vertex_buffer == 0)
-        {
-            return d3d_ok;
-        }
-        uint64_t vb_mem_size = 0;
-        uint64_t vb_mem_align = 0;
-        uint32_t vb_mem_type_bits = 0;
-        this->vulkan_.get_buffer_memory_requirements(device, vertex_buffer, vb_mem_size, vb_mem_align, vb_mem_type_bits);
-        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, vb_mem_type_bits,
-                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (memory_type == UINT32_MAX)
-        {
-            this->vulkan_.destroy_buffer(device, vertex_buffer);
-            return d3d_ok;
-        }
         uint64_t vertex_memory = 0;
-        if (this->vulkan_.allocate_memory(device, vb_mem_size, memory_type, vertex_memory) != 0 || vertex_memory == 0)
+        if (!create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                          vb_backing, vertex_buffer, vertex_memory))
         {
-            this->vulkan_.destroy_buffer(device, vertex_buffer);
             return d3d_ok;
         }
-        this->vulkan_.bind_buffer_memory(device, vertex_buffer, vertex_memory, 0);
-        this->vulkan_.upload_memory(device, vertex_memory, 0, vb_backing.size(), vb_backing.data(), vb_backing.size());
+
+        uint64_t index_buffer_vk = 0;
+        uint64_t index_memory = 0;
+        if (ib_entry != nullptr &&
+            !create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                          ib_entry->backing, index_buffer_vk, index_memory))
+        {
+            this->vulkan_.destroy_buffer(device, vertex_buffer);
+            this->vulkan_.free_memory(device, vertex_memory);
+            return d3d_ok;
+        }
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
@@ -676,6 +714,11 @@ namespace sogen
             {
                 this->vulkan_.destroy_buffer(device, vertex_buffer);
                 this->vulkan_.free_memory(device, vertex_memory);
+                if (index_buffer_vk != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, index_buffer_vk);
+                    this->vulkan_.free_memory(device, index_memory);
+                }
                 if (vs_ubo != 0)
                 {
                     this->vulkan_.destroy_buffer(device, vs_ubo);
@@ -724,6 +767,11 @@ namespace sogen
             {
                 this->vulkan_.destroy_buffer(device, vertex_buffer);
                 this->vulkan_.free_memory(device, vertex_memory);
+                if (index_buffer_vk != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, index_buffer_vk);
+                    this->vulkan_.free_memory(device, index_memory);
+                }
                 this->vulkan_.destroy_buffer(device, vs_ubo);
                 this->vulkan_.free_memory(device, vs_ubo_memory);
                 this->vulkan_.destroy_buffer(device, ps_ubo);
@@ -825,7 +873,17 @@ namespace sogen
 
         const uint64_t vb_offset = 0;
         this->vulkan_.cmd_bind_vertex_buffers(this->command_buffer_, 0, 1, &vertex_buffer, &vb_offset);
-        this->vulkan_.cmd_draw(this->command_buffer_, vertex_count, 1, first_vertex, 0);
+        if (indexed != nullptr)
+        {
+            const uint32_t index_type = indexed->index_format != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+            this->vulkan_.cmd_bind_index_buffer(this->command_buffer_, index_buffer_vk, 0, index_type);
+            this->vulkan_.cmd_draw_indexed(this->command_buffer_, vertex_count, 1, indexed->first_index,
+                                           indexed->base_vertex_index, 0);
+        }
+        else
+        {
+            this->vulkan_.cmd_draw(this->command_buffer_, vertex_count, 1, first_vertex, 0);
+        }
 
         this->vulkan_.cmd_end_rendering(this->command_buffer_);
 
@@ -844,6 +902,11 @@ namespace sogen
 
         this->vulkan_.destroy_buffer(device, vertex_buffer);
         this->vulkan_.free_memory(device, vertex_memory);
+        if (index_buffer_vk != 0)
+        {
+            this->vulkan_.destroy_buffer(device, index_buffer_vk);
+            this->vulkan_.free_memory(device, index_memory);
+        }
         if (use_programmable)
         {
             this->vulkan_.destroy_buffer(device, vs_ubo);
@@ -1384,7 +1447,16 @@ namespace sogen
         }
         case gpu_bridge::command::d3d9_draw_indexed_primitive: {
             d3d9_cmd::draw_indexed_primitive_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            // Same D3DPT_TRIANGLELIST-only assumption as d3d9_draw_primitive.
+            const indexed_draw indexed{.index_buffer = this->state_.index_buffer,
+                                       .index_format = this->state_.index_format,
+                                       .first_index = req.start_index,
+                                       .base_vertex_index = req.base_vertex_index};
+            return this->execute_draw(req.primitive_count * 3, 0, &indexed);
         }
         case gpu_bridge::command::d3d9_draw_primitive_up: {
             d3d9_cmd::draw_primitive_up_record req{};

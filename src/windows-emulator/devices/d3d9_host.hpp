@@ -200,6 +200,17 @@ namespace sogen
         bool build_sampler(uint64_t device, uint32_t sampler_index, uint64_t& out_sampler) const;
         const programmable_pipeline_entry* ensure_programmable_pipeline(uint32_t color_format, uint32_t width,
                                                                          uint32_t height);
-        int32_t execute_draw(uint32_t vertex_count, uint32_t first_vertex);
+
+        // Present only for indexed draws; execute_draw binds `index_buffer` and calls cmd_draw_indexed
+        // instead of cmd_draw when passed. index_format matches set_indices_record::format (0 = 16-bit,
+        // 1 = 32-bit indices).
+        struct indexed_draw
+        {
+            uint64_t index_buffer;
+            uint32_t index_format;
+            uint32_t first_index;
+            int32_t base_vertex_index;
+        };
+        int32_t execute_draw(uint32_t vertex_count, uint32_t first_vertex, const indexed_draw* indexed = nullptr);
     };
 } // namespace sogen
