@@ -486,35 +486,38 @@ typedef struct _D3DDDIARG_DRAWINDEXEDPRIMITIVE
     UINT PrimitiveCount;
 } D3DDDIARG_DRAWINDEXEDPRIMITIVE;
 
-// hResource@0/Reserved0@8/OffsetToLock@16/SizeToLock@20/Reserved1@24 were originally RE'd against
-// CDriverVertexBuffer::Lock's OWN 104-byte local struct ("ddi.cpp") -- but that struct (memset_0'd to
-// 0x68 bytes there) is an *intermediate* representation CDriverVertexBuffer::Lock builds for its own
-// internal bookkeeping, not what actually crosses the DDI boundary. Live GDB tracing (2026-07-03,
-// sogen's own debugger, breakpoints via lldb's gdb-remote support against a real running d3d9.dll) of
-// the ACTUAL pfnLock call site -- inside the global DdLockLH dispatcher, several calls deeper -- proved
-// the real driver-facing struct is only ~64 bytes: DdLockLH builds its own smaller local copy (verified
-// via the memcpy_0-adjacent stack layout in idasql's decompile of DdLockLH) and it, not the 104-byte
-// outer struct, is what pArgs points to inside pfnLock (hResource@0 confirmed live: reads back the
-// exact wire handle value). Its caller reads the OUTPUT data pointer back from offset 40 (confirmed by
-// fixing pData's offset here and observing Lock()/LockRect() return real, working pointers end-to-end
-// for the first time this project). Flags's offset (previously modeled at 96) is now known to be
-// definitely out of the real struct's bounds (past offset ~64) -- not yet re-RE'd, so umd_Lock no
-// longer reads it from here at all (see umd_Lock's own comment).
+// hResource@0 and pData@40 are RE-verified and reliable across every resource kind and routing path
+// (confirmed live 2026-07-03/2026-07-04 -- see below). OffsetToLock/SizeToLock are deliberately NOT
+// modeled as named fields: real d3d9.dll builds this 104-byte struct from at least TWO DIFFERENT code
+// paths depending on internal buffer routing (see HANDOFF_MACBOOK.md for the full capture), and the
+// two paths disagree on which offset (if any) carries which value:
+//   - "sysmem-routed" buffers (CVertexBuffer::Lock / CIndexBuffer::Lock's own direct dispatch, taken
+//     when CreateXxxBuffer's DevCaps-gated routing picks CreateSysmemXxxBuffer): offset 72 reliably
+//     carries the app's requested SizeToLock (confirmed across 4 distinct sizes: 12, 12, 6, 40 bytes);
+//     OffsetToLock has no field at all here (confirmed by locking at a distinctive nonzero offset, 96,
+//     and finding that value nowhere in the captured bytes) -- the driver is only ever asked to lock
+//     from its own resource's base; the runtime adds OffsetToLock to the driver's returned base
+//     pointer itself, after the DDI call returns.
+//   - "driver-routed" buffers (CDriverVertexBuffer::Lock/CDriverIndexBuffer::Lock -> ::LockI, taken
+//     once the real per-resource-kind DevCaps routing bit is set -- see fill_d3d9caps's
+//     k_devcaps_driver_managed_pool/k_devcaps_driver_managed_index_pool): offset 80 carries the app's
+//     requested OffsetToLock instead (confirmed: locking at offsets 6 and 96 on two different buffers
+//     read back exactly 6 and 96 at this offset); SizeToLock has no reliable field in THIS shape --
+//     the offset umd_Lock originally also tried (72) holds an unrelated caller-stack address here, not
+//     a size (confirmed: it produced a ~25MB "size" once index buffers started using this path).
+// Since umd_Lock is one resource-kind- and routing-path-agnostic function (by design -- see its own
+// comment), it cannot statically know which shape a given call used. The safe, correct-either-way
+// choice: always treat every lock as an implicit whole-buffer lock (offset 0, size unknown) --
+// resolve_buffer_resource_id's existing size-unknown fallback already exists for exactly this case and
+// safely over-allocates rather than misreading a garbage value as a byte count.
 typedef struct _D3DDDIARG_LOCK
 {
     HANDLE hResource;    // 0 -- confirmed
     UINT64 Reserved0;    // 8 -- present, purpose unconfirmed
-    UINT OffsetToLock;   // 16 -- likely correct (inherited from the outer-struct RE; not independently
-                          //       re-verified against the real inner struct)
-    UINT SizeToLock;     // 20 -- likely correct, same caveat as OffsetToLock
-    UINT Reserved1;       // 24 -- present (BOOL-shaped), purpose unconfirmed
-    BYTE Reserved2[12];  // 28..39 -- unconfirmed
-    VOID* pData;         // 40 -- RE-verified live 2026-07-03 (see comment above); this is the real,
-                          //       correct offset for the struct pfnLock actually receives.
-    BYTE Reserved3[56];  // 48..103 -- unconfirmed; kept as trailing padding rather than shrinking the
-                          //            struct, since callers only read hResource/OffsetToLock/
-                          //            SizeToLock/pData through this type -- the true struct is smaller
-                          //            but nothing here reads or writes past pData anymore.
+    BYTE Reserved1[24];  // 16..39 -- unconfirmed
+    VOID* pData;         // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
+    BYTE Reserved2[56];  // 48..103 -- unconfirmed (includes OffsetToLock@80 in the "driver-routed"
+                          //            shape only -- not read, see comment above)
 } D3DDDIARG_LOCK;
 
 // RE-verified against the real staged d3d9.dll (CDriverVertexBuffer::Unlock, ddi.cpp) -- NOT guessed.

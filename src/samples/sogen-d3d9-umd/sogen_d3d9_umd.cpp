@@ -159,12 +159,54 @@ namespace
     // in the common case now that CreateResource populates the map directly.
     std::unordered_map<uint64_t, uint64_t> g_resource_ids;
 
+    // Handles actually minted by a real pfnCreateResource call (see umd_CreateResource) -- kept
+    // SEPARATE from g_resource_ids/resolve_buffer_resource_id's lazy-bind cache rather than merged into
+    // it, because the two live in genuinely different, independently-numbered handle spaces that CAN
+    // collide: pfnCreateResource's own resource ids (this host's sequential allocate_id() counter,
+    // echoed back as the app's handle) vs. the runtime's own small-integer internal handles for
+    // vertex/index buffers (which never call pfnCreateResource at all). A real collision was hit live
+    // 2026-07-04 merging these into one map: an internal-use pfnCreateResource call (format=100,
+    // D3DFMT_VERTEXDATA, fired automatically at device/resource creation for reasons unrelated to any
+    // guest-visible resource) happened to mint the exact numeric id a guest vertex buffer's own,
+    // unrelated runtime handle later collided with, so resolve_buffer_resource_id's cache hit on that
+    // id and silently handed the vertex buffer's Lock() an unrelated, empty resource instead of
+    // creating its own correctly-sized one.
+    std::unordered_map<uint64_t, uint64_t> g_created_resource_ids;
+
+    // pfnCreateResource's real width/height/usage/pool offsets are still not RE'd (see the KNOWN
+    // LIMITATION below), but its Format field (offset 0) IS confirmed, for every resource kind that
+    // reaches this call at all (render targets, depth-stencil surfaces, and plain textures alike).
+    // Classifying the *usage* purely from the requested Format is a real, evidence-backed heuristic
+    // for this bring-up milestone's fixed set of formats, not a guess: D3DFMT_D24S8/D24X8 (75/77) only
+    // ever mean a depth-stencil surface; D3DFMT_X8R8G8B8 (22) is this UMD's own only advertised
+    // display/render-target format (g_formats); everything else this milestone creates (currently just
+    // D3DFMT_A8R8G8B8, 21, for real sampled textures -- see d3d9_texture_test.cpp) is a plain texture
+    // with no RT/DS usage bit. This is what makes a genuinely NEW CreateTexture()-backed sampled
+    // texture (as opposed to Task 2's host-side-only, never-exercised-via-a-real-guest-call plumbing)
+    // land in d3d9_host::create_resource's is_texture branch instead of its is_render_target one.
+    uint32_t classify_resource_usage(uint32_t format)
+    {
+        if (format == 75 || format == 77) // D3DFMT_D24S8 / D3DFMT_D24X8
+        {
+            return 0x2; // D3DUSAGE_DEPTHSTENCIL
+        }
+        if (format == 22) // D3DFMT_X8R8G8B8
+        {
+            return 0x1; // D3DUSAGE_RENDERTARGET
+        }
+        return 0; // plain texture, no RT/DS usage bit
+    }
+
     HRESULT APIENTRY umd_CreateResource(HANDLE /*hDevice*/, void* pArgs)
     {
         auto* bytes = reinterpret_cast<unsigned char*>(pArgs);
         uint32_t format = 0;
         std::memcpy(&format, bytes, sizeof(format));
 
+        // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): D3DDDIARG_CREATERESOURCE's real width/height/pool
+        // offsets are still not RE'd -- every call gets this milestone's fixed 640x480 shape. Fine for
+        // every resource this session's tests create (all sized to match the 640x480 window/backbuffer
+        // exactly), wrong in general.
         const d3d9c::create_resource_request req{
             .kind = static_cast<uint32_t>(d3d9c::resource_kind::texture_2d),
             .format = format,
@@ -172,18 +214,44 @@ namespace
             .height = 480,
             .depth = 1,
             .mip_levels = 1,
-            .usage = 0x1, // D3DUSAGE_RENDERTARGET (public, ABI-stable D3D9 constant, not RE'd)
+            .usage = classify_resource_usage(format),
             .pool = 0,
         };
         d3d9c::create_resource_response resp{};
         bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
         if (resp.hr == 0)
         {
-            // The runtime echoes this back unchanged in later calls (SetRenderTarget's hRenderTarget,
-            // Lock's hResource, ...), so no separate g_resource_ids entry is needed: resolve_resource_id
-            // already returns an unrecognized handle unchanged, which is correct here since the handle
-            // IS the wire resource_id once this write lands.
             std::memcpy(bytes + 48, &resp.resource, sizeof(resp.resource));
+            // The runtime echoes this back unchanged as the handle in later calls (SetRenderTarget's
+            // hRenderTarget, Lock's hResource, SetTexture's hTexture, ...), so the numeric handle value
+            // IS the wire resource_id from here on. Recorded in g_created_resource_ids (a SEPARATE map
+            // from g_resource_ids -- see its own comment on why they must not be merged) so umd_Lock
+            // can recognize "this handle already names a real, correctly-shaped resource" instead of
+            // treating it as an unregistered buffer handle needing lazy-bind. Without this, Lock()/
+            // Unlock() on any real pfnCreateResource-backed resource (confirmed for plain textures,
+            // live 2026-07-04) silently mints a second, wrong-kind/wrong-shape resource that
+            // SetTexture/SetRenderTarget's own (unresolved, direct) handle never references -- the
+            // app's real pixel writes land in a resource nothing else ever reads, and the texture stays
+            // permanently all-zero. Coincidentally harmless for render targets so far (the lazy-bind
+            // fallback's hardcoded 640x480 X8R8G8B8 RENDERTARGET shape happens to match every existing
+            // test's own render target), but a real, general bug.
+            //
+            // EXCEPT for D3DFMT_VERTEXDATA (100) and D3DFMT_INDEX16/INDEX32 (101/102): live-confirmed
+            // 2026-07-04 that pfnCreateResource DOES fire for vertex/index buffer objects too, with
+            // these internal-only format values -- this was previously missed entirely (the "buffers
+            // never call pfnCreateResource" finding this whole file's comments repeat was true for
+            // every OTHER format, just not these three). This function's own hardcoded kind/width/
+            // height/format shape (a 640x480 texture_2d) is wrong for these -- registering them in
+            // g_created_resource_ids would make Lock() use that wrong, zero-backing (none of these
+            // formats are in d3d9_format_to_vulkan's table) resource instead of
+            // resolve_buffer_resource_id's own correctly-shaped, correctly-sized vertex/index buffer
+            // lazy-bind. Skip the registration for these formats so those handles keep falling through
+            // to that existing, already-correct path -- the resource created above for them is orphaned
+            // (harmless) rather than referenced again.
+            if (format != 100 && format != 101 && format != 102)
+            {
+                g_created_resource_ids[resp.resource] = resp.resource;
+            }
         }
         return S_OK;
     }
@@ -194,6 +262,15 @@ namespace
         if (raw == 0)
         {
             return 0;
+        }
+
+        // Check the real pfnCreateResource registry first (see g_created_resource_ids' own comment on
+        // why this must stay a separate map from g_resource_ids) -- a handle that already names a real,
+        // correctly-shaped resource must never fall into this function's own texture-shaped lazy-bind.
+        const auto created_it = g_created_resource_ids.find(raw);
+        if (created_it != g_created_resource_ids.end())
+        {
+            return created_it->second;
         }
 
         const auto it = g_resource_ids.find(raw);
@@ -223,18 +300,81 @@ namespace
         return resp.resource;
     }
 
+    // KNOWN LIMITATION, resolved 2026-07-04 (see HANDOFF_MACBOOK.md for the full RE trail): a real
+    // depth-stencil surface's DDI handle does NOT reach pfnSetDepthStencil as the same value
+    // pfnCreateResource's Format/output-handle write registered (live-confirmed: pfnCreateResource
+    // fires with Format=75/D3DFMT_D24S8 for CreateDepthStencilSurface, but pfnSetDepthStencil's
+    // hZBuffer -- itself only invoked once a real Clear()/draw actually references the bound Z-buffer,
+    // via the same worker-thread DP2-batch deferral documented elsewhere in this file -- carries a
+    // small, unrelated runtime-internal handle instead, exactly like vertex/index buffer handles never
+    // reaching pfnCreateResource at all). resolve_resource_id's generic lazy-bind fallback (640x480
+    // X8R8G8B8 RENDERTARGET) is therefore wrong for this handle in exactly the way Task 5's KNOWN
+    // LIMITATION comment predicted: a depth-stencil surface would silently get a color-shaped resource.
+    // Fixed the same way umd_Lock's buffer handles are: a dedicated lazy-bind that mints the CORRECT
+    // shape (D3DFMT_D24S8 format + D3DUSAGE_DEPTHSTENCIL usage) for this one DDI call site, which is
+    // architecturally guaranteed to only ever be used for depth-stencil surfaces -- no full
+    // D3DDDIARG_CREATERESOURCE width/height/usage/pool RE needed for this specific, narrow case.
+    uint64_t resolve_depth_stencil_resource_id(void* handle)
+    {
+        const auto raw = reinterpret_cast<uint64_t>(handle);
+        if (raw == 0)
+        {
+            return 0;
+        }
+
+        const auto created_it = g_created_resource_ids.find(raw);
+        if (created_it != g_created_resource_ids.end())
+        {
+            return created_it->second;
+        }
+
+        const auto it = g_resource_ids.find(raw);
+        if (it != g_resource_ids.end())
+        {
+            return it->second;
+        }
+
+        const d3d9c::create_resource_request req{
+            .kind = static_cast<uint32_t>(d3d9c::resource_kind::texture_2d),
+            .format = 75, // D3DFMT_D24S8 -- matches this UMD's own advertised depth-stencil format.
+            .width = 640,
+            .height = 480,
+            .depth = 1,
+            .mip_levels = 1,
+            .usage = 0x2, // D3DUSAGE_DEPTHSTENCIL (public, ABI-stable D3D9 constant, not RE'd)
+            .pool = 0,
+        };
+        d3d9c::create_resource_response resp{};
+        bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
+        if (resp.hr != 0)
+        {
+            return raw;
+        }
+
+        g_resource_ids[raw] = resp.resource;
+        return resp.resource;
+    }
+
     // Buffers (vertex/index) never call pfnCreateResource at all (RE-confirmed live), so their DDI
     // handle -- a small runtime-internal number, live-observed to collide with resolve_resource_id's
-    // own sequential ids -- reaches pfnLock completely unregistered. pfnLock is the first (and only)
-    // call site that knows the buffer's real byte size (SizeToLock), so it's the right place to lazily
-    // register a correctly-sized/kinded resource instead of resolve_resource_id's texture-shaped
+    // own sequential ids -- reaches pfnLock completely unregistered. pfnLock is the right place to
+    // lazily register a correctly-kinded resource instead of resolve_resource_id's texture-shaped
     // fallback, which previously made every never-seen Lock() land on a wrong-kind 640x480 texture.
+    // byte_size is always 0 in practice (see umd_Lock's own comment on why SizeToLock isn't reliably
+    // readable) -- kept as a parameter rather than removed in case a future, routing-path-aware caller
+    // can supply a real size.
     uint64_t resolve_buffer_resource_id(void* handle, uint32_t byte_size)
     {
         const auto raw = reinterpret_cast<uint64_t>(handle);
         if (raw == 0)
         {
             return 0;
+        }
+
+        const auto created_it = g_created_resource_ids.find(raw);
+        if (created_it != g_created_resource_ids.end())
+        {
+            return created_it->second;
         }
 
         const auto it = g_resource_ids.find(raw);
@@ -297,8 +437,25 @@ namespace
         // Undocumented internal reuse of this bit by the runtime's caps gauntlet -- same pattern as the
         // DevCaps2 STREAMOFFSET gate above.
         constexpr DWORD k_devcaps_driver_managed_pool = 0x02000000;
+        // DevCaps bit 0x04000000 (also undocumented, same reuse pattern as 0x02000000 above) is the
+        // analogous gate in CIndexBuffer::Create's OWN routing logic (a genuinely separate check on the
+        // same DevCaps DWORD, not shared code with CVertexBuffer::Create) -- confirmed live 2026-07-04
+        // by hooking CreateDriverIndexBuffer/CreateDriverManagedIndexBuffer/CreateSysmemIndexBuffer
+        // directly: without this bit, EVERY index buffer routes through CreateSysmemIndexBuffer
+        // regardless of requested pool, and its Lock() (CIndexBuffer::Lock's own direct dispatch) never
+        // updates the app-visible Data() pointer from anything this driver returns -- pfnLock/pfnUnlock
+        // are still invoked (confirmed: hr=S_OK every time) but purely as vestigial bookkeeping, so an
+        // index buffer's Lock()/Unlock() round-trips only through the runtime's own pre-allocated
+        // system-memory shadow, never reaching this driver at all. This is the real, confirmed root
+        // cause of the "index buffer Lock data never reaches the host" finding -- not a struct-offset
+        // bug (D3DDDIARG_LOCK's fields are read the exact same way for every resource kind; see its own
+        // comment for the separate, secondary struct-shape issue this pass also found and fixed). With
+        // this bit set, CreateDriverIndexBuffer is used instead and pfnLock/pfnUnlock's real return
+        // values genuinely reach the app.
+        constexpr DWORD k_devcaps_driver_managed_index_pool = 0x04000000;
         caps->DevCaps = D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_PUREDEVICE |
-                        D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY | k_devcaps_driver_managed_pool;
+                        D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY | k_devcaps_driver_managed_pool |
+                        k_devcaps_driver_managed_index_pool;
         // PrimitiveMiscCaps bit 0x2000 has no name in the public D3DPMISCCAPS_* set (the defined bits jump
         // from D3DPMISCCAPS_NULLREFERENCE=0x1000 straight past it to D3DPMISCCAPS_INDEPENDENTWRITEMASKS=
         // 0x4000) -- found via objdump disassembly of d3d9.dll's VS/PS-2.0+ HAL-enable validator (the
@@ -408,6 +565,7 @@ namespace
     const FORMATOP g_formats[] = {
         {22 /*X8R8G8B8*/, DISPLAY_RT, 0, 0, 0},
         {75 /*D24S8   */, FMT_OP_ZSTENCIL, 0, 0, 0},
+        {21 /*A8R8G8B8*/, FMT_OP_TEXTURE, 0, 0, 0}, // real sampled textures (d3d9_texture_test.cpp)
     };
 
     HRESULT APIENTRY umd_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps)
@@ -527,6 +685,16 @@ namespace
         // RE-verified live: pfnSetTexture takes Stage/hTexture as direct value arguments, not a
         // pointer to D3DDDIARG_SETTEXTURE -- a struct-pointer read crashed with the small Stage
         // integer (e.g. 0x1) dereferenced as an address. 0 for hTexture means unbind.
+        //
+        // KNOWN LIMITATION found during this session's RE work: for a D3DPOOL_MANAGED texture,
+        // pfnCreateResource fires TWICE for what the app sees as one CreateTexture() call, with two
+        // different output handles -- one that LockRect's hResource later uses (and correctly
+        // receives the app's real pixel writes) and a DIFFERENT one that this hTexture uses (which
+        // stays an empty, never-written resource, so a sampled texture created with D3DPOOL_MANAGED
+        // reads as entirely black/transparent). Not resolved -- d3d9_texture_test.cpp uses
+        // D3DUSAGE_DYNAMIC + D3DPOOL_DEFAULT instead (a single pfnCreateResource call, confirmed live)
+        // to avoid it, since root-causing and fixing the double-resource case was out of scope on top
+        // of this session's two required carried-forward findings.
         d3d9c::set_texture_record req{.stage = Stage, .reserved = 0, .texture = reinterpret_cast<uint64_t>(hTexture)};
         bridge_call(gb::ioctl_d3d9_set_texture, &req, sizeof(req), nullptr, 0);
         return S_OK;
@@ -719,7 +887,7 @@ namespace
         {
             return S_OK;
         }
-        d3d9c::set_depth_stencil_record req{.surface = resolve_resource_id(pArgs->hZBuffer)};
+        d3d9c::set_depth_stencil_record req{.surface = resolve_depth_stencil_resource_id(pArgs->hZBuffer)};
         bridge_call(gb::ioctl_d3d9_set_depth_stencil, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
@@ -859,19 +1027,23 @@ namespace
             return E_FAIL;
         }
         // Real render-target/texture handles are already registered by pfnCreateResource by the time
-        // Lock() reaches them (confirmed live), so the lazy-bind path below only ever fires for
-        // vertex/index buffers (which never call pfnCreateResource at all) -- safe to always resolve
-        // as a buffer here; already-registered handles hit the same early-return in either function.
-        const auto resource = resolve_buffer_resource_id(pArgs->hResource, pArgs->SizeToLock);
-        // Flags's real offset in the true (smaller) DDI-level struct is unknown (see d3d9_ddi.hpp's
-        // D3DDDIARG_LOCK comment) -- reading it at the old, now-known-wrong offset would read past the
-        // real struct's bounds, so this always sends 0 (no lock hints) until that offset is RE'd.
-        d3d9c::lock_request req{.resource = resource,
-                                .subresource = 0,
-                                .offset = pArgs->OffsetToLock,
-                                .size = pArgs->SizeToLock,
-                                .flags = 0,
-                                .reserved = 0};
+        // Lock() reaches them (confirmed live) -- resolve_buffer_resource_id checks g_created_resource_ids
+        // first and uses that resource id directly for them; only an unregistered handle (vertex/index
+        // buffers, which never call pfnCreateResource) falls through to its own buffer lazy-bind path.
+        //
+        // Neither OffsetToLock nor SizeToLock has a reliable, routing-path-independent offset in this
+        // struct (see d3d9_ddi.hpp's D3DDDIARG_LOCK comment for the full RE finding: two different real
+        // d3d9.dll code paths build this struct differently, and umd_Lock -- one function shared by
+        // every resource kind -- cannot tell which one produced a given call). Always treat every lock
+        // as an implicit whole-buffer lock: offset 0, size unknown (0, meaning "use the resource's own
+        // known/fallback byte size" -- both resolve_buffer_resource_id and the host's lock() already
+        // implement exactly this convention). This is what actually fixes the index-buffer round-trip
+        // bug this RE pass investigated: an earlier model read SizeToLock from an offset that happened
+        // to read back 0 for every index-buffer lock, and separately, index buffers were routing
+        // through a d3d9.dll internal path that never reached this driver's pfnLock/pfnUnlock at all
+        // until fill_d3d9caps gained the matching DevCaps routing bit (see its own comment).
+        const auto resource = resolve_buffer_resource_id(pArgs->hResource, 0);
+        d3d9c::lock_request req{.resource = resource, .subresource = 0, .offset = 0, .size = 0, .flags = 0, .reserved = 0};
 
         // First call with no output buffer just to learn the true backing size via lock_response.
         d3d9c::lock_response probe{};
