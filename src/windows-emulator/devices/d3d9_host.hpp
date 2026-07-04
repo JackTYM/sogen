@@ -193,6 +193,11 @@ namespace sogen
         uint64_t ensure_vk_device();
         bool ensure_draw_infra();
         bool ensure_pipeline(uint32_t color_format, uint32_t width, uint32_t height);
+        // Builds a fresh VkSampler from the accumulated D3D9 sampler state for `sampler_index` (falling
+        // back to D3D9's own documented per-state defaults for anything never explicitly set). Created
+        // fresh per draw and destroyed after, mirroring execute_draw's own per-draw VS/PS UBO lifecycle --
+        // no persistent sampler cache yet.
+        bool build_sampler(uint64_t device, uint32_t sampler_index, uint64_t& out_sampler) const;
         const programmable_pipeline_entry* ensure_programmable_pipeline(uint32_t color_format, uint32_t width,
                                                                          uint32_t height);
         int32_t execute_draw(uint32_t vertex_count, uint32_t first_vertex);

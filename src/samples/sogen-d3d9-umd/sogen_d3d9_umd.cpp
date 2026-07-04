@@ -465,10 +465,56 @@ namespace
         return S_OK;
     }
 
+    // RE-verified live (M2 Task 3): D3D9's real WDDM DDI has no separate pfnSetSamplerState slot at all
+    // (confirmed by re-reading D3DDDI_DEVICEFUNCS's declared members) -- sampler state reaches the driver
+    // through this same pfnSetTextureStageState call, via extra D3DDDITEXTURESTAGESTATETYPE values that
+    // have no counterpart in the public D3DTEXTURESTAGESTATETYPE enum. The two are told apart purely by
+    // which State value arrives, not by a numeric threshold: captured live via a real guest
+    // SetSamplerState()-driven test against the actual staged d3d9.dll, both from the runtime's own
+    // per-sampler default-initialization sequence (State=13,14,25,15,16,17,18,19,20,21,29,31,30 emitted
+    // for every one of the 16 real samplers, Stage/Sampler 0-15 with no offset) and from explicit
+    // non-default SetSamplerState() calls that changed a cached value and so weren't optimized away:
+    // ADDRESSU(13)->CLAMP=3, MAGFILTER(16)->LINEAR=2, MINFILTER(17)->LINEAR=2 (sampler 2, confirming the
+    // Stage field carries the sampler index unmodified), ADDRESSV(14)->MIRROR=2 (sampler 3). See
+    // HANDOFF_MACBOOK.md for the full capture.
+    uint32_t sampler_state_for_ddi_tss_state(UINT ddi_state)
+    {
+        switch (ddi_state)
+        {
+        case 13: return D3DSAMP_ADDRESSU;
+        case 14: return D3DSAMP_ADDRESSV;
+        case 25: return D3DSAMP_ADDRESSW;
+        case 15: return D3DSAMP_BORDERCOLOR;
+        case 16: return D3DSAMP_MAGFILTER;
+        case 17: return D3DSAMP_MINFILTER;
+        case 18: return D3DSAMP_MIPFILTER;
+        case 19: return D3DSAMP_MIPMAPLODBIAS;
+        case 20: return D3DSAMP_MAXMIPLEVEL;
+        case 21: return D3DSAMP_MAXANISOTROPY;
+        // Confirmed sampler-shaped (present in every sampler's default-init sequence, distinct from any
+        // TSS default) but never individually round-tripped through an explicit non-default
+        // SetSamplerState() call, so their real D3DSAMPLERSTATETYPE identity (candidates: SRGBTEXTURE/
+        // ELEMENTINDEX/DMAPOFFSET, D3DSAMP 11-13) isn't confirmed. Still routed to the sampler bucket
+        // (the correct category) under reserved values outside D3DSAMPLERSTATETYPE's real range, instead
+        // of guessing a specific identity or silently misfiling them as texture-stage-state.
+        case 29: return 1029;
+        case 30: return 1030;
+        case 31: return 1031;
+        default: return 0; // a genuine D3DTEXTURESTAGESTATETYPE value; 0 is never a real D3DSAMPLERSTATETYPE
+        }
+    }
+
     HRESULT APIENTRY umd_SetTextureStageState(HANDLE /*hDevice*/, CONST D3DDDIARG_TEXTURESTAGESTATE* pArgs)
     {
         if (pArgs == nullptr)
         {
+            return S_OK;
+        }
+        if (const uint32_t sampler_state = sampler_state_for_ddi_tss_state(pArgs->State); sampler_state != 0)
+        {
+            d3d9c::set_sampler_state_record req{
+                .sampler = pArgs->Stage, .state = sampler_state, .value = pArgs->Value, .reserved = 0};
+            bridge_call(gb::ioctl_d3d9_set_sampler_state, &req, sizeof(req), nullptr, 0);
             return S_OK;
         }
         d3d9c::set_texture_stage_state_record req{.stage = pArgs->Stage, .state = pArgs->State, .value = pArgs->Value, .reserved = 0};

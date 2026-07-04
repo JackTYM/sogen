@@ -26,6 +26,17 @@ namespace sogen
         constexpr uint32_t d3dusage_rendertarget = 0x00000001;
         constexpr uint32_t d3dusage_depthstencil = 0x00000002;
 
+        // Public D3DSAMPLERSTATETYPE values (d3d9types.h) -- the wire protocol's set_sampler_state_record
+        // carries these directly (see the UMD's sampler_state_for_ddi_tss_state, which translates the real
+        // DDI-level D3DDDITEXTURESTAGESTATETYPE encoding into these before it ever reaches the host).
+        constexpr uint32_t d3dsamp_addressu = 1;
+        constexpr uint32_t d3dsamp_addressv = 2;
+        constexpr uint32_t d3dsamp_addressw = 3;
+        constexpr uint32_t d3dsamp_magfilter = 5;
+        constexpr uint32_t d3dsamp_minfilter = 6;
+        constexpr uint32_t d3dsamp_mipfilter = 7;
+        constexpr uint32_t d3dsamp_maxanisotropy = 10;
+
         // Minimal fixed-function passthrough shader pair for D3DFVF_XYZRHW|D3DFVF_DIFFUSE (see
         // devices/shaders/ff_triangle.{vert,frag} for the GLSL source this was compiled from with
         // glslangValidator). Not a placeholder for missing vkd3d-shader translation -- Vulkan has no
@@ -189,8 +200,12 @@ namespace sogen
             return false;
         }
 
-        const std::array<vulkan_host::descriptor_pool_size, 1> pool_sizes{
-            {{.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 2}}};
+        const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 2},
+            // One combined-image-sampler slot: the PS set's binding 1 (see ensure_programmable_pipeline),
+            // for texture stage/sampler 0 -- this slice's minimum-viable single-texture binding.
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1},
+        }};
         if (this->vulkan_.create_descriptor_pool(device, 2, pool_sizes, this->descriptor_pool_) != 0 ||
             this->descriptor_pool_ == 0)
         {
@@ -324,8 +339,14 @@ namespace sogen
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
         }};
-        const std::array<vulkan_host::descriptor_binding, 1> ps_bindings{{
+        // Binding 1 (combined image sampler, texture stage/sampler 0) is declared here unconditionally --
+        // Vulkan allows a pipeline layout to declare more bindings than a given shader module statically
+        // uses, so this is safe even before the shader translator (Task 7) emits a SPIR-V sampler that
+        // references it. execute_draw only writes this descriptor when a texture is actually bound.
+        const std::array<vulkan_host::descriptor_binding, 2> ps_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
+            {.binding = 1, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
         }};
         if (this->vulkan_.create_descriptor_set_layout(device, vs_bindings, entry.vs_set_layout) != 0 ||
@@ -484,7 +505,66 @@ namespace sogen
             vulkan.upload_memory(device, out_memory, 0, size, staging.data(), size);
             return true;
         }
+
+        // D3DTEXTUREFILTERTYPE (D3DTEXF_NONE=0, POINT=1, LINEAR=2, ANISOTROPIC=3, ...) -> VkFilter.
+        // Anisotropic/pyramidal/gaussian quad filters all sample linearly in Vulkan; anisotropy itself is
+        // the sampler's separate anisotropyEnable/maxAnisotropy fields (see build_sampler below).
+        uint32_t d3d9_filter_to_vk_filter(const uint32_t d3d9_filter)
+        {
+            return d3d9_filter >= 2 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        }
+
+        uint32_t d3d9_mip_filter_to_vk_mipmap_mode(const uint32_t d3d9_mip_filter)
+        {
+            return d3d9_mip_filter >= 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        }
+
+        // D3DTEXTUREADDRESS (WRAP=1, MIRROR=2, CLAMP=3, BORDER=4, MIRRORONCE=5) -> VkSamplerAddressMode.
+        uint32_t d3d9_address_to_vk(const uint32_t d3d9_address)
+        {
+            switch (d3d9_address)
+            {
+            case 2: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+            case 3: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            case 4: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            case 5: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+            default: return VK_SAMPLER_ADDRESS_MODE_REPEAT; // WRAP (1) and any unrecognized value
+            }
+        }
+
+        uint32_t sampler_state_or(const std::unordered_map<uint64_t, uint32_t>& sampler_state, const uint32_t sampler,
+                                  const uint32_t d3dsamp_type, const uint32_t default_value)
+        {
+            const auto it = sampler_state.find(tss_key(sampler, d3dsamp_type));
+            return it != sampler_state.end() ? it->second : default_value;
+        }
     } // namespace
+
+    bool d3d9_host::build_sampler(const uint64_t device, const uint32_t sampler_index, uint64_t& out_sampler) const
+    {
+        out_sampler = 0;
+        const auto& ss = this->state_.sampler_state;
+        // Defaults match real D3D9's own documented per-D3DSAMPLERSTATETYPE defaults (D3DSAMP_MAGFILTER/
+        // MINFILTER default to D3DTEXF_POINT, MIPFILTER to D3DTEXF_NONE, ADDRESSU/V/W to D3DTADDRESS_WRAP,
+        // MAXANISOTROPY to 1), confirmed live in this task's own default-init capture (HANDOFF_MACBOOK.md).
+        const uint32_t mag_filter = d3d9_filter_to_vk_filter(sampler_state_or(ss, sampler_index, d3dsamp_magfilter, 1));
+        const uint32_t min_filter = d3d9_filter_to_vk_filter(sampler_state_or(ss, sampler_index, d3dsamp_minfilter, 1));
+        const uint32_t mipmap_mode =
+            d3d9_mip_filter_to_vk_mipmap_mode(sampler_state_or(ss, sampler_index, d3dsamp_mipfilter, 0));
+        const uint32_t address_u = d3d9_address_to_vk(sampler_state_or(ss, sampler_index, d3dsamp_addressu, 1));
+        const uint32_t address_v = d3d9_address_to_vk(sampler_state_or(ss, sampler_index, d3dsamp_addressv, 1));
+        const uint32_t address_w = d3d9_address_to_vk(sampler_state_or(ss, sampler_index, d3dsamp_addressw, 1));
+        const uint32_t max_anisotropy = sampler_state_or(ss, sampler_index, d3dsamp_maxanisotropy, 1);
+
+        // Every resource created by this slice has exactly one mip level (see create_resource), so LOD is
+        // pinned to 0 regardless of the app's own MIPFILTER/MAXMIPLEVEL/MIPMAPLODBIAS state.
+        return this->vulkan_.create_sampler(device, mag_filter, min_filter, address_u, address_v, address_w, mipmap_mode,
+                                            /*compare_enable=*/0, /*compare_op=*/0,
+                                            /*anisotropy_enable=*/max_anisotropy > 1 ? 1 : 0, /*border_color=*/0,
+                                            /*mip_lod_bias=*/0.0f, static_cast<float>(max_anisotropy), /*min_lod=*/0.0f,
+                                            /*max_lod=*/0.0f, out_sampler) == 0 &&
+               out_sampler != 0;
+    }
 
     int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex)
     {
@@ -577,6 +657,8 @@ namespace sogen
         uint64_t vs_ubo_memory = 0;
         uint64_t ps_ubo = 0;
         uint64_t ps_ubo_memory = 0;
+        uint64_t tex_sampler = 0;
+        uint64_t tex_image_view = 0;
         std::array<uint64_t, 2> descriptor_sets{};
         if (use_programmable)
         {
@@ -595,6 +677,37 @@ namespace sogen
                 return d3d_ok;
             }
 
+            // Combined-image-sampler binding for texture stage/sampler 0 (this slice's minimum-viable
+            // single-texture scope -- see ensure_programmable_pipeline's ps_bindings comment). Only
+            // written into the descriptor set when a real, GPU-backed texture is actually bound; Vulkan
+            // permits an allocated descriptor set to leave a binding unwritten as long as no bound
+            // pipeline's shader statically accesses it (still true until Task 7 wires the SPIR-V side).
+            const auto tex_it = this->state_.bound_textures.find(0);
+            if (tex_it != this->state_.bound_textures.end() && tex_it->second != 0 &&
+                this->ensure_texture_uploaded(tex_it->second))
+            {
+                const auto tex_res_it = this->resources_.find(tex_it->second);
+                if (tex_res_it != this->resources_.end())
+                {
+                    resource_entry& tex = tex_res_it->second;
+                    if (tex.vk_image_view_id == 0)
+                    {
+                        uint32_t tex_vk_format = 0;
+                        if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
+                        {
+                            this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
+                                                            VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                            VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
+                        }
+                    }
+                    if (tex.vk_image_view_id != 0 && this->build_sampler(device, 0, tex_sampler))
+                    {
+                        tex_image_view = tex.vk_image_view_id;
+                    }
+                }
+            }
+
             this->vulkan_.reset_descriptor_pool(device, this->descriptor_pool_, 0);
             const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
             uint32_t set_count = 0;
@@ -608,10 +721,14 @@ namespace sogen
                 this->vulkan_.free_memory(device, vs_ubo_memory);
                 this->vulkan_.destroy_buffer(device, ps_ubo);
                 this->vulkan_.free_memory(device, ps_ubo_memory);
+                if (tex_sampler != 0)
+                {
+                    this->vulkan_.destroy_sampler(device, tex_sampler);
+                }
                 return d3d_ok;
             }
 
-            const std::array<vulkan_host::descriptor_write, 2> writes{{
+            std::vector<vulkan_host::descriptor_write> writes{
                 {.dst_set = descriptor_sets[0],
                  .dst_binding = 0,
                  .dst_array_element = 0,
@@ -632,7 +749,20 @@ namespace sogen
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
-            }};
+            };
+            if (tex_image_view != 0 && tex_sampler != 0)
+            {
+                writes.push_back({.dst_set = descriptor_sets[1],
+                                  .dst_binding = 1,
+                                  .dst_array_element = 0,
+                                  .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                  .buffer = 0,
+                                  .offset = 0,
+                                  .range = 0,
+                                  .sampler = tex_sampler,
+                                  .image_view = tex_image_view,
+                                  .image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+            }
             this->vulkan_.update_descriptor_sets(device, writes);
         }
 
@@ -713,6 +843,10 @@ namespace sogen
             this->vulkan_.free_memory(device, vs_ubo_memory);
             this->vulkan_.destroy_buffer(device, ps_ubo);
             this->vulkan_.free_memory(device, ps_ubo_memory);
+            if (tex_sampler != 0)
+            {
+                this->vulkan_.destroy_sampler(device, tex_sampler);
+            }
         }
 
         // Read the drawn frame back into the resource's backing store, same as pfnClear -- so pfnLock

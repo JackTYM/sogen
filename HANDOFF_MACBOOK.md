@@ -1003,3 +1003,80 @@ the roadmap doc instead.
 
 Constant buffers/UBOs (the item this section used to list first) are done as of the very next slice
 after this one — see `docs/d3d9-roadmap.md`'s M1.5 entry.
+
+---
+
+## 16. M2 Task 3 — sampler-state DDI encoding RE'd live; real samplers + combined-image-sampler binding wired (2026-07-03)
+
+**The question this session answered, gate-task style:** §11's earlier note ("`pfnSetSamplerState`: no
+separate slot exists in `D3DDDI_DEVICEFUNCS` at all... figure out the real TSS/sampler-state boundary
+before wiring it to anything") is now resolved with live-captured evidence, not assumption.
+
+**Method:** a throwaway guest test (`d3d9_sampler_diag_test.cpp`, removed after use) called
+`SetTextureStageState(0, D3DTSS_COLOROP, ...)` plus several `SetSamplerState(sampler, TYPE, value)`
+calls with values chosen to differ from D3D9's own cached defaults (so the runtime's dirty-state cache
+wouldn't suppress the driver dispatch), then issued a real `DrawPrimitive` to force any deferred/batched
+state to flush. Temporary `log_line` instrumentation in `umd_SetTextureStageState`
+(`sogen_d3d9_umd.cpp`, removed after) printed every `Stage`/`State`/`Value` the real staged `d3d9.dll`
+actually sent, captured through `analyzer -e root -c`.
+
+**Finding: there is no numeric threshold — sampler state and texture-stage state share one interleaved
+`State` enum (`D3DDDITEXTURESTAGESTATETYPE`), told apart only by which specific value arrives.** Two
+independent pieces of live evidence agree:
+1. **The runtime's own per-sampler default-initialization sequence**, captured for every one of the 16
+   real samplers (`Stage`/`Sampler` 0-15, no offset applied): `State = 13, 14, 25, 15, 16, 17, 18, 19,
+   20, 21, 29, 31, 30` in that fixed order, for every sampler index — clearly distinct from the plain
+   TSS default-init sequence also captured for stages 0-7 (`State = 7, 8, 9, 10, 11, 22, 23, 24`).
+2. **Explicit `SetSamplerState()` calls with non-default values**, which changed a cached value and so
+   weren't optimized away by the runtime, reached the driver as:
+   - `SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR)` → `Stage=0 State=16 Value=2`
+   - `SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP)` → `Stage=0 State=13 Value=3`
+   - `SetSamplerState(2, D3DSAMP_MINFILTER, D3DTEXF_LINEAR)` → `Stage=2 State=17 Value=2` (confirms the
+     `Stage` field carries the sampler index unmodified, not offset by the 8 real texture stages)
+   - `SetSamplerState(3, D3DSAMP_ADDRESSV, D3DTADDRESS_MIRROR)` → `Stage=3 State=14 Value=2`
+
+   Confirmed mapping (DDI `State` → public `D3DSAMPLERSTATETYPE`): `13→ADDRESSU, 14→ADDRESSV,
+   25→ADDRESSW, 15→BORDERCOLOR, 16→MAGFILTER, 17→MINFILTER, 18→MIPFILTER, 19→MIPMAPLODBIAS,
+   20→MAXMIPLEVEL, 21→MAXANISOTROPY`. Three more sampler-shaped values (`29, 31, 30`) appear in every
+   default-init sequence but were never individually round-tripped through a distinguishing explicit
+   call, so their exact `D3DSAMPLERSTATETYPE` identity (candidates: `SRGBTEXTURE`/`ELEMENTINDEX`/
+   `DMAPOFFSET`, `D3DSAMP` 11-13) is unconfirmed — routed to the sampler bucket regardless (the correct
+   category), under reserved out-of-range values (1029-1031) rather than a guessed identity.
+
+**Implementation on top of this finding:**
+- `sogen_d3d9_umd.cpp`'s `umd_SetTextureStageState` now runs every `State` through
+  `sampler_state_for_ddi_tss_state()` (the table above); a nonzero result means "this is really a
+  sampler-state call" — it repacks `{Sampler=Stage, State=<public D3DSAMP value>, Value}` and sends it
+  over the wire's existing (previously unused) `ioctl_d3d9_set_sampler_state`/`set_sampler_state_record`
+  instead of `ioctl_d3d9_set_texture_stage_state`. `d3d9_host`'s host-side handler for that opcode
+  already stored into `device_state::sampler_state` (keyed `(sampler<<32)|state`) unconditionally since
+  the M1.5 slice — it was simply never reachable from the guest before this fix.
+- `d3d9_host.cpp`: new `build_sampler()` reads the accumulated `sampler_state` map for a given sampler
+  index (falling back to D3D9's real documented per-state defaults — `POINT` filters, `WRAP` addressing,
+  `MAXANISOTROPY=1` — confirmed by this session's own default-init capture) and calls
+  `vulkan_host::create_sampler` with real `VkFilter`/`VkSamplerAddressMode`/`VkSamplerMipmapMode` values
+  translated from the public D3D9 enums. Created fresh per draw and destroyed after, mirroring
+  `execute_draw`'s existing per-draw VS/PS UBO lifecycle (no persistent sampler cache yet — a reasonable
+  follow-up once this scheme sees real reuse pressure).
+- `ensure_programmable_pipeline`'s PS descriptor-set layout (set 1) gained a second binding — binding 1,
+  `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`, for texture stage/sampler 0 (this slice's minimum-viable
+  single-texture scope; more samplers are additional bindings, a follow-up for whenever a test needs
+  more than one bound texture). `descriptor_pool_`'s pool sizes grew to include one
+  `COMBINED_IMAGE_SAMPLER` slot. `execute_draw` only writes binding 1 when a real, GPU-backed texture is
+  actually bound at stage 0 (via the already-existing `ensure_texture_uploaded`, wired in for the first
+  time here) — Vulkan permits a pipeline layout to declare more bindings than a shader module statically
+  uses, so this is safe even before Task 7 makes the SPIR-V side actually sample.
+- **Verified with a second throwaway test** (`d3d9_texture_smoke_test.cpp`, scratchpad, not committed):
+  real `CreateTexture`/`SetTexture`/multiple `SetSamplerState` calls followed by two consecutive
+  `DrawPrimitive`+`Present` cycles (exercising the descriptor-pool reset/reallocate and sampler
+  create/destroy cycle twice) completed with no crash and no Vulkan validation output — this path has no
+  coverage in the existing regression suite (none of `d3d9-triangle-test`/`-shader-test`/`-const-test`
+  ever call `SetTexture`), so this was a deliberate extra check given the gate-task risk level.
+
+**Pre-existing dead code, left untouched:** `D3DDDIARG_SAMPLERSTATE` in `d3d9_ddi.hpp` (a struct-pointer
+DDI arg shape for a `pfnSetSamplerState` slot that this task's own RE reconfirms doesn't exist) predates
+this task and remains unreferenced — not touched, per the "don't remove pre-existing dead code" rule.
+
+No regressions: `d3d9-triangle-test`/`-shader-test`/`-const-test` all unchanged (`DrawPrimitive`/
+`Present` still `hr=0x00000000`, `d3d9-const-test`'s two pixel checks still exact), smoke test still
+26/26. `clang-format` remains unavailable on this machine (same as Tasks 4/6's notes).
