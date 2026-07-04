@@ -157,26 +157,26 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   `Present`) coming back `0x00000000`, proving the shader-create/shader-set DDI slots
   (`pfnCreateVertexShaderFunc`, `pfnCreatePixelShader`, `pfnSetVertexShaderFunc`, `pfnSetPixelShader`)
   and the programmable draw path on x86. `d3d9-texture-test` remains x64-only.
-- **`d3d9-const-test-x86.exe` FAILS on real WoW64 -- a genuine, unresolved x86-specific finding, not a
-  regression of the already-fixed `pfnSetVertexShaderConst`/`pfnSetPixelShaderConst` calling
-  convention.** The pixel-A check (must show the exact PS constant `c0` color) fails, reading back the
-  background clear color instead -- i.e. the triangle did not visibly rasterize at all, consistent with
-  the VS-side `c1`-`c4` scale matrix collapsing to zero rather than the intended 0.5x scale (pixel-B
-  still trivially "passes" since nothing renders there either way). This is NOT the previously-fixed
-  calling-convention bug regressing: a temporary diagnostic added to `umd_SetVertexShaderConst`/
-  `umd_SetPixelShaderConst` (logged, then reverted; not committed) showed the exact same three DDI
-  calls, in the exact same order and with the exact same values, reaching the UMD on both x64 and x86 --
-  `{Register=1, Count=4, f0=0.5}` (the app's real `SetVertexShaderConstantF`), then a second, unexplained
-  `{Register=0, Count=5, f0=0.0}` call (some internal/automatic zero-init that numerically overlaps and
-  should, by `d3d9_host.cpp`'s literal last-write-wins `memcpy` logic, re-zero registers 1-4), then
-  `{Register=0, Count=1, f0=0.75}` (the app's real `SetPixelShaderConstantF`). x64 renders correctly
-  despite this same overlapping zero call; x86 does not -- so the divergence is downstream of DDI
-  argument delivery (proven byte-identical across both architectures) and is most likely a timing/
-  ordering issue (e.g. a worker-thread DP2-batch race between the app's real call and the internal
-  zero-init call, resolving differently under WoW64's different scheduling/thunking overhead vs. native
-  x64). Not root-caused or fixed here -- out of scope for a test-porting task; needs a dedicated
-  investigation (live trace of the worker-thread dispatch order, and/or of `d3d9_host.cpp`'s constant-
-  buffer upload timing relative to `DrawPrimitive`).
+- **`d3d9-const-test-x86.exe` FAILS on real WoW64 -- root-caused and fixed (2026-07-04), and it was NOT
+  a constant-register timing/ordering bug.** The pixel-A check (must show the exact PS constant `c0`
+  color) failed, reading back the background clear color instead -- the triangle never rasterized at
+  all. An earlier pass suspected a worker-thread DP2-batch race around the app's real
+  `SetVertexShaderConstantF`/`SetPixelShaderConstantF` calls and an unexplained coalesced
+  `{Register=0, Count=5, f0=0.0}` call; re-instrumented host-side logging (real arrival order + full
+  per-vector payload, not just the first float) proved that call is a benign, correctly-echoed re-flush
+  (its `c1.x`/etc. sub-range carries the app's own already-set values, not zeros) -- byte-identical and
+  harmless on both architectures. The real bug: `execute_draw` was silently no-oping on x86 because
+  `ensure_programmable_pipeline`'s `shaders_.find()` missed. `d3d9_host::allocate_id()` minted shader ids
+  starting at `1ULL << 32` (to avoid colliding with the runtime's own small internal handles), but
+  `create_shader_common`'s `pArgs->ShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(
+  resp.shader))` round-trips that id through a `HANDLE`, which is only 32 bits wide on an x86 guest --
+  silently truncating e.g. `4294967301` to `5`. The app then echoed this truncated value back via
+  `SetVertexShaderFunc`/`SetPixelShader`, permanently mismatching `shaders_`'s 64-bit keys. x64's 64-bit
+  `HANDLE` never truncated, and `d3d9-shader-test-x86.exe` never caught this either since it only checks
+  HRESULTs, not rendered pixels (it was silently exercising this exact same bug the whole time). Fixed by
+  starting `next_id_` at `0x10000` instead -- still ~65000x above the documented "few hundred"
+  runtime-handle range, but small enough to survive a 32-bit `HANDLE` round-trip on any guest
+  architecture. See `d3d9_host.hpp`'s own comment on `next_id_` for the full account.
 - **5 of the 143 device-func-table slots have unverified arities on x86** (`pfnCheckCounter`,
   `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) -- a simple triangle-draw
   app never calls them, so their assumed byte counts haven't been checked against the real 32-bit
