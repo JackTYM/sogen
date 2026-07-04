@@ -1209,3 +1209,109 @@ sampled pixel matches its known texture color exactly; the depth-occlusion pixel
 quad's tint exactly, proving the farther quad's fragments were really discarded by the depth test; the
 blend pixel matches the analytic `SRCALPHA`/`INVSRCALPHA`/`ADD` formula exactly. Full regression sweep
 green: `d3d9-triangle-test`/`-shader-test`/`-const-test` unchanged, smoke test 26/26.
+
+## 17. D3DPOOL_MANAGED fix attempt (2026-07-04) — one layer fixed, a second, deeper one found
+
+Task: root-cause and fix the `D3DPOOL_MANAGED` double-resource-creation bug documented in §16.3
+(highest-priority of the three M2-carried bugs — MW2 will very likely hit it, since MANAGED is the
+common case for real game asset loading).
+
+### 17.1. Static RE: why two `pfnCreateResource` calls happen
+
+idasql against `d3d9_x64.dll.i64`: `CBaseDevice::CreateTexture` → `CMipMap::Create` →
+`CMipMap::CMipMap` (constructor). `CBaseTexture::CanCreateLightWeight` (decompiled) requires
+`CBaseDevice::CanDriverManageResource(**(CBaseDevice***)(this+104))` to be true for `D3DPOOL_MANAGED`
+(`v11 == 1`) before letting the texture's container and its level-0 surface share ONE driver resource.
+`CanDriverManageResource` itself: `(*(this+120) & 0x100) == 0 && (*(this+444) & 0x10000000) != 0`. Both
+gates are also used directly inside `CMipMap::CMipMap`'s own constructor logic (3 call sites), confirming
+they control whether `CMipMap` allocates its own private sysmem buffer (current behavior) vs. letting
+the driver manage it — the same shape of gate `DevCaps` bits `0x02000000`/`0x04000000` already fixed for
+`CVertexBuffer::Create`/`CIndexBuffer::Create` (§16.1's index-buffer fix, and the earlier vertex-buffer
+one).
+
+### 17.2. Live RE: confirming the double-create + finding the sync call
+
+Wrote `d3d9_managed_texture_test.cpp` (real `D3DPOOL_MANAGED`, no workaround) and instrumented every
+device-func-table slot with a labeled stub (temporary, `template<size_t N> labeled_device_stub`,
+reverted after use) plus per-call `log_line`s in `umd_CreateResource`/`umd_SetTexture`/`umd_Lock`
+(reverted after use — `OutputDebugStringA` reaches the analyzer's console directly via
+`on_debug_string`/`console_reporter`, no Python hooking needed for this part). Confirmed live:
+
+```
+CreateResource format=21 resource=0x10007   (sysmem "master", created immediately at CreateTexture)
+Lock hResource=0x10007 resolved=0x10007     (app's LockRect/UnlockRect)
+... (render target / vertex / index buffer creates) ...
+stub slot=45 invoked                        (pfnCreateVertexShaderDecl, from SetFVF -- unrelated)
+CreateResource format=21 resource=0x1000d   (vidmem copy, created lazily at first bind)
+stub slot=18 invoked                        (pfnTexBlt -- fires here, nowhere else, exactly once)
+SetTexture stage=0 hTexture=0x1000d         (forwards the VIDMEM copy's handle)
+```
+
+Only slot 18 (`pfnTexBlt`) fires between the second `pfnCreateResource` and `pfnSetTexture` — confirming
+`pfnTexBlt` is the real sync call. Dumped its raw `D3DDDIARG_TEXBLT` argument bytes (temporary,
+reverted) at the call site: `{q0=0x1000d (dst), q1=0x10007 (src), q2=0, q3=0, q4/q5={0,0,640,480}
+(a whole-image rect), q6/q7=stack garbage (confirmed unreadable/unmapped when dereferenced as a pointer
+in a second independent run — not a hidden data pointer)}`. No raw pixel data crosses in this struct;
+the driver is expected to already hold both resources' correct pixel content.
+
+### 17.3. Fix implemented
+
+- `sogen_d3d9_umd.cpp`: `umd_TexBlt` reads `{hDstResource, hSrcResource}` (offsets 0/8, same direct
+  resource-id convention as every other real DDI call in this file) and forwards them to a new
+  `ioctl_d3d9_tex_blt` wire command. Wired into device-func slot 18 (arity 8 on x86, matching the
+  existing `k_device_func_arity` table entry).
+- `d3d9-command-protocol/d3d9_command_protocol.hpp`: new `tex_blt_request{dst_resource, src_resource}`.
+- `gpu-bridge-protocol/gpu_bridge_protocol.hpp`: new `command::d3d9_tex_blt = 0x909` / `ioctl_d3d9_tex_blt`.
+- `windows-emulator/devices/gpu_bridge.cpp`: new `handle_d3d9_tex_blt` dispatch case.
+- `windows-emulator/devices/d3d9_host.{hpp,cpp}`: new `d3d9_host::tex_blt(dst, src)` — copies the
+  source resource's entire `backing` shadow into the destination's. No GPU re-upload needed here:
+  `ensure_texture_uploaded` already re-uploads a texture's `backing` unconditionally on every draw.
+
+### 17.4. A second, deeper bug found while verifying the fix
+
+With the TexBlt fix in place, `d3d9_managed_texture_test.cpp` still failed (sampled pixel stayed
+black). Re-instrumented `d3d9_host::unlock`/`tex_blt`/`ensure_texture_uploaded`/`execute_draw` (native
+host-side `printf`, temporary, reverted) and found: `unlock resource=0x10007 ... data_size=1228800
+first4=00000000` — the app's real magenta pixel writes never reached the host at all; the "sysmem
+master" resource's backing was all-zero from the start, so the TexBlt copy faithfully propagated
+zeros.
+
+Compared this driver's own `pfnLock` return pointer against the app's own `LockRect()`-returned
+`lr.pBits` directly (`log_line` in `umd_Lock`, temporary, reverted): for the D3DPOOL_MANAGED texture,
+`pArgs->pData = 0x105afd040` but the app's own printed `pBits = 0x1059bd060` — **different addresses**.
+Cross-checked against the render target's own Lock in the same run (a plain, non-MANAGED resource):
+driver pData and app pBits both `0x105af9040` — **identical**, confirming this driver's Lock/Unlock
+plumbing is correct in general and the mismatch is specific to the MANAGED texture's heavyweight path.
+
+Decompiled `CMipMap::LockRect` → delegates to a per-level object's own virtual `LockRect` (offset+104);
+for the non-lightweight path (`CanCreateLightWeight` false) this resolves to `CMipSurface::LockRect` →
+`CMipSurface::InternalLockRect`, which calls `CMipMap::ComputeMipMapOffset` to compute the app-visible
+pointer from `CMipMap`'s own private buffer (allocated via `MallocAligned`/`LocConstAlloc` in
+`CMipMap::CMipMap`'s constructor, confirmed in that function's own decompile) — never touching anything
+this driver's `pfnLock` returned. `pfnLock`/`pfnUnlock` still fire (confirmed: always `hr=S_OK`) but are
+genuinely vestigial for this resource kind, exactly the same shape of bug already found and fixed for
+sysmem-routed vertex/index buffers in §16.1 — except the analogous fix (the right `DevCaps` bit) has not
+yet been found for textures.
+
+Live-traced `CanDriverManageResource`'s actual inputs via the Python debugger API (`build/release-py`,
+hooking the real RVA `CanDriverManageResource - 0x180000000` inside the loaded `d3d9.dll`): for a real
+`CreateDevice`, `this+120 = 0x40` (passes: bit `0x100` clear) and `this+444 = 0xe4608800` (fails: bit
+`0x10000000` clear). Tried the obvious candidate fix — adding `0x10000000` to this driver's own
+`fill_d3d9caps`'s `DevCaps` DWORD, mirroring the `0x02000000`/`0x04000000` precedent — and re-traced:
+**zero effect**, `this+444` stayed exactly `0xe4608800`. This value also doesn't match any combination
+of this driver's own `Caps`/`Caps2`/`Caps3`/`DevCaps`/`DevCaps2` bits at all, so `this+444` is not
+sourced from anything `fill_d3d9caps` currently populates — its real source is still unidentified.
+Finding it would need its own dedicated live-RE session (a memory-write watch on `this+444`, mirroring
+the original `dev+460` DevCaps hunt earlier this session) — not completed within this task's budget.
+
+### 17.5. Final state
+
+- **Fixed and verified**: the double-`pfnCreateResource`/`pfnTexBlt` sync mechanism. This is real,
+  necessary, correct infrastructure regardless of §17.4 — it's the right thing to do whenever the
+  sysmem side does hold real data.
+- **Still open**: `pfnLock`/`pfnUnlock` don't deliver real pixel data for a `D3DPOOL_MANAGED` texture's
+  sysmem copy at all, because `CanDriverManageResource` fails for a reason not yet identified.
+  `d3d9_managed_texture_test.cpp` (new, kept in the tree as the regression vehicle for whoever picks
+  this up next) still fails for this reason — sampled pixel reads back black, not the expected magenta.
+- **Zero regressions**: `d3d9-triangle-test`/`-shader-test`/`-const-test`/`-texture-test` all unchanged
+  and green on both x64 and x86, smoke test still green.

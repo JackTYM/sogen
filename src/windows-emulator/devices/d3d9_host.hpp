@@ -63,6 +63,16 @@ namespace sogen
                                 uint32_t mip_levels, uint32_t usage, uint32_t pool, uint64_t& out_resource);
         void destroy_resource(uint64_t resource);
 
+        // Real pfnTexBlt handler: copies src_resource's host-side pixel backing into dst_resource's.
+        // This is the D3DPOOL_MANAGED fix -- see sogen_d3d9_umd.cpp's umd_TexBlt for the live-RE trail
+        // showing the real d3d9.dll issues exactly this call, with these two resource ids, to sync a
+        // MANAGED texture's sysmem "master" copy (what LockRect/UnlockRect write) into its lazily
+        // created vidmem copy (what SetTexture binds) on first use. Both resources must already exist
+        // and share the same format/dimensions (guaranteed here: both were created from the exact same
+        // CreateTexture() call). ensure_texture_uploaded already re-uploads a texture's `backing` to its
+        // GPU image unconditionally on every draw, so this only needs to update the CPU-side shadow.
+        int32_t tex_blt(uint64_t dst_resource, uint64_t src_resource);
+
         // Copies up to out_capacity bytes of the resource's host-side shadow copy into out.
         // out_data_size always receives the true backing-store size.
         int32_t lock(uint64_t resource, uint32_t subresource, uint32_t offset, uint32_t size, uint32_t flags, void* out,

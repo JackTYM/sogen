@@ -247,6 +247,8 @@ namespace sogen
                     return handle_d3d9_create_vertex_decl(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_present:
                     return handle_d3d9_present(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_tex_blt:
+                    return handle_d3d9_tex_blt(win_emu, context);
 
                 case gpu_bridge::ioctl_d3d9_set_render_state:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_state);
@@ -2403,6 +2405,17 @@ namespace sogen
                 }
                 this->d3d9_.destroy_resource(request.resource);
                 return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_d3d9_tex_blt(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::tex_blt_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const int32_t hr = this->d3d9_.tex_blt(request.dst_resource, request.src_resource);
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             }
 
             NTSTATUS handle_d3d9_lock(windows_emulator& win_emu, const io_device_context& context)

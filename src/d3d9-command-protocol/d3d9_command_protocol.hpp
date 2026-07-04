@@ -74,6 +74,18 @@ namespace sogen::d3d9_cmd
         resource_id resource;
     };
 
+    // ioctl_d3d9_tex_blt: the real d3d9.dll issues pfnTexBlt to sync a D3DPOOL_MANAGED texture's
+    // sysmem "master" copy (dst of LockRect/UnlockRect) into its lazily created vidmem copy (dst of
+    // SetTexture) on first bind -- see sogen_d3d9_umd.cpp's umd_TexBlt for the live-RE trail. Only the
+    // two resource ids matter for this milestone (every texture this bring-up creates is single-mip,
+    // whole-image, so a full-backing copy is always correct); the real DDI's rect/point/subresource
+    // fields are intentionally not modeled.
+    struct tex_blt_request
+    {
+        resource_id dst_resource;
+        resource_id src_resource;
+    };
+
     // ioctl_d3d9_lock: out header immediately followed by data_size bytes of the locked region.
     struct lock_request
     {
@@ -355,6 +367,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(marker_request) == 8, "wire layout drift");
     static_assert(sizeof(create_resource_request) == 32, "wire layout drift");
     static_assert(sizeof(create_resource_response) == 16, "wire layout drift");
+    static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");
     static_assert(sizeof(lock_response) == 8, "wire layout drift");
     static_assert(sizeof(unlock_request) == 24, "wire layout drift");

@@ -26,6 +26,9 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-texture-test-x64.exe -ld3d9 -ld3dcompiler_43
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_managed_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-managed-texture-test-x64.exe -ld3d9 -ld3dcompiler_43
+
 i686-w64-mingw32-g++ -shared -O2 -std=c++20 -I../../d3d9-command-protocol -I../../gpu-bridge-protocol \
     sogen_d3d9_umd.cpp sogen_d3d9_umd.def \
     -static -static-libgcc -static-libstdc++ -o sogen_d3d9um-x86.dll
@@ -57,6 +60,7 @@ cp d3d9-spike-test-x64.exe <root>/filesys/c/d3d9-spike-test.exe
 cp d3d9-shader-test-x64.exe <root>/filesys/c/d3d9-shader-test.exe
 cp d3d9-const-test-x64.exe <root>/filesys/c/d3d9-const-test.exe
 cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
+cp d3d9-managed-texture-test-x64.exe <root>/filesys/c/d3d9-managed-texture-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
@@ -78,6 +82,7 @@ already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_
 ./analyzer -e <root> -c c:/d3d9-shader-test.exe
 ./analyzer -e <root> -c c:/d3d9-const-test.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test.exe
+./analyzer -e <root> -c c:/d3d9-managed-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
@@ -277,9 +282,22 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   `D3DFVF_DIFFUSE` color channel (`COLOR0.rg`), which is proven correct by every prior guest test that
   passes a `COLOR0` varying through a real compiled shader.
 - **A `D3DPOOL_MANAGED` texture creates two, unrelated DDI resources for what the app sees as one
-  `CreateTexture()` call** -- confirmed live: `pfnCreateResource(Format=21/A8R8G8B8)` fires twice with
-  two different output handles, one that `LockRect()` later uses (and correctly receives the app's
-  pixel writes) and a different one that `SetTexture()` uses (which stays empty, so the sampled texture
-  reads as black/transparent). Not root-caused or fixed -- `d3d9_texture_test.cpp` uses
-  `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` instead, which was confirmed live to issue only one
-  `pfnCreateResource` call.
+  `CreateTexture()` call -- partially fixed 2026-07-04, one layer of a two-layer bug.** The
+  double-`pfnCreateResource`/`pfnTexBlt` mechanism itself is now understood and correctly handled: a
+  real, expected D3D9 MANAGED-pool "sysmem master + lazily-created vidmem copy" architecture, with
+  `pfnTexBlt` as the genuine sync call the runtime issues between the second `pfnCreateResource` and the
+  following `pfnSetTexture` -- this driver's `pfnTexBlt` was previously an unwired no-op stub and is now
+  implemented (`umd_TexBlt`/`d3d9_host::tex_blt`, forwarding the source resource's full pixel backing
+  into the destination's). **A second, deeper, previously-unknown bug sits upstream of it and is still
+  open**: `pfnLock`/`pfnUnlock` never carry the app's real pixel writes for a `D3DPOOL_MANAGED`
+  texture's sysmem copy at all -- live-confirmed this driver's own `pfnLock` return pointer and the
+  app's own `LockRect()` pointer are different addresses, meaning the app actually writes into
+  `d3d9.dll`'s own private system-memory allocation, invisible to the driver. Root cause: this driver
+  doesn't yet satisfy `CBaseDevice::CanDriverManageResource` (the same shape of undocumented capability
+  gate that `DevCaps` bits `0x02000000`/`0x04000000` already fixed for vertex/index buffers), which
+  `CBaseTexture::CanCreateLightWeight` requires before letting `CMipMap` share one real driver resource
+  and route Lock/Unlock through it. The exact source of the failing field is not yet identified (see
+  `umd_TexBlt`'s own comment in `sogen_d3d9_umd.cpp` for the full live-RE trail) -- finding it needs its
+  own dedicated live-RE session. `d3d9_managed_texture_test.cpp` (new, real `D3DPOOL_MANAGED`, no
+  workaround) still fails for this reason; `d3d9_texture_test.cpp` continues to use `D3DUSAGE_DYNAMIC` +
+  `D3DPOOL_DEFAULT` to avoid the whole area.

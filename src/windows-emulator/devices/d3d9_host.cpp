@@ -1395,6 +1395,19 @@ namespace sogen
         this->resources_.erase(resource);
     }
 
+    int32_t d3d9_host::tex_blt(const uint64_t dst_resource, const uint64_t src_resource)
+    {
+        const auto dst_it = this->resources_.find(dst_resource);
+        const auto src_it = this->resources_.find(src_resource);
+        if (dst_it == this->resources_.end() || src_it == this->resources_.end())
+        {
+            return d3derr_invalidcall;
+        }
+
+        dst_it->second.backing = src_it->second.backing;
+        return d3d_ok;
+    }
+
     bool d3d9_host::snapshot_resource(const uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
                                       uint32_t& out_height) const
     {

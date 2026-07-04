@@ -207,6 +207,7 @@ namespace sogen::gpu_bridge
         d3d9_create_pixel_shader = 0x906,
         d3d9_create_vertex_decl = 0x907,
         d3d9_present = 0x908,
+        d3d9_tex_blt = 0x909,
 
         // Streamed (recorded via command_record_header, flushed as one ioctl_record_commands escape).
         d3d9_set_render_state = 0x920,
@@ -383,6 +384,7 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_d3d9_create_pixel_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_create_pixel_shader));
     inline constexpr uint32_t ioctl_d3d9_create_vertex_decl = make_ioctl(static_cast<uint32_t>(command::d3d9_create_vertex_decl));
     inline constexpr uint32_t ioctl_d3d9_present = make_ioctl(static_cast<uint32_t>(command::d3d9_present));
+    inline constexpr uint32_t ioctl_d3d9_tex_blt = make_ioctl(static_cast<uint32_t>(command::d3d9_tex_blt));
 
     // Streamed D3D9 opcodes, sent one at a time as individual sync Escape calls for now (record-batch
     // replay via ioctl_record_commands is a pure perf optimization for later -- d3d9_host's

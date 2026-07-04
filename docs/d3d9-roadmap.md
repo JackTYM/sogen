@@ -75,14 +75,25 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   channel (`COLOR0.rg`) instead of a real `TEXCOORD0`, which every prior guest test proves interpolates
   correctly. Any future test or real game content that relies on a genuine `TEXCOORD0` varying will hit
   this. Full trace: `HANDOFF_MACBOOK.md` §16.3.
-- [ ] **`D3DPOOL_MANAGED` texture double-resource-creation bug.** `CreateTexture()` with
-  `D3DPOOL_MANAGED` causes `pfnCreateResource` to fire *twice* for what the app sees as one call, with
-  two different output handles — one that `LockRect()` uses (and correctly receives app pixel writes)
-  and a different, never-written one that `SetTexture()` uses, so a `D3DPOOL_MANAGED` sampled texture
-  reads back as entirely black/transparent. Not root-caused; `d3d9_texture_test.cpp` avoids it by using
-  `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` (confirmed live to issue exactly one `pfnCreateResource` call).
-  `D3DPOOL_MANAGED` textures are the common case for real game asset loading — MW2 will very likely hit
-  this. Full trace: `HANDOFF_MACBOOK.md` §16.3.
+- [ ] **`D3DPOOL_MANAGED` texture bug — partially fixed 2026-07-04, two decoupled layers.** `CreateTexture()`
+  with `D3DPOOL_MANAGED` causes `pfnCreateResource` to fire *twice* for what the app sees as one call —
+  now understood to be real, expected D3D9 architecture (a sysmem "master" copy created immediately, a
+  vidmem copy created lazily on first bind, synced by a real `pfnTexBlt` call this driver previously
+  left as a no-op stub). **Fixed**: `pfnTexBlt` is now implemented (`umd_TexBlt`/`d3d9_host::tex_blt`),
+  forwarding the sysmem copy's full pixel backing into the vidmem copy. **Still open, a second, deeper
+  bug found while fixing the first**: `pfnLock`/`pfnUnlock` never carry the app's real pixel writes for
+  the sysmem copy at all — live-confirmed the app's own `LockRect()` pointer differs from this driver's
+  own `pfnLock` return pointer, so the app writes into `d3d9.dll`'s own private system-memory allocation
+  instead. Root cause: `CBaseDevice::CanDriverManageResource` (gating `CanCreateLightWeight`, the same
+  shape of undocumented capability check the `DevCaps` `0x02000000`/`0x04000000` bits already fixed for
+  vertex/index buffers) is not satisfied by this driver, for a reason not yet identified — live-traced
+  the failing field to a specific `this`-relative offset/bit, but it is not sourced from any D3DCAPS9
+  field this driver's own `fill_d3d9caps` populates, so the real fix needs its own dedicated live-RE
+  session (see `sogen_d3d9_umd.cpp`'s `umd_TexBlt` comment for the full trail). `D3DPOOL_MANAGED`
+  textures are the common case for real game asset loading — MW2 will very likely hit this.
+  `d3d9_managed_texture_test.cpp` (new, real `D3DPOOL_MANAGED`, no workaround) reproduces the remaining
+  failure; `d3d9_texture_test.cpp` still avoids the whole area via `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT`.
+  Full trace: `HANDOFF_MACBOOK.md` §16.3, §17.
 - [ ] **Partial-buffer `Lock()` is a permanent limitation, not a stopgap.** `D3DDDIARG_LOCK`'s
   `OffsetToLock`/`SizeToLock` have no single, routing-path-independent struct offset — real `d3d9.dll`
   builds this 104-byte struct two genuinely different ways depending on internal buffer routing

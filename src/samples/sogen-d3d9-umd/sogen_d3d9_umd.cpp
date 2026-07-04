@@ -935,21 +935,74 @@ namespace
         return S_OK;
     }
 
+    // D3DPOOL_MANAGED fix (see docs/d3d9-roadmap.md and HANDOFF_MACBOOK.md for the full live-RE
+    // trail): a D3DPOOL_MANAGED texture's single CreateTexture() call makes the real d3d9.dll issue
+    // pfnCreateResource TWICE -- once immediately (a lightweight "sysmem master" copy, the one
+    // LockRect/UnlockRect actually read/write) and again lazily, on first bind, for a second "vidmem"
+    // copy (the one SetTexture forwards to the driver for sampling). This is genuine, expected D3D9
+    // MANAGED-pool architecture, not a bug in the double-create itself -- what WAS missing is the sync
+    // step: real d3d9.dll issues a pfnTexBlt call between the second pfnCreateResource and the
+    // following pfnSetTexture to copy the sysmem master's pixels into the new vidmem copy, and this
+    // driver's pfnTexBlt slot was an unwired no-op stub, so the vidmem copy stayed permanently empty
+    // (black/transparent when sampled).
+    //
+    // Live-RE trail: instrumenting every device-func-table slot with its own labeled stub (temporary,
+    // reverted) and running a real D3DPOOL_MANAGED CreateTexture()/LockRect()/SetTexture() sequence
+    // showed slot 18 (pfnTexBlt) fires exactly once, between the second pfnCreateResource and
+    // pfnSetTexture, with no other unimplemented slot invoked in between. Dumping pfnTexBlt's raw
+    // D3DDDIARG_TEXBLT argument bytes at that call site (also temporary) gave
+    // {q0=0x1000d (dst), q1=0x10007 (src), ...}, exactly matching the vidmem copy's handle (the one
+    // SetTexture went on to bind) and the sysmem copy's handle (the one Lock had just written into) --
+    // unambiguous, since these two handles are the only two live resource ids in that run. The
+    // remaining bytes (subresource indices, dst point, src rect) were not individually pinned down --
+    // unnecessary for this milestone, since every texture here is single-mip and whole-image, so a
+    // full-backing copy (see d3d9_host::tex_blt) is always correct regardless of their exact values.
+    //
+    // Fix: forward {hDstResource, hSrcResource} (offsets 0/8, the same direct resource-id convention
+    // every other real DDI call in this file already uses) to the host, which copies the source
+    // resource's entire pixel backing into the destination resource's -- ensure_texture_uploaded
+    // already re-uploads a texture's backing to its GPU image unconditionally on every draw, so no
+    // further dirty-tracking is needed for the copied data to reach the sampler.
+    //
+    // KNOWN LIMITATION, found live-RE'ing this fix (2026-07-04): this alone does NOT yet make a real
+    // D3DPOOL_MANAGED texture sample correctly, because a SECOND, decoupled bug sits upstream of this
+    // one -- pfnLock/pfnUnlock never carry the app's real pixel writes for the "sysmem master" copy in
+    // the first place. Live-verified: this driver's own pfnLock returns pArgs->pData correctly, but the
+    // app's IDirect3DTexture9::LockRect() hands back a DIFFERENT pointer (confirmed by comparing the two
+    // addresses directly), so the app writes into d3d9.dll's own CMipMap-owned system-memory allocation
+    // (CMipMap::CMipMap calls MallocAligned/LocalAlloc for exactly this) and pfnUnlock forwards zeros.
+    // Root cause: CBaseTexture::CanCreateLightWeight requires CBaseDevice::CanDriverManageResource --
+    // `(*(this+120) & 0x100) == 0 && (*(this+444) & 0x10000000) != 0` -- to be true before the runtime
+    // will let CMipMap share ONE real driver resource and route Lock/Unlock through it (exactly the
+    // same shape of gate that DevCaps 0x02000000/0x04000000 already fixed for vertex/index buffers).
+    // Live-traced this+444 == 0xe4608800 for a real CreateDevice -- NOT sourced from any D3DCAPS9 field
+    // this driver's own fill_d3d9caps populates (confirmed: adding candidate bit 0x10000000 to DevCaps
+    // had zero effect on the live value), so the real source is still unidentified; finding it needs
+    // its own dedicated live-RE session (a memory-write watch on this+444, mirroring the original
+    // DevCaps hunt in HANDOFF_MACBOOK.md). This function's own fix (the TexBlt sync forward) is real,
+    // necessary, and independently correct -- it is the right thing to do whenever the sysmem side DOES
+    // hold real data -- but is not sufficient by itself until the Lock-side bug above is also fixed.
+    HRESULT APIENTRY umd_TexBlt(HANDLE /*hDevice*/, void* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
+        auto* bytes = reinterpret_cast<unsigned char*>(pArgs);
+        uint64_t dst_resource = 0;
+        uint64_t src_resource = 0;
+        std::memcpy(&dst_resource, bytes, sizeof(dst_resource));
+        std::memcpy(&src_resource, bytes + sizeof(dst_resource), sizeof(src_resource));
+        d3d9c::tex_blt_request req{.dst_resource = dst_resource, .src_resource = src_resource};
+        bridge_call(gb::ioctl_d3d9_tex_blt, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
     HRESULT APIENTRY umd_SetTexture(HANDLE /*hDevice*/, UINT Stage, HANDLE hTexture)
     {
         // RE-verified live: pfnSetTexture takes Stage/hTexture as direct value arguments, not a
         // pointer to D3DDDIARG_SETTEXTURE -- a struct-pointer read crashed with the small Stage
         // integer (e.g. 0x1) dereferenced as an address. 0 for hTexture means unbind.
-        //
-        // KNOWN LIMITATION found during this session's RE work: for a D3DPOOL_MANAGED texture,
-        // pfnCreateResource fires TWICE for what the app sees as one CreateTexture() call, with two
-        // different output handles -- one that LockRect's hResource later uses (and correctly
-        // receives the app's real pixel writes) and a DIFFERENT one that this hTexture uses (which
-        // stays an empty, never-written resource, so a sampled texture created with D3DPOOL_MANAGED
-        // reads as entirely black/transparent). Not resolved -- d3d9_texture_test.cpp uses
-        // D3DUSAGE_DYNAMIC + D3DPOOL_DEFAULT instead (a single pfnCreateResource call, confirmed live)
-        // to avoid it, since root-causing and fixing the double-resource case was out of scope on top
-        // of this session's two required carried-forward findings.
         d3d9c::set_texture_record req{.stage = Stage, .reserved = 0, .texture = reinterpret_cast<uint64_t>(hTexture)};
         bridge_call(gb::ioctl_d3d9_set_texture, &req, sizeof(req), nullptr, 0);
         return S_OK;
@@ -1381,6 +1434,7 @@ namespace
             slots[8] = reinterpret_cast<void*>(&umd_SetIndices);              // pfnSetIndices
             slots[10] = reinterpret_cast<void*>(&umd_DrawPrimitive);          // pfnDrawPrimitive
             slots[11] = reinterpret_cast<void*>(&umd_DrawIndexedPrimitive);   // pfnDrawIndexedPrimitive
+            slots[18] = reinterpret_cast<void*>(&umd_TexBlt);                 // pfnTexBlt
             slots[21] = reinterpret_cast<void*>(&umd_Clear);                  // pfnClear
             slots[24] = reinterpret_cast<void*>(&umd_SetVertexShaderConst);   // pfnSetVertexShaderConst
             slots[27] = reinterpret_cast<void*>(&umd_SetViewport);            // pfnSetViewport
