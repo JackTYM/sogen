@@ -558,6 +558,13 @@ namespace sogen
 
         // Every resource created by this slice has exactly one mip level (see create_resource), so LOD is
         // pinned to 0 regardless of the app's own MIPFILTER/MAXMIPLEVEL/MIPMAPLODBIAS state.
+        //
+        // D3DSAMP_BORDERCOLOR is captured into sampler_state (see the UMD's tss_key table) but never read
+        // here -- border_color is hardcoded to transparent-black, matching D3D9's own default. vulkan_host
+        // ::create_sampler only accepts discrete VkBorderColor buckets (transparent/opaque black/white; the
+        // bridge doesn't forward VK_EXT_custom_border_color), so an arbitrary ARGB border color can't be
+        // represented faithfully with the current wrapper regardless. Only matters once D3DTADDRESS_BORDER
+        // is actually used with a non-default border color.
         return this->vulkan_.create_sampler(device, mag_filter, min_filter, address_u, address_v, address_w, mipmap_mode,
                                             /*compare_enable=*/0, /*compare_op=*/0,
                                             /*anisotropy_enable=*/max_anisotropy > 1 ? 1 : 0, /*border_color=*/0,
