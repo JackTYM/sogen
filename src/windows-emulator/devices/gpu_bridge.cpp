@@ -1,7 +1,9 @@
 #include "../std_include.hpp"
 #include "gpu_bridge.hpp"
 #include "vulkan_host.hpp"
+#ifdef SOGEN_HAS_VKD3D_SHADER
 #include "d3d9_host.hpp"
+#endif
 #include "../windows_emulator.hpp"
 
 #include <gpu_bridge_protocol.hpp>
@@ -226,6 +228,7 @@ namespace sogen
                 case gpu_bridge::ioctl_destroy_sampler:
                     return handle_destroy_sampler(win_emu, context);
 
+#ifdef SOGEN_HAS_VKD3D_SHADER
                 case gpu_bridge::ioctl_d3d9_marker:
                     return handle_d3d9_marker(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_create_resource:
@@ -283,6 +286,7 @@ namespace sogen
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_draw_primitive);
                 case gpu_bridge::ioctl_d3d9_draw_indexed_primitive:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_draw_indexed_primitive);
+#endif
 
                 default:
                     win_emu.log.warn("[gpu-bridge] Unsupported IOCTL: 0x%X\n", static_cast<unsigned>(context.io_control_code));
@@ -292,7 +296,9 @@ namespace sogen
 
           private:
             vulkan_host vulkan_{};
+#ifdef SOGEN_HAS_VKD3D_SHADER
             d3d9_host d3d9_{this->vulkan_};
+#endif
 
             // VkDeviceMemory aliased directly into the guest address space (see handle_map_memory_direct),
             // keyed by memory object id, so unmap can release the guest range and the host mapping.
@@ -2358,6 +2364,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+#ifdef SOGEN_HAS_VKD3D_SHADER
             // D3D9 UMD <-> host d3d9_host bridge sync commands (see d3d9-command-protocol/
             // d3d9_command_protocol.hpp for the payload structs). Dispatched below the same way as the
             // Vulkan handlers above.
@@ -2582,6 +2589,7 @@ namespace sogen
                 const int32_t hr = this->d3d9_.execute_recorded(static_cast<uint32_t>(opcode), payload.data(), payload.size());
                 return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             }
+#endif
 
             // Executes one recorded command-buffer command from a batch (see ioctl_record_commands). The
             // payload is the command's normal request struct; this is the per-command core shared with the
@@ -3161,6 +3169,7 @@ namespace sogen
                                                            static_cast<uint32_t>(data_bytes));
                 }
                 default:
+#ifdef SOGEN_HAS_VKD3D_SHADER
                     // D3D9 streamed opcodes (gpu_bridge::command's 0x900 block) all forward to the same
                     // d3d9_host entry point rather than getting one case each here -- see
                     // d3d9-command-protocol/d3d9_command_protocol.hpp for what each opcode's payload means.
@@ -3169,6 +3178,7 @@ namespace sogen
                     {
                         return this->d3d9_.execute_recorded(command, payload, size);
                     }
+#endif
                     win_emu.log.warn("[gpu-bridge] record_commands: unsupported command 0x%X\n", command);
                     return vk_error_initialization_failed;
                 }

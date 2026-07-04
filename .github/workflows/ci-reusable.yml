@@ -143,6 +143,17 @@ jobs:
       - name: Enable Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1.13.0
 
+      - name: Install Windows vkd3d-shader Build Tools
+        shell: cmd
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-x86_64-tools mingw-w64-x86_64-vulkan-devel"
+
+      - name: Add MSYS2 Tools to Path
+        shell: bash
+        run: |
+          echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
+          echo "C:\\msys64\\mingw64\\bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=C:\\msys64\\mingw64" >> "$GITHUB_ENV"
+
       - name: CMake Build
         run: cmake --preset=release && cmake --build --preset=release -t dump-apiset
 
@@ -237,9 +248,13 @@ jobs:
           - platform: Windows x86
             runner: windows-latest
             devcmd_arch: x86
+            msys-arch: i686
+            msys-prefix: mingw32
           - platform: Windows x86_64
             runner: windows-latest
             devcmd_arch: x64
+            msys-arch: x86_64
+            msys-prefix: mingw64
           - platform: MinGW x86_64
             runner: ubuntu-24.04
             rust-target: x86_64-pc-windows-gnu
@@ -322,11 +337,33 @@ jobs:
         with:
           platform: x64
 
+      - name: Install macOS vkd3d-shader Build Dependencies
+        if: "${{ startsWith(matrix.platform, 'macOS') }}"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 15
+          retry_wait_seconds: 60
+          command: brew install perl flex bison libtool mingw-w64 vulkan-headers spirv-headers vulkan-loader
+
       - name: Enable Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1.13.0
         if: ${{ startsWith(matrix.platform, 'Windows') }}
         with:
           arch: ${{ matrix.devcmd_arch }}
+
+      - name: Install Windows vkd3d-shader Build Tools
+        if: "${{ matrix.msys-arch }}"
+        shell: cmd
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-${{ matrix.msys-arch }}-tools mingw-w64-${{ matrix.msys-arch }}-vulkan-devel"
+
+      - name: Add MSYS2 Tools to Path
+        if: "${{ matrix.msys-arch }}"
+        shell: bash
+        run: |
+          echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
+          echo "C:\\msys64\\${{ matrix.msys-prefix }}\\bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=C:\\msys64\\${{ matrix.msys-prefix }}" >> "$GITHUB_ENV"
 
       - uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -358,6 +395,19 @@ jobs:
               libdrm-dev libgbm-dev libgl1-mesa-dev libegl-dev libgles-dev \
               libdbus-1-dev libudev-dev \
               libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+
+      - name: Install Linux vkd3d-shader Build Dependencies
+        if: "${{ contains(matrix.platform, 'Linux x86_64') || matrix.platform == 'MinGW x86_64' }}"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 15
+          retry_wait_seconds: 60
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              perl flex bison libtool mingw-w64-tools \
+              vulkan-headers spirv-headers libvulkan-dev
 
       - name: CMake Build
         run: cmake --preset=${{matrix.preset}} ${{matrix.cmake-options}} && cmake --build --preset=${{matrix.preset}}
@@ -411,6 +461,19 @@ jobs:
         if: ${{ startsWith(matrix.platform, 'Windows') }}
         with:
           arch: ${{ matrix.devcmd_arch }}
+
+      - name: Install Windows vkd3d-shader Build Tools
+        if: ${{ startsWith(matrix.platform, 'Windows') }}
+        shell: cmd
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-x86_64-tools mingw-w64-x86_64-vulkan-devel"
+
+      - name: Add MSYS2 Tools to Path
+        if: ${{ startsWith(matrix.platform, 'Windows') }}
+        shell: bash
+        run: |
+          echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
+          echo "C:\\msys64\\mingw64\\bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=C:\\msys64\\mingw64" >> "$GITHUB_ENV"
 
       - name: CMake Build
         run: cmake --preset=${{matrix.preset}} ${{matrix.cmake-options}} && cmake --build --preset=${{matrix.preset}}

@@ -17,6 +17,22 @@ if(NOT TARGET SDL3::SDL3)
   endif()
 endif()
 
+# vkd3d-shader (real D3D9 SM2/3 shader translation) is a desktop-only feature: it's cross-compiled
+# from source via autotools and needs a widl IDL compiler plus GNU libtool/bison on the host, none of
+# which are meaningful (or available) on Android/iOS/Emscripten.
+if(NOT ANDROID AND NOT IOS AND NOT EMSCRIPTEN)
+  set(SOGEN_HAS_VKD3D_SHADER ON)
+endif()
+
+if(NOT SOGEN_HAS_VKD3D_SHADER)
+  list(REMOVE_ITEM SRC_FILES
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_host.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_host.hpp"
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_shader_translator.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_shader_translator.hpp"
+  )
+endif()
+
 add_library(windows-emulator ${SRC_FILES})
 
 sogen_assign_source_group(${SRC_FILES})
@@ -28,7 +44,12 @@ endif()
 find_package(Freetype REQUIRED)
 
 target_link_libraries(windows-emulator PUBLIC emulator minidump)
-target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers Freetype::Freetype vkd3d-shader-bridge)
+target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers Freetype::Freetype)
+
+if(SOGEN_HAS_VKD3D_SHADER)
+  target_link_libraries(windows-emulator PRIVATE vkd3d-shader-bridge)
+  target_compile_definitions(windows-emulator PRIVATE SOGEN_HAS_VKD3D_SHADER=1)
+endif()
 
 if(TARGET SDL3::SDL3)
   target_link_libraries(windows-emulator PRIVATE SDL3::SDL3)
