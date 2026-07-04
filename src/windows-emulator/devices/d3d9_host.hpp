@@ -146,6 +146,9 @@ namespace sogen
         uint64_t command_pool_{};
         uint64_t command_buffer_{};
         uint64_t fence_{};
+        // Sized for the two per-draw constant-register UBOs (VS set 0 + PS set 1); reset and
+        // re-allocated from every draw once Task 4 lands.
+        uint64_t descriptor_pool_{};
         bool draw_infra_ready_{false};
 
         // The one hardcoded fixed-function shader pair (see execute_draw's comment) and its pipeline,

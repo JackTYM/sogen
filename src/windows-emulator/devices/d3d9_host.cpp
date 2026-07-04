@@ -188,6 +188,14 @@ namespace sogen
             return false;
         }
 
+        const std::array<vulkan_host::descriptor_pool_size, 1> pool_sizes{
+            {{.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 2}}};
+        if (this->vulkan_.create_descriptor_pool(device, 2, pool_sizes, this->descriptor_pool_) != 0 ||
+            this->descriptor_pool_ == 0)
+        {
+            return false;
+        }
+
         this->draw_infra_ready_ = true;
         return true;
     }
