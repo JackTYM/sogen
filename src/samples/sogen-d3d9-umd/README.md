@@ -25,12 +25,20 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-texture-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -shared -O2 -std=c++20 -I../../d3d9-command-protocol -I../../gpu-bridge-protocol \
+    sogen_d3d9_umd.cpp sogen_d3d9_umd.def \
+    -static -static-libgcc -static-libstdc++ -o sogen_d3d9um-x86.dll
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_triangle_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-triangle-test-x86.exe -ld3d9
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, and `d3d9_texture_test.cpp` are guest-runtime tests,
 not driver-side files, so they do not need the `-I../../d3d9-command-protocol
 -I../../gpu-bridge-protocol` include paths the UMD build above requires; they only talk to
-`d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API.
+`d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same applies to
+`d3d9_triangle_test.cpp` above -- it's a guest-runtime test too.
 
 ## Stage
 
@@ -40,12 +48,15 @@ cp d3d9-spike-test-x64.exe <root>/filesys/c/d3d9-spike-test.exe
 cp d3d9-shader-test-x64.exe <root>/filesys/c/d3d9-shader-test.exe
 cp d3d9-const-test-x64.exe <root>/filesys/c/d3d9-const-test.exe
 cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
+cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
+cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
-shader, const, and texture tests.
+shader, const, and texture tests. For the x86/WoW64 UMD, the real 32-bit Microsoft `d3d9.dll` must
+already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`.
 
 ## Run
 
