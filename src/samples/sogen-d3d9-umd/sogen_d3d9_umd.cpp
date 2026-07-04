@@ -573,38 +573,38 @@ namespace
         return S_OK;
     }
 
-    // pArgs points at the fixed header; the vector4 float data immediately follows it in memory
-    // (the runtime's own send buffer), matching d3d9_cmd::set_const_f_record's trailing-payload shape.
-    HRESULT APIENTRY umd_SetVertexShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONST* pArgs)
+    // pArgs is the fixed {Register, Count} header; the float data is a separate third DDI argument
+    // (see D3DDDIARG_SETVERTEXSHADERCONST's header comment), not trailing bytes after pArgs.
+    HRESULT APIENTRY umd_SetVertexShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONST* pArgs,
+                                              CONST FLOAT* pRegisters)
     {
-        if (pArgs == nullptr)
+        if (pArgs == nullptr || pRegisters == nullptr)
         {
             return S_OK;
         }
-        const auto* values = reinterpret_cast<const float*>(pArgs + 1);
         const size_t float_count = static_cast<size_t>(pArgs->Count) * 4;
         std::vector<uint8_t> buf(sizeof(d3d9c::set_const_f_record) + float_count * sizeof(float));
         auto* req = reinterpret_cast<d3d9c::set_const_f_record*>(buf.data());
         req->start_register = pArgs->Register;
         req->vector4_count = pArgs->Count;
-        std::memcpy(buf.data() + sizeof(*req), values, float_count * sizeof(float));
+        std::memcpy(buf.data() + sizeof(*req), pRegisters, float_count * sizeof(float));
         bridge_call(gb::ioctl_d3d9_set_vs_const_f, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetPixelShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONST* pArgs)
+    HRESULT APIENTRY umd_SetPixelShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONST* pArgs,
+                                             CONST FLOAT* pRegisters)
     {
-        if (pArgs == nullptr)
+        if (pArgs == nullptr || pRegisters == nullptr)
         {
             return S_OK;
         }
-        const auto* values = reinterpret_cast<const float*>(pArgs + 1);
         const size_t float_count = static_cast<size_t>(pArgs->Count) * 4;
         std::vector<uint8_t> buf(sizeof(d3d9c::set_const_f_record) + float_count * sizeof(float));
         auto* req = reinterpret_cast<d3d9c::set_const_f_record*>(buf.data());
         req->start_register = pArgs->Register;
         req->vector4_count = pArgs->Count;
-        std::memcpy(buf.data() + sizeof(*req), values, float_count * sizeof(float));
+        std::memcpy(buf.data() + sizeof(*req), pRegisters, float_count * sizeof(float));
         bridge_call(gb::ioctl_d3d9_set_ps_const_f, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
         return S_OK;
     }

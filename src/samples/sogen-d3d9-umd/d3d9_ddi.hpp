@@ -411,10 +411,16 @@ typedef struct _D3DDDIVERTEXELEMENT
     BYTE UsageIndex;
 } D3DDDIVERTEXELEMENT;
 
+// pfnSetVertexShaderConst/pfnSetPixelShaderConst take the float array as a separate third DDI
+// argument (CONST FLOAT*), not trailing bytes after this header -- matching the same
+// header-plus-separate-array-pointer(s) shape already RE-confirmed for pfnClear (D3DDDIARG_CLEAR's
+// own comment). A first attempt assuming trailing-bytes read zeroed/garbage constant data (the
+// runtime's own automatic zero-init shadow calls made this invisible until a real, distinctive
+// non-zero SetVertexShaderConstantF/SetPixelShaderConstantF value was round-tripped end to end).
 typedef struct _D3DDDIARG_SETVERTEXSHADERCONST
 {
     UINT Register;
-    UINT Count; // number of 4-float vectors; the float data follows the struct in memory
+    UINT Count; // number of 4-float vectors
 } D3DDDIARG_SETVERTEXSHADERCONST;
 
 typedef struct _D3DDDIARG_SETPIXELSHADERCONST

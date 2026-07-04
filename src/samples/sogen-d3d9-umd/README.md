@@ -19,11 +19,15 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_spike_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_shader_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-shader-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-const-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
-`d3d9_shader_test.cpp` is a guest-runtime test, not a driver-side file, so it does not need the
-`-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
-requires; it only talks to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API.
+`d3d9_shader_test.cpp` and `d3d9_const_test.cpp` are guest-runtime tests, not driver-side files, so
+they do not need the `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the
+UMD build above requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9
+API.
 
 ## Stage
 
@@ -31,18 +35,20 @@ requires; it only talks to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3
 cp sogen_d3d9um-x64.dll <root>/filesys/c/windows/system32/sogen_d3d9um.dll
 cp d3d9-spike-test-x64.exe <root>/filesys/c/d3d9-spike-test.exe
 cp d3d9-shader-test-x64.exe <root>/filesys/c/d3d9-shader-test.exe
+cp d3d9-const-test-x64.exe <root>/filesys/c/d3d9-const-test.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
-shader test.
+shader and const tests.
 
 ## Run
 
 ```bash
 ./analyzer -e <root> -c c:/d3d9-spike-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test.exe
+./analyzer -e <root> -c c:/d3d9-const-test.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -52,6 +58,18 @@ real `D3DCompile()` (`vs_2_0`/`ps_2_0`), creates them via `CreateVertexShader`/`
 and draws a `D3DFVF_XYZ|D3DFVF_DIFFUSE` triangle through the programmable pipeline. Expect
 `D3DCompile(vs) hr=0x00000000`, `D3DCompile(ps) hr=0x00000000`, `CreateVertexShader hr=0x00000000`,
 and `CreatePixelShader hr=0x00000000`.
+
+`d3d9-const-test.exe` proves a D3D9 float constant register round-trips from a guest
+`SetPixelShaderConstantF`/`SetVertexShaderConstantF` call, through the wire protocol and UBO/
+descriptor-set binding, into a real SPIR-V shader's read of `c#`, into a rendered pixel. The pixel
+shader returns a solid color read straight from PS constant register `c0`; the vertex shader applies
+a scale-by-0.5 matrix packed across VS constant registers `c1`-`c4` to the vertex position. It draws
+to an off-screen render target and `LockRect`s it to check two pixels: one inside the scaled-down
+triangle (must exactly match the `c0` color) and one inside the original, unscaled triangle's bounds
+but outside the scaled-down triangle (must show the background clear color, proving the VS-side
+matrix actually applied). Expect `SetVertexShaderConstantF hr=0x00000000`,
+`SetPixelShaderConstantF hr=0x00000000`, and both `PASS:` lines followed by
+`[d3d9-const-test] ALL CHECKS PASSED`.
 
 ## Notes
 
@@ -85,3 +103,11 @@ and `CreatePixelShader hr=0x00000000`.
   real SM2 shader translation end to end.
 - x64-only bring-up; the x86/WoW64 UMD needs typed `__stdcall` thunks per device-func slot instead
   of the generic caller-cleanup stub.
+- `pfnSetVertexShaderConst`/`pfnSetPixelShaderConst` take the float array as a separate third DDI
+  argument (`CONST FLOAT*`), not trailing bytes after the `{Register, Count}` header -- the same
+  header-plus-separate-array-pointer shape already used by `pfnClear`. A first attempt assumed the
+  floats trailed the header in memory; this silently read zeroed/garbage stack data instead of the
+  real constant values, invisible until `d3d9-const-test.exe` round-tripped a distinctive non-zero
+  constant end to end (the runtime's own automatic shadow-init calls are always zero, so this bug
+  never surfaced with zero data). `umd_SetVertexShaderConst`/`umd_SetPixelShaderConst` now take the
+  data pointer as their own third parameter.
