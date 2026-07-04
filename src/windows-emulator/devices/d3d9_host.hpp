@@ -146,8 +146,8 @@ namespace sogen
         uint64_t command_pool_{};
         uint64_t command_buffer_{};
         uint64_t fence_{};
-        // Sized for the two per-draw constant-register UBOs (VS set 0 + PS set 1); reset each draw,
-        // with descriptor sets re-allocated from it, once the UBO upload path is wired up.
+        // Sized for the two per-draw constant-register UBOs (VS set 0 + PS set 1); reset each draw in
+        // execute_draw, with descriptor sets re-allocated from it every time.
         uint64_t descriptor_pool_{};
         bool draw_infra_ready_{false};
 

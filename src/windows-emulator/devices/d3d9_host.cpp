@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <span>
 
@@ -420,6 +421,42 @@ namespace sogen
             }
             return UINT32_MAX;
         }
+
+        // Creates a host-visible UBO of exactly `size` bytes and uploads `data` zero-padded to that
+        // size -- the fixed D3D9 constant-register cap (VS=4096B/256 float4 regs, PS=512B/32 float4
+        // regs) regardless of how many registers the app actually set, matching real D3D9 semantics
+        // where unset registers read as 0. Mirrors execute_draw's own per-draw vertex-buffer upload.
+        bool create_and_upload_ubo(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device, const size_t size,
+                                   const std::vector<float>& data, uint64_t& out_buffer, uint64_t& out_memory)
+        {
+            if (vulkan.create_buffer(device, size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, out_buffer) != 0 || out_buffer == 0)
+            {
+                return false;
+            }
+            uint64_t mem_size = 0;
+            uint64_t mem_align = 0;
+            uint32_t mem_type_bits = 0;
+            vulkan.get_buffer_memory_requirements(device, out_buffer, mem_size, mem_align, mem_type_bits);
+            const uint32_t memory_type = find_memory_type_index(
+                vulkan, physical_device, mem_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (memory_type == UINT32_MAX || vulkan.allocate_memory(device, mem_size, memory_type, out_memory) != 0 ||
+                out_memory == 0)
+            {
+                vulkan.destroy_buffer(device, out_buffer);
+                out_buffer = 0;
+                return false;
+            }
+            vulkan.bind_buffer_memory(device, out_buffer, out_memory, 0);
+
+            std::vector<std::byte> staging(size, std::byte{0});
+            const size_t bytes = std::min(data.size() * sizeof(float), size);
+            if (bytes > 0)
+            {
+                std::memcpy(staging.data(), data.data(), bytes);
+            }
+            vulkan.upload_memory(device, out_memory, 0, size, staging.data(), size);
+            return true;
+        }
     } // namespace
 
     int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex)
@@ -506,6 +543,84 @@ namespace sogen
         this->vulkan_.bind_buffer_memory(device, vertex_buffer, vertex_memory, 0);
         this->vulkan_.upload_memory(device, vertex_memory, 0, vb_backing.size(), vb_backing.data(), vb_backing.size());
 
+        // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps): fixed
+        // UBO sizes regardless of how many registers the app actually set -- unset registers read as
+        // 0, matching real D3D9 semantics (see create_and_upload_ubo's zero-padding).
+        constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
+        constexpr size_t ps_ubo_size = 32 * 4 * sizeof(float);
+        uint64_t vs_ubo = 0;
+        uint64_t vs_ubo_memory = 0;
+        uint64_t ps_ubo = 0;
+        uint64_t ps_ubo_memory = 0;
+        std::array<uint64_t, 2> descriptor_sets{};
+        if (use_programmable)
+        {
+            // TEMPORARY bring-up diagnostic (Task 4) -- confirms real constant data set by the guest via
+            // SetVertexShaderConstantF/SetPixelShaderConstantF actually reaches execute_draw, populated,
+            // at the right time relative to the DrawPrimitive state-flush gate. Remove once verified.
+            std::fprintf(stderr, "[d3d9_host] execute_draw: vs_const_f.size()=%zu ps_const_f.size()=%zu\n",
+                        this->state_.vs_const_f.size(), this->state_.ps_const_f.size());
+
+            if (!create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, vs_ubo_size, this->state_.vs_const_f,
+                                       vs_ubo, vs_ubo_memory) ||
+                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, ps_ubo_size, this->state_.ps_const_f,
+                                       ps_ubo, ps_ubo_memory))
+            {
+                this->vulkan_.destroy_buffer(device, vertex_buffer);
+                this->vulkan_.free_memory(device, vertex_memory);
+                if (vs_ubo != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, vs_ubo);
+                    this->vulkan_.free_memory(device, vs_ubo_memory);
+                }
+                if (ps_ubo != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, ps_ubo);
+                }
+                return d3d_ok;
+            }
+
+            this->vulkan_.reset_descriptor_pool(device, this->descriptor_pool_, 0);
+            const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
+            uint32_t set_count = 0;
+            if (this->vulkan_.allocate_descriptor_sets(device, this->descriptor_pool_, set_layouts, descriptor_sets, set_count) !=
+                    0 ||
+                set_count != descriptor_sets.size())
+            {
+                this->vulkan_.destroy_buffer(device, vertex_buffer);
+                this->vulkan_.free_memory(device, vertex_memory);
+                this->vulkan_.destroy_buffer(device, vs_ubo);
+                this->vulkan_.free_memory(device, vs_ubo_memory);
+                this->vulkan_.destroy_buffer(device, ps_ubo);
+                this->vulkan_.free_memory(device, ps_ubo_memory);
+                return d3d_ok;
+            }
+
+            const std::array<vulkan_host::descriptor_write, 2> writes{{
+                {.dst_set = descriptor_sets[0],
+                 .dst_binding = 0,
+                 .dst_array_element = 0,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .buffer = vs_ubo,
+                 .offset = 0,
+                 .range = vs_ubo_size,
+                 .sampler = 0,
+                 .image_view = 0,
+                 .image_layout = 0},
+                {.dst_set = descriptor_sets[1],
+                 .dst_binding = 0,
+                 .dst_array_element = 0,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .buffer = ps_ubo,
+                 .offset = 0,
+                 .range = ps_ubo_size,
+                 .sampler = 0,
+                 .image_view = 0,
+                 .image_layout = 0},
+            }};
+            this->vulkan_.update_descriptor_sets(device, writes);
+        }
+
         this->vulkan_.reset_fence(device, this->fence_);
         this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
 
@@ -534,6 +649,12 @@ namespace sogen
 
         this->vulkan_.cmd_bind_pipeline(this->command_buffer_, use_programmable ? programmable->pipeline : this->pipeline_,
                                         VK_PIPELINE_BIND_POINT_GRAPHICS);
+
+        if (use_programmable)
+        {
+            this->vulkan_.cmd_bind_descriptor_sets(this->command_buffer_, programmable->pipeline_layout, 0, descriptor_sets,
+                                                   VK_PIPELINE_BIND_POINT_GRAPHICS, {});
+        }
 
         const std::array<vulkan_host::viewport_entry, 1> viewports{
             {{.x = 0, .y = 0, .width = static_cast<float>(rt.width), .height = static_cast<float>(rt.height), .min_depth = 0.0f,
@@ -571,6 +692,13 @@ namespace sogen
 
         this->vulkan_.destroy_buffer(device, vertex_buffer);
         this->vulkan_.free_memory(device, vertex_memory);
+        if (use_programmable)
+        {
+            this->vulkan_.destroy_buffer(device, vs_ubo);
+            this->vulkan_.free_memory(device, vs_ubo_memory);
+            this->vulkan_.destroy_buffer(device, ps_ubo);
+            this->vulkan_.free_memory(device, ps_ubo_memory);
+        }
 
         // Read the drawn frame back into the resource's backing store, same as pfnClear -- so pfnLock
         // sees the real drawn pixels.
