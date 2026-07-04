@@ -49,14 +49,14 @@ namespace sogen
         case d3dfmt_a8:
             out_vk_format = vk_format_r8_unorm;
             return true;
-        case d3dfmt_dxt1:
-            out_vk_format = vk_format_bc1_rgba_unorm_block;
+        case d3dfmt_l8:
+            out_vk_format = vk_format_r8_unorm;
             return true;
-        case d3dfmt_dxt3:
-            out_vk_format = vk_format_bc2_unorm_block;
+        case d3dfmt_v8u8:
+            out_vk_format = vk_format_r8g8_snorm;
             return true;
-        case d3dfmt_dxt5:
-            out_vk_format = vk_format_bc3_unorm_block;
+        case d3dfmt_q8w8v8u8:
+            out_vk_format = vk_format_r8g8b8a8_snorm;
             return true;
         case d3dfmt_d24s8:
             out_vk_format = vk_format_d24_unorm_s8_uint;
@@ -72,14 +72,14 @@ namespace sogen
         case d3dfmt_a16b16g16r16f:
             out_vk_format = vk_format_r16g16b16a16_sfloat;
             return true;
-        case d3dfmt_q8w8v8u8:
-            out_vk_format = vk_format_r8g8b8a8_snorm;
+        case d3dfmt_dxt1:
+            out_vk_format = vk_format_bc1_rgba_unorm_block;
             return true;
-        case d3dfmt_l8:
-            out_vk_format = vk_format_r8_unorm;
+        case d3dfmt_dxt3:
+            out_vk_format = vk_format_bc2_unorm_block;
             return true;
-        case d3dfmt_v8u8:
-            out_vk_format = vk_format_r8g8_snorm;
+        case d3dfmt_dxt5:
+            out_vk_format = vk_format_bc3_unorm_block;
             return true;
         default:
             return false;
