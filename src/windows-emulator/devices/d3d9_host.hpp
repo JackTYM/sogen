@@ -169,6 +169,10 @@ namespace sogen
         // there, and d3d9-shader-test-x86.exe never caught it either since it only checks HRESULTs, not
         // pixels. 0x10000 keeps ~100-300x headroom over the documented "few hundred" runtime handles
         // while comfortably fitting in 32 bits.
+        //
+        // This single counter is shared across resources_/shaders_/vertex_decls_ below -- don't give
+        // any one of them its own separately-seeded counter, or the 32-bit-safety guarantee above only
+        // covers that one map again.
         uint64_t next_id_{0x10000};
         std::unordered_map<uint64_t, resource_entry> resources_{};
         std::unordered_map<uint64_t, shader_entry> shaders_{};

@@ -174,7 +174,7 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   `SetVertexShaderFunc`/`SetPixelShader`, permanently mismatching `shaders_`'s 64-bit keys. x64's 64-bit
   `HANDLE` never truncated, and `d3d9-shader-test-x86.exe` never caught this either since it only checks
   HRESULTs, not rendered pixels (it was silently exercising this exact same bug the whole time). Fixed by
-  starting `next_id_` at `0x10000` instead -- still ~65000x above the documented "few hundred"
+  starting `next_id_` at `0x10000` instead -- still ~100-300x above the documented "few hundred"
   runtime-handle range, but small enough to survive a 32-bit `HANDLE` round-trip on any guest
   architecture. See `d3d9_host.hpp`'s own comment on `next_id_` for the full account.
 - **5 of the 143 device-func-table slots have unverified arities on x86** (`pfnCheckCounter`,

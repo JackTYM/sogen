@@ -283,6 +283,9 @@ namespace sogen
 
     uint64_t d3d9_host::allocate_id()
     {
+        // See next_id_'s own comment (d3d9_host.hpp) for why this must never reach 2^32 -- it's
+        // round-tripped through a 32-bit HANDLE on x86 (WoW64) guests.
+        assert(this->next_id_ < (1ULL << 32));
         return this->next_id_++;
     }
 
