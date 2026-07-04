@@ -202,6 +202,10 @@ namespace sogen
         bool build_sampler(uint64_t device, uint32_t sampler_index, uint64_t& out_sampler) const;
         const programmable_pipeline_entry* ensure_programmable_pipeline(uint32_t color_format, uint32_t width, uint32_t height,
                                                                          uint32_t depth_format);
+        // Lazily creates ds_entry's depth image view and, on that same first use, clears it once to
+        // D3D9's own default far-plane depth (1.0) -- see the .cpp definition's comment for why.
+        // No-op (returns true) if ds_entry already has a view. depth_format is ds_entry's own VkFormat.
+        bool ensure_depth_stencil_view(uint64_t device, resource_entry& ds_entry, uint32_t depth_format);
 
         // Present only for indexed draws; execute_draw binds `index_buffer` and calls cmd_draw_indexed
         // instead of cmd_draw when passed. index_format matches set_indices_record::format (0 = 16-bit,

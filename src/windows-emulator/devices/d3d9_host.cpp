@@ -674,6 +674,52 @@ namespace sogen
                out_sampler != 0;
     }
 
+    bool d3d9_host::ensure_depth_stencil_view(const uint64_t device, resource_entry& ds_entry, const uint32_t depth_format)
+    {
+        if (ds_entry.vk_image_view_id != 0)
+        {
+            return true;
+        }
+
+        const uint32_t depth_aspect = depth_aspect_mask(depth_format);
+        if (this->vulkan_.create_image_view(device, ds_entry.vk_image_id, depth_format, depth_aspect, VK_IMAGE_VIEW_TYPE_2D, 0,
+                                            1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                            ds_entry.vk_image_view_id) != 0 ||
+            ds_entry.vk_image_view_id == 0)
+        {
+            return false;
+        }
+
+        // First use of this depth-stencil resource: it starts VK_IMAGE_LAYOUT_UNDEFINED with
+        // undefined contents (D3DCLEAR_ZBUFFER isn't wired to a real clear yet). Clear once to D3D9's
+        // own default far-plane depth (1.0) so the first draw's comparisons are well-defined, then
+        // leave it in DEPTH_STENCIL_ATTACHMENT_OPTIMAL for cmd_begin_rendering's LOAD_OP_LOAD below to
+        // pick up -- mirrors the color attachment's own accumulate-across-draws convention, so depth
+        // persists across every draw until this resource is destroyed.
+        const vulkan_host::subresource_range depth_range{
+            .aspect_mask = depth_aspect, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        this->vulkan_.reset_fence(device, this->fence_);
+        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, depth_range);
+        this->vulkan_.cmd_clear_depth_stencil_image(this->command_buffer_, ds_entry.vk_image_id,
+                                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1.0f, 0, depth_range);
+        this->vulkan_.cmd_pipeline_barrier(
+            this->command_buffer_, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
+        this->vulkan_.end_command_buffer(this->command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
+        {
+            // Synchronous wait, matching this function's own submit pattern below.
+        }
+        return true;
+    }
+
     int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex, const indexed_draw* const indexed)
     {
         const auto rt_it = this->resources_.find(this->state_.render_targets[0]);
@@ -766,44 +812,9 @@ namespace sogen
             }
         }
 
-        if (ds_entry != nullptr && ds_entry->vk_image_view_id == 0)
+        if (ds_entry != nullptr && !this->ensure_depth_stencil_view(device, *ds_entry, depth_vk_format))
         {
-            const uint32_t depth_aspect = depth_aspect_mask(depth_vk_format);
-            if (this->vulkan_.create_image_view(device, ds_entry->vk_image_id, depth_vk_format, depth_aspect, VK_IMAGE_VIEW_TYPE_2D, 0,
-                                                1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                ds_entry->vk_image_view_id) != 0 ||
-                ds_entry->vk_image_view_id == 0)
-            {
-                return d3d_ok;
-            }
-
-            // First use of this depth-stencil resource: it starts VK_IMAGE_LAYOUT_UNDEFINED with
-            // undefined contents (D3DCLEAR_ZBUFFER isn't wired to a real clear yet). Clear once to D3D9's
-            // own default far-plane depth (1.0) so the first draw's comparisons are well-defined, then
-            // leave it in DEPTH_STENCIL_ATTACHMENT_OPTIMAL for cmd_begin_rendering's LOAD_OP_LOAD below to
-            // pick up -- mirrors the color attachment's own accumulate-across-draws convention, so depth
-            // persists across every draw until this resource is destroyed.
-            const vulkan_host::subresource_range depth_range{
-                .aspect_mask = depth_aspect, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
-            this->vulkan_.reset_fence(device, this->fence_);
-            this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
-            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, ds_entry->vk_image_id, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                               VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, depth_range);
-            this->vulkan_.cmd_clear_depth_stencil_image(this->command_buffer_, ds_entry->vk_image_id,
-                                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1.0f, 0, depth_range);
-            this->vulkan_.cmd_pipeline_barrier(
-                this->command_buffer_, ds_entry->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
-            this->vulkan_.end_command_buffer(this->command_buffer_);
-            this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-            while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
-            {
-                // Synchronous wait, matching this function's own submit pattern below.
-            }
+            return d3d_ok;
         }
 
         // Upload the current vertex buffer contents fresh every draw -- simplest correct model for a
