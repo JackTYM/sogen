@@ -5635,6 +5635,17 @@ namespace sogen
         return VK_SUCCESS;
     }
 
+    namespace
+    {
+        // VkFormat's contiguous depth/depth-stencil range (D16_UNORM..D32_SFLOAT_S8_UINT) -- covers both
+        // depth formats d3d9_format_to_vulkan can produce (D24_UNORM_S8_UINT for D3DFMT_D24S8,
+        // D32_SFLOAT for D3DFMT_D24X8).
+        bool is_depth_format(const uint32_t vk_format)
+        {
+            return vk_format >= VK_FORMAT_D16_UNORM && vk_format <= VK_FORMAT_D32_SFLOAT_S8_UINT;
+        }
+    } // namespace
+
     int32_t vulkan_host::create_render_target(const uint64_t device, const uint32_t width, const uint32_t height, const uint32_t format,
                                               uint64_t& out_image)
     {
@@ -5700,7 +5711,12 @@ namespace sogen
         image_info.arrayLayers = 1;
         image_info.samples = VK_SAMPLE_COUNT_1_BIT;
         image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        // Depth-stencil resources (D3DUSAGE_DEPTHSTENCIL) reuse this same function -- give them
+        // DEPTH_STENCIL_ATTACHMENT usage instead of COLOR_ATTACHMENT, or using the image as a depth
+        // attachment (see d3d9_host::execute_draw) would be invalid.
+        image_info.usage = is_depth_format(vk_format)
+                                ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+                                : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)

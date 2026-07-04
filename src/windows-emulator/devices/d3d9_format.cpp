@@ -28,7 +28,7 @@ namespace sogen
         constexpr uint32_t vk_format_b8g8r8a8_unorm = 44;
         constexpr uint32_t vk_format_r16g16b16a16_sfloat = 97;
         constexpr uint32_t vk_format_d32_sfloat = 126;
-        constexpr uint32_t vk_format_d24_unorm_s8_uint = 129;
+        constexpr uint32_t vk_format_d32_sfloat_s8_uint = 130;
         constexpr uint32_t vk_format_bc1_rgba_unorm_block = 133;
         constexpr uint32_t vk_format_bc2_unorm_block = 135;
         constexpr uint32_t vk_format_bc3_unorm_block = 137;
@@ -59,7 +59,11 @@ namespace sogen
             out_vk_format = vk_format_r8g8b8a8_snorm;
             return true;
         case d3dfmt_d24s8:
-            out_vk_format = vk_format_d24_unorm_s8_uint;
+            // VK_FORMAT_D24_UNORM_S8_UINT is the byte-exact match, but Apple Silicon's MoltenVK (this
+            // project's deployment target) does not support it at all (confirmed via vulkaninfo) --
+            // only D32_SFLOAT_S8_UINT, mirroring the same portability substitution already made for
+            // D3DFMT_D24X8 below.
+            out_vk_format = vk_format_d32_sfloat_s8_uint;
             return true;
         case d3dfmt_d24x8:
             // VK_FORMAT_X8_D24_UNORM_PACK32 is the byte-exact match, but Vulkan only guarantees one of
