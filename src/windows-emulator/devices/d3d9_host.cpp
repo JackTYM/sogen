@@ -317,8 +317,8 @@ namespace sogen
         }
 
         // Matches the CBV bindings d3d9_shader_translator.cpp pins into the SPIR-V: VS float-const UBO
-        // at set 0 binding 0, PS float-const UBO at set 1 binding 0. Only the SHAPE is wired up here --
-        // no buffers are created/bound yet (that lands with the descriptor pool + per-draw binding).
+        // at set 0 binding 0, PS float-const UBO at set 1 binding 0. The actual per-draw UBO creation
+        // and descriptor-set binding happens in execute_draw, using descriptor_pool_.
         const std::array<vulkan_host::descriptor_binding, 1> vs_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
@@ -394,7 +394,7 @@ namespace sogen
         }
 
         // The set layouts and pipeline layout survive here (unlike the old destroy-after-use pattern)
-        // so execute_draw's future cmd_bind_descriptor_sets has stable ids to bind into on every draw.
+        // so execute_draw's cmd_bind_descriptor_sets has stable ids to bind into on every draw.
         return &this->programmable_pipelines_.emplace(key, entry).first->second;
     }
 
