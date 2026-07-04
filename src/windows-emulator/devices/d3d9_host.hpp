@@ -37,6 +37,15 @@ namespace sogen
     // translates a bound vertex+pixel shader pair via vkd3d-shader (d3d9_shader_translator.hpp) into a
     // second, cached Vulkan pipeline, selected by execute_draw whenever both shaders are bound.
     // Verified end-to-end with real D3DCompile()-produced SM2 bytecode -- see HANDOFF_MACBOOK.md §15.
+    //
+    // M2 (textures, samplers, indexed draws, real depth/blend) is also implemented: plain sampled
+    // texture_2d resources get real GPU backing with lazy staging upload (ensure_texture_uploaded), a
+    // real vulkan_host::create_sampler is built from live-RE'd sampler state and bound as a
+    // combined-image-sampler alongside the existing float-constant UBOs, execute_draw's indexed
+    // variant issues cmd_bind_index_buffer/cmd_draw_indexed, and both pipelines build real depth
+    // (ensure_depth_stencil_view, build_depth_state) and blend (build_blend_state) state from
+    // render_state instead of the old always-disabled defaults. Verified end-to-end by
+    // d3d9_texture_test.cpp -- see HANDOFF_MACBOOK.md §16 and docs/d3d9-roadmap.md for what's still open.
     class d3d9_host
     {
       public:
