@@ -625,7 +625,7 @@ namespace sogen
         }
 
         // VkFormat's contiguous depth/depth-stencil range covers exactly the two depth formats
-        // d3d9_format_to_vulkan can produce (D24_UNORM_S8_UINT for D3DFMT_D24S8, D32_SFLOAT for
+        // d3d9_format_to_vulkan can produce (D32_SFLOAT_S8_UINT for D3DFMT_D24S8, D32_SFLOAT for
         // D3DFMT_D24X8); the aspect mask includes STENCIL only for formats that actually carry it.
         uint32_t depth_aspect_mask(const uint32_t vk_format)
         {

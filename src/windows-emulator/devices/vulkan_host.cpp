@@ -5638,7 +5638,7 @@ namespace sogen
     namespace
     {
         // VkFormat's contiguous depth/depth-stencil range (D16_UNORM..D32_SFLOAT_S8_UINT) -- covers both
-        // depth formats d3d9_format_to_vulkan can produce (D24_UNORM_S8_UINT for D3DFMT_D24S8,
+        // depth formats d3d9_format_to_vulkan can produce (D32_SFLOAT_S8_UINT for D3DFMT_D24S8,
         // D32_SFLOAT for D3DFMT_D24X8).
         bool is_depth_format(const uint32_t vk_format)
         {
