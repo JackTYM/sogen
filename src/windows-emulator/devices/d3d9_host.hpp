@@ -167,8 +167,8 @@ namespace sogen
         // Root-caused 2026-07-04 via d3d9-const-test-x86.exe's pixel-exact failure (the first x86 test
         // to actually verify rendered output); x64's 64-bit HANDLE never truncated so this was invisible
         // there, and d3d9-shader-test-x86.exe never caught it either since it only checks HRESULTs, not
-        // pixels. 0x10000 keeps ~65000x headroom over the documented "few hundred" runtime handles while
-        // comfortably fitting in 32 bits.
+        // pixels. 0x10000 keeps ~100-300x headroom over the documented "few hundred" runtime handles
+        // while comfortably fitting in 32 bits.
         uint64_t next_id_{0x10000};
         std::unordered_map<uint64_t, resource_entry> resources_{};
         std::unordered_map<uint64_t, shader_entry> shaders_{};
