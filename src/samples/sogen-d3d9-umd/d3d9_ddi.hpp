@@ -429,10 +429,13 @@ typedef struct _D3DDDIARG_SETPIXELSHADERCONST
     UINT Count;
 } D3DDDIARG_SETPIXELSHADERCONST;
 
+// NOT wired up in sogen_d3d9_umd.cpp yet, and NOT RE-verified -- the "data follows the struct"
+// convention below is the same one just proven wrong for SETVERTEXSHADERCONST/SETPIXELSHADERCONST
+// above. Do not trust it for these int/bool variants without live verification first.
 typedef struct _D3DDDIARG_SETVERTEXSHADERCONSTI
 {
     UINT Register;
-    UINT Count; // number of int4 vectors; the int32 data follows the struct in memory
+    UINT Count; // number of int4 vectors; unverified assumption: the int32 data follows in memory
 } D3DDDIARG_SETVERTEXSHADERCONSTI;
 
 typedef struct _D3DDDIARG_SETPIXELSHADERCONSTI
@@ -444,7 +447,7 @@ typedef struct _D3DDDIARG_SETPIXELSHADERCONSTI
 typedef struct _D3DDDIARG_SETVERTEXSHADERCONSTB
 {
     UINT Register;
-    UINT Count; // number of BOOLs (4 bytes each); the data follows the struct in memory
+    UINT Count; // number of BOOLs (4 bytes each); unverified assumption: the data follows in memory
 } D3DDDIARG_SETVERTEXSHADERCONSTB;
 
 typedef struct _D3DDDIARG_SETPIXELSHADERCONSTB
