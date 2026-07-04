@@ -161,6 +161,13 @@ namespace sogen
         {
             uint64_t vs_module{};
             uint64_t fs_module{};
+            // Set 0 = VS float-const UBO (binding 0), set 1 = PS float-const UBO (binding 0) -- matches
+            // the CBV bindings d3d9_shader_translator.cpp pins into the SPIR-V. Cached alongside the
+            // pipeline (rather than destroyed after create_graphics_pipeline like a one-shot local) so
+            // execute_draw's cmd_bind_descriptor_sets has stable layout ids to bind into on every draw.
+            uint64_t vs_set_layout{};
+            uint64_t ps_set_layout{};
+            uint64_t pipeline_layout{};
             uint64_t pipeline{};
         };
 

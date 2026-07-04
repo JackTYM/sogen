@@ -308,11 +308,41 @@ namespace sogen
             return nullptr;
         }
 
-        uint64_t layout = 0;
-        if (this->vulkan_.create_pipeline_layout(device, 0, 0, {}, layout) != 0 || layout == 0)
+        // Matches the CBV bindings d3d9_shader_translator.cpp pins into the SPIR-V: VS float-const UBO
+        // at set 0 binding 0, PS float-const UBO at set 1 binding 0. Only the SHAPE is wired up here --
+        // no buffers are created/bound yet (that lands with the descriptor pool + per-draw binding).
+        const std::array<vulkan_host::descriptor_binding, 1> vs_bindings{{
+            {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
+        }};
+        const std::array<vulkan_host::descriptor_binding, 1> ps_bindings{{
+            {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
+        }};
+        if (this->vulkan_.create_descriptor_set_layout(device, vs_bindings, entry.vs_set_layout) != 0 ||
+            entry.vs_set_layout == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
+            return nullptr;
+        }
+        if (this->vulkan_.create_descriptor_set_layout(device, ps_bindings, entry.ps_set_layout) != 0 ||
+            entry.ps_set_layout == 0)
+        {
+            this->vulkan_.destroy_shader_module(device, entry.vs_module);
+            this->vulkan_.destroy_shader_module(device, entry.fs_module);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
+            return nullptr;
+        }
+
+        const std::array<uint64_t, 2> set_layouts{entry.vs_set_layout, entry.ps_set_layout};
+        if (this->vulkan_.create_pipeline_layout(device, 0, 0, set_layouts, entry.pipeline_layout) != 0 ||
+            entry.pipeline_layout == 0)
+        {
+            this->vulkan_.destroy_shader_module(device, entry.vs_module);
+            this->vulkan_.destroy_shader_module(device, entry.fs_module);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
             return nullptr;
         }
 
@@ -341,23 +371,22 @@ namespace sogen
         const vulkan_host::specialization empty_spec{};
 
         const int32_t result = this->vulkan_.create_graphics_pipeline(
-            device, /*render_pass=*/0, layout, entry.vs_module, entry.fs_module, width, height, bindings, attributes,
-            depth, color_formats, /*depth_format=*/0, /*stencil_format=*/0, /*rasterization_samples=*/1,
+            device, /*render_pass=*/0, entry.pipeline_layout, entry.vs_module, entry.fs_module, width, height, bindings,
+            attributes, depth, color_formats, /*depth_format=*/0, /*stencil_format=*/0, /*rasterization_samples=*/1,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec,
             blend, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
-            this->vulkan_.destroy_pipeline_layout(device, layout);
+            this->vulkan_.destroy_pipeline_layout(device, entry.pipeline_layout);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
             return nullptr;
         }
 
-        // The pipeline layout is not referenced after pipeline creation (this path uses no push
-        // constants or descriptor sets, unlike ensure_pipeline's fixed-function pipeline_layout_), so
-        // it does not need to outlive the pipeline it built -- destroy it now rather than leaking it.
-        this->vulkan_.destroy_pipeline_layout(device, layout);
-
+        // The set layouts and pipeline layout survive here (unlike the old destroy-after-use pattern)
+        // so execute_draw's future cmd_bind_descriptor_sets has stable ids to bind into on every draw.
         return &this->programmable_pipelines_.emplace(key, entry).first->second;
     }
 
