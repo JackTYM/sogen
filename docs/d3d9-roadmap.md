@@ -24,9 +24,10 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
 | M1 | Programmable SM2/3 triangle (VS+PS bytecode, DrawPrimitive, Present) | **Done** | Real `D3DCompile()` → `vkd3d-shader` → SPIR-V → Vulkan pipeline, pixel-verified. No DXVK oracle was built (dropped in favor of analytic pixel-readback checks, same rigor, no new dependency). |
 | M1.5 | Float constant registers (`c#`) | **Done** | Not in the original plan as a separate milestone; pulled forward because a WVP matrix is needed for M2 anyway. UBO + descriptor-set binding contract now proven for one register set. |
 | M2 | Textured + depth quad (`SetTexture`/sampler, indexed draw, depth, alpha blend) | **Done** | Real GPU-backed 2D textures (single mip, lazy staging upload), real `vulkan_host::create_sampler` + combined-image-sampler binding (RE'd sampler-state DDI encoding), indexed draws, real depth testing (D32_SFLOAT_S8_UINT in place of D24S8 for MoltenVK), real alpha blending, and the SPIR-V-side combined-sampler binding in the shader translator — all proven together by `d3d9_texture_test.cpp` (4/4 analytic pixel checks exact). D3DFORMAT↔VkFormat table covers exactly the locked MW2-first set (13 D3DFORMAT values, collapsing to 11 distinct VkFormat outputs since A8R8G8B8/X8R8G8B8 both map to B8G8R8A8_UNORM and L8/A8 both map to R8_UNORM — see below). Two real bugs found building the terminal test remain open, and the index/vertex Lock fix is a permanent partial-buffer limitation, not a full fix — see "Known bugs & limitations carried out of M2" below. |
+| WoW64 | WoW64/x86 D3D9 UMD port (32-bit `sogen_d3d9um`, SysWOW64) | **Done** | Not in the original plan's M1-M5 table; pulled forward per the user's own priority order since real games (MW2/BO2/GTA SA) are 32-bit and nothing else matters without a working x86 guest path. Proven: typed per-slot `__stdcall` thunk arities for all 143 `D3DDDI_DEVICEFUNCS` slots (28 real implementations unchanged, the other 115 now get a correctly-sized `stub_args_N` instead of x64's zero-arg `device_stub`, which would desync callee-cleanup x86's stack); x86-specific `D3DDDIARG_*`/`D3DDDI_*` struct layout for every real slot with a HANDLE/pointer field, pinned by `#ifndef _WIN64` `static_assert`s, including a live-RE'd fix for `D3DDDIARG_LOCK`/`D3DDDIARG_UNLOCK` (x86 is a genuinely different two-tier struct shape via `DdLockLH`, not just a pointer-shrunk copy of the x64 layout); `i686-w64-mingw32-g++` build tooling (parallel commands in `src/samples/sogen-d3d9-umd/README.md`) producing `sogen_d3d9um-x86.dll`. End-to-end proof: `d3d9-triangle-test-x86.exe`, cross-compiled to i686 and run through the real WoW64 path against the genuine 32-bit Microsoft `d3d9.dll` (not DXVK), reaches the x86 UMD and reads back the exact same pixel (`B=FF G=80 R=40 A=FF`) as the x64 `d3d9-triangle-test` — full pixel parity. **Not yet covered:** only the triangle guest test has been ported/verified on x86 — `d3d9-shader-test`, `d3d9-const-test`, and `d3d9-texture-test` (real shaders, constant registers, textures, depth, blending) have not been cross-compiled or run on x86 yet, so M1.5/M2's features are unconfirmed on the x86 path. Five DDI slot arities flagged low-confidence during design (`pfnCheckCounter`, `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified against the real `d3d9.dll`, since a fixed-function triangle draw never calls them — a future x86 test that hits one of these slots could still find a stack-corrupting arity mismatch. |
 | M3 | DDI coverage (multi-stream, `*_UP` draws, StretchRect/ColorFill, scissor, MRT, cube/vol, more formats, **int/bool constant registers**) | **Not started** | Inherits M2's two open bugs and the partial-Lock limitation (see below) — none of this is M3-net-new work, it's M2 debt M3 must not silently re-break. |
 | M4 | Fixed-function synthesis | **Deferred by design** | Original plan: "only if MW2 needs it." MW2 is SM3-heavy; likely skippable. Revisit if a real game draw path turns out to need FF after all. |
-| M5 | MW2 integration (WoW64, SM3, 32-bit UMD) | **Not started, blocked on M2-M3** | Needs the 32-bit `sogen_d3d9um`/SysWOW64 port (typed `__stdcall` thunks, not yet built) before any x64-only shader-DDI work applies there. |
+| M5 | MW2 integration (WoW64, SM3, 32-bit UMD) | **Not started, blocked on M2-M3** | The WoW64/x86 UMD port itself is done (see the WoW64 row above) — the remaining blocker is real MW2 integration work: M3's DDI coverage, SM3 caps, and re-verifying M1.5/M2's shader/texture/constant-register features on the x86 path specifically (only the fixed-function triangle draw has been proven there so far). |
 
 ## Remaining work, consolidated (supersedes scattered "Deferred work" notes in HANDOFF_MACBOOK.md)
 
@@ -110,16 +111,16 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   own caps-gauntlet RE pass, same shape as the SM2.0 one already done (expect more undocumented bits).
 
 ### Cross-cutting / infra
-- [ ] **WoW64/x86 shader path** — the UMD is x64-only. The 32-bit `sogen_d3d9um` (SysWOW64) DLL needs
-  typed `__stdcall` thunks per device-func slot instead of the generic caller-cleanup stub before any
-  of this session's shader-DDI work (or M2/M3) applies there. MW2 is a 32-bit game — this is a hard
-  blocker for M5, should probably be tackled before M3 gets too far ahead of it. **New concern from
-  M2:** the two DevCaps-routing-bit findings (vertex buffers and index buffers each gate through their
-  own, separately-discovered bit) and the `D3DDDIARG_LOCK` two-shapes-for-one-struct ambiguity were
-  both found via x64 live RE against the real `d3d9.dll`'s x64 code paths. The x86 build of the same
-  DLL is not guaranteed to share either finding's exact bits/offsets/calling convention — the WoW64
-  port should budget time to re-verify both from scratch on x86, not assume the x64 findings transfer
-  unchanged.
+- [x] **WoW64/x86 shader path** — done, see the WoW64 row in the milestone table above. Typed
+  `__stdcall` thunk arities, x86 struct layout (including a live-RE'd fix for `D3DDDIARG_LOCK`/
+  `D3DDDIARG_UNLOCK`'s genuinely different x86 shape, not just a pointer-shrunk x64 copy), and i686
+  build tooling are all in place, proven end-to-end by `d3d9-triangle-test-x86.exe` reaching pixel
+  parity with the x64 triangle test under real WoW64 against the genuine 32-bit `d3d9.dll`. **Still
+  open:** only the triangle test has been verified on x86 — the shader/const/texture guest tests
+  (M1.5/M2's features: real shaders, constant registers, textures, depth, blending) have not been
+  ported to x86 yet, and 5 low-confidence DDI slot arities (`pfnCheckCounter`, `pfnSetMarker`,
+  `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified since the triangle draw
+  never hits them.
 - [ ] Pipeline-key system beyond one shader pair at a time — **not actually a gap**, just not yet
   exercised. `ensure_programmable_pipeline`'s cache is already a real per-pair cache
   (`programmable_pipelines_`, keyed by `(vertex_shader_id << 32 | pixel_shader_id)`); it just hasn't
@@ -133,14 +134,14 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
 
 ## Sequencing recommendation
 
-M2 is done. Per the original plan's "de-risk earliest/riskiest first" philosophy, the next slice
-should be **WoW64/x86, not deeper M3 coverage** — it's a hard prerequisite for M5 (the actual game,
-32-bit), and M2 surfaced two separate x64-specific DDI findings (the per-buffer-kind DevCaps routing
-bits, the `D3DDDIARG_LOCK` two-shapes ambiguity) that the x86 port cannot simply inherit; left until
-after M3 balloons, every one of M3's DDI additions would need a second, x86-specific RE pass on top of
-its x64 one. Once WoW64 is up, **int/bool constant registers before further M3 coverage**, same
-reasoning as before: real games hit shader flow control before most of M3's other items (multi-stream,
-`*_UP` draws, MRT, cube/volume). The three open M2 bugs (`TEXCOORD0` interpolation, `D3DPOOL_MANAGED`
-double-creation, partial-buffer Lock) should be root-caused before M3 leans on any of them further —
-`D3DPOOL_MANAGED` in particular is likely to block real game asset loading outright, not just degrade
-a corner case.
+M2 and the WoW64/x86 UMD port are both done. Per the original plan's "de-risk earliest/riskiest first"
+philosophy, the next slice should be **porting the shader/const/texture guest tests to x86** before
+leaning further into M3 — the WoW64 port has only proven the fixed-function triangle path so far, and
+M2's texture/shader/constant-register features (plus the two DevCaps-routing-bit findings and the
+`D3DDDIARG_LOCK` ambiguity, both originally found via x64-only RE) still need x86-side confirmation
+before assuming they transfer unchanged. Once that's confirmed, **int/bool constant registers before
+further M3 coverage**, same reasoning as before: real games hit shader flow control before most of
+M3's other items (multi-stream, `*_UP` draws, MRT, cube/volume). The three open M2 bugs (`TEXCOORD0`
+interpolation, `D3DPOOL_MANAGED` double-creation, partial-buffer Lock) should be root-caused before M3
+leans on any of them further — `D3DPOOL_MANAGED` in particular is likely to block real game asset
+loading outright, not just degrade a corner case.

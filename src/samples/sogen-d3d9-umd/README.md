@@ -135,8 +135,13 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   `DrawPrimitive hr=0x00000000` and `Present hr=0x00000000`. The shader test's rendered pixel was
   verified against the hand-computed barycentric blend of the triangle's vertex colors, confirming
   real SM2 shader translation end to end.
-- x64-only bring-up; the x86/WoW64 UMD needs typed `__stdcall` thunks per device-func slot instead
-  of the generic caller-cleanup stub.
+- The x86/WoW64 UMD is built with typed `__stdcall` thunks per device-func slot (28 real
+  implementations plus a `stub_args_N` per distinct arity for the other 115, keyed by a 143-entry
+  lookup table) instead of x64's generic zero-arg caller-cleanup stub, since x86 `__stdcall` is
+  callee-cleanup and would desync the stack otherwise. Proven end-to-end: `d3d9-triangle-test-x86.exe`
+  reaches the x86 UMD through real WoW64 against the genuine 32-bit Microsoft `d3d9.dll` and reads back
+  the same pixel as the x64 triangle test. Only the triangle test has been ported to x86 so far --
+  `d3d9-shader-test`, `d3d9-const-test`, and `d3d9-texture-test` remain x64-only.
 - `pfnSetVertexShaderConst`/`pfnSetPixelShaderConst` take the float array as a separate third DDI
   argument (`CONST FLOAT*`), not trailing bytes after the `{Register, Count}` header -- the same
   header-plus-separate-array-pointer shape already used by `pfnClear`. A first attempt assumed the
