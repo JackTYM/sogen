@@ -142,6 +142,20 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   reaches the x86 UMD through real WoW64 against the genuine 32-bit Microsoft `d3d9.dll` and reads back
   the same pixel as the x64 triangle test. Only the triangle test has been ported to x86 so far --
   `d3d9-shader-test`, `d3d9-const-test`, and `d3d9-texture-test` remain x64-only.
+- **5 of the 143 device-func-table slots have unverified arities on x86** (`pfnCheckCounter`,
+  `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) -- a simple triangle-draw
+  app never calls them, so their assumed byte counts haven't been checked against the real 32-bit
+  `d3d9.dll`. A future guest that hits one of these could still desync the stack; verify via idasql
+  against `d3d9_x86.dll.i64` before relying on them.
+- **`D3DDDIARG_LOCK`/`D3DDDIARG_UNLOCK` have a genuinely different x86 layout, not just pointer-
+  shrunk fields.** The real 32-bit `d3d9.dll` builds an 84-byte struct in `CDriverVertexBuffer::Lock`/
+  `CDriverMipSurface::InternalLockRect`, then passes it through an indirect call (a per-device,
+  runtime-populated function pointer, invisible to static xref analysis) to `DdLockLH`/`DdUnlockLH`,
+  which build their own, separate 48-byte/8-byte struct -- that inner struct, not the outer one, is
+  what actually crosses the DDI boundary (`pData` at offset 32, not 40 as the x64-derived first
+  attempt assumed). RE'd via live execution trace (sogen's own Python debugger API hooking the real
+  call sites), not just decompilation -- see `d3d9_ddi.hpp`'s `D3DDDIARG_LOCK` comment for the full
+  method and evidence.
 - `pfnSetVertexShaderConst`/`pfnSetPixelShaderConst` take the float array as a separate third DDI
   argument (`CONST FLOAT*`), not trailing bytes after the `{Register, Count}` header -- the same
   header-plus-separate-array-pointer shape already used by `pfnClear`. A first attempt assumed the
