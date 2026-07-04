@@ -566,6 +566,10 @@ typedef struct _D3DDDIARG_DRAWINDEXEDPRIMITIVE
 // choice: always treat every lock as an implicit whole-buffer lock (offset 0, size unknown) --
 // resolve_buffer_resource_id's existing size-unknown fallback already exists for exactly this case and
 // safely over-allocates rather than misreading a garbage value as a byte count.
+//
+// x86 note: this x64 layout does NOT carry over -- see the separate x86 definition below. Task 6's
+// live idasql RE (2026-07-04) found the x86 struct is genuinely different, not just pointer-shrunk.
+#ifdef _WIN64
 typedef struct _D3DDDIARG_LOCK
 {
     HANDLE hResource;    // 0 -- confirmed
@@ -575,14 +579,69 @@ typedef struct _D3DDDIARG_LOCK
     BYTE Reserved2[56];  // 48..103 -- unconfirmed (includes OffsetToLock@80 in the "driver-routed"
                           //            shape only -- not read, see comment above)
 } D3DDDIARG_LOCK;
+#else
+// x86 D3DDDIARG_LOCK is a GENUINELY DIFFERENT, smaller (48-byte) struct, not a pointer-shrunk copy of
+// the x64 one above -- Task 6's RE (2026-07-04) found a prior x86 static_assert (hResource@0/pData@40,
+// "unchanged from x64" on the theory that the UINT64 Reserved0 field's 8-byte alignment padding
+// absorbs the pointer shrinkage) was wrong: the discrepancy from the real, live-observed layout (a
+// naive single-offset fix landed at byte 68) was ~28 bytes, far more than alignment slop could explain.
+//
+// Root cause, found via idasql decompilation of the real 32-bit d3d9.dll (d3d9_x86.dll.i64):
+// CDriverVertexBuffer::Lock (0x100761D0) and CDriverMipSurface::InternalLockRect (0x10045E70) each
+// build their OWN 84-byte "outer" bookkeeping struct (21 DWORDs) and pass it to a SEPARATE function,
+// DdLockLH (0x10065460) -- exactly the same two-tier shape the x64 struct above was already known to
+// have (CDriverVertexBuffer::Lock's own 104-byte v14 vs. DdLockLH's real, 64-byte v28..v34, pData@40).
+// A naive read of the OUTER struct alone (offset 68, where the outer struct's own bookkeeping copy of
+// the result lands) is what caused the earlier crash: DdLockLH allocates only a 48-byte local struct
+// (v29, memset'd to exactly sizeof(v29)=48) for the real DDI call, so writing a driver output at byte
+// 68 (outside DdLockLH's 48-byte allocation) corrupts unrelated stack contents (DdLockLH's own other
+// locals / saved registers -- consistent with the observed "SEH stack scaffolding" corruption and the
+// null-vtable crash at teardown).
+//
+// The REAL struct crossing the DDI boundary is DdLockLH's own local `v29` (confirmed via three
+// independent, cross-checked call sites: CDriverVertexBuffer::Lock -> DdLockLH, and
+// CDriverMipSurface::InternalLockRect -> DdLockLH, both landing on the identical v29 shape; x64's
+// already-proven-correct DdLockLH was also re-decompiled as a methodology sanity check and shows the
+// exact same two-tier "outer struct calls DdLockLH, which builds its own smaller wire struct" pattern):
+// `v29[0] = *(DWORD*)v1` (hResource, single dereference through the resource-context pointer -- same
+// derivation x64's `v28 = *v1` uses for its own hResource@0), `v29[1] = *(DWORD*)(v1+4)` (Reserved0),
+// `v29[2..7]` (OffsetToLock/SizeToLock, or Rect/Box input, depending on lock kind), `v29[8]` (pData,
+// OUTPUT -- confirmed: `a1[17] = v29[8]` is exactly what the outer struct's own offset-68 bookkeeping
+// copy at issue above is populated FROM), `v29[9]` (Pitch, OUTPUT), `v29[10]` (a conditional third
+// OUTPUT field), `v29[11]` (Flags). Total struct size: 48 bytes (12 DWORDs), matching DdLockLH's own
+// `memset(v29, 0, sizeof(v29))`.
+typedef struct _D3DDDIARG_LOCK
+{
+    HANDLE hResource;    // 0 -- RE-verified live 2026-07-04 (see comment above)
+    UINT32 Reserved0;    // 4 -- present, purpose unconfirmed (x86-native 4 bytes; NOT a UINT64)
+    BYTE Reserved1[24];  // 8..31 -- unconfirmed (OffsetToLock/SizeToLock or Rect/Box input region)
+    VOID* pData;         // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
+    BYTE Reserved2[12];  // 36..47 -- unconfirmed (Pitch/SlicePitch/Flags; not read by umd_Lock)
+} D3DDDIARG_LOCK;
+#endif
 
 // RE-verified against the real staged d3d9.dll (CDriverVertexBuffer::Unlock, ddi.cpp) -- NOT guessed.
 // Exactly 2 QWORDS, matching D3DDDIARG_LOCK's first two fields.
+//
+// x86 note: same two-tier pitfall as D3DDDIARG_LOCK -- CDriverVertexBuffer::Unlock's own 8-byte local
+// struct is passed to DdUnlockLH (0x10065BF0), whose own local `v5` (2 DWORDS, 8 bytes total: `v5[0] =
+// *v1` hResource, `v5[1] = v1[1]` Reserved0) is what actually crosses into pfnUnlock -- confirmed via
+// idasql decompile 2026-07-04. Unlike D3DDDIARG_LOCK, this one genuinely IS just a pointer-shrunk copy
+// of the x64 shape (2 native-width slots, no extra fields), so it needs a size fix only, not a
+// full field-order rewrite.
+#ifdef _WIN64
 typedef struct _D3DDDIARG_UNLOCK
 {
     HANDLE hResource; // 0 -- confirmed
     UINT64 Reserved0; // 8 -- confirmed present (same field as D3DDDIARG_LOCK's Reserved0)
 } D3DDDIARG_UNLOCK;
+#else
+typedef struct _D3DDDIARG_UNLOCK
+{
+    HANDLE hResource; // 0 -- confirmed
+    UINT32 Reserved0; // 4 -- confirmed present (same field as D3DDDIARG_LOCK's Reserved0)
+} D3DDDIARG_UNLOCK;
+#endif
 
 // RE-verified via CBatchFilterI::LHBatchPresent (which copies exactly 40 bytes -- one OWORD at
 // offset 0, one OWORD at offset 16, one QWORD at offset 32 -- into the batch token): the raw struct
@@ -603,14 +662,11 @@ static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll R
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll RE (LHBatchPresent copy pattern)");
 #else
-// x86 layout, hand-recomputed from the RE-confirmed x64 layout above; compiler-verified via
-// i686-w64-mingw32-g++ (both sizeof and offsetof of hResource/pData). D3DDDIARG_LOCK and
-// D3DDDIARG_UNLOCK's totals are UNCHANGED from x64: each struct's UINT64 Reserved0 field forces
-// 8-byte struct alignment, and that alignment padding exactly absorbs the 4 bytes the HANDLE/pData
-// fields shrink by -- hResource stays at offset 0 and pData stays at offset 40 in D3DDDIARG_LOCK,
-// identical to x64. D3DDDIARG_PRESENT has no such 8-byte-aligned field, so its total does shrink.
-static_assert(sizeof(D3DDDIARG_LOCK) == 104, "D3DDDIARG_LOCK x86 layout (size unchanged from x64)");
-static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "D3DDDIARG_UNLOCK x86 layout (size unchanged from x64)");
+// D3DDDIARG_LOCK/D3DDDIARG_UNLOCK's x86 sizes are NOT "unchanged from x64" -- see Task 6's RE (2026-07-04,
+// comments on the x86 struct definitions above) for why the earlier "alignment padding absorbs the
+// shrinkage" theory was wrong and what the real, live-RE'd x86 sizes (48 / 8 bytes) are.
+static_assert(sizeof(D3DDDIARG_LOCK) == 48, "D3DDDIARG_LOCK x86 layout (RE-verified live 2026-07-04)");
+static_assert(sizeof(D3DDDIARG_UNLOCK) == 8, "D3DDDIARG_UNLOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 36, "D3DDDIARG_PRESENT x86 layout");
 #endif
 
