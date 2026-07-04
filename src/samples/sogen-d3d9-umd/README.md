@@ -35,6 +35,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_triangle_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_shader_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-shader-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-const-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, and `d3d9_texture_test.cpp` are guest-runtime tests,
@@ -54,6 +57,7 @@ cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
+cp d3d9-const-test-x86.exe <root>/filesys/c/d3d9-const-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -71,6 +75,7 @@ already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_
 ./analyzer -e <root> -c c:/d3d9-const-test.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -151,7 +156,27 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   WoW64 with all HRESULTs (`D3DCompile` x2, `CreateVertexShader`, `CreatePixelShader`, `DrawPrimitive`,
   `Present`) coming back `0x00000000`, proving the shader-create/shader-set DDI slots
   (`pfnCreateVertexShaderFunc`, `pfnCreatePixelShader`, `pfnSetVertexShaderFunc`, `pfnSetPixelShader`)
-  and the programmable draw path on x86. `d3d9-const-test` and `d3d9-texture-test` remain x64-only.
+  and the programmable draw path on x86. `d3d9-texture-test` remains x64-only.
+- **`d3d9-const-test-x86.exe` FAILS on real WoW64 -- a genuine, unresolved x86-specific finding, not a
+  regression of the already-fixed `pfnSetVertexShaderConst`/`pfnSetPixelShaderConst` calling
+  convention.** The pixel-A check (must show the exact PS constant `c0` color) fails, reading back the
+  background clear color instead -- i.e. the triangle did not visibly rasterize at all, consistent with
+  the VS-side `c1`-`c4` scale matrix collapsing to zero rather than the intended 0.5x scale (pixel-B
+  still trivially "passes" since nothing renders there either way). This is NOT the previously-fixed
+  calling-convention bug regressing: a temporary diagnostic added to `umd_SetVertexShaderConst`/
+  `umd_SetPixelShaderConst` (logged, then reverted; not committed) showed the exact same three DDI
+  calls, in the exact same order and with the exact same values, reaching the UMD on both x64 and x86 --
+  `{Register=1, Count=4, f0=0.5}` (the app's real `SetVertexShaderConstantF`), then a second, unexplained
+  `{Register=0, Count=5, f0=0.0}` call (some internal/automatic zero-init that numerically overlaps and
+  should, by `d3d9_host.cpp`'s literal last-write-wins `memcpy` logic, re-zero registers 1-4), then
+  `{Register=0, Count=1, f0=0.75}` (the app's real `SetPixelShaderConstantF`). x64 renders correctly
+  despite this same overlapping zero call; x86 does not -- so the divergence is downstream of DDI
+  argument delivery (proven byte-identical across both architectures) and is most likely a timing/
+  ordering issue (e.g. a worker-thread DP2-batch race between the app's real call and the internal
+  zero-init call, resolving differently under WoW64's different scheduling/thunking overhead vs. native
+  x64). Not root-caused or fixed here -- out of scope for a test-porting task; needs a dedicated
+  investigation (live trace of the worker-thread dispatch order, and/or of `d3d9_host.cpp`'s constant-
+  buffer upload timing relative to `DrawPrimitive`).
 - **5 of the 143 device-func-table slots have unverified arities on x86** (`pfnCheckCounter`,
   `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) -- a simple triangle-draw
   app never calls them, so their assumed byte counts haven't been checked against the real 32-bit
