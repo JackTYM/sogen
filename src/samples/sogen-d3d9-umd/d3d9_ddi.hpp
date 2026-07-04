@@ -610,6 +610,34 @@ typedef struct _D3DDDIARG_LOCK
 // copy at issue above is populated FROM), `v29[9]` (Pitch, OUTPUT), `v29[10]` (a conditional third
 // OUTPUT field), `v29[11]` (Flags). Total struct size: 48 bytes (12 DWORDs), matching DdLockLH's own
 // `memset(v29, 0, sizeof(v29))`.
+//
+// IMPORTANT METHODOLOGY NOTE, added after an independent review caught a real gap here: the
+// DdLockLH claim above was *initially* backed only by static idasql decompilation (matching the
+// helper's name and shape to the two Lock call sites) -- a spec-compliance reviewer correctly pointed
+// out that `SELECT ... FROM xrefs WHERE to_ea = <DdLockLH> AND is_code=1` returns six callers, none of
+// which is CDriverVertexBuffer::Lock/CDriverMipSurface::InternalLockRect. That is real and reproducible,
+// but it does NOT mean DdLockLH is the wrong function: the call from Lock/InternalLockRect is an
+// *indirect* call through a per-device, runtime-populated function-pointer field (raw disassembly:
+// `mov esi, [esi+308h]` / `call esi`, the ECX load right before it is just the x86 Control Flow Guard
+// ABI setting up `___guard_check_icall_fptr`'s argument register, not a real "this"/hDevice parameter --
+// it is unrelated to the actual 2-arg DDI call). A static xref pass cannot resolve an indirect call
+// through a non-constant, heap/device-object-resident pointer to its runtime target, so it correctly
+// finds zero code-xrefs here; the six functions it DOES find are DdLockLH's legacy-DirectDraw callers
+// plus whatever populates that per-device callback slot (an address-taken, not a call, reference,
+// which an `is_code=1` filter also excludes) -- unrelated to whether Lock/InternalLockRect calls it too.
+// This was re-verified LIVE (not just re-argued statically) via sogen's own Python debugger API
+// (`sogen.windows.create_application` + `hooks.memory_execution_at`, read-only registers/memory, no
+// writes) against the real emulator, hooking the exact "call esi" instructions in the staged 32-bit
+// d3d9.dll: the call target read from ESI at CDriverVertexBuffer::Lock's call site is
+// `<d3d9.dll base> + 0x65460`, and at CDriverVertexBuffer::Unlock's call site is
+// `<d3d9.dll base> + 0x65BF0` -- exactly DdLockLH's and DdUnlockLH's RVAs (0x10065460/0x10065BF0 minus
+// the IDA image base 0x10000000), for every d3d9.dll module load observed. The same live session also
+// hooked our own umd_Lock's entry and read `pArgs` (the runtime hidden-arg/CFG-artifact confusion at the
+// call site does not affect the real callee args: pArgs lands correctly at the second stdcall stack
+// slot) and confirmed `pArgs->hResource` reads a real, plausible resource handle and -- the decisive
+// check -- the value umd_Lock writes to `pArgs->pData` (offset 32) is byte-for-byte identical to the
+// pointer the guest app receives from `IDirect3DVertexBuffer9::Lock()` (both `0x41f46e0` in one capture).
+// This is now confirmed by live execution trace, not just plausible-looking decompilation.
 typedef struct _D3DDDIARG_LOCK
 {
     HANDLE hResource;    // 0 -- RE-verified live 2026-07-04 (see comment above)
@@ -625,8 +653,12 @@ typedef struct _D3DDDIARG_LOCK
 //
 // x86 note: same two-tier pitfall as D3DDDIARG_LOCK -- CDriverVertexBuffer::Unlock's own 8-byte local
 // struct is passed to DdUnlockLH (0x10065BF0), whose own local `v5` (2 DWORDS, 8 bytes total: `v5[0] =
-// *v1` hResource, `v5[1] = v1[1]` Reserved0) is what actually crosses into pfnUnlock -- confirmed via
-// idasql decompile 2026-07-04. Unlike D3DDDIARG_LOCK, this one genuinely IS just a pointer-shrunk copy
+// *v1` hResource, `v5[1] = v1[1]` Reserved0) is what actually crosses into pfnUnlock. Like
+// D3DDDIARG_LOCK above, the call from CDriverVertexBuffer::Unlock to DdUnlockLH is an indirect call
+// through a runtime-populated device-object field (`[edi+30Ch]`), invisible to a static xref query --
+// live-verified the same way (hooking the exact "call esi" instruction with sogen's Python debugger
+// API): the call target read from ESI is `<d3d9.dll base> + 0x65BF0`, exactly DdUnlockLH's RVA, for
+// every observed module load. Unlike D3DDDIARG_LOCK, this one genuinely IS just a pointer-shrunk copy
 // of the x64 shape (2 native-width slots, no extra fields), so it needs a size fix only, not a
 // full field-order rewrite.
 #ifdef _WIN64
