@@ -22,12 +22,15 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_shader_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-const-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-texture-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
-`d3d9_shader_test.cpp` and `d3d9_const_test.cpp` are guest-runtime tests, not driver-side files, so
-they do not need the `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the
-UMD build above requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9
-API.
+`d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, and `d3d9_texture_test.cpp` are guest-runtime tests,
+not driver-side files, so they do not need the `-I../../d3d9-command-protocol
+-I../../gpu-bridge-protocol` include paths the UMD build above requires; they only talk to
+`d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API.
 
 ## Stage
 
@@ -36,12 +39,13 @@ cp sogen_d3d9um-x64.dll <root>/filesys/c/windows/system32/sogen_d3d9um.dll
 cp d3d9-spike-test-x64.exe <root>/filesys/c/d3d9-spike-test.exe
 cp d3d9-shader-test-x64.exe <root>/filesys/c/d3d9-shader-test.exe
 cp d3d9-const-test-x64.exe <root>/filesys/c/d3d9-const-test.exe
+cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
-shader and const tests.
+shader, const, and texture tests.
 
 ## Run
 
@@ -49,6 +53,7 @@ shader and const tests.
 ./analyzer -e <root> -c c:/d3d9-spike-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test.exe
 ./analyzer -e <root> -c c:/d3d9-const-test.exe
+./analyzer -e <root> -c c:/d3d9-texture-test.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -70,6 +75,24 @@ but outside the scaled-down triangle (must show the background clear color, prov
 matrix actually applied). Expect `SetVertexShaderConstantF hr=0x00000000`,
 `SetPixelShaderConstantF hr=0x00000000`, and both `PASS:` lines followed by
 `[d3d9-const-test] ALL CHECKS PASSED`.
+
+`d3d9-texture-test.exe` proves the M2 milestone's four features -- real textures, indexed draws, real
+depth testing, and real alpha blending -- work together in one real render. It draws four quads (one
+16-vertex buffer, one 6-index buffer, reused across draws via `DrawIndexedPrimitive`'s
+`BaseVertexIndex`) with the same real `D3DCompile()`-produced `vs_2_0`/`ps_2_0` shader pair sampling a
+procedural 640x480 texture (four solid quadrants: RED/GREEN/BLUE/WHITE, written via `LockRect`) and
+multiplying it by a per-draw PS constant `c0` "tint". Expect `CreateTexture hr=0x00000000`, `Texture
+LockRect hr=0x00000000`, all four `DrawIndexedPrimitive(...) hr=0x00000000` lines, three `PASS:` lines,
+and `[d3d9-texture-test] ALL CHECKS PASSED`:
+- **Textured quad**: samples the RED quadrant with tint `(1,1,1,1)` -- checks the pixel matches the
+  known texture color exactly.
+- **Depth pair**: a near quad (z=0.2, greenish tint) drawn first, then a farther, fully overlapping
+  quad (z=0.8, reddish tint) drawn second -- checks the overlap pixel is the near quad's color, which
+  only happens with a real depth test (without one, the farther quad, drawn later, would simply
+  overwrite it).
+- **Blend quad**: a semi-transparent green (tint `(0,1,0,0.5)`) drawn over the plain clear-color
+  background -- checks the pixel matches the analytically-computed `SRCALPHA`/`INVSRCALPHA`/`ADD`
+  blend exactly.
 
 ## Notes
 
@@ -111,3 +134,63 @@ matrix actually applied). Expect `SetVertexShaderConstantF hr=0x00000000`,
   constant end to end (the runtime's own automatic shadow-init calls are always zero, so this bug
   never surfaced with zero data). `umd_SetVertexShaderConst`/`umd_SetPixelShaderConst` now take the
   data pointer as their own third parameter.
+- **Index-buffer `Lock()` round-trip, RE'd and fixed (2026-07-04, see `HANDOFF_MACBOOK.md` for the
+  full live-RE trace).** Two real, independent bugs, both confirmed via live GDB/Python-hook tracing
+  against the real staged `d3d9.dll`:
+  - Index buffers (unlike vertex buffers) routed through `CreateSysmemIndexBuffer` instead of
+    `CreateDriverIndexBuffer`, because `CIndexBuffer::Create`'s own routing check reads a *different*
+    DevCaps bit (`0x04000000`) than `CVertexBuffer::Create`'s (`0x02000000`, already set). Without it,
+    an index buffer's `Lock()`/`Unlock()` still call `pfnLock`/`pfnUnlock` (confirmed: always
+    `hr=S_OK`) but purely as vestigial bookkeeping -- the app-visible pointer comes from the runtime's
+    own pre-allocated system-memory shadow, never from anything the driver returns. `fill_d3d9caps`
+    now also sets this bit.
+  - `D3DDDIARG_LOCK`'s `OffsetToLock`/`SizeToLock` do not have a single, routing-path-independent
+    struct offset -- two different real `d3d9.dll` code paths build this struct differently (see
+    `d3d9_ddi.hpp`'s own comment for the full byte-level capture). `umd_Lock`/`umd_Unlock` now always
+    treat every lock as an implicit whole-buffer lock (offset 0, size unknown) instead of trying to
+    read either field, which both sidesteps the ambiguity and is what actually fixes the round-trip.
+- **Depth-stencil surface resource-id resolution, RE'd and fixed (2026-07-04).** `CreateDepthStencilSurface`
+  does call `pfnCreateResource` (confirmed: `Format=75`/`D3DFMT_D24S8` correctly captured), but its
+  DDI handle does not reach `pfnSetDepthStencil`'s `hZBuffer` as the same value -- `SetDepthStencil`
+  is itself only dispatched once a real `Clear()`/draw actually references the bound Z-buffer (the
+  same worker-thread DP2-batch deferral this file already documents for other state), and `hZBuffer`
+  is an unrelated small handle. `resolve_resource_id`'s generic lazy-bind fallback (640x480
+  X8R8G8B8 RENDERTARGET) previously minted a wrong-shaped resource for it. Fixed with a dedicated
+  `resolve_depth_stencil_resource_id` (D3DFMT_D24S8 + `D3DUSAGE_DEPTHSTENCIL`), mirroring
+  `resolve_buffer_resource_id`'s existing pattern.
+- **A real `pfnCreateResource`/lazy-bind namespace collision, found while fixing the above.**
+  `umd_CreateResource` never recorded its own output handles anywhere `resolve_resource_id`/
+  `resolve_buffer_resource_id` would check, so Lock()/Unlock() on any *real*, `pfnCreateResource`-backed
+  resource (confirmed for plain textures) silently fell into the wrong lazy-bind branch and minted a
+  second, unrelated, wrong-shaped resource -- the app's real pixel writes landed in a resource nothing
+  else ever read. Fixed with a dedicated `g_created_resource_ids` map, kept deliberately separate from
+  `resolve_buffer_resource_id`'s own lazy-bind cache (`g_resource_ids`): merging them caused a second,
+  independently-confirmed collision, since `d3d9_host::allocate_id()`'s sequential counter and the
+  runtime's own small-integer internal vertex/index-buffer handles are different, unrelated numbering
+  spaces that can coincide numerically. `allocate_id()` now starts at `1ULL << 32` so a real resource id
+  can never collide with one of those handles again. `CreateVertexBuffer`/`CreateIndexBuffer` were also
+  found to call `pfnCreateResource` after all, with the internal-only formats `D3DFMT_VERTEXDATA` (100)
+  and `D3DFMT_INDEX16`/`D3DFMT_INDEX32` (101/102) -- `umd_CreateResource` excludes exactly these three
+  formats from the new registry so those handles keep resolving through the correctly-shaped buffer
+  lazy-bind instead.
+- **`ensure_programmable_pipeline`'s vertex layout was hardcoded** to the one shape
+  `d3d9_const_test.cpp`/`d3d9_shader_test.cpp` use (`D3DFVF_XYZ|D3DFVF_DIFFUSE`, 16-byte stride). Since
+  there is no `pfnCreateVertexShaderDecl` wiring yet to learn a real vertex declaration, the host now
+  distinguishes the one other shape this milestone needs by `SetStreamSource`'s `Stride` (20 bytes for
+  `D3DFVF_XYZ|D3DFVF_TEX1`) -- a value the wire protocol already carried but previously discarded.
+- **A real, still-open bug in `TEXCOORD0` varying interpolation**, found and worked around while
+  building `d3d9_texture_test.cpp`: with a genuine `D3DFVF_XYZ|D3DFVF_TEX1` vertex format and a
+  `float2`/`float4` `TEXCOORD0` output, a quad's U value interpolated correctly across screen space but
+  V consistently did not (e.g. an expected 0.25 read back around 0.87). Isolated to the varying itself
+  via a visualize-the-interpolant diagnostic shader (independently ruled out: geometry, the texture,
+  the sampler descriptor, and the PS constant register all traced as correct). Not root-caused further
+  within this session's budget -- `d3d9_texture_test.cpp` instead packs UV into the vertex's
+  `D3DFVF_DIFFUSE` color channel (`COLOR0.rg`), which is proven correct by every prior guest test that
+  passes a `COLOR0` varying through a real compiled shader.
+- **A `D3DPOOL_MANAGED` texture creates two, unrelated DDI resources for what the app sees as one
+  `CreateTexture()` call** -- confirmed live: `pfnCreateResource(Format=21/A8R8G8B8)` fires twice with
+  two different output handles, one that `LockRect()` later uses (and correctly receives the app's
+  pixel writes) and a different one that `SetTexture()` uses (which stays empty, so the sampled texture
+  reads as black/transparent). Not root-caused or fixed -- `d3d9_texture_test.cpp` uses
+  `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` instead, which was confirmed live to issue only one
+  `pfnCreateResource` call.

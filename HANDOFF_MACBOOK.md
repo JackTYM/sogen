@@ -1080,3 +1080,123 @@ this task and remains unreferenced — not touched, per the "don't remove pre-ex
 No regressions: `d3d9-triangle-test`/`-shader-test`/`-const-test` all unchanged (`DrawPrimitive`/
 `Present` still `hr=0x00000000`, `d3d9-const-test`'s two pixel checks still exact), smoke test still
 26/26. `clang-format` remains unavailable on this machine (same as Tasks 4/6's notes).
+
+---
+
+## 16. M2 Task 8 — the terminal integration test, both carried-forward findings resolved (2026-07-04)
+
+`d3d9_texture_test.cpp` proves textures, indexed draws, real depth testing, and real alpha blending
+together in one real render, with all 4 analytic pixel checks passing exactly. Getting there required
+resolving both carried-forward findings from earlier tasks (with real, live-verified root causes, not
+guesses) plus finding and fixing several more real bugs the combined feature set exposed for the first
+time. Full methodology: live GDB-stub + `lldb`'s `gdb-remote`, and sogen's Python debugger API
+(`hook_memory_execution` on real, idasql-verified RVAs against the exact staged `d3d9.dll`), the same
+techniques used throughout this session.
+
+### 16.1. Index-buffer Lock — real root cause, two distinct bugs
+
+**Symptom, reproduced first in isolation** (`ib_diag_test.cpp`, scratchpad, not committed): locking a
+plain `D3DPOOL_DEFAULT` index buffer, writing a distinctive pattern, unlocking, then re-locking
+READONLY and reading it back at the pure D3D9 API level always passed — even with the pre-fix driver —
+because the runtime satisfies that specific round trip from its own memory regardless of whether the
+driver ever saw the data. The real test has to inspect the *host's* backing store directly (added a
+temporary `fprintf` in `d3d9_host::lock`/`unlock`) to see it was staying all-zero.
+
+**Bug 1 — index buffers were routing through the sysmem path, not the driver path.** Live-hooked
+`CreateDriverIndexBuffer`/`CreateDriverManagedIndexBuffer`/`CreateSysmemIndexBuffer` directly (RVAs from
+idasql): with the existing caps (`k_devcaps_driver_managed_pool = 0x02000000`, the bit that already
+fixed *vertex* buffers), every index buffer still resolved to `CreateSysmemIndexBuffer`. Decompiling
+`CIndexBuffer::Create`'s own routing logic (a *separate* function from `CVertexBuffer::Create`, not
+shared code) showed it checks a *different* bit on the same DevCaps DWORD: `0x04000000`. With that bit
+added, `CreateDriverIndexBuffer` fires instead (confirmed live). Consequence of the sysmem routing:
+`CIndexBuffer::Lock`'s own dispatch (hooked directly, confirmed as the actual code path taken) still
+calls into the driver's `pfnLock`/`pfnUnlock` — this is a real, unconditional dispatch to
+`device_functable[35]`/`[36]`, always returning `hr=S_OK` — but the *pointer it hands back to the app*
+comes from `*((_QWORD*)this + 16)`, a field on the C++ object that is set once at construction (a plain
+system-memory allocation) and never written by the Lock dispatch at all (confirmed by reading it live,
+before and after the dispatch call, across 4 separate Lock() calls on 2 different objects — value never
+changed). The driver call is genuine but its result is discarded; the app always reads/writes the
+runtime's own shadow copy.
+
+**Bug 2 — `D3DDDIARG_LOCK`'s `OffsetToLock`/`SizeToLock` have no single, routing-path-independent
+offset.** Once the DevCaps fix routed index buffers through the driver path, a *new* symptom appeared:
+`resolve_buffer_resource_id`'s byte-size argument (read from what was modeled as `SizeToLock`, offset
+72) came back as a garbage ~25MB value instead of the real buffer size. Byte-level comparison of the
+struct our own `pfnLock` actually receives, captured across both the sysmem-routed path
+(`CIndexBuffer::Lock`/`CVertexBuffer::Lock`'s own direct dispatch — offset 72 *does* reliably carry the
+requested size here, confirmed across 4 distinct sizes: 12, 12, 6, 40 bytes) and the driver-routed path
+(`CDriverIndexBuffer::Lock`→`LockI` — offset 72 here holds an unrelated caller-stack address; the real
+`OffsetToLock` equivalent is at offset 80, and `SizeToLock` has no field in this shape at all): these
+are genuinely two different structs built by two different real `d3d9.dll` code paths, and `umd_Lock` —
+one function shared by every resource kind and routing path — cannot statically tell which one a given
+call is. Fixed by making `umd_Lock`/`umd_Unlock` stop trying to read either field and always treat every
+lock as an implicit whole-buffer lock (offset 0, size 0 → "use the resource's own fallback size") — the
+existing `resolve_buffer_resource_id`/`d3d9_host::lock` fallback path already implements exactly this
+convention.
+
+With both fixed: `ib_diag_test.cpp`'s round trip shows the app's own second-Lock pointer now
+genuinely differs from the first (proving a real driver round trip, not the runtime's cache) and the
+host-side backing correctly shows the written pattern after `Unlock()`.
+
+### 16.2. Depth-stencil resource-id resolution — real root cause
+
+Live-traced (temporary `log_line` in `umd_CreateResource`/`umd_SetDepthStencil`, `ds_diag_test.cpp`
+scratchpad): `CreateDepthStencilSurface` **does** call `pfnCreateResource` (confirmed:
+`Format=75`/`D3DFMT_D24S8` arrives correctly at the already-RE-verified offset 0), refuting the
+"KNOWN LIMITATION" comment's implicit assumption that it might not. But `pfnSetDepthStencil` itself
+never fired at all until the guest test additionally called `Clear(D3DCLEAR_ZBUFFER)` and a real draw —
+confirming the same worker-thread DP2-batch deferral this file already documents for other state calls
+— and when it did fire, `hZBuffer` was a small, unrelated handle, *not* the same numeric value
+`pfnCreateResource` had echoed back for the depth-stencil surface. `resolve_resource_id`'s generic
+lazy-bind fallback (640x480 X8R8G8B8 RENDERTARGET) then minted a wrong-shaped resource for it, exactly
+as Task 5's "KNOWN LIMITATION" comment predicted. Fixed with a dedicated
+`resolve_depth_stencil_resource_id` (D3DFMT_D24S8 + `D3DUSAGE_DEPTHSTENCIL`, 640x480 — the same
+fixed-size-window assumption every other lazy-bind fallback in this file already makes), used by
+`umd_SetDepthStencil` instead of the generic function.
+
+### 16.3. Additional real bugs found building the combined test
+
+- **A `pfnCreateResource`/lazy-bind namespace collision** (found while fixing 16.2): registering
+  `umd_CreateResource`'s own output handles into the *same* map `resolve_buffer_resource_id` used for
+  its lazy-bind cache caused vertex/index buffer Locks to silently resolve to unrelated, wrong-shape
+  resources, because `d3d9_host::allocate_id()`'s sequential counter and the runtime's own small-integer
+  internal buffer handles are different, unrelated numbering spaces that really do coincide numerically
+  (reproduced twice, at two different numeric ranges, live). Fixed at the actual source:
+  `allocate_id()` now starts at `1ULL << 32`, and a *separate* `g_created_resource_ids` map (not merged
+  with `g_resource_ids`) tracks real `pfnCreateResource` handles.
+- **`CreateVertexBuffer`/`CreateIndexBuffer` do call `pfnCreateResource` after all** — with the
+  internal-only formats `D3DFMT_VERTEXDATA` (100) and `D3DFMT_INDEX16`/`32` (101/102), which this
+  session's earlier "buffers never call pfnCreateResource" finding (true for every other format) missed
+  entirely. `umd_CreateResource` now excludes exactly these three formats from
+  `g_created_resource_ids` so those handles keep resolving through the correctly-shaped, correctly-sized
+  buffer lazy-bind instead of a wrong-shape, zero-backing texture resource.
+- **`ensure_programmable_pipeline`'s vertex layout was hardcoded** to `d3d9_const_test.cpp`/
+  `d3d9_shader_test.cpp`'s one shape (`D3DFVF_XYZ|D3DFVF_DIFFUSE`, 16-byte stride) — the host now reads
+  `SetStreamSource`'s `Stride` (already carried over the wire, previously discarded) to pick between
+  that and the new 20-byte `D3DFVF_XYZ|D3DFVF_TEX1` shape, since there is still no
+  `pfnCreateVertexShaderDecl` wiring to learn a real vertex declaration.
+- **A real, unresolved `TEXCOORD0` interpolation bug**: with a real `D3DFVF_XYZ|D3DFVF_TEX1` vertex
+  format, a quad's U varying interpolated correctly but V consistently did not (isolated via a
+  visualize-the-varying diagnostic PS; geometry, the texture, the sampler descriptor, and the PS
+  constant register were all independently confirmed correct via the same technique). Not root-caused
+  within this task's budget on top of the two required findings above — `d3d9_texture_test.cpp` routes
+  UV through the vertex's `D3DFVF_DIFFUSE` color channel instead (`COLOR0.rg`), proven correct by every
+  prior guest test.
+- **`D3DPOOL_MANAGED` textures create two unrelated DDI resources** for one `CreateTexture()` call
+  (`pfnCreateResource(Format=21)` fires twice, with different output handles — one `LockRect()` uses,
+  a different one `SetTexture()` uses, which stays empty). Not root-caused or fixed —
+  `d3d9_texture_test.cpp` uses `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` instead (confirmed live to issue
+  only one `pfnCreateResource` call).
+- **A real Y-flip bug — in the new test itself, not the host.** This pipeline's Vulkan viewport uses
+  the unflipped convention (NDC y=-1 at the screen's top). `d3d9_texture_test.cpp`'s own `to_ndc_y`
+  helper initially assumed D3D9's opposite screen-space convention; every prior guest test only ever
+  checked pixels on the exact vertical center (Y-flip-immune by construction), so this was never caught
+  before a test needed an asymmetric row. Fixed in the test, not the host.
+
+### 16.4. Final state
+
+All 4 analytic checks in `d3d9_texture_test.cpp` pass exactly (not approximately): the textured quad's
+sampled pixel matches its known texture color exactly; the depth-occlusion pixel matches the nearer
+quad's tint exactly, proving the farther quad's fragments were really discarded by the depth test; the
+blend pixel matches the analytic `SRCALPHA`/`INVSRCALPHA`/`ADD` formula exactly. Full regression sweep
+green: `d3d9-triangle-test`/`-shader-test`/`-const-test` unchanged, smoke test 26/26.
