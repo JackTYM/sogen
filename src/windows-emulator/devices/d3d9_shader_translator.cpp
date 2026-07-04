@@ -39,7 +39,8 @@ namespace sogen
         bool compile_stage(const void* tokens, const size_t token_size_bytes,
                            const vkd3d_shader_varying_map_info* varying_map_info,
                            const vkd3d_shader_visibility shader_visibility, const unsigned int descriptor_set,
-                           std::vector<uint32_t>& out_spirv)
+                           const vkd3d_shader_combined_resource_sampler* combined_samplers,
+                           const unsigned int combined_sampler_count, std::vector<uint32_t>& out_spirv)
         {
             vkd3d_shader_spirv_target_info spirv_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO};
             spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
@@ -58,6 +59,8 @@ namespace sogen
             interface_info.next = &spirv_info;
             interface_info.bindings = &const_buffer_binding;
             interface_info.binding_count = 1;
+            interface_info.combined_samplers = combined_samplers;
+            interface_info.combined_sampler_count = combined_sampler_count;
 
             vkd3d_shader_compile_info compile_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO};
             compile_info.source.code = tokens;
@@ -125,12 +128,26 @@ namespace sogen
         varying_map_info.varying_count = varying_count;
 
         if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, VKD3D_SHADER_VISIBILITY_VERTEX, 0,
-                            out.vertex_spirv))
+                            nullptr, 0, out.vertex_spirv))
         {
             return false;
         }
+
+        // Matches d3d9_host.cpp's ensure_programmable_pipeline PS descriptor set (set 1): binding 0 is the
+        // float-const UBO, binding 1 is the combined-image-sampler for texture stage 0. vkd3d's own D3DBC
+        // frontend addresses combined samplers by plain sampler-stage number (resource_index == sampler_index
+        // == the D3D9 s# register), matching SetTexture(stage, ...) directly.
+        const vkd3d_shader_combined_resource_sampler ps_sampler_binding{
+            .resource_space = 0,
+            .resource_index = 0,
+            .sampler_space = 0,
+            .sampler_index = 0,
+            .shader_visibility = VKD3D_SHADER_VISIBILITY_PIXEL,
+            .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
+            .binding = {.set = 1, .binding = 1, .count = 1},
+        };
         if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, VKD3D_SHADER_VISIBILITY_PIXEL, 1,
-                            out.pixel_spirv))
+                            &ps_sampler_binding, 1, out.pixel_spirv))
         {
             out.vertex_spirv.clear();
             return false;
