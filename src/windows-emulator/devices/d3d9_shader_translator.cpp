@@ -37,12 +37,13 @@ namespace sogen
         }
 
         bool compile_stage(const void* tokens, const size_t token_size_bytes,
-                           vkd3d_shader_varying_map_info* varying_map_info,
+                           const vkd3d_shader_varying_map_info* varying_map_info,
                            const vkd3d_shader_visibility shader_visibility, const unsigned int descriptor_set,
                            std::vector<uint32_t>& out_spirv)
         {
             vkd3d_shader_spirv_target_info spirv_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO};
             spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
+            spirv_info.next = varying_map_info;
 
             const vkd3d_shader_resource_binding const_buffer_binding{
                 .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
@@ -64,16 +65,7 @@ namespace sogen
             compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
             compile_info.target_type = VKD3D_SHADER_TARGET_SPIRV_BINARY;
             compile_info.log_level = VKD3D_SHADER_LOG_NONE;
-
-            if (varying_map_info != nullptr)
-            {
-                varying_map_info->next = &interface_info;
-                compile_info.next = varying_map_info;
-            }
-            else
-            {
-                compile_info.next = &interface_info;
-            }
+            compile_info.next = &interface_info;
 
             vkd3d_shader_code out{};
             char* messages = nullptr;
