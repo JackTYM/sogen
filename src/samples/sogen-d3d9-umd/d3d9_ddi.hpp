@@ -623,8 +623,9 @@ typedef struct _D3DDDIARG_LOCK
 // it is unrelated to the actual 2-arg DDI call). A static xref pass cannot resolve an indirect call
 // through a non-constant, heap/device-object-resident pointer to its runtime target, so it correctly
 // finds zero code-xrefs here; the six functions it DOES find are DdLockLH's legacy-DirectDraw callers
-// plus whatever populates that per-device callback slot (an address-taken, not a call, reference,
-// which an `is_code=1` filter also excludes) -- unrelated to whether Lock/InternalLockRect calls it too.
+// (an address-taken reference from _QueryLHDDICaps builds a *separate* legacy DirectDraw HAL callback
+// table at a different offset -- not statically confirmed to be the same per-device slot Lock/
+// InternalLockRect index through) -- unrelated to whether Lock/InternalLockRect calls it too.
 // This was re-verified LIVE (not just re-argued statically) via sogen's own Python debugger API
 // (`sogen.windows.create_application` + `hooks.memory_execution_at`, read-only registers/memory, no
 // writes) against the real emulator, hooking the exact "call esi" instructions in the staged 32-bit
