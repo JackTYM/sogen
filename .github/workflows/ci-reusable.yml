@@ -140,6 +140,17 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install Windows vkd3d-shader Build Tools
+        shell: cmd
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-x86_64-tools mingw-w64-x86_64-vulkan-devel mingw-w64-i686-tools mingw-w64-i686-vulkan-devel"
+
+      - name: Add MSYS2 Tools to Path
+        shell: bash
+        run: |
+          echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
+          echo "C:\\msys64\\mingw64\\bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=C:\\msys64\\mingw64" >> "$GITHUB_ENV"
+
       - name: Enable Developer Command Prompt (x86)
         uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
@@ -219,12 +230,6 @@ jobs:
 
       - name: Dump API Set
         run: cd root && ../build/release/artifacts/dump-apiset.exe
-
-      - name: Install DXVK and Vulkan Shim
-        shell: pwsh
-        run: ./src/tools/install-gpu-runtime.ps1 -WindowsDir root/filesys/c/windows -Shim64 build/release/artifacts/vulkan-shim-x64.dll -Shim32 build/release/artifacts/vulkan-shim-x86.dll
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Upload Artifacts
         uses: pyTooling/upload-artifact@v7
