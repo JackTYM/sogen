@@ -52,6 +52,34 @@ namespace sogen
         constexpr uint32_t d3dcmp_greaterequal = 7;
         constexpr uint32_t d3dcmp_always = 8;
 
+        // Public D3DRENDERSTATETYPE values (d3d9types.h) needed for real alpha-blend wiring.
+        constexpr uint32_t d3drs_srcblend = 19;
+        constexpr uint32_t d3drs_destblend = 20;
+        constexpr uint32_t d3drs_alphablendenable = 27;
+        constexpr uint32_t d3drs_blendop = 171;
+
+        // Public D3DBLEND values (d3d9types.h), D3DRS_SRCBLEND/DESTBLEND's value space.
+        constexpr uint32_t d3dblend_zero = 1;
+        constexpr uint32_t d3dblend_one = 2;
+        constexpr uint32_t d3dblend_srccolor = 3;
+        constexpr uint32_t d3dblend_invsrccolor = 4;
+        constexpr uint32_t d3dblend_srcalpha = 5;
+        constexpr uint32_t d3dblend_invsrcalpha = 6;
+        constexpr uint32_t d3dblend_destalpha = 7;
+        constexpr uint32_t d3dblend_invdestalpha = 8;
+        constexpr uint32_t d3dblend_destcolor = 9;
+        constexpr uint32_t d3dblend_invdestcolor = 10;
+        constexpr uint32_t d3dblend_srcalphasat = 11;
+        constexpr uint32_t d3dblend_blendfactor = 14;
+        constexpr uint32_t d3dblend_invblendfactor = 15;
+
+        // Public D3DBLENDOP values (d3d9types.h), D3DRS_BLENDOP's value space.
+        constexpr uint32_t d3dblendop_add = 1;
+        constexpr uint32_t d3dblendop_subtract = 2;
+        constexpr uint32_t d3dblendop_revsubtract = 3;
+        constexpr uint32_t d3dblendop_min = 4;
+        constexpr uint32_t d3dblendop_max = 5;
+
         // Minimal fixed-function passthrough shader pair for D3DFVF_XYZRHW|D3DFVF_DIFFUSE (see
         // devices/shaders/ff_triangle.{vert,frag} for the GLSL source this was compiled from with
         // glslangValidator). Not a placeholder for missing vkd3d-shader translation -- Vulkan has no
@@ -177,6 +205,79 @@ namespace sogen
             return {.test_enable = 1,
                     .write_enable = render_state_or(render_state, d3drs_zwriteenable, 1) != 0 ? 1u : 0u,
                     .compare_op = d3dcmp_to_vk_compare_op(render_state_or(render_state, d3drs_zfunc, d3dcmp_lessequal))};
+        }
+
+        // D3DBLEND -> VkBlendFactor. D3DBLEND_BOTHSRCALPHA/BOTHINVSRCALPHA (legacy D3D3-era modes that
+        // imply an asymmetric src/dst pair from a single value) and the dual-source D3DBLEND_SRCCOLOR2/
+        // INVSRCCOLOR2 have no single-factor Vulkan equivalent -- out of scope for this minimum-viable
+        // slice, so they fall through to the same default as any other unrecognized value.
+        uint32_t d3dblend_to_vk_blend_factor(const uint32_t d3dblend)
+        {
+            switch (d3dblend)
+            {
+            case d3dblend_zero: return VK_BLEND_FACTOR_ZERO;
+            case d3dblend_one: return VK_BLEND_FACTOR_ONE;
+            case d3dblend_srccolor: return VK_BLEND_FACTOR_SRC_COLOR;
+            case d3dblend_invsrccolor: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+            case d3dblend_srcalpha: return VK_BLEND_FACTOR_SRC_ALPHA;
+            case d3dblend_invsrcalpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case d3dblend_destalpha: return VK_BLEND_FACTOR_DST_ALPHA;
+            case d3dblend_invdestalpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            case d3dblend_destcolor: return VK_BLEND_FACTOR_DST_COLOR;
+            case d3dblend_invdestcolor: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+            case d3dblend_srcalphasat: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+            case d3dblend_blendfactor: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+            case d3dblend_invblendfactor: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+            default: return VK_BLEND_FACTOR_ONE; // D3D9's own documented default for D3DRS_SRCBLEND
+            }
+        }
+
+        // D3DBLENDOP -> VkBlendOp (direct 1:1 correspondence; D3DBLENDOP_* is 1-based, VK_BLEND_OP_* is
+        // 0-based, hence ADD != ADD).
+        uint32_t d3dblendop_to_vk_blend_op(const uint32_t d3dblendop)
+        {
+            switch (d3dblendop)
+            {
+            case d3dblendop_add: return VK_BLEND_OP_ADD;
+            case d3dblendop_subtract: return VK_BLEND_OP_SUBTRACT;
+            case d3dblendop_revsubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+            case d3dblendop_min: return VK_BLEND_OP_MIN;
+            case d3dblendop_max: return VK_BLEND_OP_MAX;
+            default: return VK_BLEND_OP_ADD; // D3D9's own documented default for D3DRS_BLENDOP
+            }
+        }
+
+        // Builds the pipeline's color-blend state from the app's accumulated render state.
+        // D3DRS_ALPHABLENDENABLE unset/0 always yields the pre-blending all-zero state (blend_enable=0,
+        // every factor/op 0), matching this function's pre-blending behavior exactly for every draw that
+        // never enables blending -- this is every existing test. The same (non-separate) color factors
+        // are reused for the alpha channel, matching D3D9's own default when D3DRS_SEPARATEALPHABLENDENABLE
+        // isn't set.
+        vulkan_host::color_blend_attachment build_blend_state(const std::unordered_map<uint32_t, uint32_t>& render_state)
+        {
+            if (render_state_or(render_state, d3drs_alphablendenable, 0) == 0)
+            {
+                return {.blend_enable = 0,
+                        .src_color_blend_factor = 0,
+                        .dst_color_blend_factor = 0,
+                        .color_blend_op = 0,
+                        .src_alpha_blend_factor = 0,
+                        .dst_alpha_blend_factor = 0,
+                        .alpha_blend_op = 0,
+                        .color_write_mask = 0xF};
+            }
+            const uint32_t src_factor = d3dblend_to_vk_blend_factor(render_state_or(render_state, d3drs_srcblend, d3dblend_one));
+            const uint32_t dst_factor =
+                d3dblend_to_vk_blend_factor(render_state_or(render_state, d3drs_destblend, d3dblend_zero));
+            const uint32_t blend_op = d3dblendop_to_vk_blend_op(render_state_or(render_state, d3drs_blendop, d3dblendop_add));
+            return {.blend_enable = 1,
+                    .src_color_blend_factor = src_factor,
+                    .dst_color_blend_factor = dst_factor,
+                    .color_blend_op = blend_op,
+                    .src_alpha_blend_factor = src_factor,
+                    .dst_alpha_blend_factor = dst_factor,
+                    .alpha_blend_op = blend_op,
+                    .color_write_mask = 0xF};
         }
     } // namespace
 
@@ -316,16 +417,7 @@ namespace sogen
         const std::array<uint32_t, 1> color_formats{color_format};
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
-        const std::array<vulkan_host::color_blend_attachment, 1> blend{{{
-            .blend_enable = 0,
-            .src_color_blend_factor = 0,
-            .dst_color_blend_factor = 0,
-            .color_blend_op = 0,
-            .src_alpha_blend_factor = 0,
-            .dst_alpha_blend_factor = 0,
-            .alpha_blend_op = 0,
-            .color_write_mask = 0xF,
-        }}};
+        const std::array<vulkan_host::color_blend_attachment, 1> blend{{build_blend_state(this->state_.render_state)}};
         const vulkan_host::specialization empty_spec{};
 
         const int32_t result = this->vulkan_.create_graphics_pipeline(
@@ -444,16 +536,7 @@ namespace sogen
         const std::array<uint32_t, 1> color_formats{color_format};
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
-        const std::array<vulkan_host::color_blend_attachment, 1> blend{{{
-            .blend_enable = 0,
-            .src_color_blend_factor = 0,
-            .dst_color_blend_factor = 0,
-            .color_blend_op = 0,
-            .src_alpha_blend_factor = 0,
-            .dst_alpha_blend_factor = 0,
-            .alpha_blend_op = 0,
-            .color_write_mask = 0xF,
-        }}};
+        const std::array<vulkan_host::color_blend_attachment, 1> blend{{build_blend_state(this->state_.render_state)}};
         const vulkan_host::specialization empty_spec{};
 
         const int32_t result = this->vulkan_.create_graphics_pipeline(
