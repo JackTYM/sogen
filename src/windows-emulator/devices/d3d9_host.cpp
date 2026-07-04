@@ -806,6 +806,10 @@ namespace sogen
                     else
                     {
                         this->vulkan_.destroy_image(device, vk_image);
+                        if (image_memory != 0)
+                        {
+                            this->vulkan_.free_memory(device, image_memory);
+                        }
                     }
                 }
             }
