@@ -66,6 +66,14 @@ namespace sogen
         bool snapshot_resource(uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
                                uint32_t& out_height) const;
 
+        // Uploads a plain sampled texture_2d resource's current `backing` shadow into its real
+        // vk_image_id via a staging buffer, so it's ready to be sampled by a draw. No dirty tracking --
+        // every call re-uploads unconditionally (see d3d9_host.cpp's comment on this method for why).
+        // Meant to be called by whatever future draw path first binds/samples this texture (Task 3/7);
+        // not wired into execute_draw yet. Returns false (no-op) if the resource isn't a texture with
+        // real GPU backing, or its backing doesn't yet hold a full mip-0 image's worth of pixel data.
+        bool ensure_texture_uploaded(uint64_t resource);
+
         int32_t create_vertex_shader(const void* tokens, size_t token_size_bytes, uint64_t& out_shader);
         int32_t create_pixel_shader(const void* tokens, size_t token_size_bytes, uint64_t& out_shader);
 
@@ -94,7 +102,7 @@ namespace sogen
             uint32_t usage;
             uint32_t pool;
             std::vector<std::byte> backing; // host-side shadow copy; kept in sync with vk_image below
-            uint64_t vk_image_id{};         // 0 = no GPU backing (plain buffer); set for render targets
+            uint64_t vk_image_id{}; // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{};    // 0 until first drawn to; lazily created, cached per resource
         };
 

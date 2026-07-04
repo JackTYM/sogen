@@ -1,5 +1,6 @@
 #include "d3d9_host.hpp"
 
+#include "d3d9_format.hpp"
 #include "d3d9_shader_translator.hpp"
 
 #include <d3d9_command_protocol.hpp>
@@ -421,6 +422,33 @@ namespace sogen
             return UINT32_MAX;
         }
 
+        // Bytes needed for one tightly-packed mip-0, layer-0 image at `vk_format`/`width`x`height` --
+        // covers exactly the VkFormat constants d3d9_format_to_vulkan can produce. Returns 0 for
+        // anything else, so callers can fail cleanly instead of guessing a size.
+        size_t vk_texture_data_size(const uint32_t vk_format, const uint32_t width, const uint32_t height)
+        {
+            switch (vk_format)
+            {
+            case VK_FORMAT_R8_UNORM:
+                return static_cast<size_t>(width) * height;
+            case VK_FORMAT_R5G6B5_UNORM_PACK16:
+            case VK_FORMAT_R8G8_SNORM:
+                return static_cast<size_t>(width) * height * 2;
+            case VK_FORMAT_B8G8R8A8_UNORM:
+            case VK_FORMAT_R8G8B8A8_SNORM:
+                return static_cast<size_t>(width) * height * 4;
+            case VK_FORMAT_R16G16B16A16_SFLOAT:
+                return static_cast<size_t>(width) * height * 8;
+            case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+                return ((static_cast<size_t>(width) + 3) / 4) * ((static_cast<size_t>(height) + 3) / 4) * 8;
+            case VK_FORMAT_BC2_UNORM_BLOCK:
+            case VK_FORMAT_BC3_UNORM_BLOCK:
+                return ((static_cast<size_t>(width) + 3) / 4) * ((static_cast<size_t>(height) + 3) / 4) * 16;
+            default:
+                return 0;
+            }
+        }
+
         // Creates a host-visible UBO of exactly `size` bytes and uploads `data` zero-padded to that
         // size -- the fixed D3D9 constant-register cap (VS=4096B/256 float4 regs, PS=512B/32 float4
         // regs) regardless of how many registers the app actually set, matching real D3D9 semantics
@@ -714,7 +742,17 @@ namespace sogen
                                kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer);
         const bool is_render_target = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) &&
                                       (usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
-        const size_t backing_size = is_buffer ? width : (is_render_target ? static_cast<size_t>(width) * height * 4 : 0);
+        // Plain sampled texture_2d: real GPU backing too, single mip/layer, 2D only (mip-mapping and
+        // cube/volume are M3). Unrecognized formats fall through with no GPU image, matching this
+        // function's existing "unrecognized -> no backing" behavior rather than crashing.
+        const bool is_texture = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) && !is_render_target;
+        uint32_t texture_vk_format = 0;
+        const bool texture_format_ok = is_texture && d3d9_format_to_vulkan(format, texture_vk_format);
+        const size_t texture_backing_size = texture_format_ok ? vk_texture_data_size(texture_vk_format, width, height) : 0;
+
+        const size_t backing_size = is_buffer ? width
+                                    : is_render_target ? static_cast<size_t>(width) * height * 4
+                                                        : texture_backing_size;
 
         resource_entry entry{
             .kind = kind,
@@ -740,11 +778,149 @@ namespace sogen
                 }
             }
         }
+        else if (texture_backing_size != 0)
+        {
+            const uint64_t device = this->ensure_vk_device();
+            if (device != 0)
+            {
+                uint64_t vk_image = 0;
+                constexpr uint32_t sampled_usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                if (this->vulkan_.create_image(device, texture_vk_format, width, height, sampled_usage, VK_IMAGE_TILING_OPTIMAL,
+                                               /*samples=*/1, VK_IMAGE_TYPE_2D, /*depth=*/1, /*mip_levels=*/1, /*array_layers=*/1,
+                                               /*flags=*/0, vk_image) == 0 &&
+                    vk_image != 0)
+                {
+                    uint64_t image_mem_size = 0;
+                    uint64_t image_mem_align = 0;
+                    uint32_t image_mem_type_bits = 0;
+                    this->vulkan_.get_image_memory_requirements(device, vk_image, image_mem_size, image_mem_align, image_mem_type_bits);
+                    const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, image_mem_type_bits,
+                                                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                    uint64_t image_memory = 0;
+                    if (memory_type != UINT32_MAX &&
+                        this->vulkan_.allocate_memory(device, image_mem_size, memory_type, image_memory) == 0 && image_memory != 0 &&
+                        this->vulkan_.bind_image_memory(device, vk_image, image_memory, 0) == 0)
+                    {
+                        entry.vk_image_id = vk_image;
+                    }
+                    else
+                    {
+                        this->vulkan_.destroy_image(device, vk_image);
+                    }
+                }
+            }
+        }
 
         const uint64_t id = this->allocate_id();
         this->resources_.emplace(id, std::move(entry));
         out_resource = id;
         return d3d_ok;
+    }
+
+    bool d3d9_host::ensure_texture_uploaded(const uint64_t resource)
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end())
+        {
+            return false;
+        }
+        resource_entry& tex = it->second;
+        if (tex.vk_image_id == 0 || tex.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) ||
+            (tex.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0)
+        {
+            return false; // not a plain sampled texture with real GPU backing
+        }
+
+        uint32_t vk_format = 0;
+        if (!d3d9_format_to_vulkan(tex.format, vk_format))
+        {
+            return false;
+        }
+        const size_t required = vk_texture_data_size(vk_format, tex.width, tex.height);
+        if (required == 0 || tex.backing.size() < required)
+        {
+            return false; // no (or incomplete) pixel data written yet
+        }
+
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0 || !this->ensure_draw_infra())
+        {
+            return false;
+        }
+
+        // No dirty tracking: this always re-uploads the full image, even if nothing changed since the
+        // last call. Tracking staleness would mean setting a flag from unlock() (touching the
+        // already-correct, resource-kind-agnostic Lock/Unlock path this task must leave alone), so this
+        // is the deliberately simpler alternative -- correct in every case, just not the cheapest one.
+        // Whichever draw path first calls this (Task 3/7) can add its own caching if re-uploading every
+        // draw turns out to matter.
+        uint64_t staging_buffer = 0;
+        if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
+            staging_buffer == 0)
+        {
+            return false;
+        }
+        uint64_t mem_size = 0;
+        uint64_t mem_align = 0;
+        uint32_t mem_type_bits = 0;
+        this->vulkan_.get_buffer_memory_requirements(device, staging_buffer, mem_size, mem_align, mem_type_bits);
+        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
+                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        uint64_t staging_memory = 0;
+        if (memory_type == UINT32_MAX || this->vulkan_.allocate_memory(device, mem_size, memory_type, staging_memory) != 0 ||
+            staging_memory == 0)
+        {
+            this->vulkan_.destroy_buffer(device, staging_buffer);
+            return false;
+        }
+        this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
+        this->vulkan_.upload_memory(device, staging_memory, 0, required, tex.backing.data(), required);
+
+        this->vulkan_.reset_fence(device, this->fence_);
+        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+
+        const vulkan_host::subresource_range range{
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        // VK_IMAGE_LAYOUT_UNDEFINED is a valid old_layout regardless of the image's actual current
+        // layout (Vulkan's "discard previous contents" transition) -- correct here since every upload
+        // fully overwrites mip 0 anyway, whether this is the first upload or a later re-upload.
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, range);
+
+        const vulkan_host::buffer_image_copy_region region{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_offset_x = 0,
+            .image_offset_y = 0,
+            .image_offset_z = 0,
+            .width = tex.width,
+            .height = tex.height,
+            .depth = 1,
+            .mip_level = 0,
+            .base_array_layer = 0,
+            .layer_count = 1,
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+        };
+        this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, tex.vk_image_id,
+                                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                           VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, range);
+
+        this->vulkan_.end_command_buffer(this->command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
+        {
+            // Synchronous wait, matching execute_draw's own submit pattern.
+        }
+
+        this->vulkan_.destroy_buffer(device, staging_buffer);
+        this->vulkan_.free_memory(device, staging_memory);
+        return true;
     }
 
     void d3d9_host::destroy_resource(const uint64_t resource)
