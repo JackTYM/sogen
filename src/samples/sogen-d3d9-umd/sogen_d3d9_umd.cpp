@@ -142,6 +142,235 @@ namespace
         return S_OK;
     }
 
+#ifndef _WIN64
+    // x86 __stdcall is callee-cleanup: the callee's `ret N` epilogue is baked in from its own
+    // declared parameter list at compile time. An unimplemented slot must therefore declare the
+    // real argument byte count, or the stack desyncs the moment the real runtime calls it expecting
+    // more than zero bytes popped. One stub per distinct byte count covers every unimplemented slot
+    // (see k_device_func_arity below for which slot needs which one).
+    HRESULT APIENTRY stub_args_4(void*)
+    {
+        return S_OK;
+    }
+
+    HRESULT APIENTRY stub_args_8(void*, void*)
+    {
+        return S_OK;
+    }
+
+    HRESULT APIENTRY stub_args_12(void*, void*, void*)
+    {
+        return S_OK;
+    }
+
+    HRESULT APIENTRY stub_args_16(void*, void*, void*, void*)
+    {
+        return S_OK;
+    }
+
+    HRESULT APIENTRY stub_args_20(void*, void*, void*, void*, void*)
+    {
+        return S_OK;
+    }
+
+    HRESULT APIENTRY stub_args_24(void*, void*, void*, void*, void*, void*)
+    {
+        return S_OK;
+    }
+
+    // Per-slot argument byte count for every D3DDDI_DEVICEFUNCS entry, in exact field order and
+    // mirroring that struct's own #if version gating (d3d9_ddi.hpp) so this table's length always
+    // matches sizeof(D3DDDI_DEVICEFUNCS)/sizeof(void*) for whatever SOGEN_D3D9_UMD_INTERFACE_VERSION
+    // is configured. Values for the 28 slots umd_CreateDevice wires to a real implementation are
+    // unused -- those slots always keep their real function pointer regardless of this table -- but
+    // are filled in from the same WDK-documented signatures for readability. Defaults to 8, the
+    // dominant (HANDLE, CONST D3DDDIARG_X*) pattern; deviations noted inline.
+    constexpr uint8_t k_device_func_arity[] = {
+        // --- base (Vista) : 99 entries ---
+        8,  // pfnSetRenderState (real)
+        8,  // pfnUpdateWInfo
+        8,  // pfnValidateDevice
+        8,  // pfnSetTextureStageState (real)
+        12, // pfnSetTexture (real) -- (HANDLE, UINT Stage, HANDLE)
+        8,  // pfnSetPixelShader (real)
+        12, // pfnSetPixelShaderConst (real) -- trailing CONST FLOAT*
+        12, // pfnSetStreamSourceUm -- trailing data ptr
+        8,  // pfnSetIndices (real)
+        12, // pfnSetIndicesUm -- trailing data ptr
+        12, // pfnDrawPrimitive (real) -- trailing CONST UINT* pFlags
+        8,  // pfnDrawIndexedPrimitive (real)
+        16, // pfnDrawRectPatch
+        16, // pfnDrawTriPatch
+        8,  // pfnDrawPrimitive2
+        20, // pfnDrawIndexedPrimitive2 -- (H, arg*, UINT, VOID*, UINT*)
+        8,  // pfnVolBlt
+        8,  // pfnBufBlt
+        8,  // pfnTexBlt
+        8,  // pfnStateSet
+        8,  // pfnSetPriority
+        16, // pfnClear (real) -- (H, arg*, UINT, RECT*)
+        12, // pfnUpdatePalette
+        8,  // pfnSetPalette
+        12, // pfnSetVertexShaderConst (real) -- trailing CONST FLOAT*
+        8,  // pfnMultiplyTransform
+        8,  // pfnSetTransform
+        8,  // pfnSetViewport (real)
+        8,  // pfnSetZRange (real)
+        8,  // pfnSetMaterial
+        12, // pfnSetLight
+        8,  // pfnCreateLight
+        8,  // pfnDestroyLight
+        8,  // pfnSetClipPlane
+        16, // pfnGetInfo -- (H, UINT, VOID*, UINT)
+        8,  // pfnLock (real)
+        8,  // pfnUnlock (real)
+        8,  // pfnCreateResource (real)
+        8,  // pfnDestroyResource
+        8,  // pfnSetDisplayMode
+        8,  // pfnPresent (real)
+        4,  // pfnFlush (real) -- (HANDLE) only
+        12, // pfnCreateVertexShaderFunc (real)
+        8,  // pfnDeleteVertexShaderFunc (real)
+        8,  // pfnSetVertexShaderFunc (real)
+        12, // pfnCreateVertexShaderDecl
+        8,  // pfnDeleteVertexShaderDecl
+        8,  // pfnSetVertexShaderDecl (real)
+        12, // pfnSetVertexShaderConstI
+        12, // pfnSetVertexShaderConstB
+        8,  // pfnSetScissorRect (real)
+        8,  // pfnSetStreamSource (real)
+        8,  // pfnSetStreamSourceFreq (real)
+        8,  // pfnSetConvolutionKernelMono
+        8,  // pfnComposeRects
+        8,  // pfnBlt
+        8,  // pfnColorFill
+        8,  // pfnDepthFill
+        8,  // pfnCreateQuery
+        8,  // pfnDestroyQuery
+        8,  // pfnIssueQuery
+        8,  // pfnGetQueryData
+        8,  // pfnSetRenderTarget (real)
+        8,  // pfnSetDepthStencil (real)
+        8,  // pfnGenerateMipSubLevels
+        12, // pfnSetPixelShaderConstI
+        12, // pfnSetPixelShaderConstB
+        12, // pfnCreatePixelShader (real)
+        8,  // pfnDeletePixelShader (real)
+        8,  // pfnCreateDecodeDevice
+        8,  // pfnDestroyDecodeDevice
+        8,  // pfnSetDecodeRenderTarget
+        8,  // pfnDecodeBeginFrame
+        8,  // pfnDecodeEndFrame
+        8,  // pfnDecodeExecute
+        8,  // pfnDecodeExtensionExecute
+        8,  // pfnCreateVideoProcessDevice
+        8,  // pfnDestroyVideoProcessDevice
+        8,  // pfnVideoProcessBeginFrame
+        8,  // pfnVideoProcessEndFrame
+        8,  // pfnSetVideoProcessRenderTarget
+        8,  // pfnVideoProcessBlt
+        8,  // pfnCreateExtensionDevice
+        8,  // pfnDestroyExtensionDevice
+        8,  // pfnExtensionExecute
+        8,  // pfnCreateOverlay
+        8,  // pfnUpdateOverlay
+        8,  // pfnFlipOverlay
+        8,  // pfnGetOverlayColorControls
+        8,  // pfnSetOverlayColorControls
+        8,  // pfnDestroyOverlay
+        4,  // pfnDestroyDevice -- (HANDLE) only
+        8,  // pfnQueryResourceResidency
+        8,  // pfnOpenResource
+        8,  // pfnGetCaptureAllocationHandle
+        8,  // pfnCaptureToSysMem
+        8,  // pfnLockAsync
+        8,  // pfnUnlockAsync
+        8,  // pfnRename
+#if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WIN7)
+        // --- WIN7 : 22 entries ---
+        8,  // pfnCreateVideoProcessor
+        8,  // pfnSetVideoProcessBltState
+        8,  // pfnGetVideoProcessBltStatePrivate
+        8,  // pfnSetVideoProcessStreamState
+        8,  // pfnGetVideoProcessStreamStatePrivate
+        8,  // pfnVideoProcessBltHD
+        8,  // pfnDestroyVideoProcessor
+        8,  // pfnCreateAuthenticatedChannel
+        8,  // pfnAuthenticatedChannelKeyExchange
+        8,  // pfnQueryAuthenticatedChannel
+        8,  // pfnConfigureAuthenticatedChannel
+        8,  // pfnDestroyAuthenticatedChannel
+        8,  // pfnCreateCryptoSession
+        8,  // pfnCryptoSessionKeyExchange
+        8,  // pfnDestroyCryptoSession
+        8,  // pfnEncryptionBlt
+        8,  // pfnGetPitch
+        8,  // pfnStartSessionKeyRefresh
+        8,  // pfnFinishSessionKeyRefresh
+        8,  // pfnGetEncryptionBltKey
+        8,  // pfnDecryptionBlt
+        8,  // pfnResolveSharedResource
+#endif
+#if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WIN8)
+        // --- WIN8 : 10 entries ---
+        8,  // pfnVolBlt1
+        8,  // pfnBufBlt1
+        8,  // pfnTexBlt1
+        8,  // pfnDiscard
+        8,  // pfnOfferResources
+        8,  // pfnReclaimResources
+        8,  // pfnCheckDirectFlipSupport
+        8,  // pfnCreateResource2
+        8,  // pfnCheckMultiPlaneOverlaySupport
+        8,  // pfnPresentMultiPlaneOverlay
+#endif
+#if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM1_3)
+        // --- WDDM1.3 : 9 entries ---
+        8,  // pfnReserved1 -- never invoked by the runtime; arity irrelevant
+        8,  // pfnFlush1 -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
+        8,  // pfnCheckCounterInfo -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever hit
+        24, // pfnCheckCounter -- LOW CONFIDENCE (many out-params, the biggest outlier), verify
+            // against d3d9_x86.dll.i64 if ever actually hit
+        8,  // pfnUpdateSubresourceUP
+        8,  // pfnPresent1
+        8,  // pfnCheckPresentDurationSupport
+        8,  // pfnSetMarker -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
+        8,  // pfnSetMarkerMode -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
+#endif
+#if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM2_0)
+        8, // pfnTrimResidencySet
+#endif
+#if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM2_1_2)
+        8, // pfnAcquireResource
+        8, // pfnReleaseResource
+#endif
+    };
+
+    static_assert(sizeof(k_device_func_arity) / sizeof(k_device_func_arity[0]) ==
+                      sizeof(D3DDDI_DEVICEFUNCS) / sizeof(void*),
+                  "k_device_func_arity must have exactly one entry per D3DDDI_DEVICEFUNCS slot");
+
+    void* stub_for_arity(uint8_t bytes)
+    {
+        switch (bytes)
+        {
+        case 4:
+            return reinterpret_cast<void*>(&stub_args_4);
+        case 12:
+            return reinterpret_cast<void*>(&stub_args_12);
+        case 16:
+            return reinterpret_cast<void*>(&stub_args_16);
+        case 20:
+            return reinterpret_cast<void*>(&stub_args_20);
+        case 24:
+            return reinterpret_cast<void*>(&stub_args_24);
+        case 8:
+        default:
+            return reinterpret_cast<void*>(&stub_args_8);
+        }
+    }
+#endif // !_WIN64
+
     // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): D3DDDIARG_CREATERESOURCE's real field layout (width/
     // height/usage/pool offsets) is not yet RE-verified -- only offset 0 (Format) and offset 48 (the
     // output hResource field) are confirmed. Every call is therefore treated as a render-target 2D
@@ -1100,10 +1329,21 @@ namespace
         {
             void** slots = reinterpret_cast<void**>(pArgs->pDeviceFuncs);
             const size_t n = sizeof(D3DDDI_DEVICEFUNCS) / sizeof(void*);
+#ifdef _WIN64
+            // x64 is caller-cleanup regardless of a callee's declared arity, so one generic
+            // zero-arg stub can safely back every unimplemented slot.
             for (size_t i = 0; i < n; ++i)
             {
                 slots[i] = reinterpret_cast<void*>(&device_stub);
             }
+#else
+            // x86 __stdcall is callee-cleanup: each slot needs a stub declaring its real argument
+            // byte count, or the stack desyncs on return (see k_device_func_arity above).
+            for (size_t i = 0; i < n; ++i)
+            {
+                slots[i] = stub_for_arity(k_device_func_arity[i]);
+            }
+#endif
 
             // Real per-DDI marshaling (see the block above) for the state/draw path -- indices match
             // D3DDDI_DEVICEFUNCS's field order exactly (d3d9_ddi.hpp).
