@@ -124,6 +124,7 @@ namespace sogen
             std::unordered_map<uint64_t, uint32_t> sampler_state{};        // key = (sampler << 32) | state
             std::unordered_map<uint32_t, uint64_t> bound_textures{};       // key = stage
             std::unordered_map<uint32_t, uint64_t> stream_sources{};       // key = stream_number
+            std::unordered_map<uint32_t, uint32_t> stream_strides{};       // key = stream_number
             std::unordered_map<uint32_t, uint32_t> stream_frequencies{};   // key = stream_number
             uint64_t index_buffer{};
             uint32_t index_format{};
@@ -136,7 +137,13 @@ namespace sogen
             uint64_t depth_stencil{};
         };
 
-        uint64_t next_id_{1};
+        // Starts far above any value the real d3d9.dll runtime's own internal handle spaces (vertex/
+        // index buffer object handles, observed live as small sequential integers under a few hundred)
+        // could ever reach, so a real pfnCreateResource-allocated id can never numerically collide with
+        // one of those unrelated, never-registered handles -- see g_created_resource_ids' comment in
+        // sogen_d3d9_umd.cpp for the real, live-hit collision (twice, at two different numeric ranges)
+        // this is fixing at its actual source instead of chasing further symptomatic guest-side patches.
+        uint64_t next_id_{1ULL << 32};
         std::unordered_map<uint64_t, resource_entry> resources_{};
         std::unordered_map<uint64_t, shader_entry> shaders_{};
         std::unordered_map<uint64_t, vertex_decl_entry> vertex_decls_{};

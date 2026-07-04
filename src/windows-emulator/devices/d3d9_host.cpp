@@ -524,15 +524,29 @@ namespace sogen
             return nullptr;
         }
 
-        // D3DFVF_XYZ|D3DFVF_DIFFUSE: 12-byte {x,y,z} object-space (pre-transform) position + 4-byte
-        // D3DCOLOR diffuse, stride 16 -- this slice's one supported programmable vertex format
-        // (position+color passthrough only, see the design spec's Non-Goals).
+        // Vertex layout selection: this host has no D3DDDIARG_CREATEVERTEXSHADERDECL wiring yet
+        // (pfnCreateVertexShaderDecl is still an unwired device_stub -- the real D3DVERTEXELEMENT9
+        // array never reaches here), so the two vertex shapes this milestone's guest tests actually
+        // use are told apart by the one piece of real per-vertex-layout information the wire protocol
+        // already carries end-to-end: SetStreamSource's Stride (see d3d9_set_stream_source's handler --
+        // stream_strides was previously received and silently discarded here). D3DFVF_XYZ|D3DFVF_TEX1
+        // (position + one float2 texcoord) is 20 bytes; D3DFVF_XYZ|D3DFVF_DIFFUSE (position + one
+        // D3DCOLOR) is 16 bytes -- distinct stride values for this milestone's fixed set of shapes,
+        // same spirit as classify_resource_usage's format-based heuristic on the guest side.
+        const auto stride_it = this->state_.stream_strides.find(0);
+        const uint32_t stride = stride_it != this->state_.stream_strides.end() ? stride_it->second : 16;
+        const bool textured_layout = stride == 20;
         const std::array<vulkan_host::vertex_binding, 1> bindings{
-            {{.binding = 0, .stride = 16, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX}}};
-        const std::array<vulkan_host::vertex_attribute, 2> attributes{{
-            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
-            {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 12},
-        }};
+            {{.binding = 0, .stride = textured_layout ? 20u : 16u, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX}}};
+        const std::array<vulkan_host::vertex_attribute, 2> attributes{
+            textured_layout ? std::array<vulkan_host::vertex_attribute, 2>{{
+                                  {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+                                  {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 12},
+                              }}
+                            : std::array<vulkan_host::vertex_attribute, 2>{{
+                                  {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+                                  {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 12},
+                              }}};
         const std::array<uint32_t, 1> color_formats{color_format};
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
@@ -1536,6 +1550,7 @@ namespace sogen
                 return d3derr_invalidcall;
             }
             this->state_.stream_sources[req.stream_number] = req.vertex_buffer;
+            this->state_.stream_strides[req.stream_number] = req.stride_bytes;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_stream_source_freq: {
