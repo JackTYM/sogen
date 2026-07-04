@@ -684,7 +684,9 @@ typedef struct _D3DDDIARG_UNLOCK
 typedef struct _D3DDDIARG_PRESENT
 {
     HANDLE hSrcResource; // 0, confirmed
-    BYTE Reserved[32];   // 8..39, size-confirmed region; individual fields not yet pinned
+    BYTE Reserved[32];   // starts right after hSrcResource (8..39 on x64, 4..35 on x86, since HANDLE
+                         // is 8/4 bytes respectively) -- size-confirmed region; individual fields not
+                         // yet pinned
 } D3DDDIARG_PRESENT;
 
 #ifdef _WIN64

@@ -197,7 +197,9 @@ namespace
         12, // pfnSetStreamSourceUm -- trailing data ptr
         8,  // pfnSetIndices (real)
         12, // pfnSetIndicesUm -- trailing data ptr
-        12, // pfnDrawPrimitive (real) -- trailing CONST UINT* pFlags
+        8,  // pfnDrawPrimitive (real) -- (HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE*), matches umd_DrawPrimitive's
+            // live-verified 2-arg signature (see umd_DrawPrimitive) -- NOT the 3-arg WDK-documented shape;
+            // don't "fix" this back to 3 args without re-verifying against a live 32-bit trace first.
         8,  // pfnDrawIndexedPrimitive (real)
         16, // pfnDrawRectPatch
         16, // pfnDrawTriPatch
