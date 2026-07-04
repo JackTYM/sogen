@@ -611,22 +611,20 @@ typedef struct _D3DDDIARG_LOCK
 // OUTPUT field), `v29[11]` (Flags). Total struct size: 48 bytes (12 DWORDs), matching DdLockLH's own
 // `memset(v29, 0, sizeof(v29))`.
 //
-// IMPORTANT METHODOLOGY NOTE, added after an independent review caught a real gap here: the
-// DdLockLH claim above was *initially* backed only by static idasql decompilation (matching the
-// helper's name and shape to the two Lock call sites) -- a spec-compliance reviewer correctly pointed
-// out that `SELECT ... FROM xrefs WHERE to_ea = <DdLockLH> AND is_code=1` returns six callers, none of
-// which is CDriverVertexBuffer::Lock/CDriverMipSurface::InternalLockRect. That is real and reproducible,
-// but it does NOT mean DdLockLH is the wrong function: the call from Lock/InternalLockRect is an
-// *indirect* call through a per-device, runtime-populated function-pointer field (raw disassembly:
-// `mov esi, [esi+308h]` / `call esi`, the ECX load right before it is just the x86 Control Flow Guard
-// ABI setting up `___guard_check_icall_fptr`'s argument register, not a real "this"/hDevice parameter --
-// it is unrelated to the actual 2-arg DDI call). A static xref pass cannot resolve an indirect call
-// through a non-constant, heap/device-object-resident pointer to its runtime target, so it correctly
-// finds zero code-xrefs here; the six functions it DOES find are DdLockLH's legacy-DirectDraw callers
-// (an address-taken reference from _QueryLHDDICaps builds a *separate* legacy DirectDraw HAL callback
-// table at a different offset -- not statically confirmed to be the same per-device slot Lock/
-// InternalLockRect index through) -- unrelated to whether Lock/InternalLockRect calls it too.
-// This was re-verified LIVE (not just re-argued statically) via sogen's own Python debugger API
+// The call from Lock/InternalLockRect to DdLockLH is *indirect*, through a per-device, runtime-
+// populated function-pointer field (raw disassembly: `mov esi, [esi+308h]` / `call esi` -- the ECX
+// load right before it is just the x86 Control Flow Guard ABI setting up
+// `___guard_check_icall_fptr`'s argument register, not a real "this"/hDevice parameter, and is
+// unrelated to the actual 2-arg DDI call). A static xref pass cannot resolve an indirect call through
+// a non-constant, heap/device-object-resident pointer to its runtime target, so
+// `SELECT ... FROM xrefs WHERE to_ea = <DdLockLH> AND is_code=1` correctly finds zero code-xrefs for
+// Lock/InternalLockRect -- the six functions it DOES find are DdLockLH's legacy-DirectDraw callers (an
+// address-taken reference from _QueryLHDDICaps builds a *separate* legacy DirectDraw HAL callback
+// table at a different offset -- not statically confirmed to be the same per-device slot that
+// Lock/InternalLockRect index through when making their call) and are unrelated to whether
+// Lock/InternalLockRect calls DdLockLH too.
+//
+// Confirmed LIVE (not just via decompilation) via sogen's own Python debugger API
 // (`sogen.windows.create_application` + `hooks.memory_execution_at`, read-only registers/memory, no
 // writes) against the real emulator, hooking the exact "call esi" instructions in the staged 32-bit
 // d3d9.dll: the call target read from ESI at CDriverVertexBuffer::Lock's call site is
@@ -638,7 +636,6 @@ typedef struct _D3DDDIARG_LOCK
 // slot) and confirmed `pArgs->hResource` reads a real, plausible resource handle and -- the decisive
 // check -- the value umd_Lock writes to `pArgs->pData` (offset 32) is byte-for-byte identical to the
 // pointer the guest app receives from `IDirect3DVertexBuffer9::Lock()` (both `0x41f46e0` in one capture).
-// This is now confirmed by live execution trace, not just plausible-looking decompilation.
 typedef struct _D3DDDIARG_LOCK
 {
     HANDLE hResource;    // 0 -- RE-verified live 2026-07-04 (see comment above)
