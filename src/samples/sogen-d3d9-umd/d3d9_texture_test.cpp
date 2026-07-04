@@ -304,6 +304,25 @@ int main()
     if (FAILED(hcrt) || !rt || FAILED(hcds) || !ds)
     {
         printf("[d3d9-texture-test] FAIL: render target/depth-stencil creation failed\n");
+        if (rt)
+        {
+            rt->Release();
+        }
+        if (ds)
+        {
+            ds->Release();
+        }
+        tex->Release();
+        if (vs)
+        {
+            vs->Release();
+        }
+        if (ps)
+        {
+            ps->Release();
+        }
+        dev->Release();
+        d3d->Release();
         return 1;
     }
     dev->SetRenderTarget(0, rt);
@@ -348,6 +367,27 @@ int main()
     if (!vb || !ib)
     {
         printf("[d3d9-texture-test] FAIL: vertex/index buffer creation failed\n");
+        if (vb)
+        {
+            vb->Release();
+        }
+        if (ib)
+        {
+            ib->Release();
+        }
+        rt->Release();
+        ds->Release();
+        tex->Release();
+        if (vs)
+        {
+            vs->Release();
+        }
+        if (ps)
+        {
+            ps->Release();
+        }
+        dev->Release();
+        d3d->Release();
         return 1;
     }
 
