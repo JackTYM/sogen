@@ -57,7 +57,9 @@ namespace
     constexpr int kRedB = 0, kRedG = 0, kRedR = 255;
     constexpr int kBlueB = 255, kBlueG = 0, kBlueR = 0;
 
-    // Center (320,240) is inside the {213,160,427,320} scissor rect (the canvas's center third); the
+    // Center (320,240) is inside the {213,160,427,320} scissor rect (the canvas's center third --
+    // 213 = round(640/3), 427 = 640-213, giving symmetric ~213px left/right margins; same math for
+    // 160/320 vertically. D3D9 RECT's right/bottom are exclusive, matching this convention); the
     // two corners near (10,10) and (630,470) are outside it.
     const Check kScissorEnabledChecks[3] = {
         {"center (inside scissor rect)", 320, 240, kRedB, kRedG, kRedR},
