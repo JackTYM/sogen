@@ -59,13 +59,18 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_int_bool_const_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_int_bool_const_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-int-bool-const-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_scissor_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-scissor-test-x64.exe -ld3d9
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`, and
 `d3d9_int_bool_const_test.cpp` are guest-runtime tests, not driver-side files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
-applies to `d3d9_triangle_test.cpp` above -- it's a guest-runtime test too.
+applies to `d3d9_triangle_test.cpp` above -- it's a guest-runtime test too. `d3d9_scissor_test.cpp` is
+the same kind of guest-runtime test and, like `d3d9_partial_lock_test.cpp`, needs no `d3dcompiler_43`
+link either -- it's fixed-function-only (`D3DFVF_XYZRHW|D3DFVF_DIFFUSE`), no shader compile involved.
 
 ## Stage
 
@@ -79,6 +84,7 @@ cp d3d9-managed-texture-test-x64.exe <root>/filesys/c/d3d9-managed-texture-test.
 cp d3d9-texcoord-test-x64.exe <root>/filesys/c/d3d9-texcoord-test.exe
 cp d3d9-partial-lock-test-x64.exe <root>/filesys/c/d3d9-partial-lock-test.exe
 cp d3d9-int-bool-const-test-x64.exe <root>/filesys/c/d3d9-int-bool-const-test.exe
+cp d3d9-scissor-test-x64.exe <root>/filesys/c/d3d9-scissor-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
@@ -106,6 +112,7 @@ shader, const, texture, texcoord, and int-bool-const tests.
 ./analyzer -e <root> -c c:/d3d9-managed-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-texcoord-test.exe
 ./analyzer -e <root> -c c:/d3d9-int-bool-const-test.exe
+./analyzer -e <root> -c c:/d3d9-scissor-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
@@ -180,6 +187,20 @@ three d3dcompiler_43 quirks its exact shader shape works around (and why b0/b1 a
 together), and `docs/d3d9-roadmap.md`/`HANDOFF_MACBOOK.md` §22 for the full design and RE narrative
 (int/bool CBV binding scheme, the missing IOCTL-dispatch-routing bug this test caught, and the x64/x86
 parity results).
+
+`d3d9-scissor-test.exe` proves real `D3DRS_SCISSORTESTENABLE` + `SetScissorRect` clipping works,
+using the fixed-function `D3DFVF_XYZRHW|D3DFVF_DIFFUSE` path (no shader needed). On a 640x480
+off-screen render target cleared BLUE (sized to match `pfnCreateResource`'s hardcoded 640x480 KNOWN
+LIMITATION, same as `d3d9_texture_test.cpp`), it enables `D3DRS_SCISSORTESTENABLE`, sets the scissor
+rect to the center third (`{213,160,427,320}`), and draws a full-screen RED quad -- the center pixel
+must be RED (inside the rect) while two corner pixels near `(10,10)` and `(630,470)` must stay BLUE
+(outside it). This is the discriminator: before this rect was wired up, `execute_draw` unconditionally
+forced a full-render-target-extent scissor regardless of app state, so the whole RT would have come
+back RED and the corner checks would fail. A second sub-pass disables `D3DRS_SCISSORTESTENABLE`,
+re-clears the RT, and redraws the same quad -- all three checkpoints must now be RED, proving the
+default/no-scissor path still fills the whole RT (regression safety for the common case). Expect
+`SetRenderState(SCISSORTESTENABLE, TRUE/FALSE) hr=0x00000000`, both `DrawIndexedPrimitive(...)
+hr=0x00000000` lines, six `PASS:` lines, and `[d3d9-scissor-test] ALL CHECKS PASSED`.
 
 `d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
 dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a
