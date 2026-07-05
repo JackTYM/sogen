@@ -272,8 +272,16 @@ namespace sogen
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_pixel_shader);
                 case gpu_bridge::ioctl_d3d9_set_vs_const_f:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vs_const_f);
+                case gpu_bridge::ioctl_d3d9_set_vs_const_i:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vs_const_i);
+                case gpu_bridge::ioctl_d3d9_set_vs_const_b:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vs_const_b);
                 case gpu_bridge::ioctl_d3d9_set_ps_const_f:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_ps_const_f);
+                case gpu_bridge::ioctl_d3d9_set_ps_const_i:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_ps_const_i);
+                case gpu_bridge::ioctl_d3d9_set_ps_const_b:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_ps_const_b);
                 case gpu_bridge::ioctl_d3d9_set_render_target:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_target);
                 case gpu_bridge::ioctl_d3d9_set_depth_stencil:
