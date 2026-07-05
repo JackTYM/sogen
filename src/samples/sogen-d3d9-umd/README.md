@@ -67,8 +67,9 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_mrt_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-mrt-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
-`d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`, and
-`d3d9_int_bool_const_test.cpp` are guest-runtime tests, not driver-side files, so they do not need the
+`d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
+`d3d9_int_bool_const_test.cpp`, and `d3d9_mrt_test.cpp` are guest-runtime tests, not driver-side
+files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
 applies to `d3d9_triangle_test.cpp` above -- it's a guest-runtime test too. `d3d9_scissor_test.cpp` is
@@ -215,7 +216,11 @@ programmable-pipeline path when both a VS and a PS are bound). The PS writes two
 colors to a struct return with `COLOR0`/`COLOR1` semantics (D3D9's `ps_2_0` ISA defines `oC0`-`oC3`
 explicitly; MRT output is gated by `D3DCAPS9::NumSimultaneousRTs`, not by shader model). Two 640x480
 off-screen render targets (RT0, RT1, sized to match `pfnCreateResource`'s hardcoded 640x480 KNOWN
-LIMITATION) are bound ONCE at the start (`SetRenderTarget(0, RT0)` / `SetRenderTarget(1, RT1)`) and
+LIMITATION) use `D3DFMT_X8R8G8B8`, not `D3DFMT_A8R8G8B8` -- the UMD's FORMATOP table only flags
+X8R8G8B8 with the offscreen-render-target capability, and creating an A8R8G8B8 render target fails
+client-side with `D3DERR_INVALIDCALL` against the real `d3d9.dll` (checks are RGB-only, so this
+doesn't affect what the test proves). They are bound ONCE at the start
+(`SetRenderTarget(0, RT0)` / `SetRenderTarget(1, RT1)`) and
 never rebound for the rest of the test. Sub-pass 1 draws a full-screen quad and `LockRect`-reads back
 both RTs: RT0 must be entirely RED (`oC0`), RT1 must be entirely GREEN (`oC1`) -- the old, pre-Task-3
 code only rendered into RT0, so RT1 would have stayed black. Sub-pass 2 calls

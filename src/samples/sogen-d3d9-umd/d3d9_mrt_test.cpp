@@ -367,8 +367,10 @@ int main()
     // Sub-pass 2: Clear(D3DCLEAR_TARGET, yellow) with RT0+RT1 STILL bound, unchanged -- both must now
     // be entirely YELLOW.
     {
+        dev->BeginScene();
         HRESULT hcl = dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 255, 255, 0), 1.0f, 0);
         printf("[d3d9-mrt-test] Clear(yellow) hr=0x%08lx\n", static_cast<unsigned long>(hcl));
+        dev->EndScene();
 
         failures += check_surface_uniform(rt0, "RT0", "clear", 0, 255, 255);
         failures += check_surface_uniform(rt1, "RT1", "clear", 0, 255, 255);
