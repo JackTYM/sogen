@@ -86,14 +86,20 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   own `pfnLock` return pointer, so the app writes into `d3d9.dll`'s own private system-memory allocation
   instead. Root cause: `CBaseDevice::CanDriverManageResource` (gating `CanCreateLightWeight`, the same
   shape of undocumented capability check the `DevCaps` `0x02000000`/`0x04000000` bits already fixed for
-  vertex/index buffers) is not satisfied by this driver, for a reason not yet identified — live-traced
-  the failing field to a specific `this`-relative offset/bit, but it is not sourced from any D3DCAPS9
-  field this driver's own `fill_d3d9caps` populates, so the real fix needs its own dedicated live-RE
-  session (see `sogen_d3d9_umd.cpp`'s `umd_TexBlt` comment for the full trail). `D3DPOOL_MANAGED`
-  textures are the common case for real game asset loading — MW2 will very likely hit this.
-  `d3d9_managed_texture_test.cpp` (new, real `D3DPOOL_MANAGED`, no workaround) reproduces the remaining
-  failure; `d3d9_texture_test.cpp` still avoids the whole area via `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT`.
-  Full trace: `HANDOFF_MACBOOK.md` §16.3, §17.
+  vertex/index buffers) is not satisfied by this driver. **Now root-caused and confirmed structurally
+  uncontrollable (2026-07-04), not just unidentified**: live-traced (memory-write watch) the failing
+  field (`CBaseDevice+444`, `D3DCAPS9::Caps2` bit `0x10000000` = `D3DCAPS2_CANMANAGERESOURCE`) all the
+  way back through `d3d9.dll`'s own `QueryLHDDICaps`, which unconditionally clears that bit
+  (`& 0xEFFFFFFF`) after querying the driver, regardless of what `GetCaps` reports — empirically
+  re-verified by temporarily setting the bit in `fill_d3d9caps` and watching it get stripped live. No
+  `D3DCAPS9` field any D3DDDI/WDDM driver reports can make this gate pass; this matches real D3D9/WDDM
+  history (the OS's own video memory manager owns residency under WDDM, not the driver). `D3DPOOL_MANAGED`
+  textures are the common case for real game asset loading — MW2 will very likely hit this. A real fix
+  needs a different mechanism entirely (most likely a fuller RE of `pfnBlt`/`pfnTexBlt`'s argument struct
+  for a system-memory-source field, or a not-yet-identified DDI call) — out of scope of the caps-gate
+  investigation. `d3d9_managed_texture_test.cpp` (real `D3DPOOL_MANAGED`, no workaround) reproduces the
+  remaining failure; `d3d9_texture_test.cpp` still avoids the whole area via `D3DUSAGE_DYNAMIC` +
+  `D3DPOOL_DEFAULT`. Full trace: `HANDOFF_MACBOOK.md` §16.3, §17, §18.
 - [ ] **Partial-buffer `Lock()` is a permanent limitation, not a stopgap.** `D3DDDIARG_LOCK`'s
   `OffsetToLock`/`SizeToLock` have no single, routing-path-independent struct offset — real `d3d9.dll`
   builds this 104-byte struct two genuinely different ways depending on internal buffer routing

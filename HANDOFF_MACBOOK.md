@@ -1315,3 +1315,84 @@ the original `dev+460` DevCaps hunt earlier this session) — not completed with
   this up next) still fails for this reason — sampled pixel reads back black, not the expected magenta.
 - **Zero regressions**: `d3d9-triangle-test`/`-shader-test`/`-const-test`/`-texture-test` all unchanged
   and green on both x64 and x86, smoke test still green.
+
+## 18. `CanDriverManageResource`'s real gate traced live — confirmed structurally uncontrollable (2026-07-04)
+
+Follow-up task on §17.4's open finding: trace what actually writes `CBaseDevice+444` (the field
+`CanDriverManageResource` tests against `0x10000000`) to determine whether this driver can influence it.
+Used sogen's Python debugger API (`build/release-py`, `import sogen`) exactly per the `dev+460` DevCaps
+hunt's established methodology (§10.6): `hooks.memory_execution_at`/`hooks.memory_write`, module-load
+callbacks to resolve real runtime base addresses (no hardcoded addresses this time — `d3d9.dll`'s and
+this driver's own `sogen_d3d9um.dll`'s bases are read live from `on_module_load`).
+
+**Live trace.** Hooked `CBaseDevice::Init`'s entry (RVA `0x1425C`) to confirm `this+444` starts at `0`
+(fresh allocation) before `Init`'s own body runs, then armed a wide `memory_write` watch across the
+whole per-adapter `_D3D9_DEVICEDATA` blob `Init` memcpy's in (`this+432` .. `+1744`, 1312 bytes — a
+narrow 4-byte watch on `this+444` alone caught nothing, the exact same "narrow watch misses it" lesson
+as the original `dev+460` hunt; widening to the full copied region is what actually caught the write).
+Separately, to see the value's real origin (not just its arrival at `CBaseDevice`), resolved this
+driver's own `umd_GetCaps` runtime address without any hardcoding: hooked the exported `OpenAdapter`'s
+entry (address read from `sogen_d3d9um.dll`'s own export table via the Python binding's
+`MappedModule.exports`), captured its return address off `[RSP]` at entry, hooked that return address,
+and read `pArgs->pAdapterFuncs->pfnGetCaps` directly out of guest memory once `OpenAdapter` had filled
+it in. Armed a narrow `memory_write` watch on that exact `D3DCAPS9::Caps2` field (`pData+12`) the moment
+`umd_GetCaps(Type=SOGEN_D3DDDICAPS_GETD3D9CAPS)` is entered (before `fill_d3d9caps` runs), and watched
+every subsequent write to that same address for the rest of the run. Full observed write chain for one
+real `CreateDevice`:
+
+```
+(zeroing, ucrtbase.dll memset, several 1-byte writes)
+sogen_d3d9um.dll+0x16ca   -> 0x60020000   (this driver's own fill_d3d9caps: DYNAMICTEXTURES|FULLSCREENGAMMA|CANAUTOGENMIPMAP)
+d3d9.dll+0x1588f          -> 0xe4428800   ((driver_Caps2 & 0x7B9F77FF) | 0x84408800)
+d3d9.dll+0x158b3          -> 0xe4628800   (|= 0x200000 conditionally, then & 0xEFFFFFFF unconditionally)
+d3d9.dll+0x15a1f          -> 0xe4608800   (FULLSCREENGAMMA bit forced by a separate GetCaps(Type=34) query)
+```
+
+`0xe4608800` is exactly the value `CanDriverManageResource` reads at `this+444` (matches §17.4's
+independently-captured value exactly). idasql confirms all three `d3d9.dll` writes live inside one
+function, `QueryLHDDICaps` (RVA range `0x15780`-`0x1C000`-ish; `LH` = the WDDM/"LonghornDDI" caps path,
+taken because `IsLHDriverModel` recognizes this driver as a real D3DDDI driver — the same function has
+an entirely separate, earlier `!IsLHDriverModel` branch calling `SwDDIMungeCaps` instead, for legacy
+XPDM-style drivers, which this driver never takes). The decisive line, decompiled directly:
+
+```c
+/* 18001588A */ v27 = *(_DWORD *)(a3 + 12) & 0x7B9F77FF | 0x84408800;
+/* 1800158B3 */ *(_DWORD *)(a3 + 12) = v27 & 0xEFFFFFFF;
+```
+
+`0xEFFFFFFF` has every bit set except bit 28 (`0x10000000` = `D3DCAPS2_CANMANAGERESOURCE`). This AND is
+unconditional — it runs on every `CreateDevice`, for every driver that reaches this branch, regardless of
+what the driver's own `GetCaps` reported. **Empirically re-verified, not just decompiled**: temporarily
+added `D3DCAPS2_CANMANAGERESOURCE` to this driver's own `fill_d3d9caps` (`Caps2 |= 0x10000000`), rebuilt
+just the x64 UMD, restaged, and re-ran the same live trace. This driver's own write now showed `0x70020000`
+(bit 28 set); `d3d9.dll+0x1588f`'s write showed `0xf4428800` (bit 28 *survives* that step, confirming the
+first AND/OR pair doesn't touch it); `d3d9.dll+0x158b3`'s write showed `0xe4628800` — bit 28 **stripped**,
+caught live, in the act — settling at the exact same final `0xe4608800` as the unmodified baseline.
+Reverted immediately (`git diff --stat src/` empty afterward) since this isn't a valid fix.
+
+Also checked `CMipMap::CMipMap`'s constructor (idasql decompile) for any driver-supplied-pointer
+fallback that might route around this gate at `CreateResource` time — none exists. The private sysmem
+buffer at `this+280` is unconditionally a plain `MallocAligned` heap allocation whenever
+`CanDriverManageResource` is false, with no code path that ever consults a driver-provided resource or
+pointer first.
+
+**Conclusion, per the task's own escalation clause ("if the real mechanism turns out to be genuinely
+outside this driver's control ... that's an acceptable, honest conclusion to report, not a failure"):**
+`CanDriverManageResource` cannot be made to return `true` by any `D3DCAPS9` field this (or any) D3DDDI/WDDM
+driver reports. `d3d9.dll`'s own `QueryLHDDICaps` hardcodes `D3DCAPS2_CANMANAGERESOURCE` off for every
+driver on the modern (`IsLHDriverModel`) DDI path — consistent with real D3D9/WDDM history (WDDM's video
+memory manager owns residency; the old XPDM-era driver-managed-resource model was retired at the OS
+level, not per-driver). No source change was made or is possible at this gate; `sogen_d3d9_umd.cpp` is
+unchanged from `6f121fa7`. `d3d9_managed_texture_test.cpp` still fails exactly as in §17.4 (sampled pixel
+black, not magenta) — zero regression on every other test (x64 `triangle`/`shader`/`const`/`texture` and
+x86 `triangle`/`shader`/`const`/`texture`, plus the 26/26 smoke test), all re-verified green.
+
+A real fix for the underlying symptom (MANAGED-pool texture sampling black) would need a different
+mechanism entirely — since `pfnLock`/`pfnUnlock` are structurally never given the app's real pixel data
+for this resource kind (confirmed in §17.4), the only way real pixel bytes could ever reach this driver
+is through whatever DDI call the real WDDM D3D9 pipeline actually uses to push a `D3DPOOL_MANAGED`
+texture's sysmem content into video memory — almost certainly a genuinely different/fuller RE of
+`pfnBlt`/`pfnTexBlt`'s argument struct (this driver's current `D3DDDIARG_TEXBLT` RE only found bare
+resource handles + a rect, no system-memory source pointer field) or a DDI call not yet identified at
+all. That is a materially bigger investigation than this task's scope (tracing one caps gate) and is not
+attempted here.
