@@ -17,7 +17,9 @@
 // 1. `bool x : register(b0);` is REJECTED by d3dcompiler_43 for vs_2_0/vs_2_a with error X4509
 //    ("invalid register semantic 'b0', ... c register binding required"). A scalar bool used in a
 //    runtime "if" must be declared with NO explicit register annotation; the compiler auto-allocates
-//    it (confirmed to land at b0, the only bool declared, matching SetVertexShaderConstantB(0, ...)).
+//    it (confirmed to land at b0 for the first bool declared, matching SetVertexShaderConstantB(0, ...);
+//    a second declared-but-unannotated bool auto-allocates to b1, matching SetVertexShaderConstantB(1,
+//    ...) -- see below).
 // 2. Far more important: an `if (b) { X } else { Y }` shape where both branches merge into one
 //    trailing assignment gets FLATTENED by d3dcompiler_43 into select-style arithmetic (SGE/MAD) backed
 //    by an auto-allocated FLOAT (c#) register -- NOT the b0 CONSTBOOL register bank at all. Confirmed by
