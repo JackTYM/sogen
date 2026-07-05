@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -254,15 +255,18 @@ namespace sogen
         uint64_t ensure_vk_device();
         bool ensure_draw_infra();
         // depth_format is a VkFormat (0 = no depth attachment), matching create_graphics_pipeline's own
-        // dynamic-rendering depth_format parameter.
-        bool ensure_pipeline(uint32_t color_format, uint32_t width, uint32_t height, uint32_t depth_format);
+        // dynamic-rendering depth_format parameter. color_formats holds one VkFormat per currently-bound
+        // render target (slot order), each getting an identical blend-attachment entry -- D3D9 has no
+        // independent per-RT blend state.
+        bool ensure_pipeline(std::span<const uint32_t> color_formats, uint32_t width, uint32_t height, uint32_t depth_format);
         // Builds a fresh VkSampler from the accumulated D3D9 sampler state for `sampler_index` (falling
         // back to D3D9's own documented per-state defaults for anything never explicitly set). Created
         // fresh per draw and destroyed after, mirroring execute_draw's own per-draw VS/PS UBO lifecycle --
         // no persistent sampler cache yet.
         bool build_sampler(uint64_t device, uint32_t sampler_index, uint64_t& out_sampler) const;
-        const programmable_pipeline_entry* ensure_programmable_pipeline(uint32_t color_format, uint32_t width, uint32_t height,
-                                                                         uint32_t depth_format);
+        // color_formats: see ensure_pipeline's own comment above.
+        const programmable_pipeline_entry* ensure_programmable_pipeline(std::span<const uint32_t> color_formats, uint32_t width,
+                                                                         uint32_t height, uint32_t depth_format);
         // Lazily creates ds_entry's depth image view and, on that same first use, clears it once to
         // D3D9's own default far-plane depth (1.0) -- see the .cpp definition's comment for why.
         // No-op (returns true) if ds_entry already has a view. depth_format is ds_entry's own VkFormat.

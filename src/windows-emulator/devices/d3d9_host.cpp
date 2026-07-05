@@ -379,7 +379,7 @@ namespace sogen
         return true;
     }
 
-    bool d3d9_host::ensure_pipeline(const uint32_t color_format, const uint32_t width, const uint32_t height,
+    bool d3d9_host::ensure_pipeline(const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height,
                                     const uint32_t depth_format)
     {
         if (this->pipeline_ready_)
@@ -421,10 +421,10 @@ namespace sogen
             {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0},
             {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 16},
         }};
-        const std::array<uint32_t, 1> color_formats{color_format};
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
-        const std::array<vulkan_host::color_blend_attachment, 1> blend{{build_blend_state(this->state_.render_state)}};
+        // D3D9 has no independent per-render-target blend state -- every bound RT gets the same config.
+        const std::vector<vulkan_host::color_blend_attachment> blend(color_formats.size(), build_blend_state(this->state_.render_state));
         const vulkan_host::specialization empty_spec{};
 
         const int32_t result = this->vulkan_.create_graphics_pipeline(
@@ -441,9 +441,8 @@ namespace sogen
         return true;
     }
 
-    const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(const uint32_t color_format,
-                                                                                           const uint32_t width, const uint32_t height,
-                                                                                           const uint32_t depth_format)
+    const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(
+        const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height, const uint32_t depth_format)
     {
         const uint64_t key = (this->state_.vertex_shader << 32) | this->state_.pixel_shader;
         const auto cached = this->programmable_pipelines_.find(key);
@@ -566,10 +565,10 @@ namespace sogen
                                   {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
                                   {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 12},
                               }}};
-        const std::array<uint32_t, 1> color_formats{color_format};
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
-        const std::array<vulkan_host::color_blend_attachment, 1> blend{{build_blend_state(this->state_.render_state)}};
+        // D3D9 has no independent per-render-target blend state -- every bound RT gets the same config.
+        const std::vector<vulkan_host::color_blend_attachment> blend(color_formats.size(), build_blend_state(this->state_.render_state));
         const vulkan_host::specialization empty_spec{};
 
         const int32_t result = this->vulkan_.create_graphics_pipeline(
@@ -848,6 +847,35 @@ namespace sogen
         }
         auto& rt = rt_it->second;
 
+        // Ordered list of every currently-bound, GPU-backed, format-resolvable render target across
+        // slots 0-3 (D3D9's simultaneous-render-target slots), preserving slot order -- this must match
+        // the PS's oC0..oC3 output-index order. Slot 0 (rt, checked above) is always first when present.
+        // Render-area dimensions still come from slot 0 alone (real D3D9 requires every simultaneously-
+        // bound RT to share dimensions).
+        struct bound_render_target
+        {
+            resource_entry* entry;
+            uint32_t vk_format;
+        };
+        std::vector<bound_render_target> bound_rts;
+        std::vector<uint32_t> color_formats;
+        for (const uint64_t rt_handle : this->state_.render_targets)
+        {
+            if (rt_handle == 0)
+            {
+                continue;
+            }
+            const auto bound_it = this->resources_.find(rt_handle);
+            uint32_t bound_vk_format = 0;
+            if (bound_it == this->resources_.end() || bound_it->second.vk_image_id == 0 ||
+                !d3d9_format_to_vulkan(bound_it->second.format, bound_vk_format))
+            {
+                continue;
+            }
+            bound_rts.push_back({&bound_it->second, bound_vk_format});
+            color_formats.push_back(bound_vk_format);
+        }
+
         // A bound depth-stencil resource only participates once it has real GPU backing (create_resource
         // gives one to every render-target/depth-stencil-usage resource) and a format this host actually
         // understands. depth_vk_format stays 0 -- and every depth-testing code path below is skipped --
@@ -908,24 +936,28 @@ namespace sogen
         const programmable_pipeline_entry* programmable = nullptr;
         if (use_programmable)
         {
-            programmable = this->ensure_programmable_pipeline(VK_FORMAT_B8G8R8A8_UNORM, rt.width, rt.height, depth_vk_format);
+            programmable = this->ensure_programmable_pipeline(color_formats, rt.width, rt.height, depth_vk_format);
             if (programmable == nullptr)
             {
                 return d3d_ok; // translation/pipeline failure; degrade silently
             }
         }
-        else if (!this->ensure_pipeline(VK_FORMAT_B8G8R8A8_UNORM, rt.width, rt.height, depth_vk_format))
+        else if (!this->ensure_pipeline(color_formats, rt.width, rt.height, depth_vk_format))
         {
             return d3d_ok;
         }
 
-        if (rt.vk_image_view_id == 0)
+        for (const auto& brt : bound_rts)
         {
-            if (this->vulkan_.create_image_view(device, rt.vk_image_id, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT,
+            if (brt.entry->vk_image_view_id != 0)
+            {
+                continue;
+            }
+            if (this->vulkan_.create_image_view(device, brt.entry->vk_image_id, brt.vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                 VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
                                                 VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                VK_COMPONENT_SWIZZLE_IDENTITY, rt.vk_image_view_id) != 0 ||
-                rt.vk_image_view_id == 0)
+                                                VK_COMPONENT_SWIZZLE_IDENTITY, brt.entry->vk_image_view_id) != 0 ||
+                brt.entry->vk_image_view_id == 0)
             {
                 return d3d_ok;
             }
@@ -1178,21 +1210,28 @@ namespace sogen
         // COLOR_ATTACHMENT_OPTIMAL for rendering, then back for the readback below.
         const vulkan_host::subresource_range color_range{
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
+        for (const auto& brt : bound_rts)
+        {
+            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, brt.entry->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
+        }
 
-        const vulkan_host::rendering_attachment color_attachment{
-            .image_view = rt.vk_image_view_id,
-            .resolve_image_view = 0,
-            .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .resolve_image_layout = 0,
-            .resolve_mode = 0,
-            .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .store_op = VK_ATTACHMENT_STORE_OP_STORE,
-        };
-        const std::array<vulkan_host::rendering_attachment, 1> color_attachments{color_attachment};
+        std::vector<vulkan_host::rendering_attachment> color_attachments;
+        color_attachments.reserve(bound_rts.size());
+        for (const auto& brt : bound_rts)
+        {
+            color_attachments.push_back({
+                .image_view = brt.entry->vk_image_view_id,
+                .resolve_image_view = 0,
+                .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .resolve_image_layout = 0,
+                .resolve_mode = 0,
+                .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
+                .store_op = VK_ATTACHMENT_STORE_OP_STORE,
+            });
+        }
         // The one-time init above already left the depth image in DEPTH_STENCIL_ATTACHMENT_OPTIMAL, and
         // every later draw finds it already there (LOAD_OP_LOAD/STORE_OP_STORE keep it there across
         // draws) -- no barrier needed here, unlike the color attachment's transfer-src round trip.
@@ -1259,10 +1298,13 @@ namespace sogen
 
         this->vulkan_.cmd_end_rendering(this->command_buffer_);
 
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                           VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+        for (const auto& brt : bound_rts)
+        {
+            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, brt.entry->vk_image_id, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                               VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+        }
 
         this->vulkan_.end_command_buffer(this->command_buffer_);
         this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
@@ -1299,14 +1341,17 @@ namespace sogen
             }
         }
 
-        // Read the drawn frame back into the resource's backing store, same as pfnClear -- so pfnLock
-        // sees the real drawn pixels.
-        std::vector<std::byte> pixels;
-        uint32_t readback_width = 0;
-        uint32_t readback_height = 0;
-        if (this->vulkan_.readback_render_target(rt.vk_image_id, pixels, readback_width, readback_height) == 0)
+        // Read the drawn frame back into each bound render target's own backing store, same as
+        // pfnClear -- so pfnLock sees the real drawn pixels.
+        for (auto& brt : bound_rts)
         {
-            rt.backing = std::move(pixels);
+            std::vector<std::byte> pixels;
+            uint32_t readback_width = 0;
+            uint32_t readback_height = 0;
+            if (this->vulkan_.readback_render_target(brt.entry->vk_image_id, pixels, readback_width, readback_height) == 0)
+            {
+                brt.entry->backing = std::move(pixels);
+            }
         }
 
         return d3d_ok;
