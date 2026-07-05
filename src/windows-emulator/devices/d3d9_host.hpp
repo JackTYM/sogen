@@ -304,6 +304,15 @@ namespace sogen
         // streams) so both always agree on which case -- real declaration vs. the pre-Task-8 stream-0
         // fallback -- applies to a given draw.
         const parsed_vertex_decl* find_real_vertex_decl() const;
+        // Filters decl.used_binding_mask down to only streams that ALSO have a real, nonzero stride in
+        // state_.stream_strides -- i.e. streams the app has actually called SetStreamSource for. A
+        // stream the declaration references but that has no (or a zero) stride is not usable: emitting
+        // a Vulkan binding for it would mis-fetch, so it must be excluded from BOTH the pipeline's
+        // vertex-input state (bindings AND attributes -- an attribute whose binding isn't in this
+        // filtered mask must not be emitted either, or it would reference a VkVertexInputBindingDescription
+        // that was never declared) and execute_draw's upload/bind loop. Both call this so they can never
+        // disagree about which bindings are real.
+        uint32_t usable_vertex_binding_mask(const parsed_vertex_decl& decl) const;
         // color_formats: see ensure_pipeline's own comment above.
         const programmable_pipeline_entry* ensure_programmable_pipeline(std::span<const uint32_t> color_formats, uint32_t width,
                                                                          uint32_t height, uint32_t depth_format);

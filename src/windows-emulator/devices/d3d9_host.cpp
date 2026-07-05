@@ -452,6 +452,24 @@ namespace sogen
         return &*vdecl_it->second.parsed;
     }
 
+    uint32_t d3d9_host::usable_vertex_binding_mask(const parsed_vertex_decl& decl) const
+    {
+        uint32_t mask = 0;
+        for (uint32_t stream = 0; stream < 32; ++stream)
+        {
+            if ((decl.used_binding_mask & (1u << stream)) == 0)
+            {
+                continue;
+            }
+            const auto stride_it = this->state_.stream_strides.find(stream);
+            if (stride_it != this->state_.stream_strides.end() && stride_it->second != 0)
+            {
+                mask |= (1u << stream);
+            }
+        }
+        return mask;
+    }
+
     const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(
         const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height, const uint32_t depth_format)
     {
@@ -567,28 +585,32 @@ namespace sogen
         std::vector<vulkan_host::vertex_attribute> attributes;
         if (real_decl != nullptr)
         {
+            // Only streams with a real, nonzero stride (usable_vertex_binding_mask) get a Vulkan
+            // binding -- a stream the declaration references but the app never called SetStreamSource
+            // for (or set a zero stride) is excluded rather than emitting a zero-stride binding that
+            // would mis-fetch. Every attribute referencing a binding NOT in that filtered mask is
+            // dropped too (not just skipped from `bindings`): a VkVertexInputAttributeDescription whose
+            // binding has no corresponding VkVertexInputBindingDescription is a Vulkan spec violation
+            // (VUID-VkPipelineVertexInputStateCreateInfo-binding-00615). execute_draw's own per-stream
+            // upload/bind loop uses this exact same filtered mask, so the two can never disagree.
+            const uint32_t usable_mask = this->usable_vertex_binding_mask(*real_decl);
             for (uint32_t stream = 0; stream < 32; ++stream)
             {
-                if ((real_decl->used_binding_mask & (1u << stream)) == 0)
+                if ((usable_mask & (1u << stream)) == 0)
                 {
                     continue;
                 }
                 const auto stride_it = this->state_.stream_strides.find(stream);
-                if (stride_it == this->state_.stream_strides.end() || stride_it->second == 0)
-                {
-                    // The declaration references this stream, but the app never called
-                    // SetStreamSource for it (or set a zero stride) -- emitting a zero-stride Vulkan
-                    // binding would make every vertex fetch from this stream alias offset 0 instead of
-                    // failing loudly, so skip the binding entirely rather than mis-fetch.
-                    // execute_draw's own per-stream loop applies this same guard.
-                    continue;
-                }
                 bindings.push_back(
                     {.binding = stream, .stride = stride_it->second, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX});
             }
             attributes.reserve(real_decl->attributes.size());
             for (const auto& attr : real_decl->attributes)
             {
+                if (attr.binding >= 32 || (usable_mask & (1u << attr.binding)) == 0)
+                {
+                    continue; // references a binding that didn't make it into `bindings` above
+                }
                 attributes.push_back(
                     {.location = attr.location, .binding = attr.binding, .format = attr.vk_format, .offset = attr.offset});
             }
@@ -1035,11 +1057,13 @@ namespace sogen
         }
 
         // Which vertex streams this draw actually needs to bind: the real parsed declaration's
-        // used_binding_mask (Task 7) when state_.vertex_decl is a real, non-empty declaration, else the
-        // pre-Task-8 stream-0-only fallback -- same fallback rule ensure_programmable_pipeline just
-        // applied to build this pipeline's vertex input state, so the two always agree.
+        // usable_vertex_binding_mask (streams it references AND that have a real, nonzero stride) when
+        // state_.vertex_decl is a real, non-empty declaration, else the pre-Task-8 stream-0-only
+        // fallback. This is the exact same filtered mask ensure_programmable_pipeline just used to build
+        // this pipeline's vertex input state, so the two can never disagree about which bindings the
+        // pipeline actually declared.
         const parsed_vertex_decl* real_decl = this->find_real_vertex_decl();
-        const uint32_t used_binding_mask = real_decl != nullptr ? real_decl->used_binding_mask : 1u;
+        const uint32_t used_binding_mask = real_decl != nullptr ? this->usable_vertex_binding_mask(*real_decl) : 1u;
         uint32_t highest_binding = 0;
         for (uint32_t bit = 0; bit < 32; ++bit)
         {
@@ -1051,9 +1075,9 @@ namespace sogen
 
         // Upload the current contents of every referenced stream fresh every draw -- simplest correct
         // model for a first triangle; no persistent GPU vertex buffer / dirty tracking yet. Streams the
-        // declaration doesn't reference (a gap between two set bits of used_binding_mask), or a
-        // referenced stream the app never called SetStreamSource for, are left at buffer id 0 --
-        // cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
+        // declaration doesn't reference, or that lack a real stride (both already filtered out of
+        // used_binding_mask above), or a referenced+usable stream the app never called SetStreamSource
+        // for, are left at buffer id 0 -- cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
         std::vector<uint64_t> stream_buffers(highest_binding + 1, 0);
         std::vector<uint64_t> stream_memories(highest_binding + 1, 0);
         std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
