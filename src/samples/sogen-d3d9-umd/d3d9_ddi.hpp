@@ -437,6 +437,10 @@ static_assert(sizeof(D3DDDIARG_DELETEVERTEXSHADERFUNC) == 8, "D3DDDIARG_DELETEVE
 static_assert(sizeof(D3DDDIARG_DELETEVERTEXSHADERFUNC) == 4, "D3DDDIARG_DELETEVERTEXSHADERFUNC x86 layout");
 #endif
 
+// SUPERSEDED (RE-corrected live, this Task-9 test): pfnSetVertexShaderDecl does NOT take a pointer to
+// this struct -- it's a DIRECT-VALUE HANDLE call, same convention as pfnSetVertexShaderFunc/
+// pfnSetPixelShader. umd_SetVertexShaderDecl (sogen_d3d9_umd.cpp) now takes a plain HANDLE parameter;
+// this type is kept only for the static_asserts' historical record and is otherwise unused.
 typedef struct _D3DDDIARG_SETVERTEXSHADERDECL
 {
     HANDLE ShaderHandle;
@@ -449,10 +453,17 @@ static_assert(sizeof(D3DDDIARG_SETVERTEXSHADERDECL) == 8, "D3DDDIARG_SETVERTEXSH
 static_assert(sizeof(D3DDDIARG_SETVERTEXSHADERDECL) == 4, "D3DDDIARG_SETVERTEXSHADERDECL x86 layout");
 #endif
 
+// RE-verified live (this Task-9 test, via a diagnostic byte dump of pArgs -- see
+// umd_CreateVertexShaderDecl's own comment): NumVertexElements comes FIRST (offset 0), not
+// ShaderHandle -- a real, distinct 2-element D3DVERTEXELEMENT9 array read back as
+// pArgs->NumVertexElements == 2 (matching bytes 0-3) once this field order was corrected; the
+// original guess (ShaderHandle first) instead decoded a garbage/padding 64-bit value at offset 0
+// as ShaderHandle and read NumVertexElements == 0 from what is actually just the 4 bytes of
+// x64 alignment padding before the 8-byte-aligned HANDLE at offset 8.
 typedef struct _D3DDDIARG_CREATEVERTEXSHADERDECL
 {
-    HANDLE ShaderHandle; // out
-    UINT NumVertexElements;
+    UINT NumVertexElements; // in
+    HANDLE ShaderHandle;    // out (offset 8 on x64: 4 bytes of alignment padding follow NumVertexElements)
     // D3DDDIVERTEXELEMENT elements[NumVertexElements] follow the struct in memory
 } D3DDDIARG_CREATEVERTEXSHADERDECL;
 

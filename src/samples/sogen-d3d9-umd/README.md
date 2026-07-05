@@ -65,10 +65,13 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_scissor_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_mrt_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-mrt-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_multistream_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-multistream-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
-`d3d9_int_bool_const_test.cpp`, and `d3d9_mrt_test.cpp` are guest-runtime tests, not driver-side
+`d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, and `d3d9_multistream_test.cpp` are guest-runtime tests, not driver-side
 files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
@@ -90,6 +93,7 @@ cp d3d9-partial-lock-test-x64.exe <root>/filesys/c/d3d9-partial-lock-test.exe
 cp d3d9-int-bool-const-test-x64.exe <root>/filesys/c/d3d9-int-bool-const-test.exe
 cp d3d9-scissor-test-x64.exe <root>/filesys/c/d3d9-scissor-test.exe
 cp d3d9-mrt-test-x64.exe <root>/filesys/c/d3d9-mrt-test.exe
+cp d3d9-multistream-test-x64.exe <root>/filesys/c/d3d9-multistream-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
@@ -119,6 +123,7 @@ shader, const, texture, texcoord, and int-bool-const tests.
 ./analyzer -e <root> -c c:/d3d9-int-bool-const-test.exe
 ./analyzer -e <root> -c c:/d3d9-scissor-test.exe
 ./analyzer -e <root> -c c:/d3d9-mrt-test.exe
+./analyzer -e <root> -c c:/d3d9-multistream-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
@@ -229,6 +234,41 @@ entirely YELLOW -- the old, pre-Task-4 code only cleared RT0, so RT1 would have 
 `CreateVertexShader`/`CreatePixelShader`/both `CreateRenderTarget`/both `SetRenderTarget`/
 `DrawIndexedPrimitive`/`Clear(yellow)` all `hr=0x00000000`, twelve `PASS:` lines (three checkpoints
 per RT per sub-pass), and `[d3d9-mrt-test] ALL CHECKS PASSED`.
+
+`d3d9-multistream-test.exe` proves a real multi-stream `D3DVERTEXELEMENT9` vertex declaration --
+POSITION on stream 0, COLOR on stream 1, with stream 1 bound at a NONZERO `SetStreamSource` byte
+offset -- actually reaches a real draw (Task 9, the empirical gate for Tasks 6-8's host-side
+`stream_offsets`/`parse_vertex_decl`/multi-stream `execute_draw` work). Stream 0 holds 12 FLOAT3
+positions (two flat-shaded, non-indexed triangles per half of the viewport); stream 1's buffer starts
+with 20 bytes of a deliberately wrong pad color before its real 12 per-vertex `D3DCOLOR` entries begin,
+and `SetStreamSource(1, ..., 20, sizeof(DWORD))` points past that pad at the real data. The left half
+of the viewport must read back RED, the right half GREEN -- neither color is reachable unless BOTH the
+second stream is genuinely bound (not silently dropped/falled-back-to-stream-0) AND its real, nonzero
+offset is honored (not ignored/treated as 0, which would read the pad color instead). Expect
+`CreateVertexDeclaration`/`DrawPrimitive` `hr=0x00000000`, two `PASS:` lines, and
+`[d3d9-multistream-test] ALL CHECKS PASSED`. See this test's own header comment for the full account of
+THREE genuine, independent guest-UMD bugs this task found and fixed while building it -- Tasks 6-8 never
+touched the guest UMD (only `d3d9_host.cpp`/`.hpp`), and nothing before this test ever called
+`CreateVertexDeclaration`/`SetVertexDeclaration` from a guest, so none of the three had ever been
+reachable or visible:
+1. `pfnCreateVertexShaderDecl` (D3DDDI_DEVICEFUNCS slot 45) was still an unwired `device_stub`, so
+   `CreateVertexDeclaration()` never reached the host at all. Fixed by adding
+   `umd_CreateVertexShaderDecl` (mirrors `umd_CreateVertexShaderFunc`/`create_shader_common`'s already-
+   verified struct-pointer-plus-trailing-array convention) and wiring slot 45 to it.
+2. `D3DDDIARG_CREATEVERTEXSHADERDECL`'s field order was guessed backwards (`ShaderHandle` first) --
+   a live byte-dump of the real `pArgs` (once bug 1 was fixed enough to reach it) showed
+   `NumVertexElements` actually comes first (offset 0), with the 8-byte `ShaderHandle` at offset 8 (4
+   bytes of ordinary x64 alignment padding in between, previously misread as part of `ShaderHandle`).
+   Fixed by swapping the field order.
+3. `pfnSetVertexShaderDecl` (slot 47) was already wired, but as a struct-pointer call -- a live dump
+   showed the "pArgs" parameter itself receiving the raw, small decl-id value directly (not a real
+   pointer), meaning it is actually a DIRECT-VALUE `HANDLE` call, the same convention as
+   `umd_SetVertexShaderFunc`/`umd_SetPixelShader`. Every real `SetVertexDeclaration()` call was silently
+   forwarding `decl=0` to the host until this was fixed. Fixed by changing `umd_SetVertexShaderDecl`'s
+   signature to take a plain `HANDLE` directly instead of a struct pointer.
+
+All three had to be fixed together before this test produced anything but an unrendered (black) result;
+the host-side dispatch and wire-protocol structs Tasks 6-8 built needed no changes at all.
 
 `d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
 dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a

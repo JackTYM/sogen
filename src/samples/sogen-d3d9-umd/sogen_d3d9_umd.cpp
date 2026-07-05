@@ -235,7 +235,7 @@ namespace
         12, // pfnCreateVertexShaderFunc (real)
         8,  // pfnDeleteVertexShaderFunc (real)
         8,  // pfnSetVertexShaderFunc (real)
-        12, // pfnCreateVertexShaderDecl
+        12, // pfnCreateVertexShaderDecl (real)
         8,  // pfnDeleteVertexShaderDecl
         8,  // pfnSetVertexShaderDecl (real)
         12, // pfnSetVertexShaderConstI (real) -- trailing CONST INT*
@@ -1100,12 +1100,57 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetVertexShaderDecl(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERDECL* pArgs)
+    // pfnCreateVertexShaderDecl was, until this Task-9 test needed a real end-to-end multi-stream
+    // declaration path, still an unwired device_stub (see this file's own arity-table comment on the
+    // slot, pre-fix) -- CreateVertexDeclaration() therefore never reached the host at all, silently
+    // leaving Tasks 6-8's already-built host-side parse_vertex_decl/multi-stream-binding plumbing
+    // permanently unreachable by any real D3D9 app. Wired following the exact same struct-pointer-plus-
+    // separate-trailing-array convention this driver's own umd_CreateVertexShaderFunc/umd_CreatePixelShader
+    // (create_shader_common) already use and already got live-RE-verified for -- the WDK's own
+    // PFND3DDDI_CREATEVERTEXSHADERDECL prototype takes pVertexElements as this DDI's own third argument,
+    // matching that shape. ShaderHandle (D3DDDIARG_CREATEVERTEXSHADERDECL's own first field) is the
+    // driver's output slot, same convention as D3DDDIARG_CREATESHADERFUNC::ShaderHandle.
+    HRESULT APIENTRY umd_CreateVertexShaderDecl(HANDLE /*hDevice*/, D3DDDIARG_CREATEVERTEXSHADERDECL* pArgs,
+                                                CONST D3DDDIVERTEXELEMENT* pVertexElements)
     {
-        // NULL pArgs crashed this function live (confirmed via a real access violation at the
-        // dereference below) -- the runtime passes it for fixed-function (D3DFVF-only, no explicit
-        // vertex declaration) draws. 0 = no decl, matching umd_SetVertexShaderFunc's own convention.
-        d3d9c::set_vertex_decl_record req{.decl = pArgs != nullptr ? reinterpret_cast<uint64_t>(pArgs->ShaderHandle) : 0};
+        if (pArgs == nullptr)
+        {
+            return E_INVALIDARG;
+        }
+        const UINT element_count = pArgs->NumVertexElements;
+        const size_t elements_size_bytes = element_count * sizeof(d3d9c::vertex_element);
+
+        std::vector<uint8_t> buf(sizeof(d3d9c::create_vertex_decl_request) + elements_size_bytes);
+        auto* req = reinterpret_cast<d3d9c::create_vertex_decl_request*>(buf.data());
+        req->element_count = element_count;
+        req->reserved = 0;
+        if (element_count != 0 && pVertexElements != nullptr)
+        {
+            std::memcpy(buf.data() + sizeof(*req), pVertexElements, elements_size_bytes);
+        }
+
+        d3d9c::create_vertex_decl_response resp{};
+        bridge_call(gb::ioctl_d3d9_create_vertex_decl, buf.data(), static_cast<DWORD>(buf.size()), &resp, sizeof(resp));
+        pArgs->ShaderHandle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(resp.decl));
+        return resp.hr;
+    }
+
+    // RE-corrected live (this Task-9 test, via a diagnostic dump of the incoming parameter): despite
+    // the struct-pointer signature this function used before, pfnSetVertexShaderDecl is actually a
+    // DIRECT-VALUE HANDLE call -- same convention as umd_SetVertexShaderFunc/umd_SetPixelShader, NOT a
+    // pointer to D3DDDIARG_SETVERTEXSHADERDECL. Before this fix, a real, non-null decl handle (0x10007)
+    // was observed arriving in the "pArgs" parameter slot itself (an implausibly small value for a real
+    // heap/stack pointer, unlike every genuine pointer elsewhere in this driver's traces), and
+    // `pArgs->ShaderHandle` dereferenced through it read back 0 -- silently forwarding decl=0 (i.e.
+    // "no declaration") to the host on every real SetVertexDeclaration() call, permanently defeating
+    // Tasks 6-8's multi-stream draw path even after pfnCreateVertexShaderDecl itself was fixed. The
+    // previous "NULL pArgs crashes" observation (an earlier session, testing the fixed-function/no-decl
+    // case) is still consistent with this: a null decl handle IS what the runtime passes there too --
+    // it was never really a struct pointer being null, just the handle value 0. 0 continues to mean
+    // "no decl / fixed-function", matching every other direct-value Set* slot's own convention.
+    HRESULT APIENTRY umd_SetVertexShaderDecl(HANDLE /*hDevice*/, HANDLE hDecl)
+    {
+        d3d9c::set_vertex_decl_record req{.decl = reinterpret_cast<uint64_t>(hDecl)};
         bridge_call(gb::ioctl_d3d9_set_vertex_decl, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
@@ -1553,6 +1598,7 @@ namespace
             slots[42] = reinterpret_cast<void*>(&umd_CreateVertexShaderFunc); // pfnCreateVertexShaderFunc
             slots[43] = reinterpret_cast<void*>(&umd_DeleteVertexShaderFunc); // pfnDeleteVertexShaderFunc
             slots[44] = reinterpret_cast<void*>(&umd_SetVertexShaderFunc);    // pfnSetVertexShaderFunc
+            slots[45] = reinterpret_cast<void*>(&umd_CreateVertexShaderDecl); // pfnCreateVertexShaderDecl
             slots[47] = reinterpret_cast<void*>(&umd_SetVertexShaderDecl);    // pfnSetVertexShaderDecl
             slots[48] = reinterpret_cast<void*>(&umd_SetVertexShaderConstI);  // pfnSetVertexShaderConstI
             slots[49] = reinterpret_cast<void*>(&umd_SetVertexShaderConstB);  // pfnSetVertexShaderConstB
