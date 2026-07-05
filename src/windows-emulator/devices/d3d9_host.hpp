@@ -297,6 +297,13 @@ namespace sogen
         // fresh per draw and destroyed after, mirroring execute_draw's own per-draw VS/PS UBO lifecycle --
         // no persistent sampler cache yet.
         bool build_sampler(uint64_t device, uint32_t sampler_index, uint64_t& out_sampler) const;
+        // Returns the cached parsed_vertex_decl for state_.vertex_decl, or nullptr when there's no real
+        // declaration to use (state_.vertex_decl == 0, or its cached parse produced no attributes --
+        // e.g. a decl containing only unrecognized D3DDECLTYPEs). Shared by ensure_programmable_pipeline
+        // (builds the pipeline's vertex input state) and execute_draw (uploads/binds the referenced
+        // streams) so both always agree on which case -- real declaration vs. the pre-Task-8 stream-0
+        // fallback -- applies to a given draw.
+        const parsed_vertex_decl* find_real_vertex_decl() const;
         // color_formats: see ensure_pipeline's own comment above.
         const programmable_pipeline_entry* ensure_programmable_pipeline(std::span<const uint32_t> color_formats, uint32_t width,
                                                                          uint32_t height, uint32_t depth_format);

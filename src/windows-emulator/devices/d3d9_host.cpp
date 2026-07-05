@@ -441,6 +441,17 @@ namespace sogen
         return true;
     }
 
+    const parsed_vertex_decl* d3d9_host::find_real_vertex_decl() const
+    {
+        const auto vdecl_it = this->vertex_decls_.find(this->state_.vertex_decl);
+        if (this->state_.vertex_decl == 0 || vdecl_it == this->vertex_decls_.end() || !vdecl_it->second.parsed.has_value() ||
+            vdecl_it->second.parsed->attributes.empty())
+        {
+            return nullptr;
+        }
+        return &*vdecl_it->second.parsed;
+    }
+
     const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(
         const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height, const uint32_t depth_format)
     {
@@ -542,29 +553,68 @@ namespace sogen
             return nullptr;
         }
 
-        // Vertex layout selection: this host has no D3DDDIARG_CREATEVERTEXSHADERDECL wiring yet
-        // (pfnCreateVertexShaderDecl is still an unwired device_stub -- the real D3DVERTEXELEMENT9
-        // array never reaches here), so the two vertex shapes this milestone's guest tests actually
-        // use are told apart by the one piece of real per-vertex-layout information the wire protocol
-        // already carries end-to-end: SetStreamSource's Stride (see d3d9_set_stream_source's handler --
-        // stream_strides was previously received and silently discarded here). D3DFVF_XYZ|D3DFVF_TEX1
-        // (position + one float2 texcoord) is 20 bytes; D3DFVF_XYZ|D3DFVF_DIFFUSE (position + one
-        // D3DCOLOR) is 16 bytes -- distinct stride values for this milestone's fixed set of shapes,
-        // same spirit as classify_resource_usage's format-based heuristic on the guest side.
-        const auto stride_it = this->state_.stream_strides.find(0);
-        const uint32_t stride = stride_it != this->state_.stream_strides.end() ? stride_it->second : 16;
-        const bool textured_layout = stride == 20;
-        const std::array<vulkan_host::vertex_binding, 1> bindings{
-            {{.binding = 0, .stride = textured_layout ? 20u : 16u, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX}}};
-        const std::array<vulkan_host::vertex_attribute, 2> attributes{
-            textured_layout ? std::array<vulkan_host::vertex_attribute, 2>{{
-                                  {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
-                                  {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 12},
-                              }}
-                            : std::array<vulkan_host::vertex_attribute, 2>{{
-                                  {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
-                                  {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 12},
-                              }}};
+        // Vertex layout selection: prefer the real parsed D3DVERTEXELEMENT9 declaration (Task 7's
+        // parse_vertex_decl, cached in vertex_decls_ at CreateVertexDeclaration time) when the app
+        // actually bound one -- see parse_vertex_decl's comment (this file) for why its
+        // parsed_vertex_attribute::location/binding/offset can be consumed directly with no further
+        // usage-keyed remapping. Falls back to the old stride heuristic below when state_.vertex_decl
+        // is unset or its cached parse produced no attributes, so every existing programmable-pipeline
+        // guest test (none of which call CreateVertexDeclaration/SetVertexDeclaration) keeps working
+        // byte-for-byte unchanged.
+        const parsed_vertex_decl* real_decl = this->find_real_vertex_decl();
+
+        std::vector<vulkan_host::vertex_binding> bindings;
+        std::vector<vulkan_host::vertex_attribute> attributes;
+        if (real_decl != nullptr)
+        {
+            for (uint32_t stream = 0; stream < 32; ++stream)
+            {
+                if ((real_decl->used_binding_mask & (1u << stream)) == 0)
+                {
+                    continue;
+                }
+                const auto stride_it = this->state_.stream_strides.find(stream);
+                if (stride_it == this->state_.stream_strides.end() || stride_it->second == 0)
+                {
+                    // The declaration references this stream, but the app never called
+                    // SetStreamSource for it (or set a zero stride) -- emitting a zero-stride Vulkan
+                    // binding would make every vertex fetch from this stream alias offset 0 instead of
+                    // failing loudly, so skip the binding entirely rather than mis-fetch.
+                    // execute_draw's own per-stream loop applies this same guard.
+                    continue;
+                }
+                bindings.push_back(
+                    {.binding = stream, .stride = stride_it->second, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX});
+            }
+            attributes.reserve(real_decl->attributes.size());
+            for (const auto& attr : real_decl->attributes)
+            {
+                attributes.push_back(
+                    {.location = attr.location, .binding = attr.binding, .format = attr.vk_format, .offset = attr.offset});
+            }
+        }
+        else
+        {
+            // Fallback: this host has no D3DDDIARG_CREATEVERTEXSHADERDECL wiring yet
+            // (pfnCreateVertexShaderDecl is still an unwired device_stub -- the real D3DVERTEXELEMENT9
+            // array never reaches here), so the two vertex shapes this milestone's guest tests actually
+            // use are told apart by the one piece of real per-vertex-layout information the wire protocol
+            // already carries end-to-end: SetStreamSource's Stride (see d3d9_set_stream_source's handler --
+            // stream_strides was previously received and silently discarded here). D3DFVF_XYZ|D3DFVF_TEX1
+            // (position + one float2 texcoord) is 20 bytes; D3DFVF_XYZ|D3DFVF_DIFFUSE (position + one
+            // D3DCOLOR) is 16 bytes -- distinct stride values for this milestone's fixed set of shapes,
+            // same spirit as classify_resource_usage's format-based heuristic on the guest side.
+            const auto stride_it = this->state_.stream_strides.find(0);
+            const uint32_t stride = stride_it != this->state_.stream_strides.end() ? stride_it->second : 16;
+            const bool textured_layout = stride == 20;
+            bindings.push_back(
+                {.binding = 0, .stride = textured_layout ? 20u : 16u, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX});
+            attributes.push_back({.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0});
+            attributes.push_back({.location = 1,
+                                  .binding = 0,
+                                  .format = textured_layout ? VK_FORMAT_R32G32_SFLOAT : VK_FORMAT_B8G8R8A8_UNORM,
+                                  .offset = 12});
+        }
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
         // D3D9 has no independent per-render-target blend state -- every bound RT gets the same config.
@@ -925,7 +975,6 @@ namespace sogen
         {
             return d3d_ok; // no real vertex data bound
         }
-        const auto& vb_backing = vb_it->second.backing;
 
         const resource_entry* ib_entry = nullptr;
         if (indexed != nullptr)
@@ -985,14 +1034,65 @@ namespace sogen
             return d3d_ok;
         }
 
-        // Upload the current vertex buffer contents fresh every draw -- simplest correct model for a
-        // first triangle; no persistent GPU vertex buffer / dirty tracking yet.
-        uint64_t vertex_buffer = 0;
-        uint64_t vertex_memory = 0;
-        if (!create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                                          vb_backing, vertex_buffer, vertex_memory))
+        // Which vertex streams this draw actually needs to bind: the real parsed declaration's
+        // used_binding_mask (Task 7) when state_.vertex_decl is a real, non-empty declaration, else the
+        // pre-Task-8 stream-0-only fallback -- same fallback rule ensure_programmable_pipeline just
+        // applied to build this pipeline's vertex input state, so the two always agree.
+        const parsed_vertex_decl* real_decl = this->find_real_vertex_decl();
+        const uint32_t used_binding_mask = real_decl != nullptr ? real_decl->used_binding_mask : 1u;
+        uint32_t highest_binding = 0;
+        for (uint32_t bit = 0; bit < 32; ++bit)
         {
-            return d3d_ok;
+            if ((used_binding_mask & (1u << bit)) != 0)
+            {
+                highest_binding = bit;
+            }
+        }
+
+        // Upload the current contents of every referenced stream fresh every draw -- simplest correct
+        // model for a first triangle; no persistent GPU vertex buffer / dirty tracking yet. Streams the
+        // declaration doesn't reference (a gap between two set bits of used_binding_mask), or a
+        // referenced stream the app never called SetStreamSource for, are left at buffer id 0 --
+        // cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
+        std::vector<uint64_t> stream_buffers(highest_binding + 1, 0);
+        std::vector<uint64_t> stream_memories(highest_binding + 1, 0);
+        std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
+        const auto destroy_stream_buffers = [&]() {
+            for (size_t stream = 0; stream < stream_buffers.size(); ++stream)
+            {
+                if (stream_buffers[stream] != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, stream_buffers[stream]);
+                    this->vulkan_.free_memory(device, stream_memories[stream]);
+                }
+            }
+        };
+        for (uint32_t stream = 0; stream <= highest_binding; ++stream)
+        {
+            if ((used_binding_mask & (1u << stream)) == 0)
+            {
+                continue;
+            }
+            const auto src_it = this->state_.stream_sources.find(stream);
+            if (src_it == this->state_.stream_sources.end())
+            {
+                continue;
+            }
+            const auto res_it = this->resources_.find(src_it->second);
+            if (res_it == this->resources_.end() || res_it->second.backing.empty() ||
+                (res_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
+                 res_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+            {
+                continue;
+            }
+            if (!create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                              res_it->second.backing, stream_buffers[stream], stream_memories[stream]))
+            {
+                destroy_stream_buffers();
+                return d3d_ok;
+            }
+            const auto off_it = this->state_.stream_offsets.find(stream);
+            stream_bind_offsets[stream] = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
         }
 
         uint64_t index_buffer_vk = 0;
@@ -1001,8 +1101,7 @@ namespace sogen
             !create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                                           ib_entry->backing, index_buffer_vk, index_memory))
         {
-            this->vulkan_.destroy_buffer(device, vertex_buffer);
-            this->vulkan_.free_memory(device, vertex_memory);
+            destroy_stream_buffers();
             return d3d_ok;
         }
 
@@ -1074,8 +1173,7 @@ namespace sogen
                 !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
                                        this->state_.ps_const_b, ps_ubo_b, ps_ubo_b_memory))
             {
-                this->vulkan_.destroy_buffer(device, vertex_buffer);
-                this->vulkan_.free_memory(device, vertex_memory);
+                destroy_stream_buffers();
                 if (index_buffer_vk != 0)
                 {
                     this->vulkan_.destroy_buffer(device, index_buffer_vk);
@@ -1126,8 +1224,7 @@ namespace sogen
                     0 ||
                 set_count != descriptor_sets.size())
             {
-                this->vulkan_.destroy_buffer(device, vertex_buffer);
-                this->vulkan_.free_memory(device, vertex_memory);
+                destroy_stream_buffers();
                 if (index_buffer_vk != 0)
                 {
                     this->vulkan_.destroy_buffer(device, index_buffer_vk);
@@ -1311,8 +1408,8 @@ namespace sogen
                                              sizeof(viewport_size), viewport_size.data());
         }
 
-        const uint64_t vb_offset = 0;
-        this->vulkan_.cmd_bind_vertex_buffers(this->command_buffer_, 0, 1, &vertex_buffer, &vb_offset);
+        this->vulkan_.cmd_bind_vertex_buffers(this->command_buffer_, 0, static_cast<uint32_t>(stream_buffers.size()),
+                                              stream_buffers.data(), stream_bind_offsets.data());
         if (indexed != nullptr)
         {
             const uint32_t index_type = indexed->index_format != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
@@ -1347,8 +1444,7 @@ namespace sogen
             // Synchronous wait, matching create_render_target's own submit_clear/readback pattern.
         }
 
-        this->vulkan_.destroy_buffer(device, vertex_buffer);
-        this->vulkan_.free_memory(device, vertex_memory);
+        destroy_stream_buffers();
         if (index_buffer_vk != 0)
         {
             this->vulkan_.destroy_buffer(device, index_buffer_vk);
