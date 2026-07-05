@@ -41,7 +41,10 @@
 //    pair -- 0.999/0.001 round-trips through the pixel format identically to 1.0/0.0 (see
 //    `channel_close`'s tolerance below) but does not trigger the optimizer's shortcut, empirically
 //    confirmed to produce a single genuine IF/ELSE/ENDIF with both branches' colors written entirely
-//    from real branch-gated instructions (no stray SGE, no unrelated shadow constant).
+//    from real branch-gated instructions (no stray SGE, no unrelated shadow constant). Recompiler-version
+//    drift isn't a practical risk for this fix: `d3dcompiler_43.dll` is a pinned filesystem asset staged
+//    into the guest root (`root/filesys/c/windows/{system32,syswow64}/d3dcompiler_43.dll`), not rebuilt
+//    from source, so this exact optimizer behavior is stable across runs.
 //
 // Both the bool and the int4 loop trip count are supplied ONLY via runtime SetVertexShaderConstantB/
 // SetVertexShaderConstantI calls -- never as HLSL-side literals/defb/defi -- so vkd3d-shader's D3DBC
