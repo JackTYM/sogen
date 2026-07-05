@@ -49,14 +49,16 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   D3DBC `IF` instruction reading the `b0` CONSTBOOL register, and a genuine int loop
   (`for(k<loopTripCount.x)`, driven by `SetVertexShaderConstantI(0,...)`) that compiles to a real D3DBC
   `REP` opcode — both confirmed by walking the raw D3DBC token stream, not by trusting HRESULTs alone.
-  Two non-host findings surfaced while building that test, both already documented in the test's own
-  header comment and `HANDOFF_MACBOOK.md`: (1) a missing IOCTL-dispatch-routing case in `gpu_bridge.cpp`
-  for the two new opcodes — a genuine host bug, fixed; (2) a `d3dcompiler_43` compiler quirk where an
-  `if`/`else` merging into one trailing write gets flattened into `SGE`/`MAD` arithmetic against an
-  auto-allocated FLOAT register instead of ever reading the real `b0` CONSTBOOL bank (worked around
-  with early-`return` branches in the test shader — a real, reproducible-on-real-hardware compiler
-  quirk, not a sogen bug), plus a narrower third quirk where exact `0.0`/`1.0` literals inside a branch
-  get pulled out via a separate, never-set shadow float register (worked around with `0.999`/`0.001`).
+  Four findings surfaced while building that test, all already documented in the test's own header
+  comment and `HANDOFF_MACBOOK.md`, and meaningfully different in kind: **one genuine host bug** — a
+  missing IOCTL-dispatch-routing case in `gpu_bridge.cpp` for the two new opcodes, fixed with real code
+  — plus **three confirmed `d3dcompiler_43` compiler quirks, none of them sogen bugs** (all reproducible
+  on real hardware): (1) `bool x : register(b0)` is rejected outright for a vs_2_0 target and must be
+  left auto-allocated; (2) an `if`/`else` merging into one trailing write gets flattened into `SGE`/`MAD`
+  arithmetic against an auto-allocated FLOAT register instead of ever reading the real `b0` CONSTBOOL
+  bank (worked around with early-`return` branches in the test shader, without weakening what the test
+  proves); (3) a narrower quirk where exact `0.0`/`1.0` literals inside a branch get pulled out via a
+  separate, never-set shadow float register (worked around with `0.999`/`0.001`).
   Confirmed pixel-exact on **both x64 and x86/WoW64** through the real 32-bit Microsoft `d3d9.dll`
   (Task 5): `pixel(320,240)=B=26 G=00 R=FF A=FF` and both analytic checks pass identically on both
   architectures. The one x86 wrinkle Task 5 hit was not a new architecture bug: the staged x86 UMD DLL
@@ -231,9 +233,9 @@ asset loading outright, not just degrade a corner case.
 Per the original plan's "de-risk earliest/riskiest first" philosophy, int/bool constant registers were
 taken ahead of the rest of M3 (real games hit shader flow control before most of M3's other items —
 multi-stream, `*_UP` draws, MRT, cube/volume) and are now done, proven pixel-exact on both x64 and x86.
-M3's remaining DDI-coverage items can proceed in roughly the order listed above. `D3DPOOL_MANAGED`'s confirmed-permanent
-limitation should be treated as a standing MW2-integration risk to design around (e.g. a different
-resource-management strategy for managed-pool assets) rather than something more DDI coverage will
-incidentally fix — it won't. If x86 partial-buffer Lock support becomes necessary before MW2 integration,
-budget for the same kind of live-RE pass (`D3DDDIARG_LOCK`'s x86 driver-routed `OffsetToLock` offset)
-that resolved the x64 case.
+M3's remaining DDI-coverage items can proceed in roughly the order listed above. `D3DPOOL_MANAGED`'s
+confirmed-permanent limitation should be treated as a standing MW2-integration risk to design around
+(e.g. a different resource-management strategy for managed-pool assets) rather than something more DDI
+coverage will incidentally fix — it won't. If x86 partial-buffer Lock support becomes necessary before
+MW2 integration, budget for the same kind of live-RE pass (`D3DDDIARG_LOCK`'s x86 driver-routed
+`OffsetToLock` offset) that resolved the x64 case.

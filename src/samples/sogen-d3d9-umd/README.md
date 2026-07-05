@@ -419,12 +419,14 @@ semantics, which would have corrupted chunk 0 and failed this exact test.
   real runtime shader flow control, not just byte delivery: a genuine bool branch compiling to a real
   D3DBC `IF` reading `b0`, and a genuine int-driven loop compiling to a real D3DBC `REP` (both confirmed
   by walking the raw bytecode). Building it caught a real host bug (a missing IOCTL-dispatch-routing case
-  for the two new opcodes in `gpu_bridge.cpp`, now fixed) and worked around two real `d3dcompiler_43`
-  quirks in the test shader itself (an `if`/`else` that flattens into arithmetic unless both arms
-  early-`return`; a narrower quirk where exact `0.0`/`1.0` literals get pulled out via a separate shadow
-  float register, worked around with `0.999`/`0.001`) -- see the test's own header comment for the full
-  account. **Porting to x86 (Task 5) hit no new architecture bug** -- unlike the earlier const-test-x86
-  and texture-test-x86 ports, which each found a genuine x86-only DDI/handle bug. The one x86 run that
+  for the two new opcodes in `gpu_bridge.cpp`, now fixed) and worked around three real `d3dcompiler_43`
+  quirks (not sogen bugs) in the test shader itself: a `bool` variable rejected with an explicit register
+  annotation for a vs_2_0 target (must be left auto-allocated); an `if`/`else` that flattens into
+  arithmetic unless both arms early-`return`; and a narrower quirk where exact `0.0`/`1.0` literals get
+  pulled out via a separate shadow float register, worked around with `0.999`/`0.001` -- see the test's
+  own header comment for the full account. **Porting to x86 (Task 5) hit no new architecture bug** --
+  unlike the earlier const-test-x86 and texture-test-x86 ports, which each found a genuine x86-only
+  DDI/handle bug. The one x86 run that
   initially failed (`pixel(320,240)=B=00 G=FF R=00`, i.e. both the bool and int constants silently read
   back as their unset defaults) was traced to a stale build artifact: `sogen_d3d9um-x86.dll` had not been
   rebuilt since Task 1 added `umd_SetVertexShaderConstI`/`ConstB`/`umd_SetPixelShaderConstI`/`ConstB` to
