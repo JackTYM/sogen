@@ -331,8 +331,9 @@ int main()
                p[0], p[1], p[2], p[3]);
         if (!channel_close(p[0], 255, 2) || !channel_close(p[1], 0, 2) || !channel_close(p[2], 255, 2))
         {
-            printf("[d3d9-managed-texture-test] FAIL: pixel does not match the MANAGED texture's known color -- see "
-                   "umd_TexBlt's comment in sogen_d3d9_umd.cpp for the known-open root cause\n");
+            printf("[d3d9-managed-texture-test] EXPECTED FAILURE (known, permanent limitation -- see this "
+                   "file's header comment and umd_TexBlt's comment in sogen_d3d9_umd.cpp): pixel does not "
+                   "match the MANAGED texture's known color\n");
             ++failures;
         }
         else

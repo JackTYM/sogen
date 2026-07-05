@@ -550,9 +550,7 @@ typedef struct _D3DDDIARG_DRAWINDEXEDPRIMITIVE
 // pfnTexBlt itself). Every byte of the 48 bytes is accounted for; there is no pixel-data pointer
 // anywhere in it (and no other DDI call this driver receives during a full, live-traced
 // D3DPOOL_MANAGED texture lifecycle carries one either -- see umd_TexBlt's own comment in
-// sogen_d3d9_umd.cpp for the full trace and conclusion). Only the x64 shape has been live-RE'd --
-// no D3DPOOL_MANAGED guest test exists on x86 yet, so the x86 layout (HANDLE is 4 bytes there, at
-// minimum shifting every offset after the first two fields) is deliberately left unmodeled.
+// sogen_d3d9_umd.cpp for the full trace and conclusion).
 #ifdef _WIN64
 typedef struct _D3DDDIARG_TEXBLT
 {
@@ -568,6 +566,26 @@ typedef struct _D3DDDIARG_TEXBLT
     UINT Reserved;            // 44 -- always 0, confirmed via decompile (CD3DDDIDX10::TexBlt's own v18)
 } D3DDDIARG_TEXBLT;
 static_assert(sizeof(D3DDDIARG_TEXBLT) == 48, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt)");
+#else
+// x86 shape live-RE'd the same way (idasql decompile of the real 32-bit d3d9.dll's own
+// CD3DDDIDX10::TexBlt, d3d9_x86.dll.i64 address 0x100656d0) -- NOT a guess extrapolated from the x64
+// layout above, an independent decompile of the genuine 32-bit function. It is exactly the x64 shape
+// with every HANDLE shrunk to 4 bytes (this driver's own `HANDLE` is `void*`, already 4 bytes in an
+// x86 build) and every later offset shifted down by 8 to match -- 40 bytes total, not 48:
+//   v13[0] = *a2 (hDstResource, offset 0), v14 = a2[1]/a2[2] (subresource index, offset 8),
+//   v13[1] = *a3 (hSrcResource, offset 4), x = a4->x (offset 12), v16 = a4->y (offset 16),
+//   v17..v20 = *a5 (SrcRect, offset 20, 16 bytes), v21 = 0 (Reserved, offset 36).
+typedef struct _D3DDDIARG_TEXBLT
+{
+    HANDLE hDstResource;      // 0
+    HANDLE hSrcResource;      // 4 -- NOT 8: HANDLE is 4 bytes on x86, unlike the x64 shape above.
+    UINT DstSubResourceIndex; // 8
+    LONG DstPointX;           // 12 -- from *pDstPoint
+    LONG DstPointY;           // 16
+    D3DDDIRECT SrcRect;       // 20, 16 bytes (left/top/right/bottom) -- from *pSrcRect
+    UINT Reserved;            // 36 -- always 0, confirmed via decompile
+} D3DDDIARG_TEXBLT;
+static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt, x86)");
 #endif
 
 // hResource@0 and pData@40 are RE-verified and reliable across every resource kind and routing path

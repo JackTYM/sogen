@@ -282,22 +282,35 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   `D3DFVF_DIFFUSE` color channel (`COLOR0.rg`), which is proven correct by every prior guest test that
   passes a `COLOR0` varying through a real compiled shader.
 - **A `D3DPOOL_MANAGED` texture creates two, unrelated DDI resources for what the app sees as one
-  `CreateTexture()` call -- partially fixed 2026-07-04, one layer of a two-layer bug.** The
-  double-`pfnCreateResource`/`pfnTexBlt` mechanism itself is now understood and correctly handled: a
-  real, expected D3D9 MANAGED-pool "sysmem master + lazily-created vidmem copy" architecture, with
-  `pfnTexBlt` as the genuine sync call the runtime issues between the second `pfnCreateResource` and the
-  following `pfnSetTexture` -- this driver's `pfnTexBlt` was previously an unwired no-op stub and is now
-  implemented (`umd_TexBlt`/`d3d9_host::tex_blt`, forwarding the source resource's full pixel backing
-  into the destination's). **A second, deeper, previously-unknown bug sits upstream of it and is still
-  open**: `pfnLock`/`pfnUnlock` never carry the app's real pixel writes for a `D3DPOOL_MANAGED`
-  texture's sysmem copy at all -- live-confirmed this driver's own `pfnLock` return pointer and the
-  app's own `LockRect()` pointer are different addresses, meaning the app actually writes into
-  `d3d9.dll`'s own private system-memory allocation, invisible to the driver. Root cause: this driver
-  doesn't yet satisfy `CBaseDevice::CanDriverManageResource` (the same shape of undocumented capability
-  gate that `DevCaps` bits `0x02000000`/`0x04000000` already fixed for vertex/index buffers), which
+  `CreateTexture()` call -- confirmed unfixable through this driver's own DDI surface (2026-07-04),
+  three decoupled layers, all root-caused.** The double-`pfnCreateResource`/`pfnTexBlt` mechanism itself
+  is understood and correctly handled: a real, expected D3D9 MANAGED-pool "sysmem master +
+  lazily-created vidmem copy" architecture, with `pfnTexBlt` as the genuine sync call the runtime issues
+  between the second `pfnCreateResource` and the following `pfnSetTexture` -- this driver's `pfnTexBlt`
+  was previously an unwired no-op stub and is now implemented (`umd_TexBlt`/`d3d9_host::tex_blt`,
+  forwarding the source resource's full pixel backing into the destination's). **A second, deeper bug
+  sits upstream of it**: `pfnLock`/`pfnUnlock` never carry the app's real pixel writes for a
+  `D3DPOOL_MANAGED` texture's sysmem copy at all -- live-confirmed this driver's own `pfnLock` return
+  pointer and the app's own `LockRect()` pointer are different addresses, meaning the app actually
+  writes into `d3d9.dll`'s own private system-memory allocation, invisible to the driver. Root cause:
+  `CBaseDevice::CanDriverManageResource` (the same shape of undocumented capability gate that `DevCaps`
+  bits `0x02000000`/`0x04000000` already fixed for vertex/index buffers), which
   `CBaseTexture::CanCreateLightWeight` requires before letting `CMipMap` share one real driver resource
-  and route Lock/Unlock through it. The exact source of the failing field is not yet identified (see
-  `umd_TexBlt`'s own comment in `sogen_d3d9_umd.cpp` for the full live-RE trail) -- finding it needs its
-  own dedicated live-RE session. `d3d9_managed_texture_test.cpp` (new, real `D3DPOOL_MANAGED`, no
-  workaround) still fails for this reason; `d3d9_texture_test.cpp` continues to use `D3DUSAGE_DYNAMIC` +
-  `D3DPOOL_DEFAULT` to avoid the whole area.
+  and route Lock/Unlock through it, is **unconditionally false for any real D3DDDI/WDDM driver** --
+  traced live (memory-write watch) all the way back to `d3d9.dll`'s own `QueryLHDDICaps`, which
+  unconditionally clears `D3DCAPS2_CANMANAGERESOURCE` after querying the driver regardless of what
+  `GetCaps` reports (empirically re-verified by temporarily setting the bit and watching it get stripped
+  again live). **A third layer, closing the investigation**: does `pfnTexBlt`'s real argument struct
+  carry a sysmem-source pixel pointer that could bypass the broken Lock/Unlock path entirely? A live
+  trace plus a full idasql decompile of the real caller (`CD3DDDIDX10::TexBlt`) settled it -- the real,
+  now-typed `D3DDDIARG_TEXBLT` struct (see `d3d9_ddi.hpp`) carries only two resource handles, a
+  subresource index, a destination point, and a source rect, no pixel-data pointer anywhere, and a full
+  live trace of every DDI call across an entire `D3DPOOL_MANAGED` texture test run confirms no other
+  call carries pixel bytes either. The real MANAGED-pool sysmem pixel data is structurally never exposed
+  to any D3DDDI/WDDM driver through any DDI call for this resource kind -- `d3d9.dll` keeps it entirely
+  inside its own private `CMipMap` buffer end to end. No fix is possible through this driver's own DDI
+  surface (see `umd_TexBlt`'s own comment in `sogen_d3d9_umd.cpp`, `docs/d3d9-roadmap.md`, and
+  `HANDOFF_MACBOOK.md` §17-§19 for the full live-RE trail). `d3d9_managed_texture_test.cpp` (real
+  `D3DPOOL_MANAGED`, no workaround) is expected to keep failing for this reason, permanently, until a
+  fundamentally different mechanism is found; `d3d9_texture_test.cpp` continues to use
+  `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` to avoid the whole area.

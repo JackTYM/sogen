@@ -1454,8 +1454,8 @@ rect, and a zero. The ambiguous-looking `q6` onward bytes from §19.1's live dum
 struct fields at all — `TexBlt`'s own 48-byte local only extends to `rsp+0x58`; everything past that in
 the raw dump is leftover stack content from unrelated earlier call frames (explaining why some of it
 looked pointer-shaped: real heap/code addresses genuinely were sitting there, just not put there by
-`TexBlt`). Added `D3DDDIARG_TEXBLT` as a proper typed struct to `d3d9_ddi.hpp` (x64-only, `static_assert`
-pinned) documenting this exact layout.
+`TexBlt`). Added `D3DDDIARG_TEXBLT` as a proper typed struct to `d3d9_ddi.hpp` (`static_assert`-pinned)
+documenting this exact layout.
 
 ### 19.3. Full live call-sequence trace: no other DDI call carries pixel data either
 
@@ -1495,10 +1495,47 @@ for a MANAGED resource), the real pixel data for a `D3DPOOL_MANAGED` texture's s
 the investigative loop opened across Tasks 4/4b/4c: three independently-verified, real architectural
 findings, and a final, honest negative result rather than a fabricated fix.
 
-Updated `d3d9_ddi.hpp` (new typed `D3DDDIARG_TEXBLT`, x64-only), `sogen_d3d9_umd.cpp` (`umd_TexBlt`'s own
-comment rewritten with the full trail and conclusion; its actual read logic is unchanged — it was already
-reading the only two fields that matter), `d3d9_managed_texture_test.cpp`'s header comment, and
+Updated `d3d9_ddi.hpp` (new typed `D3DDDIARG_TEXBLT`), `sogen_d3d9_umd.cpp` (`umd_TexBlt`'s own comment
+rewritten with the full trail and conclusion), `d3d9_managed_texture_test.cpp`'s header comment, and
 `docs/d3d9-roadmap.md`'s `D3DPOOL_MANAGED` entry. `d3d9_managed_texture_test.cpp` still fails exactly as
 before (sampled pixel black, not magenta) — this is now a confirmed, permanent limitation, not an open
 lead. Zero regression: every other guest test (x64 `triangle`/`shader`/`const`/`texture` and x86
 `triangle`/`shader`/`const`/`texture`), plus the smoke test, all re-verified green.
+
+### 19.5. Code-review fix round: x86 layout, typed struct, and stale README (2026-07-04)
+
+A code-quality review of this task's first commit caught two real issues and one stale-docs issue,
+addressed here:
+
+- **Critical, real bug**: `umd_TexBlt` was wired into `slots[18]` unconditionally (not inside this
+  file's existing `#ifdef _WIN64`/`#else` split for the rest of the stub table), but its body hardcoded
+  8-byte reads for both resource handles. §19.2's own struct comment had explicitly called the x86 shape
+  "deliberately left unmodeled" — but nothing actually gated the handler off for x86, so a real x86
+  `D3DPOOL_MANAGED` texture would have read `hSrcResource` from the wrong offset (8, not 4) and corrupted
+  both resource ids. Fixed properly, not by gating: idasql-decompiled the real 32-bit
+  `CD3DDDIDX10::TexBlt` (`d3d9_x86.dll.i64`, address `0x100656d0`) the same way §19.2 decompiled the x64
+  one, and found the real 40-byte x86 layout — the exact x64 shape with every `HANDLE` shrunk to 4 bytes
+  and every later offset shifted down by 8 (`hDstResource@0`, `hSrcResource@4`, `DstSubResourceIndex@8`,
+  `DstPointX@12`, `DstPointY@16`, `SrcRect@20`, `Reserved@36`) — an independent decompile, not a guessed
+  extrapolation. Added this as the `#else` branch of `D3DDDIARG_TEXBLT` in `d3d9_ddi.hpp`
+  (`static_assert(sizeof == 40)`).
+- **Important**: `umd_TexBlt` was refactored to take `CONST D3DDDIARG_TEXBLT* pArgs` (matching every
+  other handler in this file, e.g. `umd_SetIndices`/`umd_Clear`/`umd_SetRenderTarget`) instead of `void*`
+  + raw `memcpy` against hardcoded byte offsets — this is also the direct fix for the critical bug above,
+  since the typed struct now carries the x64/x86 size difference itself instead of a hand-copied
+  constant. Rebuilt both `sogen_d3d9um-x64.dll` and `sogen_d3d9um-x86.dll` and confirmed via `objdump`
+  disassembly that the generated code reads the right offsets on each arch: x64 does one 16-byte
+  `movdqu` load at offset 0 (both handles, offsets 0/8); x86 does `mov (%eax),%edx` (offset 0) then
+  `mov 0x4(%eax),%eax` (offset 4) — exactly matching the new struct, not the old hardcoded 8. Re-ran the
+  full guest-test regression sweep (x64 `triangle`/`shader`/`const`/`texture`/`managed-texture`, x86
+  `triangle`/`shader`/`const`/`texture`, 26/26 smoke test) — all still green, `managed-texture` still
+  fails exactly as documented (no behavior change, since the x64 path's bytes are identical either way
+  and no x86 `D3DPOOL_MANAGED` test exists yet to exercise the corrected x86 offsets directly).
+- **Important**: `README.md`'s `D3DPOOL_MANAGED` entry still said the `CanDriverManageResource` failing
+  field "is not yet identified... finding it needs its own dedicated live-RE session" — stale since §18
+  (which found and confirmed the exact root cause) and never touched by this task's own first commit.
+  Rewritten to state the final, three-layer, confirmed-unfixable conclusion, matching
+  `docs/d3d9-roadmap.md`/`HANDOFF_MACBOOK.md`/`umd_TexBlt`'s own comment.
+- **Minor (adopted)**: `d3d9_managed_texture_test.cpp`'s failure line now reads "EXPECTED FAILURE (known,
+  permanent limitation...)" instead of a bare "FAIL", to read as documented-and-understood rather than a
+  fresh regression at a glance. New convention for this one test, not applied elsewhere.

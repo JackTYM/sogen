@@ -999,18 +999,14 @@ namespace
     // fix (the TexBlt sync forward) remains real, necessary, and independently correct -- it is the right
     // thing to do whenever the sysmem side DOES hold real data -- it is just not sufficient by itself,
     // and per this task's conclusion, nothing else in this driver's DDI surface can make it sufficient.
-    HRESULT APIENTRY umd_TexBlt(HANDLE /*hDevice*/, void* pArgs)
+    HRESULT APIENTRY umd_TexBlt(HANDLE /*hDevice*/, CONST D3DDDIARG_TEXBLT* pArgs)
     {
         if (pArgs == nullptr)
         {
             return S_OK;
         }
-        auto* bytes = reinterpret_cast<unsigned char*>(pArgs);
-        uint64_t dst_resource = 0;
-        uint64_t src_resource = 0;
-        std::memcpy(&dst_resource, bytes, sizeof(dst_resource));
-        std::memcpy(&src_resource, bytes + sizeof(dst_resource), sizeof(src_resource));
-        d3d9c::tex_blt_request req{.dst_resource = dst_resource, .src_resource = src_resource};
+        d3d9c::tex_blt_request req{.dst_resource = reinterpret_cast<uint64_t>(pArgs->hDstResource),
+                                   .src_resource = reinterpret_cast<uint64_t>(pArgs->hSrcResource)};
         bridge_call(gb::ioctl_d3d9_tex_blt, &req, sizeof(req), nullptr, 0);
         return S_OK;
     }
