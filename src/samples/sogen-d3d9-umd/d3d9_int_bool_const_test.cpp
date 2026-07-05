@@ -4,7 +4,7 @@
 // bool branch selects between two unambiguous branch colors, and a register-bound for-loop
 // (register(i0)) accumulates a small per-iteration delta into the blue channel.
 //
-// Two non-obvious d3dcompiler_43/HLSL findings drove this shader's exact shape (both confirmed
+// Three non-obvious d3dcompiler_43/HLSL findings drove this shader's exact shape (all confirmed
 // empirically by compiling isolated variants and inspecting the resulting D3DBC bytecode):
 // 1. `bool x : register(b0);` is REJECTED by d3dcompiler_43 for vs_2_0/vs_2_a with error X4509
 //    ("invalid register semantic 'b0', ... c register binding required"). A scalar bool used in a
@@ -22,6 +22,26 @@
 //    can't reduce an early exit to arithmetic) and empirically forces a real D3DBC IF instruction whose
 //    operand IS the genuine CONSTBOOL b0 register (confirmed: opcode 0x28, operand register type=0x0E,
 //    number=0).
+// 3. Even WITH the early-return shape from #2, d3dcompiler_43 has a second, narrower quirk: if either
+//    branch's `output.color` literal contains an exact 0.0/1.0 in a component (a canonical
+//    "boolean-as-float" pair), the optimizer pulls just THAT component out of the real IF/ELSE and
+//    recomputes it via `SGE dst, -c#, c#` against a SEPARATE, auto-allocated FLOAT constant register
+//    that is NEVER the b0 CONSTBOOL register and that this shader's own SetVertexShaderConstantB(0, ...)
+//    call never populates (confirmed via full D3DBC disassembly: a genuine, unrelated CONST register,
+//    e.g. c0, fed into an SGE comparing it against its own negation; also confirmed via the shader's own
+//    CTAB reflection block, which lists TWO separate constant-table entries both named "useAltColor" --
+//    one D3DXRS_BOOL, one D3DXRS_FLOAT4 -- for the exact same HLSL variable). Since that shadow float
+//    register defaults to 0.0 and is never set by this (or any bare, non-Effects-framework) D3D9 app,
+//    the affected component silently comes out constant regardless of the real runtime b0 value -- a
+//    THIRD false-positive risk, empirically confirmed by round-tripping the affected channel through
+//    SetVertexShaderConstantF and watching it move independently of b0. This is a genuine d3dcompiler_43
+//    compiler quirk (reproducible on real hardware/drivers too, not a sogen or vkd3d-shader bug -- the
+//    OTHER components in the very same instructions, which are not exact 0.0/1.0 literals, are correctly
+//    gated by real b0-conditional branches the whole time). The fix: avoid the exact 0.0/1.0 literal
+//    pair -- 0.999/0.001 round-trips through the pixel format identically to 1.0/0.0 (see
+//    `channel_close`'s tolerance below) but does not trigger the optimizer's shortcut, empirically
+//    confirmed to produce a single genuine IF/ELSE/ENDIF with both branches' colors written entirely
+//    from real branch-gated instructions (no stray SGE, no unrelated shadow constant).
 //
 // Both the bool and the int4 loop trip count are supplied ONLY via runtime SetVertexShaderConstantB/
 // SetVertexShaderConstantI calls -- never as HLSL-side literals/defb/defi -- so vkd3d-shader's D3DBC
@@ -74,12 +94,17 @@ VSOutput main(VSInput input)
     // d3dcompiler_43 into select-style arithmetic backed by an auto-allocated FLOAT (c#) register that
     // SetVertexShaderConstantB never populates, silently defeating the whole point of this test
     // (confirmed empirically; see the header comment's "genuine host/compiler finding" note).
+    //
+    // 0.999/0.001 (not the exact 0.0/1.0 pair) sidesteps a second, narrower d3dcompiler_43 quirk: exact
+    // 0.0/1.0 literals here get pulled out of the real branch and recomputed via SGE against a SEPARATE,
+    // never-set shadow float register -- see the header comment's finding #3. 0.999/0.001 round to the
+    // exact same 0xFF/0x00 bytes as 1.0/0.0 (see channel_close's tolerance below) but do not trigger it.
     if (useAltColor)
     {
-        output.color = float4(1.0, 0.0, accum, 1.0);
+        output.color = float4(0.999, 0.001, accum, 1.0);
         return output;
     }
-    output.color = float4(0.0, 1.0, accum, 1.0);
+    output.color = float4(0.001, 0.999, accum, 1.0);
     return output;
 }
 )";
