@@ -950,13 +950,9 @@ namespace
     // reverted) and running a real D3DPOOL_MANAGED CreateTexture()/LockRect()/SetTexture() sequence
     // showed slot 18 (pfnTexBlt) fires exactly once, between the second pfnCreateResource and
     // pfnSetTexture, with no other unimplemented slot invoked in between. Dumping pfnTexBlt's raw
-    // D3DDDIARG_TEXBLT argument bytes at that call site (also temporary) gave
-    // {q0=0x1000d (dst), q1=0x10007 (src), ...}, exactly matching the vidmem copy's handle (the one
-    // SetTexture went on to bind) and the sysmem copy's handle (the one Lock had just written into) --
-    // unambiguous, since these two handles are the only two live resource ids in that run. The
-    // remaining bytes (subresource indices, dst point, src rect) were not individually pinned down --
-    // unnecessary for this milestone, since every texture here is single-mip and whole-image, so a
-    // full-backing copy (see d3d9_host::tex_blt) is always correct regardless of their exact values.
+    // D3DDDIARG_TEXBLT argument bytes at that call site gave {q0=hDstResource, q1=hSrcResource, ...},
+    // exactly matching the vidmem copy's handle (the one SetTexture went on to bind) and the sysmem
+    // copy's handle (the one Lock had just written into).
     //
     // Fix: forward {hDstResource, hSrcResource} (offsets 0/8, the same direct resource-id convention
     // every other real DDI call in this file already uses) to the host, which copies the source
@@ -964,24 +960,45 @@ namespace
     // already re-uploads a texture's backing to its GPU image unconditionally on every draw, so no
     // further dirty-tracking is needed for the copied data to reach the sampler.
     //
-    // KNOWN LIMITATION, found live-RE'ing this fix (2026-07-04): this alone does NOT yet make a real
-    // D3DPOOL_MANAGED texture sample correctly, because a SECOND, decoupled bug sits upstream of this
-    // one -- pfnLock/pfnUnlock never carry the app's real pixel writes for the "sysmem master" copy in
-    // the first place. Live-verified: this driver's own pfnLock returns pArgs->pData correctly, but the
-    // app's IDirect3DTexture9::LockRect() hands back a DIFFERENT pointer (confirmed by comparing the two
-    // addresses directly), so the app writes into d3d9.dll's own CMipMap-owned system-memory allocation
-    // (CMipMap::CMipMap calls MallocAligned/LocalAlloc for exactly this) and pfnUnlock forwards zeros.
-    // Root cause: CBaseTexture::CanCreateLightWeight requires CBaseDevice::CanDriverManageResource --
-    // `(*(this+120) & 0x100) == 0 && (*(this+444) & 0x10000000) != 0` -- to be true before the runtime
-    // will let CMipMap share ONE real driver resource and route Lock/Unlock through it (exactly the
-    // same shape of gate that DevCaps 0x02000000/0x04000000 already fixed for vertex/index buffers).
-    // Live-traced this+444 == 0xe4608800 for a real CreateDevice -- NOT sourced from any D3DCAPS9 field
-    // this driver's own fill_d3d9caps populates (confirmed: adding candidate bit 0x10000000 to DevCaps
-    // had zero effect on the live value), so the real source is still unidentified; finding it needs
-    // its own dedicated live-RE session (a memory-write watch on this+444, mirroring the original
-    // DevCaps hunt in HANDOFF_MACBOOK.md). This function's own fix (the TexBlt sync forward) is real,
-    // necessary, and independently correct -- it is the right thing to do whenever the sysmem side DOES
-    // hold real data -- but is not sufficient by itself until the Lock-side bug above is also fixed.
+    // KNOWN LIMITATION -- found live-RE'ing this fix (2026-07-04), and now root-caused two layers deep,
+    // CONFIRMED STRUCTURALLY UNFIXABLE THROUGH THIS DRIVER'S DDI SURFACE (2026-07-04, Task 4c): this
+    // alone does NOT make a real D3DPOOL_MANAGED texture sample correctly, because a SECOND, decoupled
+    // bug sits upstream of this one -- pfnLock/pfnUnlock never carry the app's real pixel writes for the
+    // "sysmem master" copy in the first place. Live-verified: this driver's own pfnLock returns
+    // pArgs->pData correctly, but the app's IDirect3DTexture9::LockRect() hands back a DIFFERENT pointer
+    // (confirmed by comparing the two addresses directly), so the app writes into d3d9.dll's own
+    // CMipMap-owned system-memory allocation (CMipMap::CMipMap calls MallocAligned/LocalAlloc for
+    // exactly this) and pfnUnlock forwards zeros. Root cause: CBaseTexture::CanCreateLightWeight requires
+    // CBaseDevice::CanDriverManageResource -- `(*(this+120) & 0x100) == 0 && (*(this+444) & 0x10000000)
+    // != 0` -- to be true before the runtime will let CMipMap share ONE real driver resource and route
+    // Lock/Unlock through it. Traced live (memory-write watch on `this+444`) all the way back to
+    // `d3d9.dll`'s own `QueryLHDDICaps`, which unconditionally clears `D3DCAPS2_CANMANAGERESOURCE`
+    // (`& 0xEFFFFFFF`) after querying the driver, regardless of what `GetCaps` reports -- empirically
+    // re-verified by temporarily setting the bit in `fill_d3d9caps` and watching it get stripped again,
+    // live, on the very next write. No `D3DCAPS9` field any real D3DDDI/WDDM driver reports can make
+    // this gate pass (see HANDOFF_MACBOOK.md's §18 for the full trace).
+    //
+    // Task 4c (2026-07-04) then asked the necessary follow-up: does pfnTexBlt's REAL argument struct
+    // carry a sysmem-source pixel pointer that could bypass the broken Lock/Unlock path entirely? A live
+    // trace captured pfnTexBlt's return address into d3d9.dll and idasql-decompiled the real caller,
+    // CD3DDDIDX10::TexBlt (d3d9.dll+0x180031255) -- see D3DDDIARG_TEXBLT in d3d9_ddi.hpp for the full
+    // 48-byte field-by-field breakdown this decompile produced. The struct carries exactly: two resource
+    // handles, a subresource-derived index (always 0, single-mip textures), a destination point, a
+    // source rect, and a reserved dword (always 0) -- NO pixel-data pointer anywhere, confirmed against
+    // the decompiled source of the real function that builds it, not just an empirical byte dump. A
+    // second, independent live trace instrumented every one of this driver's 143 device-func-table slots
+    // for the ENTIRE `d3d9_managed_texture_test.cpp` run (not just the narrow CreateResource..SetTexture
+    // window already known) and confirmed every other call this driver receives is metadata/state only
+    // (pfnSetClipPlane, pfnUpdateWInfo, pfnCreateVertexShaderDecl, pfnDestroyResource, and the
+    // already-implemented real slots) -- none of them carry texture pixel bytes either. Conclusion: the
+    // real MANAGED-pool sysmem pixel data is structurally never exposed to
+    // this (or any) D3DDDI/WDDM driver through ANY DDI call for this resource kind -- `d3d9.dll` keeps it
+    // entirely inside its own private `CMipMap` buffer end to end. No fix is possible through this
+    // driver's own DDI surface; `d3d9_managed_texture_test.cpp` is expected to keep failing (sampling
+    // black, not magenta) until/unless a fundamentally different mechanism is found. This function's own
+    // fix (the TexBlt sync forward) remains real, necessary, and independently correct -- it is the right
+    // thing to do whenever the sysmem side DOES hold real data -- it is just not sufficient by itself,
+    // and per this task's conclusion, nothing else in this driver's DDI surface can make it sufficient.
     HRESULT APIENTRY umd_TexBlt(HANDLE /*hDevice*/, void* pArgs)
     {
         if (pArgs == nullptr)

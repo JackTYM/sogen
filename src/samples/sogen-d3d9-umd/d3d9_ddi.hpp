@@ -542,6 +542,34 @@ typedef struct _D3DDDIARG_DRAWINDEXEDPRIMITIVE
     UINT PrimitiveCount;
 } D3DDDIARG_DRAWINDEXEDPRIMITIVE;
 
+// Task 4c (2026-07-04) fully RE'd the real 48-byte (x64) struct: a live trace captured pfnTexBlt's
+// return address into d3d9.dll (0x180031255) and idasql-decompiled the real caller, CD3DDDIDX10::TexBlt.
+// That function builds this exact struct, field by field, from its own four parameters --
+// `(void* hDstResource, void* hSrcResource, tagPOINT* pDstPoint, RECTL* pSrcRect)` -- and passes a
+// pointer to it straight to the real device-func-table slot 18 (offset 144 = slot 18 * 8, i.e.
+// pfnTexBlt itself). Every byte of the 48 bytes is accounted for; there is no pixel-data pointer
+// anywhere in it (and no other DDI call this driver receives during a full, live-traced
+// D3DPOOL_MANAGED texture lifecycle carries one either -- see umd_TexBlt's own comment in
+// sogen_d3d9_umd.cpp for the full trace and conclusion). Only the x64 shape has been live-RE'd --
+// no D3DPOOL_MANAGED guest test exists on x86 yet, so the x86 layout (HANDLE is 4 bytes there, at
+// minimum shifting every offset after the first two fields) is deliberately left unmodeled.
+#ifdef _WIN64
+typedef struct _D3DDDIARG_TEXBLT
+{
+    HANDLE hDstResource;      // 0
+    HANDLE hSrcResource;      // 8
+    UINT DstSubResourceIndex; // 16 -- a resource-wrapper-derived index (CD3DDDIDX10::TexBlt computes
+                              // it as a division of two fields read from its own hDstResource wrapper
+                              // object, not from this struct); always observed 0 live, consistent with
+                              // this milestone's single-mip, single-subresource textures.
+    LONG DstPointX;           // 20 -- from *pDstPoint
+    LONG DstPointY;           // 24
+    D3DDDIRECT SrcRect;       // 28, 16 bytes (left/top/right/bottom) -- from *pSrcRect
+    UINT Reserved;            // 44 -- always 0, confirmed via decompile (CD3DDDIDX10::TexBlt's own v18)
+} D3DDDIARG_TEXBLT;
+static_assert(sizeof(D3DDDIARG_TEXBLT) == 48, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt)");
+#endif
+
 // hResource@0 and pData@40 are RE-verified and reliable across every resource kind and routing path
 // (confirmed live 2026-07-03/2026-07-04 -- see below). OffsetToLock/SizeToLock are deliberately NOT
 // modeled as named fields: real d3d9.dll builds this 104-byte struct from at least TWO DIFFERENT code

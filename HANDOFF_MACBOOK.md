@@ -1396,3 +1396,109 @@ texture's sysmem content into video memory — almost certainly a genuinely diff
 resource handles + a rect, no system-memory source pointer field) or a DDI call not yet identified at
 all. That is a materially bigger investigation than this task's scope (tracing one caps gate) and is not
 attempted here.
+
+## 19. `pfnTexBlt`'s real argument struct fully RE'd — no data pointer exists, confirmed unfixable (2026-07-04)
+
+User-ordered follow-up gate on §18's own closing lead: does `pfnTexBlt`'s REAL argument struct carry more
+than the two resource ids §17.2 found, specifically a pointer to the MANAGED texture's sysmem "master"
+copy's real pixel data? §17.2's own byte dump had already looked past offset 8 (`q2..q7`, i.e. bytes
+16-63) and found only a whole-image rect plus what looked like stack garbage, but never pinned that down
+against the real caller's decompiled source — this task closes that gap properly.
+
+### 19.1. Live trace: capturing pfnTexBlt's real caller
+
+Used sogen's Python debugger API (`build/release-py`, `import sogen`) to hook `umd_TexBlt`'s own entry
+(resolved via `nm`/`objdump` on the built `sogen_d3d9um.dll`, no hardcoded addresses — RVA `0x26b0`,
+combined with the real runtime module base from `on_module_load`). At the hook, read `RDX` (the real
+`pArgs` pointer, per this file's established `hDevice=RCX`/`pArgs=RDX` convention) and `[RSP]` (the
+return address, since the hook fires before the callee's own prologue executes) to get the exact
+call site inside `d3d9.dll`. One real `d3d9-managed-texture-test` run: `pArgs=0x10187f8e8`,
+`return_addr=0x1049712be` → RVA `0x312be` in `d3d9.dll` (base `0x104940000`).
+
+Dumped 256 bytes at `pArgs` (32 qwords) — `q0=0xe`/`q1=0x8` (the two resource ids, matching §17.2's
+finding with this run's own resource-id numbering), `q2/q3=0` (a subresource-derived field, see below),
+`q4/q5` decode to the rect `{0, 640, 480, 0}` (a whole-image rect, matching §17.2), and `q6` onward
+(`0x0000539fd7fb6634`, `0x0000000080004005`, `0x0000000103bda4c0`, ...) look superficially pointer-shaped
+in places (`q8`/`q12`/`q15` resemble live heap addresses, `q10`/`q14` resemble code addresses inside
+`d3d9.dll`) — exactly the kind of ambiguous garbage that could be mistaken for a hidden data pointer if
+this stopped at an empirical byte dump, which is exactly where §17.2 stopped.
+
+### 19.2. Static RE: decompiling the real caller settles it definitively
+
+idasql against `d3d9_x64.dll.i64`, `SELECT decompile(0x1800312B0)` — the containing function at RVA
+`0x312be`/base `0x1800312B0` is `CD3DDDIDX10::TexBlt(void* hDstResource, void* hSrcResource,
+tagPOINT* pDstPoint, RECTL* pSrcRect)` (mangled name decoded the real 4-argument signature directly). Its
+decompiled body builds a **48-byte** local stack struct (`v14`/`v15`/`v16`/`v17`/`v18`, contiguous from
+`rsp+0x28` to `rsp+0x58`) entirely from its own four parameters, then passes a pointer to it straight to
+the real device-func-table slot (`(*(func)(v9+144))(*(this+196), v14)` — `144 = 18*8`, i.e. slot 18,
+`pfnTexBlt` itself, matching this driver's own slot assignment exactly):
+
+```c
+if ( a2 )                                  // a2 = hDstResource
+{
+    v14[0] = *(_QWORD *)a2;                // offset  0: hDstResource (dereferenced once)
+    v15 = a2[2] / a2[3];                   // offset 16: a resource-wrapper-derived index
+}
+else { v14[0] = 0; v15 = 0; }
+v14[1] = *a3;                              // offset  8: hSrcResource (a3, dereferenced unconditionally)
+v16 = (__int64)*a4;                        // offset 20: *pDstPoint   (tagPOINT, 8 bytes: x,y)
+v17 = (__int128)*a5;                       // offset 28: *pSrcRect    (RECTL, 16 bytes: L/T/R/B)
+v18 = 0;                                   // offset 44: always zero
+```
+
+Every one of the 48 bytes is now accounted for from the real function's own decompiled source — not an
+empirical guess. There is **no pixel-data pointer anywhere in this struct**: `a2`/`a3` (the two resource
+handles) are themselves opaque wrapper-object pointers that get reduced to a single dereferenced `QWORD`
+each before crossing into the struct; the rest is a subresource index, a destination point, a source
+rect, and a zero. The ambiguous-looking `q6` onward bytes from §19.1's live dump are conclusively **not**
+struct fields at all — `TexBlt`'s own 48-byte local only extends to `rsp+0x58`; everything past that in
+the raw dump is leftover stack content from unrelated earlier call frames (explaining why some of it
+looked pointer-shaped: real heap/code addresses genuinely were sitting there, just not put there by
+`TexBlt`). Added `D3DDDIARG_TEXBLT` as a proper typed struct to `d3d9_ddi.hpp` (x64-only, `static_assert`
+pinned) documenting this exact layout.
+
+### 19.3. Full live call-sequence trace: no other DDI call carries pixel data either
+
+Per the task's own escalation clause, also traced the **entire** `d3d9_managed_texture_test` run's real
+DDI call sequence, not just the narrow window around `TexBlt` already known. Captured `pDeviceFuncs`
+(parsed live off this driver's own existing `CreateDevice reached ... pDeviceFuncs=%p` debug string),
+dumped all 143 device-func-table entries, and hooked every *unique* address among them (x64 routes every
+still-unimplemented slot through one shared, zero-arg `device_stub`, so hooking by slot index instead of
+by unique address over-counts — corrected by hooking each unique code address once and disambiguating
+shared hits by the return address's own call-site instruction, decoded via idasql, e.g. `mov rax,
+[rax+108h]; call cs:__guard_xfg_dispatch_icall_fptr` → offset `0x108/8 = slot 33`).
+
+Full result: `CreateResource` ×10 (every resource the test creates: both texture copies, vertex/index
+buffers, render target, etc.), `pfnDestroyResource` ×10 (unimplemented — resolved via
+`DdDestroySurfaceLH`'s own decompiled offset, teardown only, no data), `Lock`/`Unlock` ×4 each (texture +
+vertex buffer + index buffer + the final render-target readback), `TexBlt` ×1 (§19.2 above),
+`SetTexture` ×16, `SetStreamSource` ×16, `SetPixelShaderConst` ×58, `SetRenderState` ×94,
+`SetTextureStageState` ×274, `SetViewport`/`SetZRange` ×3 each, `SetScissorRect` ×2, `pfnSetClipPlane`
+×12 (unimplemented, resolved via offset math, fixed-function clip-plane defaults, unrelated),
+`pfnUpdateWInfo` ×1 and `pfnCreateVertexShaderDecl` ×1 (both unimplemented, matching §17.2's own
+"`pfnCreateVertexShaderDecl`, from SetFVF — unrelated" finding), plus the expected one-shot shader/
+render-target/clear/draw calls. Every single call is accounted for; none of them — implemented or
+stubbed — carries texture pixel bytes for the MANAGED resource. (`Present` never fires: this test reads
+back its render target directly via `LockRect`, it never calls `IDirect3DDevice9::Present`.)
+
+### 19.4. Conclusion
+
+Per the task's own escalation clause ("if genuine, thorough investigation shows no viable path exists
+through this driver's own DDI surface — that's an acceptable, honest conclusion to report, not a
+failure"): **no fix is possible through this driver's DDI surface.** `pfnTexBlt`'s real argument struct
+(now fully decompiled, not just empirically dumped) carries no pixel-data pointer, and a full live trace
+of this test's entire DDI call sequence confirms no other call this driver receives carries one either.
+Combined with §18's finding (the app's own `LockRect`/`UnlockRect` writes never reach this driver at all
+for a MANAGED resource), the real pixel data for a `D3DPOOL_MANAGED` texture's sysmem master copy is
+**structurally never exposed to any D3DDDI/WDDM driver through any DDI call for this resource kind** —
+`d3d9.dll` keeps it entirely inside its own private `CMipMap` buffer, end to end, by design. This closes
+the investigative loop opened across Tasks 4/4b/4c: three independently-verified, real architectural
+findings, and a final, honest negative result rather than a fabricated fix.
+
+Updated `d3d9_ddi.hpp` (new typed `D3DDDIARG_TEXBLT`, x64-only), `sogen_d3d9_umd.cpp` (`umd_TexBlt`'s own
+comment rewritten with the full trail and conclusion; its actual read logic is unchanged — it was already
+reading the only two fields that matter), `d3d9_managed_texture_test.cpp`'s header comment, and
+`docs/d3d9-roadmap.md`'s `D3DPOOL_MANAGED` entry. `d3d9_managed_texture_test.cpp` still fails exactly as
+before (sampled pixel black, not magenta) — this is now a confirmed, permanent limitation, not an open
+lead. Zero regression: every other guest test (x64 `triangle`/`shader`/`const`/`texture` and x86
+`triangle`/`shader`/`const`/`texture`), plus the smoke test, all re-verified green.

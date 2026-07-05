@@ -75,7 +75,8 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   channel (`COLOR0.rg`) instead of a real `TEXCOORD0`, which every prior guest test proves interpolates
   correctly. Any future test or real game content that relies on a genuine `TEXCOORD0` varying will hit
   this. Full trace: `HANDOFF_MACBOOK.md` §16.3.
-- [ ] **`D3DPOOL_MANAGED` texture bug — partially fixed 2026-07-04, two decoupled layers.** `CreateTexture()`
+- [ ] **`D3DPOOL_MANAGED` texture bug — confirmed unfixable through this driver's DDI surface (2026-07-04),
+  three decoupled layers, all root-caused.** `CreateTexture()`
   with `D3DPOOL_MANAGED` causes `pfnCreateResource` to fire *twice* for what the app sees as one call —
   now understood to be real, expected D3D9 architecture (a sysmem "master" copy created immediately, a
   vidmem copy created lazily on first bind, synced by a real `pfnTexBlt` call this driver previously
@@ -94,12 +95,22 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   re-verified by temporarily setting the bit in `fill_d3d9caps` and watching it get stripped live. No
   `D3DCAPS9` field any D3DDDI/WDDM driver reports can make this gate pass; this matches real D3D9/WDDM
   history (the OS's own video memory manager owns residency under WDDM, not the driver). `D3DPOOL_MANAGED`
-  textures are the common case for real game asset loading — MW2 will very likely hit this. A real fix
-  needs a different mechanism entirely (most likely a fuller RE of `pfnBlt`/`pfnTexBlt`'s argument struct
-  for a system-memory-source field, or a not-yet-identified DDI call) — out of scope of the caps-gate
-  investigation. `d3d9_managed_texture_test.cpp` (real `D3DPOOL_MANAGED`, no workaround) reproduces the
-  remaining failure; `d3d9_texture_test.cpp` still avoids the whole area via `D3DUSAGE_DYNAMIC` +
-  `D3DPOOL_DEFAULT`. Full trace: `HANDOFF_MACBOOK.md` §16.3, §17, §18.
+  textures are the common case for real game asset loading — MW2 will very likely hit this. **Confirmed
+  unfixable through this driver's own DDI surface (2026-07-04)**: the natural remaining candidate — a
+  fuller RE of `pfnTexBlt`'s argument struct for a system-memory-source pointer field — was carried out
+  in full. A live trace captured `pfnTexBlt`'s return address into `d3d9.dll` and idasql-decompiled the
+  real caller, `CD3DDDIDX10::TexBlt`; the genuine 48-byte `D3DDDIARG_TEXBLT` struct it builds (now typed
+  in `d3d9_ddi.hpp`) carries only two resource handles, a subresource index, a destination point, and a
+  source rect — no pixel-data pointer anywhere, confirmed against the real function's own decompiled
+  source, not just an empirical byte dump. A second live trace instrumented every one of this driver's
+  143 device-func-table slots across this test's entire run and confirmed no other DDI call carries
+  texture pixel bytes either. The real MANAGED-pool sysmem pixel data is structurally never exposed to
+  any D3DDDI/WDDM driver through any DDI call for this resource kind — `d3d9.dll` keeps it entirely
+  inside its own private `CMipMap` buffer end to end. `d3d9_managed_texture_test.cpp` (real
+  `D3DPOOL_MANAGED`, no workaround) is expected to keep failing (sampling black, not magenta) — this is
+  now a confirmed, permanent limitation, not an open lead; `d3d9_texture_test.cpp` continues to avoid the
+  whole area via `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT`. Full trace: `HANDOFF_MACBOOK.md` §16.3, §17,
+  §18, §19.
 - [ ] **Partial-buffer `Lock()` is a permanent limitation, not a stopgap.** `D3DDDIARG_LOCK`'s
   `OffsetToLock`/`SizeToLock` have no single, routing-path-independent struct offset — real `d3d9.dll`
   builds this 104-byte struct two genuinely different ways depending on internal buffer routing
@@ -158,7 +169,8 @@ M2's texture/shader/constant-register features (plus the two DevCaps-routing-bit
 `D3DDDIARG_LOCK` ambiguity, both originally found via x64-only RE) still need x86-side confirmation
 before assuming they transfer unchanged. Once that's confirmed, **int/bool constant registers before
 further M3 coverage**, same reasoning as before: real games hit shader flow control before most of
-M3's other items (multi-stream, `*_UP` draws, MRT, cube/volume). The three open M2 bugs (`TEXCOORD0`
-interpolation, `D3DPOOL_MANAGED` double-creation, partial-buffer Lock) should be root-caused before M3
-leans on any of them further — `D3DPOOL_MANAGED` in particular is likely to block real game asset
-loading outright, not just degrade a corner case.
+M3's other items (multi-stream, `*_UP` draws, MRT, cube/volume). All three open M2 bugs (`TEXCOORD0`
+interpolation, `D3DPOOL_MANAGED` double-creation, partial-buffer Lock) are now fully root-caused —
+`D3DPOOL_MANAGED` specifically is confirmed unfixable through this driver's own DDI surface (see above)
+and will need a fundamentally different mechanism before MW2 integration, since it is likely to block
+real game asset loading outright, not just degrade a corner case.
