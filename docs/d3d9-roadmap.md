@@ -79,10 +79,11 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   rendered pixels, because vkd3d-shader's own `ir.c` (`shader_version.type != VKD3D_SHADER_TYPE_PIXEL`
   gate) never applies the transform `varying_map_info` drives to a pixel shader's own output signature —
   a PS has no "next stage" to remap for. The asymmetry is correct API usage, not a bug. Most likely
-  explanation for the original report: it predates (or was never re-checked against) this session's
-  separate "real Y-flip bug — in the new test itself, not the host" finding (an inverted screen-Y-to-NDC
-  convention in a test's own geometry placement produces exactly this "U fine, V looks wrong" symptom
-  without touching varying interpolation at all). `d3d9_texture_test.cpp` keeps its `COLOR0`-packed UV
+  (but circumstantial -- the original scratch diagnostic no longer exists to re-run directly) explanation
+  for the original report: it predates (or was never re-checked against) this session's separate "real
+  Y-flip bug — in the new test itself, not the host" finding (an inverted screen-Y-to-NDC convention in a
+  test's own geometry placement produces exactly this "U fine, V looks wrong" symptom without touching
+  varying interpolation at all). `d3d9_texture_test.cpp` keeps its `COLOR0`-packed UV
   workaround unchanged (still proven correct, zero regression) — the workaround is no longer necessary
   but also no longer required to be removed, since it's an independently-verified-correct path. Full
   trace: `HANDOFF_MACBOOK.md` §20.

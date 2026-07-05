@@ -302,7 +302,8 @@ previously-suspected `TEXCOORD0` interpolation bug (it did not reproduce; no hos
   (`d3d9_shader_translator.cpp` passing `varying_map_info` to the VS `compile_stage` call but `nullptr`
   to the PS one) was tried both ways -- passing it to the PS call too is confirmed byte-for-byte inert
   (vkd3d-shader's own `ir.c` never applies the transform this struct drives to a pixel shader's output,
-  since a PS has no "next stage" to remap for). Most likely explanation: the original report predates
+  since a PS has no "next stage" to remap for). Most likely (but circumstantial -- the original scratch
+  diagnostic no longer exists to re-run directly) explanation: the original report predates
   (or was never re-checked against) this session's separate Y-flip screen-convention bug, found "in the
   new test itself, not the host" while building `d3d9_texture_test.cpp` -- that exact class of bug
   produces a "U fine, V looks wrong" symptom without touching varying interpolation at all.

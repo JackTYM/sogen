@@ -16,9 +16,10 @@
 //      vsir_program_remap_output_signature (the transform varying_map_info drives) when
 //      `shader_version.type != VKD3D_SHADER_TYPE_PIXEL`; a PS's own output has no "next stage" to
 //      remap for, so the asymmetry in d3d9_shader_translator.cpp is correct API usage, not a bug.
-// Most likely explanation: the original report predates (or was never re-checked against) this
-// session's separate "real Y-flip bug -- in the new test itself, not the host" finding (see
-// HANDOFF_MACBOOK.md) -- an inverted screen-Y-to-NDC convention in a test's own geometry placement
+// Most likely (but circumstantial -- the original scratch diagnostic no longer exists to re-run
+// directly, see HANDOFF_MACBOOK.md section 20.4) explanation: the original report predates (or was
+// never re-checked against) this session's separate "real Y-flip bug -- in the new test itself, not
+// the host" finding -- an inverted screen-Y-to-NDC convention in a test's own geometry placement
 // produces exactly this "U fine, V looks wrong in a non-trivial way" symptom, without touching varying
 // interpolation at all. This test, using the corrected convention, is the permanent regression vehicle
 // proving real TEXCOORD0 sampling works; d3d9_texture_test.cpp keeps its COLOR0-packed workaround
