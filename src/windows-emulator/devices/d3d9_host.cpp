@@ -847,20 +847,30 @@ namespace sogen
         }
         auto& rt = rt_it->second;
 
-        // Ordered list of every currently-bound, GPU-backed, format-resolvable render target across
-        // slots 0-3 (D3D9's simultaneous-render-target slots), preserving slot order -- this must match
-        // the PS's oC0..oC3 output-index order. Slot 0 (rt, checked above) is always first when present.
+        // Per-D3D9-slot render target list across slots 0-3 (D3D9's simultaneous-render-target slots),
+        // indexed by slot -- NOT compacted. vkd3d-shader compiles the PS's oC0..oC3 outputs to FIXED
+        // SPIR-V locations taken from the D3D9 output signature, independent of which slots happen to
+        // be bound at draw time (e.g. SetRenderTarget(0, A); SetRenderTarget(2, B) is legal D3D9 and
+        // already supported by the wire handler with no contiguity check). Attachment array index N
+        // must always be D3D9 RT slot N, so a gap (an unbound slot below the highest bound one) gets a
+        // real entry in the array with entry == nullptr / vk_format == 0 (VK_FORMAT_UNDEFINED), which
+        // both create_graphics_pipeline's color_formats and cmd_begin_rendering's color attachments
+        // already treat as "this attachment slot is unused" (VkFormat(0) / VkImageView(VK_NULL_HANDLE)
+        // are the documented Vulkan placeholders for exactly this). bound_rts is sized to one past the
+        // highest bound+resolvable slot -- slot 0 (rt, checked above) is always index 0 when present.
         // Render-area dimensions still come from slot 0 alone (real D3D9 requires every simultaneously-
         // bound RT to share dimensions).
-        struct bound_render_target
+        struct slot_render_target
         {
-            resource_entry* entry;
-            uint32_t vk_format;
+            resource_entry* entry{}; // nullptr = this D3D9 RT slot isn't bound/resolvable (a gap)
+            uint32_t vk_format{};    // 0 (VK_FORMAT_UNDEFINED) when entry == nullptr
         };
-        std::vector<bound_render_target> bound_rts;
-        std::vector<uint32_t> color_formats;
-        for (const uint64_t rt_handle : this->state_.render_targets)
+        // Matches device_state::render_targets's own std::array<uint64_t, 4> size (d3d9_host.hpp).
+        std::array<slot_render_target, 4> rt_slots{};
+        size_t bound_rt_count = 0; // one past the highest bound+resolvable slot index
+        for (size_t slot = 0; slot < this->state_.render_targets.size(); ++slot)
         {
+            const uint64_t rt_handle = this->state_.render_targets[slot];
             if (rt_handle == 0)
             {
                 continue;
@@ -872,8 +882,15 @@ namespace sogen
             {
                 continue;
             }
-            bound_rts.push_back({&bound_it->second, bound_vk_format});
-            color_formats.push_back(bound_vk_format);
+            rt_slots[slot] = {&bound_it->second, bound_vk_format};
+            bound_rt_count = slot + 1;
+        }
+        const std::span<const slot_render_target> bound_rts(rt_slots.data(), bound_rt_count);
+        std::vector<uint32_t> color_formats;
+        color_formats.reserve(bound_rts.size());
+        for (const auto& brt : bound_rts)
+        {
+            color_formats.push_back(brt.vk_format);
         }
 
         // A bound depth-stencil resource only participates once it has real GPU backing (create_resource
@@ -949,7 +966,7 @@ namespace sogen
 
         for (const auto& brt : bound_rts)
         {
-            if (brt.entry->vk_image_view_id != 0)
+            if (brt.entry == nullptr || brt.entry->vk_image_view_id != 0)
             {
                 continue;
             }
@@ -1212,6 +1229,10 @@ namespace sogen
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
         for (const auto& brt : bound_rts)
         {
+            if (brt.entry == nullptr)
+            {
+                continue; // gap slot -- no real image to transition
+            }
             this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, brt.entry->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1222,6 +1243,14 @@ namespace sogen
         color_attachments.reserve(bound_rts.size());
         for (const auto& brt : bound_rts)
         {
+            if (brt.entry == nullptr)
+            {
+                // Gap slot: image_view == 0 (VK_NULL_HANDLE) marks this attachment index unused per
+                // VkRenderingAttachmentInfo's own documented semantics -- writes to this location are
+                // discarded, matching a PS that never writes this oC# in the first place.
+                color_attachments.push_back({});
+                continue;
+            }
             color_attachments.push_back({
                 .image_view = brt.entry->vk_image_view_id,
                 .resolve_image_view = 0,
@@ -1300,6 +1329,10 @@ namespace sogen
 
         for (const auto& brt : bound_rts)
         {
+            if (brt.entry == nullptr)
+            {
+                continue; // gap slot -- no real image to transition
+            }
             this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, brt.entry->vk_image_id, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                                VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1343,8 +1376,12 @@ namespace sogen
 
         // Read the drawn frame back into each bound render target's own backing store, same as
         // pfnClear -- so pfnLock sees the real drawn pixels.
-        for (auto& brt : bound_rts)
+        for (const auto& brt : bound_rts)
         {
+            if (brt.entry == nullptr)
+            {
+                continue; // gap slot -- nothing was rendered here
+            }
             std::vector<std::byte> pixels;
             uint32_t readback_width = 0;
             uint32_t readback_height = 0;
