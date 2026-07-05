@@ -150,6 +150,7 @@ namespace sogen
             std::unordered_map<uint32_t, uint64_t> bound_textures{};       // key = stage
             std::unordered_map<uint32_t, uint64_t> stream_sources{};       // key = stream_number
             std::unordered_map<uint32_t, uint32_t> stream_strides{};       // key = stream_number
+            std::unordered_map<uint32_t, uint32_t> stream_offsets{};       // key = stream_number
             std::unordered_map<uint32_t, uint32_t> stream_frequencies{};   // key = stream_number
             uint64_t index_buffer{};
             uint32_t index_format{};

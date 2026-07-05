@@ -1774,6 +1774,7 @@ namespace sogen
             }
             this->state_.stream_sources[req.stream_number] = req.vertex_buffer;
             this->state_.stream_strides[req.stream_number] = req.stride_bytes;
+            this->state_.stream_offsets[req.stream_number] = req.offset_bytes;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_stream_source_freq: {
