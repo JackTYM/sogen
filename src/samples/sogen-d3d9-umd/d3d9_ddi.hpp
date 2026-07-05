@@ -485,13 +485,17 @@ typedef struct _D3DDDIARG_SETPIXELSHADERCONST
     UINT Count;
 } D3DDDIARG_SETPIXELSHADERCONST;
 
-// NOT wired up in sogen_d3d9_umd.cpp yet, and NOT RE-verified -- the "data follows the struct"
-// convention below is the same one just proven wrong for SETVERTEXSHADERCONST/SETPIXELSHADERCONST
-// above. Do not trust it for these int/bool variants without live verification first.
+// RE-confirmed against the real d3d9.dll (CBatchFilterI::LHBatchSetVertexShaderConstI/B and
+// ::LHBatchSetPixelShaderConstI/B): each takes this header as one argument and the INT/BOOL data
+// as a SEPARATE second argument (CONST INT*), not trailing bytes -- their own fallback path calls
+// straight through the device func table as (hDevice, pArgs, pData), the exact same
+// header-plus-separate-array-pointer shape already confirmed for SETVERTEXSHADERCONST/
+// SETPIXELSHADERCONST above. (The real runtime's internal batch layer reuses the float header
+// struct type for its I/B calls, but the layout is identical to the one below.)
 typedef struct _D3DDDIARG_SETVERTEXSHADERCONSTI
 {
     UINT Register;
-    UINT Count; // number of int4 vectors; unverified assumption: the int32 data follows in memory
+    UINT Count; // number of int4 vectors; the int32 data is a separate CONST INT* DDI argument
 } D3DDDIARG_SETVERTEXSHADERCONSTI;
 
 typedef struct _D3DDDIARG_SETPIXELSHADERCONSTI
@@ -503,7 +507,7 @@ typedef struct _D3DDDIARG_SETPIXELSHADERCONSTI
 typedef struct _D3DDDIARG_SETVERTEXSHADERCONSTB
 {
     UINT Register;
-    UINT Count; // number of BOOLs (4 bytes each); unverified assumption: the data follows in memory
+    UINT Count; // number of BOOLs (4 bytes each); the data is a separate CONST BOOL* DDI argument
 } D3DDDIARG_SETVERTEXSHADERCONSTB;
 
 typedef struct _D3DDDIARG_SETPIXELSHADERCONSTB

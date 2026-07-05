@@ -238,8 +238,8 @@ namespace
         12, // pfnCreateVertexShaderDecl
         8,  // pfnDeleteVertexShaderDecl
         8,  // pfnSetVertexShaderDecl (real)
-        12, // pfnSetVertexShaderConstI
-        12, // pfnSetVertexShaderConstB
+        12, // pfnSetVertexShaderConstI (real) -- trailing CONST INT*
+        12, // pfnSetVertexShaderConstB (real) -- trailing CONST BOOL*
         8,  // pfnSetScissorRect (real)
         8,  // pfnSetStreamSource (real)
         8,  // pfnSetStreamSourceFreq (real)
@@ -255,8 +255,8 @@ namespace
         8,  // pfnSetRenderTarget (real)
         8,  // pfnSetDepthStencil (real)
         8,  // pfnGenerateMipSubLevels
-        12, // pfnSetPixelShaderConstI
-        12, // pfnSetPixelShaderConstB
+        12, // pfnSetPixelShaderConstI (real) -- trailing CONST INT*
+        12, // pfnSetPixelShaderConstB (real) -- trailing CONST BOOL*
         12, // pfnCreatePixelShader (real)
         8,  // pfnDeletePixelShader (real)
         8,  // pfnCreateDecodeDevice
@@ -1146,6 +1146,77 @@ namespace
         return S_OK;
     }
 
+    // pArgs is the fixed {Register, Count} header; the INT data is a separate third DDI argument
+    // (see D3DDDIARG_SETVERTEXSHADERCONSTI's header comment), RE-confirmed the same shape as
+    // umd_SetVertexShaderConst's CONST FLOAT* -- not trailing bytes after pArgs.
+    HRESULT APIENTRY umd_SetVertexShaderConstI(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONSTI* pArgs,
+                                               CONST INT* pRegisters)
+    {
+        if (pArgs == nullptr || pRegisters == nullptr)
+        {
+            return S_OK;
+        }
+        const size_t int_count = static_cast<size_t>(pArgs->Count) * 4;
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_const_i_record) + int_count * sizeof(int32_t));
+        auto* req = reinterpret_cast<d3d9c::set_const_i_record*>(buf.data());
+        req->start_register = pArgs->Register;
+        req->vector4_count = pArgs->Count;
+        std::memcpy(buf.data() + sizeof(*req), pRegisters, int_count * sizeof(int32_t));
+        bridge_call(gb::ioctl_d3d9_set_vs_const_i, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetVertexShaderConstB(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONSTB* pArgs,
+                                               CONST BOOL* pRegisters)
+    {
+        if (pArgs == nullptr || pRegisters == nullptr)
+        {
+            return S_OK;
+        }
+        const size_t bool_count = static_cast<size_t>(pArgs->Count);
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_const_b_record) + bool_count * sizeof(uint32_t));
+        auto* req = reinterpret_cast<d3d9c::set_const_b_record*>(buf.data());
+        req->start_register = pArgs->Register;
+        req->count = pArgs->Count;
+        std::memcpy(buf.data() + sizeof(*req), pRegisters, bool_count * sizeof(uint32_t));
+        bridge_call(gb::ioctl_d3d9_set_vs_const_b, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetPixelShaderConstI(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONSTI* pArgs,
+                                              CONST INT* pRegisters)
+    {
+        if (pArgs == nullptr || pRegisters == nullptr)
+        {
+            return S_OK;
+        }
+        const size_t int_count = static_cast<size_t>(pArgs->Count) * 4;
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_const_i_record) + int_count * sizeof(int32_t));
+        auto* req = reinterpret_cast<d3d9c::set_const_i_record*>(buf.data());
+        req->start_register = pArgs->Register;
+        req->vector4_count = pArgs->Count;
+        std::memcpy(buf.data() + sizeof(*req), pRegisters, int_count * sizeof(int32_t));
+        bridge_call(gb::ioctl_d3d9_set_ps_const_i, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_SetPixelShaderConstB(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONSTB* pArgs,
+                                              CONST BOOL* pRegisters)
+    {
+        if (pArgs == nullptr || pRegisters == nullptr)
+        {
+            return S_OK;
+        }
+        const size_t bool_count = static_cast<size_t>(pArgs->Count);
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_const_b_record) + bool_count * sizeof(uint32_t));
+        auto* req = reinterpret_cast<d3d9c::set_const_b_record*>(buf.data());
+        req->start_register = pArgs->Register;
+        req->count = pArgs->Count;
+        std::memcpy(buf.data() + sizeof(*req), pRegisters, bool_count * sizeof(uint32_t));
+        bridge_call(gb::ioctl_d3d9_set_ps_const_b, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        return S_OK;
+    }
+
     HRESULT APIENTRY umd_SetStreamSource(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCE* pArgs)
     {
         if (pArgs == nullptr) // unbind, same convention as the shader/texture slots
@@ -1483,11 +1554,15 @@ namespace
             slots[43] = reinterpret_cast<void*>(&umd_DeleteVertexShaderFunc); // pfnDeleteVertexShaderFunc
             slots[44] = reinterpret_cast<void*>(&umd_SetVertexShaderFunc);    // pfnSetVertexShaderFunc
             slots[47] = reinterpret_cast<void*>(&umd_SetVertexShaderDecl);    // pfnSetVertexShaderDecl
+            slots[48] = reinterpret_cast<void*>(&umd_SetVertexShaderConstI);  // pfnSetVertexShaderConstI
+            slots[49] = reinterpret_cast<void*>(&umd_SetVertexShaderConstB);  // pfnSetVertexShaderConstB
             slots[50] = reinterpret_cast<void*>(&umd_SetScissorRect);         // pfnSetScissorRect
             slots[51] = reinterpret_cast<void*>(&umd_SetStreamSource);        // pfnSetStreamSource
             slots[52] = reinterpret_cast<void*>(&umd_SetStreamSourceFreq);    // pfnSetStreamSourceFreq
             slots[62] = reinterpret_cast<void*>(&umd_SetRenderTarget);        // pfnSetRenderTarget
             slots[63] = reinterpret_cast<void*>(&umd_SetDepthStencil);        // pfnSetDepthStencil
+            slots[65] = reinterpret_cast<void*>(&umd_SetPixelShaderConstI);   // pfnSetPixelShaderConstI
+            slots[66] = reinterpret_cast<void*>(&umd_SetPixelShaderConstB);   // pfnSetPixelShaderConstB
             slots[67] = reinterpret_cast<void*>(&umd_CreatePixelShader);      // pfnCreatePixelShader
             slots[68] = reinterpret_cast<void*>(&umd_DeletePixelShader);      // pfnDeletePixelShader
         }

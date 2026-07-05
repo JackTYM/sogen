@@ -402,7 +402,11 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_d3d9_set_vertex_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vertex_shader));
     inline constexpr uint32_t ioctl_d3d9_set_pixel_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_set_pixel_shader));
     inline constexpr uint32_t ioctl_d3d9_set_vs_const_f = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vs_const_f));
+    inline constexpr uint32_t ioctl_d3d9_set_vs_const_i = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vs_const_i));
+    inline constexpr uint32_t ioctl_d3d9_set_vs_const_b = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vs_const_b));
     inline constexpr uint32_t ioctl_d3d9_set_ps_const_f = make_ioctl(static_cast<uint32_t>(command::d3d9_set_ps_const_f));
+    inline constexpr uint32_t ioctl_d3d9_set_ps_const_i = make_ioctl(static_cast<uint32_t>(command::d3d9_set_ps_const_i));
+    inline constexpr uint32_t ioctl_d3d9_set_ps_const_b = make_ioctl(static_cast<uint32_t>(command::d3d9_set_ps_const_b));
     inline constexpr uint32_t ioctl_d3d9_set_render_target = make_ioctl(static_cast<uint32_t>(command::d3d9_set_render_target));
     inline constexpr uint32_t ioctl_d3d9_set_depth_stencil = make_ioctl(static_cast<uint32_t>(command::d3d9_set_depth_stencil));
     inline constexpr uint32_t ioctl_d3d9_set_viewport = make_ioctl(static_cast<uint32_t>(command::d3d9_set_viewport));
