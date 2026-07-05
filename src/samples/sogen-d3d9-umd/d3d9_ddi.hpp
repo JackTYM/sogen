@@ -610,11 +610,16 @@ static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll 
 //     read back exactly 6 and 96 at this offset); SizeToLock has no reliable field in THIS shape --
 //     the offset umd_Lock originally also tried (72) holds an unrelated caller-stack address here, not
 //     a size (confirmed: it produced a ~25MB "size" once index buffers started using this path).
-// Since umd_Lock is one resource-kind- and routing-path-agnostic function (by design -- see its own
-// comment), it cannot statically know which shape a given call used. The safe, correct-either-way
-// choice: always treat every lock as an implicit whole-buffer lock (offset 0, size unknown) --
-// resolve_buffer_resource_id's existing size-unknown fallback already exists for exactly this case and
-// safely over-allocates rather than misreading a garbage value as a byte count.
+// umd_Lock is one resource-kind- and routing-path-agnostic function (by design -- see its own
+// comment) and cannot statically know which shape a given call used -- but per-call detection turns
+// out unnecessary on x64 (Task 6, 2026-07-04): fill_d3d9caps's k_devcaps_driver_managed_pool/
+// k_devcaps_driver_managed_index_pool are set UNCONDITIONALLY, so every real D3DPOOL_DEFAULT buffer
+// (the common case, including every D3DLOCK_NOOVERWRITE append) is always driver-routed in practice --
+// offset 80 is real there. For the sysmem-routed shape, the app discards whatever pData/offset this
+// driver returns regardless (confirmed live), so reading offset 80 as "OffsetToLock" in that shape too
+// is harmless even though it isn't really that field there. umd_Lock therefore reads offset 80
+// unconditionally on x64. resolve_buffer_resource_id's size-unknown fallback (size 0 = "to end of
+// resource") still covers SizeToLock, which no shape reliably carries.
 //
 // x86 note: this x64 layout does NOT carry over -- see the separate x86 definition below. Task 6's
 // live idasql RE (2026-07-04) found the x86 struct is genuinely different, not just pointer-shrunk.
