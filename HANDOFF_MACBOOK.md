@@ -1539,3 +1539,79 @@ addressed here:
 - **Minor (adopted)**: `d3d9_managed_texture_test.cpp`'s failure line now reads "EXPECTED FAILURE (known,
   permanent limitation...)" instead of a bare "FAIL", to read as documented-and-understood rather than a
   fresh regression at a glance. New convention for this one test, not applied elsewhere.
+
+---
+
+## 20. TEXCOORD0 varying-interpolation "bug" investigated — does not reproduce, no host fix needed (2026-07-04)
+
+Task: root-cause and fix the `TEXCOORD0` varying-interpolation bug documented in §16.3/`docs/d3d9-roadmap.md`
+(genuine `D3DFVF_XYZ|D3DFVF_TEX1` + `TEXCOORD0` PS input; U interpolated correctly, V consistently did
+not). Concrete starting lead: `d3d9_shader_translator.cpp` passes `varying_map_info` to the VS
+`compile_stage` call but `nullptr` to the PS one.
+
+### 20.1. The lead investigated and confirmed to be correct-as-is, not a bug
+
+Read `vkd3d_shader.h`'s own doc comment for `vkd3d_shader_varying_map_info`: "This mapping should be
+used ... to compile the **first** shader" (the varying-producing stage). Traced the actual mechanism in
+`deps/vkd3d/libs/vkd3d-shader/ir.c`'s `vsir_program_remap_output_signature`: it remaps the *compiling
+stage's own output signature* target locations to match the next stage's input register indices — it is
+never meant to be attached to the consuming (PS) side at all. Confirmed the gate directly: `ir.c`'s
+`vsir_program_transform` only runs this transform `if (program->shader_version.type != VKD3D_SHADER_TYPE_PIXEL)`
+— vkd3d-shader itself unconditionally skips it for pixel shaders, varying_map_info present or not,
+because a PS has no "next stage" to remap its output for. `d3d9_shader_translator.cpp`'s asymmetry
+(VS gets the map, PS gets `nullptr`) is therefore correct, documented API usage, not an oversight.
+
+### 20.2. Empirical confirmation: passing the map to the PS call too is a no-op
+
+Temporarily changed the PS `compile_stage` call to pass `&varying_map_info` instead of `nullptr`,
+rebuilt, and re-ran both a scratch diagnostic test and the full `d3d9-texture-test.exe` suite: **byte-
+identical rendered pixels** in both cases (same HRESULTs, same pixel values to the last bit). This
+matches §20.1's source-level finding exactly — the change is empirically inert, not just theoretically
+so. Reverted the change; kept a durable comment at the `nullptr` call site explaining why, referencing
+this section.
+
+### 20.3. Reproducing the original bug — it does not reproduce today
+
+Wrote a scratch diagnostic test (`texcoord_diag_test.cpp`, not committed) mirroring the exact technique
+the original report used (`return float4(input.uv, 0, 1)`, visualizing the raw interpolant), using a
+real `D3DFVF_XYZ|D3DFVF_TEX1` vertex format and genuine `TEXCOORD0`. Two scenarios, both against the
+*current*, unmodified host:
+- A full-canvas quad, sampled at 5 points spanning all four screen quadrants plus center: U and V both
+  read back within +-1/255 of the exact expected value (`col/640`, `row/480`) at every point, including
+  asymmetric (non-center) locations.
+- A small partial quad at the exact screen rect (`40,40`-`240,200`) the original `d3d9_texture_test.cpp`
+  quad 0 uses, sampled at local UV `(0.25, 0.25)` and `(0.75, 0.75)` — **the exact two figures the
+  original bug report cited** ("expected 0.25 reads back ~0.87, expected 0.75 reads back ~0.37"). Actual
+  readback: `(0.2510, 0.2549)` and `(0.7529, 0.7529)` — both U and V correct, no discrepancy at all.
+
+The bug simply does not reproduce against the current host, with the exact geometry and exact UV values
+originally cited.
+
+### 20.4. Most likely explanation
+
+This session separately found and fixed "a real Y-flip bug — in the new test itself, not the host"
+while building `d3d9_texture_test.cpp` (§16.3's last bullet): this pipeline's Vulkan viewport uses the
+unflipped NDC convention (y=-1 at the screen's top), and an early version of that test's own `to_ndc_y`
+helper assumed D3D9's opposite convention, which only ever surfaced on asymmetric (non-center-row)
+pixel checks. The original `TEXCOORD0` diagnostic (a separate, earlier, not-committed scratch test) was
+never re-checked against the corrected convention — an inverted screen-Y-to-NDC mapping in a test's own
+geometry placement produces exactly a "U reads fine, V reads a value that isn't a simple flip of what's
+expected" symptom (screen position, not the interpolated value itself, ends up wrong), without touching
+varying interpolation at all. This is circumstantial (the original scratch test no longer exists to
+re-run directly), but it is the only hypothesis consistent with every piece of live evidence gathered:
+the varying-map mechanism is confirmed correct by source and by empirical no-op testing, and the
+interpolation itself is confirmed correct by direct reproduction using the report's own cited figures.
+
+### 20.5. Outcome
+
+No host-side code change was needed or made (the one experimental change was reverted; only an
+explanatory comment was added). Added `d3d9_texcoord_test.cpp` as permanent regression coverage: a real
+`D3DFVF_XYZ|D3DFVF_TEX1` + `TEXCOORD0` quad, real `tex2D()` sampling (not the diagnostic-PS technique),
+checked at all four UV-quadrant combinations (`u,v` = `0.25`/`0.75` each) so a swapped or one-axis-broken
+interpolant would fail at least one check. Passes exactly on both x64 and x86. `d3d9_texture_test.cpp`'s
+`D3DFVF_DIFFUSE`-packed UV workaround is left unchanged (still independently proven correct); it's no
+longer strictly necessary but there's no reason to remove a working, already-verified path.
+
+Full regression sweep after this task: x64 `spike`/`shader`/`const`/`texture`/`managed-texture`/
+`texcoord`, x86 `triangle`/`shader`/`const`/`texture`/`texcoord`, all pass exactly as before (`managed-
+texture` still fails exactly as documented, its own known permanent limitation). Smoke test 26/26.

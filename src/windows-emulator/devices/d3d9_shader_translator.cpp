@@ -151,6 +151,15 @@ namespace sogen
             .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
             .binding = {.set = 1, .binding = 1, .count = 1},
         };
+        // varying_map_info is deliberately NOT passed here (unlike the VS call above) -- this is correct,
+        // not an asymmetry to fix. vkd3d_shader_varying_map_info remaps the *compiling stage's own output*
+        // signature (vsir_program_remap_output_signature in ir.c), and vkd3d-shader's own pipeline
+        // (ir.c's vsir_program_transform, which gates that transform on
+        // `shader_version.type != VKD3D_SHADER_TYPE_PIXEL`) never applies it to a pixel shader, since a PS
+        // has no "next stage" to remap its output for. Passing it here anyway was tried and confirmed
+        // byte-for-byte inert (same SPIR-V, same rendered pixels, both via a diagnostic PS visualizing
+        // TEXCOORD0 directly and via d3d9_texture_test.cpp's full run) -- see d3d9_texcoord_test.cpp and
+        // docs/d3d9-roadmap.md for the investigation this closed out.
         if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, VKD3D_SHADER_VISIBILITY_PIXEL, 1,
                             &ps_sampler_binding, 1, out.pixel_spirv))
         {

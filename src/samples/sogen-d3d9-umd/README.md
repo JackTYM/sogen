@@ -29,6 +29,9 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_managed_texture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-managed-texture-test-x64.exe -ld3d9 -ld3dcompiler_43
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_texcoord_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-texcoord-test-x64.exe -ld3d9 -ld3dcompiler_43
+
 i686-w64-mingw32-g++ -shared -O2 -std=c++20 -I../../d3d9-command-protocol -I../../gpu-bridge-protocol \
     sogen_d3d9_umd.cpp sogen_d3d9_umd.def \
     -static -static-libgcc -static-libstdc++ -o sogen_d3d9um-x86.dll
@@ -44,13 +47,16 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-texture-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texcoord_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-texcoord-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
-`d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, and `d3d9_texture_test.cpp` are guest-runtime tests,
-not driver-side files, so they do not need the `-I../../d3d9-command-protocol
--I../../gpu-bridge-protocol` include paths the UMD build above requires; they only talk to
-`d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same applies to
-`d3d9_triangle_test.cpp` above -- it's a guest-runtime test too.
+`d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, and `d3d9_texcoord_test.cpp`
+are guest-runtime tests, not driver-side files, so they do not need the
+`-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
+requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
+applies to `d3d9_triangle_test.cpp` above -- it's a guest-runtime test too.
 
 ## Stage
 
@@ -61,11 +67,13 @@ cp d3d9-shader-test-x64.exe <root>/filesys/c/d3d9-shader-test.exe
 cp d3d9-const-test-x64.exe <root>/filesys/c/d3d9-const-test.exe
 cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
 cp d3d9-managed-texture-test-x64.exe <root>/filesys/c/d3d9-managed-texture-test.exe
+cp d3d9-texcoord-test-x64.exe <root>/filesys/c/d3d9-texcoord-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
 cp d3d9-const-test-x86.exe <root>/filesys/c/d3d9-const-test-x86.exe
 cp d3d9-texture-test-x86.exe <root>/filesys/c/d3d9-texture-test-x86.exe
+cp d3d9-texcoord-test-x86.exe <root>/filesys/c/d3d9-texcoord-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -83,9 +91,11 @@ already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_
 ./analyzer -e <root> -c c:/d3d9-const-test.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-managed-texture-test.exe
+./analyzer -e <root> -c c:/d3d9-texcoord-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-texcoord-test-x86.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -125,6 +135,15 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
 - **Blend quad**: a semi-transparent green (tint `(0,1,0,0.5)`) drawn over the plain clear-color
   background -- checks the pixel matches the analytically-computed `SRCALPHA`/`INVSRCALPHA`/`ADD`
   blend exactly.
+
+`d3d9-texcoord-test.exe` proves a genuine `TEXCOORD0` varying (`D3DFVF_XYZ|D3DFVF_TEX1`, not
+`d3d9_texture_test.cpp`'s `D3DFVF_DIFFUSE`-packed UV workaround) samples a texture correctly via a real
+`tex2D()` call. One quad samples the same four-quadrant procedural texture at all four UV combinations
+(`u,v` = `0.25/0.75` each) -- a swapped or one-axis-broken interpolant would land in the wrong quadrant
+for at least one of these. Expect `CreateTexture hr=0x00000000`, `DrawIndexedPrimitive hr=0x00000000`,
+four `PASS:` lines, and `[d3d9-texcoord-test] ALL CHECKS PASSED`. See this test's own header comment
+and `docs/d3d9-roadmap.md`/`HANDOFF_MACBOOK.md` §20 for the investigation that closed out the
+previously-suspected `TEXCOORD0` interpolation bug (it did not reproduce; no host fix was needed).
 
 ## Notes
 
@@ -272,15 +291,24 @@ and `[d3d9-texture-test] ALL CHECKS PASSED`:
   there is no `pfnCreateVertexShaderDecl` wiring yet to learn a real vertex declaration, the host now
   distinguishes the one other shape this milestone needs by `SetStreamSource`'s `Stride` (20 bytes for
   `D3DFVF_XYZ|D3DFVF_TEX1`) -- a value the wire protocol already carried but previously discarded.
-- **A real, still-open bug in `TEXCOORD0` varying interpolation**, found and worked around while
-  building `d3d9_texture_test.cpp`: with a genuine `D3DFVF_XYZ|D3DFVF_TEX1` vertex format and a
-  `float2`/`float4` `TEXCOORD0` output, a quad's U value interpolated correctly across screen space but
-  V consistently did not (e.g. an expected 0.25 read back around 0.87). Isolated to the varying itself
-  via a visualize-the-interpolant diagnostic shader (independently ruled out: geometry, the texture,
-  the sampler descriptor, and the PS constant register all traced as correct). Not root-caused further
-  within this session's budget -- `d3d9_texture_test.cpp` instead packs UV into the vertex's
-  `D3DFVF_DIFFUSE` color channel (`COLOR0.rg`), which is proven correct by every prior guest test that
-  passes a `COLOR0` varying through a real compiled shader.
+- **The suspected `TEXCOORD0` varying-interpolation bug does NOT reproduce (investigated 2026-07-04) --
+  no host fix was needed.** Originally found while building `d3d9_texture_test.cpp`: with a genuine
+  `D3DFVF_XYZ|D3DFVF_TEX1` vertex format and a `float2`/`float4` `TEXCOORD0` output, a quad's U value
+  appeared to interpolate correctly but V did not (e.g. an expected 0.25 read back around 0.87). Against
+  the current host, a diagnostic PS (`return float4(input.uv, 0, 1)`) against the exact quad shape and
+  exact UV figures originally cited reads back both U and V correctly at every sampled point, and
+  `d3d9_texcoord_test.cpp` proves a real `tex2D()` sample through a genuine `TEXCOORD0` varying reads the
+  correct texture quadrant at all four UV combinations. The one concrete lead
+  (`d3d9_shader_translator.cpp` passing `varying_map_info` to the VS `compile_stage` call but `nullptr`
+  to the PS one) was tried both ways -- passing it to the PS call too is confirmed byte-for-byte inert
+  (vkd3d-shader's own `ir.c` never applies the transform this struct drives to a pixel shader's output,
+  since a PS has no "next stage" to remap for). Most likely explanation: the original report predates
+  (or was never re-checked against) this session's separate Y-flip screen-convention bug, found "in the
+  new test itself, not the host" while building `d3d9_texture_test.cpp` -- that exact class of bug
+  produces a "U fine, V looks wrong" symptom without touching varying interpolation at all.
+  `d3d9_texture_test.cpp` keeps its `D3DFVF_DIFFUSE`-packed UV workaround (`COLOR0.rg`) unchanged, since
+  it remains an independently-proven-correct path; it's no longer required, just no longer necessary to
+  remove. See `docs/d3d9-roadmap.md` and `HANDOFF_MACBOOK.md` §20 for the full investigation.
 - **A `D3DPOOL_MANAGED` texture creates two, unrelated DDI resources for what the app sees as one
   `CreateTexture()` call -- confirmed unfixable through this driver's own DDI surface (2026-07-04),
   three decoupled layers, all root-caused.** The double-`pfnCreateResource`/`pfnTexBlt` mechanism itself

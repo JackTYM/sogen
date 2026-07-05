@@ -66,15 +66,26 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   real blending proven together in one render, 4/4 analytic pixel checks exact.
 
 ### Known bugs & limitations carried out of M2 (real, open, not lost)
-- [ ] **`TEXCOORD0` varying interpolation bug.** With a genuine `D3DFVF_XYZ|D3DFVF_TEX1` vertex format
-  and a `float2`/`float4` `TEXCOORD0` PS input, the U component interpolates correctly across screen
-  space but V consistently does not (e.g. an expected 0.25 reads back around 0.87). Isolated to the
-  varying itself via a visualize-the-interpolant diagnostic shader — geometry, the texture, the sampler
-  descriptor, and the PS constant register were all independently confirmed correct. Not root-caused;
-  `d3d9_texture_test.cpp` works around it by routing UV through the vertex's `D3DFVF_DIFFUSE` color
-  channel (`COLOR0.rg`) instead of a real `TEXCOORD0`, which every prior guest test proves interpolates
-  correctly. Any future test or real game content that relies on a genuine `TEXCOORD0` varying will hit
-  this. Full trace: `HANDOFF_MACBOOK.md` §16.3.
+- [x] **`TEXCOORD0` varying interpolation "bug" — investigated (2026-07-04), does NOT reproduce; no host
+  fix needed.** The originally-reported symptom (genuine `D3DFVF_XYZ|D3DFVF_TEX1` + `TEXCOORD0`, U
+  interpolates correctly but V does not) could not be reproduced against the current host. Live
+  evidence: a diagnostic PS (`return float4(input.uv, 0, 1)`) against the exact quad shape/position and
+  exact UV figures the original report cited (0.25, 0.75) reads back both U and V correctly at every
+  sampled point, including asymmetric (non-center) screen locations — see `d3d9_texcoord_test.cpp`,
+  which also proves a real `tex2D()` sample through a genuine `TEXCOORD0` varying reads the correct
+  texture quadrant at all four UV combinations. The one concrete lead (`d3d9_shader_translator.cpp`
+  passing `varying_map_info` to the VS `compile_stage` call but `nullptr` to the PS one) was tried both
+  ways — passing the same map to the PS call too produces byte-identical SPIR-V and byte-identical
+  rendered pixels, because vkd3d-shader's own `ir.c` (`shader_version.type != VKD3D_SHADER_TYPE_PIXEL`
+  gate) never applies the transform `varying_map_info` drives to a pixel shader's own output signature —
+  a PS has no "next stage" to remap for. The asymmetry is correct API usage, not a bug. Most likely
+  explanation for the original report: it predates (or was never re-checked against) this session's
+  separate "real Y-flip bug — in the new test itself, not the host" finding (an inverted screen-Y-to-NDC
+  convention in a test's own geometry placement produces exactly this "U fine, V looks wrong" symptom
+  without touching varying interpolation at all). `d3d9_texture_test.cpp` keeps its `COLOR0`-packed UV
+  workaround unchanged (still proven correct, zero regression) — the workaround is no longer necessary
+  but also no longer required to be removed, since it's an independently-verified-correct path. Full
+  trace: `HANDOFF_MACBOOK.md` §20.
 - [ ] **`D3DPOOL_MANAGED` texture bug — confirmed unfixable through this driver's DDI surface (2026-07-04),
   three decoupled layers, all root-caused.** `CreateTexture()`
   with `D3DPOOL_MANAGED` causes `pfnCreateResource` to fire *twice* for what the app sees as one call —
@@ -169,8 +180,9 @@ M2's texture/shader/constant-register features (plus the two DevCaps-routing-bit
 `D3DDDIARG_LOCK` ambiguity, both originally found via x64-only RE) still need x86-side confirmation
 before assuming they transfer unchanged. Once that's confirmed, **int/bool constant registers before
 further M3 coverage**, same reasoning as before: real games hit shader flow control before most of
-M3's other items (multi-stream, `*_UP` draws, MRT, cube/volume). All three open M2 bugs (`TEXCOORD0`
-interpolation, `D3DPOOL_MANAGED` double-creation, partial-buffer Lock) are now fully root-caused —
-`D3DPOOL_MANAGED` specifically is confirmed unfixable through this driver's own DDI surface (see above)
-and will need a fundamentally different mechanism before MW2 integration, since it is likely to block
-real game asset loading outright, not just degrade a corner case.
+M3's other items (multi-stream, `*_UP` draws, MRT, cube/volume). All three M2-carried findings are now
+fully root-caused — `TEXCOORD0` interpolation turned out not to be a real bug (investigated, does not
+reproduce; see above), `D3DPOOL_MANAGED` specifically is confirmed unfixable through this driver's own
+DDI surface (see above) and will need a fundamentally different mechanism before MW2 integration, since
+it is likely to block real game asset loading outright, not just degrade a corner case, and
+partial-buffer Lock remains a permanent, real limitation (whole-buffer semantics only).
