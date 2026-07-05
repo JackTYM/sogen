@@ -1947,11 +1947,13 @@ namespace sogen
                 return d3derr_invalidcall;
             }
 
-            // Real GPU clear + readback into the bound render target's backing store, so pfnLock
+            // Real GPU clear + readback into every bound render target's backing store, so pfnLock
             // (already wired) hands the app real pixels -- see the class comment for why this
             // sidesteps needing to know how the real d3d9.dll gets pixels onto an actual window.
-            const auto it = this->resources_.find(this->state_.render_targets[0]);
-            if (it != this->resources_.end() && it->second.vk_image_id != 0 && (req.flags & 1) != 0 /* D3DCLEAR_TARGET */)
+            // D3DCLEAR_TARGET clears ALL currently-bound render targets (D3D9's SetRenderTarget slots
+            // 0-3) to the single supplied color, not just slot 0 -- same slot resolution as
+            // execute_draw's rt_slots loop, just without needing a Vulkan format for a pipeline.
+            if ((req.flags & 1) != 0 /* D3DCLEAR_TARGET */)
             {
                 // D3DCOLOR is 0xAARRGGBB.
                 const std::array<float, 4> color{
@@ -1960,14 +1962,22 @@ namespace sogen
                     static_cast<float>(req.color_argb & 0xFF) / 255.0f,
                     static_cast<float>((req.color_argb >> 24) & 0xFF) / 255.0f,
                 };
-                this->vulkan_.submit_clear(it->second.vk_image_id, color.data());
-
-                std::vector<std::byte> pixels;
-                uint32_t readback_width = 0;
-                uint32_t readback_height = 0;
-                if (this->vulkan_.readback_render_target(it->second.vk_image_id, pixels, readback_width, readback_height) == 0)
+                for (const uint64_t rt_handle : this->state_.render_targets)
                 {
-                    it->second.backing = std::move(pixels);
+                    const auto it = this->resources_.find(rt_handle);
+                    if (it == this->resources_.end() || it->second.vk_image_id == 0)
+                    {
+                        continue;
+                    }
+                    this->vulkan_.submit_clear(it->second.vk_image_id, color.data());
+
+                    std::vector<std::byte> pixels;
+                    uint32_t readback_width = 0;
+                    uint32_t readback_height = 0;
+                    if (this->vulkan_.readback_render_target(it->second.vk_image_id, pixels, readback_width, readback_height) == 0)
+                    {
+                        it->second.backing = std::move(pixels);
+                    }
                 }
             }
             return d3d_ok;
