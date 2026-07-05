@@ -1615,3 +1615,65 @@ longer strictly necessary but there's no reason to remove a working, already-ver
 Full regression sweep after this task: x64 `spike`/`shader`/`const`/`texture`/`managed-texture`/
 `texcoord`, x86 `triangle`/`shader`/`const`/`texture`/`texcoord`, all pass exactly as before (`managed-
 texture` still fails exactly as documented, its own known permanent limitation). Smoke test 26/26.
+
+---
+
+## 21. Task 6 — partial-buffer `Lock()` support designed and implemented, permanent limitation from
+    §16.1 resolved (2026-07-04)
+
+§16.1 left a documented permanent limitation: `umd_Lock` always treated every vertex/index buffer lock
+as an implicit whole-buffer lock (offset 0, size unknown), because `D3DDDIARG_LOCK`'s
+`OffsetToLock`/`SizeToLock` don't have one routing-path-independent struct offset, and `umd_Lock` is one
+function shared by every resource kind and routing path with no apparent way to tell which shape a given
+call used. This task revisited that conclusion and found the real per-call detection question doesn't
+actually need answering.
+
+**Key realization: the "ambiguous shape" only matters for calls whose result is discarded anyway.**
+§16.1's own evidence already showed that "sysmem-routed" buffer locks (`CVertexBuffer::Lock`/
+`CIndexBuffer::Lock`'s own direct dispatch) call `pfnLock` for real, but the app never uses this
+driver's returned `pData` for that path -- it reads/writes through the runtime's own separate,
+pre-allocated system-memory shadow instead. So an unrelated value read from `OffsetToLock`'s struct
+offset in that shape is harmless: nothing dereferences the pointer this driver computes from it. The
+only routing path where this driver's own `pData` genuinely matters is "driver-routed"
+(`CDriverVertexBuffer::Lock`/`CDriverIndexBuffer::Lock` -> `LockI`) -- and this UMD's own DevCaps bits
+(`k_devcaps_driver_managed_pool`/`k_devcaps_driver_managed_index_pool`, both unconditionally set) make
+that the routing every real `D3DPOOL_DEFAULT` vertex/index buffer takes, which is the common case
+(including every `D3DLOCK_NOOVERWRITE` growing-buffer append). So `umd_Lock` can safely read
+`OffsetToLock` (offset 80 on x64, named for the first time in `d3d9_ddi.hpp`) unconditionally for every
+buffer resource, without needing to distinguish which shape actually produced a given call -- and the
+host's own `lock()` already rejects an out-of-range offset defensively, so a garbage value from the
+"other" shape can't misbehave even in the case that's supposed to be harmless anyway.
+
+**`SizeToLock` genuinely isn't needed, not just hard to read.** The wire protocol
+(`d3d9_command_protocol.hpp`'s `lock_request`/`unlock_request`) and `d3d9_host::lock`/`unlock` already
+treat `size=0` as "from `offset` to the end of the resource" -- discovered to already be fully,
+correctly implemented host-side, needing zero host changes for this task. That is exactly the right
+semantics for `D3DLOCK_NOOVERWRITE`: the app only ever writes forward from `OffsetToLock` anyway, so
+there is no need to know how much it wrote in advance.
+
+**Implementation** (`sogen_d3d9_umd.cpp`): `umd_Lock` now forwards the real `OffsetToLock` (buffers
+only -- detected the same way `resolve_buffer_resource_id` already distinguishes a lazily-bound buffer
+handle from an already-`pfnCreateResource`-registered texture/render-target/depth-stencil handle, since
+`LockRect` uses this same struct region for Rect/Box input, not a byte offset) as the wire protocol's
+own `lock_request::offset`, so `g_locked_buffers` now holds only `[offset, end)` of the resource per
+outstanding lock instead of the whole thing. A new `g_locked_offsets` map remembers each lock's offset
+so `umd_Unlock` writes its data back to the same place. `resolve_buffer_resource_id`'s lazy-bind size
+hint now uses `OffsetToLock` as a lower bound (`std::max(byte_size, 64*1024)`) instead of always
+defaulting to a flat 64 KiB, in case a never-before-seen buffer's first lock needs more than that. x86
+keeps the pre-fix whole-buffer-lock behavior unchanged, since its driver-routed `OffsetToLock` offset
+isn't RE-verified yet (see `d3d9_ddi.hpp`'s x86 `D3DDDIARG_LOCK` comment) -- a real per-path fix there
+would need the same kind of live-RE pass §16.1/Task 6's x64 work already did, not attempted this task.
+
+**Verified with a new guest test**, `d3d9_partial_lock_test.cpp`: fills a 256-byte chunk with a
+`D3DLOCK_DISCARD` lock (offset 0), then appends two more 256-byte chunks at increasing nonzero offsets
+with `D3DLOCK_NOOVERWRITE`, each with a distinctive byte pattern (0xAA/0xBB/0xCC); a final whole-buffer
+read-only Lock confirms all three chunks still hold exactly their own pattern. This is a pure D3D9-API-
+level check (no host-side backdoor needed): since driver-routed buffer locks hand the app this driver's
+own `pData` directly, the pre-fix bug (offset always mapped to 0) would have made the second lock's
+write land at the buffer's start instead of its real offset, corrupting chunk 0 -- exactly what this
+test would catch. Result: `PASS: chunk0/1/2 intact`, `ALL CHECKS PASSED`.
+
+Full regression sweep after this task: x64 `spike`/`shader`/`const`/`texture`/`managed-texture`/
+`texcoord`/`triangle`/`triangle-x64`, x86 `triangle`/`shader`/`const`/`texture`/`texcoord`, all pass
+exactly as before (`managed-texture` still fails exactly as documented, its own unrelated known
+permanent limitation). Smoke test 26/26.

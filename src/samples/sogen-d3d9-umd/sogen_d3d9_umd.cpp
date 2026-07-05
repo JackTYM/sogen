@@ -8,6 +8,7 @@
 #include "d3d9_ddi.hpp"
 
 #include <d3d9.h>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -615,9 +616,9 @@ namespace
     // own sequential ids -- reaches pfnLock completely unregistered. pfnLock is the right place to
     // lazily register a correctly-kinded resource instead of resolve_resource_id's texture-shaped
     // fallback, which previously made every never-seen Lock() land on a wrong-kind 640x480 texture.
-    // byte_size is always 0 in practice (see umd_Lock's own comment on why SizeToLock isn't reliably
-    // readable) -- kept as a parameter rather than removed in case a future, routing-path-aware caller
-    // can supply a real size.
+    // byte_size is umd_Lock's real OffsetToLock (Task 6, 2026-07-04) when known, used only as a lower
+    // bound -- there is still no reliable SizeToLock in any routing path (see umd_Lock's own comment),
+    // so the fallback floor below stays the effective size for the common (offset-0 first lock) case.
     uint64_t resolve_buffer_resource_id(void* handle, uint32_t byte_size)
     {
         const auto raw = reinterpret_cast<uint64_t>(handle);
@@ -641,8 +642,9 @@ namespace
         const d3d9c::create_resource_request req{
             .kind = static_cast<uint32_t>(d3d9c::resource_kind::vertex_buffer),
             .format = 0,
-            .width = byte_size != 0 ? byte_size : 64 * 1024, // SizeToLock==0 means "whole buffer"; no
-                                                              // real size is knowable here, so guess.
+            .width = std::max<uint32_t>(byte_size, 64 * 1024), // no real total size is knowable here,
+                                                                // so guess a floor and grow it if a
+                                                                // known offset needs more than that.
             .height = 0,
             .depth = 1,
             .mip_levels = 1,
@@ -1338,8 +1340,11 @@ namespace
 
     // D3DDDIARG_LOCK::pData must point to memory that stays valid until the matching Unlock (the app
     // writes vertex/index data directly through it), so each outstanding lock owns a persistent
-    // heap buffer here instead of a call-local one. Keyed by the wire resource id (== hResource).
+    // heap buffer here instead of a call-local one. Keyed by the wire resource id (== hResource). The
+    // buffer holds only `[offset, end)` of the resource (see umd_Lock), so g_locked_offsets remembers
+    // which offset it started at, for umd_Unlock to write it back to the right place.
     std::unordered_map<uint64_t, std::vector<uint8_t>> g_locked_buffers;
+    std::unordered_map<uint64_t, uint32_t> g_locked_offsets;
 
     HRESULT APIENTRY umd_Lock(HANDLE /*hDevice*/, D3DDDIARG_LOCK* pArgs)
     {
@@ -1351,22 +1356,34 @@ namespace
         // Lock() reaches them (confirmed live) -- resolve_buffer_resource_id checks g_created_resource_ids
         // first and uses that resource id directly for them; only an unregistered handle (vertex/index
         // buffers, which never call pfnCreateResource) falls through to its own buffer lazy-bind path.
-        //
-        // Neither OffsetToLock nor SizeToLock has a reliable, routing-path-independent offset in this
-        // struct (see d3d9_ddi.hpp's D3DDDIARG_LOCK comment for the full RE finding: two different real
-        // d3d9.dll code paths build this struct differently, and umd_Lock -- one function shared by
-        // every resource kind -- cannot tell which one produced a given call). Always treat every lock
-        // as an implicit whole-buffer lock: offset 0, size unknown (0, meaning "use the resource's own
-        // known/fallback byte size" -- both resolve_buffer_resource_id and the host's lock() already
-        // implement exactly this convention). This is what actually fixes the index-buffer round-trip
-        // bug this RE pass investigated: an earlier model read SizeToLock from an offset that happened
-        // to read back 0 for every index-buffer lock, and separately, index buffers were routing
-        // through a d3d9.dll internal path that never reached this driver's pfnLock/pfnUnlock at all
-        // until fill_d3d9caps gained the matching DevCaps routing bit (see its own comment).
-        const auto resource = resolve_buffer_resource_id(pArgs->hResource, 0);
-        d3d9c::lock_request req{.resource = resource, .subresource = 0, .offset = 0, .size = 0, .flags = 0, .reserved = 0};
+        // Only buffers get OffsetToLock treatment below: LockRect (textures/render targets/depth-
+        // stencil) uses this same struct region for Rect/Box input, not a byte offset.
+        const auto raw_handle = reinterpret_cast<uint64_t>(pArgs->hResource);
+        const bool is_buffer = g_created_resource_ids.find(raw_handle) == g_created_resource_ids.end();
 
-        // First call with no output buffer just to learn the true backing size via lock_response.
+#ifdef _WIN64
+        // OffsetToLock (d3d9_ddi.hpp, offset 80) is reliable for "driver-routed" buffer locks -- the
+        // routing this UMD's own DevCaps bits (k_devcaps_driver_managed_pool/_index_pool) make the
+        // common case for D3DPOOL_DEFAULT buffers. "Sysmem-routed" locks read something unrelated from
+        // this offset, but their driver-returned pData is discarded by the app regardless (confirmed
+        // live, HANDOFF_MACBOOK.md #16.1), and an out-of-range offset is safely rejected by the host's
+        // own lock() below rather than misbehaving locally -- so reading it unconditionally for every
+        // buffer lock is safe. SizeToLock still has no reliable offset in either shape (see
+        // d3d9_ddi.hpp) -- size = 0 below means "from offset to the end of the resource", which is
+        // exactly right for the common D3DLOCK_NOOVERWRITE tail-append pattern this fixes: the app
+        // only ever writes forward from OffsetToLock anyway.
+        const uint32_t offset = is_buffer ? pArgs->OffsetToLock : 0;
+#else
+        // x86's driver-routed OffsetToLock offset is not yet RE-verified (see d3d9_ddi.hpp's own
+        // D3DDDIARG_LOCK comment) -- keep the pre-existing whole-buffer-lock behavior here.
+        const uint32_t offset = 0;
+#endif
+
+        const auto resource = resolve_buffer_resource_id(pArgs->hResource, offset);
+        d3d9c::lock_request req{.resource = resource, .subresource = 0, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
+
+        // First call with no output buffer just to learn the true backing size via lock_response
+        // (lock_response::data_size is "bytes available from `offset` to the end of the resource").
         d3d9c::lock_response probe{};
         bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe));
 
@@ -1384,6 +1401,7 @@ namespace
         }
         std::memcpy(buffer.data(), out_buf.data() + sizeof(*resp), buffer.size());
         pArgs->pData = buffer.data();
+        g_locked_offsets[resource] = offset;
         return S_OK;
     }
 
@@ -1400,16 +1418,20 @@ namespace
             return S_OK; // nothing to write back (e.g. a failed Lock)
         }
 
+        const auto offset_it = g_locked_offsets.find(resource);
+        const uint32_t offset = offset_it != g_locked_offsets.end() ? offset_it->second : 0;
+
         std::vector<uint8_t> buf(sizeof(d3d9c::unlock_request) + it->second.size());
         auto* req = reinterpret_cast<d3d9c::unlock_request*>(buf.data());
         req->resource = resource;
         req->subresource = 0;
-        req->offset = 0;
+        req->offset = offset;
         req->data_size = static_cast<uint32_t>(it->second.size());
         std::memcpy(buf.data() + sizeof(*req), it->second.data(), it->second.size());
         bridge_call(gb::ioctl_d3d9_unlock, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
 
         g_locked_buffers.erase(it);
+        g_locked_offsets.erase(resource);
         return S_OK;
     }
 

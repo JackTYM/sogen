@@ -50,6 +50,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texcoord_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-texcoord-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_partial_lock_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-partial-lock-test-x64.exe -ld3d9
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, and `d3d9_texcoord_test.cpp`
@@ -68,6 +71,7 @@ cp d3d9-const-test-x64.exe <root>/filesys/c/d3d9-const-test.exe
 cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
 cp d3d9-managed-texture-test-x64.exe <root>/filesys/c/d3d9-managed-texture-test.exe
 cp d3d9-texcoord-test-x64.exe <root>/filesys/c/d3d9-texcoord-test.exe
+cp d3d9-partial-lock-test-x64.exe <root>/filesys/c/d3d9-partial-lock-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
@@ -96,6 +100,7 @@ already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texcoord-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -144,6 +149,16 @@ for at least one of these. Expect `CreateTexture hr=0x00000000`, `DrawIndexedPri
 four `PASS:` lines, and `[d3d9-texcoord-test] ALL CHECKS PASSED`. See this test's own header comment
 and `docs/d3d9-roadmap.md`/`HANDOFF_MACBOOK.md` §20 for the investigation that closed out the
 previously-suspected `TEXCOORD0` interpolation bug (it did not reproduce; no host fix was needed).
+
+`d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
+dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a
+`D3DLOCK_DISCARD` lock, then appends two more 256-byte chunks at increasing nonzero offsets with
+`D3DLOCK_NOOVERWRITE`, each with a distinctive byte pattern; a final whole-buffer read-only Lock
+checks all three chunks still hold exactly their own pattern -- in particular that the first chunk
+(the "untouched earlier region") was not disturbed by the later, higher-offset locks. Expect three
+`PASS:` lines and `[d3d9-partial-lock-test] ALL CHECKS PASSED`. See the note below (Task 6,
+2026-07-04) for what this fixes and how -- previously this class of lock silently got whole-buffer
+semantics, which would have corrupted chunk 0 and failed this exact test.
 
 ## Notes
 
@@ -255,13 +270,38 @@ previously-suspected `TEXCOORD0` interpolation bug (it did not reproduce; no hos
     now also sets this bit.
   - `D3DDDIARG_LOCK`'s `OffsetToLock`/`SizeToLock` do not have a single, routing-path-independent
     struct offset -- two different real `d3d9.dll` code paths build this struct differently (see
-    `d3d9_ddi.hpp`'s own comment for the full byte-level capture). `umd_Lock`/`umd_Unlock` now always
-    treat every lock as an implicit whole-buffer lock (offset 0, size unknown) instead of trying to
-    read either field, which both sidesteps the ambiguity and is what actually fixes the round-trip.
-    **This is a permanent limitation, not a stopgap**: partial-range locks (e.g. the common
-    `D3DLOCK_NOOVERWRITE` growing-buffer pattern) silently get whole-buffer semantics instead of an
-    error -- a real game relying on partial locks will see incorrect behavior. See `HANDOFF_MACBOOK.md`
-    §16.1 for what real per-path fix would require.
+    `d3d9_ddi.hpp`'s own comment for the full byte-level capture). At the time of this fix,
+    `umd_Lock`/`umd_Unlock` always treated every lock as an implicit whole-buffer lock (offset 0, size
+    unknown) instead of trying to read either field, which both sidestepped the ambiguity and is what
+    fixed this round-trip bug. **This partial-lock limitation was itself resolved as a follow-up (Task
+    6, 2026-07-04, see below) -- it is no longer current.**
+- **Partial-buffer `Lock()` support (Task 6, 2026-07-04, see `HANDOFF_MACBOOK.md`/
+  `.claude/plans/jazzy-giggling-cloud.md` for the full account).** The whole-buffer-only limitation
+  above is fixed: `umd_Lock` now reads `D3DDDIARG_LOCK::OffsetToLock` (offset 80, named for the first
+  time -- see `d3d9_ddi.hpp`) and forwards it as the wire protocol's own `lock_request::offset` for any
+  resource that isn't already a registered `pfnCreateResource` handle (i.e. every vertex/index buffer;
+  texture/render-target/depth-stencil `LockRect` calls are unaffected, since this DDI region means
+  Rect/Box input for those, not a byte offset). Real per-call detection of which of the two routing-
+  path struct shapes a given Lock used turned out to be unnecessary, not just hard: the "sysmem-routed"
+  shape's driver-returned `pData` is discarded by the app regardless of what this driver computes
+  (confirmed live, `HANDOFF_MACBOOK.md` #16.1), and both this UMD's DevCaps bits
+  (`k_devcaps_driver_managed_pool`/`k_devcaps_driver_managed_index_pool`) are unconditionally set, so
+  every `D3DPOOL_DEFAULT` vertex/index buffer -- the common real-world case, including every
+  `D3DLOCK_NOOVERWRITE` growing-buffer append -- is always "driver-routed" and this offset is always
+  real for it. `SizeToLock` still has no reliable offset in either shape, but none is needed: the wire
+  protocol's existing `size=0` convention ("from offset to the end of the resource", already correctly
+  implemented host-side in `d3d9_host::lock`/`unlock` before this fix) is exactly the right semantics
+  for a tail-append lock, since the app never writes past its own requested range anyway. `g_locked_buffers`
+  now holds only `[offset, end)` of the resource per outstanding lock (not the whole thing), and a new
+  `g_locked_offsets` map remembers each lock's offset so `umd_Unlock` writes its data back to the same
+  place. Proven end-to-end by the new `d3d9-partial-lock-test.exe` (see above): a `D3DLOCK_DISCARD`
+  fill of the first chunk survives unmodified after two subsequent `D3DLOCK_NOOVERWRITE` appends at
+  higher offsets, each chunk reading back exactly its own distinctive byte pattern -- with the
+  pre-fix behavior (offset always treated as 0), the second append would have overwritten the first
+  chunk instead. x86 keeps the pre-fix whole-buffer-lock behavior unchanged (its driver-routed
+  `OffsetToLock` offset is not yet RE-verified -- see `d3d9_ddi.hpp`'s x86 `D3DDDIARG_LOCK` comment),
+  so no x86 test exercises partial locks yet; this is a known, explicitly scoped-out gap, not an
+  oversight.
 - **Depth-stencil surface resource-id resolution, RE'd and fixed (2026-07-04).** `CreateDepthStencilSurface`
   does call `pfnCreateResource` (confirmed: `Format=75`/`D3DFMT_D24S8` correctly captured), but its
   DDI handle does not reach `pfnSetDepthStencil`'s `hZBuffer` as the same value -- `SetDepthStencil`

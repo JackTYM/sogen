@@ -589,10 +589,13 @@ static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll 
 #endif
 
 // hResource@0 and pData@40 are RE-verified and reliable across every resource kind and routing path
-// (confirmed live 2026-07-03/2026-07-04 -- see below). OffsetToLock/SizeToLock are deliberately NOT
-// modeled as named fields: real d3d9.dll builds this 104-byte struct from at least TWO DIFFERENT code
-// paths depending on internal buffer routing (see HANDOFF_MACBOOK.md for the full capture), and the
-// two paths disagree on which offset (if any) carries which value:
+// (confirmed live 2026-07-03/2026-07-04 -- see below). SizeToLock is deliberately NOT modeled as a
+// named field (no reliable offset exists for it in either routing path -- see below); OffsetToLock IS
+// named (Task 6, 2026-07-04) since it has one reliable offset (80) in the routing path this UMD's own
+// DevCaps bits actually enable (see the field's own comment for why reading it unconditionally, even
+// on the other routing path, is safe). Real d3d9.dll builds this 104-byte struct from at least TWO
+// DIFFERENT code paths depending on internal buffer routing (see HANDOFF_MACBOOK.md for the full
+// capture), and the two paths disagree on which offset (if any) carries which value:
 //   - "sysmem-routed" buffers (CVertexBuffer::Lock / CIndexBuffer::Lock's own direct dispatch, taken
 //     when CreateXxxBuffer's DevCaps-gated routing picks CreateSysmemXxxBuffer): offset 72 reliably
 //     carries the app's requested SizeToLock (confirmed across 4 distinct sizes: 12, 12, 6, 40 bytes);
@@ -622,8 +625,15 @@ typedef struct _D3DDDIARG_LOCK
     UINT64 Reserved0;    // 8 -- present, purpose unconfirmed
     BYTE Reserved1[24];  // 16..39 -- unconfirmed
     VOID* pData;         // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
-    BYTE Reserved2[56];  // 48..103 -- unconfirmed (includes OffsetToLock@80 in the "driver-routed"
-                          //            shape only -- not read, see comment above)
+    BYTE Reserved2[32];  // 48..79 -- unconfirmed
+    UINT OffsetToLock;   // 80 -- RE-verified live (see comment above): the app's requested byte offset,
+                         // reliably present in the "driver-routed" shape. In the "sysmem-routed" shape
+                         // this offset holds unrelated data instead, but that path's driver-returned
+                         // pData is discarded by the app regardless (confirmed live,
+                         // HANDOFF_MACBOOK.md #16.1), so umd_Lock reading this field unconditionally
+                         // for buffer resources is safe either way -- the host's own lock() already
+                         // rejects an out-of-range offset.
+    BYTE Reserved3[20];  // 84..103 -- unconfirmed
 } D3DDDIARG_LOCK;
 #else
 // x86 D3DDDIARG_LOCK is a GENUINELY DIFFERENT, smaller (48-byte) struct, not a pointer-shrunk copy of
