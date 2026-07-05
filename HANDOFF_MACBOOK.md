@@ -1677,3 +1677,147 @@ Full regression sweep after this task: x64 `spike`/`shader`/`const`/`texture`/`m
 `texcoord`/`triangle`/`triangle-x64`, x86 `triangle`/`shader`/`const`/`texture`/`texcoord`, all pass
 exactly as before (`managed-texture` still fails exactly as documented, its own unrelated known
 permanent limitation). Smoke test 26/26.
+
+---
+
+## 22. Int (`i#`) / bool (`b#`) shader constant registers — designed, wired, and proven pixel-exact on both x64 and x86 (2026-07-05)
+
+Plan `jazzy-giggling-cloud.md` (session-local, not checked into this repo), Tasks 1-5. Closes the last
+open item under "Constant registers" in `docs/d3d9-roadmap.md` — the float (`c#`) path was already done;
+this extends the same design to int and bool registers, the ones real shader flow control (loops,
+branches) depends on.
+
+### 22.1 Design phase — vkd3d-shader RE findings
+
+Before writing any code, the binding scheme had to be settled by reading how vkd3d-shader's D3DBC
+frontend actually consumes constant registers, not by guessing. Key findings (`deps/vkd3d/libs/
+vkd3d-shader/`):
+- Each constant register **bank** (float `c#`, int `i#`, bool `b#`) is a **separate CBV**, keyed by its
+  own `register_index` space starting at 0 — a D3DBC shader that reads `c0`/`i0`/`b0` produces three
+  independent constant-buffer reads, not three offsets into one buffer. This is why the original roadmap
+  text speculated "up to 4 descriptor sets" (one per bank, times two stages) — a reasonable worst-case
+  guess before checking the actual binding granularity vkd3d-shader expects.
+- **The locked design is narrower**: vkd3d-shader binds CBVs *within whichever descriptor set the
+  calling stage already owns* — it doesn't need or want a set per bank. Since the float (`c#`) path
+  already committed to 2 sets (VS = set 0, PS = set 1, binding 0 = float CBV, PS-only binding 1 =
+  combined-image-sampler), int and bool just needed two more bindings *in the same two sets*: binding 2
+  = int CBV, binding 3 = bool CBV, per stage. No new descriptor sets at all.
+- **Both int and bool constants use a 16-byte (std140-style) per-register stride**, matching float's
+  existing `float4`-per-register layout — this was not obvious a priori for bool (a single register only
+  ever needs 1 bit of real information) but matches how `SetVertexShaderConstantB`'s own D3D9 API shape
+  works (`BOOL* pConstantData, UINT BoolCount` — one `BOOL` per logical register, no packing) and keeps
+  the host-side storage/wire-protocol code identical in shape to the already-proven float path.
+- **Bool convention: non-zero is true.** D3D9's own `BOOL` is a 32-bit int where the API contract is
+  "any non-zero value is TRUE" (not strictly `1`) — `vs_const_b`/`ps_const_b` are stored host-side as
+  `uint32_t` (mirroring the wire's raw 32-bit `BOOL` payload) and expanded to the 16-byte CBV stride
+  unchanged, rather than being normalized to a strict 0/1. vkd3d-shader's own SPIR-V codegen for the D3DBC
+  `IF`/`IFC` opcodes already treats the CONSTBOOL operand this way (a `!= 0` comparison, not `== 1`), so
+  no host-side normalization was needed for correctness.
+
+### 22.2 Implementation (Tasks 1-3, already committed as `c8847dc6`/`d8cc98df`/`32fdb6e5`)
+
+- Wire protocol: two new opcodes (`set_vertex_shader_const_i`/`_b`, `set_pixel_shader_const_i`/`_b`,
+  mirroring the existing float opcodes' `{Register, Count}` header + trailing data array shape).
+- `device_state`: `vs_const_i`/`ps_const_i` stored as `int32_t`, `vs_const_b`/`ps_const_b` stored as
+  `uint32_t`, both expanded to the 16-byte-per-register stride at write time (matching `vs_const_f`'s
+  existing shape).
+- Host-side: 2 more UBO buffers per stage (int, bool) and 2 more descriptor bindings per set (2, 3),
+  wired into `vulkan_host`'s existing per-draw descriptor-set update path alongside the float CBV and
+  (PS-only) sampler.
+- UMD: `umd_SetVertexShaderConstI`/`ConstB`/`umd_SetPixelShaderConstI`/`ConstB` added to
+  `sogen_d3d9_umd.cpp`, wired to `D3DDDI_DEVICEFUNCS` slots 48/49/65/66 (already present as "real"
+  entries in `k_device_func_arity`, arity 12 — `(HANDLE, header*, trailing CONST INT*/BOOL*)`, the same
+  shape as the already-proven float `pfnSetVertexShaderConst`/`pfnSetPixelShaderConst`).
+
+### 22.3 A real host bug found while building the guest test (Task 4, fixed in `67e6acff`)
+
+`d3d9_int_bool_const_test.cpp`'s very first run got `SetVertexShaderConstantB hr=0x00000000` and
+`SetVertexShaderConstantI hr=0x00000000` (the DDI calls succeeded) but the rendered pixel showed neither
+constant had actually reached the shader (default/unset values). Root cause: `gpu_bridge.cpp`'s IOCTL
+dispatch `switch` — the function that routes an incoming D3DKMT Escape's opcode to the right host-side
+handler — had no `case` for the two new int/bool opcodes at all. They fell through to the `default` path
+silently (no error returned, since the runtime doesn't require every escape to do anything), so the UMD's
+DDI calls genuinely reached the driver and returned `S_OK`, but the host never decoded or stored the
+payload. Fixed by adding the missing `case` labels routing to the same decode-and-store path Task 2 had
+already implemented. This is a genuinely different bug class from the WoW64/x86 struct-layout bugs found
+earlier in this project (§15, §16.1-16.3) — a dispatch-routing gap, not an ABI mismatch — and would not
+have been caught by an HRESULT-only test, only by actually reading back a rendered pixel.
+
+### 22.4 Three `d3dcompiler_43` compiler quirks found while shaping the test shader (Task 4c, fixed in `1e851fc2`/`478e0372`)
+
+Getting `d3d9_int_bool_const_test.cpp`'s vertex shader to compile into bytecode that actually exercised
+the real `b0`/`i0` registers (rather than something the compiler could optimize away) took three rounds
+of empirical D3DBC disassembly, documented in full in the test file's own header comment:
+1. `bool x : register(b0);` is rejected by d3dcompiler_43 for `vs_2_0`/`vs_2_a` (error X4509) — a scalar
+   bool used in a runtime `if` must have no explicit register annotation; the compiler auto-allocates it
+   (empirically confirmed to land at `b0`, matching `SetVertexShaderConstantB(0, ...)`).
+2. An `if (b) { X } else { Y }` shape where both branches merge into one shared trailing write gets
+   **flattened by the compiler into `SGE`/`MAD` select-style arithmetic backed by an auto-allocated FLOAT
+   (`c#`) register — not the real `b0` CONSTBOOL bank at all**. This was caught red-handed: an earlier
+   version of the test used exactly this shape, compiled and ran successfully, but always rendered the
+   "false" branch regardless of the runtime `SetVertexShaderConstantB(0, TRUE, 1)` call — a false negative
+   that would have gone unnoticed without disassembling the bytecode and finding zero CONSTBOOL operands
+   anywhere. Fixed by giving each branch an early `return` instead — not flattenable, and empirically
+   forces a genuine D3DBC `IF` instruction whose operand is the real `b0` register (opcode 0x28, operand
+   register type 0x0E, number 0).
+3. Even with the early-return shape, a narrower quirk remained: if either branch's output color literal
+   contains an exact `0.0`/`1.0` in a component, the optimizer pulls just that component out of the real
+   `IF`/`ELSE` and recomputes it via `SGE dst, -c#, c#` against a **separate, auto-allocated FLOAT
+   constant register that is never `b0` and that this test's own `SetVertexShaderConstantB` call never
+   populates** — confirmed via full D3DBC disassembly (a genuine unrelated `c#` register fed into an SGE
+   against its own negation) and independently via the shader's own CTAB reflection block, which lists
+   **two separate constant-table entries both named `useAltColor`** — one `D3DXRS_BOOL`, one
+   `D3DXRS_FLOAT4` — for the same HLSL variable. This is a genuine, reproducible-on-real-hardware
+   `d3dcompiler_43` compiler quirk, not a sogen or vkd3d-shader bug (the *other* components in the same
+   instructions, not exact `0.0`/`1.0` literals, are correctly gated by real `b0`-conditional branches the
+   whole time). Fixed by using `0.999`/`0.001` instead of the exact `0.0`/`1.0` pair — round-trips through
+   the 8-bit pixel format identically (within the test's ±2 tolerance) but doesn't trigger the shortcut.
+   `d3dcompiler_43.dll` is a pinned filesystem asset (not rebuilt from source), so this exact optimizer
+   behavior is stable across runs — no recompiler-version-drift risk.
+
+The finished test shader: a bare (no `register()` annotation) `bool useAltColor`, an `int4 loopTripCount
+: register(i0)`, an early-return `if`/else selecting between two colors via `0.999`/`0.001` channel
+values, and a `for (k < loopTripCount.x)` loop accumulating into the blue channel. Compiled `vs_2_0`
+bytecode is walked as raw D3DBC tokens (opcode in the low 16 bits, length in bits 24-27, per
+`vkd3d-shader`'s own `d3dbc.c` shifts/masks) to independently confirm a real `REP`/`ENDREP` pair (0x26/
+0x27) and a real `IF` (0x28) reading register type 0x0E (CONSTBOOL) number 0 — not just that HRESULTs
+came back clean.
+
+### 22.5 Task 5 — x86/WoW64 port: pixel-exact parity, no new architecture bug
+
+Cross-compiled `d3d9_int_bool_const_test.cpp` unchanged to i686 (`i686-w64-mingw32-g++`, same flags as
+every other x86-ported test) and staged it against the already-present genuine 32-bit `d3d9.dll`/
+`d3dcompiler_43.dll` in `syswow64/`. The first run genuinely failed: `pixel(320,240)=B=00 G=FF R=00`
+(the "false"-branch default color, with the loop accumulator at 0) — i.e. **both** the bool and int
+constants silently read back as their never-set defaults, both analytic checks failing.
+
+This looked exactly like the shape of the two previous real x86-only bugs this project found
+(`allocate_id()`'s `HANDLE` truncation, §16; `D3DDDIARG_CREATERESOURCE`'s x86 offset, §16.3), so it was
+root-caused with the same rigor before assuming anything: comparing file mtimes showed
+`sogen_d3d9_umd.cpp` (source) was last modified at `00:43` (Task 1's DDI-handler addition), the x64 UMD
+DLL (`sogen_d3d9um-x64.dll`) was rebuilt at `00:44` — one minute later, picking up the change — but the
+staged x86 UMD DLL (`sogen_d3d9um-x86.dll`) was still dated `19:29` the *previous* day, predating Task 1
+entirely. **This was not a new x86 architecture bug** — the x86 UMD binary simply hadn't been rebuilt
+since the int/bool DDI handlers were added to the shared source file (both x64 and x86 UMDs are built
+from the exact same `sogen_d3d9_umd.cpp`; only the x64 copy had been refreshed). Rebuilding
+`sogen_d3d9um-x86.dll` from current source (`i686-w64-mingw32-g++`, no code change whatsoever) and
+re-staging it fixed the mismatch completely:
+
+```
+pixel(320,240)=B=26 G=00 R=FF A=FF   (x86, after rebuild — identical to x64)
+PASS: pixel R/G matches the alt-branch color
+PASS: pixel B=26 matches expected 26
+ALL CHECKS PASSED
+```
+
+Byte-for-byte identical to the x64 result. Unlike the const-test-x86 and texture-test-x86 ports, this
+port needed zero source or host changes — the underlying DDI wiring, descriptor binding, and shader
+translation were already architecture-agnostic; the only gap was a stale local build artifact.
+
+### 22.6 Full regression sweep (2026-07-05)
+
+x64: `shader`/`const`/`texture`/`texcoord`/`partial-lock`/`int-bool-const` all `ALL CHECKS PASSED`;
+`managed-texture` fails exactly as documented (§17-19, confirmed permanent, not a regression). x86:
+`shader`/`const`/`texture`/`texcoord`/`int-bool-const` all `ALL CHECKS PASSED`. Smoke test: 26/26
+`Success`. See `docs/d3d9-roadmap.md`'s "Constant registers" entry and
+`src/samples/sogen-d3d9-umd/README.md` for the consolidated write-ups.

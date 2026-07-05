@@ -53,10 +53,16 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texcoord_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_partial_lock_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-partial-lock-test-x64.exe -ld3d9
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_int_bool_const_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-int-bool-const-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_int_bool_const_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-int-bool-const-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
-`d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, and `d3d9_texcoord_test.cpp`
-are guest-runtime tests, not driver-side files, so they do not need the
+`d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`, and
+`d3d9_int_bool_const_test.cpp` are guest-runtime tests, not driver-side files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
 applies to `d3d9_triangle_test.cpp` above -- it's a guest-runtime test too.
@@ -72,20 +78,23 @@ cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
 cp d3d9-managed-texture-test-x64.exe <root>/filesys/c/d3d9-managed-texture-test.exe
 cp d3d9-texcoord-test-x64.exe <root>/filesys/c/d3d9-texcoord-test.exe
 cp d3d9-partial-lock-test-x64.exe <root>/filesys/c/d3d9-partial-lock-test.exe
+cp d3d9-int-bool-const-test-x64.exe <root>/filesys/c/d3d9-int-bool-const-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
 cp d3d9-const-test-x86.exe <root>/filesys/c/d3d9-const-test-x86.exe
 cp d3d9-texture-test-x86.exe <root>/filesys/c/d3d9-texture-test-x86.exe
 cp d3d9-texcoord-test-x86.exe <root>/filesys/c/d3d9-texcoord-test-x86.exe
+cp d3d9-int-bool-const-test-x86.exe <root>/filesys/c/d3d9-int-bool-const-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
-shader, const, and texture tests. For the x86/WoW64 UMD, the real 32-bit Microsoft `d3d9.dll` must
-already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_43.dll` must exist at
-`<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86 shader, const, and texture tests.
+shader, const, texture, and int-bool-const tests. For the x86/WoW64 UMD, the real 32-bit Microsoft
+`d3d9.dll` must already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and
+`d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86
+shader, const, texture, texcoord, and int-bool-const tests.
 
 ## Run
 
@@ -96,10 +105,12 @@ already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and `d3dcompiler_
 ./analyzer -e <root> -c c:/d3d9-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-managed-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-texcoord-test.exe
+./analyzer -e <root> -c c:/d3d9-int-bool-const-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texcoord-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-int-bool-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
 ```
 
@@ -149,6 +160,23 @@ for at least one of these. Expect `CreateTexture hr=0x00000000`, `DrawIndexedPri
 four `PASS:` lines, and `[d3d9-texcoord-test] ALL CHECKS PASSED`. See this test's own header comment
 and `docs/d3d9-roadmap.md`/`HANDOFF_MACBOOK.md` §20 for the investigation that closed out the
 previously-suspected `TEXCOORD0` interpolation bug (it did not reproduce; no host fix was needed).
+
+`d3d9-int-bool-const-test.exe` proves the D3D9 int (`i#`) and bool (`b#`) shader constant registers
+round-trip from a guest `SetVertexShaderConstantI`/`SetVertexShaderConstantB` call, through the wire
+protocol and the int/bool CBV descriptor bindings (VS set 0 / PS set 1, bindings 2 and 3), into REAL
+runtime shader flow control -- not just raw byte delivery. The vertex shader has a genuine bool branch
+(`if (useAltColor)`, both arms an early `return` so the compiler can't flatten it into arithmetic) that
+selects between two unambiguous colors driven by `SetVertexShaderConstantB(0, ...)`, and a genuine
+register-bound loop (`for (k < loopTripCount.x)`, driven by `SetVertexShaderConstantI(0, ...)`) that
+accumulates a per-iteration delta into the blue channel. The compiled `vs_2_0` bytecode is walked as
+raw D3DBC tokens to confirm the compiler actually emitted a real `REP` opcode (not unrolled) and a real
+`IF` instruction reading the `b0` CONSTBOOL register, not just that the HRESULTs came back clean. Expect
+`SetVertexShaderConstantB hr=0x00000000`, `SetVertexShaderConstantI hr=0x00000000`,
+`saw_REP/ENDREP=yes saw_IF(b0)=yes` in the bytecode scan, both `PASS:` lines, and
+`[d3d9-int-bool-const-test] ALL CHECKS PASSED`. See this test's own header comment for the three
+d3dcompiler_43 quirks its exact shader shape works around, and `docs/d3d9-roadmap.md`/
+`HANDOFF_MACBOOK.md` §22 for the full design and RE narrative (int/bool CBV binding scheme, the missing
+IOCTL-dispatch-routing bug this test caught, and the x64/x86 parity results).
 
 `d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
 dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a
@@ -383,3 +411,25 @@ semantics, which would have corrupted chunk 0 and failed this exact test.
   `D3DPOOL_MANAGED`, no workaround) is expected to keep failing for this reason, permanently, until a
   fundamentally different mechanism is found; `d3d9_texture_test.cpp` continues to use
   `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` to avoid the whole area.
+- **Int (`i#`) / bool (`b#`) shader constant registers, wired end to end and ported to x86 (2026-07-05,
+  `jazzy-giggling-cloud.md` Tasks 1-5).** Mirrors the float (`c#`) path: wire protocol opcodes,
+  `device_state` storage, and two more UBO/descriptor bindings per set (binding 2 = int CBV, binding 3
+  = bool CBV, alongside the existing binding 0 float CBV and PS-only binding 1 sampler) -- still just 2
+  descriptor sets total (VS=0, PS=1), not a set per register bank. `d3d9_int_bool_const_test.cpp` proves
+  real runtime shader flow control, not just byte delivery: a genuine bool branch compiling to a real
+  D3DBC `IF` reading `b0`, and a genuine int-driven loop compiling to a real D3DBC `REP` (both confirmed
+  by walking the raw bytecode). Building it caught a real host bug (a missing IOCTL-dispatch-routing case
+  for the two new opcodes in `gpu_bridge.cpp`, now fixed) and worked around two real `d3dcompiler_43`
+  quirks in the test shader itself (an `if`/`else` that flattens into arithmetic unless both arms
+  early-`return`; a narrower quirk where exact `0.0`/`1.0` literals get pulled out via a separate shadow
+  float register, worked around with `0.999`/`0.001`) -- see the test's own header comment for the full
+  account. **Porting to x86 (Task 5) hit no new architecture bug** -- unlike the earlier const-test-x86
+  and texture-test-x86 ports, which each found a genuine x86-only DDI/handle bug. The one x86 run that
+  initially failed (`pixel(320,240)=B=00 G=FF R=00`, i.e. both the bool and int constants silently read
+  back as their unset defaults) was traced to a stale build artifact: `sogen_d3d9um-x86.dll` had not been
+  rebuilt since Task 1 added `umd_SetVertexShaderConstI`/`ConstB`/`umd_SetPixelShaderConstI`/`ConstB` to
+  the shared `sogen_d3d9_umd.cpp` (the x64 DLL had already been rebuilt and picked up the new DDI slots;
+  the x86 DLL predated that rebuild and was still missing them). Rebuilding `sogen_d3d9um-x86.dll` from
+  the current source, no code change, produced pixel-exact parity with x64
+  (`pixel(320,240)=B=26 G=00 R=FF A=FF`, both analytic checks passing). See `docs/d3d9-roadmap.md` and
+  `HANDOFF_MACBOOK.md` §22 for the full design/RE narrative.
