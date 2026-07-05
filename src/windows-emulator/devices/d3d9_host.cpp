@@ -58,6 +58,9 @@ namespace sogen
         constexpr uint32_t d3drs_alphablendenable = 27;
         constexpr uint32_t d3drs_blendop = 171;
 
+        // Public D3DRENDERSTATETYPE value (d3d9types.h) needed for real scissor-test wiring.
+        constexpr uint32_t d3drs_scissortestenable = 174;
+
         // Public D3DBLEND values (d3d9types.h), D3DRS_SRCBLEND/DESTBLEND's value space.
         constexpr uint32_t d3dblend_zero = 1;
         constexpr uint32_t d3dblend_one = 2;
@@ -1218,8 +1221,19 @@ namespace sogen
             {{.x = 0, .y = 0, .width = static_cast<float>(rt.width), .height = static_cast<float>(rt.height), .min_depth = 0.0f,
               .max_depth = 1.0f}}};
         this->vulkan_.cmd_set_viewport(this->command_buffer_, 0, false, viewports);
-        const std::array<vulkan_host::scissor_entry, 1> scissors{
-            {{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height}}};
+        vulkan_host::scissor_entry scissor{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height};
+        if (render_state_or(this->state_.render_state, d3drs_scissortestenable, 0) != 0)
+        {
+            const int32_t clamped_left = std::clamp(this->state_.scissor_left, 0, static_cast<int32_t>(rt.width));
+            const int32_t clamped_top = std::clamp(this->state_.scissor_top, 0, static_cast<int32_t>(rt.height));
+            const int32_t clamped_right = std::clamp(this->state_.scissor_right, clamped_left, static_cast<int32_t>(rt.width));
+            const int32_t clamped_bottom = std::clamp(this->state_.scissor_bottom, clamped_top, static_cast<int32_t>(rt.height));
+            scissor = {.offset_x = clamped_left,
+                       .offset_y = clamped_top,
+                       .width = static_cast<uint32_t>(clamped_right - clamped_left),
+                       .height = static_cast<uint32_t>(clamped_bottom - clamped_top)};
+        }
+        const std::array<vulkan_host::scissor_entry, 1> scissors{scissor};
         this->vulkan_.cmd_set_scissor(this->command_buffer_, 0, false, scissors);
 
         if (!use_programmable)
@@ -1824,16 +1838,25 @@ namespace sogen
             this->state_.depth_stencil = req.surface;
             return d3d_ok;
         }
-        // set_viewport / set_scissor / clear / draw_* are consumed once Part 3's pipeline builder and
-        // vulkan_host integration land; for now they parse-validate (catching wire-format bugs early)
-        // and no-op.
+        // set_viewport still parse-validates (catching wire-format bugs early) and no-ops until
+        // execute_draw's hardcoded full-render-target-extent viewport is replaced with real viewport
+        // state; clear/draw are fully implemented (see class comment), and set_scissor below now feeds
+        // execute_draw's D3DRS_SCISSORTESTENABLE-gated scissor.
         case gpu_bridge::command::d3d9_set_viewport: {
             d3d9_cmd::set_viewport_record req{};
             return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
         }
         case gpu_bridge::command::d3d9_set_scissor: {
             d3d9_cmd::set_scissor_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            this->state_.scissor_left = req.left;
+            this->state_.scissor_top = req.top;
+            this->state_.scissor_right = req.right;
+            this->state_.scissor_bottom = req.bottom;
+            return d3d_ok;
         }
         case gpu_bridge::command::d3d9_clear: {
             d3d9_cmd::clear_record req{};

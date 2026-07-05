@@ -166,6 +166,12 @@ namespace sogen
             std::vector<uint32_t> ps_const_b{};
             std::array<uint64_t, 4> render_targets{};
             uint64_t depth_stencil{};
+            // Last SetScissorRect rect (RECT semantics -- exclusive right/bottom); only consulted at
+            // draw time when D3DRS_SCISSORTESTENABLE is set (see execute_draw).
+            int32_t scissor_left{};
+            int32_t scissor_top{};
+            int32_t scissor_right{};
+            int32_t scissor_bottom{};
         };
 
         // Starts far above any value the real d3d9.dll runtime's own internal handle spaces (vertex/
