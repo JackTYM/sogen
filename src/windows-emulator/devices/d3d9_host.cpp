@@ -360,7 +360,8 @@ namespace sogen
         }
 
         const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
-            {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 2},
+            // 2 float UBOs (VS+PS) + 2 int UBOs (VS+PS) + 2 bool UBOs (VS+PS).
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 6},
             // One combined-image-sampler slot: the PS set's binding 1 (see ensure_programmable_pipeline),
             // for texture stage/sampler 0 -- this slice's minimum-viable single-texture binding.
             {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1},
@@ -484,10 +485,17 @@ namespace sogen
         }
 
         // Matches the CBV bindings d3d9_shader_translator.cpp pins into the SPIR-V: VS float-const UBO
-        // at set 0 binding 0, PS float-const UBO at set 1 binding 0. The actual per-draw UBO creation
-        // and descriptor-set binding happens in execute_draw, using descriptor_pool_.
-        const std::array<vulkan_host::descriptor_binding, 1> vs_bindings{{
+        // at set 0 binding 0, PS float-const UBO at set 1 binding 0. Bindings 2/3 (int-const/bool-const
+        // UBOs) are declared here unconditionally too, same rationale as binding 1 below -- vkd3d only
+        // emits an actual SPIR-V descriptor for a register file a shader statically references, but
+        // Vulkan permits a pipeline layout to declare bindings a shader doesn't use. The actual per-draw
+        // UBO creation and descriptor-set binding happens in execute_draw, using descriptor_pool_.
+        const std::array<vulkan_host::descriptor_binding, 3> vs_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
+            {.binding = 2, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
+            {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
         }};
         // Binding 1 (combined image sampler, texture stage/sampler 0) is declared here unconditionally --
@@ -495,10 +503,14 @@ namespace sogen
         // uses, so this is safe for a PS that never samples (d3d9_shader_translator.cpp only emits a
         // SPIR-V sampler variable for a PS that actually reads register s0). execute_draw only writes
         // this descriptor when a texture is actually bound.
-        const std::array<vulkan_host::descriptor_binding, 2> ps_bindings{{
+        const std::array<vulkan_host::descriptor_binding, 4> ps_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
             {.binding = 1, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
+            {.binding = 2, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
+            {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
         }};
         if (this->vulkan_.create_descriptor_set_layout(device, vs_bindings, entry.vs_set_layout) != 0 ||
@@ -657,11 +669,14 @@ namespace sogen
         }
 
         // Creates a host-visible UBO of exactly `size` bytes and uploads `data` zero-padded to that
-        // size -- the fixed D3D9 constant-register cap (VS=4096B/256 float4 regs, PS=512B/32 float4
-        // regs) regardless of how many registers the app actually set, matching real D3D9 semantics
-        // where unset registers read as 0. Mirrors execute_draw's own per-draw vertex-buffer upload.
+        // size -- the fixed D3D9 constant-register caps (float: VS=4096B/256 float4 regs, PS=512B/32
+        // float4 regs; int/bool: 256B/16 regs, both stages) regardless of how many registers the app
+        // actually set, matching real D3D9 semantics where unset registers read as 0. Mirrors
+        // execute_draw's own per-draw vertex-buffer upload. Generic over the constant-register element
+        // type (float for c#, int32_t for i#, uint32_t for b#) -- same upload shape for all three.
+        template <typename T>
         bool create_and_upload_ubo(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device, const size_t size,
-                                   const std::vector<float>& data, uint64_t& out_buffer, uint64_t& out_memory)
+                                   const std::vector<T>& data, uint64_t& out_buffer, uint64_t& out_memory)
         {
             if (vulkan.create_buffer(device, size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, out_buffer) != 0 || out_buffer == 0)
             {
@@ -683,7 +698,7 @@ namespace sogen
             vulkan.bind_buffer_memory(device, out_buffer, out_memory, 0);
 
             std::vector<std::byte> staging(size, std::byte{0});
-            const size_t bytes = std::min(data.size() * sizeof(float), size);
+            const size_t bytes = std::min(data.size() * sizeof(T), size);
             if (bytes > 0)
             {
                 std::memcpy(staging.data(), data.data(), bytes);
@@ -942,19 +957,70 @@ namespace sogen
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
         constexpr size_t ps_ubo_size = 32 * 4 * sizeof(float);
+        // D3D9 SM3 int/bool constant-register caps (16 registers each, both stages -- fill_d3d9caps),
+        // each register expanded to a 16-byte slot (see vs/ps_const_i/b's own comments in d3d9_host.hpp).
+        constexpr size_t int_bool_ubo_size = 16 * 4 * sizeof(uint32_t);
         uint64_t vs_ubo = 0;
         uint64_t vs_ubo_memory = 0;
         uint64_t ps_ubo = 0;
         uint64_t ps_ubo_memory = 0;
+        uint64_t vs_ubo_i = 0;
+        uint64_t vs_ubo_i_memory = 0;
+        uint64_t ps_ubo_i = 0;
+        uint64_t ps_ubo_i_memory = 0;
+        uint64_t vs_ubo_b = 0;
+        uint64_t vs_ubo_b_memory = 0;
+        uint64_t ps_ubo_b = 0;
+        uint64_t ps_ubo_b_memory = 0;
         uint64_t tex_sampler = 0;
         uint64_t tex_image_view = 0;
         std::array<uint64_t, 2> descriptor_sets{};
         if (use_programmable)
         {
+            const auto destroy_const_ubos = [&]() {
+                if (vs_ubo != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, vs_ubo);
+                    this->vulkan_.free_memory(device, vs_ubo_memory);
+                }
+                if (ps_ubo != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, ps_ubo);
+                    this->vulkan_.free_memory(device, ps_ubo_memory);
+                }
+                if (vs_ubo_i != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, vs_ubo_i);
+                    this->vulkan_.free_memory(device, vs_ubo_i_memory);
+                }
+                if (ps_ubo_i != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, ps_ubo_i);
+                    this->vulkan_.free_memory(device, ps_ubo_i_memory);
+                }
+                if (vs_ubo_b != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, vs_ubo_b);
+                    this->vulkan_.free_memory(device, vs_ubo_b_memory);
+                }
+                if (ps_ubo_b != 0)
+                {
+                    this->vulkan_.destroy_buffer(device, ps_ubo_b);
+                    this->vulkan_.free_memory(device, ps_ubo_b_memory);
+                }
+            };
             if (!create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, vs_ubo_size, this->state_.vs_const_f,
                                        vs_ubo, vs_ubo_memory) ||
                 !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, ps_ubo_size, this->state_.ps_const_f,
-                                       ps_ubo, ps_ubo_memory))
+                                       ps_ubo, ps_ubo_memory) ||
+                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
+                                       this->state_.vs_const_i, vs_ubo_i, vs_ubo_i_memory) ||
+                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
+                                       this->state_.ps_const_i, ps_ubo_i, ps_ubo_i_memory) ||
+                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
+                                       this->state_.vs_const_b, vs_ubo_b, vs_ubo_b_memory) ||
+                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
+                                       this->state_.ps_const_b, ps_ubo_b, ps_ubo_b_memory))
             {
                 this->vulkan_.destroy_buffer(device, vertex_buffer);
                 this->vulkan_.free_memory(device, vertex_memory);
@@ -963,11 +1029,7 @@ namespace sogen
                     this->vulkan_.destroy_buffer(device, index_buffer_vk);
                     this->vulkan_.free_memory(device, index_memory);
                 }
-                if (vs_ubo != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, vs_ubo);
-                    this->vulkan_.free_memory(device, vs_ubo_memory);
-                }
+                destroy_const_ubos();
                 return d3d_ok;
             }
 
@@ -1019,10 +1081,7 @@ namespace sogen
                     this->vulkan_.destroy_buffer(device, index_buffer_vk);
                     this->vulkan_.free_memory(device, index_memory);
                 }
-                this->vulkan_.destroy_buffer(device, vs_ubo);
-                this->vulkan_.free_memory(device, vs_ubo_memory);
-                this->vulkan_.destroy_buffer(device, ps_ubo);
-                this->vulkan_.free_memory(device, ps_ubo_memory);
+                destroy_const_ubos();
                 if (tex_sampler != 0)
                 {
                     this->vulkan_.destroy_sampler(device, tex_sampler);
@@ -1048,6 +1107,46 @@ namespace sogen
                  .buffer = ps_ubo,
                  .offset = 0,
                  .range = ps_ubo_size,
+                 .sampler = 0,
+                 .image_view = 0,
+                 .image_layout = 0},
+                {.dst_set = descriptor_sets[0],
+                 .dst_binding = 2,
+                 .dst_array_element = 0,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .buffer = vs_ubo_i,
+                 .offset = 0,
+                 .range = int_bool_ubo_size,
+                 .sampler = 0,
+                 .image_view = 0,
+                 .image_layout = 0},
+                {.dst_set = descriptor_sets[0],
+                 .dst_binding = 3,
+                 .dst_array_element = 0,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .buffer = vs_ubo_b,
+                 .offset = 0,
+                 .range = int_bool_ubo_size,
+                 .sampler = 0,
+                 .image_view = 0,
+                 .image_layout = 0},
+                {.dst_set = descriptor_sets[1],
+                 .dst_binding = 2,
+                 .dst_array_element = 0,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .buffer = ps_ubo_i,
+                 .offset = 0,
+                 .range = int_bool_ubo_size,
+                 .sampler = 0,
+                 .image_view = 0,
+                 .image_layout = 0},
+                {.dst_set = descriptor_sets[1],
+                 .dst_binding = 3,
+                 .dst_array_element = 0,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .buffer = ps_ubo_b,
+                 .offset = 0,
+                 .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
@@ -1172,6 +1271,14 @@ namespace sogen
             this->vulkan_.free_memory(device, vs_ubo_memory);
             this->vulkan_.destroy_buffer(device, ps_ubo);
             this->vulkan_.free_memory(device, ps_ubo_memory);
+            this->vulkan_.destroy_buffer(device, vs_ubo_i);
+            this->vulkan_.free_memory(device, vs_ubo_i_memory);
+            this->vulkan_.destroy_buffer(device, ps_ubo_i);
+            this->vulkan_.free_memory(device, ps_ubo_i_memory);
+            this->vulkan_.destroy_buffer(device, vs_ubo_b);
+            this->vulkan_.free_memory(device, vs_ubo_b_memory);
+            this->vulkan_.destroy_buffer(device, ps_ubo_b);
+            this->vulkan_.free_memory(device, ps_ubo_b_memory);
             if (tex_sampler != 0)
             {
                 this->vulkan_.destroy_sampler(device, tex_sampler);

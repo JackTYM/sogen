@@ -137,11 +137,10 @@ namespace sogen
 
         // Per-device fixed-function/DDI state. Most of this is now consumed by execute_draw and the
         // pipeline builders (render_state, bound_textures, sampler_state, index_buffer, stream_sources/
-        // strides, vertex_decl, vs/ps_const_f, render_targets, depth_stencil); texture_stage_state (the
-        // non-sampler TSS values, e.g. D3DTSS_COLOROP) and stream_frequencies are still write-only,
-        // tracked for fixed-function texture combining and instancing respectively, neither in scope yet.
-        // vs/ps_const_i and vs/ps_const_b are likewise write-only until the pipeline builders gain int/
-        // bool CBV descriptors.
+        // strides, vertex_decl, vs/ps_const_f, vs/ps_const_i, vs/ps_const_b, render_targets,
+        // depth_stencil); texture_stage_state (the non-sampler TSS values, e.g. D3DTSS_COLOROP) and
+        // stream_frequencies are still write-only, tracked for fixed-function texture combining and
+        // instancing respectively, neither in scope yet.
         struct device_state
         {
             std::unordered_map<uint32_t, uint32_t> render_state{};

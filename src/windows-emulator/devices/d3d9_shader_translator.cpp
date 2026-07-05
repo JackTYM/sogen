@@ -2,6 +2,7 @@
 
 #include <vkd3d_shader.h>
 
+#include <array>
 #include <cstring>
 
 namespace sogen
@@ -46,19 +47,42 @@ namespace sogen
             spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
             spirv_info.next = varying_map_info;
 
-            const vkd3d_shader_resource_binding const_buffer_binding{
-                .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
-                .register_space = 0,
-                .register_index = VKD3D_SHADER_D3DBC_FLOAT_CONSTANT_REGISTER,
-                .shader_visibility = shader_visibility,
-                .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
-                .binding = {.set = descriptor_set, .binding = 0, .count = 1},
-            };
+            // Matches d3d9_host.cpp's ensure_programmable_pipeline bindings: float-const UBO at binding
+            // 0, int-const UBO at binding 2, bool-const UBO at binding 3 (binding 1 is the PS-only
+            // combined-image-sampler, declared separately below/at the call site, not here). All three
+            // are declared unconditionally, same rationale as the float one always was -- vkd3d only
+            // emits an actual SPIR-V descriptor for a register file a shader statically references.
+            const std::array<vkd3d_shader_resource_binding, 3> const_buffer_bindings{{
+                {
+                    .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
+                    .register_space = 0,
+                    .register_index = VKD3D_SHADER_D3DBC_FLOAT_CONSTANT_REGISTER,
+                    .shader_visibility = shader_visibility,
+                    .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
+                    .binding = {.set = descriptor_set, .binding = 0, .count = 1},
+                },
+                {
+                    .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
+                    .register_space = 0,
+                    .register_index = VKD3D_SHADER_D3DBC_INT_CONSTANT_REGISTER,
+                    .shader_visibility = shader_visibility,
+                    .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
+                    .binding = {.set = descriptor_set, .binding = 2, .count = 1},
+                },
+                {
+                    .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
+                    .register_space = 0,
+                    .register_index = VKD3D_SHADER_D3DBC_BOOL_CONSTANT_REGISTER,
+                    .shader_visibility = shader_visibility,
+                    .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
+                    .binding = {.set = descriptor_set, .binding = 3, .count = 1},
+                },
+            }};
 
             vkd3d_shader_interface_info interface_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_INTERFACE_INFO};
             interface_info.next = &spirv_info;
-            interface_info.bindings = &const_buffer_binding;
-            interface_info.binding_count = 1;
+            interface_info.bindings = const_buffer_bindings.data();
+            interface_info.binding_count = static_cast<unsigned int>(const_buffer_bindings.size());
             interface_info.combined_samplers = combined_samplers;
             interface_info.combined_sampler_count = combined_sampler_count;
 
