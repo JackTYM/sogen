@@ -40,7 +40,6 @@ namespace sogen
     // d3d9_format_to_vulkan itself signals an unsupported format rather than guessing one.
     parsed_vertex_decl parse_vertex_decl(std::span<const std::byte> blob);
 
-
     // Host-side D3D9 DDI decoder. Owned by gpu_command_processor (gpu_bridge.cpp), which forwards the
     // D3D9 opcode block (gpu_bridge::command's 0x900 range, see d3d9-command-protocol/
     // d3d9_command_protocol.hpp) here after reading guest memory into plain buffers.

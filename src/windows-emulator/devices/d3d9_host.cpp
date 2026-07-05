@@ -1779,7 +1779,15 @@ namespace sogen
                 .vk_format = vk_format,
                 .offset = element.offset,
             });
-            out.used_binding_mask |= (1u << element.stream);
+            // element.stream is an untrusted guest-supplied uint16_t (see d3d9_host.hpp's
+            // bound_textures/render_state comment for this same class of guest-value concern) --
+            // shifting a uint32_t by >= 32 is UB, so bound the shift instead of trusting the wire
+            // value. This project's own UMD caps MaxStreams at 16 (sogen_d3d9_umd.cpp), so every
+            // legitimate declaration is unaffected.
+            if (element.stream < 32)
+            {
+                out.used_binding_mask |= (1u << element.stream);
+            }
         }
 
         return out;

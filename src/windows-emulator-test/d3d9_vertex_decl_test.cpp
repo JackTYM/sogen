@@ -97,4 +97,20 @@ namespace sogen::test
         EXPECT_TRUE(parsed.attributes.empty());
         EXPECT_EQ(parsed.used_binding_mask, 0u);
     }
+
+    TEST(D3D9VertexDeclTest, OutOfRangeStreamDoesNotShiftPastBitWidth)
+    {
+        // element.stream is an untrusted guest-supplied uint16_t; a stream index >= 32 must not be
+        // shifted into used_binding_mask (uint32_t) -- that would be undefined behavior. The
+        // attribute itself is still produced (binding just carries the raw, out-of-range value
+        // through unchanged), only the mask update is guarded.
+        std::vector<std::byte> blob;
+        append_element(blob, /*stream=*/12345, /*offset=*/0, d3ddecltype_float3, d3ddeclusage_position, 0);
+
+        const parsed_vertex_decl parsed = parse_vertex_decl(blob);
+
+        ASSERT_EQ(parsed.attributes.size(), 1u);
+        EXPECT_EQ(parsed.attributes[0].binding, 12345u);
+        EXPECT_EQ(parsed.used_binding_mask, 0u);
+    }
 } // namespace sogen::test
