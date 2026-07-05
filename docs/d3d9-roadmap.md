@@ -60,8 +60,9 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   proves); (3) a narrower quirk where exact `0.0`/`1.0` literals inside a branch get pulled out via a
   separate, never-set shadow float register (worked around with `0.999`/`0.001`).
   Confirmed pixel-exact on **both x64 and x86/WoW64** through the real 32-bit Microsoft `d3d9.dll`
-  (Task 5): `pixel(320,240)=B=26 G=00 R=FF A=FF` and both analytic checks pass identically on both
-  architectures. The one x86 wrinkle Task 5 hit was not a new architecture bug: the staged x86 UMD DLL
+  (Task 5): `pixel(320,240)=B=26 G=FF R=00 A=FF` and both analytic checks pass identically on both
+  architectures (a later follow-up test extension, proving the CBV stride math at a nonzero register
+  in addition to register 0, swapped which branch's color the test now expects here). The one x86 wrinkle Task 5 hit was not a new architecture bug: the staged x86 UMD DLL
   (`sogen_d3d9um-x86.dll`) had simply not been rebuilt since Task 1 added the new DDI handlers to
   `sogen_d3d9_umd.cpp` — rebuilding it (no source change) fixed the mismatch. See
   `src/samples/sogen-d3d9-umd/README.md` and `HANDOFF_MACBOOK.md` §22 for the full narrative.
