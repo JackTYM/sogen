@@ -62,6 +62,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_int_bool_const_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_scissor_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-scissor-test-x64.exe -ld3d9
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_mrt_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-mrt-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`, and
@@ -85,6 +88,7 @@ cp d3d9-texcoord-test-x64.exe <root>/filesys/c/d3d9-texcoord-test.exe
 cp d3d9-partial-lock-test-x64.exe <root>/filesys/c/d3d9-partial-lock-test.exe
 cp d3d9-int-bool-const-test-x64.exe <root>/filesys/c/d3d9-int-bool-const-test.exe
 cp d3d9-scissor-test-x64.exe <root>/filesys/c/d3d9-scissor-test.exe
+cp d3d9-mrt-test-x64.exe <root>/filesys/c/d3d9-mrt-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
@@ -113,6 +117,7 @@ shader, const, texture, texcoord, and int-bool-const tests.
 ./analyzer -e <root> -c c:/d3d9-texcoord-test.exe
 ./analyzer -e <root> -c c:/d3d9-int-bool-const-test.exe
 ./analyzer -e <root> -c c:/d3d9-scissor-test.exe
+./analyzer -e <root> -c c:/d3d9-mrt-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
@@ -201,6 +206,24 @@ re-clears the RT, and redraws the same quad -- all three checkpoints must now be
 default/no-scissor path still fills the whole RT (regression safety for the common case). Expect
 `SetRenderState(SCISSORTESTENABLE, TRUE/FALSE) hr=0x00000000`, both `DrawIndexedPrimitive(...)
 hr=0x00000000` lines, six `PASS:` lines, and `[d3d9-scissor-test] ALL CHECKS PASSED`.
+
+`d3d9-mrt-test.exe` proves real multiple-render-target (MRT) rendering and the all-bound-RTs
+`Clear()` fix both work end to end, using a real `vs_2_0`/`ps_2_0` shader pair (`D3DFVF_XYZ|
+D3DFVF_DIFFUSE`, matching `d3d9_const_test.cpp`'s recognized vertex layout -- a fixed-function VS
+combined with a programmable PS doesn't reach the real PS at all, since `execute_draw` only takes the
+programmable-pipeline path when both a VS and a PS are bound). The PS writes two distinct constant
+colors to a struct return with `COLOR0`/`COLOR1` semantics (D3D9's `ps_2_0` ISA defines `oC0`-`oC3`
+explicitly; MRT output is gated by `D3DCAPS9::NumSimultaneousRTs`, not by shader model). Two 640x480
+off-screen render targets (RT0, RT1, sized to match `pfnCreateResource`'s hardcoded 640x480 KNOWN
+LIMITATION) are bound ONCE at the start (`SetRenderTarget(0, RT0)` / `SetRenderTarget(1, RT1)`) and
+never rebound for the rest of the test. Sub-pass 1 draws a full-screen quad and `LockRect`-reads back
+both RTs: RT0 must be entirely RED (`oC0`), RT1 must be entirely GREEN (`oC1`) -- the old, pre-Task-3
+code only rendered into RT0, so RT1 would have stayed black. Sub-pass 2 calls
+`Clear(D3DCLEAR_TARGET, yellow)` with both RTs still bound and re-reads both: both must now be
+entirely YELLOW -- the old, pre-Task-4 code only cleared RT0, so RT1 would have stayed GREEN. Expect
+`CreateVertexShader`/`CreatePixelShader`/both `CreateRenderTarget`/both `SetRenderTarget`/
+`DrawIndexedPrimitive`/`Clear(yellow)` all `hr=0x00000000`, twelve `PASS:` lines (three checkpoints
+per RT per sub-pass), and `[d3d9-mrt-test] ALL CHECKS PASSED`.
 
 `d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
 dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a
