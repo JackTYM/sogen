@@ -6,12 +6,41 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
 
 namespace sogen
 {
+    // One D3DVERTEXELEMENT9-derived attribute, translated to what a Vulkan graphics pipeline needs.
+    // binding is the element's own D3DVERTEXELEMENT9::Stream (so multi-stream vertex sources map to
+    // distinct Vulkan vertex bindings, one per D3D9 stream); offset is the element's own Offset,
+    // relative to the start of one vertex in that stream. See parse_vertex_decl's definition
+    // (d3d9_host.cpp) for how location is derived -- it is NOT a function of usage/usage_index alone,
+    // despite D3DDECLUSAGE being the natural-looking key; that finding is written up there in full.
+    struct parsed_vertex_attribute
+    {
+        uint32_t location;
+        uint32_t binding;
+        uint32_t vk_format;
+        uint32_t offset;
+    };
+
+    struct parsed_vertex_decl
+    {
+        std::vector<parsed_vertex_attribute> attributes;
+        uint32_t used_binding_mask{}; // bit i set => stream i is referenced by this declaration
+    };
+
+    // Reinterprets blob as a back-to-back array of d3d9_cmd::vertex_element (8 bytes each; blob.size()
+    // must be a multiple of that, any remainder is ignored) and produces one parsed_vertex_attribute
+    // per element whose D3DDECLTYPE is recognized by d3d9_format.hpp's d3d9_decl_type_to_vulkan --
+    // elements with an unrecognized type are skipped (not added to attributes), matching how
+    // d3d9_format_to_vulkan itself signals an unsupported format rather than guessing one.
+    parsed_vertex_decl parse_vertex_decl(std::span<const std::byte> blob);
+
+
     // Host-side D3D9 DDI decoder. Owned by gpu_command_processor (gpu_bridge.cpp), which forwards the
     // D3D9 opcode block (gpu_bridge::command's 0x900 range, see d3d9-command-protocol/
     // d3d9_command_protocol.hpp) here after reading guest memory into plain buffers.
@@ -134,6 +163,10 @@ namespace sogen
         struct vertex_decl_entry
         {
             std::vector<std::byte> elements; // raw d3d9_cmd::vertex_element entries
+            // Populated eagerly by create_vertex_decl right after the memcpy above -- a D3D9 vertex
+            // declaration is immutable once created (no update DDI exists), so there is no staleness
+            // to guard against and no reason to defer this to first draw-time use.
+            std::optional<parsed_vertex_decl> parsed;
         };
 
         // Per-device fixed-function/DDI state. Most of this is now consumed by execute_draw and the

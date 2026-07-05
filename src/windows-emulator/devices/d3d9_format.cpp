@@ -20,6 +20,13 @@ namespace sogen
         constexpr uint32_t d3dfmt_dxt3 = 0x33545844;
         constexpr uint32_t d3dfmt_dxt5 = 0x35545844;
 
+        // D3DDECLTYPE values, verified against mingw-w64's d3d9types.h.
+        constexpr uint32_t d3ddecltype_float1 = 0;
+        constexpr uint32_t d3ddecltype_float2 = 1;
+        constexpr uint32_t d3ddecltype_float3 = 2;
+        constexpr uint32_t d3ddecltype_float4 = 3;
+        constexpr uint32_t d3ddecltype_d3dcolor = 4;
+
         // VkFormat values, verified against deps/Vulkan-Headers/include/vulkan/vulkan_core.h.
         constexpr uint32_t vk_format_r5g6b5_unorm_pack16 = 4;
         constexpr uint32_t vk_format_r8_unorm = 9;
@@ -27,6 +34,10 @@ namespace sogen
         constexpr uint32_t vk_format_r8g8b8a8_snorm = 38;
         constexpr uint32_t vk_format_b8g8r8a8_unorm = 44;
         constexpr uint32_t vk_format_r16g16b16a16_sfloat = 97;
+        constexpr uint32_t vk_format_r32_sfloat = 100;
+        constexpr uint32_t vk_format_r32g32_sfloat = 103;
+        constexpr uint32_t vk_format_r32g32b32_sfloat = 106;
+        constexpr uint32_t vk_format_r32g32b32a32_sfloat = 109;
         constexpr uint32_t vk_format_d32_sfloat = 126;
         constexpr uint32_t vk_format_d32_sfloat_s8_uint = 130;
         constexpr uint32_t vk_format_bc1_rgba_unorm_block = 133;
@@ -84,6 +95,32 @@ namespace sogen
             return true;
         case d3dfmt_dxt5:
             out_vk_format = vk_format_bc3_unorm_block;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool d3d9_decl_type_to_vulkan(const uint32_t d3ddecltype, uint32_t& out_vk_format)
+    {
+        switch (d3ddecltype)
+        {
+        case d3ddecltype_float1:
+            out_vk_format = vk_format_r32_sfloat;
+            return true;
+        case d3ddecltype_float2:
+            out_vk_format = vk_format_r32g32_sfloat;
+            return true;
+        case d3ddecltype_float3:
+            out_vk_format = vk_format_r32g32b32_sfloat;
+            return true;
+        case d3ddecltype_float4:
+            out_vk_format = vk_format_r32g32b32a32_sfloat;
+            return true;
+        case d3ddecltype_d3dcolor:
+            // Matches the fixed-function path's existing D3DCOLOR-attribute convention (see
+            // ensure_pipeline's attributes array in d3d9_host.cpp).
+            out_vk_format = vk_format_b8g8r8a8_unorm;
             return true;
         default:
             return false;

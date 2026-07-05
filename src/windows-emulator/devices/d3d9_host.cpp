@@ -1704,6 +1704,87 @@ namespace sogen
         return this->create_vertex_shader(tokens, token_size_bytes, out_shader);
     }
 
+    // --- Vertex declaration parsing -------------------------------------------------------------
+    //
+    // Location-assignment investigation (Task 7 of the multi-stream-vertex-source plan):
+    //
+    // The open question was how vkd3d-shader assigns SPIR-V `Location` decorations to a translated
+    // D3D9 (SM1-3 "D3DBC") vertex shader's input registers (v0, v1, ...), since that is exactly what
+    // a Vulkan VkVertexInputAttributeDescription's own `location` field must match.
+    //
+    // Read directly out of this project's vendored deps/vkd3d/libs/vkd3d-shader sources:
+    //   - d3dbc.c's add_signature_element (~line 707) sets `element->target_location = register_index`
+    //     unconditionally for every D3DBC (SM1-3) input-signature element -- register_index being the
+    //     literal v# the shader's own `dcl_<usage><index> vN` token declared.
+    //   - spirv.c's spirv_compiler_emit_input_register (~lines 5725/5735) reads that same
+    //     `target_location` straight into `OpDecorate %v<N> Location <target_location>` for every
+    //     vertex-shader input, with no further remapping.
+    //   - The one place vkd3d-shader *does* rewrite `target_location` post-hoc is
+    //     vsir_program_remap_output_signature (ir.c ~line 4076), but that only ever touches
+    //     `program->output_signature` -- i.e. a VS's *output* varyings feeding a PS's input, via the
+    //     varying_map machinery d3d9_shader_translator.cpp's compile_stage() builds. It is never
+    //     consulted for a VS's own *input* signature, which is what a vertex declaration feeds.
+    //
+    // Conclusion: a compiled D3D9 vertex shader's input Location is simply its declared v# register
+    // index, decided entirely by where its HLSL input struct/D3DBC dcl instructions place that
+    // semantic -- NOT by the semantic (D3DDECLUSAGE) itself.
+    //
+    // Empirically confirmed (not just read) via this repo's own deps/vkd3d/programs/vkd3d-compiler,
+    // built ad hoc against the already-built libvkd3d-shader.dylib and run against hand-written HLSL
+    // vs_2_0 shaders, then inspected with spirv-dis:
+    //   struct { POSITION, TEXCOORD0, COLOR0 } -> dcl_position v0, dcl_texcoord0 v1, dcl_color v2
+    //                                          -> OpDecorate %v0/%v1/%v2 Location 0/1/2
+    //   struct { POSITION, COLOR0, TEXCOORD0 } -> dcl_position v0, dcl_color v1, dcl_texcoord0 v2
+    //                                          -> OpDecorate %v0/%v1/%v2 Location 0/1/2
+    //   struct { COLOR0, POSITION, TEXCOORD0 } -> dcl_color v0, dcl_position v1, dcl_texcoord0 v2
+    //                                          -> OpDecorate %v0/%v1/%v2 Location 0/1/2
+    // All three assign Location purely by struct/declaration order; POSITION gets no special-casing
+    // (the third case puts it at v1/Location 1, not v0/Location 0). This directly rules out a static
+    // D3DDECLUSAGE(+usage_index) -> location table as originally planned: usage does not determine
+    // location, declaration position does.
+    //
+    // Consequence for parse_vertex_decl below: since this parser deliberately has no visibility into
+    // the paired vertex shader (that pairing is Task 8's concern, not this standalone task's), the
+    // only location it can produce is each element's own ordinal position within the D3DVERTEXELEMENT9
+    // array `blob` encodes -- under the (documented, currently-true-for-every-shader-in-this-repo)
+    // convention that a vertex declaration's element order matches its paired vertex shader's HLSL
+    // input-struct order. Every existing shader in this codebase (d3d9_const_test.cpp,
+    // d3d9_shader_test.cpp, d3d9_texcoord_test.cpp, etc.) declares POSITION first, matching this.
+    // Task 8/9 must preserve that convention for new multi-stream shapes; the fully general fix (cross-
+    // referencing the actually-bound VS's own scanned input signature instead of assuming declaration
+    // order) is future work if that convention is ever violated.
+    parsed_vertex_decl parse_vertex_decl(const std::span<const std::byte> blob)
+    {
+        parsed_vertex_decl out{};
+
+        const size_t element_count = blob.size() / sizeof(d3d9_cmd::vertex_element);
+        std::vector<d3d9_cmd::vertex_element> elements(element_count);
+        if (element_count != 0)
+        {
+            std::memcpy(elements.data(), blob.data(), element_count * sizeof(d3d9_cmd::vertex_element));
+        }
+
+        for (uint32_t location = 0; location < element_count; ++location)
+        {
+            const d3d9_cmd::vertex_element& element = elements[location];
+            uint32_t vk_format = 0;
+            if (!d3d9_decl_type_to_vulkan(element.type, vk_format))
+            {
+                continue; // Unrecognized D3DDECLTYPE -- skip, don't guess a format (see the .hpp comment).
+            }
+
+            out.attributes.push_back({
+                .location = location,
+                .binding = element.stream,
+                .vk_format = vk_format,
+                .offset = element.offset,
+            });
+            out.used_binding_mask |= (1u << element.stream);
+        }
+
+        return out;
+    }
+
     int32_t d3d9_host::create_vertex_decl(const void* elements, const size_t element_count, const size_t element_size_bytes,
                                           uint64_t& out_decl)
     {
@@ -1719,6 +1800,7 @@ namespace sogen
         {
             std::memcpy(entry.elements.data(), elements, entry.elements.size());
         }
+        entry.parsed = parse_vertex_decl(entry.elements);
 
         const uint64_t id = this->allocate_id();
         this->vertex_decls_.emplace(id, std::move(entry));
