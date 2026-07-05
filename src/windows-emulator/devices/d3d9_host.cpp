@@ -1643,6 +1643,58 @@ namespace sogen
             std::memcpy(target.data() + static_cast<size_t>(req.start_register) * 4, payload + sizeof(req), bytes);
             return d3d_ok;
         }
+        case gpu_bridge::command::d3d9_set_vs_const_i:
+        case gpu_bridge::command::d3d9_set_ps_const_i: {
+            d3d9_cmd::set_const_i_record req{};
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            const size_t int_count = static_cast<size_t>(req.vector4_count) * 4;
+            const size_t bytes = int_count * sizeof(int32_t);
+            if (size - sizeof(req) < bytes)
+            {
+                return d3derr_invalidcall;
+            }
+            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_i
+                              ? this->state_.vs_const_i
+                              : this->state_.ps_const_i;
+            const size_t required = static_cast<size_t>(req.start_register) * 4 + int_count;
+            if (target.size() < required)
+            {
+                target.resize(required);
+            }
+            std::memcpy(target.data() + static_cast<size_t>(req.start_register) * 4, payload + sizeof(req), bytes);
+            return d3d_ok;
+        }
+        case gpu_bridge::command::d3d9_set_vs_const_b:
+        case gpu_bridge::command::d3d9_set_ps_const_b: {
+            d3d9_cmd::set_const_b_record req{};
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            const size_t bytes = static_cast<size_t>(req.count) * sizeof(uint32_t);
+            if (size - sizeof(req) < bytes)
+            {
+                return d3derr_invalidcall;
+            }
+            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_b
+                              ? this->state_.vs_const_b
+                              : this->state_.ps_const_b;
+            const size_t required = (static_cast<size_t>(req.start_register) + req.count) * 4;
+            if (target.size() < required)
+            {
+                target.resize(required);
+            }
+            for (uint32_t i = 0; i < req.count; ++i)
+            {
+                uint32_t value{};
+                std::memcpy(&value, payload + sizeof(req) + static_cast<size_t>(i) * sizeof(uint32_t), sizeof(value));
+                target[(static_cast<size_t>(req.start_register) + i) * 4] = value;
+            }
+            return d3d_ok;
+        }
         case gpu_bridge::command::d3d9_set_render_target: {
             d3d9_cmd::set_render_target_record req{};
             if (!read_record(payload, size, req))

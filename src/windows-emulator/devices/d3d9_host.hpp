@@ -140,6 +140,8 @@ namespace sogen
         // strides, vertex_decl, vs/ps_const_f, render_targets, depth_stencil); texture_stage_state (the
         // non-sampler TSS values, e.g. D3DTSS_COLOROP) and stream_frequencies are still write-only,
         // tracked for fixed-function texture combining and instancing respectively, neither in scope yet.
+        // vs/ps_const_i and vs/ps_const_b are likewise write-only until the pipeline builders gain int/
+        // bool CBV descriptors.
         struct device_state
         {
             std::unordered_map<uint32_t, uint32_t> render_state{};
@@ -156,6 +158,13 @@ namespace sogen
             uint64_t pixel_shader{};
             std::vector<float> vs_const_f{};
             std::vector<float> ps_const_f{};
+            std::vector<int32_t> vs_const_i{};
+            std::vector<int32_t> ps_const_i{};
+            // Expanded to 4-word (16-byte) stride per register at receipt time, matching vs/ps_const_f's
+            // layout, even though the wire payload itself is tightly packed (see d3d9_set_vs_const_b's
+            // handler in d3d9_host.cpp) -- only element (register * 4) is ever non-zero.
+            std::vector<uint32_t> vs_const_b{};
+            std::vector<uint32_t> ps_const_b{};
             std::array<uint64_t, 4> render_targets{};
             uint64_t depth_stencil{};
         };
