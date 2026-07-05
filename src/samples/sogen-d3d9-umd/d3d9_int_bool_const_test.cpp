@@ -1,8 +1,16 @@
 // D3D9-over-Vulkan int (i#) / bool (b#) shader constant register end-to-end test (see
 // .claude/plans/jazzy-giggling-cloud.md, Task 4). Mirrors d3d9_const_test.cpp's proven float-constant
-// (c#) structure, but exercises REAL vs_2_0 flow control instead of a straight-line shader: a static
-// bool branch selects between two unambiguous branch colors, and a register-bound for-loop
-// (register(i0)) accumulates a small per-iteration delta into the blue channel.
+// (c#) structure, but exercises REAL vs_2_0 flow control instead of a straight-line shader: two static
+// bool branches (b0, b1) select between three unambiguous branch colors, and a register-bound for-loop
+// (register(i1)) accumulates a small per-iteration delta into the blue channel.
+//
+// Both the bool and int registers are deliberately exercised at a NONZERO start register (b1, i1), not
+// just b0/i0: the host stores both int and bool constant registers at a 16-byte (4-word) stride per
+// register, so register 0's data always lands at word/element index 0 regardless of whether that
+// stride is actually 4 words (correct) or some other, wrong value -- register 0 alone cannot distinguish
+// "the stride math is correct" from "the stride math is broken but register 0 accidentally still
+// works." b0 is kept in play too (set to FALSE here) so a wrong stride that made b1's write bleed into
+// b0's slot (or vice versa) would also be caught -- the branch structure below reads BOTH registers.
 //
 // Three non-obvious d3dcompiler_43/HLSL findings drove this shader's exact shape (all confirmed
 // empirically by compiling isolated variants and inspecting the resulting D3DBC bytecode):
@@ -54,16 +62,17 @@
 // Loop-vs-unroll verification: the VS bytecode is dumped and walked as real D3DBC tokens (opcode in
 // the low 16 bits, instruction length in bits 24-27, per vkd3d-shader's own
 // VKD3D_SM1_INSTRUCTION_LENGTH_SHIFT/_MASK in deps/vkd3d/libs/vkd3d-shader/d3dbc.c) looking for a
-// LOOP/ENDLOOP or REP/ENDREP opcode pair (0x1B/0x1D or 0x26/0x27), and for the IF opcode (0x28)
-// confirming its operand is the real b0 CONSTBOOL register (type 0x0E). Since loopTripCount.x is a
-// genuine runtime register read with no compile-time literal anywhere in the HLSL source,
-// d3dcompiler_43 has no fixed trip count to unroll around in the first place -- the dump confirms which
-// real loop opcode it chose, not just that unrolling didn't happen.
+// LOOP/ENDLOOP or REP/ENDREP opcode pair (0x1B/0x1D or 0x26/0x27), and for each IF opcode (0x28)
+// confirming its operand is a real CONSTBOOL register (type 0x0E) -- one reading b0, one reading b1.
+// Since loopTripCount.x is a genuine runtime register read with no compile-time literal anywhere in the
+// HLSL source, d3dcompiler_43 has no fixed trip count to unroll around in the first place -- the dump
+// confirms which real loop opcode it chose, not just that unrolling didn't happen.
 //
 // Renders one triangle to an off-screen render target and LockRect-reads back a single point (the
 // output color is constant across the whole triangle, so any interior point works): the R/G channels
-// prove the bool branch was taken from the real runtime b0 value, and the B channel proves the loop
-// ran exactly N iterations driven by the real runtime i0 value.
+// prove the bool branches were taken from the real runtime b0 AND b1 values (b0=FALSE, b1=TRUE selects
+// a third, distinct branch color that neither a stuck-false b1 nor a stuck-true b0 would produce), and
+// the B channel proves the loop ran exactly N iterations driven by the real runtime i1 value.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -79,7 +88,8 @@ namespace
 struct VSInput { float3 pos : POSITION; float4 color : COLOR0; };
 struct VSOutput { float4 pos : POSITION; float4 color : COLOR0; };
 bool useAltColor;
-int4 loopTripCount : register(i0);
+bool useAltColor2;
+int4 loopTripCount : register(i1);
 VSOutput main(VSInput input)
 {
     VSOutput output;
@@ -91,23 +101,33 @@ VSOutput main(VSInput input)
         accum += 0.05;
     }
 
-    // The early-return shape (as opposed to if/else assigning a shared trailing variable) is
-    // required to force a genuine D3DBC IF instruction reading the b0 CONSTBOOL register -- see this
-    // file's header comment. An if/else merging into one trailing output.color write gets flattened by
-    // d3dcompiler_43 into select-style arithmetic backed by an auto-allocated FLOAT (c#) register that
-    // SetVertexShaderConstantB never populates, silently defeating the whole point of this test
-    // (confirmed empirically; see the header comment's "genuine host/compiler finding" note).
+    // Each early-return guard clause below (as opposed to if/else assigning a shared trailing
+    // variable) is required to force a genuine D3DBC IF instruction reading its CONSTBOOL register --
+    // see this file's header comment. An if/else merging into one trailing output.color write gets
+    // flattened by d3dcompiler_43 into select-style arithmetic backed by an auto-allocated FLOAT (c#)
+    // register that SetVertexShaderConstantB never populates, silently defeating the whole point of
+    // this test (confirmed empirically; see the header comment's "genuine host/compiler finding" note).
     //
     // 0.999/0.001 (not the exact 0.0/1.0 pair) sidesteps a second, narrower d3dcompiler_43 quirk: exact
     // 0.0/1.0 literals here get pulled out of the real branch and recomputed via SGE against a SEPARATE,
     // never-set shadow float register -- see the header comment's finding #3. 0.999/0.001 round to the
     // exact same 0xFF/0x00 bytes as 1.0/0.0 (see channel_close's tolerance below) but do not trigger it.
+    //
+    // useAltColor (b0) is checked first, useAltColor2 (b1) second: this test sets b0=FALSE/b1=TRUE, so
+    // reaching the useAltColor2 branch below proves BOTH registers were read correctly -- b0 must have
+    // come back false (not leaked/aliased from b1's write) and b1 must have come back true (not stuck
+    // at its never-set default) for this exact branch's color to appear in the rendered pixel.
     if (useAltColor)
     {
         output.color = float4(0.999, 0.001, accum, 1.0);
         return output;
     }
-    output.color = float4(0.001, 0.999, accum, 1.0);
+    if (useAltColor2)
+    {
+        output.color = float4(0.001, 0.999, accum, 1.0);
+        return output;
+    }
+    output.color = float4(0.001, 0.001, accum, 1.0);
     return output;
 }
 )";
@@ -120,8 +140,10 @@ float4 main(PSInput input) : COLOR0
 }
 )";
 
-    // Runtime-only inputs -- never baked into the HLSL above.
-    constexpr BOOL kUseAltColor = TRUE;
+    // Runtime-only inputs -- never baked into the HLSL above. b0=FALSE/b1=TRUE deliberately exercises
+    // BOTH the zero and a nonzero bool register in one run -- see the header comment.
+    constexpr BOOL kUseAltColor = FALSE;
+    constexpr BOOL kUseAltColor2 = TRUE;
     constexpr int kLoopTripCount[4] = {3, 0, 0, 0};
     constexpr float kAccumDelta = 0.05f;
 
@@ -162,17 +184,19 @@ float4 main(PSInput input) : COLOR0
 
     // Walks a D3DBC (SM1-3) token stream as real instructions (opcode in the low 16 bits, instruction
     // length in bits 24-27, matching vkd3d-shader's own VKD3D_SM1_INSTRUCTION_LENGTH_SHIFT/_MASK), and
-    // reports whether a genuine LOOP/ENDLOOP or REP/ENDREP opcode pair is present, and whether a genuine
-    // IF instruction reads the b0 CONSTBOOL register (as opposed to being flattened away -- see this
-    // file's header comment). Also prints the register type/number of IF's and REP's source operand, to
-    // independently confirm which physical b#/i# register the compiler actually bound
-    // useAltColor/loopTripCount to.
+    // reports whether a genuine LOOP/ENDLOOP or REP/ENDREP opcode pair is present, and whether genuine
+    // IF instructions read the b0 AND b1 CONSTBOOL registers (as opposed to being flattened away -- see
+    // this file's header comment). Also prints the register type/number of every IF's and REP's source
+    // operand, to independently confirm which physical b#/i# register the compiler actually bound
+    // useAltColor/useAltColor2/loopTripCount to.
     void scan_for_loop_opcode(const uint32_t* tokens, const size_t token_count, bool& out_saw_loop,
-                               bool& out_saw_rep, bool& out_saw_if_reading_bool0)
+                               bool& out_saw_rep, bool& out_saw_if_reading_bool0,
+                               bool& out_saw_if_reading_bool1)
     {
         out_saw_loop = false;
         out_saw_rep = false;
         out_saw_if_reading_bool0 = false;
+        out_saw_if_reading_bool1 = false;
         if (token_count == 0)
         {
             return;
@@ -214,6 +238,10 @@ float4 main(PSInput input) : COLOR0
                 if (opcode == kD3dsioIf && reg_type == kVkd3dSm1RegConstBool && reg_number == 0)
                 {
                     out_saw_if_reading_bool0 = true;
+                }
+                if (opcode == kD3dsioIf && reg_type == kVkd3dSm1RegConstBool && reg_number == 1)
+                {
+                    out_saw_if_reading_bool1 = true;
                 }
             }
             if (opcode == kD3dsioIfc && length >= 2 && i + 2 < token_count)
@@ -302,10 +330,12 @@ int main()
         bool saw_loop = false;
         bool saw_rep = false;
         bool saw_if_bool0 = false;
-        scan_for_loop_opcode(vs_tokens, vs_token_count, saw_loop, saw_rep, saw_if_bool0);
+        bool saw_if_bool1 = false;
+        scan_for_loop_opcode(vs_tokens, vs_token_count, saw_loop, saw_rep, saw_if_bool0, saw_if_bool1);
         printf("[d3d9-int-bool-const-test] VS bytecode opcode scan: saw_LOOP/ENDLOOP=%s saw_REP/ENDREP=%s "
-               "saw_IF(b0)=%s\n",
-               saw_loop ? "yes" : "no", saw_rep ? "yes" : "no", saw_if_bool0 ? "yes" : "no");
+               "saw_IF(b0)=%s saw_IF(b1)=%s\n",
+               saw_loop ? "yes" : "no", saw_rep ? "yes" : "no", saw_if_bool0 ? "yes" : "no",
+               saw_if_bool1 ? "yes" : "no");
         if (!saw_loop && !saw_rep)
         {
             printf("[d3d9-int-bool-const-test] WARNING: neither a LOOP nor a REP opcode was found in the VS "
@@ -315,6 +345,11 @@ int main()
         {
             printf("[d3d9-int-bool-const-test] WARNING: no IF instruction reading the b0 CONSTBOOL register was "
                    "found -- the bool branch may have been flattened into arithmetic that never reads b0\n");
+        }
+        if (!saw_if_bool1)
+        {
+            printf("[d3d9-int-bool-const-test] WARNING: no IF instruction reading the b1 CONSTBOOL register was "
+                   "found -- the second bool branch may have been flattened into arithmetic that never reads b1\n");
         }
     }
 
@@ -422,9 +457,11 @@ int main()
     dev->SetPixelShader(ps);
 
     HRESULT hsvb = dev->SetVertexShaderConstantB(0, &kUseAltColor, 1);
-    printf("[d3d9-int-bool-const-test] SetVertexShaderConstantB hr=0x%08lx\n", static_cast<unsigned long>(hsvb));
-    HRESULT hsvi = dev->SetVertexShaderConstantI(0, kLoopTripCount, 1);
-    printf("[d3d9-int-bool-const-test] SetVertexShaderConstantI hr=0x%08lx\n", static_cast<unsigned long>(hsvi));
+    printf("[d3d9-int-bool-const-test] SetVertexShaderConstantB(0) hr=0x%08lx\n", static_cast<unsigned long>(hsvb));
+    HRESULT hsvb2 = dev->SetVertexShaderConstantB(1, &kUseAltColor2, 1);
+    printf("[d3d9-int-bool-const-test] SetVertexShaderConstantB(1) hr=0x%08lx\n", static_cast<unsigned long>(hsvb2));
+    HRESULT hsvi = dev->SetVertexShaderConstantI(1, kLoopTripCount, 1);
+    printf("[d3d9-int-bool-const-test] SetVertexShaderConstantI(1) hr=0x%08lx\n", static_cast<unsigned long>(hsvi));
 
     dev->BeginScene();
     dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(kBackgroundR, kBackgroundG, kBackgroundB), 1.0f, 0);
@@ -449,35 +486,38 @@ int main()
         printf("[d3d9-int-bool-const-test] pixel(320,240)=B=%02X G=%02X R=%02X A=%02X\n", pixel[0], pixel[1],
                pixel[2], pixel[3]);
 
-        // Bool check: b0=TRUE must select the "alt" branch (R=255,G=0), not the default (R=0,G=255).
-        constexpr int expected_r_alt = 255;
-        constexpr int expected_g_alt = 0;
-        if (!channel_close(pixel[2], expected_r_alt) || !channel_close(pixel[1], expected_g_alt))
+        // Bool check: b0=FALSE and b1=TRUE together must select the "alt2" branch (R=0,G=255) -- neither
+        // the "alt" branch (b0 wrongly read true: R=255,G=0) nor the "neither" branch (b1 wrongly read
+        // false/stuck-zero: R=0,G=0) would produce this exact R/G pair, so this single check proves BOTH
+        // registers were read from their correct, distinct storage slots (see the header comment).
+        constexpr int expected_r_alt2 = 0;
+        constexpr int expected_g_alt2 = 255;
+        if (!channel_close(pixel[2], expected_r_alt2) || !channel_close(pixel[1], expected_g_alt2))
         {
-            printf("[d3d9-int-bool-const-test] FAIL: pixel R/G does not match the alt-branch color -- bool constant "
-                   "register b0 did not select the alt branch\n");
+            printf("[d3d9-int-bool-const-test] FAIL: pixel R/G does not match the alt2-branch color -- bool "
+                   "constant registers b0/b1 did not select the alt2 branch\n");
             ++failures;
         }
         else
         {
-            printf("[d3d9-int-bool-const-test] PASS: pixel R/G matches the alt-branch color, confirming the "
-                   "runtime bool constant drove the VS branch\n");
+            printf("[d3d9-int-bool-const-test] PASS: pixel R/G matches the alt2-branch color, confirming the "
+                   "runtime b0 (FALSE) and b1 (TRUE) bool constants both drove the VS branch correctly\n");
         }
 
-        // Int check: i0.x=3 loop iterations, each accumulating kAccumDelta into the blue channel.
+        // Int check: i1.x=3 loop iterations, each accumulating kAccumDelta into the blue channel.
         const int expected_b =
             static_cast<int>(static_cast<float>(kLoopTripCount[0]) * kAccumDelta * 255.0f + 0.5f);
         if (!channel_close(pixel[0], expected_b))
         {
             printf("[d3d9-int-bool-const-test] FAIL: pixel B=%02X does not match expected %02X -- int constant "
-                   "register i0 did not drive the loop trip count\n",
+                   "register i1 did not drive the loop trip count\n",
                    pixel[0], expected_b);
             ++failures;
         }
         else
         {
             printf("[d3d9-int-bool-const-test] PASS: pixel B=%02X matches expected %02X, confirming the runtime "
-                   "int constant drove exactly %d loop iterations\n",
+                   "int constant at register i1 drove exactly %d loop iterations\n",
                    pixel[0], expected_b, kLoopTripCount[0]);
         }
 

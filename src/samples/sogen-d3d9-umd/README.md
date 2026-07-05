@@ -164,19 +164,22 @@ previously-suspected `TEXCOORD0` interpolation bug (it did not reproduce; no hos
 `d3d9-int-bool-const-test.exe` proves the D3D9 int (`i#`) and bool (`b#`) shader constant registers
 round-trip from a guest `SetVertexShaderConstantI`/`SetVertexShaderConstantB` call, through the wire
 protocol and the int/bool CBV descriptor bindings (VS set 0 / PS set 1, bindings 2 and 3), into REAL
-runtime shader flow control -- not just raw byte delivery. The vertex shader has a genuine bool branch
-(`if (useAltColor)`, both arms an early `return` so the compiler can't flatten it into arithmetic) that
-selects between two unambiguous colors driven by `SetVertexShaderConstantB(0, ...)`, and a genuine
-register-bound loop (`for (k < loopTripCount.x)`, driven by `SetVertexShaderConstantI(0, ...)`) that
-accumulates a per-iteration delta into the blue channel. The compiled `vs_2_0` bytecode is walked as
-raw D3DBC tokens to confirm the compiler actually emitted a real `REP` opcode (not unrolled) and a real
-`IF` instruction reading the `b0` CONSTBOOL register, not just that the HRESULTs came back clean. Expect
-`SetVertexShaderConstantB hr=0x00000000`, `SetVertexShaderConstantI hr=0x00000000`,
-`saw_REP/ENDREP=yes saw_IF(b0)=yes` in the bytecode scan, both `PASS:` lines, and
-`[d3d9-int-bool-const-test] ALL CHECKS PASSED`. See this test's own header comment for the three
-d3dcompiler_43 quirks its exact shader shape works around, and `docs/d3d9-roadmap.md`/
-`HANDOFF_MACBOOK.md` §22 for the full design and RE narrative (int/bool CBV binding scheme, the missing
-IOCTL-dispatch-routing bug this test caught, and the x64/x86 parity results).
+runtime shader flow control -- not just raw byte delivery, and that the host's 16-byte-per-register
+stride is correct at a NONZERO start register, not just register 0. The vertex shader has two genuine
+bool branches (`if (useAltColor)` then `if (useAltColor2)`, every arm an early `return` so the compiler
+can't flatten them into arithmetic) driven by `SetVertexShaderConstantB(0, FALSE, 1)` and
+`SetVertexShaderConstantB(1, TRUE, 1)`, and a genuine register-bound loop (`for (k < loopTripCount.x)`,
+driven by `SetVertexShaderConstantI(1, ...)`) that accumulates a per-iteration delta into the blue
+channel. The compiled `vs_2_0` bytecode is walked as raw D3DBC tokens to confirm the compiler actually
+emitted a real `REP` opcode reading register `i1` (not unrolled) and two real `IF` instructions reading
+the `b0` and `b1` CONSTBOOL registers, not just that the HRESULTs came back clean. Expect
+`SetVertexShaderConstantB(0)`/`SetVertexShaderConstantB(1)`/`SetVertexShaderConstantI(1)`
+`hr=0x00000000`, `saw_REP/ENDREP=yes saw_IF(b0)=yes saw_IF(b1)=yes` in the bytecode scan, both `PASS:`
+lines, and `[d3d9-int-bool-const-test] ALL CHECKS PASSED`. See this test's own header comment for the
+three d3dcompiler_43 quirks its exact shader shape works around (and why b0/b1 and i1 are exercised
+together), and `docs/d3d9-roadmap.md`/`HANDOFF_MACBOOK.md` §22 for the full design and RE narrative
+(int/bool CBV binding scheme, the missing IOCTL-dispatch-routing bug this test caught, and the x64/x86
+parity results).
 
 `d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
 dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a
