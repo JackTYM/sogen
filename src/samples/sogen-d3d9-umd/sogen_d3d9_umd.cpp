@@ -1108,8 +1108,9 @@ namespace
     // separate-trailing-array convention this driver's own umd_CreateVertexShaderFunc/umd_CreatePixelShader
     // (create_shader_common) already use and already got live-RE-verified for -- the WDK's own
     // PFND3DDDI_CREATEVERTEXSHADERDECL prototype takes pVertexElements as this DDI's own third argument,
-    // matching that shape. ShaderHandle (D3DDDIARG_CREATEVERTEXSHADERDECL's own first field) is the
-    // driver's output slot, same convention as D3DDDIARG_CREATESHADERFUNC::ShaderHandle.
+    // matching that shape. ShaderHandle (D3DDDIARG_CREATEVERTEXSHADERDECL's second field, at offset 8 --
+    // NumVertexElements is first, see that struct's own comment) is the driver's output slot, same
+    // convention as D3DDDIARG_CREATESHADERFUNC::ShaderHandle.
     HRESULT APIENTRY umd_CreateVertexShaderDecl(HANDLE /*hDevice*/, D3DDDIARG_CREATEVERTEXSHADERDECL* pArgs,
                                                 CONST D3DDDIVERTEXELEMENT* pVertexElements)
     {
