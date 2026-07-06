@@ -366,9 +366,10 @@ namespace sogen
         const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
             // 2 float UBOs (VS+PS) + 2 int UBOs (VS+PS) + 2 bool UBOs (VS+PS).
             {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 6},
-            // Four combined-image-sampler slots: the PS set's bindings 1/4/5/6 (see ensure_programmable_
-            // pipeline), one per texture stage s0..s3 that execute_draw may write in a single draw.
-            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 4},
+            // max_ps_sampler_stages combined-image-sampler slots: the PS set's bindings 1/4/5/6 (see
+            // ensure_programmable_pipeline), one per texture stage s0..s3 that execute_draw may write
+            // in a single draw.
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = max_ps_sampler_stages},
         }};
         if (this->vulkan_.create_descriptor_pool(device, 2, pool_sizes, this->descriptor_pool_) != 0 ||
             this->descriptor_pool_ == 0)
@@ -581,29 +582,31 @@ namespace sogen
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
         }};
         // Combined-image-sampler bindings for texture stages s0..s3 sit at bindings 1, 4, 5, 6 (bindings 2/3
-        // are the int/bool-const UBOs) -- the exact scheme d3d9_shader_translator.cpp pins into the PS SPIR-V,
-        // ps_sampler_binding_for_stage below encodes the same s(k) -> {1,4,5,6} mapping. All four are declared
-        // here unconditionally: Vulkan allows a pipeline layout to declare more bindings than a given shader
-        // module statically uses, so this is safe both for a PS that never samples and for one that samples
-        // fewer than four stages (d3d9_shader_translator.cpp only emits a SPIR-V sampler variable for a stage
-        // the PS actually reads). execute_draw only writes each descriptor when a texture is bound to that
-        // stage. Raising the cap toward D3D9's 16-sampler max is a mechanical change here + the pool sizing.
-        const std::array<vulkan_host::descriptor_binding, 7> ps_bindings{{
+        // are the int/bool-const UBOs) -- the exact scheme d3d9_shader_translator.cpp pins into the PS SPIR-V.
+        // The sampler entries below are generated from max_ps_sampler_stages/ps_sampler_binding_for_stage
+        // (d3d9_shader_translator.hpp) rather than hand-typed, so the two sides can never independently
+        // drift on the s(k) -> binding mapping. All four are declared here unconditionally: Vulkan allows a
+        // pipeline layout to declare more bindings than a given shader module statically uses, so this is
+        // safe both for a PS that never samples and for one that samples fewer than four stages
+        // (d3d9_shader_translator.cpp only emits a SPIR-V sampler variable for a stage the PS actually
+        // reads). execute_draw only writes each descriptor when a texture is bound to that stage. Raising
+        // the cap toward D3D9's 16-sampler max is a mechanical change to max_ps_sampler_stages + the pool
+        // sizing (this constant is now the only place that needs to change for the bindings themselves).
+        std::array<vulkan_host::descriptor_binding, 3 + max_ps_sampler_stages> ps_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
-             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
-            {.binding = 1, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
             {.binding = 2, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
             {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
-            {.binding = 4, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
-             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
-            {.binding = 5, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
-             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
-            {.binding = 6, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
-             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
         }};
+        for (uint32_t stage = 0; stage < max_ps_sampler_stages; ++stage)
+        {
+            ps_bindings[3 + stage] = {.binding = ps_sampler_binding_for_stage(stage),
+                                      .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                      .descriptor_count = 1,
+                                      .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT};
+        }
         if (this->vulkan_.create_descriptor_set_layout(device, vs_bindings, entry.vs_set_layout) != 0 ||
             entry.vs_set_layout == 0)
         {
@@ -872,15 +875,6 @@ namespace sogen
         {
             const auto it = sampler_state.find(tss_key(sampler, d3dsamp_type));
             return it != sampler_state.end() ? it->second : default_value;
-        }
-
-        // Highest PS texture stage execute_draw binds in one draw, and the D3D9 s#-register -> Vulkan
-        // descriptor-set-1 binding map, both mirroring d3d9_shader_translator.cpp's ps_sampler_bindings:
-        // s0 keeps binding 1; s(k) -> 3+k for k>=1, stepping over the int/bool-const UBOs at bindings 2/3.
-        constexpr uint32_t max_ps_sampler_stages = 4;
-        constexpr uint32_t ps_sampler_binding_for_stage(const uint32_t stage)
-        {
-            return stage == 0 ? 1u : 3u + stage;
         }
 
         // VkFormat's contiguous depth/depth-stencil range covers exactly the two depth formats

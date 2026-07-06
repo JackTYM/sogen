@@ -173,7 +173,7 @@ namespace sogen
         // That makes this fixed s0..s3 scheme safe for single-sampler shaders. s0..s3 is a D3D9-realistic cap
         // for real content (diffuse+normal, multi-texturing); raising it toward D3D9's 16-sampler max is a
         // trivial, mechanical change here plus a matching bump to d3d9_host.cpp's ps_bindings/pool if needed.
-        std::array<vkd3d_shader_combined_resource_sampler, 4> ps_sampler_bindings{};
+        std::array<vkd3d_shader_combined_resource_sampler, max_ps_sampler_stages> ps_sampler_bindings{};
         for (unsigned int k = 0; k < ps_sampler_bindings.size(); ++k)
         {
             ps_sampler_bindings[k] = {
@@ -186,7 +186,7 @@ namespace sogen
                 // the shader's own declared resource dimension and silently drops the binding on a mismatch --
                 // the sampler variable then never resolves and vkd3d-shader crashes when the shader references it.
                 .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
-                .binding = {.set = 1, .binding = (k == 0 ? 1u : 3u + k), .count = 1},
+                .binding = {.set = 1, .binding = ps_sampler_binding_for_stage(k), .count = 1},
             };
         }
         // varying_map_info is deliberately NOT passed here (unlike the VS call above) -- this is correct,
