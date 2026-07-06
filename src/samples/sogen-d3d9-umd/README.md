@@ -86,12 +86,18 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_multistream_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_dimension_discriminator_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-dim-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_dimension_discriminator_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-dim-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
-`d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`, and
-`d3d9_pipeline_cache_test.cpp` are guest-runtime tests, not driver-side
-files, so they do not need the
+`d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`,
+`d3d9_pipeline_cache_test.cpp`, and `d3d9_dimension_discriminator_test.cpp` are guest-runtime tests,
+not driver-side files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
 applies to `d3d9_triangle_test.cpp` above -- it's a guest-runtime test too. `d3d9_scissor_test.cpp` is
