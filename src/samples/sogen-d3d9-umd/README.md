@@ -110,6 +110,18 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_drawprimitiveup_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_drawprimitiveup_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-drawprimitiveup-test-x86.exe -ld3d9
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_colorfill_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-colorfill-test-x64.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_colorfill_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-colorfill-test-x86.exe -ld3d9
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_stretchrect_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-stretchrect-test-x64.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_stretchrect_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-stretchrect-test-x86.exe -ld3d9
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -157,6 +169,10 @@ cp d3d9-pipeline-cache-rs-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-rs-t
 cp d3d9-pipeline-cache-stride-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-stride-test.exe
 cp d3d9-drawprimitiveup-test-x64.exe <root>/filesys/c/d3d9-drawprimitiveup-test.exe
 cp d3d9-drawprimitiveup-test-x86.exe <root>/filesys/c/d3d9-drawprimitiveup-test-x86.exe
+cp d3d9-colorfill-test-x64.exe <root>/filesys/c/d3d9-colorfill-test.exe
+cp d3d9-colorfill-test-x86.exe <root>/filesys/c/d3d9-colorfill-test-x86.exe
+cp d3d9-stretchrect-test-x64.exe <root>/filesys/c/d3d9-stretchrect-test.exe
+cp d3d9-stretchrect-test-x86.exe <root>/filesys/c/d3d9-stretchrect-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -199,6 +215,10 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-stride-test.exe
 ./analyzer -e <root> -c c:/d3d9-drawprimitiveup-test.exe
 ./analyzer -e <root> -c c:/d3d9-drawprimitiveup-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-colorfill-test.exe
+./analyzer -e <root> -c c:/d3d9-colorfill-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-stretchrect-test.exe
+./analyzer -e <root> -c c:/d3d9-stretchrect-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -215,6 +235,30 @@ buffers, composing with the existing resource-id-backed path (fixed-function
 GREEN quad via `DrawIndexedPrimitiveUP` (both `D3DFMT_INDEX16` and `D3DFMT_INDEX32`), reading each back
 with `LockRect` to check interior pixels match the geometry and corners stay the clear color. Expect all
 `PASS:` lines and `[d3d9-drawprimitiveup-test] ALL CHECKS PASSED`.
+
+`d3d9-colorfill-test.exe` proves `IDirect3DDevice9::ColorFill` -> real `d3d9.dll` `pfnColorFill`
+(device-func-table slot 56, `D3DDDIARG_COLORFILL` RE'd in `d3d9_ddi.hpp`) -> UMD `color_fill` wire
+record -> host rect-scoped fill of the render target's Vulkan image (a buffer->image transfer copy on
+the shared draw command buffer, through the same `cmd_pipeline_barrier` layout choke point
+`execute_draw` uses). A 640x480 RT is cleared BLUE, then `ColorFill` fills the center rect
+`{160,120,480,360}` RED. Four interior checkpoints must read RED and four exterior ones must stay BLUE,
+so a whole-surface fill or an off-by-one rect fails at least one check. Fixed-function only (no
+`d3dcompiler_43`). Expect `ColorFill(...) hr=0x00000000`, eight `PASS:` lines, and
+`[d3d9-colorfill-test] ALL CHECKS PASSED`. (No `d3dcompiler_43` needed on either architecture.)
+
+`d3d9-stretchrect-test.exe` proves `IDirect3DDevice9::StretchRect` -> real `d3d9.dll` `pfnBlt`
+(device-func-table slot 55, `D3DDDIARG_BLT` RE'd in `d3d9_ddi.hpp` -- SRC-first-then-DST field order) ->
+UMD `blt` wire record -> host `vkCmdBlitImage`, both as a same-size 1:1 copy and a genuinely scaled
+stretch. A src RT is given distinctive content by a REAL fixed-function draw (BLUE clear + RED quad over
+the LEFT HALF only), so the test does not depend on ColorFill. Sub-pass A blits src whole->dst whole
+(`D3DTEXF_POINT`): dst must become RED-left/BLUE-right, mirroring src. Sub-pass B blits the RED half
+`{0,0,320,480}` -> dst whole `{0,0,640,480}`: the 2x horizontal magnification must make the whole dst
+RED, and the (480,240) checkpoint that read BLUE in sub-pass A now reading RED is the discriminator
+proving genuine scaling occurred. Scaled StretchRect only reaches `pfnBlt` because `fill_d3d9caps` now
+advertises `StretchRectFilterCaps` (point+linear); with that field 0 the runtime returns
+`D3DERR_INVALIDCALL` for any different-size-rect StretchRect before the driver is ever called (same-size
+copies always dispatch). Fixed-function only (no `d3dcompiler_43`). Expect both
+`StretchRect(...) hr=0x00000000`, seven `PASS:` lines, and `[d3d9-stretchrect-test] ALL CHECKS PASSED`.
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
 
