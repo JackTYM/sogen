@@ -1673,13 +1673,13 @@ namespace sogen
         // Buffers (vertex/index) size their backing store directly from `width` (the byte count, per
         // d3d9_cmd::create_resource_request's convention). Render-target/depth-stencil 2D textures get
         // real GPU backing (see the class comment); other texture kinds still get a plain host-side
-        // shadow sized for one mip's worth, no GPU backing yet.
+        // shadow, no GPU backing yet.
         const bool is_buffer = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) ||
                                kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer);
         const bool is_render_target = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) &&
                                       (usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
-        // Plain sampled texture_2d: real GPU backing too, single mip/layer, 2D only (mip-mapping and
-        // cube/volume are M3). Unrecognized formats fall through with no GPU image, matching this
+        // Plain sampled texture_2d: real GPU backing with a real mip chain (see below, extra_mips);
+        // cube/volume are still M3. Unrecognized formats fall through with no GPU image, matching this
         // function's existing "unrecognized -> no backing" behavior rather than crashing.
         const bool is_texture = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) && !is_render_target;
         uint32_t texture_vk_format = 0;

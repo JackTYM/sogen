@@ -930,7 +930,8 @@ typedef struct _D3DDDIARG_LOCK
     HANDLE hResource;        // 0 -- confirmed
     UINT SubResourceIndex;   // 8 -- RE-verified live + static 2026-07-06 (see block comment above):
                              //      flattened subresource index (Level for mips; FaceType*MipLevels +
-                             //      Level for cube/array). 0 for buffers. NOT yet consumed by umd_Lock.
+                             //      Level for cube/array). 0 for buffers. Consumed by umd_Lock as of the
+                             //      real mip-mapping work (see block comment above).
     UINT Reserved0Hi;        // 12 -- always 0 live (high half of the former UINT64 Reserved0 slot)
     BYTE Reserved1[24];      // 16..39 -- Range/Box input region (DdLockLH's v30/v31); not modeled
     VOID* pData;         // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
@@ -1007,7 +1008,7 @@ typedef struct _D3DDDIARG_LOCK
     UINT SubResourceIndex; // 4 -- RE-verified live + static 2026-07-06 (see block comment above the x64
                          //      struct): flattened subresource index (Level for mips; FaceType*MipLevels
                          //      + Level for cube/array). 0 for buffers. Was "Reserved0"; NOT a UINT64.
-                         //      NOT yet consumed by umd_Lock.
+                         //      Consumed by umd_Lock as of the real mip-mapping work.
     BYTE Reserved1[24];  // 8..31 -- unconfirmed (OffsetToLock/SizeToLock or Rect/Box input region)
     VOID* pData;         // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
     BYTE Reserved2[12];  // 36..47 -- unconfirmed (Pitch/SlicePitch/Flags; not read by umd_Lock)

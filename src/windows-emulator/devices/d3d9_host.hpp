@@ -153,6 +153,11 @@ namespace sogen
             uint32_t usage;
             uint32_t pool;
             std::vector<std::byte> backing; // subresource 0 (mip level 0); buffers/RTs use only this
+            // backing (not extra_mips[0]) stays the storage for level 0 specifically -- not folded
+            // uniformly into extra_mips[0..N-1] -- so every render-target/buffer/pre-mip-mapping call
+            // site that already addresses `.backing` directly (sync_backing_from_gpu, StretchRect's
+            // dst-copy, tex_blt, etc.) needed zero changes for this feature to land.
+            //
             // Per-mip-level backing for subresources 1..mip_levels-1 (sampled textures only): each mip is
             // a different byte size, so a single flat vector can't address them. Empty for buffers, render
             // targets, and single-mip textures. Indexed as extra_mips[subresource - 1].
