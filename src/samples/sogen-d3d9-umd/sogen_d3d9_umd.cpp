@@ -779,8 +779,14 @@ namespace
         // d3d9's aggregate HAL validator rejects the adapter as non-HAL if TextureCaps or FVFCaps is 0
         // (before it ever looks at formats/shaders), so FVFCaps must be nonzero.
         caps->FVFCaps = D3DFVFCAPS_PSIZE | 8; // 0x00100008: PSIZE + 8 texcoord sets
-        caps->VertexShaderVersion = D3DVS_VERSION(2, 0);
-        caps->PixelShaderVersion = D3DPS_VERSION(2, 0);
+        // SM3.0: report vs_3_0/ps_3_0. Real d3d9.dll's IsD3DHALSupported reads these two DWORDs directly
+        // out of this same GetCaps(type=13) buffer; raising them from 2.0 to 3.0 (0xFFFE0300/0xFFFF0300)
+        // opens the SM3.0 validation branch, whose additional field requirements are satisfied below.
+        // Live-confirmed against real d3d9.dll: with the full SM3.0 delta in this function, GetDeviceCaps
+        // returns S_OK, CreateDevice succeeds, and a real D3DCompile()'d vs_3_0/ps_3_0 pair both create
+        // (CreateVertexShader/CreatePixelShader return S_OK with non-null handles) -- see d3d9_sm3_test.cpp.
+        caps->VertexShaderVersion = D3DVS_VERSION(3, 0);
+        caps->PixelShaderVersion = D3DPS_VERSION(3, 0);
         caps->MaxVertexShaderConst = 256;
         caps->PixelShader1xMaxValue = 8.0f;
         caps->DeclTypes = D3DDTCAPS_UBYTE4 | D3DDTCAPS_UBYTE4N | D3DDTCAPS_SHORT2N | D3DDTCAPS_SHORT4N |
@@ -791,7 +797,11 @@ namespace
         // d3d9's HAL-enable path (sub_1004B19B branch-3, ddcreate.cpp:860) stamps the driver disabled
         // and skips format-table population when (DevCaps2 & 1) == 0, making GetDeviceCaps(HAL) return
         // D3DERR_NOTAVAILABLE. STREAMOFFSET (bit0) satisfies the gate; d3d9 then re-derives DevCaps2.
-        caps->DevCaps2 = D3DDEVCAPS2_STREAMOFFSET;
+        // SM3.0 gate: IsD3DHALSupported's vs_3_0 validation branch additionally requires
+        // D3DDEVCAPS2_VERTEXELEMENTSCANSHARESTREAMOFFSET (0x40) in DevCaps2 (live-traced: with VS reported
+        // as 3.0 but this bit clear, GetDeviceCaps(HAL) returns D3DERR_NOTAVAILABLE). ORed on top of the
+        // existing STREAMOFFSET gate above, so the SM2.0 format-table path is unaffected.
+        caps->DevCaps2 = D3DDEVCAPS2_STREAMOFFSET | D3DDEVCAPS2_VERTEXELEMENTSCANSHARESTREAMOFFSET;
         caps->PresentationIntervals = D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE;
         // DevCaps bit 0x02000000 has no name in the public D3DDEVCAPS_* set (the defined bits jump from
         // D3DDEVCAPS_NPATCHES=0x1000000 straight past it) -- live-traced (via sogen's own Python
@@ -832,14 +842,29 @@ namespace
         // eax,0x2882; jne <fail>` -- 0x2882 == MASKZ|COLORWRITEENABLE|BLENDOP|this bit). Same undocumented-
         // internal-reuse pattern as the DevCaps/DevCaps2 gates above.
         constexpr DWORD k_primitivemisc_vs20_gate = 0x00002000;
+        // SM3.0 + MRT: this UMD reports NumSimultaneousRTs=4, and once VS/PS are 3.0 the runtime's own MRT
+        // validation (reached via IsD3DHALSupported's SM3.0 branch) requires INDEPENDENTWRITEMASKS and
+        // MRTPOSTPIXELSHADERBLENDING to be advertised for a >1-RT HAL adapter. RAW HEX is used deliberately
+        // for these two bits instead of this toolchain's D3DPMISCCAPS_* symbols: the RE investigation that
+        // confirmed the SM3.0 cap set hit a mingw d3d9caps.h whose symbolic constant for one of these MRT
+        // fields resolved to a DIFFERENT bit than the MSDN-documented value, silently failing the validator
+        // until raw hex was substituted -- so these literals pin the exact MSDN-documented bit values
+        // (0x00004000 = INDEPENDENTWRITEMASKS, 0x00080000 = MRTPOSTPIXELSHADERBLENDING) independent of any
+        // header. Live-confirmed part of the working SM3.0 delta (see d3d9_sm3_test.cpp).
+        constexpr DWORD k_primitivemisc_independentwritemasks = 0x00004000;
+        constexpr DWORD k_primitivemisc_mrtpostpixelshaderblending = 0x00080000;
         caps->PrimitiveMiscCaps = D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW |
                                   D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP |
-                                  D3DPMISCCAPS_SEPARATEALPHABLEND | k_primitivemisc_vs20_gate;
+                                  D3DPMISCCAPS_SEPARATEALPHABLEND | k_primitivemisc_vs20_gate |
+                                  k_primitivemisc_independentwritemasks | k_primitivemisc_mrtpostpixelshaderblending;
         // The same validator also requires D3DPRASTERCAPS_FOGVERTEX (0x80, bit 7 of RasterCaps) once
         // VertexShaderVersion >= 2.0, via objdump on the same function.
+        // SM3.0 additionally requires D3DPRASTERCAPS_COLORPERSPECTIVE (0x00400000) in RasterCaps: the SM3.0
+        // RasterCaps mask IsD3DHALSupported checks is the SM2.0 mask this set already fully satisfied plus
+        // exactly this one bit (live-traced -- every other bit the SM3 mask needs is already ORed in here).
         caps->RasterCaps = D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_SCISSORTEST |
                            D3DPRASTERCAPS_DEPTHBIAS | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS |
-                           D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ANISOTROPY;
+                           D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ANISOTROPY | D3DPRASTERCAPS_COLORPERSPECTIVE;
         caps->ZCmpCaps = 0xFF;
         // The validator also requires D3DPBLENDCAPS_BLENDFACTOR (0x2000, a real documented bit) set in both
         // Src/DestBlendCaps once VertexShaderVersion >= 2.0 (`and eax,0x3fff/0x23ff; cmp; jne <fail>`).
@@ -847,9 +872,32 @@ namespace
         caps->DestBlendCaps = 0x1FFF | D3DPBLENDCAPS_BLENDFACTOR;
         caps->AlphaCmpCaps = 0xFF;
         caps->ShadeCaps = D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_ALPHAGOURAUDBLEND;
+        // SM3.0 completes an existing partial TextureCaps mask: the SM3.0 validation branch additionally
+        // requires PERSPECTIVE (0x1), TEXREPEATNOTSCALEDBYSIZE (0x40), and PROJECTED (0x400) on top of the
+        // SM2.0 bits already set below (live-traced). RAW HEX for these three added bits, same rationale as
+        // the PrimitiveMiscCaps MRT bits above: the confirming RE investigation hit a mingw d3d9caps.h
+        // symbolic constant that resolved to a different bit than MSDN for a field in this group, so these
+        // literals pin the MSDN-documented values directly.
+        constexpr DWORD k_texturecaps_perspective = 0x00000001;
+        constexpr DWORD k_texturecaps_texrepeatnotscaledbysize = 0x00000040;
+        constexpr DWORD k_texturecaps_projected = 0x00000400;
         caps->TextureCaps = D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_CUBEMAP |
-                            D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPCUBEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP;
+                            D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPCUBEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP |
+                            k_texturecaps_perspective | k_texturecaps_texrepeatnotscaledbysize | k_texturecaps_projected;
         caps->TextureFilterCaps = 0x03070700;
+        // The following four fields were previously left at the memset-to-0 default (they passed the SM2.0
+        // validator unset). IsD3DHALSupported's SM3.0 branch reads all four directly and rejects the adapter
+        // as non-HAL if any is 0; the exact values below are the ones live-traced to satisfy that branch
+        // (GetDeviceCaps returns S_OK with them, D3DERR_NOTAVAILABLE without). Additive: no SM2.0 path reads
+        // these.
+        // Cube/volume texture filtering: same MIN/MAG/MIP point+linear shape as TextureFilterCaps, required
+        // now that CUBEMAP/VOLUMEMAP are advertised under SM3.0.
+        caps->CubeTextureFilterCaps = 0x03030300;
+        caps->VolumeTextureFilterCaps = 0x03030300;
+        // Texture addressing modes (WRAP|MIRROR|CLAMP|BORDER|MIRRORONCE|INDEPENDENTUV = 0x3F).
+        caps->TextureAddressCaps = 0x3F;
+        // Stencil ops (KEEP|ZERO|REPLACE|INCRSAT|DECRSAT|INVERT|INCR|DECR|TWOSIDED = 0x1FF).
+        caps->StencilCaps = 0x1FF;
         // StretchRectFilterCaps gates whether real d3d9.dll lets a SCALED (different-size-rect)
         // IDirect3DDevice9::StretchRect reach the driver's pfnBlt at all: with this field 0 (the memset
         // default), CD3DDDIDX10::StretchRect's own validation returns D3DERR_INVALIDCALL before pfnBlt is
@@ -899,10 +947,13 @@ namespace
         caps->VertexTextureFilterCaps = 0x03000300;
         caps->MaxVShaderInstructionsExecuted = 0xFFFFFFFF;
         caps->MaxPShaderInstructionsExecuted = 0xFFFFFFFF;
-        // With VS/PS reported as SM2.0 (below vs_3_0/ps_3_0), d3d9's aggregate HAL validator rejects the
-        // adapter unless the SM3.0 instruction-slot caps are 0.
-        caps->MaxVertexShader30InstructionSlots = 0;
-        caps->MaxPixelShader30InstructionSlots = 0;
+        // This constraint INVERTS at SM3.0: when VS/PS were reported as SM2.0 the aggregate HAL validator
+        // required these SM3.0 instruction-slot caps to be 0, but now that VS/PS are vs_3_0/ps_3_0 the
+        // SM3.0 branch of IsD3DHALSupported instead requires them to be nonzero and within the documented
+        // 256..32768 range (0 now fails). 32768 is the D3DMAX30SHADERINSTRUCTIONSLOTS ceiling -- live-traced
+        // as accepted (CreateVertexShader/CreatePixelShader for real vs_3_0/ps_3_0 bytecode both succeed).
+        caps->MaxVertexShader30InstructionSlots = 32768;
+        caps->MaxPixelShader30InstructionSlots = 32768;
     }
 
     // D3DDDI FORMATOP: what d3d9.dll's GetDeviceCaps scans to decide HAL is available. It requires at least one
