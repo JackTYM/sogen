@@ -1463,6 +1463,8 @@ namespace
 
     // pfnSetStreamSourceUm (slot 7): (HANDLE, CONST D3DDDIARG_SETSTREAMSOURCEUM*, CONST VOID* pUMVertices).
     // See D3DDDIARG_SETSTREAMSOURCEUM in d3d9_ddi.hpp -- the user vertex pointer is a separate third arg.
+    // This binding is transient: a later real umd_SetStreamSource() targeting the same stream clears it
+    // (see the comment there) -- the two are mutually exclusive, matching real D3D9's own UP semantics.
     HRESULT APIENTRY umd_SetStreamSourceUm(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCEUM* pArgs,
                                            CONST VOID* pUMVertices)
     {
@@ -1480,6 +1482,8 @@ namespace
 
     // pfnSetIndicesUm (slot 9): (HANDLE, UINT Stride, CONST VOID* pUMIndices). Stride is the raw index
     // element size in bytes (2 or 4) passed by value, NOT a struct pointer (see d3d9_ddi.hpp's note).
+    // This binding is transient: a later real umd_SetIndices() clears it unconditionally (see the
+    // comment there) -- the two are mutually exclusive, matching real D3D9's own UP semantics.
     HRESULT APIENTRY umd_SetIndicesUm(HANDLE /*hDevice*/, UINT Stride, CONST VOID* pUMIndices)
     {
         if (pUMIndices == nullptr)
