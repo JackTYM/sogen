@@ -2679,3 +2679,92 @@ Roadmap updated: `docs/d3d9-roadmap.md`'s `DrawPrimitiveUP`/`DrawIndexedPrimitiv
 open to closed (citing all four commits), the M3 table row updated to list it among the now-done items
 and to note the incidental arity fix, and the sequencing-recommendation prose corrected to drop it from
 the remaining-work list.
+
+## 34. `StretchRect`/`ColorFill` — the last remaining M3 surface-transfer DDI pair RE'd, wired, and
+proven pixel-exact on both x64 and x86 (2026-07-06)
+
+M3's `StretchRect`/`ColorFill` gap was the last unimplemented pair of surface-transfer DDIs (§10 had
+already deferred `pfnBlt`/`pfnColorFill` explicitly, back when even the backbuffer/swapchain resource
+creation path was still being RE'd). This section closes it, following the same RE-gate → feature →
+test → polish commit discipline as §33's `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` work.
+
+**RE (`b915658a`).** `IDirect3DDevice9::ColorFill` and `IDirect3DDevice9::StretchRect` route through
+device-func-table slots 56 and 55 respectively (`pfnColorFill`/`pfnBlt`) — confirmed both statically and
+live, the same both-ways standard already established for `D3DDDIARG_TEXBLT` (§19). Statically:
+idasql-decompiled the real staged `d3d9.dll`'s own builders, `CD3DDDIDX10::Colorfill`/`::Blt` (x64 and
+x86), whose own indirect device-func-table calls at offsets 448/224 (=56) and 440/220 (=55) confirm the
+slot indices; cross-checked against the independent batch consumers `LHBatchColorFill`/`LHBatchBlt`
+(struct sizes 40/32 and 72/56, resource-handle field offsets). Live: a guest probe drove real
+ColorFill/StretchRect calls with distinctive rects and a distinctive color, then dumped the raw DDI arg
+bytes crossing the wire — matching the static decompile byte-for-byte, with one correction the bare
+decompile alone could not make: **the live trace corrected `D3DDDIARG_BLT`'s field ordering to
+SRC-first-then-DST** (matching the WDK convention), which the decompile's own field layout did not
+disambiguate on its own. Commit `b915658a` is additive-only — new typed, `static_assert`-pinned struct
+definitions in `d3d9_ddi.hpp`, no wire/UMD/host changes — the RE-gate deliverable pattern this session
+has used consistently (§19, §33).
+
+**Implementation (`3dd369f9`).** Wire protocol: two new streamed opcodes, `d3d9_color_fill` (`0x939`)
+and `d3d9_blt` (`0x93A`), carrying `color_fill_record`/`blt_record` payloads (`blt_record` is SRC-first,
+matching the RE finding above); the `gpu_bridge` record-dispatch range extended to cover them. UMD:
+`umd_ColorFill`/`umd_Blt` read the real DDI structs and batch a streamed record via the existing
+`record_d3d9` path (same in-order-with-draws/clears batching every other streamed DDI call already
+uses), registered at slots 56/55. Host: `d3d9_host::color_fill` fills the target rect via a scoped
+staging-buffer→image transfer copy — the RT is always `B8G8R8A8_UNORM`, so a solid `D3DCOLOR` dword
+needs no channel juggling before the copy. `d3d9_host::blt` uses `vkCmdBlitImage`, which scales natively
+when the src/dst rects differ in size — a genuinely reusable primitive, not a copy-only shortcut. Both
+run on the existing shared draw command buffer and route every layout transition through the existing
+`cmd_pipeline_barrier` choke point (keeping `render_targets[image].current_layout` authoritative, the
+same discipline §24's readback fix established), assume the resting `TRANSFER_SRC_OPTIMAL` layout on
+entry exactly like `execute_draw` already does, and mark the destination `backing_dirty` so
+`sync_backing_from_gpu` (§24) picks the change up on the next `Lock`/`Present` rather than needing a new
+readback path of its own.
+
+**The `StretchRectFilterCaps` discovery.** Implementing `blt()` correctly for same-size copies wasn't
+the whole story: real `d3d9.dll` gates whether a genuinely *scaled* StretchRect (differently-sized
+src/dst rects) ever reaches `pfnBlt` at all behind `D3DCAPS9::StretchRectFilterCaps` —
+`CD3DDDIDX10::StretchRect`'s own validation rejects any scaled stretch with `D3DERR_INVALIDCALL` before
+the driver is ever called when this field is 0 (this UMD's prior, unset `memset` default); a same-size
+copy always dispatched regardless, which is why this gap wasn't visible until scaled StretchRect was
+specifically tried. Fixed by having `fill_d3d9caps` advertise
+`MINFPOINT|MAGFPOINT|MINFLINEAR|MAGFLINEAR`, letting a genuine stretch reach the driver, where
+`vkCmdBlitImage` performs the actual scale.
+
+**Test evidence (`f7b9696e`).** `d3d9_colorfill_test.cpp`: clears a 640x480 RT BLUE, ColorFills the
+center rect `{160,120,480,360}` RED, and checks four interior points read RED while four exterior points
+stay BLUE — a whole-surface fill or an off-by-one rect fails at least one of the eight checks.
+`d3d9_stretchrect_test.cpp`: gives a src RT distinctive content via a real fixed-function draw (BLUE
+clear + RED left-half quad), then StretchRects it into a dst RT twice. Sub-pass A (same-size 1:1 copy)
+checks dst mirrors src (RED-left/BLUE-right). Sub-pass B (a genuine 2x horizontal stretch of the RED
+half) checks the whole dst reads RED, with the `(480,240)` checkpoint flipping from BLUE (in the 1:1
+sub-pass) to RED (in the scaled sub-pass) as the discriminator proving genuine scaling actually happened,
+not just a same-size copy repeated twice. Both tests pass every analytic pixel check on both x64 and
+i686/WoW64 against the real Microsoft `d3d9.dll`, plus a full regression sweep of every existing D3D9
+guest test (x64+x86) — no regressions, independently verified by an adversarial reviewer at every stage.
+
+**Two known limitations, documented as deliberate scope boundaries (`83c518c6`).** Code-quality review of
+`3dd369f9` flagged two real, not-yet-generalized gaps, and rather than silently carrying them forward
+undocumented, both got explicit `KNOWN LIMITATION` comments at their sites: (1) `color_fill` hardcodes 4
+bytes/texel — correct today since every RT this codebase creates is `B8G8R8A8_UNORM`, but would need
+generalizing if a non-4-byte-per-texel RT format is ever added; (2) both handlers'
+`subresource`/`dst_subresource`/`src_subresource` parameters are always 0 and unused — single-mip,
+single-layer resources only, not yet plumbed into the underlying `image_blit_region`'s
+`mip_level`/`base_array_layer` fields (hardcoded to 0). Neither is a bug in what this slice actually
+claims to support; both are scope boundaries the roadmap now tracks explicitly rather than losing them
+to a commit message.
+
+**A forward-looking note on `blt()` and mip-mapping — precise, not overclaiming.** `blt()`'s
+`vkCmdBlitImage`-based scaling is exactly the kind of primitive a future GPU-side mip-generation
+implementation (successively blitting level N into level N+1) would want to reuse. It is **not** yet
+directly reusable for that, though — per known limitation (2) above, its subresource parameters are
+accepted but ignored, so it can only ever blit between mip level 0 of two resources today. Mip-generation
+work would need to thread `dst_subresource`/`src_subresource` through to `image_blit_region`'s
+`mip_level`/`base_array_layer` fields first; the primitive exists, the mip-level plumbing doesn't yet.
+
+**Verification.** Full regression sweep — all existing D3D9 guest tests on both x64 and x86, plus the
+smoke test — stayed green at every stage (RE-gate, feature, test, and polish commits), independently
+confirmed by an adversarial reviewer.
+
+Roadmap updated: `docs/d3d9-roadmap.md`'s `StretchRect`/`ColorFill` bullet flipped from open to closed
+(citing all four commits), the M3 table row updated to list it among the now-done items, the
+sequencing-recommendation prose corrected to drop it from the remaining-work list, and the mip-mapping
+bullet given a note on `blt()`'s not-yet-reusable subresource plumbing.
