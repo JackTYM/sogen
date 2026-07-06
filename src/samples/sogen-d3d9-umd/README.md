@@ -122,6 +122,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_stretchrect_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_stretchrect_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-stretchrect-test-x86.exe -ld3d9
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_miptexture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-miptexture-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_miptexture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-miptexture-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -173,6 +179,8 @@ cp d3d9-colorfill-test-x64.exe <root>/filesys/c/d3d9-colorfill-test.exe
 cp d3d9-colorfill-test-x86.exe <root>/filesys/c/d3d9-colorfill-test-x86.exe
 cp d3d9-stretchrect-test-x64.exe <root>/filesys/c/d3d9-stretchrect-test.exe
 cp d3d9-stretchrect-test-x86.exe <root>/filesys/c/d3d9-stretchrect-test-x86.exe
+cp d3d9-miptexture-test-x64.exe <root>/filesys/c/d3d9-miptexture-test.exe
+cp d3d9-miptexture-test-x86.exe <root>/filesys/c/d3d9-miptexture-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -219,6 +227,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-colorfill-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-stretchrect-test.exe
 ./analyzer -e <root> -c c:/d3d9-stretchrect-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-miptexture-test.exe
+./analyzer -e <root> -c c:/d3d9-miptexture-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -259,6 +269,25 @@ advertises `StretchRectFilterCaps` (point+linear); with that field 0 the runtime
 `D3DERR_INVALIDCALL` for any different-size-rect StretchRect before the driver is ever called (same-size
 copies always dispatch). Fixed-function only (no `d3dcompiler_43`). Expect both
 `StretchRect(...) hr=0x00000000`, seven `PASS:` lines, and `[d3d9-stretchrect-test] ALL CHECKS PASSED`.
+
+`d3d9-miptexture-test.exe` proves real mip-mapping: a texture created with several REAL mip levels
+gets each level's own pixel data all the way to the GPU (per-subresource `LockRect(level)` -> UMD
+`D3DDDIARG_LOCK::SubResourceIndex` -> wire `subresource` -> host per-mip `extra_mips` backing ->
+per-level `vkCmdCopyBufferToImage`), and the sampler actually selects a non-zero level (real
+`min_lod`/`max_lod` range in `build_sampler`, not the old hardcoded `0`/`0` pinning). A 64x64 3-level
+texture is filled RED (level 0, 64x64) / GREEN (level 1, 32x32) / BLUE (level 2, 16x16) via three
+separate `LockRect(level, ...)` calls. Three sub-passes use `D3DSAMP_MIPFILTER=D3DTEXF_NONE` with
+`D3DSAMP_MAXMIPLEVEL` = 0/1/2 to pin the sampler to exactly one level each (host maps MIPFILTER=NONE +
+MAXMIPLEVEL=k to `min_lod==max_lod==k`), so the readback must be RED/GREEN/BLUE respectively -- the
+GREEN and BLUE passes are the discriminator (broken per-level upload would read garbage/level-0 red;
+the old LOD pinning would read RED for all three). A fourth sub-pass drives genuine minification (a
+16x16-screen quad sampling the whole texture with `D3DSAMP_MIPFILTER=D3DTEXF_POINT` and the full LOD
+range) so the GPU's own screen-space-derivative LOD (`log2(64/16)=2`) selects level 2 -- BLUE -- with
+no MAXMIPLEVEL clamp. Expect `CreateTexture(64x64, 3 levels) hr=0x00000000`, three
+`LockRect(level=...) hr=0x00000000` lines, four `PASS:` lines, and
+`[d3d9-miptexture-test] ALL CHECKS PASSED`. Pixel-exact parity confirmed on x64 and x86/WoW64 (the
+`SubResourceIndex` DDI offset differs -- 8 on x64, 4 on x86 -- but the `#ifdef _WIN64` struct split in
+`d3d9_ddi.hpp` makes the UMD read the correct one automatically).
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
 
