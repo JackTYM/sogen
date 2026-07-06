@@ -3308,3 +3308,131 @@ Performance section keeps multi-frame-in-flight pipelining listed as the one ope
 and gains a new, clearly-dated entry recording this risk analysis, the measurement numbers above, and the
 safer-batching recommendation as future work — explicitly not done, not started, not scoped further than
 what's written here.
+
+---
+
+## 40. SM3.0 caps — the last remaining M3 item on the "still not started" list before this session closed,
+gated RE'd, wired, and proven pixel-exact on both x64 and x86 (2026-07-06)
+
+`docs/d3d9-roadmap.md`'s M3 row listed SM3.0 caps as not started, alongside cube/volume textures, more
+formats, and `stream_frequencies`/instancing: `fill_d3d9caps` still reported SM2.0
+(`VertexShaderVersion`/`PixelShaderVersion` = `D3DVS_VERSION(2,0)`/`D3DPS_VERSION(2,0)`), so real
+`d3d9.dll` would refuse a real `vs_3_0`/`ps_3_0` shader pair outright — a hard blocker for MW2, which is
+SM3-heavy. Three commits: `1b940580` (feat), `d82434ff` (test), `c468e80d` (polish).
+
+### 40.1 The RE finding: this was the SM2.0-gauntlet's shape, not cube/volume's
+
+The prior entry in this doc (§36) found cube/volume textures blocked by a genuine wall: real `d3d9.dll`
+rejects `CreateCubeTexture`/`CreateVolumeTexture` through an opaque, internal, transformed per-format
+capability cache (`CEnum::CheckDeviceFormat`) that a direct UMD-side write couldn't reach — a
+fundamentally different code path than anything the driver's own `GetCaps` response controls. Going into
+this investigation, SM3.0 caps could have turned out to be the same shape. It didn't: live-tracing
+`IsD3DHALSupported`'s SM3.0 validation branch showed it reads every field it needs DIRECTLY out of the
+same `GetCaps(type=13)` buffer `fill_d3d9caps` fills — no cache, no transform, no indirection between the
+UMD's write and the validator's read. That's the exact same tractable shape as the original SM2.0
+caps-gauntlet this UMD already passed (the `DevCaps`/`DevCaps2`/`PrimitiveMiscCaps`/`RasterCaps`/
+blend-caps/`GuardBand` gauntlet documented earlier in this file and in the UMD's own README). This
+contrast is worth stating plainly: the same kind of "flip a caps bit, watch the validator's branch" RE
+gauntlet can land on either shape, and there was no way to know in advance which one SM3.0 would be
+without actually live-tracing it — the calibrated move was to spend the RE pass and find out, not to
+assume either outcome.
+
+### 40.2 The confirmed 12-field delta (`1b940580`)
+
+Each field carries its own validator-gate comment directly in `fill_d3d9caps` (`sogen_d3d9_umd.cpp`):
+
+- The two version fields: `VertexShaderVersion`/`PixelShaderVersion` raised from `D3DVS_VERSION(2,0)`/
+  `D3DPS_VERSION(2,0)` to `D3DVS_VERSION(3,0)`/`D3DPS_VERSION(3,0)` (`0xFFFE0300`/`0xFFFF0300`) — this is
+  what opens the SM3.0 validation branch in the first place.
+- `DevCaps2 |= D3DDEVCAPS2_VERTEXELEMENTSCANSHARESTREAMOFFSET` (`0x40`).
+- `RasterCaps |= D3DPRASTERCAPS_COLORPERSPECTIVE` (`0x00400000`) — the SM3.0 mask turned out to be the
+  already-satisfied SM2.0 mask plus exactly this one additional bit.
+- Three added `TextureCaps` bits: `PERSPECTIVE`/`TEXREPEATNOTSCALEDBYSIZE`/`PROJECTED`.
+- Two MRT-specific `PrimitiveMiscCaps` bits: `INDEPENDENTWRITEMASKS`/`MRTPOSTPIXELSHADERBLENDING`,
+  required once VS/PS report 3.0 AND `NumSimultaneousRTs>1` (this UMD already advertises 4).
+- `Cube`/`VolumeTextureFilterCaps`, `TextureAddressCaps`, `StencilCaps` — all four previously left at the
+  `memset`-0 default (unread by the SM2.0 path), now read directly by the SM3.0 branch and rejected as
+  HAL-unavailable if still 0.
+- The **instruction-slot count inversion**: `MaxVertex/PixelShader30InstructionSlots` had to be 0 under
+  SM2.0 (the aggregate validator required them clear) and now has to be nonzero under SM3.0 — raised to
+  32768, the documented `D3DMAX30SHADERINSTRUCTIONSLOTS` ceiling. Same fields, opposite requirement,
+  purely a function of which shader model is declared — a nice concrete example of why this kind of caps
+  work can't be done by pattern-matching the SM2.0 gauntlet's direction; each field's requirement had to be
+  live-traced again, not assumed to point the same way.
+
+Raw hex literals (rather than this build's `D3DPTEXTURECAPS_*`/`D3DPMISCCAPS_*` symbols) were used for the
+`TextureCaps`/`PrimitiveMiscCaps` SM3.0 bits specifically, as a defensive pin — see §40.4 below for why that
+turned out to need a correction.
+
+Purely additive: all 40 pre-existing SM2.0 guest tests rendered byte-for-byte pixel-identical to baseline
+on both x64 and x86/WoW64 after this commit.
+
+### 40.3 The test's 4-part proof design (`d82434ff`, `d3d9_sm3_test.cpp`)
+
+The core design decision: prove more than "shader creation succeeds." A trivial `vs_3_0`/`ps_3_0` pair
+with no real SM3.0-only content could pass caps validation and still compile fine at `ps_2_0` — that would
+prove the caps delta didn't regress anything, but not that it actually unlocked SM3.0-specific behavior.
+The test instead builds a pixel shader with a genuine runtime-count loop, driven by
+`SetPixelShaderConstantI`, which `ps_2_0` cannot express at all (no loop/rep instructions, no integer
+constant registers at SM2.0) — so the SAME HLSL source must fail `D3DCompile` at `ps_2_0` and succeed at
+`ps_3_0`. That's a true SM3.0-only discriminator, not a proxy for one.
+
+Four independent proofs, in order:
+1. `GetDeviceCaps(HAL)` reports back exactly `VertexShaderVersion=0xFFFE0300`/
+   `PixelShaderVersion=0xFFFF0300` — confirms the caps buffer round-trips exactly what `fill_d3d9caps`
+   wrote.
+2. `D3DCompile` of the loop-bearing shader source fails at `ps_2_0` and succeeds at `ps_3_0` — the
+   SM3.0-only discriminator itself.
+3. The compiled `ps_3_0` bytecode is walked as raw D3DBC tokens to confirm a real `LOOP`/`REP` opcode was
+   actually emitted, not silently unrolled or closed-form-folded by the compiler.
+4. A real off-screen draw with this VS/PS pair: the PS accumulates `0.1` per iteration over 5
+   runtime-supplied iterations and returns `float4(acc, acc*0.5, acc*1.5, 1)`. The three distinct readback
+   channel bytes (`B=BF G=40 R=80`), independently recomputed by replaying the identical float loop
+   C++-side, prove caps acceptance, `ps_3_0` SPIR-V translation, PS integer constant register (set 1 /
+   binding 2) delivery, and the real GPU loop execution all worked together, not just in isolation.
+
+All four checks pass, pixel-exact, on both x64 and x86/WoW64 (`interior pixel(320,240)=B=BF G=40 R=80` on
+both).
+
+### 40.4 The code-quality-review catch (`c468e80d`)
+
+Review of `1b940580` caught a comment that overclaimed. The `PrimitiveMiscCaps` raw-hex comment asserted
+that "this toolchain's" `D3DPMISCCAPS_*` symbols resolve to a different bit than the MSDN-documented value
+for one of the two MRT fields — the stated reason raw hex was used instead of the symbolic constants.
+Checked against this repo's actual mingw-w64 14.0.0 `d3d9caps.h`: the symbols match MSDN exactly here. The
+specific factual claim was false as written. The underlying caution (keep raw hex as a defensive pin
+against a *future* toolchain regression, since a header symbol silently resolving to the wrong bit would
+fail this validator with no compile-time signal) is still sound — it just needed rewording so a future
+reader who verifies the claim doesn't conclude the whole comment is wrong and "clean up" the intentional
+raw hex. Fixed by rephrasing to state the caution without asserting a discrepancy that doesn't currently
+hold. The same commit also fixed a stale README.md note that still described `VertexShaderVersion`/
+`PixelShaderVersion` as SM2.0 values, unchanged since before this work landed.
+
+This is a good example of this session's "verify claims precisely" discipline: the fix that mattered
+(keeping the raw hex) was correct, but the *justification* written for it wasn't accurate against this
+specific toolchain, and that gap would have misled a future reader who went and checked. Catching it
+required someone to actually go read the real header rather than trust the commit's own reasoning.
+
+### 40.5 Residual uncertainty — stated honestly, not overclaimed
+
+This closes SM3.0 CAPS acceptance and proves one genuine SM3.0-only construct (a runtime-count shader
+loop) compiles and renders correctly end to end, on both x64 and x86/WoW64, with zero regression across
+every pre-existing SM2.0 guest test. That is real, major progress toward running MW2, which is SM3-heavy.
+
+It is NOT a claim that every real MW2 shader will work flawlessly. A minimal SM3.0 test passing proves
+what it actually exercised — one loop construct, one integer constant register, one draw shape — and
+nothing more. A real, complex MW2 shader could still use SM3.0 instructions or features this test never
+touched (vertex texture fetch, `texldl`, additional interpolator/register-count behavior, or other
+SM3.0-only opcodes) and hit its own gap, either in caps validation this delta didn't anticipate or in
+`vkd3d-shader`/SPIR-V translation for an instruction this test never compiled. That residual, smaller
+uncertainty stays open until real MW2 shaders are actually run through this path — this session closes
+the CAPS-acceptance blocker, not the entire SM3.0-correctness question.
+
+### 40.6 Verification
+
+Full regression sweep: all 40 pre-existing SM2.0 D3D9 guest tests pass unchanged on both x64 and
+x86/WoW64, byte-for-byte pixel-identical to their previously-documented values. `d3d9-sm3-test.exe`/
+`-x86.exe` (new) pass all 4 checks, pixel-exact between architectures. `docs/d3d9-roadmap.md`'s M3 row,
+M5 row, "M3 coverage items" checklist, and "Sequencing recommendation" section all updated to flip SM3.0
+caps from "not started" to done, citing all three commits and preserving the residual-uncertainty framing
+above rather than declaring MW2 shader compatibility solved.
