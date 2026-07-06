@@ -147,11 +147,15 @@ namespace
     }
 
     // Batched D3D9 streamed opcodes: same wire mechanism vulkan_shim.cpp's g_command_streams/
-    // record_command use, but a single global stream since D3D9 has no command-buffer concept. For now
-    // record_d3d9 flushes after every append (batch depth of 1), so this is wire-format-identical to
-    // sending each opcode as its own Escape -- proving the ioctl_record_commands path carries D3D9
-    // opcodes correctly before a later change actually defers the flush.
+    // record_command use, but a single global stream since D3D9 has no command-buffer concept.
+    // record_d3d9 only appends; bridge_call's flush-on-every-other-call guard above is what actually
+    // drains the batch, right before the host needs to observe its effects.
     std::vector<uint8_t> g_d3d9_command_batch;
+
+    // Backstop only: every frame ends in Present, which flushes via bridge_call's guard, so this
+    // should never trigger in practice. Guards against unbounded growth if an unusually long run of
+    // Group-A calls happens with no Group-B call in between.
+    constexpr size_t k_d3d9_batch_flush_threshold = 64 * 1024;
 
     void flush_d3d9_batch()
     {
@@ -175,7 +179,10 @@ namespace
         const auto* payload_bytes = reinterpret_cast<const uint8_t*>(in);
         g_d3d9_command_batch.insert(g_d3d9_command_batch.end(), payload_bytes, payload_bytes + in_len);
 
-        flush_d3d9_batch();
+        if (g_d3d9_command_batch.size() > k_d3d9_batch_flush_threshold)
+        {
+            flush_d3d9_batch();
+        }
     }
 
     // Generic device-function stub, still backing every slot D3D9 marshaling below doesn't implement
