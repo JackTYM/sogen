@@ -134,6 +134,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_manydraws_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_manydraws_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-manydraws-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_sm3_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-sm3-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_sm3_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-sm3-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -189,6 +195,8 @@ cp d3d9-miptexture-test-x64.exe <root>/filesys/c/d3d9-miptexture-test.exe
 cp d3d9-miptexture-test-x86.exe <root>/filesys/c/d3d9-miptexture-test-x86.exe
 cp d3d9-manydraws-test-x64.exe <root>/filesys/c/d3d9-manydraws-test.exe
 cp d3d9-manydraws-test-x86.exe <root>/filesys/c/d3d9-manydraws-test-x86.exe
+cp d3d9-sm3-test-x64.exe <root>/filesys/c/d3d9-sm3-test.exe
+cp d3d9-sm3-test-x86.exe <root>/filesys/c/d3d9-sm3-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -239,6 +247,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-miptexture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-manydraws-test.exe
 ./analyzer -e <root> -c c:/d3d9-manydraws-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-sm3-test.exe
+./analyzer -e <root> -c c:/d3d9-sm3-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -590,6 +600,32 @@ identical (all-PASS) pixel output in both. This is emulated guest wall-clock (th
 busy-spin's polling loop and the per-draw allocation churn, not a raw hardware GPU-stall number. Expect
 all `hr=0x00000000` setup lines, `TIMING: 768 draws in ... ms`, eight `PASS:` lines, and
 `[d3d9-manydraws-test] ALL CHECKS PASSED`.
+
+`d3d9-sm3-test.exe` proves the Shader Model 3.0 caps delta in `fill_d3d9caps` (`sogen_d3d9_umd.cpp`)
+makes real Microsoft `d3d9.dll` accept AND render a genuine `vs_3_0`/`ps_3_0` shader pair end to end.
+Raising `VertexShaderVersion`/`PixelShaderVersion` to `D3DVS_VERSION(3,0)`/`D3DPS_VERSION(3,0)` opens
+`IsD3DHALSupported`'s SM3.0 validation branch, which reads a dozen further `D3DCAPS9` fields directly
+out of the same GetCaps(type=13) buffer; the delta adds exactly the fields that branch requires
+(`DevCaps2` VERTEXELEMENTSCANSHARESTREAMOFFSET, `RasterCaps` COLORPERSPECTIVE, `TextureCaps`
+PERSPECTIVE/TEXREPEATNOTSCALEDBYSIZE/PROJECTED, `PrimitiveMiscCaps` INDEPENDENTWRITEMASKS/
+MRTPOSTPIXELSHADERBLENDING, `Cube`/`VolumeTextureFilterCaps`, `TextureAddressCaps`, `StencilCaps`, and
+the SM3.0 instruction-slot caps raised from 0 to 32768) while leaving every SM2.0 field untouched --
+the change is purely additive and byte-for-byte pixel-identical for all existing SM2.0 tests. The test
+has four independent proofs: (1) `GetDeviceCaps(HAL)` must report `VertexShaderVersion=0xFFFE0300`/
+`PixelShaderVersion=0xFFFF0300`; (2) the pixel shader carries a real runtime-count loop
+(`for i < loopCount.x`, driven by `SetPixelShaderConstantI`), so `D3DCompile` of the SAME source at
+`ps_2_0` MUST FAIL (ps_2_0 has neither loop/rep nor integer constant registers) while `ps_3_0`
+SUCCEEDS -- a genuine SM3.0-only discriminator; (3) the `ps_3_0` bytecode is walked as raw D3DBC tokens
+to confirm a real LOOP/REP opcode was emitted (not unrolled/closed-formed); (4) a triangle is drawn to
+an off-screen RT with this pair and `LockRect`-read back -- the PS accumulates `0.1` per iteration over
+5 runtime-supplied iterations and returns `float4(acc, acc*0.5, acc*1.5, 1)`, whose three DISTINCT
+channel bytes (`B=BF G=40 R=80`, computed by replaying the identical float loop C++-side) prove the
+whole path -- caps acceptance, `ps_3_0` SPIR-V translation, PS integer constant register (set 1 /
+binding 2) delivery, and the real GPU loop -- worked. Expect the `ps_2_0`-rejected/`ps_3_0`-accepted
+lines, `saw_LOOP/REP=yes`, `CreateVertexShader`/`CreatePixelShader` `hr=0x00000000` with non-null
+handles, four `PASS:` lines, and `[d3d9-sm3-test] ALL CHECKS PASSED`. Pixel-exact parity confirmed on
+x64 and x86/WoW64 (`interior pixel(320,240)=B=BF G=40 R=80` on both). Needs `d3dcompiler_43` on both
+architectures.
 
 ## Notes
 
