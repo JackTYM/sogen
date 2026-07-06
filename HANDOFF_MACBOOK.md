@@ -2080,7 +2080,85 @@ both x64 and x86, pixel values byte-identical to their previously-documented val
 test: 26/26.
 
 **Explicitly not addressed by this fix** (real, separate, larger remaining work, see
-`docs/d3d9-roadmap.md`'s new "Performance — D3D9 native path" section): the present/submit path's
-busy-spin fence-wait, per-draw buffer/UBO/descriptor-set allocation churn, and the total lack of
-wire-protocol batching for D3D9 DDI calls. This fix eliminates the confirmed per-draw/per-clear
-blocking-readback catastrophe; it does not touch any of those three.
+`docs/d3d9-roadmap.md`'s "Performance — D3D9 native path" section): the present/submit path's
+busy-spin fence-wait, per-draw buffer/UBO/descriptor-set allocation churn, and (at the time this fix
+landed) the total lack of wire-protocol batching for D3D9 DDI calls. This fix eliminates the confirmed
+per-draw/per-clear blocking-readback catastrophe; it does not touch either of the first two. The third
+item — DDI-call wire batching — was subsequently designed, implemented, and verified; see §25 below.
+
+## 25. D3D9 DDI-call wire batching — designed, implemented in three steps, and verified with a live
+1256-byte/15-call batch (2026-07-05)
+
+§24 fixed the per-draw/per-clear GPU->CPU readback stall but explicitly left "no wire-protocol batching
+for D3D9 DDI calls" on the table as separate, larger remaining work. This slice closes that item: every
+streamed D3D9 opcode (`SetRenderState`, `SetTexture`, `DrawPrimitive`, `Clear`, ~22 call sites in
+`sogen_d3d9_umd.cpp`) now batches guest-side instead of crossing the guest/host wire as its own
+individual sync Escape call.
+
+### 25.1 Design: Group-A batchable vs. Group-B must-flush
+
+DDI calls split into two groups:
+- **Group A (batchable)** — state-setting, draw, and clear calls whose effects the host only needs to
+  have observed *before the next thing that actually reads results back*: `SetRenderState`,
+  `SetTextureStageState`, `SetSamplerState`, `SetTexture`, `SetStreamSource(Freq)`, `SetIndices`,
+  `SetVertexDecl`, `SetVertexShader`/`SetPixelShader`, the `Set{VS,PS}Const{F,I,B}` families,
+  `SetRenderTarget`/`SetDepthStencil`, `SetViewport`, `SetScissorRect`, `Clear`,
+  `DrawPrimitive`/`DrawIndexedPrimitive`. These append to a single guest-side buffer,
+  `g_d3d9_command_batch`, via `record_d3d9()`.
+- **Group B (must-flush)** — anything that needs to observe host-side state synchronously before it can
+  do its own job correctly: `Lock`/`Unlock`, `Present`, `CreateResource`, `TexBlt`, and
+  shader/vertex-declaration creation. These already go through `bridge_call` for their own Escape; no
+  Group-B call site needed editing.
+
+The mechanism reused is the **already-existing** `record_commands`/`ioctl_record_commands` wire
+protocol — previously only exercised by the generic Vulkan-ICD bridge (`vulkan_shim.cpp`) for batching
+command-buffer contents. `record_d3d9` writes a `command_record_header` + payload per call into
+`g_d3d9_command_batch`, exactly the record format `d3d9_host`'s `execute_recorded` already knows how to
+replay — zero host-side or wire-format changes were needed.
+
+The actual flush point is a single guard added to `bridge_call` itself: every call whose opcode isn't
+`ioctl_record_commands` drains any pending batch first (via `flush_d3d9_batch()`), so every Group-B call
+site gets the "flush before you run" behavior for free, and `flush_d3d9_batch`'s own recursive call into
+`bridge_call` (to send the `ioctl_record_commands` Escape) can't re-trigger itself. A 64 KiB size cap in
+`record_d3d9` is a pure backstop in case an unusually long run of Group-A calls happens with no Group-B
+call in between (in practice every frame ends in `Present`, so this should never trigger).
+
+### 25.2 Four-task implementation sequence
+
+1. **`ecda4363`** — add the batching infrastructure (`g_d3d9_command_batch`, `record_d3d9`,
+   `flush_d3d9_batch`, the `bridge_call` guard) but have `record_d3d9` flush after every single append —
+   batch depth of 1, wire-identical to the old per-call path. This proved the wire format carries D3D9
+   opcodes correctly through `ioctl_record_commands` with zero behavior change, before touching the part
+   that actually changes behavior.
+2. **`e1ec179a`** — code-quality pass from review: documented why the `bridge_call` guard exists and why
+   its `!=` check prevents `flush_d3d9_batch`'s own recursive Escape from re-entering itself, and
+   switched the drain-and-reset in `flush_d3d9_batch` from move+clear to `swap()`, matching
+   `vulkan_shim.cpp`'s established idiom for the same operation.
+3. **`87863527`** — the real perf change: `record_d3d9` no longer flushes after every append. Group-A
+   calls now genuinely accumulate until a Group-B call (or an internal lazy-bind resolver) needs to
+   observe them via the `bridge_call` guard. The 64 KiB cap was added here as the backstop described
+   above. Full guest test suite (shader/const/texture/texcoord/partial-lock/int-bool-const/scissor/mrt/
+   multistream, x64+x86 where applicable) and the 26-subtest smoke test all passed with unchanged pixel
+   values.
+4. **`5bac1070`** — documented, per review feedback, that `umd_Flush` (`pfnFlush`) deliberately does
+   *not* drain `g_d3d9_command_batch`: no query/fence DDI is wired yet that would need the pending batch
+   visible, but a future reader wiring one could reasonably assume `Flush()` already interacts with
+   batching, so the non-interaction is now explicit rather than silent.
+
+### 25.3 Live-instrumentation verification: a real 15-call, 1256-byte batch
+
+Beyond the regression suite passing pixel-identical, batching was confirmed as *actually happening* (not
+just plumbed through a new mechanism that still flushes every call) by adding live instrumentation and
+running the `texture` guest test (`d3d9_texture_test.cpp`). The trace showed a single flush of **1256
+bytes** covering **15+ accumulated Group-A calls** — `SetRenderTarget`, `SetDepthStencil`,
+`SetStreamSource`, `SetIndices`, `SetTexture`, vertex/pixel shader binds, `SetViewport`, `Clear`, and
+four `DrawIndexedPrimitive` calls — all collapsing into one `ioctl_record_commands` Escape immediately
+before the readback `Lock()` that needed to observe their effects. This is the concrete evidence that the
+`bridge_call` guard is doing real batching across a representative real-world call sequence, not merely
+routing individual calls through `ioctl_record_commands` one at a time.
+
+### 25.4 Scope
+
+This closes the third and last item §24 left on the table. The other two — the present/submit path's
+busy-spin fence-wait and per-draw buffer/UBO/descriptor-set allocation churn — remain real, separate,
+unaddressed work; see `docs/d3d9-roadmap.md`'s "Performance — D3D9 native path" section.

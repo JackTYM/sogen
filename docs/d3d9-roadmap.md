@@ -91,12 +91,32 @@ real, separate, larger pieces of remaining work:
   rather than a genuine blocking wait or async completion callback.
 - **Per-draw buffer/UBO/descriptor-set allocation churn** — vertex/constant buffers and descriptor sets
   are still allocated fresh per draw rather than pooled/reused across frames.
-- **No wire-protocol batching for D3D9 DDI calls** — each DDI call still crosses the guest/host wire
-  individually; there is no batching of multiple DDI calls into one IOCTL round trip.
 
-Do not read this fix as having addressed any of the three items above — it didn't. A further planned
+Do not read this fix as having addressed either of the two items above — it didn't. A further planned
 slice (persistent GPU resource pooling + pipelined multi-frame submission) would need to address them
 and is separate, larger work.
+
+### Fixed (genuinely fixed with real code, 2026-07-05): D3D9 DDI-call wire batching
+
+The item previously listed here as a known remaining limitation — "no wire-protocol batching for D3D9
+DDI calls, each DDI call crosses the guest/host wire individually" — is now fixed. Four commits:
+`ecda4363`, `e1ec179a`, `87863527`, `5bac1070`.
+
+State-setting/draw/clear DDI calls (`SetRenderState`, `SetTexture`, `DrawPrimitive`, `Clear`, ~22 call
+sites in `sogen_d3d9_umd.cpp`) now accumulate guest-side in `g_d3d9_command_batch` via `record_d3d9`,
+reusing the already-existing `record_commands`/`ioctl_record_commands` wire mechanism (previously only
+used by the generic Vulkan-ICD bridge) with zero host or wire-format changes. `bridge_call` gained a
+guard that flushes any pending batch as a single `ioctl_record_commands` Escape before every call that
+needs the host to observe synchronous state first — Lock, Unlock, Present, CreateResource, TexBlt, and
+shader/vertex-declaration creation.
+
+**Verification**: live instrumentation on the `texture` guest test (`d3d9_texture_test.cpp`) showed a
+real batch of 15+ DDI calls (SetRenderTarget, SetDepthStencil, SetStreamSource, SetIndices, SetTexture,
+shader binds, viewport, Clear, 4x DrawIndexedPrimitive) collapsing into one 1256-byte flush right before
+the readback `Lock()` that needed to observe them — confirming genuine batching across multiple calls,
+not just per-call flushing routed through a new mechanism. Full regression sweep (shader, const,
+texture, texcoord, partial-lock, int-bool-const, scissor, mrt, multistream, x64+x86 where applicable)
+and the 26-subtest smoke test all pass with unchanged pixel values.
 
 ## Status by milestone
 

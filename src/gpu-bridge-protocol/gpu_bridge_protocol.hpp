@@ -386,9 +386,12 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_d3d9_present = make_ioctl(static_cast<uint32_t>(command::d3d9_present));
     inline constexpr uint32_t ioctl_d3d9_tex_blt = make_ioctl(static_cast<uint32_t>(command::d3d9_tex_blt));
 
-    // Streamed D3D9 opcodes, sent one at a time as individual sync Escape calls for now (record-batch
-    // replay via ioctl_record_commands is a pure perf optimization for later -- d3d9_host's
-    // execute_recorded is agnostic to which path delivered it).
+    // Streamed D3D9 opcodes. State-setting/draw/clear calls are batched guest-side into
+    // g_d3d9_command_batch (sogen_d3d9_umd.cpp's record_d3d9) and flushed as one ioctl_record_commands
+    // Escape only when a call needing synchronous host-visible state (Lock, Present, CreateResource,
+    // TexBlt, shader/vertex-decl creation) is about to cross the wire -- see bridge_call's flush guard
+    // there (commits ecda4363, e1ec179a, 87863527, 5bac1070). d3d9_host's execute_recorded is agnostic
+    // to which path delivered it either way.
     inline constexpr uint32_t ioctl_d3d9_set_render_state = make_ioctl(static_cast<uint32_t>(command::d3d9_set_render_state));
     inline constexpr uint32_t ioctl_d3d9_set_texture_stage_state =
         make_ioctl(static_cast<uint32_t>(command::d3d9_set_texture_stage_state));
