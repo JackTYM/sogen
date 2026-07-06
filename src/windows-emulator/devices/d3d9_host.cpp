@@ -837,72 +837,69 @@ namespace sogen
             }
         }
 
-        // Creates a host-visible buffer sized exactly for `data` and uploads it -- shared by
-        // execute_draw's per-draw vertex and index buffer uploads (simplest correct model for a first
-        // triangle; no persistent GPU buffer / dirty tracking yet, same as the rest of this file).
-        bool create_and_upload_gpu_buffer(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device,
-                                          const uint32_t usage, const std::vector<std::byte>& data, uint64_t& out_buffer,
-                                          uint64_t& out_memory)
+        // Ensures `pool` holds a host-visible buffer of at least `size` bytes with `usage`, then uploads
+        // `size` bytes from `data` into it. If the pool's existing buffer is already large enough, it's
+        // reused in place (just a mapped re-upload); otherwise any existing buffer/memory is destroyed and
+        // a new one of exactly `size` bytes is created. Pooled buffers persist across draws -- reuse is
+        // safe because execute_draw blocks on a fence before returning, so a prior draw's GPU read of this
+        // buffer has completed before a later draw rewrites it. On failure the pool is left empty (any
+        // partially created buffer freed) so the next draw retries cleanly. Replaces the former
+        // create_and_upload_gpu_buffer, which created and freed a fresh buffer every draw.
+        bool ensure_pooled_buffer(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device,
+                                  pooled_buffer& pool, const void* data, const size_t size, const uint32_t usage)
         {
-            if (vulkan.create_buffer(device, data.size(), usage, out_buffer) != 0 || out_buffer == 0)
+            if (pool.buffer == 0 || pool.capacity < size)
             {
-                return false;
+                if (pool.buffer != 0)
+                {
+                    vulkan.destroy_buffer(device, pool.buffer);
+                    vulkan.free_memory(device, pool.memory);
+                    pool = {};
+                }
+                if (vulkan.create_buffer(device, size, usage, pool.buffer) != 0 || pool.buffer == 0)
+                {
+                    pool = {};
+                    return false;
+                }
+                uint64_t mem_size = 0;
+                uint64_t mem_align = 0;
+                uint32_t mem_type_bits = 0;
+                vulkan.get_buffer_memory_requirements(device, pool.buffer, mem_size, mem_align, mem_type_bits);
+                const uint32_t memory_type = find_memory_type_index(
+                    vulkan, physical_device, mem_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                if (memory_type == UINT32_MAX || vulkan.allocate_memory(device, mem_size, memory_type, pool.memory) != 0 ||
+                    pool.memory == 0)
+                {
+                    vulkan.destroy_buffer(device, pool.buffer);
+                    pool = {};
+                    return false;
+                }
+                vulkan.bind_buffer_memory(device, pool.buffer, pool.memory, 0);
+                pool.capacity = size;
             }
-            uint64_t mem_size = 0;
-            uint64_t mem_align = 0;
-            uint32_t mem_type_bits = 0;
-            vulkan.get_buffer_memory_requirements(device, out_buffer, mem_size, mem_align, mem_type_bits);
-            const uint32_t memory_type = find_memory_type_index(
-                vulkan, physical_device, mem_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            if (memory_type == UINT32_MAX || vulkan.allocate_memory(device, mem_size, memory_type, out_memory) != 0 ||
-                out_memory == 0)
-            {
-                vulkan.destroy_buffer(device, out_buffer);
-                out_buffer = 0;
-                return false;
-            }
-            vulkan.bind_buffer_memory(device, out_buffer, out_memory, 0);
-            vulkan.upload_memory(device, out_memory, 0, data.size(), data.data(), data.size());
+            vulkan.upload_memory(device, pool.memory, 0, size, data, size);
             return true;
         }
 
-        // Creates a host-visible UBO of exactly `size` bytes and uploads `data` zero-padded to that
-        // size -- the fixed D3D9 constant-register caps (float: VS=4096B/256 float4 regs, PS=512B/32
-        // float4 regs; int/bool: 256B/16 regs, both stages) regardless of how many registers the app
-        // actually set, matching real D3D9 semantics where unset registers read as 0. Mirrors
-        // execute_draw's own per-draw vertex-buffer upload. Generic over the constant-register element
-        // type (float for c#, int32_t for i#, uint32_t for b#) -- same upload shape for all three.
+        // Re-uploads `data` (zero-padded to `size`) into `pool`'s UBO, growing/creating it if needed via
+        // ensure_pooled_buffer. `size` is the fixed D3D9 constant-register cap (float: VS=4096B/256 float4
+        // regs, PS=512B/32 float4 regs; int/bool: 256B/16 regs, both stages) regardless of how many
+        // registers the app actually set, matching real D3D9 semantics where unset registers read as 0 --
+        // the full zero-padded buffer is re-uploaded every draw so no stale tail can survive across draws.
+        // Since the caps never change, the pool creates its buffer once and reuses it forever after.
+        // Generic over the constant-register element type (float for c#, int32_t for i#, uint32_t for b#).
         template <typename T>
-        bool create_and_upload_ubo(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device, const size_t size,
-                                   const std::vector<T>& data, uint64_t& out_buffer, uint64_t& out_memory)
+        bool upload_pooled_ubo(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device, pooled_buffer& pool,
+                               const size_t size, const std::vector<T>& data)
         {
-            if (vulkan.create_buffer(device, size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, out_buffer) != 0 || out_buffer == 0)
-            {
-                return false;
-            }
-            uint64_t mem_size = 0;
-            uint64_t mem_align = 0;
-            uint32_t mem_type_bits = 0;
-            vulkan.get_buffer_memory_requirements(device, out_buffer, mem_size, mem_align, mem_type_bits);
-            const uint32_t memory_type = find_memory_type_index(
-                vulkan, physical_device, mem_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            if (memory_type == UINT32_MAX || vulkan.allocate_memory(device, mem_size, memory_type, out_memory) != 0 ||
-                out_memory == 0)
-            {
-                vulkan.destroy_buffer(device, out_buffer);
-                out_buffer = 0;
-                return false;
-            }
-            vulkan.bind_buffer_memory(device, out_buffer, out_memory, 0);
-
             std::vector<std::byte> staging(size, std::byte{0});
             const size_t bytes = std::min(data.size() * sizeof(T), size);
             if (bytes > 0)
             {
                 std::memcpy(staging.data(), data.data(), bytes);
             }
-            vulkan.upload_memory(device, out_memory, 0, size, staging.data(), size);
-            return true;
+            return ensure_pooled_buffer(vulkan, device, physical_device, pool, staging.data(), size,
+                                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
         }
 
         // D3DTEXTUREFILTERTYPE (D3DTEXF_NONE=0, POINT=1, LINEAR=2, ANISOTROPIC=3, ...) -> VkFilter.
@@ -1222,24 +1219,13 @@ namespace sogen
             }
         }
 
-        // Upload the current contents of every referenced stream fresh every draw -- simplest correct
-        // model for a first triangle; no persistent GPU vertex buffer / dirty tracking yet. Streams the
-        // declaration doesn't reference, or that lack a real stride (both already filtered out of
-        // used_binding_mask above), or a referenced+usable stream the app never called SetStreamSource
+        // Upload the current contents of every referenced stream into its per-stream pooled vertex buffer
+        // (stream_buffer_pool_[stream]) -- reused/regrown across draws rather than reallocated every draw.
+        // Streams the declaration doesn't reference, or that lack a real stride (both already filtered out
+        // of used_binding_mask above), or a referenced+usable stream the app never called SetStreamSource
         // for, are left at buffer id 0 -- cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
         std::vector<uint64_t> stream_buffers(highest_binding + 1, 0);
-        std::vector<uint64_t> stream_memories(highest_binding + 1, 0);
         std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
-        const auto destroy_stream_buffers = [&]() {
-            for (size_t stream = 0; stream < stream_buffers.size(); ++stream)
-            {
-                if (stream_buffers[stream] != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, stream_buffers[stream]);
-                    this->vulkan_.free_memory(device, stream_memories[stream]);
-                }
-            }
-        };
         for (uint32_t stream = 0; stream <= highest_binding; ++stream)
         {
             if ((used_binding_mask & (1u << stream)) == 0)
@@ -1271,28 +1257,29 @@ namespace sogen
                 }
                 src_bytes = &res_it->second.backing;
             }
-            if (!create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                                              *src_bytes, stream_buffers[stream], stream_memories[stream]))
+            if (!ensure_pooled_buffer(this->vulkan_, device, this->vk_physical_device_, this->stream_buffer_pool_[stream],
+                                      src_bytes->data(), src_bytes->size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
             {
-                destroy_stream_buffers();
                 return d3d_ok;
             }
+            stream_buffers[stream] = this->stream_buffer_pool_[stream].buffer;
             const auto off_it = this->state_.stream_offsets.find(stream);
             stream_bind_offsets[stream] = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
         }
 
         uint64_t index_buffer_vk = 0;
-        uint64_t index_memory = 0;
         // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
-        // index buffer; both upload identically as a transient index buffer.
+        // index buffer; both upload identically into the pooled index buffer.
         const std::vector<std::byte>* ib_bytes =
             ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr ? &ib_entry->backing : nullptr);
-        if (ib_bytes != nullptr &&
-            !create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                                          *ib_bytes, index_buffer_vk, index_memory))
+        if (ib_bytes != nullptr)
         {
-            destroy_stream_buffers();
-            return d3d_ok;
+            if (!ensure_pooled_buffer(this->vulkan_, device, this->vk_physical_device_, this->index_buffer_pool_,
+                                      ib_bytes->data(), ib_bytes->size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+            {
+                return d3d_ok;
+            }
+            index_buffer_vk = this->index_buffer_pool_.buffer;
         }
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
@@ -1301,18 +1288,17 @@ namespace sogen
         // D3D9 SM3 int/bool constant-register caps (16 registers each, both stages -- fill_d3d9caps),
         // each register expanded to a 16-byte slot (see vs/ps_const_i/b's own comments in d3d9_host.hpp).
         constexpr size_t int_bool_ubo_size = 16 * 4 * sizeof(uint32_t);
-        uint64_t vs_ubo = 0;
-        uint64_t vs_ubo_memory = 0;
-        uint64_t ps_ubo = 0;
-        uint64_t ps_ubo_memory = 0;
-        uint64_t vs_ubo_i = 0;
-        uint64_t vs_ubo_i_memory = 0;
-        uint64_t ps_ubo_i = 0;
-        uint64_t ps_ubo_i_memory = 0;
-        uint64_t vs_ubo_b = 0;
-        uint64_t vs_ubo_b_memory = 0;
-        uint64_t ps_ubo_b = 0;
-        uint64_t ps_ubo_b_memory = 0;
+        // Indices into ubo_pool_ (d3d9_host.hpp). Order is fixed -- the descriptor writes below read each
+        // pool by these names.
+        enum ubo_index : size_t
+        {
+            ubo_vs_f = 0,
+            ubo_ps_f = 1,
+            ubo_vs_i = 2,
+            ubo_ps_i = 3,
+            ubo_vs_b = 4,
+            ubo_ps_b = 5,
+        };
         std::array<uint64_t, max_ps_sampler_stages> tex_samplers{};
         std::array<uint64_t, max_ps_sampler_stages> tex_image_views{};
         std::array<uint64_t, 2> descriptor_sets{};
@@ -1327,58 +1313,23 @@ namespace sogen
         };
         if (use_programmable)
         {
-            const auto destroy_const_ubos = [&]() {
-                if (vs_ubo != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, vs_ubo);
-                    this->vulkan_.free_memory(device, vs_ubo_memory);
-                }
-                if (ps_ubo != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, ps_ubo);
-                    this->vulkan_.free_memory(device, ps_ubo_memory);
-                }
-                if (vs_ubo_i != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, vs_ubo_i);
-                    this->vulkan_.free_memory(device, vs_ubo_i_memory);
-                }
-                if (ps_ubo_i != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, ps_ubo_i);
-                    this->vulkan_.free_memory(device, ps_ubo_i_memory);
-                }
-                if (vs_ubo_b != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, vs_ubo_b);
-                    this->vulkan_.free_memory(device, vs_ubo_b_memory);
-                }
-                if (ps_ubo_b != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, ps_ubo_b);
-                    this->vulkan_.free_memory(device, ps_ubo_b_memory);
-                }
-            };
-            if (!create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, vs_ubo_size, this->state_.vs_const_f,
-                                       vs_ubo, vs_ubo_memory) ||
-                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, ps_ubo_size, this->state_.ps_const_f,
-                                       ps_ubo, ps_ubo_memory) ||
-                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
-                                       this->state_.vs_const_i, vs_ubo_i, vs_ubo_i_memory) ||
-                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
-                                       this->state_.ps_const_i, ps_ubo_i, ps_ubo_i_memory) ||
-                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
-                                       this->state_.vs_const_b, vs_ubo_b, vs_ubo_b_memory) ||
-                !create_and_upload_ubo(this->vulkan_, device, this->vk_physical_device_, int_bool_ubo_size,
-                                       this->state_.ps_const_b, ps_ubo_b, ps_ubo_b_memory))
+            // Re-upload the six constant buffers into their persistent pools (created once, on the first
+            // programmable draw, and reused every draw after -- their sizes are fixed caps that never
+            // change). Contents genuinely change per draw, so the full zero-padded buffer is rewritten
+            // each time; the pool objects are not reallocated.
+            if (!upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_vs_f], vs_ubo_size,
+                                   this->state_.vs_const_f) ||
+                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_ps_f], ps_ubo_size,
+                                   this->state_.ps_const_f) ||
+                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_vs_i], int_bool_ubo_size,
+                                   this->state_.vs_const_i) ||
+                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_ps_i], int_bool_ubo_size,
+                                   this->state_.ps_const_i) ||
+                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_vs_b], int_bool_ubo_size,
+                                   this->state_.vs_const_b) ||
+                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_ps_b], int_bool_ubo_size,
+                                   this->state_.ps_const_b))
             {
-                destroy_stream_buffers();
-                if (index_buffer_vk != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, index_buffer_vk);
-                    this->vulkan_.free_memory(device, index_memory);
-                }
-                destroy_const_ubos();
                 return d3d_ok;
             }
 
@@ -1434,7 +1385,7 @@ namespace sogen
                  .dst_binding = 0,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = vs_ubo,
+                 .buffer = this->ubo_pool_[ubo_vs_f].buffer,
                  .offset = 0,
                  .range = vs_ubo_size,
                  .sampler = 0,
@@ -1444,7 +1395,7 @@ namespace sogen
                  .dst_binding = 0,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = ps_ubo,
+                 .buffer = this->ubo_pool_[ubo_ps_f].buffer,
                  .offset = 0,
                  .range = ps_ubo_size,
                  .sampler = 0,
@@ -1454,7 +1405,7 @@ namespace sogen
                  .dst_binding = 2,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = vs_ubo_i,
+                 .buffer = this->ubo_pool_[ubo_vs_i].buffer,
                  .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
@@ -1464,7 +1415,7 @@ namespace sogen
                  .dst_binding = 3,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = vs_ubo_b,
+                 .buffer = this->ubo_pool_[ubo_vs_b].buffer,
                  .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
@@ -1474,7 +1425,7 @@ namespace sogen
                  .dst_binding = 2,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = ps_ubo_i,
+                 .buffer = this->ubo_pool_[ubo_ps_i].buffer,
                  .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
@@ -1484,7 +1435,7 @@ namespace sogen
                  .dst_binding = 3,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = ps_ubo_b,
+                 .buffer = this->ubo_pool_[ubo_ps_b].buffer,
                  .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
@@ -1636,26 +1587,11 @@ namespace sogen
 
         this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
-        destroy_stream_buffers();
-        if (index_buffer_vk != 0)
-        {
-            this->vulkan_.destroy_buffer(device, index_buffer_vk);
-            this->vulkan_.free_memory(device, index_memory);
-        }
+        // Vertex/index/constant buffers are pooled (retained in stream_buffer_pool_/index_buffer_pool_/
+        // ubo_pool_ for reuse next draw), so nothing to free here -- only the per-draw samplers, which are
+        // not yet pooled.
         if (use_programmable)
         {
-            this->vulkan_.destroy_buffer(device, vs_ubo);
-            this->vulkan_.free_memory(device, vs_ubo_memory);
-            this->vulkan_.destroy_buffer(device, ps_ubo);
-            this->vulkan_.free_memory(device, ps_ubo_memory);
-            this->vulkan_.destroy_buffer(device, vs_ubo_i);
-            this->vulkan_.free_memory(device, vs_ubo_i_memory);
-            this->vulkan_.destroy_buffer(device, ps_ubo_i);
-            this->vulkan_.free_memory(device, ps_ubo_i_memory);
-            this->vulkan_.destroy_buffer(device, vs_ubo_b);
-            this->vulkan_.free_memory(device, vs_ubo_b_memory);
-            this->vulkan_.destroy_buffer(device, ps_ubo_b);
-            this->vulkan_.free_memory(device, ps_ubo_b_memory);
             destroy_tex_samplers();
         }
 

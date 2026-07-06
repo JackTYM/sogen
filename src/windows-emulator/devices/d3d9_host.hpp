@@ -34,6 +34,16 @@ namespace sogen
         uint32_t used_binding_mask{}; // bit i set => stream i is referenced by this declaration
     };
 
+    // A GPU buffer + its backing memory, retained across draws and reused in place. `capacity` is the
+    // byte size the buffer was last (re)created with; ensure_pooled_buffer (d3d9_host.cpp) grows it only
+    // when a draw needs more, otherwise it just re-uploads the new contents into the existing buffer.
+    struct pooled_buffer
+    {
+        uint64_t buffer{};
+        uint64_t memory{};
+        size_t capacity{};
+    };
+
     // Reinterprets blob as a back-to-back array of d3d9_cmd::vertex_element (8 bytes each; blob.size()
     // must be a multiple of that, any remainder is ignored) and produces one parsed_vertex_attribute
     // per element whose D3DDECLTYPE is recognized by d3d9_format.hpp's d3d9_decl_type_to_vulkan --
@@ -373,6 +383,17 @@ namespace sogen
         // bound, since SM1-3 requires the VS/PS pair together to build the inter-stage varying map (see
         // d3d9_shader_translator.hpp).
         std::map<pipeline_cache_key, programmable_pipeline_entry> programmable_pipelines_{};
+
+        // Per-device-lifetime GPU buffer pools, created once and reused/regrown across draws instead of
+        // being allocated and freed every draw. One vertex-buffer pool per stream (multiple streams can
+        // be bound simultaneously), a single index-buffer pool (only one index buffer per draw), and six
+        // constant-buffer pools (VS/PS x float/int/bool -- fixed sizes, so these only ever create once).
+        // Reuse is safe because execute_draw submits and blocks on a fence before returning, so a prior
+        // draw's GPU read of a pooled buffer has completed before a later draw rewrites it. Indices into
+        // ubo_pool_ match the ubo_index enum in execute_draw.
+        std::array<pooled_buffer, max_vertex_streams> stream_buffer_pool_{};
+        pooled_buffer index_buffer_pool_{};
+        std::array<pooled_buffer, 6> ubo_pool_{};
 
         uint64_t allocate_id();
         // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
