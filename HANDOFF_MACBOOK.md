@@ -2594,3 +2594,88 @@ Roadmap updated: `docs/d3d9-roadmap.md`'s stream-stride pipeline-cache-key bulle
 fixed (citing `6f723bc1`/`02d33bba`), and the M3 table row and sequencing-recommendation prose both
 corrected to state that the pipeline-cache-key system has no known open gaps left, rather than one
 remaining.
+
+## 33. `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` — the real DDI mechanism turned out to be a third,
+previously-unconsidered path; an incidental pre-existing arity bug found and fixed along the way
+(2026-07-06)
+
+M3's `*_UP`-draws gap was scoped with two candidate hypotheses going in: either a dedicated "UP draw" DDI
+call carrying inline vertex/index bytes (what the previously-existing wire scaffolding,
+`draw_primitive_up_record`/`draw_indexed_primitive_up_record`, was modeled on), or some reuse of the
+`DrawPrimitive2`/`DrawIndexedPrimitive2` DP2-batched slots (14/15) already ruled out as dead ends back in
+§10.6. **Neither was true.** Live RE (`f36af2b7`) traced real `d3d9.dll` (x64 and x86) bracketing an actual
+`DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` call and found a third mechanism: the runtime binds the user
+vertex array via `pfnSetStreamSourceUm` (device-func-table slot 7) and, for the indexed variant, the user
+index array via `pfnSetIndicesUm` (slot 9), then calls the **already-wired, ordinary**
+`pfnDrawPrimitive`/`pfnDrawIndexedPrimitive` slots (10/11) — the exact same slots a normal buffer-backed
+draw uses. Slots 14/15 never fire, confirming the §10.6 dead end was correctly abandoned. There is no
+dedicated "UP draw" DDI call in real d3d9.dll at all.
+
+**The struct-vs-scalar correction.** `pfnSetStreamSourceUm` is struct-based, RE-confirmed as
+`D3DDDIARG_SETSTREAMSOURCEUM = {UINT StreamNumber; UINT Stride;}` (8 bytes, identical x64/x86 — two plain
+UINTs, no pointer to shrink), with the user vertex pointer passed as a separate third argument, not folded
+into the struct. Going in, `pfnSetIndicesUm` was assumed to follow the same struct-based shape as its
+sibling. Live RE showed that assumption wrong too: it is a plain SCALAR call, `(HANDLE, UINT Stride, CONST
+VOID* pUMIndices)` — no `D3DDDIARG_SETINDICESUM` struct exists, Stride is the raw index element size (2 or
+4) passed by value. Getting this specific correction right mattered: treating it as struct-based would
+have read a garbage pointer as the stride and crashed or corrupted every indexed UP draw.
+
+**Implementation (`1c2bd176`).** The old, incorrectly-modeled `draw_primitive_up_record`/
+`draw_indexed_primitive_up_record` wire records and their inert host stubs (they parsed and no-op'd —
+never reachable from a real DDI call, since no DDI call shape matched them) were retired outright, not
+kept alongside the new ones. Replaced with `set_stream_source_um_record` (`stream_number`, `stride_bytes`,
+`offset_bytes`, `vertex_data_size` + inline vertex bytes) and `set_indices_um_record`
+(`index_element_size`, `index_data_size` + inline index bytes), new opcodes `d3d9_set_stream_source_um`
+(`0x937`) / `d3d9_set_indices_um` (`0x938`). UMD side: `umd_SetStreamSourceUm` (slot 7) /
+`umd_SetIndicesUm` (slot 9) stash the user pointer + stride/element-size; they don't know the vertex/index
+*count* yet (Um-binding calls don't carry it), so the actual byte copy is deferred to the subsequent,
+reused `umd_DrawPrimitive`/`umd_DrawIndexedPrimitive` call, which does carry the counts and now copies
+exactly the referenced bytes into the new wire records before emitting the normal draw record. Host side:
+`device_state` gained transient UM-backed `stream_um_data`/`index_um_data`; the `set_*_um` handlers stash
+the inline bytes and clear the corresponding resource-id binding (and a real buffer bind clears the UM
+one) — mutual exclusivity enforced from both directions, not just one. `execute_draw` composes the two
+sources: it checks for UM-backed bytes first per stream/index slot, falling back to the existing
+resource-id-backed path otherwise, uploading either as a throwaway Vulkan buffer the same way. **No new
+draw-time DDI handler was needed at all** — real `d3d9.dll` reusing the normal draw slots meant the
+existing `execute_draw` path only needed a second data source, not a new entry point. UM streams populate
+`stream_strides` identically to real buffer binds, so `vertex_shape_key()`'s existing per-stream stride
+keying (§32) already covers them with no further change.
+
+**Incidental arity bug, precisely scoped.** Implementing the UM-binding call sequence required fixing
+`pfnDrawPrimitive` (device-func slot 10)'s arity table entry, which was wrong: declared 2 args, but the
+real WDK-standard shape is 3 args, `(HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE*, CONST UINT* pFlags)` —
+confirmed by live IDA disassembly of both x64 and x86 `d3d9.dll`, which push three args at every call
+site, normal and UP-draw alike. The wrong arity is a genuinely **pre-existing** bug, not introduced by
+this slice — the 2-arg declaration has been in the arity table since the WoW64 port. It caused an
+**x86-only** `__stdcall` stack desync (`STATUS_STACK_BUFFER_OVERRUN`): x86's callee-cleanup convention
+needs the callee's `ret N` to pop exactly the bytes the caller pushed, so a declared arity short by one
+argument desyncs the stack; x64's caller-cleanup convention masked the same mismatch entirely, which is
+why it went unnoticed until now. Critically, this bug was **latent and unreachable until this slice's new
+UP-draw call sequence exercised it** — it did **not** affect `d3d9-triangle-test-x86` or any other
+existing test. This was independently verified, not just asserted: reverting to the 2-arg declaration and
+re-running `triangle-test-x86` still passes correctly, while `drawprimitiveup-test-x86` crashes with the
+2-arg declaration and passes with the 3-arg fix. Do not read this as "the UP-draw work fixed an existing
+test" — it didn't; it fixed a bug that only its own new test could reach.
+
+**Test evidence (`91f1ded5`).** `d3d9_drawprimitiveup_test.cpp`: a RED triangle via `DrawPrimitiveUP` and
+a GREEN indexed quad via `DrawIndexedPrimitiveUP` (both `D3DFMT_INDEX16` and `D3DFMT_INDEX32` sub-passes),
+driven through the fixed-function `D3DFVF_XYZRHW|D3DFVF_DIFFUSE` path, with **no vertex or index buffer
+object created at all** — every vertex/index array is a plain stack/heap array passed straight to
+`DrawPrimitiveUP`/`DrawIndexedPrimitiveUP`. Each sub-pass clears an off-screen render target, draws, and
+`LockRect`-reads it back to check interior pixels match the geometry color while corners stay the clear
+color. Passes pixel-identical on both x64 and x86/WoW64.
+
+**Polish (`bc86b91b`).** Code-quality review of `1c2bd176` found the mutual-exclusivity coupling was only
+documented from one side (`umd_SetStreamSource`/`umd_SetIndices` note that they supersede a pending UM
+binding, but the new UM setters said nothing about being superseded later). Added one-line
+cross-reference comments on each UM setter so a future reader touching only the UM side has a local signal
+the coupling exists.
+
+**Verification.** Full regression sweep — all existing D3D9 guest tests on both x64 and x86, plus the
+smoke test — stayed green at every stage (RE-gate commit, feature commit, test commit, polish commit),
+independently confirmed by an adversarial reviewer.
+
+Roadmap updated: `docs/d3d9-roadmap.md`'s `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` bullet flipped from
+open to closed (citing all four commits), the M3 table row updated to list it among the now-done items
+and to note the incidental arity fix, and the sequencing-recommendation prose corrected to drop it from
+the remaining-work list.
