@@ -1747,9 +1747,9 @@ namespace sogen
         return true;
     }
 
-    void d3d9_host::sync_backing_from_gpu(resource_entry& e)
+    void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
     {
-        if (!e.backing_dirty || e.vk_image_id == 0)
+        if (!rt.backing_dirty || rt.vk_image_id == 0)
         {
             return;
         }
@@ -1757,10 +1757,10 @@ namespace sogen
         std::vector<std::byte> pixels;
         uint32_t readback_width = 0;
         uint32_t readback_height = 0;
-        if (this->vulkan_.readback_render_target(e.vk_image_id, pixels, readback_width, readback_height) == 0)
+        if (this->vulkan_.readback_render_target(rt.vk_image_id, pixels, readback_width, readback_height) == 0)
         {
-            e.backing = std::move(pixels);
-            e.backing_dirty = false;
+            rt.backing = std::move(pixels);
+            rt.backing_dirty = false;
         }
     }
 

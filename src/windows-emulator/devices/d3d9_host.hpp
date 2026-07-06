@@ -324,9 +324,10 @@ namespace sogen
 
         // If this color RT has GPU-side pixels not yet mirrored into `backing`, copy them now (blocking,
         // same mechanism as the existing per-draw/per-clear readback) and clear the flag. No-op for
-        // buffers/plain textures (backing_dirty never set for them) and for RTs already clean. Safe because
-        // a dirty RT is always left in TRANSFER_SRC_OPTIMAL layout by the draw/clear that dirtied it.
-        void sync_backing_from_gpu(resource_entry& e);
+        // buffers/plain textures (backing_dirty never set for them) and for RTs already clean. Safe
+        // because readback_render_target itself verifies the image is in TRANSFER_SRC_OPTIMAL layout
+        // (the resting state left by the draw/clear that dirtied it) and fails closed otherwise.
+        void sync_backing_from_gpu(resource_entry& rt);
 
         // Present only for indexed draws; execute_draw binds `index_buffer` and calls cmd_draw_indexed
         // instead of cmd_draw when passed. index_format matches set_indices_record::format (0 = 16-bit,
