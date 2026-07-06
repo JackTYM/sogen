@@ -78,6 +78,15 @@ namespace sogen
         constexpr uint32_t d3dblend_blendfactor = 14;
         constexpr uint32_t d3dblend_invblendfactor = 15;
 
+        // D3DSTREAMSOURCE_* flags (d3d9types.h): the high 2 bits of a SetStreamSourceFreq divider select
+        // the stream's instancing role; the low 30 bits carry the instance count (INDEXEDDATA) or the
+        // per-instance advance divider (INSTANCEDATA). A divider with neither flag is an ordinary
+        // per-vertex stream. These are the raw values the guest UMD forwards untouched (see
+        // umd_SetStreamSourceFreq) and this host stores in state_.stream_frequencies.
+        constexpr uint32_t d3dstreamsource_indexeddata = 1u << 30;
+        constexpr uint32_t d3dstreamsource_instancedata = 2u << 30;
+        constexpr uint32_t d3dstreamsource_freq_mask = (1u << 30) - 1u; // low 30 bits: count/divider
+
         // Public D3DBLENDOP values (d3d9types.h), D3DRS_BLENDOP's value space.
         constexpr uint32_t d3dblendop_add = 1;
         constexpr uint32_t d3dblendop_subtract = 2;
@@ -424,6 +433,8 @@ namespace sogen
         }
 
         // D3DFVF_XYZRHW|D3DFVF_DIFFUSE: 16-byte {x,y,z,rhw} position + 4-byte D3DCOLOR diffuse, stride 20.
+        // Always per-vertex: the FF path is a single hardcoded, non-instanced stream (instancing requires
+        // a programmable pipeline with a real multi-stream declaration), so it never sees INSTANCEDATA.
         const std::array<vulkan_host::vertex_binding, 1> bindings{
             {{.binding = 0, .stride = 20, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX}}};
         const std::array<vulkan_host::vertex_attribute, 2> attributes{{
@@ -467,6 +478,10 @@ namespace sogen
     d3d9_host::vertex_input_shape d3d9_host::vertex_shape_key() const
     {
         vertex_input_shape shape{};
+        // Same shared helper the binding builder (ensure_programmable_pipeline) and draw (execute_draw)
+        // consult, so the per-instance inputRate baked into a built pipeline can never disagree with the
+        // mask this cache key was computed from. 0 for every non-instanced draw -- keeps existing keys.
+        shape.instance_binding_mask = this->resolve_instancing().instance_binding_mask;
         const auto* real_decl = this->find_real_vertex_decl();
         if (real_decl != nullptr)
         {
@@ -526,6 +541,40 @@ namespace sogen
             }
         }
         return mask;
+    }
+
+    d3d9_host::instancing_state d3d9_host::resolve_instancing() const
+    {
+        instancing_state result{};
+        for (const auto& [stream, freq] : this->state_.stream_frequencies)
+        {
+            if (stream >= max_vertex_streams)
+            {
+                continue; // beyond the mask width -- no Vulkan binding is ever emitted for it anyway
+            }
+            if ((freq & d3dstreamsource_indexeddata) != 0)
+            {
+                // The INDEXEDDATA stream's low 30 bits are the instance count for the whole draw. A count
+                // of 0 is meaningless (a draw of no instances); ignore it and keep the default of 1.
+                const uint32_t count = freq & d3dstreamsource_freq_mask;
+                if (count != 0)
+                {
+                    result.instance_count = count;
+                }
+            }
+            else if ((freq & d3dstreamsource_instancedata) != 0)
+            {
+                // Only divider == 1 (advance the stream once per instance) is representable without
+                // VK_EXT_vertex_attribute_divisor. KNOWN LIMITATION: a non-1 divider is left per-vertex
+                // (mask bit unset) rather than silently rendering wrong per-instance data -- the extension
+                // is not enabled on the D3D9 path's Vulkan device (see this file's device creation).
+                if ((freq & d3dstreamsource_freq_mask) == 1)
+                {
+                    result.instance_binding_mask |= (1u << stream);
+                }
+            }
+        }
+        return result;
     }
 
     const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(
@@ -678,6 +727,11 @@ namespace sogen
             // (VUID-VkPipelineVertexInputStateCreateInfo-binding-00615). execute_draw's own per-stream
             // upload/bind loop uses this exact same filtered mask, so the two can never disagree.
             const uint32_t usable_mask = this->usable_vertex_binding_mask(*real_decl);
+            // Same shared helper vertex_shape_key() folded into this pipeline's cache key -- a stream
+            // flagged D3DSTREAMSOURCE_INSTANCEDATA gets VK_VERTEX_INPUT_RATE_INSTANCE so Vulkan fetches it
+            // by instance index; every other stream stays per-vertex. Because both the key and this build
+            // read the identical mask, they can never disagree about which bindings are instance-rate.
+            const uint32_t instance_mask = this->resolve_instancing().instance_binding_mask;
             for (uint32_t stream = 0; stream < 32; ++stream)
             {
                 if ((usable_mask & (1u << stream)) == 0)
@@ -685,8 +739,9 @@ namespace sogen
                     continue;
                 }
                 const auto stride_it = this->state_.stream_strides.find(stream);
-                bindings.push_back(
-                    {.binding = stream, .stride = stride_it->second, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX});
+                const uint32_t input_rate = (instance_mask & (1u << stream)) != 0 ? VK_VERTEX_INPUT_RATE_INSTANCE
+                                                                                  : VK_VERTEX_INPUT_RATE_VERTEX;
+                bindings.push_back({.binding = stream, .stride = stride_it->second, .input_rate = input_rate});
             }
             attributes.reserve(real_decl->attributes.size());
             for (const auto& attr : real_decl->attributes)
@@ -713,6 +768,9 @@ namespace sogen
             const auto stride_it = this->state_.stream_strides.find(0);
             const uint32_t stride = stride_it != this->state_.stream_strides.end() ? stride_it->second : 16;
             const bool textured_layout = stride == 20;
+            // Always per-vertex: this fallback is a single stream-0-only shape with no vertex declaration,
+            // so there is no second stream to carry per-instance data (instancing needs a real multi-stream
+            // declaration, which takes the real-decl branch above).
             bindings.push_back(
                 {.binding = 0, .stride = textured_layout ? 20u : 16u, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX});
             attributes.push_back({.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0});
@@ -1572,16 +1630,21 @@ namespace sogen
 
         this->vulkan_.cmd_bind_vertex_buffers(this->command_buffer_, 0, static_cast<uint32_t>(stream_buffers.size()),
                                               stream_buffers.data(), stream_bind_offsets.data());
+        // D3D9 hardware instancing carries no explicit instance-count draw parameter: the count is the low
+        // 30 bits of the D3DSTREAMSOURCE_INDEXEDDATA stream's SetStreamSourceFreq divider (default 1, i.e.
+        // an ordinary single-instance draw). Same helper the pipeline's per-binding inputRate was built
+        // from, so the fetched instance data matches the instance count issued here.
+        const uint32_t instance_count = this->resolve_instancing().instance_count;
         if (indexed != nullptr)
         {
             const uint32_t index_type = indexed->index_format != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
             this->vulkan_.cmd_bind_index_buffer(this->command_buffer_, index_buffer_vk, 0, index_type);
-            this->vulkan_.cmd_draw_indexed(this->command_buffer_, vertex_count, 1, indexed->first_index,
+            this->vulkan_.cmd_draw_indexed(this->command_buffer_, vertex_count, instance_count, indexed->first_index,
                                            indexed->base_vertex_index, 0);
         }
         else
         {
-            this->vulkan_.cmd_draw(this->command_buffer_, vertex_count, 1, first_vertex, 0);
+            this->vulkan_.cmd_draw(this->command_buffer_, vertex_count, instance_count, first_vertex, 0);
         }
 
         this->vulkan_.cmd_end_rendering(this->command_buffer_);

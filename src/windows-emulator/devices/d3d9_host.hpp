@@ -201,9 +201,10 @@ namespace sogen
         // Per-device fixed-function/DDI state. Most of this is now consumed by execute_draw and the
         // pipeline builders (render_state, bound_textures, sampler_state, index_buffer, stream_sources/
         // strides, vertex_decl, vs/ps_const_f, vs/ps_const_i, vs/ps_const_b, render_targets,
-        // depth_stencil); texture_stage_state (the non-sampler TSS values, e.g. D3DTSS_COLOROP) and
-        // stream_frequencies are still write-only, tracked for fixed-function texture combining and
-        // instancing respectively, neither in scope yet.
+        // depth_stencil, stream_frequencies -- the last now decoded by resolve_instancing() into a draw's
+        // instance count and per-instance binding mask for D3D9 hardware instancing); texture_stage_state
+        // (the non-sampler TSS values, e.g. D3DTSS_COLOROP) is still write-only, tracked for fixed-function
+        // texture combining, not in scope yet.
         struct device_state
         {
             std::unordered_map<uint32_t, uint32_t> render_state{};
@@ -322,6 +323,19 @@ namespace sogen
         // D3D9's real MaxStreams cap (16); sized to the mask width so a stride snapshot can never truncate.
         static constexpr uint32_t max_vertex_streams = 32;
 
+        // Resolved D3D9 hardware-instancing state for the current draw, decoded once from
+        // state_.stream_frequencies (the raw SetStreamSourceFreq dividers, INCLUDING their
+        // D3DSTREAMSOURCE_* flag bits). instance_count is the vkCmdDraw*/instanceCount to issue;
+        // instance_binding_mask has bit i set iff stream i must be bound VK_VERTEX_INPUT_RATE_INSTANCE.
+        // The pipeline-cache key (via vertex_shape_key), the vertex-binding builder
+        // (ensure_programmable_pipeline), and execute_draw's draw calls all derive their decisions from
+        // this ONE helper (resolve_instancing) so they can never disagree.
+        struct instancing_state
+        {
+            uint32_t instance_count{1};       // from the D3DSTREAMSOURCE_INDEXEDDATA stream's low 30 bits
+            uint32_t instance_binding_mask{}; // bit i => stream i is D3DSTREAMSOURCE_INSTANCEDATA (divider 1)
+        };
+
         // Full identity of the vertex-input state ensure_programmable_pipeline will BUILD for a draw, so a
         // cache key computed from it can never disagree with what actually gets built on a miss. `id` is the
         // real declaration handle (allocate_id(), >= 0x10000) or one of two fallback tags (1/2); see
@@ -331,10 +345,22 @@ namespace sogen
         // change WITHOUT changing the declaration handle. Two draws with the same declaration/VS/PS/RT-shape
         // but a different bound stride are genuinely different pipelines; keying on `id` alone silently
         // reuses a pipeline built for the first stride and mis-fetches every vertex past index 0.
+        //
+        // instance_binding_mask (bit i => stream i is VK_VERTEX_INPUT_RATE_INSTANCE, from a
+        // D3DSTREAMSOURCE_INSTANCEDATA SetStreamSourceFreq -- see resolve_instancing()) is folded in for
+        // the same reason as the per-stream strides above: ensure_programmable_pipeline bakes each
+        // binding's inputRate STATICALLY into the pipeline, and SetStreamSourceFreq can flip a stream
+        // between per-vertex and per-instance WITHOUT changing the declaration handle. Two draws with the
+        // same declaration/strides but a different instance mask are genuinely different pipelines; keying
+        // on `id`/`strides` alone would reuse a per-vertex pipeline for a per-instance draw (or vice
+        // versa) and fetch the instanced stream by the wrong index. Defaults to 0 (all streams per-vertex),
+        // so every non-instanced draw -- which is every draw that never calls SetStreamSourceFreq with an
+        // INSTANCEDATA flag, i.e. every existing test -- keys exactly as it did before instancing existed.
         struct vertex_input_shape
         {
             uint64_t id{};
             std::array<uint32_t, max_vertex_streams> strides{};
+            uint32_t instance_binding_mask{};
             auto operator<=>(const vertex_input_shape&) const = default;
         };
 
@@ -464,6 +490,15 @@ namespace sogen
         // stride to 16 or 20 (never the raw bound stride) and reads only stream 0, so the tag already
         // captures its entire stride-dependence -- there is no per-stream stride to fold in there.
         vertex_input_shape vertex_shape_key() const;
+        // Decodes state_.stream_frequencies into the effective instance count and per-instance binding
+        // mask (see instancing_state). The stream carrying D3DSTREAMSOURCE_INDEXEDDATA supplies the
+        // instance count in its low 30 bits (default 1 when no stream sets that flag); each stream
+        // carrying D3DSTREAMSOURCE_INSTANCEDATA sets its mask bit. KNOWN LIMITATION: only an INSTANCEDATA
+        // divider of exactly 1 is honored -- a non-1 divider needs VK_EXT_vertex_attribute_divisor, which
+        // is not enabled on this path, so such a stream is left per-vertex (mask bit unset) rather than
+        // silently rendering wrong per-instance data. Called by vertex_shape_key (cache key),
+        // ensure_programmable_pipeline (binding inputRate), and execute_draw (draw instanceCount).
+        instancing_state resolve_instancing() const;
         // Filters decl.used_binding_mask down to only streams that ALSO have a real, nonzero stride in
         // state_.stream_strides -- i.e. streams the app has actually called SetStreamSource for. A
         // stream the declaration references but that has no (or a zero) stride is not usable: emitting
