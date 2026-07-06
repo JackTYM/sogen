@@ -275,9 +275,6 @@ namespace sogen
         uint64_t command_pool_{};
         uint64_t command_buffer_{};
         uint64_t fence_{};
-        // Sized for the two per-draw constant-register UBOs (VS set 0 + PS set 1); reset each draw in
-        // execute_draw, with descriptor sets re-allocated from it every time.
-        uint64_t descriptor_pool_{};
         bool draw_infra_ready_{false};
 
         // The one hardcoded fixed-function shader pair (see execute_draw's comment), its shader modules
@@ -360,6 +357,14 @@ namespace sogen
             uint64_t ps_set_layout{};
             uint64_t pipeline_layout{};
             uint64_t pipeline{};
+            // Per-pipeline descriptor pool (maxSets=2) and its two allocated sets (VS at set 0, PS at
+            // set 1), created once on cache miss alongside the objects above. execute_draw rewrites the
+            // sets' CONTENTS every draw but no longer resets/reallocates the SET OBJECTS -- reuse is safe
+            // because every draw submits and blocks on a fence before returning, so draw N's GPU read of
+            // these sets has completed before draw N+1 rewrites them.
+            uint64_t descriptor_pool{};
+            uint64_t vs_descriptor_set{};
+            uint64_t ps_descriptor_set{};
         };
 
         // Keyed by pipeline_cache_key (VS/PS pair, bound RT/depth formats, vertex-input shape, and

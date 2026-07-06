@@ -364,20 +364,6 @@ namespace sogen
             return false;
         }
 
-        const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
-            // 2 float UBOs (VS+PS) + 2 int UBOs (VS+PS) + 2 bool UBOs (VS+PS).
-            {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 6},
-            // max_ps_sampler_stages combined-image-sampler slots: the PS set's bindings 1/4/5/6 (see
-            // ensure_programmable_pipeline), one per texture stage s0..s3 that execute_draw may write
-            // in a single draw.
-            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = max_ps_sampler_stages},
-        }};
-        if (this->vulkan_.create_descriptor_pool(device, 2, pool_sizes, this->descriptor_pool_) != 0 ||
-            this->descriptor_pool_ == 0)
-        {
-            return false;
-        }
-
         this->draw_infra_ready_ = true;
         return true;
     }
@@ -754,6 +740,45 @@ namespace sogen
             this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
             return nullptr;
         }
+
+        // Per-pipeline descriptor pool + its two sets, allocated ONCE here on cache miss rather than
+        // reset/reallocated every draw from a shared pool. Sized exactly as the old shared pool was:
+        // maxSets=2, 6 UBOs (VS+PS float/int/bool const registers) and max_ps_sampler_stages
+        // combined-image-samplers (the PS set's bindings 1/4/5/6). execute_draw rewrites the sets'
+        // contents each draw but reuses these same set objects -- safe because each draw blocks on a
+        // fence before returning (no in-flight GPU read of a set about to be rewritten).
+        const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 6},
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = max_ps_sampler_stages},
+        }};
+        if (this->vulkan_.create_descriptor_pool(device, 2, pool_sizes, entry.descriptor_pool) != 0 ||
+            entry.descriptor_pool == 0)
+        {
+            this->vulkan_.destroy_pipeline(device, entry.pipeline);
+            this->vulkan_.destroy_shader_module(device, entry.vs_module);
+            this->vulkan_.destroy_shader_module(device, entry.fs_module);
+            this->vulkan_.destroy_pipeline_layout(device, entry.pipeline_layout);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
+            return nullptr;
+        }
+        std::array<uint64_t, 2> descriptor_sets{};
+        uint32_t set_count = 0;
+        if (this->vulkan_.allocate_descriptor_sets(device, entry.descriptor_pool, set_layouts, descriptor_sets, set_count) !=
+                0 ||
+            set_count != descriptor_sets.size())
+        {
+            this->vulkan_.destroy_descriptor_pool(device, entry.descriptor_pool);
+            this->vulkan_.destroy_pipeline(device, entry.pipeline);
+            this->vulkan_.destroy_shader_module(device, entry.vs_module);
+            this->vulkan_.destroy_shader_module(device, entry.fs_module);
+            this->vulkan_.destroy_pipeline_layout(device, entry.pipeline_layout);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
+            this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
+            return nullptr;
+        }
+        entry.vs_descriptor_set = descriptor_sets[0];
+        entry.ps_descriptor_set = descriptor_sets[1];
 
         // The set layouts and pipeline layout survive here (unlike the old destroy-after-use pattern)
         // so execute_draw's cmd_bind_descriptor_sets has stable ids to bind into on every draw.
@@ -1396,23 +1421,11 @@ namespace sogen
                 }
             }
 
-            this->vulkan_.reset_descriptor_pool(device, this->descriptor_pool_, 0);
-            const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
-            uint32_t set_count = 0;
-            if (this->vulkan_.allocate_descriptor_sets(device, this->descriptor_pool_, set_layouts, descriptor_sets, set_count) !=
-                    0 ||
-                set_count != descriptor_sets.size())
-            {
-                destroy_stream_buffers();
-                if (index_buffer_vk != 0)
-                {
-                    this->vulkan_.destroy_buffer(device, index_buffer_vk);
-                    this->vulkan_.free_memory(device, index_memory);
-                }
-                destroy_const_ubos();
-                destroy_tex_samplers();
-                return d3d_ok;
-            }
+            // Reuse the pipeline entry's cached descriptor sets (allocated once in
+            // ensure_programmable_pipeline) rather than resetting/reallocating a shared pool every draw.
+            // Only the CONTENTS are rewritten below via update_descriptor_sets, since the bound
+            // UBOs/textures/samplers can differ draw-to-draw even for the same pipeline.
+            descriptor_sets = {programmable->vs_descriptor_set, programmable->ps_descriptor_set};
 
             std::vector<vulkan_host::descriptor_write> writes{
                 {.dst_set = descriptor_sets[0],
