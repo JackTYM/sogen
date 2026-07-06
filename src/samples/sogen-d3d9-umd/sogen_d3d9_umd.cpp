@@ -987,18 +987,37 @@ namespace
     constexpr uint32_t RT_TEX = FMT_OP_OFFSCREEN_RENDERTARGET | FMT_OP_SAME_FORMAT_RENDERTARGET | FMT_OP_TEXTURE;
     constexpr uint32_t DISPLAY_RT = FMT_OP_DISPLAYMODE | FMT_OP_3DACCELERATION | RT_TEX;
 
-    // Minimal set: exactly one 32-bit display+3D-accelerated format (satisfies GetDeviceCaps' 0x800 scan)
-    // plus one depth-stencil. d3d9 runs a disable "gauntlet" over the format list, so keep it lean while
-    // proving HAL; more formats are added back once the gate passes.
+    // One 32-bit display+3D-accelerated format (satisfies GetDeviceCaps' 0x800 scan) plus one
+    // depth-stencil is the minimum that passes d3d9's HAL-disable "gauntlet". The remaining rows
+    // advertise the exact set d3d9_format_to_vulkan (d3d9_format.cpp) already maps host-side, so real
+    // d3d9.dll lets apps actually create/sample/render them: CheckDeviceFormat/CreateTexture/
+    // CreateRenderTarget flip from D3DERR_NOTAVAILABLE/D3DERR_INVALIDCALL to S_OK purely from a row
+    // being present (before/after gate-verified for DXT1, d3d9_dxt1_probe). CONSTRAINT (see FORMATOP's
+    // comment above): 0x800 (3DACCELERATION) may only ever appear together with 0x400 (DISPLAYMODE), or
+    // d3d9 stamps the whole driver disabled -- so no row below sets 3DACCELERATION; the color render
+    // targets use RT_TEX (offscreen RT + texture, no display-mode question) rather than DISPLAY_RT.
     const FORMATOP g_formats[] = {
-        {22 /*X8R8G8B8*/, DISPLAY_RT, 0, 0, 0},
-        {75 /*D24S8   */, FMT_OP_ZSTENCIL, 0, 0, 0},
-        {21 /*A8R8G8B8*/, FMT_OP_TEXTURE, 0, 0, 0}, // real sampled textures (d3d9_texture_test.cpp)
-        // Task 1 of the format-expansion slice: advertising a brand-new (not just op-bit-widened)
-        // compressed format is sufficient -- real d3d9.dll's CheckDeviceFormat/CreateTexture flip from
-        // D3DERR_NOTAVAILABLE/D3DERR_INVALIDCALL to S_OK purely from this row (before/after gate-verified,
-        // d3d9_dxt1_probe). Host already maps DXT1 -> VK_FORMAT_BC1_RGBA_UNORM_BLOCK (d3d9_format.cpp).
+        {22 /*X8R8G8B8    */, DISPLAY_RT, 0, 0, 0},
+        {75 /*D24S8       */, FMT_OP_ZSTENCIL, 0, 0, 0},
+        {77 /*D24X8       */, FMT_OP_ZSTENCIL, 0, 0, 0},          // depth-only variant (matches D24S8)
+        // A8R8G8B8: sampled textures (d3d9_texture_test.cpp) AND offscreen render targets -- alpha
+        // render targets are common (MRT/HDR-ish passes); RT_TEX, not DISPLAY_RT (no 3DACCELERATION).
+        {21 /*A8R8G8B8    */, RT_TEX, 0, 0, 0},
+        {23 /*R5G6B5      */, RT_TEX, 0, 0, 0},                   // 16-bit color: texture + offscreen RT
+        {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0},           // texture-only single-channel formats
+        {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
+        {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only
+        {63 /*Q8W8V8U8    */, FMT_OP_TEXTURE, 0, 0, 0},
+        // A16B16G16R16F: sampled HDR texture ONLY -- deliberately NOT a render target. The host
+        // Present/snapshot readback path (vulkan_host::create_render_target's readback buffer, and
+        // d3d9_host's RT backing + ColorFill snapshot copy) hardcodes 4 bytes/texel BGRA8; an 8-byte/
+        // texel RT would undersize those buffers. Renderable HDR support needs that host work first.
+        {113 /*A16B16G16R16F*/, FMT_OP_TEXTURE, 0, 0, 0},
+        // Compressed textures -- FMT_OP_TEXTURE only (matches DXT1's gate-verified precedent). Host maps
+        // DXT1/3/5 -> VK_FORMAT_BC1/BC2/BC3 (d3d9_format.cpp).
         {0x31545844 /*DXT1*/, FMT_OP_TEXTURE, 0, 0, 0},
+        {0x33545844 /*DXT3*/, FMT_OP_TEXTURE, 0, 0, 0},
+        {0x35545844 /*DXT5*/, FMT_OP_TEXTURE, 0, 0, 0},
     };
 
     HRESULT APIENTRY umd_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps)
