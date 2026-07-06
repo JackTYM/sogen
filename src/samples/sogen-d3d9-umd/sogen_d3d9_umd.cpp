@@ -1012,23 +1012,25 @@ namespace
     // already re-uploads a texture's backing to its GPU image unconditionally on every draw, so no
     // further dirty-tracking is needed for the copied data to reach the sampler.
     //
-    // KNOWN LIMITATION -- found live-RE'ing this fix (2026-07-04), and now root-caused two layers deep,
-    // CONFIRMED STRUCTURALLY UNFIXABLE THROUGH THIS DRIVER'S DDI SURFACE (2026-07-04, Task 4c): this
-    // alone does NOT make a real D3DPOOL_MANAGED texture sample correctly, because a SECOND, decoupled
-    // bug sits upstream of this one -- pfnLock/pfnUnlock never carry the app's real pixel writes for the
-    // "sysmem master" copy in the first place. Live-verified: this driver's own pfnLock returns
-    // pArgs->pData correctly, but the app's IDirect3DTexture9::LockRect() hands back a DIFFERENT pointer
-    // (confirmed by comparing the two addresses directly), so the app writes into d3d9.dll's own
-    // CMipMap-owned system-memory allocation (CMipMap::CMipMap calls MallocAligned/LocalAlloc for
-    // exactly this) and pfnUnlock forwards zeros. Root cause: CBaseTexture::CanCreateLightWeight requires
-    // CBaseDevice::CanDriverManageResource -- `(*(this+120) & 0x100) == 0 && (*(this+444) & 0x10000000)
-    // != 0` -- to be true before the runtime will let CMipMap share ONE real driver resource and route
-    // Lock/Unlock through it. Traced live (memory-write watch on `this+444`) all the way back to
-    // `d3d9.dll`'s own `QueryLHDDICaps`, which unconditionally clears `D3DCAPS2_CANMANAGERESOURCE`
-    // (`& 0xEFFFFFFF`) after querying the driver, regardless of what `GetCaps` reports -- empirically
-    // re-verified by temporarily setting the bit in `fill_d3d9caps` and watching it get stripped again,
-    // live, on the very next write. No `D3DCAPS9` field any real D3DDDI/WDDM driver reports can make
-    // this gate pass (see HANDOFF_MACBOOK.md's §18 for the full trace).
+    // KNOWN LIMITATION -- found live-RE'ing this fix (2026-07-04), root-caused two layers deep
+    // (2026-07-04), and FIXED on x64 by a mechanism outside this driver's own DDI surface entirely
+    // (2026-07-05): this TexBlt sync alone does NOT make a real D3DPOOL_MANAGED texture sample
+    // correctly by itself, because a SECOND, decoupled bug sits upstream of this one -- pfnLock/pfnUnlock
+    // never carry the app's real pixel writes for the "sysmem master" copy in the first place, UNLESS
+    // the routing below is forced onto the driver-managed path. Live-verified: this driver's own pfnLock
+    // returns pArgs->pData correctly, but the app's IDirect3DTexture9::LockRect() hands back a DIFFERENT
+    // pointer (confirmed by comparing the two addresses directly) whenever the gate below is closed, so
+    // the app writes into d3d9.dll's own CMipMap-owned system-memory allocation (CMipMap::CMipMap calls
+    // MallocAligned/LocalAlloc for exactly this) and pfnUnlock forwards zeros. Root cause:
+    // CBaseTexture::CanCreateLightWeight requires CBaseDevice::CanDriverManageResource --
+    // `(*(this+120) & 0x100) == 0 && (*(this+444) & 0x10000000) != 0` -- to be true before the runtime
+    // will let CMipMap share ONE real driver resource and route Lock/Unlock through it. Traced live
+    // (memory-write watch on `this+444`) all the way back to `d3d9.dll`'s own `QueryLHDDICaps`, which
+    // unconditionally clears `D3DCAPS2_CANMANAGERESOURCE` (`& 0xEFFFFFFF`) after querying the driver,
+    // regardless of what `GetCaps` reports -- empirically re-verified by temporarily setting the bit in
+    // `fill_d3d9caps` and watching it get stripped again, live, on the very next write. This part remains
+    // true and permanent: no `D3DCAPS9` field any real D3DDDI/WDDM driver reports can make this gate pass
+    // through the reported-caps mechanism (see HANDOFF_MACBOOK.md's §18 for the full trace).
     //
     // Task 4c (2026-07-04) then asked the necessary follow-up: does pfnTexBlt's REAL argument struct
     // carry a sysmem-source pixel pointer that could bypass the broken Lock/Unlock path entirely? A live
@@ -1043,14 +1045,27 @@ namespace
     // window already known) and confirmed every other call this driver receives is metadata/state only
     // (pfnSetClipPlane, pfnUpdateWInfo, pfnCreateVertexShaderDecl, pfnDestroyResource, and the
     // already-implemented real slots) -- none of them carry texture pixel bytes either. Conclusion: the
-    // real MANAGED-pool sysmem pixel data is structurally never exposed to
-    // this (or any) D3DDDI/WDDM driver through ANY DDI call for this resource kind -- `d3d9.dll` keeps it
-    // entirely inside its own private `CMipMap` buffer end to end. No fix is possible through this
-    // driver's own DDI surface; `d3d9_managed_texture_test.cpp` is expected to keep failing (sampling
-    // black, not magenta) until/unless a fundamentally different mechanism is found. This function's own
-    // fix (the TexBlt sync forward) remains real, necessary, and independently correct -- it is the right
-    // thing to do whenever the sysmem side DOES hold real data -- it is just not sufficient by itself,
-    // and per this task's conclusion, nothing else in this driver's DDI surface can make it sufficient.
+    // real MANAGED-pool sysmem pixel data is structurally never exposed to this (or any) D3DDDI/WDDM
+    // driver through ANY DDI call for this resource kind -- `d3d9.dll` keeps it entirely inside its own
+    // private `CMipMap` buffer end to end, AS LONG AS the driver-managed gate stays closed. Through the
+    // DDI surface alone (reported caps, or a TexBlt argument change), this remains permanently unfixable.
+    //
+    // FIX (2026-07-05, x64 only): `windows_emulator::install_d3d9_caps_patch_hook` (windows_emulator.cpp)
+    // installs a permanent runtime memory-execution hook on x64 d3d9.dll load that re-sets
+    // `D3DCAPS2_CANMANAGERESOURCE` immediately after `QueryLHDDICaps`'s own strip -- a patch to d3d9.dll's
+    // in-memory *behavior*, not a DDI-surface or reported-caps change, so the "no D3DCAPS9 field survives
+    // the strip" conclusion above is unaffected and still correct. With the gate forced open this way,
+    // `d3d9.dll` routes the sysmem/vidmem MANAGED-pool lock through the driver-managed path instead of its
+    // own private CMipMap copy, and this driver's existing `umd_Lock`/`g_locked_buffers` machinery --
+    // originally built for ordinary, non-MANAGED resources, unchanged for this fix -- turned out to
+    // already serve a real pixel backing once that path is taken; no new UMD code was needed.
+    // `d3d9_managed_texture_test.cpp` now genuinely passes (magenta, not black). Independently verified
+    // via A/B (disabling the hook reproduces the old black-pixel failure; re-enabling it restores the
+    // pass) plus a full x64/x86 guest-test regression sweep. x86/WoW64 scope: this hook is x64-only -- the
+    // RVA pattern was verified only against the staged 64-bit system32/d3d9.dll build; the 32-bit
+    // syswow64/d3d9.dll real MW2 (a 32-bit game) would actually use has not had an equivalent RE pass, so
+    // this fix does not yet help a 32-bit guest -- separately-scoped follow-up work. Full trail:
+    // docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries, HANDOFF_MACBOOK.md.
     HRESULT APIENTRY umd_TexBlt(HANDLE /*hDevice*/, CONST D3DDDIARG_TEXBLT* pArgs)
     {
         if (pArgs == nullptr)

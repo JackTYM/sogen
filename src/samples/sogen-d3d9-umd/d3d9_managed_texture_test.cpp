@@ -4,24 +4,19 @@
 // CreateTexture(..., D3DPOOL_MANAGED, ...), LockRect a distinctive solid color into it, UnlockRect,
 // SetTexture, draw a textured quad, and read back the rendered pixel.
 //
-// STATUS (2026-07-04): CONFIRMED PERMANENTLY FAILING, not fixable through this driver's own DDI
-// surface. Three layers of live-RE, each verified independently:
-//   1. The original double-pfnCreateResource/pfnTexBlt sync mechanism this test was written to prove
-//      fixed is real, expected D3D9 architecture, and correctly handled (sogen_d3d9_umd.cpp's
-//      umd_TexBlt / d3d9_host::tex_blt).
-//   2. pfnLock/pfnUnlock never carry the app's real pixel writes for a D3DPOOL_MANAGED texture's
-//      "sysmem master" copy at all -- CBaseDevice::CanDriverManageResource is unconditionally false for
-//      any real D3DDDI/WDDM driver (d3d9.dll's own QueryLHDDICaps hardcodes D3DCAPS2_CANMANAGERESOURCE
-//      off on every CreateDevice, live-verified by watching it get stripped even after this driver's own
-//      GetCaps sets the bit).
-//   3. pfnTexBlt's real argument struct (fully decompiled from the genuine caller, CD3DDDIDX10::TexBlt --
-//      see D3DDDIARG_TEXBLT in d3d9_ddi.hpp) carries no pixel-data pointer either, and a full live trace
-//      of every DDI call this driver receives across this test's entire run confirms no other call does.
-// The real MANAGED-pool sysmem pixel data is structurally never exposed to this (or any) driver through
-// any DDI call for this resource kind -- see umd_TexBlt's comment in sogen_d3d9_umd.cpp for the full
-// trail. Kept in the tree (not deleted) as the regression vehicle proving this is understood, not
-// merely unencountered: the sampled pixel is expected to stay black, never magenta, until a
-// fundamentally different mechanism (not a DDI-surface fix) is found.
+// STATUS (2026-07-05): FIXED on x64. The reported-caps surface (D3DCAPS9::Caps2) is still
+// unforceable -- d3d9.dll's own QueryLHDDICaps unconditionally strips D3DCAPS2_CANMANAGERESOURCE
+// after querying the driver, regardless of what GetCaps reports. But a permanent runtime memory
+// patch installed on x64 d3d9.dll load (windows_emulator::install_d3d9_caps_patch_hook, in
+// windows_emulator.cpp) re-sets the bit immediately after d3d9.dll's own strip, bypassing the
+// reported-caps mechanism entirely. This routes D3DPOOL_MANAGED locks through the driver-managed
+// path, and this driver's existing umd_Lock/g_locked_buffers machinery (built for ordinary
+// resources, no MANAGED-specific code needed) already serves a real pixel backing for it. See
+// umd_TexBlt's comment in sogen_d3d9_umd.cpp and docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries for
+// the full trail, including why the caps-reporting approach alone doesn't work.
+// x86/WoW64 scope: this fix is x64-only. The 32-bit syswow64/d3d9.dll build real MW2 (a 32-bit
+// game) would use has not had an equivalent RE pass, so this fix does not yet help a 32-bit guest --
+// separately-scoped follow-up work.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -331,9 +326,8 @@ int main()
                p[0], p[1], p[2], p[3]);
         if (!channel_close(p[0], 255, 2) || !channel_close(p[1], 0, 2) || !channel_close(p[2], 255, 2))
         {
-            printf("[d3d9-managed-texture-test] EXPECTED FAILURE (known, permanent limitation -- see this "
-                   "file's header comment and umd_TexBlt's comment in sogen_d3d9_umd.cpp): pixel does not "
-                   "match the MANAGED texture's known color\n");
+            printf("[d3d9-managed-texture-test] FAIL: pixel does not match the MANAGED texture's known "
+                   "color\n");
             ++failures;
         }
         else
