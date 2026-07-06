@@ -1005,22 +1005,27 @@ namespace
         // A8R8G8B8: sampled textures (d3d9_texture_test.cpp) AND offscreen render targets -- alpha
         // render targets are common (MRT/HDR-ish passes); RT_TEX, not DISPLAY_RT (no 3DACCELERATION).
         {21 /*A8R8G8B8    */, RT_TEX, 0, 0, 0},
-        // R5G6B5: sampled 16-bit texture ONLY -- deliberately NOT a render target, for the exact same
-        // reason as A16B16G16R16F below. R5G6B5 is 2 bytes/texel host-side (VK_FORMAT_R5G6B5_UNORM_PACK16),
-        // but every RT readback/Present/ColorFill path assumes 4 bytes/texel BGRA8: d3d9_host::color_fill
-        // ("KNOWN LIMITATION: hardcodes 4 bytes/texel"), vulkan_host's create_render_target/
-        // readback_render_target size their readback buffer at width*height*4, and the Present paths
-        // (syscalls/gdi.cpp + gpu_bridge.cpp) build ui_surface_desc{.stride = width*4, .format = bgra8}.
-        // The VkBufferImageCopy packs tightly at R5G6B5's real 2 bytes/texel, so a renderable R5G6B5 RT
-        // would be read back with a 2x-too-wide stride and wrong format -- corrupted pixels. Renderable
-        // 16-bit color needs those host paths generalized to per-format bytes/texel first.
-        {23 /*R5G6B5      */, FMT_OP_TEXTURE, 0, 0, 0},
+        // R5G6B5: 16-bit off-screen render target + texture (RT_TEX). The host RT sizing/readback/ColorFill
+        // paths are now per-format bytes-per-texel aware (shared vk_format_bytes_per_texel helper +
+        // d3d9_host::color_fill's format-aware texel encoder, added by the off-screen-render-target format
+        // work), so a R5G6B5 RT reads back at its true 2 bytes/texel tight packing (proven byte-exact in
+        // d3d9_format_coverage_test.cpp's R5G6B5 sub-pass). NOT DISPLAY_RT: presenting a non-BGRA8 format to
+        // the OS window is a separate, out-of-scope architectural item (ui_surface_format has no 16-bit
+        // stage), so no DISPLAYMODE/3DACCELERATION -- off-screen use only, matching real G-buffer patterns.
+        {23 /*R5G6B5      */, RT_TEX, 0, 0, 0},
         {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0},           // texture-only single-channel formats
         {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
         {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only
         {63 /*Q8W8V8U8    */, FMT_OP_TEXTURE, 0, 0, 0},
-        // A16B16G16R16F: sampled HDR texture, NOT a render target (see the 4-bytes/texel host limitation
-        // above -- an 8-byte/texel RT would undersize the readback buffers). It IS advertised as
+        // A16B16G16R16F: HDR off-screen render target + texture (RT_TEX), plus vertex-texture-usable. The
+        // former 8-byte/texel readback-buffer undersizing is fixed: the host RT sizing/readback/ColorFill
+        // paths are now per-format bytes-per-texel aware (shared vk_format_bytes_per_texel +
+        // d3d9_host::color_fill's half-float texel encoder, from the off-screen-render-target format work),
+        // so an A16B16G16R16F RT reads back at its true 8 bytes/texel packing (proven byte-exact in
+        // d3d9_format_coverage_test.cpp's A16B16G16R16F sub-pass). RT_TEX only, NOT DISPLAY_RT: presenting a
+        // 16-bit-float HDR surface to the OS window needs a tone-mapping/conversion stage ui_surface_format
+        // does not have, a separate out-of-scope item -- off-screen use only (matching HDR-intermediate
+        // passes). It IS advertised as
         // vertex-texture-usable (FMT_OP_VERTEXTEXTURE): the SM3.0 vertex-texture-fetch DDI/draw path is
         // already proven for this format (d3d9_vertex_texture_test.cpp binds it to D3DVERTEXTEXTURESAMPLER0
         // and samples it via tex2Dlod), so a well-behaved app that gates on
@@ -1031,7 +1036,7 @@ namespace
         // per-format op-word (a verbatim copy of this driver FORMATOP) for bit 0x00800000 on a
         // D3DUSAGE_QUERY_VERTEXTEXTURE query -- advertising the documented 0x00400000 (AUTOGENMIPMAP) does
         // NOT satisfy it.
-        {113 /*A16B16G16R16F*/, FMT_OP_TEXTURE | FMT_OP_VERTEXTEXTURE, 0, 0, 0},
+        {113 /*A16B16G16R16F*/, RT_TEX | FMT_OP_VERTEXTEXTURE, 0, 0, 0},
         // Compressed textures -- FMT_OP_TEXTURE only (matches DXT1's gate-verified precedent). Host maps
         // DXT1/3/5 -> VK_FORMAT_BC1/BC2/BC3 (d3d9_format.cpp).
         {0x31545844 /*DXT1*/, FMT_OP_TEXTURE, 0, 0, 0},

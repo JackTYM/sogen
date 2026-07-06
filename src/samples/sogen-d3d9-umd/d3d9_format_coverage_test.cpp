@@ -21,10 +21,15 @@
 // 3. L8 texture (FMT_OP_TEXTURE): a 4x4 single-channel luminance texture (value 200). Host maps L8 ->
 //    VK_FORMAT_R8_UNORM sampled with IDENTITY swizzle, so the value lands in R and G/B read 0 -- a
 //    single-channel format sampled and confirmed.
-// 4. R5G6B5 negative discriminator (FMT_OP_TEXTURE only): CreateTexture must SUCCEED but
-//    CreateRenderTarget must FAIL. R5G6B5 is 2 bytes/texel host-side while every RT readback/Present/
-//    ColorFill path hardcodes 4 bytes/texel BGRA8, so R5G6B5 is advertised texture-only; before that fix
-//    the row carried RT_TEX and the RT creation would have silently succeeded with corrupt output.
+// 4. R5G6B5 + A16B16G16R16F off-screen render targets (RT_TEX): CreateRenderTarget must SUCCEED and a
+//    ColorFill/LockRect round trip must read back the CORRECT per-format bytes at the format's TIGHT
+//    stride (R5G6B5 565-packed at 2 bytes/texel, A16B16G16R16F 4x half-float at 8 bytes/texel). This
+//    sub-pass previously asserted the OPPOSITE for R5G6B5 (CreateRenderTarget must FAIL), proving the
+//    texture-only restriction that held while the host RT paths hardcoded 4 bytes/texel BGRA8. The
+//    off-screen-render-target format work generalized those host paths (shared vk_format_bytes_per_texel
+//    helper + d3d9_host::color_fill's format-aware texel encoder), so the restriction is lifted and the
+//    assertion is inverted -- byte-exact readback replaces the FAILED-HRESULT proof. Off-screen only:
+//    neither RT is Presented (presenting a non-BGRA8 surface is a separate, out-of-scope item).
 // 5. Vertex-texture-fetch capability (FMT_OP_VERTEXTEXTURE): a pure CheckDeviceFormat capability check, no
 //    render. A16B16G16R16F must return S_OK for CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE) -- before the
 //    bit was added it returned D3DERR_NOTAVAILABLE for every format, blocking a capability-gating app from
@@ -200,6 +205,111 @@ float4 main(PSInput input) : COLOR0
         out[3] = p[3];
         rt->UnlockRect();
         return true;
+    }
+
+    // Off-screen render-target format sub-pass for a non-BGRA8 render target (R5G6B5, A16B16G16R16F).
+    // Creates a small `format` render target, clears it to `colorTop`, ColorFills its bottom half to
+    // `colorBot`, then LockRect(READONLY)s it and confirms the RAW BYTES at four texel positions --
+    // computed with the format's TIGHT per-texel stride (`bpp`) -- match the expected per-format encodings
+    // (`enc_top`/`enc_bot`, `bpp` bytes each). This is the byte-exact regression proof that the host RT
+    // sizing/readback/ColorFill paths are format-aware: a stale 4-bytes/texel implementation would encode
+    // the fill wrong (a raw BGRA8 dword, not 565 / half-float) and mis-locate the bottom row. The bottom
+    // half is written via ColorFill specifically to exercise the new host color_fill texel encoder; the
+    // top half via Clear exercises the format-agnostic clear path too. Off-screen only -- never Presented
+    // (presenting a non-BGRA8 surface is a separate, out-of-scope item).
+    //
+    // Note on D3DLOCKED_RECT::Pitch: the sogen UMD does not populate it (real d3d9.dll reports 0 for these
+    // driver-lockable render targets, same gap d3d9_colorfill_test.cpp documents), so the readback uses the
+    // format's known tight stride width*bpp -- the same convention every other guest test here uses. The
+    // reported Pitch is logged for visibility but not asserted on.
+    bool run_offscreen_rt_format_subpass(IDirect3DDevice9* dev, D3DFORMAT format, int bpp, D3DCOLOR colorTop,
+                                         D3DCOLOR colorBot, const unsigned char* enc_top, const unsigned char* enc_bot,
+                                         const char* label)
+    {
+        constexpr int kW = 64;
+        constexpr int kH = 64;
+
+        IDirect3DSurface9* rt = nullptr;
+        HRESULT hcrt = dev->CreateRenderTarget(kW, kH, format, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+        printf("[d3d9-format-coverage-test] CreateRenderTarget(%s) hr=0x%08lx surf=%p\n", label,
+               static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
+        if (FAILED(hcrt) || !rt)
+        {
+            printf("[d3d9-format-coverage-test] FAIL: %s render target creation must SUCCEED (now RT-capable)\n", label);
+            return false;
+        }
+
+        // Clear the whole surface to colorTop (also establishes the resting TRANSFER_SRC_OPTIMAL layout the
+        // host ColorFill path expects), then ColorFill the bottom half to colorBot.
+        dev->SetRenderTarget(0, rt);
+        dev->BeginScene();
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, colorTop, 1.0f, 0);
+        dev->EndScene();
+
+        RECT bottom = {0, kH / 2, kW, kH};
+        HRESULT hcf = dev->ColorFill(rt, &bottom, colorBot);
+        printf("[d3d9-format-coverage-test] %s ColorFill(bottom-half, 0x%08lX) hr=0x%08lx\n", label,
+               static_cast<unsigned long>(colorBot), static_cast<unsigned long>(hcf));
+
+        D3DLOCKED_RECT lr{};
+        HRESULT hl = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
+        printf("[d3d9-format-coverage-test] %s LockRect hr=0x%08lx pBits=%p reported-Pitch=%ld (tight width*bpp=%d)\n", label,
+               static_cast<unsigned long>(hl), lr.pBits, lr.Pitch, kW * bpp);
+        if (FAILED(hl) || !lr.pBits)
+        {
+            printf("[d3d9-format-coverage-test] FAIL: %s RT LockRect failed\n", label);
+            rt->Release();
+            return false;
+        }
+
+        const auto* base = static_cast<const unsigned char*>(lr.pBits);
+        const size_t stride = static_cast<size_t>(kW) * bpp;
+        auto texel = [&](int col, int row) { return base + static_cast<size_t>(row) * stride + static_cast<size_t>(col) * bpp; };
+
+        struct TexelCheck
+        {
+            const char* where;
+            int col, row;
+            const unsigned char* expected;
+        };
+        const TexelCheck checks[] = {
+            {"top-left (cleared top color)", 0, 0, enc_top},
+            {"top-right (cleared top color)", kW - 1, 0, enc_top},
+            {"bottom-left (ColorFill'd bottom color)", 0, kH - 1, enc_bot},
+            {"bottom-right (ColorFill'd bottom color)", kW - 1, kH - 1, enc_bot},
+        };
+
+        bool ok = true;
+        for (const TexelCheck& c : checks)
+        {
+            const unsigned char* p = texel(c.col, c.row);
+            printf("[d3d9-format-coverage-test] %s %s texel(%d,%d) bytes=", label, c.where, c.col, c.row);
+            for (int i = 0; i < bpp; ++i)
+            {
+                printf("%02X ", p[i]);
+            }
+            printf("expected=");
+            for (int i = 0; i < bpp; ++i)
+            {
+                printf("%02X ", c.expected[i]);
+            }
+            printf("\n");
+            if (std::memcmp(p, c.expected, static_cast<size_t>(bpp)) != 0)
+            {
+                printf("[d3d9-format-coverage-test] FAIL: %s %s byte pattern is wrong\n", label, c.where);
+                ok = false;
+            }
+        }
+
+        rt->UnlockRect();
+        rt->Release();
+        if (ok)
+        {
+            printf("[d3d9-format-coverage-test] PASS: %s off-screen render target byte-exact (correct per-format encoding + "
+                   "tight width*%d stride)\n",
+                   label, bpp);
+        }
+        return ok;
     }
 } // namespace
 
@@ -423,36 +533,56 @@ int main()
         ++failures;
     }
 
-    // Sub-pass 4 (negative discriminator): R5G6B5 is advertised TEXTURE-ONLY -- CreateTexture must
-    // succeed, but CreateRenderTarget must FAIL. R5G6B5 is 2 bytes/texel host-side, and every RT
-    // readback/Present/ColorFill path hardcodes 4 bytes/texel BGRA8, so a renderable R5G6B5 RT would read
-    // back corrupted; the fix scoped its FORMATOP row to FMT_OP_TEXTURE only. Before that fix the row
-    // carried RT_TEX and this CreateRenderTarget would have SUCCEEDED (silently producing garbage), so a
-    // FAILED HRESULT here is the exact before/after proof the RT capability was withdrawn.
+    // Sub-pass 4 (R5G6B5 off-screen render target -- inverted from the old negative discriminator): R5G6B5
+    // is now advertised RT_TEX (off-screen RT + texture), so CreateRenderTarget must SUCCEED, and a
+    // ColorFill/LockRect round trip must read back the CORRECT 565-packed bytes at the format's tight 2
+    // bytes/texel stride. This sub-pass previously asserted CreateRenderTarget(R5G6B5) FAILS, to prove the
+    // (then-correct) texture-only restriction imposed while the host RT paths hardcoded 4 bytes/texel
+    // BGRA8. The off-screen-render-target format work made those host paths per-format bytes-per-texel
+    // aware (shared vk_format_bytes_per_texel + d3d9_host::color_fill's format-aware texel encoder), so the
+    // restriction is lifted and the assertion is inverted: creation SUCCEEDS and the readback is byte-exact.
+    //
+    // 565 encoding (VK_FORMAT_R5G6B5_UNORM_PACK16 == D3DFMT_R5G6B5: R in bits 11..15, G in 5..10, B in
+    // 0..4, stored little-endian): RED  D3DCOLOR(255,0,0) -> 31<<11 = 0xF800 -> bytes {0x00,0xF8};
+    //                                    GREEN D3DCOLOR(0,255,0) -> 63<<5 = 0x07E0 -> bytes {0xE0,0x07}.
+    // First confirm R5G6B5 is still texture-creatable (unchanged), then drive the RT round trip.
     IDirect3DTexture9* texR5 = nullptr;
     HRESULT hr5tex = dev->CreateTexture(4, 4, 1, 0, D3DFMT_R5G6B5, D3DPOOL_MANAGED, &texR5, nullptr);
-    IDirect3DSurface9* rtR5 = nullptr;
-    HRESULT hr5rt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_R5G6B5, D3DMULTISAMPLE_NONE, 0, TRUE,
-                                            &rtR5, nullptr);
-    printf("[d3d9-format-coverage-test] R5G6B5 CreateTexture hr=0x%08lx tex=%p / CreateRenderTarget hr=0x%08lx surf=%p\n",
-           static_cast<unsigned long>(hr5tex), static_cast<void*>(texR5), static_cast<unsigned long>(hr5rt),
-           static_cast<void*>(rtR5));
-    if (SUCCEEDED(hr5tex) && texR5 && FAILED(hr5rt) && !rtR5)
+    printf("[d3d9-format-coverage-test] R5G6B5 CreateTexture hr=0x%08lx tex=%p\n", static_cast<unsigned long>(hr5tex),
+           static_cast<void*>(texR5));
+    if (FAILED(hr5tex) || !texR5)
     {
-        printf("[d3d9-format-coverage-test] PASS: R5G6B5 is texture-creatable but render-target creation is refused\n");
-    }
-    else
-    {
-        printf("[d3d9-format-coverage-test] FAIL: R5G6B5 texture/render-target advertisement is wrong (RT must fail)\n");
+        printf("[d3d9-format-coverage-test] FAIL: R5G6B5 must remain texture-creatable\n");
         ++failures;
     }
     if (texR5)
     {
         texR5->Release();
     }
-    if (rtR5)
     {
-        rtR5->Release();
+        const unsigned char enc_red_565[2] = {0x00, 0xF8};
+        const unsigned char enc_green_565[2] = {0xE0, 0x07};
+        if (!run_offscreen_rt_format_subpass(dev, D3DFMT_R5G6B5, 2, D3DCOLOR_ARGB(255, 255, 0, 0),
+                                             D3DCOLOR_ARGB(255, 0, 255, 0), enc_red_565, enc_green_565, "R5G6B5-RT"))
+        {
+            ++failures;
+        }
+    }
+
+    // Sub-pass 4b (A16B16G16R16F off-screen render target): now advertised RT_TEX, so an HDR off-screen RT
+    // creates and reads back at its true 8 bytes/texel with each channel a half-float. Half encoding
+    // (VK_FORMAT_R16G16B16A16_SFLOAT, R,G,B,A memory order; 0.0f->0x0000, 1.0f->0x3C00, D3DCOLOR channels
+    // normalized /255): RED   D3DCOLOR(255,0,0,255) -> R=1,G=0,B=0,A=1 -> bytes {00 3C 00 00 00 00 00 3C};
+    //                        GREEN D3DCOLOR(0,255,0,255) -> R=0,G=1,B=0,A=1 -> bytes {00 00 00 3C 00 00 00 3C}.
+    {
+        const unsigned char enc_red_half[8] = {0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C};
+        const unsigned char enc_green_half[8] = {0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x3C};
+        if (!run_offscreen_rt_format_subpass(dev, D3DFMT_A16B16G16R16F, 8, D3DCOLOR_ARGB(255, 255, 0, 0),
+                                             D3DCOLOR_ARGB(255, 0, 255, 0), enc_red_half, enc_green_half,
+                                             "A16B16G16R16F-RT"))
+        {
+            ++failures;
+        }
     }
 
     // Sub-pass 5 (vertex-texture-fetch capability advertisement): before the FMT_OP_VERTEXTEXTURE bit was
