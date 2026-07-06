@@ -48,6 +48,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_const_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-texture-test-x86.exe -ld3d9 -ld3dcompiler_43
 
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_managed_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-managed-texture-test-x86.exe -ld3d9 -ld3dcompiler_43
+
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texcoord_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-texcoord-test-x86.exe -ld3d9 -ld3dcompiler_43
 
@@ -116,6 +119,7 @@ cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
 cp d3d9-const-test-x86.exe <root>/filesys/c/d3d9-const-test-x86.exe
 cp d3d9-texture-test-x86.exe <root>/filesys/c/d3d9-texture-test-x86.exe
+cp d3d9-managed-texture-test-x86.exe <root>/filesys/c/d3d9-managed-texture-test-x86.exe
 cp d3d9-texcoord-test-x86.exe <root>/filesys/c/d3d9-texcoord-test-x86.exe
 cp d3d9-int-bool-const-test-x86.exe <root>/filesys/c/d3d9-int-bool-const-test-x86.exe
 cp d3d9-scissor-test-x86.exe <root>/filesys/c/d3d9-scissor-test-x86.exe
@@ -130,7 +134,7 @@ cp d3d9-pipeline-cache-test-x86.exe <root>/filesys/c/d3d9-pipeline-cache-test-x8
 shader, const, texture, int-bool-const, mrt, multistream, and pipeline-cache tests. For the x86/WoW64 UMD, the real
 32-bit Microsoft `d3d9.dll` must already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86
-shader, const, texture, texcoord, int-bool-const, mrt, multistream, and pipeline-cache tests. (The scissor test is
+shader, const, texture, managed-texture, texcoord, int-bool-const, mrt, multistream, and pipeline-cache tests. (The scissor test is
 fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 
 ## Run
@@ -150,6 +154,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-managed-texture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texcoord-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-int-bool-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-scissor-test-x86.exe

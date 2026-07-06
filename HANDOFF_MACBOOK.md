@@ -2327,3 +2327,76 @@ the Option-A spike bullet's "not attempted" framing corrected now that it has be
 milestone-table rows that called this out as a standing MW2 risk all corrected to the x64-fixed/
 x86-still-open state). Full regression: every x64 and x86 `d3d9-*-test.exe` green, including
 `d3d9-managed-texture-test` now passing for real on x64.
+
+## 29. D3DPOOL_MANAGED — the caps-forcing hook extended to 32-bit (WoW64); the test now genuinely passes
+on x86 too, closing the last MW2-relevant gap (2026-07-05)
+
+§28 productionized the `D3DCAPS2_CANMANAGERESOURCE` bit-forcing patch into a permanent
+`install_d3d9_caps_patch_hook`, but only for 64-bit `d3d9.dll` — the hook's `mod.machine != 0x8664`
+check returned immediately for a 32-bit module, and §28's own scope note flagged that "as things stand
+today, this fix does not help a real 32-bit game" (real MW2 is 32-bit). This section closes that gap.
+
+**The 32-bit RE finding.** The equivalent caps-strip+store site was located in the staged
+`syswow64/d3d9.dll` (sha256 `99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302`, real
+Microsoft PE32, machine `0x14c`/`IMAGE_FILE_MACHINE_I386`), verified two independent ways (static IDA
+disassembly + live runtime trace). It sits inside `QueryLHDDICaps` at RVA `0x51c91`:
+`and eax, 0xEFFFFFFF` (bytes `25 FF FF FF EF`) — a literal AND rather than x64's `btr eax, 0x1c` — then
+immediately at `0x51c96` `mov [ebx+0Ch], eax` (bytes `89 43 0C`), storing into the same logical `Caps2`
+field offset (`+0xc`) as the x64 site but through `EBX` instead of `RSI`. The combined 8-byte pattern
+`25 FF FF FF EF 89 43 0C` at RVA `0x51c91` was confirmed (independently re-verified this session via a
+PE-section RVA→file-offset walk of the staged DLL) to occur **exactly once** in the whole DLL — same
+rigor as the x64 7-byte guard. Post-store hook point: RVA `0x51c99` (`= 0x51c91 + 8`). A live trace at
+this site read the field as `0xe4628800` (bit 28 clear) — byte-identical to the x64 site's own baseline,
+confirming it is genuinely the same logical field.
+
+**The production fix.** `install_d3d9_caps_patch_hook` (`windows_emulator.cpp`) now has two
+clearly-parallel branches: the unchanged AMD64 one (`mod.machine == 0x8664`, `btr`/`RSI`,
+`+0x158af`/`+0x158b6`), and a new I386 one (`mod.machine == 0x014c`, `and`/`EBX`, `+0x51c91`/`+0x51c99`).
+The I386 branch mirrors the x64 branch's shape exactly: it re-verifies its own 8-byte guard pattern
+before installing anything (logging a warning and bailing if the bytes don't match, guarding against a
+different 32-bit `d3d9.dll` build), then installs an `emu().hook_memory_execution` at the post-store RVA
+whose callback reads the 32-bit sub-register `EBX` (`this->emu().reg<uint32_t>(x86_register::ebx)` — the
+same 32-bit-read idiom `esp`/`eax` use elsewhere for WoW64 guests; a 32-bit guest still runs on the
+underlying x86_64 register file, and `EBX` is the low 32 bits of `RBX`), computes `field_addr = ebx + 0xc`,
+reads the `uint32_t` there, and re-ORs bit 28 back in if it's clear. Duplication over a shared helper was
+chosen deliberately: four values differ (machine constant, pattern bytes *and* length, RVAs, register
+*and* width), matching this session's established "prefer two clearly-parallel blocks over premature
+abstraction for two-call-site logic" convention.
+
+**Independent verification — A/B causality proof, same rigor as §28's x64 proof.**
+`d3d9_managed_texture_test.cpp` was cross-compiled to i686 with **zero source changes** (this project's
+established zero-source-change x86-port pattern) and staged against the genuine 32-bit `d3d9.dll`/
+`d3dcompiler_43.dll` in `syswow64/`.
+
+```
+I386 branch ENABLED:   textured pixel(140,120)=B=FF G=00 R=FF A=FF  →  ALL CHECKS PASSED, exit 0
+I386 branch DISABLED:  textured pixel(140,120)=B=00 G=00 R=00 A=00  →  FAILED, exit 1
+```
+
+Disabled was produced by temporarily setting the branch's `machine_i386` constant to a value the real
+module never matches (keeps all code reachable/used, so no `-Werror` fallout), rebuilding, and rerunning;
+the black-pixel failure reproduces the exact pre-fix symptom §28 documented for x64. Restoring the
+constant, rebuilding, and rerunning returned the magenta pass. The tree was left clean (`git diff` on
+`windows_emulator.cpp` empty except the real change) before committing.
+
+**Full regression sweep, both architectures, all green.** Every guest test in
+`src/samples/sogen-d3d9-umd/README.md` on both x64 and x86, plus the 26/26 emulator smoke test:
+
+```
+x64: spike, triangle, shader, const, texture, managed-texture, texcoord, int-bool-const, scissor, mrt,
+     multistream, pipeline-cache, partial-lock  — all exit 0 / ALL CHECKS PASSED
+x86: triangle, shader, const, texture, managed-texture (NEW), texcoord, int-bool-const, scissor, mrt,
+     multistream, pipeline-cache               — all exit 0 / ALL CHECKS PASSED
+smoke (test-sample.exe, -e root):              — 26/26 subtests Success
+```
+
+The x64 branch's behavior is completely unchanged (its RVAs/pattern/register/messages were not touched),
+and no other x86 test regressed.
+
+Docs updated alongside the code: `src/samples/sogen-d3d9-umd/README.md` (x86 build/stage/run lines for the
+managed-texture test, plus the managed-texture entry added to the x86 `d3dcompiler_43` dependency note),
+and `docs/d3d9-roadmap.md` (the `D3DPOOL_MANAGED` bullet header flipped from "FIXED on x64; x86 not yet
+covered" to "FIXED on both x64 and x86/WoW64", the bullet's x86-scope note and the Option-A spike's
+"32-bit RE pass still unstarted" note both rewritten as done, and the M2/WoW64/M3/M5 milestone-table rows
+plus the sequencing-recommendation summary all corrected to remove the standing x86/WoW64 MW2 risk).
+Real MW2 is 32-bit, so this I386 branch is the one that actually matters for it.
