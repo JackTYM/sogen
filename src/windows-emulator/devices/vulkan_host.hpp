@@ -493,7 +493,7 @@ namespace sogen
             uint32_t test_enable;
             uint32_t write_enable;
             uint32_t compare_op;
-            auto operator<=>(const depth_state&) const = default;
+            auto operator<=>(const depth_state&) const = default; // lets this struct key d3d9_host::pipeline_cache_key
         };
 
         struct spec_entry
@@ -515,7 +515,7 @@ namespace sogen
             uint32_t dst_alpha_blend_factor;
             uint32_t alpha_blend_op;
             uint32_t color_write_mask;
-            auto operator<=>(const color_blend_attachment&) const = default;
+            auto operator<=>(const color_blend_attachment&) const = default; // lets this struct key d3d9_host::pipeline_cache_key
         };
 
         // A shader stage's specialization constants. DXVK bakes d3d9 render state (alpha-test compare op, fog,

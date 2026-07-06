@@ -282,7 +282,10 @@ namespace sogen
         // genuinely different pipelines. Two draws that differ in any of these need genuinely different
         // VkPipeline objects -- caching on a subset silently reuses a stale pipeline (e.g. omitting blend
         // makes a blend-enabled draw incorrectly reuse an earlier blend-disabled pipeline and render
-        // transparent geometry opaque).
+        // transparent geometry opaque). Cull mode, fill mode, stencil, and D3DRS_COLORWRITEENABLE are
+        // currently hardcoded constants in create_graphics_pipeline/build_blend_state, not yet driven by
+        // render_state -- if any of those are ever made render-state-driven, they need the same
+        // treatment: fold them into this key, exactly like depth/blend were just added here.
         struct pipeline_cache_key
         {
             uint64_t vertex_shader{};
@@ -296,7 +299,8 @@ namespace sogen
         };
 
         // Keyed by pipeline_cache_key with vertex_shader/pixel_shader/vertex_shape all 0 (FF never varies
-        // these) -- only the RT/depth shape actually distinguishes one FF pipeline from another.
+        // these) -- RT/depth format and the resolved depth/blend render state (see pipeline_cache_key's
+        // own comment) are what distinguish one FF pipeline from another.
         std::map<pipeline_cache_key, uint64_t> ff_pipelines_{};
 
         struct programmable_pipeline_entry
@@ -313,8 +317,9 @@ namespace sogen
             uint64_t pipeline{};
         };
 
-        // Keyed by pipeline_cache_key (VS/PS pair, bound RT/depth formats, and vertex-input shape --
-        // see pipeline_cache_key's own comment). Translation is lazy, on first draw with both shaders
+        // Keyed by pipeline_cache_key (VS/PS pair, bound RT/depth formats, vertex-input shape, and
+        // resolved depth/blend render state -- see pipeline_cache_key's own comment). Translation is
+        // lazy, on first draw with both shaders
         // bound, since SM1-3 requires the VS/PS pair together to build the inter-stage varying map (see
         // d3d9_shader_translator.hpp).
         std::map<pipeline_cache_key, programmable_pipeline_entry> programmable_pipelines_{};
