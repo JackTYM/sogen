@@ -2921,3 +2921,131 @@ commits, the RE narrative, the implementation, and the 4-sub-pass test), the M3 
 it among the now-done items, the "Still not started"/sequencing-recommendation prose corrected to drop it
 from the remaining-work list, and the cube/volume bullet rewritten to describe its new, narrower risk
 profile without overclaiming it as trivial.
+
+## 36. Cube/volume textures — investigated, and the gap turns out to be deeper than §35.6 believed:
+real `d3d9.dll` rejects `CreateCubeTexture`/`CreateVolumeTexture` before any driver call at all
+(2026-07-06)
+
+§35.6 closed out mip-mapping and re-scoped cube/volume down to "confirm one classifier bit
+(`D3DDDIARG_CREATERESOURCE::Flags`'s CubeMap/Volume distinction), then straightforward Vulkan
+image-type/view-type plumbing" — no new `vulkan_host` signature changes needed, since
+`create_image`/`create_image_view` already take an image-type/view-type parameter. This section is a
+gated, read-only RE investigation into closing that last item. **It found the prior framing wrong: there
+is a real, reproducible blocker sitting in front of the `Flags`-bit question, and it's a genuinely deeper
+RE problem than "one more bit to find."** No source files were touched — this was scoped and executed as
+investigation-only, per the same RE-gate discipline as §19/§33/§34/§35, and the working tree is clean.
+
+### 36.1 What was expected going in
+
+The plan assumed real `d3d9.dll` would happily build a `D3DDDIARG_CREATERESOURCE` for a cube or volume
+texture and hand it to `pfnCreateResource` exactly like it does for 2D textures today, with the only
+open question being *how the driver tells the two apart* — i.e., which bit(s) of the already-RE'd,
+live-confirmed `Flags` field (offset 56 x64 / 48 x86, a `D3DDDI_RESOURCEFLAGS` bitfield) carry
+`CubeMap`/`Volume`. Once that bit was found, the plumbing on the host side (Vulkan image type, view
+type, `d3d9_shader_translator.cpp` sampler-dimension info) was expected to be the only remaining work,
+and none of it was expected to need new primitives.
+
+### 36.2 What was actually found: `CreateCubeTexture`/`CreateVolumeTexture` never reach the driver
+
+A scratch probe (`d3d9_cubevol_probe.cpp`, this session's scratchpad, cross-compiled and staged as
+`d3d9-cubevol-probe-x64.exe`) creates a plain 2D texture, a cube texture, and a volume texture with
+deliberately distinctive dimensions (128x64 2D, edge-32 cube, 16x8x4 volume) so a
+`umd_CreateResource`-entry hook (`cubevol_hook.py`) could identify and dump the real
+`D3DDDIARG_CREATERESOURCE` for each. Only the plain 2D call ever reaches the hook. `CreateCubeTexture`
+and `CreateVolumeTexture` both return before `pfnCreateResource` is called at all.
+
+Tracing this down (idasql static decompile of the real staged `d3d9_x64.dll`, cross-checked live via
+`record_trace.py` hooking `D3DRecordHRESULT`'s entry to read the exact source-line/message strings the
+runtime records for the rejection):
+
+- `CBaseTexture::Validate` (`clientcore\windows\directx\dxg\inactive\d3d9\d3d\fw\texture.cpp`, decompiled
+  at `0x1800d1416`) is the common validation gate `CreateTexture`/`CreateCubeTexture`/
+  `CreateVolumeTexture` all funnel through. For the non-`D3DPOOL_SCRATCH` (pool 3) case it calls
+  `CBaseDevice::CheckDeviceFormat(this, usage & 0x4603, resourceType, format)` (`0x180005c40`) and, on a
+  negative `HRESULT`, calls `D3DRecordHRESULT(0xdeadbeef, msg, "texture.cpp", line)` and returns
+  `D3DERR_INVALIDCALL` (`0x8876086c`) straight back to the app — no driver call has happened yet.
+- `CBaseDevice::CheckDeviceFormat` is a one-line vtable thunk: it forwards straight into a per-adapter
+  `CEnum` object's own `CheckDeviceFormat` slot (offset `+80` in that object's vtable).
+- `CEnum::CheckDeviceFormat` (`0x18002f4f0`) is where the real logic lives. For `D3DRTYPE_CUBETEXTURE` it
+  tests `(*(DWORD*)v59 & 0x10000) == 0` and rejects (`-2005530518`, translated to
+  `D3DERR_INVALIDCALL`) if clear; for `D3DRTYPE_VOLUME`/`D3DRTYPE_VOLUMETEXTURE` it tests
+  `(*(DWORD*)v61 & 0x8000) == 0` and rejects the same way. `v59`/`v61` are pointers into an **internal,
+  runtime-owned per-format capability record** that `CEnum` builds and caches per adapter/format — not a
+  live read of the driver's advertised `FORMATOP` op-word. For every format this investigation tested,
+  those two bits are clear, so cube and volume texture creation is rejected for all of them, before
+  `pfnCreateResource` is ever reached.
+
+This is *not* a device-level caps strip: `D3DCAPS9::TextureCaps` was checked live and already correctly
+reports `CUBEMAP`/`VOLUMEMAP` (`0x0001e804` includes both bits) — sogen's UMD caps response is fine at
+that level. The gate that's actually rejecting the calls is entirely per-FORMAT, several layers below the
+device-caps struct games §17/§18/§27/§28/§29 already fought through for `D3DPOOL_MANAGED`.
+
+### 36.3 The patch attempt, and why it didn't work
+
+The natural first fix to try: sogen's own UMD already owns a `g_formats` table encoding `FORMATOP` bits
+per D3DFORMAT (the driver-facing capability advertisement `CEnum` is presumably supposed to be built
+from). `cubevol_force_hook.py` located the UMD's `A8R8G8B8` format-op entry in the staged
+`sogen_d3d9um.dll` image by byte pattern and patched its `Operations` dword to set the runtime-tested
+`0x4000`/`0x8000`/`0x10000` bits (texture/volume/cube) directly in guest memory before any device is
+created, then re-ran the same cube/volume probe.
+
+**This did not unblock `CreateCubeTexture`/`CreateVolumeTexture`.** The rejection in
+`CEnum::CheckDeviceFormat` still fires exactly as before. This means the runtime does not read the
+driver's `FORMATOP` word directly at `CheckDeviceFormat` time — it consults a cached/transformed
+internal per-format table that `CEnum` builds once (most likely from the UMD's `pfnGetCaps`/
+`GETFORMATDATA` DDI response, though that specific transformation was not traced this session), and a
+straight edit to the UMD's own format-op encoding doesn't reach whatever that internal table actually is.
+A separate, more targeted attempt (`cubevol_caps_hook.py`) hooked `CCubeMap::Create`/`CMipVolume::Create`
+directly to inspect and force-set a device-cached texture-caps word at a fixed offset — useful for
+confirming the caps word's layout, but orthogonal to the `CheckDeviceFormat` gate itself, which fires
+earlier in the call chain and is format-keyed, not device-cap-keyed.
+
+### 36.4 Confirmed non-blocker: the shader translator needs zero changes
+
+One genuinely positive, confirmed finding from the same pass, worth recording clearly so nobody
+re-investigates it: **`d3d9_shader_translator.cpp` needs no changes for cube/volume sampler support.**
+§35.6's open item (2) had flagged `vkd3d_shader_d3dbc_source_info`'s per-sampler texture-dimension hint
+— currently defaulting to "2D" for every sampler — as something that would need extending to avoid
+mispredicting cube/volume samplers. That concern doesn't apply: vkd3d-shader derives the sampler's
+dimensionality directly from the shader bytecode's own `dcl_cube`/`dcl_volume` declaration tokens for
+Shader Model 2.0 and above, and the host-side dimension-hint field is documented as ignored for SM2+.
+Sogen only targets SM2.0+ (§9, §15), so this half of the previously-expected plumbing work simply isn't
+needed.
+
+### 36.5 Honest assessment of what remains
+
+The `Flags`-bit classification question from §35.6 is now **moot until a new, more fundamental gate is
+passed**: real `d3d9.dll` never builds a cube/volume `D3DDDIARG_CREATERESOURCE` in the first place, for
+any format sogen currently advertises. What a future attempt actually needs is to RE the transformation
+`d3d9.dll` uses to build `CEnum`'s internal per-format cube/volume capability cache from whatever the
+UMD's DDI surface exposes (candidate: `pfnGetCaps`/`D3DDDIARG_GETCAPS` with a `GETFORMATDATA`-shaped
+sub-query, though this session did not trace that call specifically) — and confirm that patching
+*that* input, at the point where `CEnum` actually reads it, is sufficient to flip the two tested bits.
+This is genuinely uncertain: it's possible no UMD-side DDI response can influence this cache at all
+(some runtime internal tables are populated from a hardcoded reference-rasterizer capability set rather
+than anything driver-supplied, in which case the fix would need to look more like the `D3DPOOL_MANAGED`
+caps-forcing runtime memory patch — §28/§29 — applied to a different code path, not a DDI-surface
+change). Nothing here is close to "confirm one bit, then plumbing" — it is closer in shape and risk to
+the `D3DPOOL_MANAGED` investigation before that one found its real fix. Cube/volume textures remain open
+in the roadmap, now correctly scoped as blocked on this deeper question rather than on the classifier
+bit.
+
+**Reusable scratch tooling for a future attempt** (this session's scratchpad, not committed):
+`d3d9_cubevol_probe.cpp`/`d3d9-cubevol-probe-x64.exe` (the three-resource-kind guest probe),
+`cubevol_hook.py` (hooks `umd_CreateResource`, confirms cube/volume never arrive),
+`cubevol_force_hook.py` (the failed `g_formats` FORMATOP patch attempt, byte-pattern-based, reusable
+as a starting point for patching a different location once the real cache is found),
+`cubevol_caps_hook.py` (hooks `CCubeMap::Create`/`CMipVolume::Create`, dumps/force-patches the
+device-cached texture-caps word), `record_trace.py` (hooks `D3DRecordHRESULT` to read the exact
+rejection message/line live), and the raw idasql decompile dumps `validate.txt` (`CBaseTexture::Validate`),
+`checkdevfmt.txt` (`CBaseDevice::CheckDeviceFormat`), and `enum_checkfmt.txt`
+(`CEnum::CheckDeviceFormat`, the actual per-format gate).
+
+### 36.6 Verification and roadmap update
+
+Read-only investigation: no `src/` files were modified, confirmed via `git status` at both the start and
+end of this section's work. Roadmap updated: `docs/d3d9-roadmap.md`'s cube/volume bullet corrected to
+describe the `CheckDeviceFormat` gate as the actual current blocker (kept open, `[ ]`, not closed — this
+investigation re-scoped the gap, it did not close it), the M3 table row's "Still not started" note
+updated to match, and the mip-mapping section's own cube/volume cross-reference (§35's closing prose in
+the roadmap) corrected so it no longer claims the classifier-bit framing is still accurate.
