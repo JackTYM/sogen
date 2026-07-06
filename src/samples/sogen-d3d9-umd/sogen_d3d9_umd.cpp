@@ -91,10 +91,17 @@ namespace
         return g_adapter;
     }
 
+    void flush_d3d9_batch();
+
     // Carries one D3D9 command to the host over the D3DKMT Escape channel:
     // [escape_command_header][in][out]. Mirrors vulkan_shim.cpp's bridge_call.
     bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len)
     {
+        if (code != gb::ioctl_record_commands)
+        {
+            flush_d3d9_batch();
+        }
+
         static pfn_d3dkmt escape = load_win32u("NtGdiDdDDIEscape");
         const uint32_t adapter = ensure_adapter();
         if (!escape || adapter == 0)
@@ -133,6 +140,38 @@ namespace
             std::memcpy(out, buffer.data() + header_size + in_len, out_len);
         }
         return header->result >= 0;
+    }
+
+    // Batched D3D9 streamed opcodes: same wire mechanism vulkan_shim.cpp's g_command_streams/
+    // record_command use, but a single global stream since D3D9 has no command-buffer concept. For now
+    // record_d3d9 flushes after every append (batch depth of 1), so this is wire-format-identical to
+    // sending each opcode as its own Escape -- proving the ioctl_record_commands path carries D3D9
+    // opcodes correctly before a later change actually defers the flush.
+    std::vector<uint8_t> g_d3d9_command_batch;
+
+    void flush_d3d9_batch()
+    {
+        if (g_d3d9_command_batch.empty())
+        {
+            return;
+        }
+
+        std::vector<uint8_t> batch(std::move(g_d3d9_command_batch));
+        g_d3d9_command_batch.clear();
+
+        gb::result_response resp{};
+        bridge_call(gb::ioctl_record_commands, batch.data(), static_cast<DWORD>(batch.size()), &resp, sizeof(resp));
+    }
+
+    void record_d3d9(gb::command opcode, const void* in, uint32_t in_len)
+    {
+        gb::command_record_header header{.command = static_cast<uint32_t>(opcode), .size = in_len};
+        const auto* header_bytes = reinterpret_cast<const uint8_t*>(&header);
+        g_d3d9_command_batch.insert(g_d3d9_command_batch.end(), header_bytes, header_bytes + sizeof(header));
+        const auto* payload_bytes = reinterpret_cast<const uint8_t*>(in);
+        g_d3d9_command_batch.insert(g_d3d9_command_batch.end(), payload_bytes, payload_bytes + in_len);
+
+        flush_d3d9_batch();
     }
 
     // Generic device-function stub, still backing every slot D3D9 marshaling below doesn't implement
@@ -876,7 +915,7 @@ namespace
             return S_OK;
         }
         d3d9c::set_render_state_record req{.state = pArgs->State, .value = pArgs->Value};
-        bridge_call(gb::ioctl_d3d9_set_render_state, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_render_state, &req, sizeof(req));
         return S_OK;
     }
 
@@ -929,11 +968,11 @@ namespace
         {
             d3d9c::set_sampler_state_record req{
                 .sampler = pArgs->Stage, .state = sampler_state, .value = pArgs->Value, .reserved = 0};
-            bridge_call(gb::ioctl_d3d9_set_sampler_state, &req, sizeof(req), nullptr, 0);
+            record_d3d9(gb::command::d3d9_set_sampler_state, &req, sizeof(req));
             return S_OK;
         }
         d3d9c::set_texture_stage_state_record req{.stage = pArgs->Stage, .state = pArgs->State, .value = pArgs->Value, .reserved = 0};
-        bridge_call(gb::ioctl_d3d9_set_texture_stage_state, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_texture_stage_state, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1019,7 +1058,7 @@ namespace
         // pointer to D3DDDIARG_SETTEXTURE -- a struct-pointer read crashed with the small Stage
         // integer (e.g. 0x1) dereferenced as an address. 0 for hTexture means unbind.
         d3d9c::set_texture_record req{.stage = Stage, .reserved = 0, .texture = reinterpret_cast<uint64_t>(hTexture)};
-        bridge_call(gb::ioctl_d3d9_set_texture, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_texture, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1031,7 +1070,7 @@ namespace
         // through (after the create_shader_common ShaderHandle-offset fix), a struct-pointer read
         // crashed dereferencing the small handle value (e.g. 0xB) as an address. 0 means unbind.
         d3d9c::set_pixel_shader_record req{.shader = reinterpret_cast<uint64_t>(hShader)};
-        bridge_call(gb::ioctl_d3d9_set_pixel_shader, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_pixel_shader, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1041,7 +1080,7 @@ namespace
         // 0 means "no vertex shader / use fixed-function", e.g. when a D3DFVF_XYZRHW draw follows a
         // shader-bound one.
         d3d9c::set_vertex_shader_record req{.shader = reinterpret_cast<uint64_t>(hShader)};
-        bridge_call(gb::ioctl_d3d9_set_vertex_shader, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_vertex_shader, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1152,7 +1191,7 @@ namespace
     HRESULT APIENTRY umd_SetVertexShaderDecl(HANDLE /*hDevice*/, HANDLE hDecl)
     {
         d3d9c::set_vertex_decl_record req{.decl = reinterpret_cast<uint64_t>(hDecl)};
-        bridge_call(gb::ioctl_d3d9_set_vertex_decl, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_vertex_decl, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1171,7 +1210,7 @@ namespace
         req->start_register = pArgs->Register;
         req->vector4_count = pArgs->Count;
         std::memcpy(buf.data() + sizeof(*req), pRegisters, float_count * sizeof(float));
-        bridge_call(gb::ioctl_d3d9_set_vs_const_f, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_vs_const_f, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
     }
 
@@ -1188,7 +1227,7 @@ namespace
         req->start_register = pArgs->Register;
         req->vector4_count = pArgs->Count;
         std::memcpy(buf.data() + sizeof(*req), pRegisters, float_count * sizeof(float));
-        bridge_call(gb::ioctl_d3d9_set_ps_const_f, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_ps_const_f, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
     }
 
@@ -1208,7 +1247,7 @@ namespace
         req->start_register = pArgs->Register;
         req->vector4_count = pArgs->Count;
         std::memcpy(buf.data() + sizeof(*req), pRegisters, int_count * sizeof(int32_t));
-        bridge_call(gb::ioctl_d3d9_set_vs_const_i, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_vs_const_i, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
     }
 
@@ -1225,7 +1264,7 @@ namespace
         req->start_register = pArgs->Register;
         req->count = pArgs->Count;
         std::memcpy(buf.data() + sizeof(*req), pRegisters, bool_count * sizeof(uint32_t));
-        bridge_call(gb::ioctl_d3d9_set_vs_const_b, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_vs_const_b, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
     }
 
@@ -1242,7 +1281,7 @@ namespace
         req->start_register = pArgs->Register;
         req->vector4_count = pArgs->Count;
         std::memcpy(buf.data() + sizeof(*req), pRegisters, int_count * sizeof(int32_t));
-        bridge_call(gb::ioctl_d3d9_set_ps_const_i, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_ps_const_i, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
     }
 
@@ -1259,7 +1298,7 @@ namespace
         req->start_register = pArgs->Register;
         req->count = pArgs->Count;
         std::memcpy(buf.data() + sizeof(*req), pRegisters, bool_count * sizeof(uint32_t));
-        bridge_call(gb::ioctl_d3d9_set_ps_const_b, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_ps_const_b, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
     }
 
@@ -1279,7 +1318,7 @@ namespace
                                             .stride_bytes = pArgs->Stride,
                                             .reserved = 0,
                                             .vertex_buffer = resolve_buffer_resource_id(pArgs->hVertexBuffer, 0)};
-        bridge_call(gb::ioctl_d3d9_set_stream_source, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_stream_source, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1290,7 +1329,7 @@ namespace
             return S_OK;
         }
         d3d9c::set_stream_source_freq_record req{.stream_number = pArgs->StreamNumber, .frequency = pArgs->Divider};
-        bridge_call(gb::ioctl_d3d9_set_stream_source_freq, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_stream_source_freq, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1304,7 +1343,7 @@ namespace
         d3d9c::set_indices_record req{.index_buffer = resolve_buffer_resource_id(pArgs->hIndexBuffer, 0),
                                       .format = pArgs->Stride == 4 ? 1u : 0u,
                                       .reserved = 0};
-        bridge_call(gb::ioctl_d3d9_set_indices, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_indices, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1317,7 +1356,7 @@ namespace
         d3d9c::set_render_target_record req{.render_target_index = pArgs->RenderTargetIndex,
                                             .reserved = 0,
                                             .surface = resolve_resource_id(pArgs->hRenderTarget)};
-        bridge_call(gb::ioctl_d3d9_set_render_target, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_render_target, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1328,7 +1367,7 @@ namespace
             return S_OK;
         }
         d3d9c::set_depth_stencil_record req{.surface = resolve_depth_stencil_resource_id(pArgs->hZBuffer)};
-        bridge_call(gb::ioctl_d3d9_set_depth_stencil, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_depth_stencil, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1347,7 +1386,7 @@ namespace
                                        .height = static_cast<float>(g_viewport.Height),
                                        .min_z = g_zrange.MinZ,
                                        .max_z = g_zrange.MaxZ};
-        bridge_call(gb::ioctl_d3d9_set_viewport, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_viewport, &req, sizeof(req));
     }
 
     HRESULT APIENTRY umd_SetViewport(HANDLE /*hDevice*/, CONST D3DDDIARG_VIEWPORTINFO* pArgs)
@@ -1379,7 +1418,7 @@ namespace
             return S_OK;
         }
         d3d9c::set_scissor_record req{.left = pArgs->left, .top = pArgs->top, .right = pArgs->right, .bottom = pArgs->bottom};
-        bridge_call(gb::ioctl_d3d9_set_scissor, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_set_scissor, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1404,7 +1443,7 @@ namespace
             wire_rects[i] = d3d9c::set_scissor_record{
                 .left = pRect[i].left, .top = pRect[i].top, .right = pRect[i].right, .bottom = pRect[i].bottom};
         }
-        bridge_call(gb::ioctl_d3d9_clear, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        record_d3d9(gb::command::d3d9_clear, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
     }
 
@@ -1418,7 +1457,7 @@ namespace
                                          .start_vertex = pArgs->VStart,
                                          .primitive_count = pArgs->PrimitiveCount,
                                          .reserved = 0};
-        bridge_call(gb::ioctl_d3d9_draw_primitive, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_draw_primitive, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1434,7 +1473,7 @@ namespace
                                                  .num_vertices = pArgs->NumVertices,
                                                  .start_index = pArgs->StartIndex,
                                                  .primitive_count = pArgs->PrimitiveCount};
-        bridge_call(gb::ioctl_d3d9_draw_indexed_primitive, &req, sizeof(req), nullptr, 0);
+        record_d3d9(gb::command::d3d9_draw_indexed_primitive, &req, sizeof(req));
         return S_OK;
     }
 
