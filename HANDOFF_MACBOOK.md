@@ -2260,3 +2260,70 @@ was attempted here; both are real, separately-scoped follow-up work if this path
 
 Scratch harness (not committed, reusable): `managed_spike.py`, `disasm.py`, `d2.py` under this session's
 scratchpad, plus a Python 3.14 venv with `capstone`/`pefile`.
+
+## 28. D3DPOOL_MANAGED — the Option-A patch productionized into a permanent hook; the test now genuinely
+passes on x64 (2026-07-05)
+
+§27's spike proved the `D3DCAPS2_CANMANAGERESOURCE` gate could be forced open at runtime from outside the
+reported-caps mechanism, but left two items as unstarted follow-up: productionizing the scratch Python
+patch into a permanent emulator-side hook, and a 32-bit RE pass. The first has now been done (commits
+`36e2a8bb`/`c42fabd4`); the second has not (see the x86/WoW64 scope note below).
+
+**The hook:** `windows_emulator::install_d3d9_caps_patch_hook` (`windows_emulator.cpp`), called from
+`setup_hooks`'s `on_module_load` callback whenever a module named `d3d9.dll` loads. It gates on
+`mod.machine == 0x8664` (AMD64) and re-verifies the exact 7-byte pattern the spike found
+(`0F BA F0 1C 89 46 0C` — `btr eax,0x1c` / `mov [rsi+0xc],eax`) at `image_base+0x158af` before installing
+anything, logging a warning and bailing out (not forcing anything blind) if the bytes don't match — this
+guards against a different `d3d9.dll` build silently getting the wrong RVA patched. On a match, it
+installs an `emu().hook_memory_execution` callback at `image_base+0x158b6` (the instruction right after
+the strip's store) that reads `RSI` (the struct pointer, per the decompiled calling convention), re-ORs
+bit 28 back into `[RSI+0xc]` if it's clear, and writes it back. The hook handle is tracked in a new
+`d3d9_caps_hooks_` map keyed by image base and torn down on module unload, matching the existing
+`section_first_execution_hooks_` pattern already used elsewhere in this file.
+
+**Independent verification, not just a commit-message claim.** This session ran its own A/B toggle
+(temporarily forcing the hook to bail out early right after the machine-type check, rebuilding the release
+preset, re-running `d3d9_managed_texture_test.cpp`, then reverting the change and rebuilding again to
+confirm the diff was clean) before touching any documentation. Disabled, the test fails exactly as §27
+documented (`Texture->LockRect()` pBits non-null but pointing at `d3d9.dll`'s own private shadow, sampled
+pixel black, `[d3d9-managed-texture-test] FAILED`). Enabled, `Texture->LockRect()` returns a real, non-null
+pointer this driver actually serves, and the final rendered pixel reads back exact solid magenta
+(`B=FF G=00 R=FF A=FF`) — `[d3d9-managed-texture-test] ALL CHECKS PASSED`, unqualified. The full x64 and
+x86 guest-test regression sweep (all `d3d9-*-test.exe` on both architectures) was also re-run clean with
+the hook restored. Commit `c42fabd4`'s message additionally credits a code-quality review pass for the
+cross-reference-to-roadmap polish.
+
+**The corrected understanding.** §17-19's "structurally uncontrollable"/"confirmed unfixable" conclusion
+was about one specific surface: the *reported* `D3DCAPS9` value, which `QueryLHDDICaps` strips
+unconditionally regardless of what any driver reports through `GetCaps`. That conclusion is unchanged and
+still correct — no `D3DCAPS9` field survives the strip. What's different here is that this hook is not a
+DDI-surface or reported-caps change at all — it's a permanent patch to `d3d9.dll`'s own in-memory
+*behavior*, installed and torn down by the emulator itself outside any driver-reported value. That
+distinction is exactly what makes the old conclusion (about the reported-caps surface) and this fix (a
+runtime behavior patch) both true at once, rather than contradictory.
+
+The other surprise: no new UMD code was needed. §27's spike, run through a scratch Python harness with no
+UMD-side changes, saw `Texture->LockRect()` return `pBits=nullptr` once the gate was forced open — the
+natural reading at the time was that `umd_Lock`/`g_locked_buffers` would need new code to serve a
+driver-managed MANAGED resource. Re-running the *same*, unmodified `umd_Lock`/`g_locked_buffers` machinery
+against the *permanent* hook instead produced a real, working pixel backing — this existing machinery,
+originally built only for ordinary (non-MANAGED) resources, was already sufficient once the gate stayed
+open for the whole run. Nothing on the UMD side changed between the spike and this fix; the diff for
+`36e2a8bb` touches only `windows_emulator.cpp`/`windows_emulator.hpp`.
+
+**x86/WoW64 scope — not fixed there, don't read this as MW2-ready.** The pattern match and RVAs
+(`+0x158af`/`+0x158b6`) are verified only against the staged 64-bit `system32/d3d9.dll`
+(sha256 `bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c`). The 32-bit
+`syswow64/d3d9.dll` real MW2 (a 32-bit game) would actually load has not had an equivalent RE pass — the
+hook's `mod.machine != machine_amd64` check returns immediately for a 32-bit module, so no patch is even
+attempted there yet. This is real, unstarted, separately-scoped follow-up work, not a detail to gloss
+over: as things stand today, this fix does not help a real 32-bit game.
+
+Updated to reflect this: `d3d9_managed_texture_test.cpp`'s header comment and its pixel-check branch (the
+old "EXPECTED FAILURE" leniency removed — it's a normal strict pass/fail check now, like every other guest
+test in this directory), `sogen_d3d9_umd.cpp`'s `umd_TexBlt` comment (conclusion corrected, backstory kept),
+and `docs/d3d9-roadmap.md`'s `D3DPOOL_MANAGED` entries (the main WONTFIX bullet flipped to FIXED-on-x64,
+the Option-A spike bullet's "not attempted" framing corrected now that it has been, and the M2/M3/M5
+milestone-table rows that called this out as a standing MW2 risk all corrected to the x64-fixed/
+x86-still-open state). Full regression: every x64 and x86 `d3d9-*-test.exe` green, including
+`d3d9-managed-texture-test` now passing for real on x64.

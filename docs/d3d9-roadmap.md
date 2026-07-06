@@ -124,11 +124,11 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
 |---|-----------|--------|-------|
 | M1 | Programmable SM2/3 triangle (VS+PS bytecode, DrawPrimitive, Present) | **Done** | Real `D3DCompile()` → `vkd3d-shader` → SPIR-V → Vulkan pipeline, pixel-verified. No DXVK oracle was built (dropped in favor of analytic pixel-readback checks, same rigor, no new dependency). |
 | M1.5 | Float constant registers (`c#`) | **Done** | Not in the original plan as a separate milestone; pulled forward because a WVP matrix is needed for M2 anyway. UBO + descriptor-set binding contract now proven for one register set. |
-| M2 | Textured + depth quad (`SetTexture`/sampler, indexed draw, depth, alpha blend) | **Done** | Real GPU-backed 2D textures (single mip, lazy staging upload), real `vulkan_host::create_sampler` + combined-image-sampler binding (RE'd sampler-state DDI encoding), indexed draws, real depth testing (D32_SFLOAT_S8_UINT in place of D24S8 for MoltenVK), real alpha blending, and the SPIR-V-side combined-sampler binding in the shader translator — all proven together by `d3d9_texture_test.cpp` (4/4 analytic pixel checks exact). D3DFORMAT↔VkFormat table covers exactly the locked MW2-first set (13 D3DFORMAT values, collapsing to 11 distinct VkFormat outputs since A8R8G8B8/X8R8G8B8 both map to B8G8R8A8_UNORM and L8/A8 both map to R8_UNORM — see below). Of the two bugs found building the terminal test: `D3DPOOL_MANAGED` got a real code fix for its double-resource-creation half (`pfnTexBlt` now syncs the sysmem/vidmem copies), but its deeper remaining symptom (managed textures sample black) is confirmed a permanent, unfixable-via-this-DDI limitation, not something more code will resolve; TEXCOORD0 interpolation turned out not to be a real bug at all — investigated and does not reproduce, no code change needed. Both are fully investigated, see "Known bugs & limitations carried out of M2" below for the three-way distinction (fixed / confirmed non-bug / confirmed permanent). The partial-buffer Lock limitation is now genuinely fixed on x64 (still whole-buffer-only on x86, a scoped-out gap) — also below. |
-| WoW64 | WoW64/x86 D3D9 UMD port (32-bit `sogen_d3d9um`, SysWOW64) | **Done** | Not in the original plan's M1-M5 table; pulled forward per the user's own priority order since real games (MW2/BO2/GTA SA) are 32-bit and nothing else matters without a working x86 guest path. Proven: typed per-slot `__stdcall` thunk arities for all 143 `D3DDDI_DEVICEFUNCS` slots (28 real implementations unchanged, the other 115 now get a correctly-sized `stub_args_N` instead of x64's zero-arg `device_stub`, which would desync callee-cleanup x86's stack); x86-specific `D3DDDIARG_*`/`D3DDDI_*` struct layout for every real slot with a HANDLE/pointer field, pinned by `#ifndef _WIN64` `static_assert`s, including a live-RE'd fix for `D3DDDIARG_LOCK`/`D3DDDIARG_UNLOCK` (x86 is a genuinely different two-tier struct shape via `DdLockLH`, not just a pointer-shrunk copy of the x64 layout); `i686-w64-mingw32-g++` build tooling (parallel commands in `src/samples/sogen-d3d9-umd/README.md`) producing `sogen_d3d9um-x86.dll`. End-to-end proof: `d3d9-triangle-test-x86.exe`, cross-compiled to i686 and run through the real WoW64 path against the genuine 32-bit Microsoft `d3d9.dll` (not DXVK), reaches the x86 UMD and reads back the exact same pixel (`B=FF G=80 R=40 A=FF`) as the x64 `d3d9-triangle-test` — full pixel parity. **Now also covered:** `d3d9-shader-test`, `d3d9-const-test`, `d3d9-texture-test`, and `d3d9-texcoord-test` have all been cross-compiled to i686 and pass on x86 too (all analytic pixel checks exact, matching the x64 results) — M1.5/M2's shader, constant-register, texture, depth, blend, and real-`TEXCOORD0` features are now confirmed on the x86 path, not just the fixed-function triangle. Porting these caught two real, x86-only bugs along the way (both fixed): `d3d9_host::allocate_id()`'s shared id counter started at `1ULL << 32`, silently truncating through a 32-bit `HANDLE` on x86 guests (fixed, starts at `0x10000`; commit `c35871ca`); and `D3DDDIARG_CREATERESOURCE`'s output-handle offset is 44 on x86, not 48 as RE'd for x64 (a clean 4-byte shift, fixed; commit `c5dd3d27`) — full narrative for both in `src/samples/sogen-d3d9-umd/README.md`. Full regression sweep after all this session's fixes landed: every x64 and x86 guest test green, smoke test 26/26 (2026-07-04). Partial-buffer Lock support (see below) is x64-only — x86 keeps whole-buffer-lock semantics, a known, explicitly scoped-out gap (its driver-routed `OffsetToLock` offset isn't RE-verified). Five DDI slot arities flagged low-confidence during design (`pfnCheckCounter`, `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified against the real `d3d9.dll`, since none of the current x86 tests call them — a future x86 test that hits one of these slots could still find a stack-corrupting arity mismatch. **Now also covered (2026-07-05):** `d3d9-scissor-test`, `d3d9-mrt-test`, and `d3d9-multistream-test` have all been cross-compiled to i686 and pass on x86 too, pixel-exact against x64 — unlike several earlier ports, this one found ZERO new x86-only bugs; all three worked unchanged on the first run. Full regression sweep after this session's work: every x64 and x86 guest test green (`d3d9-managed-texture-test` fails by design, permanent limitation), smoke test 26/26 (2026-07-05). |
-| M3 | DDI coverage (multi-stream, `*_UP` draws, StretchRect/ColorFill, scissor, MRT, cube/vol, more formats) | **In progress** | Int/bool constant registers, originally scoped as part of this milestone, are done (see "Constant registers" below) — pulled forward for the same reason float constants were (real games hit shader flow control early). **Three more M3 items are now done**: multi-stream vertex sources (real per-stream `SetStreamSource` offsets + a new `D3DVERTEXELEMENT9` declaration parser), scissor rect (`D3DRS_SCISSORTESTENABLE`-gated real clipping), and multiple render targets (real N-RT rendering + all-bound-RTs `Clear()`) — see the "M3 coverage items" checklist below for the full account of each, including the 3 UMD bugs the multi-stream work found/fixed and the RT-slot-compaction bug found/fixed during MRT work. Proven pixel-exact on both x64 and x86/WoW64 (all three ported to i686 with zero source changes, zero new x86 bugs). **Still not started**: `*_UP` draws, `StretchRect`/`ColorFill`, cube/volume textures, formats beyond the M2 table, SM3.0 caps, mip-mapping, and `stream_frequencies`/instancing. The remaining M3 work inherits the `D3DPOOL_MANAGED` permanent limitation, (on x86 only) the partial-Lock gap, and the two narrower pipeline-cache-key gaps (render-state, real-vertex-decl stream strides — see below; the RT/vertex-decl-shape cache-key gap itself is now fixed) — none of this is M3-net-new work, it's M2 debt M3 must not silently re-break. |
+| M2 | Textured + depth quad (`SetTexture`/sampler, indexed draw, depth, alpha blend) | **Done** | Real GPU-backed 2D textures (single mip, lazy staging upload), real `vulkan_host::create_sampler` + combined-image-sampler binding (RE'd sampler-state DDI encoding), indexed draws, real depth testing (D32_SFLOAT_S8_UINT in place of D24S8 for MoltenVK), real alpha blending, and the SPIR-V-side combined-sampler binding in the shader translator — all proven together by `d3d9_texture_test.cpp` (4/4 analytic pixel checks exact). D3DFORMAT↔VkFormat table covers exactly the locked MW2-first set (13 D3DFORMAT values, collapsing to 11 distinct VkFormat outputs since A8R8G8B8/X8R8G8B8 both map to B8G8R8A8_UNORM and L8/A8 both map to R8_UNORM — see below). Of the two bugs found building the terminal test: `D3DPOOL_MANAGED` got a real code fix for its double-resource-creation half (`pfnTexBlt` now syncs the sysmem/vidmem copies), and its deeper remaining symptom (managed textures sample black) — for a long time confirmed permanently unfixable through this driver's own DDI surface — is now FIXED on x64 by a different mechanism entirely, a permanent runtime memory patch to `d3d9.dll` itself (see the `D3DPOOL_MANAGED` entry below; x86/WoW64 not yet covered); TEXCOORD0 interpolation turned out not to be a real bug at all — investigated and does not reproduce, no code change needed. Both are fully investigated, see "Known bugs & limitations carried out of M2" below for the three-way distinction (fixed / confirmed non-bug / confirmed permanent) — `D3DPOOL_MANAGED` has since moved from that third category into the first, on x64. The partial-buffer Lock limitation is now genuinely fixed on x64 (still whole-buffer-only on x86, a scoped-out gap) — also below. |
+| WoW64 | WoW64/x86 D3D9 UMD port (32-bit `sogen_d3d9um`, SysWOW64) | **Done** | Not in the original plan's M1-M5 table; pulled forward per the user's own priority order since real games (MW2/BO2/GTA SA) are 32-bit and nothing else matters without a working x86 guest path. Proven: typed per-slot `__stdcall` thunk arities for all 143 `D3DDDI_DEVICEFUNCS` slots (28 real implementations unchanged, the other 115 now get a correctly-sized `stub_args_N` instead of x64's zero-arg `device_stub`, which would desync callee-cleanup x86's stack); x86-specific `D3DDDIARG_*`/`D3DDDI_*` struct layout for every real slot with a HANDLE/pointer field, pinned by `#ifndef _WIN64` `static_assert`s, including a live-RE'd fix for `D3DDDIARG_LOCK`/`D3DDDIARG_UNLOCK` (x86 is a genuinely different two-tier struct shape via `DdLockLH`, not just a pointer-shrunk copy of the x64 layout); `i686-w64-mingw32-g++` build tooling (parallel commands in `src/samples/sogen-d3d9-umd/README.md`) producing `sogen_d3d9um-x86.dll`. End-to-end proof: `d3d9-triangle-test-x86.exe`, cross-compiled to i686 and run through the real WoW64 path against the genuine 32-bit Microsoft `d3d9.dll` (not DXVK), reaches the x86 UMD and reads back the exact same pixel (`B=FF G=80 R=40 A=FF`) as the x64 `d3d9-triangle-test` — full pixel parity. **Now also covered:** `d3d9-shader-test`, `d3d9-const-test`, `d3d9-texture-test`, and `d3d9-texcoord-test` have all been cross-compiled to i686 and pass on x86 too (all analytic pixel checks exact, matching the x64 results) — M1.5/M2's shader, constant-register, texture, depth, blend, and real-`TEXCOORD0` features are now confirmed on the x86 path, not just the fixed-function triangle. Porting these caught two real, x86-only bugs along the way (both fixed): `d3d9_host::allocate_id()`'s shared id counter started at `1ULL << 32`, silently truncating through a 32-bit `HANDLE` on x86 guests (fixed, starts at `0x10000`; commit `c35871ca`); and `D3DDDIARG_CREATERESOURCE`'s output-handle offset is 44 on x86, not 48 as RE'd for x64 (a clean 4-byte shift, fixed; commit `c5dd3d27`) — full narrative for both in `src/samples/sogen-d3d9-umd/README.md`. Full regression sweep after all this session's fixes landed: every x64 and x86 guest test green, smoke test 26/26 (2026-07-04). Partial-buffer Lock support (see below) is x64-only — x86 keeps whole-buffer-lock semantics, a known, explicitly scoped-out gap (its driver-routed `OffsetToLock` offset isn't RE-verified). Five DDI slot arities flagged low-confidence during design (`pfnCheckCounter`, `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified against the real `d3d9.dll`, since none of the current x86 tests call them — a future x86 test that hits one of these slots could still find a stack-corrupting arity mismatch. **Now also covered (2026-07-05):** `d3d9-scissor-test`, `d3d9-mrt-test`, and `d3d9-multistream-test` have all been cross-compiled to i686 and pass on x86 too, pixel-exact against x64 — unlike several earlier ports, this one found ZERO new x86-only bugs; all three worked unchanged on the first run. Full regression sweep after this session's work: every x64 and x86 guest test green (`d3d9-managed-texture-test` fails by design, permanent limitation, at the time of this sweep — since fixed on x64, see the `D3DPOOL_MANAGED` entry below; x86 unaffected), smoke test 26/26 (2026-07-05). |
+| M3 | DDI coverage (multi-stream, `*_UP` draws, StretchRect/ColorFill, scissor, MRT, cube/vol, more formats) | **In progress** | Int/bool constant registers, originally scoped as part of this milestone, are done (see "Constant registers" below) — pulled forward for the same reason float constants were (real games hit shader flow control early). **Three more M3 items are now done**: multi-stream vertex sources (real per-stream `SetStreamSource` offsets + a new `D3DVERTEXELEMENT9` declaration parser), scissor rect (`D3DRS_SCISSORTESTENABLE`-gated real clipping), and multiple render targets (real N-RT rendering + all-bound-RTs `Clear()`) — see the "M3 coverage items" checklist below for the full account of each, including the 3 UMD bugs the multi-stream work found/fixed and the RT-slot-compaction bug found/fixed during MRT work. Proven pixel-exact on both x64 and x86/WoW64 (all three ported to i686 with zero source changes, zero new x86 bugs). **Still not started**: `*_UP` draws, `StretchRect`/`ColorFill`, cube/volume textures, formats beyond the M2 table, SM3.0 caps, mip-mapping, and `stream_frequencies`/instancing. The remaining M3 work inherits `D3DPOOL_MANAGED`'s x86/WoW64 gap (fixed on x64, see below; the 32-bit `syswow64/d3d9.dll` has not had an equivalent RE pass), (on x86 only) the partial-Lock gap, and the two narrower pipeline-cache-key gaps (render-state, real-vertex-decl stream strides — see below; the RT/vertex-decl-shape cache-key gap itself is now fixed) — none of this is M3-net-new work, it's M2 debt M3 must not silently re-break. |
 | M4 | Fixed-function synthesis | **Deferred by design** | Original plan: "only if MW2 needs it." MW2 is SM3-heavy; likely skippable. Revisit if a real game draw path turns out to need FF after all. |
-| M5 | MW2 integration (WoW64, SM3, 32-bit UMD) | **Not started, blocked on M3** | The WoW64/x86 UMD port itself is done (see the WoW64 row above), and its shader/texture/constant-register/texcoord features are now confirmed on the x86 path specifically (not just the fixed-function triangle) — the remaining blocker is real MW2 integration work: M3's DDI coverage and SM3 caps. The confirmed-permanent `D3DPOOL_MANAGED` limitation (see below) is likely to be hit by real MW2 asset loading and will need a fundamentally different mechanism, not just more DDI coverage. |
+| M5 | MW2 integration (WoW64, SM3, 32-bit UMD) | **Not started, blocked on M3** | The WoW64/x86 UMD port itself is done (see the WoW64 row above), and its shader/texture/constant-register/texcoord features are now confirmed on the x86 path specifically (not just the fixed-function triangle) — the remaining blocker is real MW2 integration work: M3's DDI coverage and SM3 caps. `D3DPOOL_MANAGED` is now fixed on x64 (see below) via a permanent runtime memory patch, not more DDI coverage — but real MW2 is a 32-bit game, and the 32-bit `syswow64/d3d9.dll` this fix would need to target for MW2 has not had an equivalent RE pass; until that follow-up work happens, MANAGED-pool asset loading remains an open, real risk for actual MW2 integration specifically. |
 
 ## Remaining work, consolidated (supersedes scattered "Deferred work" notes in HANDOFF_MACBOOK.md)
 
@@ -214,72 +214,85 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   workaround unchanged (still proven correct, zero regression) — the workaround is no longer necessary
   but also no longer required to be removed, since it's an independently-verified-correct path. Full
   trace: `HANDOFF_MACBOOK.md` §20.
-- [x] **`D3DPOOL_MANAGED` texture bug — WONTFIX: permanently closed, not code-fixable through this
-  driver's DDI surface (2026-07-04). Checked here because the investigation is complete and no further
-  action is expected, not because the symptom is gone — see `d3d9_managed_texture_test.cpp`, which is
-  expected to keep failing forever.** Three decoupled layers, all root-caused. `CreateTexture()`
-  with `D3DPOOL_MANAGED` causes `pfnCreateResource` to fire *twice* for what the app sees as one call —
-  now understood to be real, expected D3D9 architecture (a sysmem "master" copy created immediately, a
-  vidmem copy created lazily on first bind, synced by a real `pfnTexBlt` call this driver previously
-  left as a no-op stub). **Fixed**: `pfnTexBlt` is now implemented (`umd_TexBlt`/`d3d9_host::tex_blt`),
-  forwarding the sysmem copy's full pixel backing into the vidmem copy. **Still open, a second, deeper
-  bug found while fixing the first**: `pfnLock`/`pfnUnlock` never carry the app's real pixel writes for
-  the sysmem copy at all — live-confirmed the app's own `LockRect()` pointer differs from this driver's
-  own `pfnLock` return pointer, so the app writes into `d3d9.dll`'s own private system-memory allocation
-  instead. Root cause: `CBaseDevice::CanDriverManageResource` (gating `CanCreateLightWeight`, the same
-  shape of undocumented capability check the `DevCaps` `0x02000000`/`0x04000000` bits already fixed for
-  vertex/index buffers) is not satisfied by this driver. **Now root-caused and confirmed structurally
-  uncontrollable (2026-07-04), not just unidentified**: live-traced (memory-write watch) the failing
-  field (`CBaseDevice+444`, `D3DCAPS9::Caps2` bit `0x10000000` = `D3DCAPS2_CANMANAGERESOURCE`) all the
-  way back through `d3d9.dll`'s own `QueryLHDDICaps`, which unconditionally clears that bit
-  (`& 0xEFFFFFFF`) after querying the driver, regardless of what `GetCaps` reports — empirically
-  re-verified by temporarily setting the bit in `fill_d3d9caps` and watching it get stripped live. No
-  `D3DCAPS9` field any D3DDDI/WDDM driver reports can make this gate pass; this matches real D3D9/WDDM
-  history (the OS's own video memory manager owns residency under WDDM, not the driver). `D3DPOOL_MANAGED`
-  textures are the common case for real game asset loading — MW2 will very likely hit this. **Confirmed
-  unfixable through this driver's own DDI surface (2026-07-04)**: the natural remaining candidate — a
-  fuller RE of `pfnTexBlt`'s argument struct for a system-memory-source pointer field — was carried out
-  in full. A live trace captured `pfnTexBlt`'s return address into `d3d9.dll` and idasql-decompiled the
-  real caller, `CD3DDDIDX10::TexBlt`; the genuine 48-byte `D3DDDIARG_TEXBLT` struct it builds (now typed
-  in `d3d9_ddi.hpp`) carries only two resource handles, a subresource index, a destination point, and a
+- [x] **`D3DPOOL_MANAGED` texture bug — FIXED on x64 (2026-07-05); x86/WoW64 not yet covered, a
+  separately-scoped follow-up (see the spike entry below and its follow-on fix).** Kept here with its
+  full backstory since the investigation trail explains *why* the gate exists and why the obvious
+  DDI-surface fixes don't work — only the final conclusion below is corrected, not the history. Three
+  decoupled layers, all root-caused. `CreateTexture()` with `D3DPOOL_MANAGED` causes `pfnCreateResource`
+  to fire *twice* for what the app sees as one call — understood to be real, expected D3D9 architecture
+  (a sysmem "master" copy created immediately, a vidmem copy created lazily on first bind, synced by a
+  real `pfnTexBlt` call this driver previously left as a no-op stub). **Fixed**: `pfnTexBlt` is now
+  implemented (`umd_TexBlt`/`d3d9_host::tex_blt`), forwarding the sysmem copy's full pixel backing into
+  the vidmem copy. **A second, deeper bug found while fixing the first**: `pfnLock`/`pfnUnlock` never
+  carry the app's real pixel writes for the sysmem copy at all — live-confirmed the app's own
+  `LockRect()` pointer differs from this driver's own `pfnLock` return pointer, so the app writes into
+  `d3d9.dll`'s own private system-memory allocation instead. Root cause: `CBaseDevice::CanDriverManageResource`
+  (gating `CanCreateLightWeight`, the same shape of undocumented capability check the `DevCaps`
+  `0x02000000`/`0x04000000` bits already fixed for vertex/index buffers) is not satisfied by this driver.
+  **Root-caused (2026-07-04)**: live-traced (memory-write watch) the failing field (`CBaseDevice+444`,
+  `D3DCAPS9::Caps2` bit `0x10000000` = `D3DCAPS2_CANMANAGERESOURCE`) all the way back through
+  `d3d9.dll`'s own `QueryLHDDICaps`, which unconditionally clears that bit (`& 0xEFFFFFFF`) after
+  querying the driver, regardless of what `GetCaps` reports — empirically re-verified by temporarily
+  setting the bit in `fill_d3d9caps` and watching it get stripped live. This part remains true and
+  permanent: no `D3DCAPS9` field any D3DDDI/WDDM driver reports can make this gate pass through the
+  *reported-caps* mechanism specifically; this matches real D3D9/WDDM history (the OS's own video memory
+  manager owns residency under WDDM, not the driver). `D3DPOOL_MANAGED` textures are the common case for
+  real game asset loading — MW2 will very likely hit this. **Confirmed unfixable through the reported-caps
+  or TexBlt-argument DDI surface (2026-07-04)**: the natural remaining DDI-surface candidate — a fuller RE
+  of `pfnTexBlt`'s argument struct for a system-memory-source pointer field — was carried out in full. A
+  live trace captured `pfnTexBlt`'s return address into `d3d9.dll` and idasql-decompiled the real caller,
+  `CD3DDDIDX10::TexBlt`; the genuine 48-byte `D3DDDIARG_TEXBLT` struct it builds (now typed in
+  `d3d9_ddi.hpp`) carries only two resource handles, a subresource index, a destination point, and a
   source rect — no pixel-data pointer anywhere, confirmed against the real function's own decompiled
   source, not just an empirical byte dump. A second live trace instrumented every one of this driver's
   143 device-func-table slots across this test's entire run and confirmed no other DDI call carries
   texture pixel bytes either. The real MANAGED-pool sysmem pixel data is structurally never exposed to
   any D3DDDI/WDDM driver through any DDI call for this resource kind — `d3d9.dll` keeps it entirely
-  inside its own private `CMipMap` buffer end to end. `d3d9_managed_texture_test.cpp` (real
-  `D3DPOOL_MANAGED`, no workaround) is expected to keep failing (sampling black, not magenta) — this is
-  now a confirmed, permanent limitation, not an open lead; `d3d9_texture_test.cpp` continues to avoid the
-  whole area via `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT`. Full trace: `HANDOFF_MACBOOK.md` §16.3, §17,
-  §18, §19.
-- [x] **D3DPOOL_MANAGED — Option-A spike run (2026-07-05): the caps gate CAN be forced open at runtime,
-  but this reveals a second, deeper gap rather than a fix; net result is a corrected, more precise
-  understanding of the limitation above, not a reopened lead.** The prior entry's "structurally
-  uncontrollable" conclusion is about the *reported-caps* surface specifically (no `D3DCAPS9` value any
-  driver reports survives `QueryLHDDICaps`'s unconditional strip) — that part still stands, unchanged.
-  This spike tested a genuinely different mechanism: a live, in-memory, runtime patch (a Python
-  `emu.hooks.memory_execution_at()` callback watching `d3d9.dll+0x158b3`'s caps-strip site and re-setting
-  bit 28 immediately after) that never touches any reported-caps value at all. Disassembly confirmed the
-  exact instruction (`btr eax, 0x1c` / `mov [rsi+0xc], eax` at image-relative `+0x158af`/`+0x158b3`, x64
-  build only, sha256 `bb65372a…`) and the patch does work mechanically: `CBaseDevice+444`'s bit flips from
-  `0xe4628800` to `0xf4628800` live, every run, and `d3d9.dll` demonstrably takes a different internal code
-  path afterward (confirmed by the *different* failure mode below, not merely by the bit read-back).
-  **But the unmodified `d3d9_managed_texture_test.cpp` still does not pass with the gate forced open** —
-  it fails earlier and differently: `CreateTexture(D3DPOOL_MANAGED)` still succeeds, but
-  `Texture->LockRect()` now returns `hr=0x00000000` with `pBits=nullptr` (previously it returned a real,
-  non-null pointer into `d3d9.dll`'s own private sysmem shadow — the old bug). This is because forcing the
-  gate makes `d3d9.dll` hand the lock off to the *driver-managed* path, and this driver's own `umd_Lock`
-  has never had to serve a driver-managed `D3DPOOL_MANAGED` resource before — it has no real sysmem
-  backing to hand back for one, so the app gets a null buffer instead. **This is a genuinely new, concrete,
-  addressable target** (give `umd_CreateResource`/`umd_Lock` a real sysmem allocation for driver-managed
-  MANAGED resources) that did not exist as an option before this spike, since the gate was previously
-  believed to be unforceable by any means. **Not attempted in this spike** (out of the time-box, and it
-  would require productionizing the patch — moving the bit-forcing from a scratch Python harness into a
-  real, permanent emulator-side hook, plus new UMD code, plus a 32-bit RE pass since the RVA is x64-only
-  verified) — this is real, separately-scoped follow-up work, not folded into this entry. The existing
-  test is correctly left unmodified and continues to fail (for its original, pre-spike reason, since the
-  gate-forcing patch was never made permanent) — nothing about its current expected-FAILED status changes
-  as a result of this spike. Full spike detail: `HANDOFF_MACBOOK.md` (dated 2026-07-05 entry).
+  inside its own private `CMipMap` buffer end to end, as long as the driver-managed gate stays closed.
+  Through the DDI surface alone, this remained permanently unfixable. **FIXED, a fundamentally different
+  mechanism (2026-07-05, commits `36e2a8bb`/`c42fabd4`)**: not a DDI-surface or reported-caps change at
+  all, but a permanent runtime memory patch — `windows_emulator::install_d3d9_caps_patch_hook`
+  (`windows_emulator.cpp`) installs an execution hook on x64 `d3d9.dll` load that re-sets
+  `D3DCAPS2_CANMANAGERESOURCE` immediately after `QueryLHDDICaps`'s own strip, bypassing the reported-caps
+  mechanism entirely. This routes the MANAGED-pool lock through the driver-managed path, and this driver's
+  existing `umd_Lock`/`g_locked_buffers` machinery — built for ordinary resources, unmodified for this fix
+  — turned out to already serve a real pixel backing once that path is taken; no new UMD code was needed.
+  `d3d9_managed_texture_test.cpp` (real `D3DPOOL_MANAGED`, no workaround, no test-side leniency) now
+  genuinely passes (magenta, not black) — independently verified via A/B (disabling the hook reproduces
+  the old black-pixel failure) plus a full x64/x86 guest-test regression sweep; `d3d9_texture_test.cpp`
+  continues to avoid the whole area via `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` regardless. **x86/WoW64
+  scope: this hook is x64-only** — the RVA pattern was verified only against the staged 64-bit
+  `system32/d3d9.dll` build; the 32-bit `syswow64/d3d9.dll` real MW2 (a 32-bit game) would actually use
+  has not had an equivalent RE pass, so this fix does not yet help a 32-bit guest — separately-scoped
+  follow-up work. Full trace: `HANDOFF_MACBOOK.md` §16.3, §17, §18, §19, §27, and the newest dated entry.
+- [x] **D3DPOOL_MANAGED — Option-A spike run (2026-07-05): the caps gate CAN be forced open at runtime;
+  productionized into a permanent fix the same day (see the entry above).** The prior entry's
+  "structurally uncontrollable" conclusion was about the *reported-caps* surface specifically (no
+  `D3DCAPS9` value any driver reports survives `QueryLHDDICaps`'s unconditional strip) — that part still
+  stands, unchanged. This spike tested a genuinely different mechanism: a live, in-memory, runtime patch
+  (a Python `emu.hooks.memory_execution_at()` callback watching `d3d9.dll+0x158b3`'s caps-strip site and
+  re-setting bit 28 immediately after) that never touches any reported-caps value at all. Disassembly
+  confirmed the exact instruction (`btr eax, 0x1c` / `mov [rsi+0xc], eax` at image-relative
+  `+0x158af`/`+0x158b3`, x64 build only, sha256 `bb65372a…`) and the patch worked mechanically:
+  `CBaseDevice+444`'s bit flipped from `0xe4628800` to `0xf4628800` live, every run, and `d3d9.dll`
+  demonstrably took a different internal code path afterward. **At spike time, the unmodified
+  `d3d9_managed_texture_test.cpp` did not yet pass with the gate forced open** — it failed earlier and
+  differently: `CreateTexture(D3DPOOL_MANAGED)` still succeeded, but `Texture->LockRect()` returned
+  `hr=0x00000000` with `pBits=nullptr` (previously it returned a real, non-null pointer into `d3d9.dll`'s
+  own private sysmem shadow — the old bug), because forcing the gate hands the lock to the
+  driver-managed path, and the scratch Python harness didn't change anything on the UMD side to serve
+  one. **This turned out to need no new UMD code after all**: the same-day follow-up (commits
+  `36e2a8bb`/`c42fabd4`, see the entry above) productionized the bit-forcing into a permanent
+  emulator-side hook and re-ran the unmodified test — it passed outright. The existing `umd_Lock`/
+  `g_locked_buffers` machinery (built for ordinary resources, never changed for this fix) turned out to
+  already be sufficient; why the productionized hook succeeds where the scratch spike's `pBits=nullptr`
+  result suggested a missing UMD-side allocation was not separately re-investigated — the working,
+  reproducible end state (confirmed by this session's own A/B toggle) is what matters here, not a full
+  explanation of the spike's differing intermediate symptom. The one piece of this spike's follow-up list
+  that is still real, separately-scoped, unstarted work: the 32-bit RE pass, since `+0x158b3` was verified
+  only against the staged x64
+  `system32/d3d9.dll` (sha256 `bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c`) — real
+  MW2 is 32-bit. Full spike detail: `HANDOFF_MACBOOK.md` §27 and the newest dated entry.
 - [x] **Partial-buffer `Lock()` — fixed on x64 (2026-07-04, Task 6); x86 keeps the old whole-buffer-only
   behavior, a known, scoped-out gap.** `D3DDDIARG_LOCK`'s `OffsetToLock`/`SizeToLock` have no single,
   routing-path-independent struct offset — real `d3d9.dll` builds this struct two genuinely different
@@ -446,10 +459,11 @@ M2-carried findings are now fully root-caused, each to a different outcome: `TEX
 turned out not to be a real bug at all (investigated, does not reproduce; see above, no code changed);
 partial-buffer Lock is now genuinely fixed with real code (on x64 — whole-buffer semantics remain an
 x86-only, scoped-out gap, not RE-verified yet, not a blocker for further x64 work); and `D3DPOOL_MANAGED`
-got a real partial fix (the double-resource-creation sync, via `pfnTexBlt`) but its deeper remaining
-symptom is confirmed permanently unfixable through this driver's own DDI surface (see above) and will
-need a fundamentally different mechanism before MW2 integration, since it is likely to block real game
-asset loading outright, not just degrade a corner case.
+got a real fix for the double-resource-creation sync (via `pfnTexBlt`) and, since 2026-07-05, a real fix
+for its deeper remaining symptom too — a permanent runtime memory patch to `d3d9.dll` (see above), not
+more DDI coverage — on x64. The 32-bit `syswow64/d3d9.dll` real MW2 would use has not had the equivalent
+RE pass, so this is not yet a fix for a real 32-bit game; that RE pass is real, separately-scoped,
+unstarted follow-up work before MW2 integration.
 
 Per the original plan's "de-risk earliest/riskiest first" philosophy, int/bool constant registers were
 taken ahead of the rest of M3 (real games hit shader flow control before most of M3's other items —
@@ -470,8 +484,11 @@ per-stream strides) remain open — see the "Pipeline-key system" bullets above.
 
 M3's remaining DDI-coverage items (`*_UP` draws, `StretchRect`/`ColorFill`, `stream_frequencies`/
 instancing, cube/volume textures, more formats, SM3.0 caps, mip-mapping) can proceed in roughly the
-order listed above. `D3DPOOL_MANAGED`'s confirmed-permanent limitation should be treated as a standing
-MW2-integration risk to design around (e.g. a different resource-management strategy for managed-pool
-assets) rather than something more DDI coverage will incidentally fix — it won't. If x86 partial-buffer
-Lock support becomes necessary before MW2 integration, budget for the same kind of live-RE pass
-(`D3DDDIARG_LOCK`'s x86 driver-routed `OffsetToLock` offset) that resolved the x64 case.
+order listed above. `D3DPOOL_MANAGED` is fixed on x64 (see above) but its x86/WoW64 gap should be treated
+as a standing MW2-integration risk to budget for explicitly — real MW2 is a 32-bit game, and the caps-patch
+hook's RVA has only been RE'd and verified against the 64-bit `d3d9.dll` build; a separate 32-bit RE pass
+(same shape of work: disassemble the caps-strip site in `syswow64/d3d9.dll`, confirm the pattern, wire up
+a second hook gated on the x86 machine type) is real, unstarted, separately-scoped follow-up work before
+MW2 integration. If x86 partial-buffer Lock support becomes necessary before MW2 integration, budget for
+the same kind of live-RE pass (`D3DDDIARG_LOCK`'s x86 driver-routed `OffsetToLock` offset) that resolved
+the x64 case.
