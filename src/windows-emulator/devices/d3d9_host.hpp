@@ -407,8 +407,8 @@ namespace sogen
         bool ensure_pipeline(std::span<const uint32_t> color_formats, uint32_t width, uint32_t height, uint32_t depth_format);
         // Builds a fresh VkSampler from the accumulated D3D9 sampler state for `sampler_index` (falling
         // back to D3D9's own documented per-state defaults for anything never explicitly set). Created
-        // fresh per draw and destroyed after, mirroring execute_draw's own per-draw VS/PS UBO lifecycle --
-        // no persistent sampler cache yet.
+        // fresh per draw and destroyed after -- unlike execute_draw's now-pooled VB/IB/UBOs
+        // (stream_buffer_pool_/index_buffer_pool_/ubo_pool_), samplers have no persistent cache yet.
         bool build_sampler(uint64_t device, uint32_t sampler_index, uint32_t mip_levels, uint64_t& out_sampler) const;
         // Returns the cached parsed_vertex_decl for state_.vertex_decl, or nullptr when there's no real
         // declaration to use (state_.vertex_decl == 0, or its cached parse produced no attributes --

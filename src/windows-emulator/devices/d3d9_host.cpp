@@ -845,6 +845,11 @@ namespace sogen
         // buffer has completed before a later draw rewrites it. On failure the pool is left empty (any
         // partially created buffer freed) so the next draw retries cleanly. Replaces the former
         // create_and_upload_gpu_buffer, which created and freed a fresh buffer every draw.
+        // Known, accepted tradeoff: growth is exact-fit (no headroom), and a later draw whose `size` is
+        // SMALLER than the pool's already-grown capacity only overwrites its own `size` bytes -- any
+        // bytes beyond that (but still within capacity) retain the PRIOR draw's content. This is benign
+        // for VB/IB (a correct draw only ever reads its own resource's real backing size, never past it)
+        // and irrelevant for UBOs (upload_pooled_ubo below always re-uploads the full fixed size).
         bool ensure_pooled_buffer(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device,
                                   pooled_buffer& pool, const void* data, const size_t size, const uint32_t usage)
         {
