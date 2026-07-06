@@ -151,10 +151,32 @@ namespace sogen
         varying_map_info.varying_map = varying_map.data();
         varying_map_info.varying_count = varying_count;
 
-        // No combined-sampler binding for VS in this milestone -- d3d9_host.cpp's vs_bindings (set 0) has no
-        // sampler slot at all; vertex-shader texture fetch (SM3.0) is out of scope, not merely unwired here.
+        // Combined-image-samplers for the vertex stage's texture registers s0..s3 (SM3.0 vertex texture
+        // fetch, e.g. tex2Dlod), declared into VS descriptor set 0 at the same bindings the pixel stage
+        // uses within its own set (1, 4, 5, 6 -- stepping over the int/bool-const UBOs at bindings 2/3),
+        // via the shared sampler_binding_for_stage formula. resource_index/sampler_index are the VS's own
+        // s# register numbers (0..3); the DDI-stage-to-register mapping (D3DVERTEXTEXTURESAMPLER0 == DDI
+        // stage 257 -> shader register 0) is a host-side concern (d3d9_host.cpp's execute_draw), not the
+        // translator's. Same over-declaration safety as the PS array below: vkd3d only emits a SPIR-V
+        // sampler variable for a stage the VS statically references, so a VS that fetches no texture (the
+        // overwhelmingly common case) emits zero extra SPIR-V and the unused set-0 sampler bindings stay
+        // inert -- confirmed byte-for-byte unchanged for every existing non-vertex-texture guest test.
+        std::array<vkd3d_shader_combined_resource_sampler, max_vs_sampler_stages> vs_sampler_bindings{};
+        for (unsigned int k = 0; k < vs_sampler_bindings.size(); ++k)
+        {
+            vs_sampler_bindings[k] = {
+                .resource_space = 0,
+                .resource_index = k,
+                .sampler_space = 0,
+                .sampler_index = k,
+                .shader_visibility = VKD3D_SHADER_VISIBILITY_VERTEX,
+                .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
+                .binding = {.set = 0, .binding = vs_sampler_binding_for_stage(k), .count = 1},
+            };
+        }
         if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, VKD3D_SHADER_VISIBILITY_VERTEX, 0,
-                            nullptr, 0, out.vertex_spirv))
+                            vs_sampler_bindings.data(), static_cast<unsigned int>(vs_sampler_bindings.size()),
+                            out.vertex_spirv))
         {
             return false;
         }

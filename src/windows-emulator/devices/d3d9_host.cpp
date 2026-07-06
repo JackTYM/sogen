@@ -39,6 +39,13 @@ namespace sogen
         constexpr uint32_t d3dsamp_maxmiplevel = 9;
         constexpr uint32_t d3dsamp_maxanisotropy = 10;
 
+        // Public D3DSAMPLER_TEXTURE_TYPE base (d3d9types.h): D3D9 folds the vertex-stage texture samplers
+        // into the SAME SetTexture/bound_textures stage-key space as the pixel samplers, starting at
+        // D3DVERTEXTEXTURESAMPLER0 == 257 (D3DDMAPSAMPLER + 1). Real d3d9.dll passes these stage numbers
+        // through the DDI unmodified, so bound_textures[257 + k] is the texture the guest bound to vertex
+        // sampler s{k}. execute_draw maps that back to the VS's own shader register k (0..3).
+        constexpr uint32_t d3dvertextexturesampler0 = 257;
+
         // Public D3DRENDERSTATETYPE values (d3d9types.h) needed for real depth-test wiring.
         constexpr uint32_t d3drs_zenable = 7;
         constexpr uint32_t d3drs_zwriteenable = 14;
@@ -647,7 +654,15 @@ namespace sogen
         // UBO creation happens in execute_draw; the descriptor sets themselves are cached on this
         // pipeline's programmable_pipeline_entry (see its own comment) and only their contents are
         // rewritten per draw, not the sets or their pool.
-        const std::array<vulkan_host::descriptor_binding, 3> vs_bindings{{
+        // Combined-image-sampler bindings for the vertex stage's texture registers s0..s3 sit at
+        // bindings 1, 4, 5, 6 within set 0 (bindings 2/3 are the int/bool-const UBOs) -- the same
+        // per-set scheme the PS uses in set 1, generated from the shared
+        // max_vs_sampler_stages/vs_sampler_binding_for_stage (d3d9_shader_translator.hpp) that
+        // d3d9_shader_translator.cpp pins into the VS SPIR-V. Declared unconditionally for the same
+        // reason as PS: Vulkan permits a layout to declare more bindings than a shader statically uses,
+        // so a VS that never samples (the common case) is unaffected; execute_draw only writes a
+        // descriptor when a vertex texture is actually bound to that stage.
+        std::array<vulkan_host::descriptor_binding, 3 + max_vs_sampler_stages> vs_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
             {.binding = 2, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
@@ -655,6 +670,13 @@ namespace sogen
             {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
         }};
+        for (uint32_t stage = 0; stage < max_vs_sampler_stages; ++stage)
+        {
+            vs_bindings[3 + stage] = {.binding = vs_sampler_binding_for_stage(stage),
+                                      .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                      .descriptor_count = 1,
+                                      .stage_flags = VK_SHADER_STAGE_VERTEX_BIT};
+        }
         // Combined-image-sampler bindings for texture stages s0..s3 sit at bindings 1, 4, 5, 6 (bindings 2/3
         // are the int/bool-const UBOs) -- the exact scheme d3d9_shader_translator.cpp pins into the PS SPIR-V.
         // The sampler entries below are generated from max_ps_sampler_stages/ps_sampler_binding_for_stage
@@ -806,14 +828,16 @@ namespace sogen
         }
 
         // Per-pipeline descriptor pool + its two sets, allocated ONCE here on cache miss rather than
-        // reset/reallocated every draw from a shared pool. Sized exactly as the old shared pool was:
-        // maxSets=2, 6 UBOs (VS+PS float/int/bool const registers) and max_ps_sampler_stages
-        // combined-image-samplers (the PS set's bindings 1/4/5/6). execute_draw rewrites the sets'
-        // contents each draw but reuses these same set objects -- safe because each draw blocks on a
-        // fence before returning (no in-flight GPU read of a set about to be rewritten).
+        // reset/reallocated every draw from a shared pool. maxSets=2, 6 UBOs (VS+PS float/int/bool const
+        // registers) and max_vs_sampler_stages + max_ps_sampler_stages combined-image-samplers (both the
+        // VS set's and the PS set's bindings 1/4/5/6 -- the pool must cover the samplers declared across
+        // BOTH allocated sets, not just one). execute_draw rewrites the sets' contents each draw but
+        // reuses these same set objects -- safe because each draw blocks on a fence before returning (no
+        // in-flight GPU read of a set about to be rewritten).
         const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
             {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 6},
-            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = max_ps_sampler_stages},
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+             .descriptor_count = max_vs_sampler_stages + max_ps_sampler_stages},
         }};
         if (this->vulkan_.create_descriptor_pool(device, 2, pool_sizes, entry.descriptor_pool) != 0 ||
             entry.descriptor_pool == 0)
@@ -1388,6 +1412,11 @@ namespace sogen
         };
         std::array<uint64_t, max_ps_sampler_stages> tex_samplers{};
         std::array<uint64_t, max_ps_sampler_stages> tex_image_views{};
+        // Separate from the PS arrays above so both stages' per-draw sampler/view selection is tracked
+        // independently (a vertex texture and a pixel texture can be bound to the same shader-register
+        // index k at once -- they live in different descriptor sets and different bound_textures keys).
+        std::array<uint64_t, max_vs_sampler_stages> vs_tex_samplers{};
+        std::array<uint64_t, max_vs_sampler_stages> vs_tex_image_views{};
         std::array<uint64_t, 2> descriptor_sets{};
         if (use_programmable)
         {
@@ -1449,6 +1478,48 @@ namespace sogen
                 if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, std::max(1u, tex.mip_levels), tex_samplers[stage]))
                 {
                     tex_image_views[stage] = tex.vk_image_view_id;
+                }
+            }
+
+            // Vertex-stage texture fetch (SM3.0 tex2Dlod etc.): the guest binds these via
+            // SetTexture(D3DVERTEXTEXTURESAMPLER0 + k, ...), which real d3d9.dll forwards through the DDI
+            // unmodified, so the texture for VS sampler register k lives at bound_textures[257 + k]. This
+            // mirrors the PS loop above exactly (same upload/view-creation/sampler-build), just keyed off
+            // the vertex-sampler stage numbers and tracked in the separate vs_* arrays. build_sampler is
+            // called with the raw stage (257 + k) so any D3DSAMP_* state the app set on that vertex
+            // sampler is honored; with none set it defaults to POINT/no-mipmap, matching real D3D9's
+            // vertex-texture-fetch filtering restrictions.
+            for (uint32_t k = 0; k < max_vs_sampler_stages; ++k)
+            {
+                const uint32_t vs_stage = d3dvertextexturesampler0 + k;
+                const auto tex_it = this->state_.bound_textures.find(vs_stage);
+                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0 ||
+                    !this->ensure_texture_uploaded(tex_it->second))
+                {
+                    continue;
+                }
+                const auto tex_res_it = this->resources_.find(tex_it->second);
+                if (tex_res_it == this->resources_.end())
+                {
+                    continue;
+                }
+                resource_entry& tex = tex_res_it->second;
+                if (tex.vk_image_view_id == 0)
+                {
+                    uint32_t tex_vk_format = 0;
+                    if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
+                    {
+                        const uint32_t view_levels = std::max(1u, tex.mip_levels);
+                        this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
+                                                        VK_IMAGE_VIEW_TYPE_2D, 0, view_levels, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
+                    }
+                }
+                if (tex.vk_image_view_id != 0 &&
+                    this->build_sampler(device, vs_stage, std::max(1u, tex.mip_levels), vs_tex_samplers[k]))
+                {
+                    vs_tex_image_views[k] = tex.vk_image_view_id;
                 }
             }
 
@@ -1535,6 +1606,25 @@ namespace sogen
                                   .range = 0,
                                   .sampler = tex_samplers[stage],
                                   .image_view = tex_image_views[stage],
+                                  .image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+            }
+            // Vertex-stage samplers go into the VS descriptor set (set 0) at the same per-set binding
+            // formula as PS -- see the vs_bindings layout and the vertex-texture upload loop above.
+            for (uint32_t k = 0; k < max_vs_sampler_stages; ++k)
+            {
+                if (vs_tex_image_views[k] == 0 || vs_tex_samplers[k] == 0)
+                {
+                    continue;
+                }
+                writes.push_back({.dst_set = descriptor_sets[0],
+                                  .dst_binding = vs_sampler_binding_for_stage(k),
+                                  .dst_array_element = 0,
+                                  .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                  .buffer = 0,
+                                  .offset = 0,
+                                  .range = 0,
+                                  .sampler = vs_tex_samplers[k],
+                                  .image_view = vs_tex_image_views[k],
                                   .image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
             }
             this->vulkan_.update_descriptor_sets(device, writes);
