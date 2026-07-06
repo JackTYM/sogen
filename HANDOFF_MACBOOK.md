@@ -2261,6 +2261,74 @@ was attempted here; both are real, separately-scoped follow-up work if this path
 Scratch harness (not committed, reusable): `managed_spike.py`, `disasm.py`, `d2.py` under this session's
 scratchpad, plus a Python 3.14 venv with `capstone`/`pefile`.
 
+## 30. Pixel-shader multi-sampler support (s0..s3) — design investigation, implementation, discriminator
+test, and a follow-up centralization refactor (2026-07-06)
+
+The D3D9-over-Vulkan pixel-shader path had exactly one hardcoded texture-sampler binding since M2: s0,
+PS descriptor set 1 binding 1. Any real pixel shader sampling a second texture (diffuse+normal,
+multi-texturing — common in real game shaders, expected for MW2) referenced `s1`, which had no matching
+SPIR-V binding at all.
+
+**Gated design investigation, empirically confirmed against the real vkd3d-shader build (not assumed):**
+- Vulkan binding numbers are fully decoupled from D3D9 `s#` sampler registers — vkd3d's own D3DBC
+  frontend addresses combined samplers by plain sampler-stage number (`resource_index == sampler_index
+  == the D3D9 s# register`), so the Vulkan-side binding a given `s#` maps to is this driver's own free
+  choice, not something vkd3d-shader dictates.
+- Over-declaring sampler bindings a given shader doesn't statically reference is empirically inert:
+  vkd3d only emits SPIR-V for a resource the shader actually declares (verified by disassembling the
+  generated SPIR-V for a single-sampler shader compiled against a 4-sampler binding set and confirming no
+  extra sampler variables appear) — so a fixed, always-four-bindings scheme is safe for every existing
+  single-sampler shader, not just new multi-sampler ones.
+- A single Vulkan binding with `descriptor_count > 1` (one binding, an array of 4 combined-image-samplers)
+  was tried first as the more "natural" design and was rejected by vkd3d at translation time — this is why
+  the shipped design is four separate bindings (1, 4, 5, 6), not one array binding.
+
+**Implementation (`fd24dcea`):** `d3d9_shader_translator.cpp` now emits `combined_resource_sampler`
+entries for all of s0..s3 (`resource_index == sampler_index == k`) instead of just s0.
+`d3d9_host.cpp`'s `ps_bindings` grew from 4 to 7 entries (bindings 4/5/6 added for s1/s2/s3), the
+combined-image-sampler descriptor-pool size went 1->4, and `execute_draw`'s old single-texture block
+became a per-stage loop (0..3) that builds a sampler and writes a descriptor at the mapped binding for
+each actively-bound stage, freeing every created sampler on every exit path.
+`ps_sampler_binding_for_stage()` encodes the s(k) -> {1,4,5,6} map. Binding scheme: binding 0 = float
+CBV, binding 1 = sampler s0, binding 2 = int CBV, binding 3 = bool CBV, s(k) for k>=1 at binding 3+k —
+stepping over the pre-existing int/bool-const UBOs rather than renumbering them.
+
+**Discriminator test (`2b80506e`, `d3d9_multitexture_test.cpp`):** two solid-color textures, RED bound
+to s0 and GREEN bound to s1, one real `D3DCompile()`'d `ps_2_0` shader that samples both and outputs
+`s0.rgb + s1.rgb`. YELLOW on the read-back render target is an unambiguous, hard-to-fake pass signal
+(neither RED nor GREEN alone, and not the black clear color). Proven on both x64 and x86/WoW64.
+
+**Before/after evidence — the pre-fix failure mode was graceful degradation, not a crash, correcting an
+initial prediction.** The design investigation predicted that referencing an unbound `s1` on the old code
+would make vkd3d-shader crash outright. Re-running the discriminator test against the actual pre-fix host
+build showed something milder and more informative: referencing `s1` with no `s1` binding supplied makes
+`vkd3d_shader_compile` return a translation error (not a crash), `translate_d3d9_shader_pair` fails
+cleanly, `ensure_programmable_pipeline` returns `nullptr`, and `execute_draw` skips the draw entirely,
+leaving the black clear color on screen — still a valid, deterministic pass/fail discriminator for the
+test, just a different failure mechanism than predicted. This was caught by a spec-compliance review of
+`fd24dcea` and corrected in a dedicated follow-up commit, `fb7999c6`, which fixed only the test's own
+header-comment description of the pre-fix failure mode (no test-logic change) — worth calling out
+explicitly since it's a case of a design-time prediction being wrong in a way that only surfaced once
+someone re-verified against the real pre-fix build rather than trusting the original reasoning.
+
+**Follow-up centralization refactor (`6ffa2d9a`):** `max_ps_sampler_stages` and
+`ps_sampler_binding_for_stage()` had been written independently in both
+`d3d9_shader_translator.cpp` and `d3d9_host.cpp` (plus three more bare literal-4s for the sampler count)
+— a real code-quality drift-risk finding, since a future edit to one copy without the other would silently
+desync the translator's SPIR-V bindings from the host's descriptor-set layout, producing the exact
+graceful-degradation failure this feature exists to avoid, with no build error or validation-layer
+message to catch it. Both constants moved to `d3d9_shader_translator.hpp` as the single source of truth;
+`d3d9_host.cpp`'s `ps_bindings` sampler entries are now generated from a loop instead of hand-typed.
+Pure refactor — binding numbers, sampler cap, and `ps_bindings`' runtime contents are unchanged.
+
+**Verification.** Full regression sweep at every stage (feature commit, test commit, and refactor
+commit), independently reviewed twice: all existing D3D9 guest tests on both x64 and x86 (24 tests as of
+the refactor commit), plus the 26-subtest smoke test, all pass — including pixel-exact
+`d3d9-multitexture-test` parity on both architectures.
+
+Roadmap updated: `docs/d3d9-roadmap.md`'s M2 "delivered" bullet for sampler binding now describes s0..s3
+instead of s0-only, citing all four commits and the discriminator test.
+
 ## 28. D3DPOOL_MANAGED — the Option-A patch productionized into a permanent hook; the test now genuinely
 passes on x64 (2026-07-05)
 

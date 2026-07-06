@@ -177,9 +177,30 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   `D3DDDITEXTURESTAGESTATETYPE` enum, told apart only by which `State` value arrives, not a numeric
   range split. `umd_SetTextureStageState` now demultiplexes via `sampler_state_for_ddi_tss_state()`
   and routes real sampler calls over the wire's `set_sampler_state` opcode.
-- [x] `vulkan_host::create_sampler` + a combined-image-sampler descriptor (PS set 1, binding 1) wired
-  into the programmable pipeline; `d3d9_shader_translator.cpp` pins the matching SPIR-V binding for any
-  PS that actually reads sampler register s0.
+- [x] `vulkan_host::create_sampler` + combined-image-sampler descriptors wired into the programmable
+  pipeline for **all four PS sampler stages, s0..s3 — extended from s0-only (fixed 2026-07-06, commits
+  `fd24dcea`/`2b80506e`/`6ffa2d9a`/`fb7999c6`).** Previously exactly one hardcoded sampler binding (s0,
+  PS set 1 binding 1) existed; a real pixel shader referencing s1 or higher (diffuse+normal, real
+  multi-texturing) failed translation and silently degraded to an unrendered draw — host-side graceful
+  degradation, not a crash (`hr=0` from `CreatePixelShader`/`DrawIndexedPrimitive`, but the draw itself
+  was silently skipped by `ensure_programmable_pipeline` returning `nullptr`, leaving stale/clear-color
+  pixels). **Binding scheme** (PS descriptor set 1): binding 0 = float CBV, binding 1 = sampler s0,
+  binding 2 = int CBV, binding 3 = bool CBV, and each additional sampler stage k>=1 at binding 3+k
+  (s1/s2/s3 -> 4/5/6, stepping over the int/bool-const UBOs) — centralized as `max_ps_sampler_stages`/
+  `ps_sampler_binding_for_stage()` in `d3d9_shader_translator.hpp` (`6ffa2d9a`, a follow-up refactor
+  resolving a drift risk from the same constants being independently duplicated across
+  `d3d9_shader_translator.cpp` and `d3d9_host.cpp`). **Safe/backward-compatible for single-sampler
+  shaders**: over-declaring sampler bindings a shader doesn't statically reference is empirically inert —
+  vkd3d-shader only emits SPIR-V for a resource the shader actually declares, confirmed against the real
+  vkd3d-shader build (not assumed) via SPIR-V disassembly; a single binding with `descriptor_count>1` was
+  tried and rejected by vkd3d, which is why this is four separate bindings rather than one array binding.
+  Proven by a new discriminator test, `d3d9_multitexture_test.cpp` (`2b80506e`): two solid-color textures
+  (RED->s0, GREEN->s1), one `D3DCompile()`'d `ps_2_0` shader summing both samples, checked analytically
+  for YELLOW on the read-back render target — passes on both x64 and x86/WoW64. The test fails against
+  the pre-fix host code and passes against the fixed code, confirming the discriminator is real; the
+  pre-fix failure mode was corrected post-hoc (`fb7999c6`) from an initially predicted vkd3d-shader crash
+  to the actual observed graceful degradation described above. Full x64/x86 regression sweep and the
+  26-subtest smoke test pass unchanged at every stage. Full narrative: `HANDOFF_MACBOOK.md` §30.
 - [x] Indexed draw execution (`cmd_bind_index_buffer`/`cmd_draw_indexed`).
 - [x] Real depth testing (depth attachment + pipeline depth state). `D3DFMT_D24S8`/`D24X8` map to
   `VK_FORMAT_D32_SFLOAT_S8_UINT`/`D32_SFLOAT`, not their byte-exact Vulkan equivalents — MoltenVK/
