@@ -635,15 +635,17 @@ architectures.
 - `OpenAdapter` reports `DriverVersion = SOGEN_D3D9_UMD_INTERFACE_VERSION` (our own implemented
   interface version), not the runtime's offered `Version` — echoing the runtime's value makes it
   validate device-func slots beyond what our `D3DDDI_DEVICEFUNCS` table declares.
-- `fill_d3d9caps` reports real SM2.0 shader support (`VertexShaderVersion = D3DVS_VERSION(2, 0)`,
-  `PixelShaderVersion = D3DPS_VERSION(2, 0)`). This re-triggers an internal, undocumented
-  `d3d9.dll` HAL-enable validator (found via `objdump` disassembly, live-confirmed via sogen's
-  Python debugger API) that runs once VS2.0+ is declared and additionally requires:
-  `PrimitiveMiscCaps` bit `0x2000` plus `D3DPMISCCAPS_MASKZ`; `RasterCaps` to include
-  `D3DPRASTERCAPS_FOGVERTEX`; `Src`/`DestBlendCaps` to include `D3DPBLENDCAPS_BLENDFACTOR`; and
-  `GuardBand{Left,Top,Right,Bottom}` to each satisfy `abs(value) >= 8192.0`. `fill_d3d9caps` now
-  sets all of these, and `CreateDevice`/`GetDeviceCaps`/`GetCaps` succeed with real SM2.0 caps
-  reported.
+- `fill_d3d9caps` reports real SM3.0 shader support (`VertexShaderVersion = D3DVS_VERSION(3, 0)`,
+  `PixelShaderVersion = D3DPS_VERSION(3, 0)` -- see the SM3.0 delta writeup further down this file,
+  around the `d3d9-sm3-test.exe` description, for the full SM3.0-specific gate list). This first
+  re-triggered an internal, undocumented `d3d9.dll` HAL-enable validator (found via `objdump`
+  disassembly, live-confirmed via sogen's Python debugger API) that runs once VS2.0+ is declared
+  and additionally requires: `PrimitiveMiscCaps` bit `0x2000` plus `D3DPMISCCAPS_MASKZ`;
+  `RasterCaps` to include `D3DPRASTERCAPS_FOGVERTEX`; `Src`/`DestBlendCaps` to include
+  `D3DPBLENDCAPS_BLENDFACTOR`; and `GuardBand{Left,Top,Right,Bottom}` to each satisfy
+  `abs(value) >= 8192.0`. `fill_d3d9caps` sets all of these (the SM2.0 gate), plus the further
+  SM3.0-specific gate documented below, and `CreateDevice`/`GetDeviceCaps`/`GetCaps` succeed with
+  real SM3.0 caps reported.
 - With the HAL-enable gate satisfied, declaring VS2.0+ made `DrawPrimitive` start returning
   `E_OUTOFMEMORY` for every draw, fixed-function or shader-bound alike (`CD3DBase::DrawPrimitive`'s
   shared state-flush block calls into a per-draw shader-cache resolution path regardless of which

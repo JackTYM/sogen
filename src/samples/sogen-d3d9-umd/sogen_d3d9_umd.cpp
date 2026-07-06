@@ -845,12 +845,14 @@ namespace
         // SM3.0 + MRT: this UMD reports NumSimultaneousRTs=4, and once VS/PS are 3.0 the runtime's own MRT
         // validation (reached via IsD3DHALSupported's SM3.0 branch) requires INDEPENDENTWRITEMASKS and
         // MRTPOSTPIXELSHADERBLENDING to be advertised for a >1-RT HAL adapter. RAW HEX is used deliberately
-        // for these two bits instead of this toolchain's D3DPMISCCAPS_* symbols: the RE investigation that
-        // confirmed the SM3.0 cap set hit a mingw d3d9caps.h whose symbolic constant for one of these MRT
-        // fields resolved to a DIFFERENT bit than the MSDN-documented value, silently failing the validator
-        // until raw hex was substituted -- so these literals pin the exact MSDN-documented bit values
-        // (0x00004000 = INDEPENDENTWRITEMASKS, 0x00080000 = MRTPOSTPIXELSHADERBLENDING) independent of any
-        // header. Live-confirmed part of the working SM3.0 delta (see d3d9_sm3_test.cpp).
+        // for these two bits instead of the D3DPMISCCAPS_* symbols: the RE investigation that confirmed the
+        // SM3.0 cap set hit a mingw d3d9caps.h whose symbolic constant for one of these MRT fields resolved
+        // to a DIFFERENT bit than the MSDN-documented value, silently failing the validator until raw hex
+        // was substituted -- so these literals pin the exact MSDN-documented bit values (0x00004000 =
+        // INDEPENDENTWRITEMASKS, 0x00080000 = MRTPOSTPIXELSHADERBLENDING) independent of any header. (This
+        // repo's current mingw-w64 d3d9caps.h happens to already match MSDN for both symbols, verified
+        // 2026-07-06 -- the raw hex is kept anyway so a future toolchain/header regression can't silently
+        // reintroduce the mismatch.) Live-confirmed part of the working SM3.0 delta (see d3d9_sm3_test.cpp).
         constexpr DWORD k_primitivemisc_independentwritemasks = 0x00004000;
         constexpr DWORD k_primitivemisc_mrtpostpixelshaderblending = 0x00080000;
         caps->PrimitiveMiscCaps = D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW |
