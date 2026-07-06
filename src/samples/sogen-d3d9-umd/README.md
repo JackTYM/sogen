@@ -98,12 +98,15 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_multitexture_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_multitexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-multitexture-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_rs_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-rs-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
 `d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`,
-`d3d9_pipeline_cache_test.cpp`, `d3d9_dimension_discriminator_test.cpp`, and
-`d3d9_multitexture_test.cpp` are guest-runtime tests,
+`d3d9_pipeline_cache_test.cpp`, `d3d9_dimension_discriminator_test.cpp`,
+`d3d9_multitexture_test.cpp`, and `d3d9_pipeline_cache_rs_test.cpp` are guest-runtime tests,
 not driver-side files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
@@ -141,6 +144,7 @@ cp d3d9-mrt-test-x86.exe <root>/filesys/c/d3d9-mrt-test-x86.exe
 cp d3d9-multistream-test-x86.exe <root>/filesys/c/d3d9-multistream-test-x86.exe
 cp d3d9-pipeline-cache-test-x86.exe <root>/filesys/c/d3d9-pipeline-cache-test-x86.exe
 cp d3d9-multitexture-test-x86.exe <root>/filesys/c/d3d9-multitexture-test-x86.exe
+cp d3d9-pipeline-cache-rs-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-rs-test.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -179,6 +183,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-multitexture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
+./analyzer -e <root> -c c:/d3d9-pipeline-cache-rs-test.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -385,6 +390,27 @@ without drawing). The rendered pixel stays the clear color (black), so the analy
 fails cleanly on old code -- a valid pass/fail discriminator, just not a crash. `d3d9-multitexture-test-
 x86.exe` was cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`,
 pixel-exact parity with x64 (`center pixel=B=00 G=FF R=FF A=FF`, `ALL CHECKS PASSED`, exit 0).
+
+`d3d9-pipeline-cache-rs-test.exe` is a GATE test proving `pipeline_cache_key` (`d3d9_host.hpp`) has a
+real, currently-unfixed cache-key gap: it's keyed by `vertex_shader`/`pixel_shader`/`color_formats[4]`/
+`depth_format`/`vertex_shape` but NOT by any `D3DRS_*` render-state field, even though
+`build_depth_state`/`build_blend_state` (`d3d9_host.cpp`) read `D3DRS_ZENABLE`/`ZWRITEENABLE`/`ZFUNC`/
+`ALPHABLENDENABLE`/`SRCBLEND`/`DESTBLEND`/`BLENDOP` out of the same app-accumulated render state and bake
+the result as STATIC pipeline state into every `VkPipeline` `ensure_programmable_pipeline` builds. It
+compiles ONE `vs_2_0`/`ps_2_0` pair (an NDC-passthrough VS, and a PS hardcoded to output solid GREEN at
+alpha 0.5, `float4(0,1,0,0.5)`) and never recreates the VS/PS objects. Sub-pass 1 draws with
+`D3DRS_ALPHABLENDENABLE` at its real default (disabled) -- builds/caches a blend-DISABLED pipeline, and
+RT0 correctly reads back unblended solid GREEN. Sub-pass 2 rebinds `D3DRS_ALPHABLENDENABLE=TRUE`/
+`D3DRS_SRCBLEND=D3DBLEND_SRCALPHA`/`D3DRS_DESTBLEND=D3DBLEND_INVSRCALPHA` (same VS/PS/RT/vertex-shape,
+so the current cache key is unchanged) and draws the same quad again -- the test asserts the
+analytically-correct `SRCALPHA`/`INVSRCALPHA` blend of GREEN(a=0.5) over the BLACK clear
+(`B=00 G=80 R=00`). Run against the current, unmodified host code: sub-pass 1's three checkpoints PASS
+(`G=FF`, unblended, as expected), but sub-pass 2's three checkpoints all FAIL -- RT0 reads back `G=FF`
+again, i.e. `ensure_programmable_pipeline` incorrectly reused sub-pass 1's blend-DISABLED `VkPipeline`
+instead of building a blend-ENABLED one, exactly the predicted bug. This test is EXPECTED to fail
+(`[d3d9-pipeline-cache-rs-test] FAILED`, exit 1) until `pipeline_cache_key` is extended to also fold in
+the depth/blend render-state fields that `build_depth_state`/`build_blend_state` actually read; it should
+start passing once that fix lands, with no changes to the test itself. Only built/run on x64 so far.
 
 ## Notes
 
