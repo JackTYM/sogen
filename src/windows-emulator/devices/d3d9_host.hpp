@@ -50,17 +50,19 @@ namespace sogen
     //
     // Render-target/depth-stencil-kind resources get real GPU backing (a lazily-created Vulkan
     // instance/device on the injected vulkan_host, then vulkan_host::create_render_target) so pfnClear
-    // can do a real clear+readback into the resource's host-side shadow copy -- which is what
-    // pfnLock/pfnUnlock (already wired) hand back to the app. This deliberately sidesteps needing to
+    // can do a real clear and mark the resource's host-side shadow copy dirty; sync_backing_from_gpu
+    // lazily copies the GPU image into that shadow the next time something needs it (pfnLock/pfnUnlock,
+    // already wired, hand the shadow back to the app). This deliberately sidesteps needing to
     // know how the real d3d9.dll gets pixels onto an actual window (RE'd to be genuinely opaque to the
     // driver -- D3DDDIARG_PRESENT carries no HWND): whatever mechanism the runtime uses to display the
     // backbuffer, it goes through Lock to read pixels back from the driver first.
     //
     // Part 3 (the real draw path -- ensure_draw_infra/ensure_pipeline/execute_draw) is implemented: a
     // single hardcoded fixed-function shader pair (D3DFVF_XYZRHW|D3DFVF_DIFFUSE), a cached pipeline,
-    // real vertex buffer upload, dynamic rendering with explicit layout barriers, and readback into the
-    // render target's backing store, mirroring pfnClear's own pattern. Verified end-to-end via the
-    // guest D3D9 API -- DrawPrimitive()/Present() both succeed, pixel readback matches expected.
+    // real vertex buffer upload, dynamic rendering with explicit layout barriers, and marking the
+    // render target's backing store dirty, mirroring pfnClear's own pattern -- sync_backing_from_gpu
+    // does the actual lazy readback. Verified end-to-end via the guest D3D9 API -- DrawPrimitive()/
+    // Present() both succeed, pixel readback matches expected.
     //
     // Part 4 (programmable shaders) is also implemented: ensure_programmable_pipeline lazily
     // translates a bound vertex+pixel shader pair via vkd3d-shader (d3d9_shader_translator.hpp) into a
@@ -322,11 +324,12 @@ namespace sogen
         // No-op (returns true) if ds_entry already has a view. depth_format is ds_entry's own VkFormat.
         bool ensure_depth_stencil_view(uint64_t device, resource_entry& ds_entry, uint32_t depth_format);
 
-        // If this color RT has GPU-side pixels not yet mirrored into `backing`, copy them now (blocking,
-        // same mechanism as the existing per-draw/per-clear readback) and clear the flag. No-op for
-        // buffers/plain textures (backing_dirty never set for them) and for RTs already clean. Safe
-        // because readback_render_target itself verifies the image is in TRANSFER_SRC_OPTIMAL layout
-        // (the resting state left by the draw/clear that dirtied it) and fails closed otherwise.
+        // If this color RT has GPU-side pixels not yet mirrored into `backing`, copy them now (blocking)
+        // and clear the flag -- the sole place this readback happens; pfnClear/pfnDrawPrimitive only
+        // mark dirty, they no longer read back eagerly. No-op for buffers/plain textures (backing_dirty
+        // never set for them) and for RTs already clean. Safe because readback_render_target itself
+        // verifies the image is in TRANSFER_SRC_OPTIMAL layout (the resting state left by the draw/clear
+        // that dirtied it) and fails closed otherwise.
         void sync_backing_from_gpu(resource_entry& rt);
 
         // Present only for indexed draws; execute_draw binds `index_buffer` and calls cmd_draw_indexed
