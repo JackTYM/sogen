@@ -82,19 +82,57 @@ Full regression sweep (independently repeated multiple times): every existing D3
 pass; `managed-texture` still fails the same documented, permanent, unrelated limitation (see
 "Known bugs & limitations" below). Smoke test: 26/26.
 
-### Known remaining limitation: this fix does NOT address the rest of the performance story
+### Fixed (genuinely fixed with real code, 2026-07-06): per-draw busy-spin and allocation churn
 
-This slice was identified as the single highest-leverage fix toward a fast GPU-paravirtualized D3D9
-pipeline, but it is one slice, not the whole story. Explicitly **not** touched by this fix, and still
-real, separate, larger pieces of remaining work:
-- **Busy-spin fence-wait** — the present/submit path still waits on Vulkan fences via a busy-spin poll
-  rather than a genuine blocking wait or async completion callback.
-- **Per-draw buffer/UBO/descriptor-set allocation churn** — vertex/constant buffers and descriptor sets
-  are still allocated fresh per draw rather than pooled/reused across frames.
+The two items previously listed here as still-open (busy-spin fence-wait; per-draw buffer/UBO/
+descriptor-set allocation churn) are now **CLOSED**. Five commits: `02b28ada`, `0238dfd7`, `fcfccc00`,
+`36b03142`, `4b0bc778`.
 
-Do not read this fix as having addressed either of the two items above — it didn't. A further planned
-slice (persistent GPU resource pooling + pipelined multi-frame submission) would need to address them
-and is separate, larger work.
+1. **Busy-spin fence-wait → genuine blocking wait** (`02b28ada`). `execute_draw` (and four other
+   `d3d9_host.cpp` call sites: depth-stencil-view, texture-upload, staging-upload) had tight,
+   empty-bodied `vkGetFenceStatus` polling loops that pinned a CPU core at 100% for the entire GPU wait.
+   `vulkan_host` already resolved `vkWaitForFences` internally but never exposed it; a new public
+   `wait_for_fence(fence, timeout_ns)` wrapper is now called with `UINT64_MAX` from every site instead
+   of spinning.
+2. **Descriptor-set pooling** (`0238dfd7`, comment fixup `fcfccc00`). `execute_draw` reset a shared
+   descriptor pool and freshly allocated 2 descriptor sets (VS+PS) on every draw. One small pool plus
+   its 2 sets are now cached on each `programmable_pipeline_entry`, allocated once on cache miss; draws
+   reuse the cached sets and only rewrite their contents. The now-unused shared `descriptor_pool_` was
+   removed.
+3. **Vertex/index/constant-UBO pooling** (`36b03142`, comment/tradeoff fixup `4b0bc778`). `execute_draw`
+   created and destroyed every vertex-stream buffer, the index buffer, and all six VS/PS constant UBOs
+   per draw. These are now per-device-lifetime pools (`ensure_pooled_buffer`/`upload_pooled_ubo`,
+   `pooled_buffer`), created once and regrown only when a draw needs more capacity. Contents are still
+   re-uploaded every draw, so output is unchanged.
+
+All three are safe because each draw still submits and blocks on a fence before returning, so a prior
+draw's GPU read of a pooled/cached object has completed before a later draw rewrites it. Net effect: the
+confirmed per-draw allocation churn (a dozen-plus `vkAllocateMemory`/`vkFreeMemory`/buffer create+destroy
+pairs per draw) drops to essentially zero after the first draw of a given shader/stream/UBO shape, and
+the CPU-pinning busy-spin is gone.
+
+**Evidence**: a new guest test, `src/samples/sogen-d3d9-umd/d3d9_manydraws_test.cpp`, issues 768
+`DrawIndexedPrimitive` calls through the SAME cached pipeline in one `BeginScene`/`EndScene`, each draw
+filling a distinct grid cell with a distinct, index-derived color driven by a real per-draw VS constant
+(cell position) and PS constant (cell color) — a correctness discriminator that would show wrong/stale
+colors if the pooling reused contents incorrectly. Eight spread cells read back byte-exact on both x64
+and x86/WoW64. Bracketed by `QueryPerformanceCounter`: the same 768-draw loop measured ~383 ms
+(~0.50 ms/draw) against a temporarily-reverted pre-fix host (`b6809cee` = `02b28ada~1`) and ~279 ms
+(~0.36 ms/draw) against fixed HEAD — a real, repeatable ~27% reduction in per-frame draw-loop time
+(emulated guest wall-clock), with identical all-PASS pixel output in both.
+
+### Known remaining limitation: this fix does NOT complete the performance story either
+
+This slice reduced the per-round-trip COST but is still not the whole story. Explicitly **not** touched,
+and still real, separate remaining work:
+- **Multi-frame-in-flight pipelining** — every draw is still FULLY SYNCHRONOUS (submit, then block until
+  the GPU completes, before the next draw starts). The NUMBER of GPU round-trips per frame is unchanged;
+  only each round-trip's cost improved. Having multiple frames' GPU work in flight simultaneously is a
+  separate, larger slice.
+- **Sampler pooling** — samplers are still created and destroyed per draw (a smaller, lower-priority
+  remaining item; the VB/IB/UBO/descriptor-set pools above deliberately left it out of scope).
+
+Do not read this fix as having made the D3D9 native path fully pipelined — it didn't.
 
 ### Fixed (genuinely fixed with real code, 2026-07-05): D3D9 DDI-call wire batching
 

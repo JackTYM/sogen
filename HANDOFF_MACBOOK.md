@@ -3049,3 +3049,102 @@ describe the `CheckDeviceFormat` gate as the actual current blocker (kept open, 
 investigation re-scoped the gap, it did not close it), the M3 table row's "Still not started" note
 updated to match, and the mip-mapping section's own cube/volume cross-reference (§35's closing prose in
 the roadmap) corrected so it no longer claims the classifier-bit framing is still accurate.
+
+## 37. Per-draw overhead — the busy-spin fence-wait and per-draw allocation churn closed out, with a
+768-draw guest test proving both correctness and the timing win (2026-07-06)
+
+This slice closes the two performance items §Performance-D3D9-native-path in `docs/d3d9-roadmap.md` had
+left open after the 2026-07-05 deferred-readback fix: `execute_draw`'s CPU-pinning busy-spin fence-wait,
+and its per-draw buffer/UBO/descriptor-set allocation churn. Both are now genuinely fixed with real code,
+five commits, each independently spec- and code-quality reviewed with full x64+x86 regression sweeps at
+every stage.
+
+### 37.1 The three coupled fixes
+
+1. **Blocking fence-wait** (`02b28ada`). `d3d9_host.cpp` had five tight, empty-bodied `vkGetFenceStatus`
+   polling loops (one per draw in `execute_draw`, plus depth-stencil-view / texture-upload /
+   staging-upload sites) that pinned a CPU core at 100% for the entire GPU wait. `vulkan_host` already
+   resolved `vkWaitForFences` internally but never exposed it; a new public
+   `wait_for_fence(fence, timeout_ns)` wrapper (mirroring `get_fence_status`'s lookup/dispatch pattern)
+   is now called with `UINT64_MAX` from every site instead of spinning.
+2. **Descriptor-set pooling** (`0238dfd7`, comment fixup `fcfccc00`). `execute_draw` reset a shared
+   descriptor pool and freshly allocated 2 descriptor sets (VS+PS) every single draw. One small pool
+   (`maxSets=2`) plus its 2 sets are now cached on each `programmable_pipeline_entry`, allocated once on
+   cache miss in `ensure_programmable_pipeline`; draws reuse the cached sets and only rewrite their
+   contents per draw. The now-fully-unused shared `descriptor_pool_` was removed.
+3. **VB/IB/UBO pooling** (`36b03142`, comment/tradeoff fixup `4b0bc778`). `execute_draw` created and
+   destroyed every vertex-stream buffer, the index buffer, and all six VS/PS constant UBOs on each draw.
+   These become per-device-lifetime pools (new `ensure_pooled_buffer`/`upload_pooled_ubo` helpers and a
+   `pooled_buffer` struct), created once and regrown only when a draw needs more capacity. Vertex/index
+   buffers are pooled per-stream (multiple streams can be bound simultaneously). Contents are still
+   re-uploaded every draw, so rendering output is unchanged.
+
+All three are safe for the same reason: every draw still submits and blocks on a fence before returning,
+so draw N's GPU read of a pooled/cached object completes before draw N+1 rewrites it. Net effect: the
+confirmed per-draw churn (well over a dozen `vkAllocateMemory`/`vkFreeMemory`/buffer create+destroy pairs
+per draw) drops to essentially zero after the first draw of a given shader/stream/UBO shape, and the
+CPU-pinning busy-spin is gone.
+
+### 37.2 The evidence test (`d3d9_manydraws_test.cpp`)
+
+New guest test, built for x64 and x86 from the start (`src/samples/sogen-d3d9-umd/d3d9_manydraws_test.cpp`,
+staged as `d3d9-manydraws-test.exe` / `-x86.exe`). Within ONE `BeginScene`/`EndScene` it issues 768
+`DrawIndexedPrimitive` calls — a 32x24 grid of 20x20-pixel cells — ALL through the SAME cached
+programmable pipeline (same `vs_2_0`/`ps_2_0` pair, same 640x480 RT shape, same 4-vertex/6-index
+unit-quad vertex shape, same two constant UBOs), i.e. exactly the pooling's target case: after the first
+draw nothing is (re)allocated. Each draw fills a distinct cell with a distinct, index-derived color,
+driven by a real changing VS constant (`c0` = the cell's NDC offset+scale, so the pooled vertex data
+lands somewhere different every draw) AND a real changing PS constant (`c0` = the cell color) — so both
+pooled UBOs carry genuinely distinct per-draw contents. Uses `DrawIndexedPrimitive` (4-vertex quad +
+6-index buffer) specifically so the pooled index buffer is exercised too, not just the vertex/constant
+pools.
+
+**Correctness discriminator**: if the pooling reused stale contents (a later draw seeing an earlier
+draw's UBO bytes because the pool was rewritten before the GPU finished reading it, or a buffer not
+actually re-uploaded), cells would show the WRONG color or land in the WRONG place. Eight cells spread
+across the grid (four corners, center, three interior) are read back and checked against their own
+analytically-derived colors. All eight read back **byte-exact on both x64 and x86/WoW64** — e.g.
+`cell(16,12)` = `B=84 G=85 R=83`, `cell(8,5)` = `B=B3 G=37 R=41`, `cell(31,23)` = `B=CC G=FF R=FF`,
+identical on both architectures — `[d3d9-manydraws-test] ALL CHECKS PASSED`, exit 0.
+
+**Timing**: the draw loop is bracketed by `QueryPerformanceCounter` and prints its wall-clock time. I ran
+it against a temporarily-reverted pre-fix host (the four host files — `d3d9_host.cpp`/`.hpp`,
+`vulkan_host.cpp`/`.hpp` — checked out at `b6809cee` = `02b28ada~1`, `analyzer` rebuilt) and against
+fixed HEAD:
+
+| Host | 768-draw loop | per draw |
+|------|---------------|----------|
+| pre-fix (`b6809cee`) | ~383 ms | ~0.50 ms |
+| fixed HEAD | ~279 ms | ~0.36 ms |
+
+A real, repeatable **~27% reduction** in per-frame draw-loop time (both numbers averaged over two runs
+each; pixel output all-PASS in both). **Honest caveat**: this is the guest's own `QueryPerformanceCounter`
+under the analyzer — emulated guest wall-clock, not host CPU time. It captures the emulated cost of the
+busy-spin's polling instructions and the per-draw allocation churn, not a raw hardware GPU-stall number,
+so 27% is the emulated-environment figure, not a claim about native FPS. The correctness proof (byte-exact
+pixels, x64==x86) is the stronger result here; the timing number is corroborating evidence that the
+mechanism does what it claims, not the headline.
+
+### 37.3 What this is explicitly NOT
+
+- **Not multi-frame-in-flight pipelining.** Every draw is still FULLY SYNCHRONOUS (submit, then block
+  until the GPU completes, before the next draw starts). The NUMBER of GPU round-trips per frame is
+  unchanged; only each round-trip's COST dropped. Having multiple frames' GPU work in flight
+  simultaneously is a separate, larger future slice.
+- **Not sampler pooling.** Samplers are still created and destroyed per draw — deliberately left out of
+  scope as a smaller, lower-priority remaining item.
+
+Do not read this slice as having made the D3D9 native path fully pipelined.
+
+### 37.4 Verification
+
+Full D3D9 guest-test sweep re-run on **both x64 and x86/WoW64** after the fixes landed, plus the new
+test: every test `ALL CHECKS PASSED` / exit 0, pixel values unchanged from baseline — `const`,
+`texture`, `managed-texture`, `texcoord`, `int-bool-const`, `scissor`, `mrt`, `multistream`,
+`pipeline-cache`, `multitexture`, `partial-lock` (x64), `pipeline-cache-rs`/`pipeline-cache-stride` (x64,
+now passing since their cache-key fixes landed — §31/§32), `drawprimitiveup`, `colorfill`, `stretchrect`,
+`miptexture`, `dim`, `shader` (compile-only, exit 0), `triangle`/`spike` (device-create), and the new
+`manydraws`. `docs/d3d9-roadmap.md`'s Performance section updated (the two items flipped from open to
+CLOSED, the new "still not done" boundary — pipelining + sampler pooling — recorded), and
+`src/samples/sogen-d3d9-umd/README.md` gained the manydraws build/stage/run entries and a full
+description.
