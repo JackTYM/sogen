@@ -384,6 +384,29 @@ namespace sogen
         // d3d9_shader_translator.hpp).
         std::map<pipeline_cache_key, programmable_pipeline_entry> programmable_pipelines_{};
 
+        // Content-addressed VkSampler cache. Unlike the VB/IB/UBO pools (which reuse one object per
+        // SLOT and rewrite its CONTENTS every draw), a VkSampler is immutable once created -- differing
+        // filter/address/aniso/LOD state genuinely needs a different object. So this is a cache keyed by
+        // the resolved sampler-state tuple (every field build_sampler varies the VkSampler on), created
+        // lazily on first use of a given state and retained for the device's lifetime, exactly like
+        // programmable_pipelines_/ff_pipelines_. There is no synchronization hazard: nothing ever mutates
+        // a cached sampler after creation, so draws that reuse it across frames only ever read it.
+        struct sampler_cache_key
+        {
+            uint32_t mag_filter{};
+            uint32_t min_filter{};
+            uint32_t mipmap_mode{};
+            uint32_t address_u{};
+            uint32_t address_v{};
+            uint32_t address_w{};
+            uint32_t anisotropy_enable{};
+            float max_anisotropy{};
+            float min_lod{};
+            float max_lod{};
+            auto operator<=>(const sampler_cache_key&) const = default;
+        };
+        std::map<sampler_cache_key, uint64_t> sampler_cache_{};
+
         // Per-device-lifetime GPU buffer pools, created once and reused/regrown across draws instead of
         // being allocated and freed every draw. One vertex-buffer pool per stream (multiple streams can
         // be bound simultaneously), a single index-buffer pool (only one index buffer per draw), and six
@@ -405,11 +428,12 @@ namespace sogen
         // render target (slot order), each getting an identical blend-attachment entry -- D3D9 has no
         // independent per-RT blend state.
         bool ensure_pipeline(std::span<const uint32_t> color_formats, uint32_t width, uint32_t height, uint32_t depth_format);
-        // Builds a fresh VkSampler from the accumulated D3D9 sampler state for `sampler_index` (falling
-        // back to D3D9's own documented per-state defaults for anything never explicitly set). Created
-        // fresh per draw and destroyed after -- unlike execute_draw's now-pooled VB/IB/UBOs
-        // (stream_buffer_pool_/index_buffer_pool_/ubo_pool_), samplers have no persistent cache yet.
-        bool build_sampler(uint64_t device, uint32_t sampler_index, uint32_t mip_levels, uint64_t& out_sampler) const;
+        // Returns a VkSampler for the accumulated D3D9 sampler state for `sampler_index` (falling back to
+        // D3D9's own documented per-state defaults for anything never explicitly set). Resolves the state
+        // into a sampler_cache_key and looks it up in sampler_cache_: on a hit the existing (immutable)
+        // sampler is reused, on a miss vulkan_host::create_sampler builds a new one that is then cached
+        // for the device's lifetime. Not destroyed per draw -- a later draw with the same state reuses it.
+        bool build_sampler(uint64_t device, uint32_t sampler_index, uint32_t mip_levels, uint64_t& out_sampler);
         // Returns the cached parsed_vertex_decl for state_.vertex_decl, or nullptr when there's no real
         // declaration to use (state_.vertex_decl == 0, or its cached parse produced no attributes --
         // e.g. a decl containing only unrecognized D3DDECLTYPEs). Shared by ensure_programmable_pipeline

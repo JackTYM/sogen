@@ -958,7 +958,7 @@ namespace sogen
     } // namespace
 
     bool d3d9_host::build_sampler(const uint64_t device, const uint32_t sampler_index, const uint32_t mip_levels,
-                                  uint64_t& out_sampler) const
+                                  uint64_t& out_sampler)
     {
         out_sampler = 0;
         const auto& ss = this->state_.sampler_state;
@@ -988,18 +988,38 @@ namespace sogen
         const float min_lod = static_cast<float>(std::min(max_mip_level, last_level));
         const float max_lod = mip_filter == 0 /*D3DTEXF_NONE*/ ? min_lod : static_cast<float>(last_level);
 
+        const uint32_t anisotropy_enable = max_anisotropy > 1 ? 1 : 0;
+
+        // Every argument below that create_sampler varies the resulting VkSampler on is folded into the
+        // cache key; the rest (compare_enable/compare_op/border_color/mip_lod_bias) are hardcoded
+        // constants here, so they never distinguish two states and are left out of the key.
+        const sampler_cache_key key{mag_filter,       min_filter, mipmap_mode, address_u,
+                                    address_v,        address_w,  anisotropy_enable,
+                                    static_cast<float>(max_anisotropy), min_lod, max_lod};
+        if (const auto it = this->sampler_cache_.find(key); it != this->sampler_cache_.end())
+        {
+            out_sampler = it->second;
+            return true;
+        }
+
         // D3DSAMP_BORDERCOLOR is captured into sampler_state (see the UMD's tss_key table) but never read
         // here -- border_color is hardcoded to transparent-black, matching D3D9's own default. vulkan_host
         // ::create_sampler only accepts discrete VkBorderColor buckets (transparent/opaque black/white; the
         // bridge doesn't forward VK_EXT_custom_border_color), so an arbitrary ARGB border color can't be
         // represented faithfully with the current wrapper regardless. Only matters once D3DTADDRESS_BORDER
         // is actually used with a non-default border color.
-        return this->vulkan_.create_sampler(device, mag_filter, min_filter, address_u, address_v, address_w, mipmap_mode,
-                                            /*compare_enable=*/0, /*compare_op=*/0,
-                                            /*anisotropy_enable=*/max_anisotropy > 1 ? 1 : 0, /*border_color=*/0,
-                                            /*mip_lod_bias=*/0.0f, static_cast<float>(max_anisotropy), min_lod, max_lod,
-                                            out_sampler) == 0 &&
-               out_sampler != 0;
+        if (this->vulkan_.create_sampler(device, mag_filter, min_filter, address_u, address_v, address_w, mipmap_mode,
+                                         /*compare_enable=*/0, /*compare_op=*/0, anisotropy_enable, /*border_color=*/0,
+                                         /*mip_lod_bias=*/0.0f, static_cast<float>(max_anisotropy), min_lod, max_lod,
+                                         out_sampler) != 0 ||
+            out_sampler == 0)
+        {
+            out_sampler = 0;
+            return false;
+        }
+
+        this->sampler_cache_.emplace(key, out_sampler);
+        return true;
     }
 
     bool d3d9_host::ensure_depth_stencil_view(const uint64_t device, resource_entry& ds_entry, const uint32_t depth_format)
@@ -1307,15 +1327,6 @@ namespace sogen
         std::array<uint64_t, max_ps_sampler_stages> tex_samplers{};
         std::array<uint64_t, max_ps_sampler_stages> tex_image_views{};
         std::array<uint64_t, 2> descriptor_sets{};
-        const auto destroy_tex_samplers = [&]() {
-            for (const uint64_t s : tex_samplers)
-            {
-                if (s != 0)
-                {
-                    this->vulkan_.destroy_sampler(device, s);
-                }
-            }
-        };
         if (use_programmable)
         {
             // Re-upload the six constant buffers into their persistent pools (created once, on the first
@@ -1592,13 +1603,10 @@ namespace sogen
 
         this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
-        // Vertex/index/constant buffers are pooled (retained in stream_buffer_pool_/index_buffer_pool_/
-        // ubo_pool_ for reuse next draw), so nothing to free here -- only the per-draw samplers, which are
-        // not yet pooled.
-        if (use_programmable)
-        {
-            destroy_tex_samplers();
-        }
+        // Nothing to free here: vertex/index/constant buffers are pooled (retained in
+        // stream_buffer_pool_/index_buffer_pool_/ubo_pool_ for reuse next draw), and samplers are now
+        // content-cached in sampler_cache_ (an immutable VkSampler reused by any later draw with the same
+        // state), both retained for the device's lifetime.
 
         // Mark each bound render target's backing store stale; sync_backing_from_gpu reads it back
         // lazily on the next pfnLock/Present that actually needs the pixels.
