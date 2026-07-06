@@ -2531,3 +2531,66 @@ Roadmap updated: `docs/d3d9-roadmap.md`'s render-state pipeline-cache-key bullet
 fixed (citing `157831bf`/`5256f980`/`76c06d53`), the M3 table row and sequencing-recommendation prose
 both corrected to reflect only the stream-stride gap remaining open, and the stream-stride bullet itself
 left untouched (still open, not this session's work).
+
+## 32. Pipeline-cache-key gap #2 (real-vertex-decl stream strides) — gate-tested, root-caused, and fixed;
+the pipeline-cache-key system now has zero known open gaps (2026-07-06)
+
+§31 closed the first of the two narrower gaps deferred by §26 (static blend/depth render-state) and left
+the second explicitly open: `vertex_shape_key()`'s (`d3d9_host.cpp`) real-vertex-declaration branch
+fingerprinted the pipeline's vertex-input shape with ONLY the immutable `D3DVERTEXELEMENT9` declaration
+handle, even though `ensure_programmable_pipeline` ALSO bakes each binding's
+`VkVertexInputBindingDescription::stride` from `state_.stream_strides[stream]` at build time.
+`SetStreamSource(stream, buffer, offset, stride)` can change a stream's stride without touching the
+declaration handle, so two draws with the same declaration/VS/PS but a different bound stride collapsed
+to one cache key and reused a stale pipeline built for the first stride — misfetching every vertex past
+index 0. This section closes that gap, the last one left in the pipeline-cache-key system.
+
+**Gate-test-first discipline.** Before touching any host code, `6f723bc1` added
+`d3d9_pipeline_cache_stride_test.cpp` and ran it against the *unmodified* host to confirm the bug is real
+and reachable, not just theorized — same discipline as §31's `157831bf`. Sub-pass 1 binds a
+tightly-packed 12-byte-stride buffer (`strideA`) and draws a left-half quad with a real vertex
+declaration and a `vs_2_0`/`ps_2_0` pair, building and caching the pipeline; the left-half checkpoint
+correctly reads back RED. Sub-pass 2 rebinds the SAME stream to a differently-strided buffer (`strideB`
+— 12 real position bytes plus 20 zeroed pad bytes per record, same declaration/VS/PS, so the pre-fix
+cache key is unchanged) and draws a right-half quad, expecting to read back RED once the real stride-32
+layout is honored. Run against the pre-fix host: the checkpoint read back BLACK (the untouched
+background) instead of RED — the reused stale stride-12-baked pipeline misfetched buffer B's actual
+stride-32 bytes, landing on padding rather than position data. Exact wrong-pixel evidence, not a
+hypothesized failure mode.
+
+**Fix (`02d33bba`).** Widened `pipeline_cache_key::vertex_shape` from a bare `uint64_t` declaration
+handle to a new `vertex_input_shape` struct: an `id` field (the handle, or one of the existing 1/2
+fallback tags) plus a fixed-size `std::array<uint32_t, max_vertex_streams>` of the per-stream strides the
+build actually reads, compared via the struct's own defaulted `operator<=>`. `vertex_shape_key()`'s
+real-decl branch now iterates the exact same `used_binding_mask` the pipeline builder consults, snapshots
+`state_.stream_strides[stream]` (or 0 if unset) for every stream the declaration references, so the two
+can never disagree. The fixed-size-array design was a deliberate choice, not an oversight: it's the same
+collision-free approach `color_formats` already uses elsewhere in `pipeline_cache_key`, matching this
+session's established "prefer defaulted `operator<=>` over new hashing machinery" philosophy — no
+`std::hash` specialization, no combining function, just a POD struct compared field-by-field. The
+no-real-declaration fallback branch needed no stride folding at all: it hardcodes its binding stride to
+16 or 20 and only ever reads stream 0, so its existing 1/2 tag already fully captures its
+stride-dependence — `strides` stays all-zero there by construction.
+
+**A/B causality proof.** Gate test fails on the pre-fix host (documented above, in `6f723bc1`) and passes
+on the post-fix host (`02d33bba`): sub-pass 2 now reads back the correct RED (`R=FF`) instead of BLACK
+(`R=00`). Same before/after rigor as every other fix this session — the bug was shown to reproduce
+without the fix and resolve with it, not just asserted fixed.
+
+**Verification.** Full regression sweep — all existing D3D9 guest tests on both x64 and x86, including
+`d3d9-multistream-test` on both arches, plus the smoke test — stayed green at every stage, independently
+confirmed by a reviewer. A separate code-quality review of the fix approved it with only optional,
+non-blocking notes; no further changes were needed.
+
+**This closes out the pipeline-cache-key system entirely.** Between the original RT/vertex-shape fix
+(§26, `3809d1c8`/`5dd05caa`) and its two deliberately-deferred follow-ups — the static blend/depth
+render-state gap (§31, `157831bf`/`5256f980`/`76c06d53`) and this stream-stride gap (`6f723bc1`/
+`02d33bba`) — every dimension `ensure_pipeline`/`ensure_programmable_pipeline` actually builds a
+`VkPipeline` from (shaders, RT color/depth formats, vertex-input shape including per-stream strides, and
+static blend/depth render state) is now covered by `pipeline_cache_key`. No known open gaps remain in
+this system.
+
+Roadmap updated: `docs/d3d9-roadmap.md`'s stream-stride pipeline-cache-key bullet flipped from open to
+fixed (citing `6f723bc1`/`02d33bba`), and the M3 table row and sequencing-recommendation prose both
+corrected to state that the pipeline-cache-key system has no known open gaps left, rather than one
+remaining.
