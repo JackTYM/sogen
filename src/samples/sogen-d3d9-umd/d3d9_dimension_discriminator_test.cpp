@@ -78,6 +78,43 @@ float4 main(PSInput input) : COLOR0
     {
         return std::abs(static_cast<int>(actual) - expected) <= tolerance;
     }
+
+    void release_all(IDirect3DIndexBuffer9* ib, IDirect3DVertexBuffer9* vb, IDirect3DSurface9* rt, IDirect3DTexture9* tex,
+                      IDirect3DPixelShader9* ps, IDirect3DVertexShader9* vs, IDirect3DDevice9* dev, IDirect3D9* d3d)
+    {
+        if (ib)
+        {
+            ib->Release();
+        }
+        if (vb)
+        {
+            vb->Release();
+        }
+        if (rt)
+        {
+            rt->Release();
+        }
+        if (tex)
+        {
+            tex->Release();
+        }
+        if (ps)
+        {
+            ps->Release();
+        }
+        if (vs)
+        {
+            vs->Release();
+        }
+        if (dev)
+        {
+            dev->Release();
+        }
+        if (d3d)
+        {
+            d3d->Release();
+        }
+    }
 } // namespace
 
 int main()
@@ -129,6 +166,15 @@ int main()
     printf("[d3d9-dim-test] D3DCompile vs=0x%08lx ps=0x%08lx\n", static_cast<unsigned long>(hvsc), static_cast<unsigned long>(hpsc));
     if (FAILED(hvsc) || FAILED(hpsc))
     {
+        if (vs_blob)
+        {
+            vs_blob->Release();
+        }
+        if (ps_blob)
+        {
+            ps_blob->Release();
+        }
+        release_all(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, dev, d3d);
         return 1;
     }
 
@@ -141,6 +187,7 @@ int main()
     if (!vs || !ps)
     {
         printf("[d3d9-dim-test] FAIL: shader creation failed\n");
+        release_all(nullptr, nullptr, nullptr, nullptr, ps, vs, dev, d3d);
         return 1;
     }
 
@@ -152,6 +199,7 @@ int main()
     if (FAILED(hct) || !tex)
     {
         printf("[d3d9-dim-test] FAIL: CreateTexture failed\n");
+        release_all(nullptr, nullptr, nullptr, nullptr, ps, vs, dev, d3d);
         return 1;
     }
     {
@@ -161,6 +209,7 @@ int main()
         if (FAILED(htl) || !lr.pBits)
         {
             printf("[d3d9-dim-test] FAIL: texture LockRect failed\n");
+            release_all(nullptr, nullptr, nullptr, tex, ps, vs, dev, d3d);
             return 1;
         }
         // Pitch is not populated by this UMD's Lock DDI (documented gap); backing is tightly packed 32bpp.
@@ -192,6 +241,7 @@ int main()
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-dim-test] FAIL: render target creation failed\n");
+        release_all(nullptr, nullptr, nullptr, tex, ps, vs, dev, d3d);
         return 1;
     }
     dev->SetRenderTarget(0, rt);
@@ -231,6 +281,7 @@ int main()
     if (!vb || !ib)
     {
         printf("[d3d9-dim-test] FAIL: vertex/index buffer creation failed\n");
+        release_all(ib, vb, rt, tex, ps, vs, dev, d3d);
         return 1;
     }
 
@@ -296,14 +347,7 @@ int main()
         ++failures;
     }
 
-    rt->Release();
-    tex->Release();
-    vb->Release();
-    ib->Release();
-    vs->Release();
-    ps->Release();
-    dev->Release();
-    d3d->Release();
+    release_all(ib, vb, rt, tex, ps, vs, dev, d3d);
 
     printf("[d3d9-dim-test] %s\n", failures == 0 ? "ALL CHECKS PASSED" : "FAILED");
     return failures == 0 ? 0 : 1;

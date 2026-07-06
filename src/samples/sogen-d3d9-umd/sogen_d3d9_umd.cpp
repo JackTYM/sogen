@@ -524,6 +524,12 @@ namespace
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t depth = 1;
+        // pSurfList/SurfCount can genuinely be null/0 here: this same function also handles the
+        // internal-use synthetic buffer formats (100/101/102, see is_internal_buffer_format below) --
+        // vertex/index buffers have no D3DDDI_SURFACEINFO array at all, since they carry no width/height.
+        // Falling through with width=height=0 is safe for that case: their create is orphaned regardless
+        // (never registered in g_created_resource_ids, see the format!=100/101/102 guard below), so a
+        // width/height of 0 is never acted on host-side.
         if (args->pSurfList != nullptr && surf_count > 0)
         {
             const D3DDDI_SURFACEINFO& surf0 = args->pSurfList[0];
