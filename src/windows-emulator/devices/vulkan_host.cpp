@@ -525,6 +525,7 @@ namespace sogen
             uint64_t device_id{};
             uint32_t width{};
             uint32_t height{};
+            VkFormat vk_format{};
             VkImage image{};
             VkDeviceMemory image_memory{};
             VkBuffer readback_buffer{};
@@ -5700,6 +5701,7 @@ namespace sogen
         rt.device_id = device;
         rt.width = width;
         rt.height = height;
+        rt.vk_format = static_cast<VkFormat>(vk_format);
 
         const auto fail = [&]() -> int32_t {
             if (rt.image && dev.destroy_image)
@@ -5768,7 +5770,10 @@ namespace sogen
         }
         dev.bind_image_memory(dev.handle, rt.image, rt.image_memory, 0);
 
-        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * 4;
+        // Size the readback staging buffer at the render target's real per-format stride, not a hardcoded
+        // 4 bytes/texel BGRA8 -- lets non-BGRA8 off-screen render targets (R5G6B5, R16G16B16A16_SFLOAT)
+        // read back at their true tight packing.
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * vk_format_bytes_per_texel(vk_format);
         VkBufferCreateInfo buffer_info{};
         buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buffer_info.size = readback_size;
@@ -5987,7 +5992,7 @@ namespace sogen
         }
         dev.wait_for_fences(dev.handle, 1, &rt.fence, VK_TRUE, UINT64_MAX);
 
-        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(rt.width) * rt.height * 4;
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(rt.width) * rt.height * vk_format_bytes_per_texel(rt.vk_format);
         void* mapped = nullptr;
         if (dev.map_memory(dev.handle, rt.readback_memory, 0, readback_size, 0, &mapped) != VK_SUCCESS || !mapped)
         {

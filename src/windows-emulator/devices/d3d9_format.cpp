@@ -101,6 +101,31 @@ namespace sogen
         }
     }
 
+    uint32_t vk_format_bytes_per_texel(const uint32_t vk_format)
+    {
+        switch (vk_format)
+        {
+        case vk_format_r8_unorm:
+            return 1;
+        case vk_format_r5g6b5_unorm_pack16:
+        case vk_format_r8g8_snorm:
+            return 2;
+        case vk_format_r8g8b8a8_snorm:
+        case vk_format_b8g8r8a8_unorm:
+        case vk_format_d32_sfloat:
+            return 4;
+        case vk_format_r16g16b16a16_sfloat:
+        // D32_SFLOAT_S8_UINT is really 5 bytes of depth+stencil, but its render-target readback buffer
+        // is only ever allocated (never used for a color readback -- depth surfaces are not locked), so
+        // an 8-byte upper-bound keeps its allocation non-zero without any layout meaning.
+        case vk_format_d32_sfloat_s8_uint:
+            return 8;
+        default:
+            // Block-compressed (BC1/BC2/BC3) and any unrecognized format: no single-texel byte size.
+            return 0;
+        }
+    }
+
     bool d3d9_decl_type_to_vulkan(const uint32_t d3ddecltype, uint32_t& out_vk_format)
     {
         switch (d3ddecltype)

@@ -926,6 +926,97 @@ namespace sogen
             }
         }
 
+        // Converts an IEEE-754 single-precision float to a half-precision (binary16) bit pattern, with
+        // round-to-nearest-even and correct handling of zero/subnormal/overflow -- used to encode a
+        // ColorFill's normalized channel value for R16G16B16A16_SFLOAT render targets.
+        uint16_t float_to_half(const float value)
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &value, sizeof(bits));
+            const uint32_t sign = (bits >> 16) & 0x8000u;
+            const int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFF) - 127 + 15;
+            const uint32_t mantissa = bits & 0x7FFFFFu;
+
+            if (((bits >> 23) & 0xFF) == 0xFF)
+            {
+                // Inf/NaN: preserve a NaN payload bit so a NaN never collapses to Inf.
+                return static_cast<uint16_t>(sign | 0x7C00u | (mantissa != 0 ? 0x0200u : 0u));
+            }
+            if (exponent >= 0x1F)
+            {
+                return static_cast<uint16_t>(sign | 0x7C00u); // overflow -> Inf
+            }
+            if (exponent <= 0)
+            {
+                if (exponent < -10)
+                {
+                    return static_cast<uint16_t>(sign); // too small -> signed zero
+                }
+                // Subnormal half: add the implicit leading 1, then round-to-nearest-even.
+                const uint32_t full_mantissa = mantissa | 0x800000u;
+                const int32_t shift = 14 - exponent;
+                const uint32_t half_mantissa = full_mantissa >> shift;
+                const uint32_t remainder = full_mantissa & ((1u << shift) - 1);
+                const uint32_t halfway = 1u << (shift - 1);
+                uint32_t rounded = half_mantissa;
+                if (remainder > halfway || (remainder == halfway && (half_mantissa & 1u) != 0))
+                {
+                    ++rounded;
+                }
+                return static_cast<uint16_t>(sign | rounded);
+            }
+            // Normal half: round the 23-bit mantissa down to 10 bits, round-to-nearest-even.
+            uint32_t half = (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13);
+            const uint32_t remainder = mantissa & 0x1FFFu;
+            if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u) != 0))
+            {
+                ++half; // carry ripples correctly into the exponent field if the mantissa overflows
+            }
+            return static_cast<uint16_t>(sign | half);
+        }
+
+        // Encodes a single D3DCOLOR (0xAARRGGBB) fill value into `out` for `vk_format`, returning the
+        // texel's byte size (bytes written) or 0 for a format with no encoder. Format-aware so ColorFill
+        // writes the correct byte pattern per render-target format, not just a raw BGRA8 dword.
+        uint32_t encode_fill_texel(const uint32_t vk_format, const uint32_t color_argb, std::array<std::byte, 8>& out)
+        {
+            const uint32_t a = (color_argb >> 24) & 0xFF;
+            const uint32_t r = (color_argb >> 16) & 0xFF;
+            const uint32_t g = (color_argb >> 8) & 0xFF;
+            const uint32_t b = color_argb & 0xFF;
+
+            switch (vk_format)
+            {
+            case VK_FORMAT_B8G8R8A8_UNORM: {
+                // In-memory byte order B,G,R,A is exactly a little-endian D3DCOLOR dword -- passthrough.
+                std::memcpy(out.data(), &color_argb, sizeof(color_argb));
+                return 4;
+            }
+            case VK_FORMAT_R5G6B5_UNORM_PACK16: {
+                // VK_FORMAT_R5G6B5_UNORM_PACK16 packs R in bits 11..15, G in 5..10, B in 0..4 -- the exact
+                // D3DFMT_R5G6B5 layout (see d3d9_format_to_vulkan).
+                const uint16_t packed =
+                    static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                std::memcpy(out.data(), &packed, sizeof(packed));
+                return 2;
+            }
+            case VK_FORMAT_R16G16B16A16_SFLOAT: {
+                // Interpret the 8-bit D3DCOLOR channels as normalized [0,1] floats and store one half per
+                // channel in R,G,B,A memory order (VK_FORMAT_R16G16B16A16_SFLOAT).
+                const uint16_t halves[4] = {
+                    float_to_half(static_cast<float>(r) / 255.0f),
+                    float_to_half(static_cast<float>(g) / 255.0f),
+                    float_to_half(static_cast<float>(b) / 255.0f),
+                    float_to_half(static_cast<float>(a) / 255.0f),
+                };
+                std::memcpy(out.data(), halves, sizeof(halves));
+                return 8;
+            }
+            default:
+                return 0;
+            }
+        }
+
         // Ensures `pool` holds a host-visible buffer of at least `size` bytes with `usage`, then uploads
         // `size` bytes from `data` into it. If the pool's existing buffer is already large enough, it's
         // reused in place (just a mapped re-upload); otherwise any existing buffer/memory is destroyed and
@@ -1807,6 +1898,16 @@ namespace sogen
         const bool texture_format_ok = is_texture && d3d9_format_to_vulkan(format, texture_vk_format);
         const size_t texture_backing_size = texture_format_ok ? vk_texture_data_size(texture_vk_format, width, height) : 0;
 
+        // A render target's host-side shadow (backing) must be sized at its real per-format stride, not a
+        // hardcoded 4 bytes/texel BGRA8, so a non-BGRA8 RT (R5G6B5, A16B16G16R16F) reads back the correct
+        // tight byte count via sync_backing_from_gpu. Depth-stencil RTs map to a depth VkFormat here too;
+        // their backing is never locked, so vk_format_bytes_per_texel's upper-bound size is harmless.
+        uint32_t render_target_vk_format = 0;
+        const size_t render_target_backing_size =
+            is_render_target && d3d9_format_to_vulkan(format, render_target_vk_format)
+                ? static_cast<size_t>(width) * height * vk_format_bytes_per_texel(render_target_vk_format)
+                : 0;
+
         // A sampled texture can carry a real mip chain (mip_levels levels). Level 0 lives in `backing`
         // (below); levels 1..N-1 each get their own byte vector in `extra_mips`, sized for that level's
         // halved dimensions (min 1) -- a flat single vector can't hold them since each level differs in
@@ -1824,7 +1925,7 @@ namespace sogen
         }
 
         const size_t backing_size = is_buffer ? width
-                                    : is_render_target ? static_cast<size_t>(width) * height * 4
+                                    : is_render_target ? render_target_backing_size
                                                         : texture_backing_size;
 
         resource_entry entry{
@@ -2118,15 +2219,26 @@ namespace sogen
             return d3derr_invalidcall;
         }
 
-        // The RT image is B8G8R8A8_UNORM (create_render_target), whose in-memory byte order is exactly a
-        // little-endian D3DCOLOR (0xAARRGGBB -> bytes B,G,R,A), so a solid buffer of the color dword needs
-        // no channel juggling before the copy.
-        // KNOWN LIMITATION: hardcodes 4 bytes/texel -- true for every RT format this codebase creates
-        // today (always B8G8R8A8_UNORM), but would need generalizing if a non-4-byte-per-texel RT format
-        // is ever added.
+        // Encode the fill color into one texel of the render target's real VkFormat, then replicate it
+        // across the fill region. Format-aware (BGRA8 dword passthrough, R5G6B5 565 packing, half-float
+        // for R16G16B16A16_SFLOAT) so a non-BGRA8 render target is filled with the correct byte pattern
+        // rather than a raw D3DCOLOR dword. An unsupported format fails cleanly instead of corrupting the
+        // staging copy.
+        uint32_t rt_vk_format = 0;
+        std::array<std::byte, 8> texel{};
+        const uint32_t bytes_per_texel =
+            d3d9_format_to_vulkan(rt.format, rt_vk_format) ? encode_fill_texel(rt_vk_format, color_argb, texel) : 0;
+        if (bytes_per_texel == 0)
+        {
+            return d3derr_invalidcall;
+        }
         const size_t pixel_count = static_cast<size_t>(fill_w) * fill_h;
-        std::vector<uint32_t> fill_pixels(pixel_count, color_argb);
-        const size_t required = pixel_count * 4;
+        const size_t required = pixel_count * bytes_per_texel;
+        std::vector<std::byte> fill_pixels(required);
+        for (size_t i = 0; i < pixel_count; ++i)
+        {
+            std::memcpy(fill_pixels.data() + i * bytes_per_texel, texel.data(), bytes_per_texel);
+        }
 
         uint64_t staging_buffer = 0;
         if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
