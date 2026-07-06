@@ -19,6 +19,85 @@ which do the real work via Vulkan (MoltenVK → Metal on this Mac). A separate, 
 (`vulkan-shim`) lets a guest app that talks Vulkan directly reach the same host Vulkan backend via a
 registered ICD — not part of this roadmap, already working, unrelated to D3D9.
 
+## Performance — D3D9 native path
+
+This section tracks the D3D9-over-Vulkan translation layer's own performance (`d3d9_host.cpp`/`.hpp`,
+`vulkan_host.cpp`). It's separate from the generic Vulkan-ICD bridge's performance work, which lives in
+`docs/gpu-paravirtualization.md`.
+
+### Confirmed bug (found and fixed 2026-07-05): mandatory per-draw/per-clear GPU->CPU readback
+
+A dedicated performance audit found that every single `execute_draw` (DrawPrimitive/DrawIndexedPrimitive)
+and `d3d9_clear` (`Clear()`) call performed a mandatory, unconditional, synchronous, **blocking**
+GPU->CPU readback of the render target it touched — a full second command-buffer submit,
+`vkWaitForFences(UINT64_MAX)`, a full-image `vkCmdCopyImageToBuffer`, and a CPU `memcpy` — regardless
+of whether the guest app ever actually needed those pixels on the CPU (i.e. regardless of whether it
+ever called `Lock()`/`GetRenderTargetData()` on that resource before its next draw). At realistic game
+draw counts (500-1000+ draws/frame), this meant 1000-2000+ blocking GPU round trips per frame:
+single-digit-FPS territory, dominated entirely by CPU-GPU sync stalls rather than actual rendering
+work. This wasn't a minor inefficiency — it made real game framerates structurally impossible
+regardless of how fast the actual Vulkan rendering was.
+
+### Fix (genuinely fixed with real code, 2026-07-05): dirty-flag / deferred-readback model
+
+Seven commits: `596b0b31`, `ecec18fb`, `ab8f2f87`, `0d6282ad`, `2f16eaf3`, `93c42040`, `dad9f5f8`.
+
+1. `resource_entry` (`d3d9_host.hpp`) gained a `backing_dirty` flag, set by every draw/clear that
+   renders to a color render target (`596b0b31`).
+2. `d3d9_host::sync_backing_from_gpu(resource_entry& rt)` (`d3d9_host.cpp`) performs the GPU->CPU
+   readback **only if `backing_dirty` is set**, clearing the flag on success. It's wired into both real
+   consumers of a resource's CPU-side pixel backing: the `lock()` wire-command handler (`ecec18fb`) and
+   `snapshot_resource`, the Present-path pixel copy (`0d6282ad`) — Present reads `.backing` directly,
+   same as Lock, so it needs the same sync or a guest that renders-then-Presents without ever locking
+   the backbuffer would show stale pixels once the eager path is gone.
+3. The eager, unconditional readback was then removed entirely from `execute_draw` and `d3d9_clear`
+   (`2f16eaf3`), making `sync_backing_from_gpu` the **sole** place a readback ever happens — and only
+   when something (Lock/Present) actually needs the pixels and the resource is actually dirty. A
+   follow-up commit (`93c42040`) corrected three doc comments (class-level, the Part-3 draw-path
+   comment, and `sync_backing_from_gpu`'s own) that still described the old eager model after the code
+   changed.
+
+**Net effect**: a game issuing hundreds of draws/frame now does **zero** GPU->CPU readbacks per frame
+unless it actually calls `Lock()`/`GetRenderTargetData()` — the confirmed per-draw/per-clear stall is
+eliminated.
+
+### Layout-tracking fragility found and fixed while closing this out (`dad9f5f8`)
+
+Removing the eager readback made `sync_backing_from_gpu`'s correctness depend entirely on
+`vulkan_host::readback_render_target`'s own safety check (verifying an image is in
+`VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL` before issuing the copy) actually reflecting reality. It didn't:
+that check reads a CPU-side mirror field, `render_target_data::current_layout`, which was previously
+updated **only by `submit_clear`** — never by `cmd_pipeline_barrier`, the single choke point every other
+layout transition (including every one of `execute_draw`'s own leading/trailing barriers) flows through.
+The check was therefore only correct by coincidence (every draw barrier happened to be symmetric around
+the same layout), not because it verified the image's actual current layout. Fixed by having
+`cmd_pipeline_barrier` itself update `current_layout` whenever the transitioned image is a tracked
+render target, making the mirror accurate for every barrier, not just `submit_clear`'s.
+
+### Verification
+
+Full regression sweep (independently repeated multiple times): every existing D3D9 guest test passes on
+**both x64 and x86**, pixel values byte-identical to their previously-documented values — `shader`,
+`const`, `texture`, `texcoord`, `partial-lock`, `int-bool-const`, `scissor`, `mrt`, `multistream` all
+pass; `managed-texture` still fails the same documented, permanent, unrelated limitation (see
+"Known bugs & limitations" below). Smoke test: 26/26.
+
+### Known remaining limitation: this fix does NOT address the rest of the performance story
+
+This slice was identified as the single highest-leverage fix toward a fast GPU-paravirtualized D3D9
+pipeline, but it is one slice, not the whole story. Explicitly **not** touched by this fix, and still
+real, separate, larger pieces of remaining work:
+- **Busy-spin fence-wait** — the present/submit path still waits on Vulkan fences via a busy-spin poll
+  rather than a genuine blocking wait or async completion callback.
+- **Per-draw buffer/UBO/descriptor-set allocation churn** — vertex/constant buffers and descriptor sets
+  are still allocated fresh per draw rather than pooled/reused across frames.
+- **No wire-protocol batching for D3D9 DDI calls** — each DDI call still crosses the guest/host wire
+  individually; there is no batching of multiple DDI calls into one IOCTL round trip.
+
+Do not read this fix as having addressed any of the three items above — it didn't. A further planned
+slice (persistent GPU resource pooling + pipelined multi-frame submission) would need to address them
+and is separate, larger work.
+
 ## Status by milestone
 
 | # | Milestone | Status | Notes |
