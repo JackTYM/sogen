@@ -11,9 +11,10 @@
 //
 // Discriminator (must fail under the OLD key, pass under the fixed key): compile ONE vs_2_0/ps_2_0
 // pair -- a trivial NDC-passthrough VS (D3DFVF_XYZ|D3DFVF_DIFFUSE, the 16-byte fixed-function-fallback
-// shape ensure_programmable_pipeline already recognizes, same as d3d9_mrt_test.cpp/d3d9_multistream_
-// test.cpp -- deliberately not exercising the vertex-decl parser here, this test is only about the
-// RT-shape cache-key dimension) and a PS that writes a single, distinctive solid color (RED) to COLOR0
+// shape ensure_programmable_pipeline already recognizes, same as d3d9_const_test.cpp/d3d9_int_bool_
+// const_test.cpp -- deliberately not exercising the vertex-decl parser here (that's d3d9_multistream_
+// test.cpp's job, testing a different cache-key dimension), this test is only about the RT-shape
+// cache-key dimension) and a PS that writes a single, distinctive solid color (RED) to COLOR0
 // ONLY -- no COLOR1 output, unlike d3d9_mrt_test.cpp's 2-output PS.
 //
 //   Sub-pass 1: RT0 bound alone (SetRenderTarget(0, RT0), no slot 1, no depth). Clear RT0 BLUE, draw
@@ -79,10 +80,10 @@ float4 main() : COLOR0
         DWORD color;
     };
 
-    // Matches d3d9_mrt_test.cpp/d3d9_multistream_test.cpp's established shape -- the one 16-byte
-    // vertex layout ensure_programmable_pipeline already recognizes with no real vertex declaration
-    // bound (see its own comment for why only this shape plus the 20-byte D3DFVF_XYZ|D3DFVF_TEX1 shape
-    // are wired up without real vertex-decl parsing).
+    // Matches d3d9_mrt_test.cpp/d3d9_const_test.cpp's established shape -- the one 16-byte vertex
+    // layout ensure_programmable_pipeline already recognizes with no real vertex declaration bound (see
+    // its own comment for why only this shape plus the 20-byte D3DFVF_XYZ|D3DFVF_TEX1 shape are wired
+    // up without real vertex-decl parsing).
     constexpr DWORD kFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
 
     // Matches pfnCreateResource's hardcoded 640x480 KNOWN LIMITATION (see sogen_d3d9_umd.cpp) -- every
