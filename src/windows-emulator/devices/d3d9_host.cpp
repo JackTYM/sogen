@@ -382,34 +382,47 @@ namespace sogen
     bool d3d9_host::ensure_pipeline(const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height,
                                     const uint32_t depth_format)
     {
-        if (this->pipeline_ready_)
+        pipeline_cache_key key{};
+        for (size_t i = 0; i < color_formats.size() && i < key.color_formats.size(); ++i)
         {
+            key.color_formats[i] = color_formats[i];
+        }
+        key.depth_format = depth_format;
+
+        const auto cached = this->ff_pipelines_.find(key);
+        if (cached != this->ff_pipelines_.end())
+        {
+            this->pipeline_ = cached->second;
             return true;
         }
+
         const uint64_t device = this->ensure_vk_device();
         if (device == 0)
         {
             return false;
         }
 
-        if (this->vulkan_.create_shader_module(device, k_ff_vertex_shader_spirv.data(),
-                                               k_ff_vertex_shader_spirv.size() * sizeof(uint32_t), this->vs_module_) != 0 ||
-            this->vs_module_ == 0)
+        if (this->vs_module_ == 0 &&
+            (this->vulkan_.create_shader_module(device, k_ff_vertex_shader_spirv.data(),
+                                                k_ff_vertex_shader_spirv.size() * sizeof(uint32_t), this->vs_module_) != 0 ||
+             this->vs_module_ == 0))
         {
             return false;
         }
-        if (this->vulkan_.create_shader_module(device, k_ff_fragment_shader_spirv.data(),
-                                               k_ff_fragment_shader_spirv.size() * sizeof(uint32_t), this->fs_module_) != 0 ||
-            this->fs_module_ == 0)
+        if (this->fs_module_ == 0 &&
+            (this->vulkan_.create_shader_module(device, k_ff_fragment_shader_spirv.data(),
+                                                k_ff_fragment_shader_spirv.size() * sizeof(uint32_t), this->fs_module_) != 0 ||
+             this->fs_module_ == 0))
         {
             return false;
         }
 
         // One push-constant range (vec2 viewportSize) in the vertex stage, no descriptor sets -- this
         // minimal shader pair needs neither textures nor uniform buffers.
-        if (this->vulkan_.create_pipeline_layout(device, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 2, {},
-                                                 this->pipeline_layout_) != 0 ||
-            this->pipeline_layout_ == 0)
+        if (this->pipeline_layout_ == 0 &&
+            (this->vulkan_.create_pipeline_layout(device, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 2, {},
+                                                  this->pipeline_layout_) != 0 ||
+             this->pipeline_layout_ == 0))
         {
             return false;
         }
@@ -427,17 +440,19 @@ namespace sogen
         const std::vector<vulkan_host::color_blend_attachment> blend(color_formats.size(), build_blend_state(this->state_.render_state));
         const vulkan_host::specialization empty_spec{};
 
+        uint64_t pipeline = 0;
         const int32_t result = this->vulkan_.create_graphics_pipeline(
             device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings,
             attributes, depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend,
-            this->pipeline_);
-        if (result != 0 || this->pipeline_ == 0)
+            pipeline);
+        if (result != 0 || pipeline == 0)
         {
             return false;
         }
 
-        this->pipeline_ready_ = true;
+        this->pipeline_ = pipeline;
+        this->ff_pipelines_.emplace(key, pipeline);
         return true;
     }
 
@@ -450,6 +465,29 @@ namespace sogen
             return nullptr;
         }
         return &*vdecl_it->second.parsed;
+    }
+
+    uint64_t d3d9_host::vertex_shape_key() const
+    {
+        const auto* real_decl = this->find_real_vertex_decl();
+        if (real_decl != nullptr)
+        {
+            // vertex_decl_entry::parsed is populated once, eagerly, at CreateVertexDeclaration time
+            // (create_vertex_decl) and never mutated after (no update DDI exists) -- same handle always
+            // implies the same shape, so the raw handle is a safe, sufficient fingerprint. Real decl ids
+            // come from allocate_id() (starts at 0x10000, see next_id_'s comment), so they can never
+            // collide with the two fallback tags below.
+            return this->state_.vertex_decl;
+        }
+        // No real declaration bound (state_.vertex_decl == 0): the fallback stride heuristic (mirrors
+        // ensure_programmable_pipeline's own `textured_layout = stride == 20` exactly) is what actually
+        // decides the pipeline's vertex-input shape in this branch, NOT state_.vertex_decl (which is
+        // always 0 here regardless of which fallback shape applies) -- so a key built from
+        // state_.vertex_decl alone would silently collide the two fallback shapes whenever the same
+        // VS/PS pair is drawn with both.
+        const auto stride_it = this->state_.stream_strides.find(0);
+        const uint32_t stride = stride_it != this->state_.stream_strides.end() ? stride_it->second : 16;
+        return stride == 20 ? 2u : 1u; // tags 1/2, disjoint from real decl handles (start at 0x10000)
     }
 
     uint32_t d3d9_host::usable_vertex_binding_mask(const parsed_vertex_decl& decl) const
@@ -473,7 +511,16 @@ namespace sogen
     const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(
         const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height, const uint32_t depth_format)
     {
-        const uint64_t key = (this->state_.vertex_shader << 32) | this->state_.pixel_shader;
+        pipeline_cache_key key{};
+        key.vertex_shader = this->state_.vertex_shader;
+        key.pixel_shader = this->state_.pixel_shader;
+        for (size_t i = 0; i < color_formats.size() && i < key.color_formats.size(); ++i)
+        {
+            key.color_formats[i] = color_formats[i];
+        }
+        key.depth_format = depth_format;
+        key.vertex_shape = this->vertex_shape_key();
+
         const auto cached = this->programmable_pipelines_.find(key);
         if (cached != this->programmable_pipelines_.end())
         {

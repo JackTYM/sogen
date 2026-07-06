@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -257,14 +258,37 @@ namespace sogen
         uint64_t descriptor_pool_{};
         bool draw_infra_ready_{false};
 
-        // The one hardcoded fixed-function shader pair (see execute_draw's comment) and its pipeline,
-        // lazily created and cached -- valid for every draw in this milestone since nothing about the
-        // pipeline shape varies yet.
+        // The one hardcoded fixed-function shader pair (see execute_draw's comment), its shader modules
+        // and pipeline layout -- shape-invariant (FF always uses the same hardcoded XYZRHW+DIFFUSE vertex
+        // layout), so these are lazily created once and reused for every FF pipeline variant.
         uint64_t vs_module_{};
         uint64_t fs_module_{};
         uint64_t pipeline_layout_{};
+        // The VkPipeline resolved by the most recent ensure_pipeline() call (looked up/inserted into
+        // ff_pipelines_ below) -- execute_draw reads this right after ensure_pipeline() returns true,
+        // same single-threaded, no-reentrancy pattern as ensure_programmable_pipeline's returned pointer.
         uint64_t pipeline_{};
-        bool pipeline_ready_{false};
+
+        // Fingerprint of every input that actually varies a built VkPipeline: the bound VS/PS pair (0/0
+        // for the fixed-function pipeline, which never varies these), the bound color-attachment formats
+        // (baked into VkPipelineRenderingCreateInfo), the depth format (also feeds build_depth_state,
+        // which bakes depthTestEnable/depthWriteEnable/depthCompareOp as STATIC pipeline state), and the
+        // vertex-input shape (see vertex_shape_key()). Two draws that differ in any of these need
+        // genuinely different VkPipeline objects -- caching on a subset silently reuses a stale pipeline.
+        struct pipeline_cache_key
+        {
+            uint64_t vertex_shader{};
+            uint64_t pixel_shader{};
+            std::array<uint32_t, 4> color_formats{}; // slot-order, 0-padded (VK_FORMAT_UNDEFINED == 0, never a real bound format)
+            uint32_t depth_format{};
+            uint64_t vertex_shape{}; // see vertex_shape_key()
+            friend auto operator<=>(const pipeline_cache_key&, const pipeline_cache_key&) = default;
+            friend bool operator==(const pipeline_cache_key&, const pipeline_cache_key&) = default;
+        };
+
+        // Keyed by pipeline_cache_key with vertex_shader/pixel_shader/vertex_shape all 0 (FF never varies
+        // these) -- only the RT/depth shape actually distinguishes one FF pipeline from another.
+        std::map<pipeline_cache_key, uint64_t> ff_pipelines_{};
 
         struct programmable_pipeline_entry
         {
@@ -280,10 +304,11 @@ namespace sogen
             uint64_t pipeline{};
         };
 
-        // Keyed by (vertex_shader_id << 32 | pixel_shader_id) -- translation is lazy, on first draw
-        // with both shaders bound, since SM1-3 requires the VS/PS pair together to build the
-        // inter-stage varying map (see d3d9_shader_translator.hpp).
-        std::unordered_map<uint64_t, programmable_pipeline_entry> programmable_pipelines_{};
+        // Keyed by pipeline_cache_key (VS/PS pair, bound RT/depth formats, and vertex-input shape --
+        // see pipeline_cache_key's own comment). Translation is lazy, on first draw with both shaders
+        // bound, since SM1-3 requires the VS/PS pair together to build the inter-stage varying map (see
+        // d3d9_shader_translator.hpp).
+        std::map<pipeline_cache_key, programmable_pipeline_entry> programmable_pipelines_{};
 
         uint64_t allocate_id();
         // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
@@ -307,6 +332,16 @@ namespace sogen
         // streams) so both always agree on which case -- real declaration vs. the pre-Task-8 stream-0
         // fallback -- applies to a given draw.
         const parsed_vertex_decl* find_real_vertex_decl() const;
+        // Fingerprint of "what vertex-input shape will this draw's pipeline get built with", using the
+        // exact same real-decl-vs-fallback-stride branch ensure_programmable_pipeline's vertex-input
+        // builder uses, so a cache key computed here can never disagree with what actually gets built on
+        // a miss. Real declaration handles (allocate_id(), starting at 0x10000 -- see next_id_'s comment)
+        // are used directly, since vertex_decl_entry::parsed is populated once, eagerly, at
+        // create_vertex_decl time and never mutated after (no update DDI exists) -- same handle always
+        // implies the same shape. The no-real-declaration fallback returns one of two tags (1 or 2,
+        // disjoint from every real handle, which start at 0x10000) identifying which of the two fallback
+        // strides applies.
+        uint64_t vertex_shape_key() const;
         // Filters decl.used_binding_mask down to only streams that ALSO have a real, nonzero stride in
         // state_.stream_strides -- i.e. streams the app has actually called SetStreamSource for. A
         // stream the declaration references but that has no (or a zero) stride is not usable: emitting
