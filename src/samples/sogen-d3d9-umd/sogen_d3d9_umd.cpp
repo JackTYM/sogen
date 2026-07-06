@@ -1488,6 +1488,8 @@ namespace
         return S_OK;
     }
 
+    // Does NOT drain g_d3d9_command_batch -- no query/fence DDI is wired yet that would need pending
+    // state visible host-side before this call returns. Revisit if one ever is.
     HRESULT APIENTRY umd_Flush(HANDLE /*hDevice*/)
     {
         return S_OK;
