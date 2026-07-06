@@ -146,6 +146,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_instancing_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_instancing_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-instancing-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_format_coverage_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-format-coverage-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_format_coverage_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-format-coverage-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -205,6 +211,8 @@ cp d3d9-sm3-test-x64.exe <root>/filesys/c/d3d9-sm3-test.exe
 cp d3d9-sm3-test-x86.exe <root>/filesys/c/d3d9-sm3-test-x86.exe
 cp d3d9-instancing-test-x64.exe <root>/filesys/c/d3d9-instancing-test.exe
 cp d3d9-instancing-test-x86.exe <root>/filesys/c/d3d9-instancing-test-x86.exe
+cp d3d9-format-coverage-test-x64.exe <root>/filesys/c/d3d9-format-coverage-test.exe
+cp d3d9-format-coverage-test-x86.exe <root>/filesys/c/d3d9-format-coverage-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -259,6 +267,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-sm3-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-instancing-test.exe
 ./analyzer -e <root> -c c:/d3d9-instancing-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-format-coverage-test.exe
+./analyzer -e <root> -c c:/d3d9-format-coverage-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -928,3 +938,29 @@ C++ plus the already-wired `SetStreamSourceFreq` transport, no guest UMD/DDI cha
 only an `INSTANCEDATA` divider of exactly 1 is honored -- a non-1 divider needs
 `VK_EXT_vertex_attribute_divisor`, which is not enabled on the D3D9 Vulkan device, so such a stream is
 left per-vertex (see `resolve_instancing()`'s comment).
+
+`d3d9-format-coverage-test.exe` proves the `g_formats` FORMATOP expansion (`sogen_d3d9_umd.cpp`) lets
+real `d3d9.dll` create/sample/render the additional `D3DFORMAT`s the host's `d3d9_format_to_vulkan`
+(`d3d9_format.cpp`) already maps. Each of three sub-passes is a genuine before/after discriminator --
+with the pre-expansion table (DXT1 + texture-only A8R8G8B8), the underlying `CreateTexture`/
+`CreateRenderTarget` calls returned `D3DERR_NOTAVAILABLE` (0x8876086c) and the sub-pass could not even
+start (observed live against the pre-change UMD). All three source textures are tiny 4x4 solid-color
+`D3DPOOL_MANAGED` textures sampled POINT/CLAMP across a full-screen quad into an off-screen RT, then read
+back with `LockRect` (same proven path as `d3d9_texture_test.cpp`/`d3d9_managed_texture_test.cpp`):
+- **DXT5 texture** (`FMT_OP_TEXTURE`): a 4x4 BC3 block encoding solid RED -- the GPU's BC3 decode must
+  reproduce RED (host maps DXT5 -> `VK_FORMAT_BC3_UNORM_BLOCK`).
+- **A8R8G8B8 render target** (the `RT_TEX` op-bit upgrade of the existing A8R8G8B8 row): render a solid
+  CYAN A8R8G8B8 source texture INTO an A8R8G8B8 render target (previously un-creatable), then read it
+  back. A8R8G8B8 is host-side `B8G8R8A8_UNORM` (4 bytes/texel), so the readback path needs no change --
+  only the FORMATOP advertisement gated it.
+- **L8 texture** (`FMT_OP_TEXTURE`): a 4x4 single-channel luminance texture (value 200). Host maps L8 ->
+  `VK_FORMAT_R8_UNORM` sampled with identity swizzle, so the value lands in R and G/B read 0.
+
+`A16B16G16R16F` is advertised `FMT_OP_TEXTURE` only (sampled HDR texture), deliberately NOT a render
+target: the host Present/snapshot readback path (`vulkan_host::create_render_target`'s readback buffer,
+plus `d3d9_host`'s RT backing and ColorFill snapshot copy) hardcodes 4 bytes/texel BGRA8, so an
+8-byte/texel HDR render target would undersize those buffers -- renderable HDR support needs that host
+work first, out of scope for this format-advertisement slice. Expect all `CreateTexture`/
+`CreateRenderTarget`/`DrawIndexedPrimitive` `hr=0x00000000`, three `PASS:` lines, and
+`[d3d9-format-coverage-test] ALL CHECKS PASSED`. Pixel-byte-identical parity confirmed on x64 and
+x86/WoW64.
