@@ -152,6 +152,7 @@ namespace sogen
             std::vector<std::byte> backing; // host-side shadow copy; kept in sync with vk_image below
             uint64_t vk_image_id{}; // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{};    // 0 until first drawn to; lazily created, cached per resource
+            bool backing_dirty{}; // color RT: GPU image has drawn/cleared pixels not yet copied to backing
         };
 
         struct shader_entry

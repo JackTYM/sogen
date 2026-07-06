@@ -1502,6 +1502,7 @@ namespace sogen
             {
                 continue; // gap slot -- nothing was rendered here
             }
+            brt.entry->backing_dirty = true;
             std::vector<std::byte> pixels;
             uint32_t readback_width = 0;
             uint32_t readback_height = 0;
@@ -2182,6 +2183,7 @@ namespace sogen
                     }
                     this->vulkan_.submit_clear(it->second.vk_image_id, color.data());
 
+                    it->second.backing_dirty = true;
                     std::vector<std::byte> pixels;
                     uint32_t readback_width = 0;
                     uint32_t readback_height = 0;
