@@ -1931,6 +1931,9 @@ namespace sogen
         // The RT image is B8G8R8A8_UNORM (create_render_target), whose in-memory byte order is exactly a
         // little-endian D3DCOLOR (0xAARRGGBB -> bytes B,G,R,A), so a solid buffer of the color dword needs
         // no channel juggling before the copy.
+        // KNOWN LIMITATION: hardcodes 4 bytes/texel -- true for every RT format this codebase creates
+        // today (always B8G8R8A8_UNORM), but would need generalizing if a non-4-byte-per-texel RT format
+        // is ever added.
         const size_t pixel_count = static_cast<size_t>(fill_w) * fill_h;
         std::vector<uint32_t> fill_pixels(pixel_count, color_argb);
         const size_t required = pixel_count * 4;

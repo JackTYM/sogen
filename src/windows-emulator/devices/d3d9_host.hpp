@@ -422,7 +422,9 @@ namespace sogen
         // current_layout authoritative) execute_draw uses; leaves the RT in TRANSFER_SRC_OPTIMAL and
         // marks backing_dirty so sync_backing_from_gpu picks it up on the next Lock/Present. Assumes the
         // RT is at its resting TRANSFER_SRC_OPTIMAL layout on entry (post clear/draw), matching
-        // execute_draw's own documented assumption.
+        // execute_draw's own documented assumption. `subresource` is always 0 (single-mip, single-layer
+        // resources only, matching this codebase's current scope) and unused -- not yet plumbed to a
+        // real mip/array level.
         int32_t color_fill(uint64_t resource, uint32_t subresource, int32_t left, int32_t top, int32_t right, int32_t bottom,
                            uint32_t color_argb);
 
@@ -430,6 +432,10 @@ namespace sogen
         // image via vkCmdBlitImage (which scales natively when the rects differ in size). Same shared
         // command buffer / cmd_pipeline_barrier choke point as color_fill; both RTs assumed at their
         // resting TRANSFER_SRC_OPTIMAL layout on entry. Marks the destination backing_dirty.
+        // `dst_subresource`/`src_subresource` are always 0 (single-mip, single-layer resources only) and
+        // unused -- not yet plumbed to a real mip/array level; a future mip-generation consumer reusing
+        // this as a blit-between-mip-levels primitive would need to thread these through into the
+        // underlying image_blit_region's mip_level/base_array_layer, which are currently hardcoded to 0.
         int32_t blt(uint64_t dst_resource, uint32_t dst_subresource, int32_t dst_left, int32_t dst_top, int32_t dst_right,
                     int32_t dst_bottom, uint64_t src_resource, uint32_t src_subresource, int32_t src_left, int32_t src_top,
                     int32_t src_right, int32_t src_bottom, uint32_t filter);
