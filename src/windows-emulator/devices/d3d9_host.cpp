@@ -975,10 +975,10 @@ namespace sogen
             return static_cast<uint16_t>(sign | half);
         }
 
-        // Encodes a single D3DCOLOR (0xAARRGGBB) fill value into `out` for `vk_format`, returning the
-        // texel's byte size (bytes written) or 0 for a format with no encoder. Format-aware so ColorFill
-        // writes the correct byte pattern per render-target format, not just a raw BGRA8 dword.
-        uint32_t encode_fill_texel(const uint32_t vk_format, const uint32_t color_argb, std::array<std::byte, 8>& out)
+        // Encodes a single D3DCOLOR (0xAARRGGBB) fill value into `out` for `vk_format`, returning false for
+        // a format with no encoder. The caller sizes `out` via the shared vk_format_bytes_per_texel, so this
+        // and the RT backing/readback sizing can never disagree on a format's texel size.
+        bool encode_fill_texel(const uint32_t vk_format, const uint32_t color_argb, std::array<std::byte, 8>& out)
         {
             const uint32_t a = (color_argb >> 24) & 0xFF;
             const uint32_t r = (color_argb >> 16) & 0xFF;
@@ -990,7 +990,7 @@ namespace sogen
             case VK_FORMAT_B8G8R8A8_UNORM: {
                 // In-memory byte order B,G,R,A is exactly a little-endian D3DCOLOR dword -- passthrough.
                 std::memcpy(out.data(), &color_argb, sizeof(color_argb));
-                return 4;
+                return true;
             }
             case VK_FORMAT_R5G6B5_UNORM_PACK16: {
                 // VK_FORMAT_R5G6B5_UNORM_PACK16 packs R in bits 11..15, G in 5..10, B in 0..4 -- the exact
@@ -998,7 +998,7 @@ namespace sogen
                 const uint16_t packed =
                     static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
                 std::memcpy(out.data(), &packed, sizeof(packed));
-                return 2;
+                return true;
             }
             case VK_FORMAT_R16G16B16A16_SFLOAT: {
                 // Interpret the 8-bit D3DCOLOR channels as normalized [0,1] floats and store one half per
@@ -1010,10 +1010,10 @@ namespace sogen
                     float_to_half(static_cast<float>(a) / 255.0f),
                 };
                 std::memcpy(out.data(), halves, sizeof(halves));
-                return 8;
+                return true;
             }
             default:
-                return 0;
+                return false;
             }
         }
 
@@ -2220,24 +2220,26 @@ namespace sogen
         }
 
         // Encode the fill color into one texel of the render target's real VkFormat, then replicate it
-        // across the fill region. Format-aware (BGRA8 dword passthrough, R5G6B5 565 packing, half-float
-        // for R16G16B16A16_SFLOAT) so a non-BGRA8 render target is filled with the correct byte pattern
+        // across the fill region, so a non-BGRA8 render target is filled with the correct byte pattern
         // rather than a raw D3DCOLOR dword. An unsupported format fails cleanly instead of corrupting the
         // staging copy.
         uint32_t rt_vk_format = 0;
         std::array<std::byte, 8> texel{};
-        const uint32_t bytes_per_texel =
-            d3d9_format_to_vulkan(rt.format, rt_vk_format) ? encode_fill_texel(rt_vk_format, color_argb, texel) : 0;
-        if (bytes_per_texel == 0)
+        if (!d3d9_format_to_vulkan(rt.format, rt_vk_format))
+        {
+            return d3derr_invalidcall;
+        }
+        const uint32_t bytes_per_texel = vk_format_bytes_per_texel(rt_vk_format);
+        if (bytes_per_texel == 0 || !encode_fill_texel(rt_vk_format, color_argb, texel))
         {
             return d3derr_invalidcall;
         }
         const size_t pixel_count = static_cast<size_t>(fill_w) * fill_h;
         const size_t required = pixel_count * bytes_per_texel;
-        std::vector<std::byte> fill_pixels(required);
+        std::vector<std::byte> fill_bytes(required);
         for (size_t i = 0; i < pixel_count; ++i)
         {
-            std::memcpy(fill_pixels.data() + i * bytes_per_texel, texel.data(), bytes_per_texel);
+            std::memcpy(fill_bytes.data() + i * bytes_per_texel, texel.data(), bytes_per_texel);
         }
 
         uint64_t staging_buffer = 0;
@@ -2260,7 +2262,7 @@ namespace sogen
             return d3derr_invalidcall;
         }
         this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
-        this->vulkan_.upload_memory(device, staging_memory, 0, required, fill_pixels.data(), required);
+        this->vulkan_.upload_memory(device, staging_memory, 0, required, fill_bytes.data(), required);
 
         this->vulkan_.reset_fence(device, this->fence_);
         this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
