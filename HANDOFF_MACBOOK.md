@@ -3436,3 +3436,113 @@ x86/WoW64, byte-for-byte pixel-identical to their previously-documented values. 
 M5 row, "M3 coverage items" checklist, and "Sequencing recommendation" section all updated to flip SM3.0
 caps from "not started" to done, citing all three commits and preserving the residual-uncertainty framing
 above rather than declaring MW2 shader compatibility solved.
+
+---
+
+## 41. D3D9 hardware instancing (`SetStreamSourceFreq`) — the transport was already wired, the Vulkan
+side never consumed it; fixed with one shared helper and proven with a real before/after discriminator
+(2026-07-06)
+
+§23's multi-stream work built the `SetStreamSourceFreq` transport (guest UMD DDI handler, wire protocol,
+host-side `state_.stream_frequencies` storage) but explicitly scoped instancing itself out — per-stream
+byte offsets and vertex-declaration parsing were that slice's target, not instanced draws (see §23 and
+the still-open bullet it left in `docs/d3d9-roadmap.md`'s "M3 coverage items"). This entry closes that
+bullet: the transport turned out to already be complete, but nothing on the Vulkan side ever read it —
+every draw used a hardcoded `instance_count=1` and `VK_VERTEX_INPUT_RATE_VERTEX` for every stream,
+regardless of what the app requested via `SetStreamSourceFreq`. Three commits: `d3a0318c` (feat),
+`a6062d66` (test), `1d4d0ab9` (polish).
+
+### 41.1 Two correctness traps identified during planning, before any code was written
+
+D3D9 hardware instancing has two ways to get this quietly wrong, both familiar from this session's other
+pipeline-cache-key work (§26, §31, §32):
+
+1. **Pipeline-cache-key collision.** `ensure_programmable_pipeline` bakes each vertex binding's
+   `inputRate` statically into the built `VkPipeline` — it cannot be changed after creation. If the
+   pipeline cache key doesn't also depend on which streams are instanced, a draw that flips a stream
+   between per-vertex and per-instance (same VS/PS/declaration, only the `SetStreamSourceFreq` state
+   changed) would silently reuse a stale pipeline built for the other rate — the exact same bug class
+   §26 fixed for RT/vertex-decl shape and §31/§32 fixed for static blend/depth state and per-stream
+   strides.
+2. **Builder/consumer disagreement.** Three separate pieces of code all need to agree on the same
+   decoded instancing state: the cache-key builder (what shape to key), the pipeline builder (what
+   `inputRate` to bake in), and the draw call (what `instanceCount` to issue). Computing that decode
+   three times, independently, is exactly the kind of duplication that drifts apart over time — the same
+   failure mode this session's shared-helper fixes elsewhere (`vertex_shape_key`, `usable_vertex_binding_mask`)
+   were built to prevent.
+
+Both were designed out up front rather than fixed after the fact.
+
+### 41.2 The fix: one shared helper, consulted three times (`d3a0318c`)
+
+`resolve_instancing()` (`d3d9_host.cpp`/`.hpp`) is the single place `state_.stream_frequencies` is
+decoded. It reads the raw `SetStreamSourceFreq` divider values (their `D3DSTREAMSOURCE_INDEXEDDATA`/
+`D3DSTREAMSOURCE_INSTANCEDATA` flag bits, `d3d9types.h` values, newly added as constants) into an
+`instancing_state{instance_count, instance_binding_mask}`:
+- `instance_count` — the `D3DSTREAMSOURCE_INDEXEDDATA` stream's low 30 bits (default 1, i.e. an ordinary
+  single-instance draw, when no stream sets that flag or its count is 0).
+- `instance_binding_mask` — bit *i* set iff stream *i* carries `D3DSTREAMSOURCE_INSTANCEDATA` with a
+  divider of exactly 1.
+
+All three consumers call it, and only it:
+- `vertex_shape_key()` folds `instance_binding_mask` into `pipeline_cache_key::vertex_input_shape`
+  (defaults to 0, so every existing non-instanced draw keys exactly as before — verified by the full
+  regression sweep, §41.4).
+- `ensure_programmable_pipeline` sets `VK_VERTEX_INPUT_RATE_INSTANCE` for masked streams in the
+  real-vertex-declaration binding loop. The fixed-function and stride-fallback binding paths are left
+  unconditionally per-vertex — both are single, non-instanced-shape paths (FF has no second stream, the
+  stride fallback has no vertex declaration to carry `INSTANCEDATA` on) — commented as such rather than
+  silently dropped.
+- `execute_draw` passes the resolved `instance_count` to `cmd_draw`/`cmd_draw_indexed` (previously always
+  a literal `1`).
+
+Because the cache key, the binding builder, and the draw call all derive from the identical call to
+`resolve_instancing()`, they cannot drift apart the way three independent decodes could.
+
+### 41.3 Explicit scope limitation: only a divider of exactly 1
+
+Real D3D9 `INSTANCEDATA` dividers can be any positive integer (advance the stream once every *N*
+instances). This fix only honors a divider of exactly 1 — a divider `VK_EXT_vertex_attribute_divisor`
+would be needed to represent generally, and that extension is not enabled on this Vulkan device. A
+stream with a non-1 divider is left per-vertex (its mask bit stays unset) rather than being bound at the
+wrong rate and silently rendering wrong per-instance data — a documented, inline-commented limitation in
+`resolve_instancing()`, not a silent gap. The same day's polish commit (`1d4d0ab9`) added matching
+inline documentation for two further accepted edge cases the initial code-quality review flagged as
+present in behavior but missing in comments: multiple `INDEXEDDATA` streams (last-wins via
+`unordered_map` iteration order — arbitrary, but harmless since that usage is itself invalid D3D9), and
+`instance_count>1` reaching the non-indexed `cmd_draw` call site (only reachable under invalid D3D9
+usage, since real hardware instancing requires an indexed draw).
+
+### 41.4 The test: a genuine before/after discriminator, independently reproduced twice (`a6062d66`)
+
+`d3d9_instancing_test.cpp` builds a real `D3DVERTEXELEMENT9` declaration across two streams — POSITION
+on stream 0 (`INDEXEDDATA | 4`, per-vertex quad geometry, indexed) and a per-instance `float2` offset
+plus `D3DCOLOR` on stream 1 (`INSTANCEDATA | 1`) — and issues one `DrawIndexedPrimitive`. The VS adds the
+per-instance offset to the per-vertex local position and the PS outputs the per-instance color, so a
+correctly-instanced draw paints four disjoint, solid-colored quads into the four screen quadrants.
+
+This is a double discriminator, not a single pixel check: (a) if `instance_count` were still hardcoded
+to 1, only the first instance would draw — one quadrant painted, three left at the clear color; (b) if
+the per-instance stream stayed `VK_VERTEX_INPUT_RATE_VERTEX`, each of the quad's four corners would pick
+up a *different* instance's offset/color, producing one large, color-interpolated quad instead of four
+flat solid ones. The test checks all four quadrant centers (plus an interior point per quadrant) for
+four distinct, pure, solid colors — either wrong implementation fails this.
+
+**The critical evidence is the actual before/after run, not just the passing test.** Run against the
+pre-task host behavior with `instance_count` forced back to 1 and `inputRate` forced back to
+`VK_VERTEX_INPUT_RATE_VERTEX` — i.e., reproducing exactly what every draw did before this slice — all
+four quadrant centers read back BLACK and the test reports FAILED. That is a real, observed
+discrimination of the old gap, not a hypothetical one, and it was independently reproduced by two
+separate reviewers. The test passes pixel-byte-identical on both x64 and x86/WoW64 (this feature is
+entirely host-side C++ against the already-wired `SetStreamSourceFreq` transport — no guest UMD/DDI
+change was needed). Documented in `src/samples/sogen-d3d9-umd/README.md`.
+
+### 41.5 Verification
+
+Full regression sweep (all ~40 existing D3D9 guest test runs, both x64 and x86/WoW64) verified clean at
+every stage by two independent reviewers, non-instanced draws proven byte-identical to pre-change
+behavior — expected, since `pipeline_cache_key::vertex_input_shape::instance_binding_mask` defaults to 0
+and `resolve_instancing().instance_count` defaults to 1 for any draw that never calls
+`SetStreamSourceFreq` with an `INSTANCEDATA`/`INDEXEDDATA` flag. `docs/d3d9-roadmap.md`'s M3 row, M5 row,
+"M3 coverage items" checklist, and "Sequencing recommendation" section all updated to flip
+`stream_frequencies`/instancing from the "still not started" list to done, citing all three commits.
