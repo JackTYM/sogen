@@ -68,6 +68,15 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_mrt_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_multistream_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-multistream-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_scissor_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-scissor-test-x86.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_mrt_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-mrt-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_multistream_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-multistream-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -101,15 +110,19 @@ cp d3d9-const-test-x86.exe <root>/filesys/c/d3d9-const-test-x86.exe
 cp d3d9-texture-test-x86.exe <root>/filesys/c/d3d9-texture-test-x86.exe
 cp d3d9-texcoord-test-x86.exe <root>/filesys/c/d3d9-texcoord-test-x86.exe
 cp d3d9-int-bool-const-test-x86.exe <root>/filesys/c/d3d9-int-bool-const-test-x86.exe
+cp d3d9-scissor-test-x86.exe <root>/filesys/c/d3d9-scissor-test-x86.exe
+cp d3d9-mrt-test-x86.exe <root>/filesys/c/d3d9-mrt-test-x86.exe
+cp d3d9-multistream-test-x86.exe <root>/filesys/c/d3d9-multistream-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
-shader, const, texture, and int-bool-const tests. For the x86/WoW64 UMD, the real 32-bit Microsoft
-`d3d9.dll` must already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and
+shader, const, texture, int-bool-const, mrt, and multistream tests. For the x86/WoW64 UMD, the real
+32-bit Microsoft `d3d9.dll` must already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86
-shader, const, texture, texcoord, and int-bool-const tests.
+shader, const, texture, texcoord, int-bool-const, mrt, and multistream tests. (The scissor test is
+fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 
 ## Run
 
@@ -129,6 +142,9 @@ shader, const, texture, texcoord, and int-bool-const tests.
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texcoord-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-int-bool-const-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-scissor-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-mrt-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-multistream-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
 ```
 
@@ -527,3 +543,18 @@ semantics, which would have corrupted chunk 0 and failed this exact test.
   the current source, no code change, produced pixel-exact parity with x64
   (`pixel(320,240)=B=26 G=00 R=FF A=FF`, both analytic checks passing). See `docs/d3d9-roadmap.md` and
   `HANDOFF_MACBOOK.md` §22 for the full design/RE narrative.
+- **Scissor rect, MRT, and multi-stream vertex sources, ported to x86/WoW64 (Task 10, 2026-07-05) --
+  ALL THREE found ZERO new x86-only bugs, unlike several earlier ports.** `d3d9-scissor-test-x86.exe`,
+  `d3d9-mrt-test-x86.exe`, and `d3d9-multistream-test-x86.exe` were cross-compiled unchanged (no source
+  edits to any of the three `.cpp` test files, matching this project's established zero-source-change
+  porting pattern) and passed on the first run against the real 32-bit `d3d9.dll`, every analytic pixel
+  check matching x64 exactly. This is a genuine (if unglamorous) finding in its own right: it confirms
+  the scissor-rect draw-time gating, the fixed-slot MRT array/`Clear()` fan-out, and the vertex-decl
+  parser + multi-stream `SetStreamSource` offset plumbing are all architecture-agnostic as designed --
+  none of them touch a HANDLE-width-sensitive struct field the way `d3d9_host::allocate_id()` and
+  `D3DDDIARG_CREATERESOURCE`'s output-handle offset did for the const/texture tests. The three real bugs
+  the multi-stream work found (see the `d3d9-multistream-test.exe` entry above) are all in the
+  architecture-independent parts of `sogen_d3d9_umd.cpp` (DDI slot wiring, struct field order, calling
+  convention), so they were already exercised by the shared x64 test run before this port and needed no
+  x86-specific fix. Full regression sweep after this port (every x64/x86 guest test plus the 26/26 smoke
+  test) is documented in `docs/d3d9-roadmap.md` and `HANDOFF_MACBOOK.md`.

@@ -1821,3 +1821,163 @@ x64: `shader`/`const`/`texture`/`texcoord`/`partial-lock`/`int-bool-const` all `
 `shader`/`const`/`texture`/`texcoord`/`int-bool-const` all `ALL CHECKS PASSED`. Smoke test: 26/26
 `Success`. See `docs/d3d9-roadmap.md`'s "Constant registers" entry and
 `src/samples/sogen-d3d9-umd/README.md` for the consolidated write-ups.
+
+## 23. Scissor rect, MRT, and multi-stream vertex sources — three M3 DDI-coverage items designed, wired, proven pixel-exact, and ported to x86 (2026-07-05)
+
+A 10-task, session-local plan (not checked into this repo) adding three independent M3 items from
+`docs/d3d9-roadmap.md`'s "M3 coverage items" checklist: scissor rects (Tasks 1-2), multiple render
+targets/MRT (Tasks 3-5), and multi-stream vertex sources (Tasks 6-9). Task 10 (this section) ports all
+three guest tests to i686/WoW64 and runs the full regression sweep. Commits: `c517c685`, `a60f26ec`,
+`63ab0030` (scissor); `527d5775`, `d82de78f`, `87548935`, `769b329c`, `274075f8` (MRT); `37685830`,
+`76a0913b`, `f32d0e12`, `1a6461ff`, `797caf7d`, `f3652a42`, `93d45040`, `6cd12c79` (multi-stream).
+
+### 23.1 Scissor rect (Tasks 1-2) — the smallest of the three, straightforward
+
+Before this work, `execute_draw` unconditionally forced a Vulkan scissor covering the whole render
+target extent, regardless of what the app had set — `SetScissorRect` and `D3DRS_SCISSORTESTENABLE` were
+tracked in `device_state` but never consulted. Fixed by gating the draw-time scissor rect: when
+`D3DRS_SCISSORTESTENABLE` is on, the app's real `RECT` (`{left, top, right, bottom}`) is converted to a
+Vulkan `VkRect2D` (`offset = {left, top}`, `extent = {right-left, bottom-top}`); when it's off, the
+full-RT-extent fallback stays exactly as before. `d3d9_scissor_test.cpp` proves both halves in one run:
+a center-third scissor rect (`{213,160,427,320}`) drawn with a full-screen quad reads RED at the
+center and BLUE (background) at both far corners with the test enabled, then the same draw with
+`D3DRS_SCISSORTESTENABLE` set back to FALSE reads RED everywhere (regression safety for the common
+no-scissor case).
+
+### 23.2 Multiple render targets / MRT (Tasks 3-5) — a real slot-compaction bug found and fixed mid-implementation
+
+M2's pipeline builders and `execute_draw` only ever built for and wrote to render-target slot 0. Task 3
+fanned both out across every bound RT, gated by `D3DCAPS9::NumSimultaneousRTs` (not shader model — D3D9's
+`ps_2_0` ISA already defines `oC0`-`oC3` explicitly). **The real bug, caught during implementation, not
+by the test**: the first draft stored bound RTs in a compacted, append-only list (RT0 bound → index 0,
+RT1 bound → index 1, and so on by binding order). This breaks the moment a guest binds RTs
+non-contiguously — e.g. RT0 left unbound while RT1 is bound — because a pixel shader's `oC1` write is
+defined by D3D9 semantics to target render-target **slot 1**, not "the second RT the app happened to
+bind." A compacted list would have silently routed that `oC1` write to whatever physical attachment
+ended up at list index 0, misdrawing into the wrong render target with no error. Fixed (`d82de78f`)
+before this ever shipped: bound RTs are now stored in a fixed-size array indexed directly by D3D9 slot
+number, preserving gaps — slot 1 bound alone stays at array index 1, array index 0 stays empty. Task 4
+(`87548935`) fixed the matching `Clear(D3DCLEAR_TARGET, ...)` gap: it also only touched slot 0
+previously, leaving other bound RTs stale after a clear. `d3d9_mrt_test.cpp` (Task 5) proves both fixes
+together: a PS returning distinct `oC0`/`oC1` colors with two RTs bound once at startup (never rebound)
+confirms both receive their own color (not just RT0 getting drawn into), then `Clear(yellow)` with both
+still bound confirms both go yellow (not just RT0 clearing).
+
+### 23.3 Multi-stream vertex sources (Tasks 6-9) — a new declaration parser, a significant vkd3d-shader RE finding, and three real UMD bugs
+
+This was the largest and most consequential of the three. M2 had no real vertex-declaration support at
+all — `ensure_programmable_pipeline`'s vertex layout was hardcoded, distinguishing the one or two shapes
+existing tests needed purely by `SetStreamSource`'s `Stride` value. Real multi-stream support needed a
+genuine `D3DVERTEXELEMENT9` array parser, since a `CreateVertexDeclaration` call is the only place a
+guest actually states which stream each vertex attribute comes from.
+
+**Task 6** added `stream_offsets` state storage (per-stream `SetStreamSource` byte offset, previously
+discarded). **Task 7** (`76a0913b`, with a guest-controlled-shift fix in `f32d0e12`) wrote
+`parse_vertex_decl`: walks a real `D3DVERTEXELEMENT9[]` terminated by `D3DDECL_END()`, extracting
+per-element `{Stream, Offset, Type, Usage, UsageIndex}` into Vulkan vertex-input-attribute data.
+
+**The significant RE finding, made empirically while building Task 7/8** (`d3d9_host.cpp`, the comment
+immediately above `parse_vertex_decl`): vkd3d-shader assigns a compiled vertex shader's SPIR-V input
+`Location` decorations by **declaration order** — each input's `v#` register index, itself decided by
+where its HLSL input-struct member (or D3DBC `dcl` instruction) appears — NOT by D3D9 usage semantics
+(`D3DDECLUSAGE`/`UsageIndex`). Confirmed with three hand-written HLSL structs reordering the same three
+semantics (`POSITION`/`TEXCOORD0`/`COLOR0`), compiled via this repo's own `deps/vkd3d/programs/
+vkd3d-compiler` and inspected with `spirv-dis`: all three orderings produced `Location 0/1/2` following
+struct order, with `POSITION` getting no special-casing (landing at `Location 1` in one ordering, not
+always `Location 0`).
+
+This directly constrains `parse_vertex_decl`, which has no visibility into its paired vertex shader (that
+pairing is a draw-time concern, not this standalone parser's): it can only assign each element's
+`Location` as its own ordinal position within the `D3DVERTEXELEMENT9` array, under the assumption that a
+vertex declaration's element order matches its paired shader's input-struct order. **This is a
+documented, currently-true-for-every-shader-in-this-repo assumption, not a fully general fix** — every
+existing shader (`d3d9_const_test.cpp`, `d3d9_shader_test.cpp`, `d3d9_texcoord_test.cpp`, etc.) declares
+`POSITION` first, matching it, but a future shader/declaration pair that violates it would silently
+swap which buffer feeds which shader input with no error — exactly the kind of bug an HRESULT-only test
+would miss. The fully general fix (cross-referencing the bound VS's own scanned input signature instead
+of assuming declaration order) is flagged as future work in `d3d9_host.cpp`'s own comment, not implemented
+here. This is now documented alongside vkd3d-shader's other RE findings in this project (the
+CBV/register-index binding scheme in §22.1, the sampler-state DDI demultiplexing in the roadmap's M2
+section).
+
+**Task 8** (`1a6461ff`, refined in `797caf7d`) wired the parsed declaration into `execute_draw`'s
+multi-stream vertex-buffer binding, binding each stream's buffer at its own bound offset rather than
+assuming everything comes from stream 0 at offset 0.
+
+**Task 9** (`f3652a42`/`93d45040`/`6cd12c79`) wrote `d3d9_multistream_test.cpp` — and building it found
+**three real, previously-unknown bugs in the guest UMD** (`sogen_d3d9_umd.cpp`), not the host. Tasks
+6-8 only ever touched `d3d9_host.cpp`/`.hpp`; nothing before this test had ever called
+`CreateVertexDeclaration`/`SetVertexDeclaration` from a guest, so none of the three had ever been
+reachable or visible:
+1. `pfnCreateVertexShaderDecl` (`D3DDDI_DEVICEFUNCS` slot 45) was still an unwired `device_stub` —
+   `CreateVertexDeclaration()` never reached the host at all. Fixed by adding
+   `umd_CreateVertexShaderDecl` (mirroring `umd_CreateVertexShaderFunc`/`create_shader_common`'s
+   already-proven struct-pointer-plus-trailing-array convention) and wiring slot 45 to it.
+2. `D3DDDIARG_CREATEVERTEXSHADERDECL`'s field order was guessed backwards (`ShaderHandle` first) — a
+   live byte-dump of the real `pArgs` (once bug 1 was fixed enough to reach it) showed
+   `NumVertexElements` actually comes first (offset 0), with the 8-byte `ShaderHandle` at offset 8 (4
+   bytes of ordinary x64 alignment padding in between, previously misread as part of `ShaderHandle`).
+   Fixed by swapping the field order and pinning it with a `static_assert` (`93d45040`).
+3. `pfnSetVertexShaderDecl` (slot 47) was already wired, but as a struct-pointer call — a live dump
+   showed the "pArgs" parameter itself receiving the raw, small decl-id value directly (not a real
+   pointer), meaning it is actually a DIRECT-VALUE `HANDLE` call, the same convention as
+   `umd_SetVertexShaderFunc`/`umd_SetPixelShader`. Every real `SetVertexDeclaration()` call was silently
+   forwarding `decl=0` to the host until this was fixed.
+
+All three had to be fixed together before this test produced anything but an unrendered (black) result;
+Tasks 6-8's host-side dispatch and wire-protocol structs needed no changes at all. The finished test:
+POSITION on stream 0 (12 FLOAT3 positions, two flat-shaded triangles), COLOR on stream 1 bound at a
+deliberately NONZERO `SetStreamSource` byte offset (the buffer starts with 20 bytes of a wrong pad
+color before the real per-vertex data begins) — the left half of the viewport reads RED, the right half
+GREEN, neither reachable unless stream 1 is genuinely bound (not silently collapsed onto stream 0) AND
+its nonzero offset is honored (not treated as 0, which would read the pad color instead).
+
+**Explicitly out of scope for this work**: `stream_frequencies`/`SetStreamSourceFreq` (instancing) and
+`DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` (user-pointer draws) — neither was touched; both remain open
+M3 items.
+
+**A pipeline-cache gap flagged, not fixed, during this work**: `ensure_programmable_pipeline`'s cache key
+is `(vertex_shader_id << 32 | pixel_shader_id)` only — it does not include the RT color-format list/
+count (also an argument to the same function, needed for the MRT work above) or the vertex declaration
+shape. A guest that reused one VS/PS pair across draws with a different RT count or a different vertex
+declaration would silently get back a stale cached `VkPipeline`. Neither `d3d9_mrt_test.cpp` nor
+`d3d9_multistream_test.cpp` exercises this (each uses one shape throughout), so it's flagged as a still-open,
+not-yet-exercised risk in `docs/d3d9-roadmap.md`, not fixed here.
+
+### 23.4 Task 10 — x86/WoW64 ports: all three pixel-exact, zero new architecture bugs
+
+All three tests (`d3d9_scissor_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`) were
+cross-compiled unchanged to i686 (`i686-w64-mingw32-g++`, identical flags to every other x86-ported
+test in this project) and staged against the already-present genuine 32-bit `d3d9.dll`/
+`d3dcompiler_43.dll`. All three passed on the very first run, every analytic pixel check matching the
+x64 results exactly:
+
+```
+d3d9-scissor-test-x86:      6/6 PASS lines, ALL CHECKS PASSED (identical to x64)
+d3d9-mrt-test-x86:          12/12 PASS lines, ALL CHECKS PASSED (identical to x64)
+d3d9-multistream-test-x86:  2/2 PASS lines, ALL CHECKS PASSED (identical to x64)
+```
+
+This is a notable contrast with several earlier ports in this project (`d3d9-const-test-x86` found the
+`allocate_id()` 32-bit `HANDLE`-truncation bug, §16; `d3d9-texture-test-x86` found the
+`D3DDDIARG_CREATERESOURCE` x86 output-handle-offset bug, §16.3) — it confirms none of this plan's three
+features touch an x86/x64-divergent struct field or handle-width-sensitive code path. The three real
+bugs Task 9 found (§23.3) live in `sogen_d3d9_umd.cpp`'s DDI slot wiring/struct layout/calling
+convention, which is shared, architecture-independent source — already exercised and fixed via the x64
+test run before this port, so the x86 build simply inherited the fix with no separate work needed.
+
+### 23.5 Full regression sweep (2026-07-05)
+
+**x64** (`./analyzer -e root -c c:/<test>.exe`): `spike`, `shader`, `const`, `texture`, `texcoord`,
+`partial-lock`, `int-bool-const`, `scissor`, `mrt`, `multistream` all `ALL CHECKS PASSED` (or, for
+`spike`, `SUCCESS: IDirect3DDevice9 created`); `managed-texture` fails exactly as documented (§17-19,
+confirmed permanent, not a regression).
+
+**x86**: `shader`, `const`, `texture`, `texcoord`, `int-bool-const`, `scissor`, `mrt`, `multistream` all
+`ALL CHECKS PASSED`. (`partial-lock` and `managed-texture` remain x64-only by design, matching
+`src/samples/sogen-d3d9-umd/README.md`'s documented scope.)
+
+**Smoke test**: `./analyzer -e root -s c:/test-sample.exe` — 26/26 `Success`, unchanged.
+
+See `docs/d3d9-roadmap.md`'s "M3 coverage items" checklist and
+`src/samples/sogen-d3d9-umd/README.md` for the consolidated write-ups.

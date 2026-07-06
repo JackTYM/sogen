@@ -26,8 +26,8 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
 | M1 | Programmable SM2/3 triangle (VS+PS bytecode, DrawPrimitive, Present) | **Done** | Real `D3DCompile()` → `vkd3d-shader` → SPIR-V → Vulkan pipeline, pixel-verified. No DXVK oracle was built (dropped in favor of analytic pixel-readback checks, same rigor, no new dependency). |
 | M1.5 | Float constant registers (`c#`) | **Done** | Not in the original plan as a separate milestone; pulled forward because a WVP matrix is needed for M2 anyway. UBO + descriptor-set binding contract now proven for one register set. |
 | M2 | Textured + depth quad (`SetTexture`/sampler, indexed draw, depth, alpha blend) | **Done** | Real GPU-backed 2D textures (single mip, lazy staging upload), real `vulkan_host::create_sampler` + combined-image-sampler binding (RE'd sampler-state DDI encoding), indexed draws, real depth testing (D32_SFLOAT_S8_UINT in place of D24S8 for MoltenVK), real alpha blending, and the SPIR-V-side combined-sampler binding in the shader translator — all proven together by `d3d9_texture_test.cpp` (4/4 analytic pixel checks exact). D3DFORMAT↔VkFormat table covers exactly the locked MW2-first set (13 D3DFORMAT values, collapsing to 11 distinct VkFormat outputs since A8R8G8B8/X8R8G8B8 both map to B8G8R8A8_UNORM and L8/A8 both map to R8_UNORM — see below). Of the two bugs found building the terminal test: `D3DPOOL_MANAGED` got a real code fix for its double-resource-creation half (`pfnTexBlt` now syncs the sysmem/vidmem copies), but its deeper remaining symptom (managed textures sample black) is confirmed a permanent, unfixable-via-this-DDI limitation, not something more code will resolve; TEXCOORD0 interpolation turned out not to be a real bug at all — investigated and does not reproduce, no code change needed. Both are fully investigated, see "Known bugs & limitations carried out of M2" below for the three-way distinction (fixed / confirmed non-bug / confirmed permanent). The partial-buffer Lock limitation is now genuinely fixed on x64 (still whole-buffer-only on x86, a scoped-out gap) — also below. |
-| WoW64 | WoW64/x86 D3D9 UMD port (32-bit `sogen_d3d9um`, SysWOW64) | **Done** | Not in the original plan's M1-M5 table; pulled forward per the user's own priority order since real games (MW2/BO2/GTA SA) are 32-bit and nothing else matters without a working x86 guest path. Proven: typed per-slot `__stdcall` thunk arities for all 143 `D3DDDI_DEVICEFUNCS` slots (28 real implementations unchanged, the other 115 now get a correctly-sized `stub_args_N` instead of x64's zero-arg `device_stub`, which would desync callee-cleanup x86's stack); x86-specific `D3DDDIARG_*`/`D3DDDI_*` struct layout for every real slot with a HANDLE/pointer field, pinned by `#ifndef _WIN64` `static_assert`s, including a live-RE'd fix for `D3DDDIARG_LOCK`/`D3DDDIARG_UNLOCK` (x86 is a genuinely different two-tier struct shape via `DdLockLH`, not just a pointer-shrunk copy of the x64 layout); `i686-w64-mingw32-g++` build tooling (parallel commands in `src/samples/sogen-d3d9-umd/README.md`) producing `sogen_d3d9um-x86.dll`. End-to-end proof: `d3d9-triangle-test-x86.exe`, cross-compiled to i686 and run through the real WoW64 path against the genuine 32-bit Microsoft `d3d9.dll` (not DXVK), reaches the x86 UMD and reads back the exact same pixel (`B=FF G=80 R=40 A=FF`) as the x64 `d3d9-triangle-test` — full pixel parity. **Now also covered:** `d3d9-shader-test`, `d3d9-const-test`, `d3d9-texture-test`, and `d3d9-texcoord-test` have all been cross-compiled to i686 and pass on x86 too (all analytic pixel checks exact, matching the x64 results) — M1.5/M2's shader, constant-register, texture, depth, blend, and real-`TEXCOORD0` features are now confirmed on the x86 path, not just the fixed-function triangle. Porting these caught two real, x86-only bugs along the way (both fixed): `d3d9_host::allocate_id()`'s shared id counter started at `1ULL << 32`, silently truncating through a 32-bit `HANDLE` on x86 guests (fixed, starts at `0x10000`; commit `c35871ca`); and `D3DDDIARG_CREATERESOURCE`'s output-handle offset is 44 on x86, not 48 as RE'd for x64 (a clean 4-byte shift, fixed; commit `c5dd3d27`) — full narrative for both in `src/samples/sogen-d3d9-umd/README.md`. Full regression sweep after all this session's fixes landed: every x64 and x86 guest test green, smoke test 26/26 (2026-07-04). Partial-buffer Lock support (see below) is x64-only — x86 keeps whole-buffer-lock semantics, a known, explicitly scoped-out gap (its driver-routed `OffsetToLock` offset isn't RE-verified). Five DDI slot arities flagged low-confidence during design (`pfnCheckCounter`, `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified against the real `d3d9.dll`, since none of the current x86 tests call them — a future x86 test that hits one of these slots could still find a stack-corrupting arity mismatch. |
-| M3 | DDI coverage (multi-stream, `*_UP` draws, StretchRect/ColorFill, scissor, MRT, cube/vol, more formats) | **Not started** | Int/bool constant registers, originally scoped as part of this milestone, are done (see "Constant registers" below) — pulled forward for the same reason float constants were (real games hit shader flow control early). The rest of M3 inherits the `D3DPOOL_MANAGED` permanent limitation and (on x86 only) the partial-Lock gap (see below) — none of this is M3-net-new work, it's M2 debt M3 must not silently re-break. |
+| WoW64 | WoW64/x86 D3D9 UMD port (32-bit `sogen_d3d9um`, SysWOW64) | **Done** | Not in the original plan's M1-M5 table; pulled forward per the user's own priority order since real games (MW2/BO2/GTA SA) are 32-bit and nothing else matters without a working x86 guest path. Proven: typed per-slot `__stdcall` thunk arities for all 143 `D3DDDI_DEVICEFUNCS` slots (28 real implementations unchanged, the other 115 now get a correctly-sized `stub_args_N` instead of x64's zero-arg `device_stub`, which would desync callee-cleanup x86's stack); x86-specific `D3DDDIARG_*`/`D3DDDI_*` struct layout for every real slot with a HANDLE/pointer field, pinned by `#ifndef _WIN64` `static_assert`s, including a live-RE'd fix for `D3DDDIARG_LOCK`/`D3DDDIARG_UNLOCK` (x86 is a genuinely different two-tier struct shape via `DdLockLH`, not just a pointer-shrunk copy of the x64 layout); `i686-w64-mingw32-g++` build tooling (parallel commands in `src/samples/sogen-d3d9-umd/README.md`) producing `sogen_d3d9um-x86.dll`. End-to-end proof: `d3d9-triangle-test-x86.exe`, cross-compiled to i686 and run through the real WoW64 path against the genuine 32-bit Microsoft `d3d9.dll` (not DXVK), reaches the x86 UMD and reads back the exact same pixel (`B=FF G=80 R=40 A=FF`) as the x64 `d3d9-triangle-test` — full pixel parity. **Now also covered:** `d3d9-shader-test`, `d3d9-const-test`, `d3d9-texture-test`, and `d3d9-texcoord-test` have all been cross-compiled to i686 and pass on x86 too (all analytic pixel checks exact, matching the x64 results) — M1.5/M2's shader, constant-register, texture, depth, blend, and real-`TEXCOORD0` features are now confirmed on the x86 path, not just the fixed-function triangle. Porting these caught two real, x86-only bugs along the way (both fixed): `d3d9_host::allocate_id()`'s shared id counter started at `1ULL << 32`, silently truncating through a 32-bit `HANDLE` on x86 guests (fixed, starts at `0x10000`; commit `c35871ca`); and `D3DDDIARG_CREATERESOURCE`'s output-handle offset is 44 on x86, not 48 as RE'd for x64 (a clean 4-byte shift, fixed; commit `c5dd3d27`) — full narrative for both in `src/samples/sogen-d3d9-umd/README.md`. Full regression sweep after all this session's fixes landed: every x64 and x86 guest test green, smoke test 26/26 (2026-07-04). Partial-buffer Lock support (see below) is x64-only — x86 keeps whole-buffer-lock semantics, a known, explicitly scoped-out gap (its driver-routed `OffsetToLock` offset isn't RE-verified). Five DDI slot arities flagged low-confidence during design (`pfnCheckCounter`, `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified against the real `d3d9.dll`, since none of the current x86 tests call them — a future x86 test that hits one of these slots could still find a stack-corrupting arity mismatch. **Now also covered (2026-07-05):** `d3d9-scissor-test`, `d3d9-mrt-test`, and `d3d9-multistream-test` have all been cross-compiled to i686 and pass on x86 too, pixel-exact against x64 — unlike several earlier ports, this one found ZERO new x86-only bugs; all three worked unchanged on the first run. Full regression sweep after this session's work: every x64 and x86 guest test green (`d3d9-managed-texture-test` fails by design, permanent limitation), smoke test 26/26 (2026-07-05). |
+| M3 | DDI coverage (multi-stream, `*_UP` draws, StretchRect/ColorFill, scissor, MRT, cube/vol, more formats) | **In progress** | Int/bool constant registers, originally scoped as part of this milestone, are done (see "Constant registers" below) — pulled forward for the same reason float constants were (real games hit shader flow control early). **Three more M3 items are now done**: multi-stream vertex sources (real per-stream `SetStreamSource` offsets + a new `D3DVERTEXELEMENT9` declaration parser), scissor rect (`D3DRS_SCISSORTESTENABLE`-gated real clipping), and multiple render targets (real N-RT rendering + all-bound-RTs `Clear()`) — see the "M3 coverage items" checklist below for the full account of each, including the 3 UMD bugs the multi-stream work found/fixed and the RT-slot-compaction bug found/fixed during MRT work. Proven pixel-exact on both x64 and x86/WoW64 (all three ported to i686 with zero source changes, zero new x86 bugs). **Still not started**: `*_UP` draws, `StretchRect`/`ColorFill`, cube/volume textures, formats beyond the M2 table, SM3.0 caps, and `stream_frequencies`/instancing. The remaining M3 work inherits the `D3DPOOL_MANAGED` permanent limitation, (on x86 only) the partial-Lock gap, and the newly-flagged pipeline-cache-key gap (see below) — none of this is M3-net-new work, it's M2 debt M3 must not silently re-break. |
 | M4 | Fixed-function synthesis | **Deferred by design** | Original plan: "only if MW2 needs it." MW2 is SM3-heavy; likely skippable. Revisit if a real game draw path turns out to need FF after all. |
 | M5 | MW2 integration (WoW64, SM3, 32-bit UMD) | **Not started, blocked on M3** | The WoW64/x86 UMD port itself is done (see the WoW64 row above), and its shader/texture/constant-register/texcoord features are now confirmed on the x86 path specifically (not just the fixed-function triangle) — the remaining blocker is real MW2 integration work: M3's DDI coverage and SM3 caps. The confirmed-permanent `D3DPOOL_MANAGED` limitation (see below) is likely to be hit by real MW2 asset loading and will need a fundamentally different mechanism, not just more DDI coverage. |
 
@@ -178,10 +178,71 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   §21.
 
 ### M3 coverage items (constant registers, above, are now done)
-- [ ] Multi-stream vertex sources, `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP`.
+- [x] **Multi-stream vertex sources** — done. Real per-stream `SetStreamSource` byte offsets
+  (`stream_offsets` state), a genuine NEW `D3DVERTEXELEMENT9` declaration parser
+  (`parse_vertex_decl`, did not exist before this work — M2 had no vertex-declaration support at
+  all, only hardcoded FVF-shape detection by stride), and multi-stream binding wired all the way
+  through `execute_draw`. Proven by `d3d9_multistream_test.cpp`: POSITION on stream 0, COLOR on
+  stream 1 at a deliberately NONZERO `SetStreamSource` byte offset (stream 1's buffer starts with
+  20 bytes of a wrong pad color before the real per-vertex data) — the left/right half-viewport
+  colors are only reachable if stream 1 is genuinely bound (not silently collapsed onto stream 0)
+  and its offset is honored (not treated as 0). **Significant RE finding**: vkd3d-shader assigns
+  SPIR-V input `Location` decorations to a compiled vertex shader's inputs by **declaration order**
+  (each input's `v#` register index, itself decided by where its HLSL input struct/D3DBC `dcl`
+  instructions place that semantic) — NOT by D3D9 usage semantics (`D3DDECLUSAGE`/`UsageIndex`).
+  Empirically confirmed, not assumed: three hand-written HLSL structs reordering the same three
+  semantics (`POSITION`/`TEXCOORD0`/`COLOR0`) all produced `Location 0/1/2` following struct order,
+  with `POSITION` getting no special-casing (landing at `Location 1` in one ordering) — see
+  `d3d9_host.cpp`'s comment immediately above `parse_vertex_decl` for the full experiment and
+  `HANDOFF_MACBOOK.md` for the write-up. Since `parse_vertex_decl` has no visibility into its paired
+  vertex shader's own HLSL input-struct order (that pairing is a draw-time concern, not this parser's),
+  it produces each element's `Location` as its own ordinal position within the `D3DVERTEXELEMENT9`
+  array, under the currently-true-for-every-shader-in-this-repo assumption that a vertex declaration's
+  element order matches its paired shader's input-struct order. **This is a documented, currently-safe
+  but not cross-checked assumption, not a general fix** — a future shader/declaration pair that
+  violates it would silently mis-bind vertex attributes with no error; the fully general fix (cross-
+  referencing the bound VS's own scanned input signature) is flagged as future work in `d3d9_host.cpp`'s
+  own comment, not done here.
+  Building the test also found and fixed **3 real, previously-unknown bugs in the guest UMD**
+  (`sogen_d3d9_umd.cpp`), not the host — nothing before this test ever exercised
+  `CreateVertexDeclaration`/`SetVertexDeclaration` from a guest, so none had ever been reachable:
+  (1) `pfnCreateVertexShaderDecl` (device-func slot 45) was still an unwired `device_stub`, so
+  `CreateVertexDeclaration()` never reached the host at all; (2)
+  `D3DDDIARG_CREATEVERTEXSHADERDECL`'s field order was guessed backwards (`ShaderHandle` first
+  instead of `NumVertexElements`); (3) `pfnSetVertexShaderDecl` (slot 47) was wired as a
+  struct-pointer call when it is actually a direct-value `HANDLE` call, so every real
+  `SetVertexDeclaration()` silently forwarded `decl=0` to the host. All three had to be fixed
+  together before anything but a black/unrendered result came back. **Explicitly NOT touched by
+  this work**: `stream_frequencies` (instancing) and `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` —
+  see the still-open bullet below. Ported to i686/WoW64 with zero source changes and zero new x86
+  bugs found — pixel-exact parity with x64 on the first run (see the WoW64 row and
+  `src/samples/sogen-d3d9-umd/README.md`).
+- [ ] `stream_frequencies` / instancing (`SetStreamSourceFreq`) — out of scope for the multi-stream
+  work above; per-stream byte offsets and vertex-declaration parsing were the target, not instanced
+  draws.
+- [ ] `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` (user-pointer draws, no vertex buffer object).
 - [ ] `StretchRect`/`ColorFill`.
-- [ ] Scissor rect (state already tracked; not consumed by the draw path).
-- [ ] Multiple render targets (MRT).
+- [x] **Scissor rect** — done. `D3DRS_SCISSORTESTENABLE` now gates whether `execute_draw`'s
+  Vulkan scissor uses the app's real `SetScissorRect` RECT (converted to a Vulkan
+  offset/extent) or falls back to the full render-target extent; previously the draw path
+  unconditionally forced a full-RT scissor regardless of app state. Proven by
+  `d3d9_scissor_test.cpp`: a center-rect draw checks in/out-of-rect pixels with scissor enabled,
+  then repeats with it disabled to confirm the full-RT default still works (regression safety).
+  Ported to i686/WoW64 with zero source changes and zero new x86 bugs found — pixel-exact parity
+  with x64 on the first run.
+- [x] **Multiple render targets (MRT)** — done. Real N-render-target rendering (pipeline builders
+  and `execute_draw` fan-out across all bound RTs, gated by `D3DCAPS9::NumSimultaneousRTs`, not
+  shader model) plus an all-bound-RTs `Clear()` fix (previously `Clear()` only touched RT slot 0,
+  leaving other bound RTs stale). **A real bug was found and fixed mid-implementation**: the bound-RT
+  slots are stored in a fixed-size array indexed by RT slot number, not compacted/appended — an
+  initial naive design that compacted bound RTs into a dense list would have broken the
+  `oC0`-`oC3` shader-output-to-slot correspondence for any non-contiguous binding (e.g. RT0 unbound,
+  RT1 bound), silently misrouting a pixel shader's `oC1` write to the wrong physical attachment. The
+  fixed-slot, index-preserving design avoids this by construction. Proven by `d3d9_mrt_test.cpp`:
+  two RTs bound once at startup and never rebound, a shader writing distinct `oC0`/`oC1` colors
+  confirms both RTs receive their own color (not just RT0), and `Clear()` with both RTs still bound
+  confirms both go yellow (not just RT0). Ported to i686/WoW64 with zero source changes and zero new
+  x86 bugs found — pixel-exact parity with x64 on the first run.
 - [ ] Mip-mapping — carried in the resource's own mip-level count, not yet consumed; every texture is
   treated as single-mip today.
 - [ ] Cube/volume textures — both the resource kind (M2 only handles `texture_2d`) and
@@ -202,14 +263,25 @@ registered ICD — not part of this roadmap, already working, unrelated to D3D9.
   registers, textures, depth, blending, real `TEXCOORD0`) have all been ported to x86 too and pass with
   the same analytic pixel-exact results as x64 — see the WoW64 row above for the two x86-only bugs this
   caught and fixed (`allocate_id()`'s 32-bit `HANDLE` truncation; `D3DDDIARG_CREATERESOURCE`'s x86
-  output-handle offset). **Still open:** partial-buffer Lock support is x64-only (see "Known bugs &
+  output-handle offset). **Since extended again (2026-07-05):** the scissor/MRT/multi-stream guest
+  tests have also been ported to i686 and pass with the same pixel-exact results as x64 — this round
+  found zero new x86-only bugs (a contrast worth noting given how many earlier ports did). **Still
+  open:** partial-buffer Lock support is x64-only (see "Known bugs &
   limitations" above), and 5 low-confidence DDI slot arities (`pfnCheckCounter`, `pfnSetMarker`,
   `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified since none of the current x86
   tests hit them.
-- [ ] Pipeline-key system beyond one shader pair at a time — **not actually a gap**, just not yet
-  exercised. `ensure_programmable_pipeline`'s cache is already a real per-pair cache
-  (`programmable_pipelines_`, keyed by `(vertex_shader_id << 32 | pixel_shader_id)`); it just hasn't
-  seen more than one distinct VS/PS pair in a single run yet. No rework needed, just more testing.
+- [ ] Pipeline-key system beyond one shader pair at a time — **partially a gap, flagged during the
+  MRT work (2026-07-05), still open.** `ensure_programmable_pipeline`'s cache
+  (`programmable_pipelines_`) is keyed ONLY by `(vertex_shader_id << 32 | pixel_shader_id)` — it does
+  NOT include the RT color-format list/count or depth format it's also called with
+  (`ensure_programmable_pipeline(color_formats, width, height, depth_vk_format)`), nor any
+  vertex-declaration/input-layout shape. A guest that reused the same VS/PS pair across draws with a
+  different bound RT count/format (e.g. 1 RT then 2 RTs) or a different vertex declaration would get
+  back a stale cached `VkPipeline` built for the first shape, not the current one — silently wrong
+  rendering, not a crash. Neither `d3d9_mrt_test.cpp` nor `d3d9_multistream_test.cpp` hits this (each
+  test's VS/PS pair is only ever drawn with one RT shape and one vertex declaration), so it remains
+  unexercised, not disproven. No rework has been done; needs a compound cache key before any guest
+  that varies RT/vertex-decl shape mid-session (a very plausible real-game pattern) can be trusted.
 
 ### Explicitly not planned (per the original architecture's own risk sequencing)
 - Fixed-function shader synthesis (M4) — the original plan's own words: "defer until a real MW2 draw
@@ -234,9 +306,22 @@ asset loading outright, not just degrade a corner case.
 Per the original plan's "de-risk earliest/riskiest first" philosophy, int/bool constant registers were
 taken ahead of the rest of M3 (real games hit shader flow control before most of M3's other items —
 multi-stream, `*_UP` draws, MRT, cube/volume) and are now done, proven pixel-exact on both x64 and x86.
-M3's remaining DDI-coverage items can proceed in roughly the order listed above. `D3DPOOL_MANAGED`'s
-confirmed-permanent limitation should be treated as a standing MW2-integration risk to design around
-(e.g. a different resource-management strategy for managed-pool assets) rather than something more DDI
-coverage will incidentally fix — it won't. If x86 partial-buffer Lock support becomes necessary before
-MW2 integration, budget for the same kind of live-RE pass (`D3DDDIARG_LOCK`'s x86 driver-routed
-`OffsetToLock` offset) that resolved the x64 case.
+
+Three more M3 items are now also done, all proven pixel-exact on x64 and x86: scissor rect
+(`D3DRS_SCISSORTESTENABLE`-gated real clipping), multiple render targets (real N-RT rendering + the
+all-bound-RTs `Clear()` fix, with a real fixed-slot/index-preserving design bug found and fixed along
+the way), and multi-stream vertex sources (a new `D3DVERTEXELEMENT9` parser, the vkd3d-shader
+declaration-order location-assignment finding, and 3 real UMD bugs found/fixed enabling
+`CreateVertexDeclaration`/`SetVertexDeclaration` to work at all — see "M3 coverage items" above for the
+full account of each). This work also surfaced a still-open, not-yet-exercised gap:
+`ensure_programmable_pipeline`'s cache key doesn't cover RT format/count or vertex-decl shape, so a
+guest that varies either mid-session with a repeated VS/PS pair could get a stale pipeline — see the
+"Pipeline-key system" bullet above.
+
+M3's remaining DDI-coverage items (`*_UP` draws, `StretchRect`/`ColorFill`, `stream_frequencies`/
+instancing, cube/volume textures, more formats, SM3.0 caps) can proceed in roughly the order listed
+above. `D3DPOOL_MANAGED`'s confirmed-permanent limitation should be treated as a standing
+MW2-integration risk to design around (e.g. a different resource-management strategy for managed-pool
+assets) rather than something more DDI coverage will incidentally fix — it won't. If x86 partial-buffer
+Lock support becomes necessary before MW2 integration, budget for the same kind of live-RE pass
+(`D3DDDIARG_LOCK`'s x86 driver-routed `OffsetToLock` offset) that resolved the x64 case.
