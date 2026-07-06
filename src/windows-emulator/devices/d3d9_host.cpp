@@ -402,6 +402,9 @@ namespace sogen
             return false;
         }
 
+        // vs_module_/fs_module_/pipeline_layout_ are shape-invariant (the fixed-function vertex/fragment
+        // shaders and layout never depend on bound RT/depth format) -- created once and reused by every
+        // cache miss below, unlike ff_pipelines_'s entries which vary per pipeline_cache_key.
         if (this->vs_module_ == 0 &&
             (this->vulkan_.create_shader_module(device, k_ff_vertex_shader_spirv.data(),
                                                 k_ff_vertex_shader_spirv.size() * sizeof(uint32_t), this->vs_module_) != 0 ||

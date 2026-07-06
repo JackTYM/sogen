@@ -282,8 +282,7 @@ namespace sogen
             std::array<uint32_t, 4> color_formats{}; // slot-order, 0-padded (VK_FORMAT_UNDEFINED == 0, never a real bound format)
             uint32_t depth_format{};
             uint64_t vertex_shape{}; // see vertex_shape_key()
-            friend auto operator<=>(const pipeline_cache_key&, const pipeline_cache_key&) = default;
-            friend bool operator==(const pipeline_cache_key&, const pipeline_cache_key&) = default;
+            auto operator<=>(const pipeline_cache_key&) const = default;
         };
 
         // Keyed by pipeline_cache_key with vertex_shader/pixel_shader/vertex_shape all 0 (FF never varies
