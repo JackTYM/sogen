@@ -3055,6 +3055,16 @@ namespace sogen
         barrier.subresourceRange = to_vk_range(range);
 
         dev->second.cmd_pipeline_barrier(cb->second.handle, src_stage_mask, dst_stage_mask, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        // Render targets (and depth-stencils, which share the same create_render_target/id space) are
+        // also tracked in render_targets for readback_render_target's layout safety check -- keep that
+        // mirror accurate for every barrier a render target goes through, not just submit_clear's own.
+        const auto rt = this->impl_->render_targets.find(image);
+        if (rt != this->impl_->render_targets.end())
+        {
+            rt->second.current_layout = barrier.newLayout;
+        }
+
         return VK_SUCCESS;
     }
 
