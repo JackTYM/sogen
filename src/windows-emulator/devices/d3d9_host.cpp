@@ -36,6 +36,7 @@ namespace sogen
         constexpr uint32_t d3dsamp_magfilter = 5;
         constexpr uint32_t d3dsamp_minfilter = 6;
         constexpr uint32_t d3dsamp_mipfilter = 7;
+        constexpr uint32_t d3dsamp_maxmiplevel = 9;
         constexpr uint32_t d3dsamp_maxanisotropy = 10;
 
         // Public D3DRENDERSTATETYPE values (d3d9types.h) needed for real depth-test wiring.
@@ -927,7 +928,8 @@ namespace sogen
         }
     } // namespace
 
-    bool d3d9_host::build_sampler(const uint64_t device, const uint32_t sampler_index, uint64_t& out_sampler) const
+    bool d3d9_host::build_sampler(const uint64_t device, const uint32_t sampler_index, const uint32_t mip_levels,
+                                  uint64_t& out_sampler) const
     {
         out_sampler = 0;
         const auto& ss = this->state_.sampler_state;
@@ -943,9 +945,20 @@ namespace sogen
         const uint32_t address_w = d3d9_address_to_vk(sampler_state_or(ss, sampler_index, d3dsamp_addressw, 1));
         const uint32_t max_anisotropy = sampler_state_or(ss, sampler_index, d3dsamp_maxanisotropy, 1);
 
-        // Every resource created by this slice has exactly one mip level (see create_resource), so LOD is
-        // pinned to 0 regardless of the app's own MIPFILTER/MAXMIPLEVEL/MIPMAPLODBIAS state.
-        //
+        // Real LOD range from the bound texture's actual mip count and the app's sampler state. The mip
+        // chain has mip_levels levels (0..last_level); D3DSAMP_MAXMIPLEVEL (default 0) is the most-detailed
+        // level the sampler may use, i.e. it clamps min_lod. D3DSAMP_MIPFILTER == D3DTEXF_NONE (0) disables
+        // mip selection entirely, so the sampler is pinned to that single MAXMIPLEVEL level (min==max_lod);
+        // POINT/LINEAR let the GPU pick across [MAXMIPLEVEL, last_level] by screen-space derivative. For a
+        // single-mip texture (mip_levels<=1) this collapses to min==max_lod==0, identical to the old
+        // hardcoded pinning -- so existing single-mip resources are byte-for-byte unaffected. mipmap_mode
+        // (above) already carries the app's D3DSAMP_MIPFILTER POINT-vs-LINEAR choice for the >NONE cases.
+        const uint32_t mip_filter = sampler_state_or(ss, sampler_index, d3dsamp_mipfilter, 0);
+        const uint32_t max_mip_level = sampler_state_or(ss, sampler_index, d3dsamp_maxmiplevel, 0);
+        const uint32_t last_level = mip_levels > 0 ? mip_levels - 1 : 0;
+        const float min_lod = static_cast<float>(std::min(max_mip_level, last_level));
+        const float max_lod = mip_filter == 0 /*D3DTEXF_NONE*/ ? min_lod : static_cast<float>(last_level);
+
         // D3DSAMP_BORDERCOLOR is captured into sampler_state (see the UMD's tss_key table) but never read
         // here -- border_color is hardcoded to transparent-black, matching D3D9's own default. vulkan_host
         // ::create_sampler only accepts discrete VkBorderColor buckets (transparent/opaque black/white; the
@@ -955,8 +968,8 @@ namespace sogen
         return this->vulkan_.create_sampler(device, mag_filter, min_filter, address_u, address_v, address_w, mipmap_mode,
                                             /*compare_enable=*/0, /*compare_op=*/0,
                                             /*anisotropy_enable=*/max_anisotropy > 1 ? 1 : 0, /*border_color=*/0,
-                                            /*mip_lod_bias=*/0.0f, static_cast<float>(max_anisotropy), /*min_lod=*/0.0f,
-                                            /*max_lod=*/0.0f, out_sampler) == 0 &&
+                                            /*mip_lod_bias=*/0.0f, static_cast<float>(max_anisotropy), min_lod, max_lod,
+                                            out_sampler) == 0 &&
                out_sampler != 0;
     }
 
@@ -1371,13 +1384,16 @@ namespace sogen
                     uint32_t tex_vk_format = 0;
                     if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
                     {
+                        // Sampling view spans the texture's full mip chain (levelCount = mip_levels) so the
+                        // sampler can select any level; single-mip textures still get levelCount 1.
+                        const uint32_t view_levels = std::max(1u, tex.mip_levels);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
-                                                        VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        VK_IMAGE_VIEW_TYPE_2D, 0, view_levels, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
                                                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                                         VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
                     }
                 }
-                if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, tex_samplers[stage]))
+                if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, std::max(1u, tex.mip_levels), tex_samplers[stage]))
                 {
                     tex_image_views[stage] = tex.vk_image_view_id;
                 }
@@ -1670,6 +1686,22 @@ namespace sogen
         const bool texture_format_ok = is_texture && d3d9_format_to_vulkan(format, texture_vk_format);
         const size_t texture_backing_size = texture_format_ok ? vk_texture_data_size(texture_vk_format, width, height) : 0;
 
+        // A sampled texture can carry a real mip chain (mip_levels levels). Level 0 lives in `backing`
+        // (below); levels 1..N-1 each get their own byte vector in `extra_mips`, sized for that level's
+        // halved dimensions (min 1) -- a flat single vector can't hold them since each level differs in
+        // size. Non-texture resources and single-mip textures leave extra_mips empty.
+        const uint32_t texture_mip_levels = std::max(1u, mip_levels);
+        std::vector<std::vector<std::byte>> extra_mips;
+        if (texture_format_ok)
+        {
+            for (uint32_t level = 1; level < texture_mip_levels; ++level)
+            {
+                const uint32_t level_width = std::max(1u, width >> level);
+                const uint32_t level_height = std::max(1u, height >> level);
+                extra_mips.emplace_back(vk_texture_data_size(texture_vk_format, level_width, level_height));
+            }
+        }
+
         const size_t backing_size = is_buffer ? width
                                     : is_render_target ? static_cast<size_t>(width) * height * 4
                                                         : texture_backing_size;
@@ -1684,6 +1716,7 @@ namespace sogen
             .usage = usage,
             .pool = pool,
             .backing = std::vector<std::byte>(backing_size),
+            .extra_mips = std::move(extra_mips),
         };
 
         if (is_render_target)
@@ -1706,7 +1739,7 @@ namespace sogen
                 uint64_t vk_image = 0;
                 constexpr uint32_t sampled_usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
                 if (this->vulkan_.create_image(device, texture_vk_format, width, height, sampled_usage, VK_IMAGE_TILING_OPTIMAL,
-                                               /*samples=*/1, VK_IMAGE_TYPE_2D, /*depth=*/1, /*mip_levels=*/1, /*array_layers=*/1,
+                                               /*samples=*/1, VK_IMAGE_TYPE_2D, /*depth=*/1, texture_mip_levels, /*array_layers=*/1,
                                                /*flags=*/0, vk_image) == 0 &&
                     vk_image != 0)
                 {
@@ -1760,10 +1793,35 @@ namespace sogen
         {
             return false;
         }
-        const size_t required = vk_texture_data_size(vk_format, tex.width, tex.height);
-        if (required == 0 || tex.backing.size() < required)
+
+        // Gather every mip level's tightly-packed size and source backing. Level 0 lives in `backing`,
+        // levels 1..N-1 in `extra_mips` (see create_resource) -- subresource_backing() abstracts that.
+        // Each level is concatenated into one staging buffer at its own offset. Bail with "false" (the
+        // same incomplete-data contract the single-mip version had) if any level's pixel data has not
+        // been written yet, so a half-filled mip chain never uploads a partially-garbage image.
+        const uint32_t mip_levels = std::max(1u, tex.mip_levels);
+        struct level_upload
         {
-            return false; // no (or incomplete) pixel data written yet
+            uint32_t width;
+            uint32_t height;
+            size_t size;
+            uint64_t staging_offset;
+            const std::byte* src;
+        };
+        std::vector<level_upload> levels;
+        uint64_t total_size = 0;
+        for (uint32_t level = 0; level < mip_levels; ++level)
+        {
+            const uint32_t level_width = std::max(1u, tex.width >> level);
+            const uint32_t level_height = std::max(1u, tex.height >> level);
+            const size_t level_size = vk_texture_data_size(vk_format, level_width, level_height);
+            const std::vector<std::byte>& src = tex.subresource_backing(level);
+            if (level_size == 0 || src.size() < level_size)
+            {
+                return false; // no (or incomplete) pixel data written for this level yet
+            }
+            levels.push_back({level_width, level_height, level_size, total_size, src.data()});
+            total_size += level_size;
         }
 
         const uint64_t device = this->ensure_vk_device();
@@ -1779,7 +1837,7 @@ namespace sogen
         // execute_draw (the only caller so far) can add its own caching if re-uploading every draw turns
         // out to matter.
         uint64_t staging_buffer = 0;
-        if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
+        if (this->vulkan_.create_buffer(device, total_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
             staging_buffer == 0)
         {
             return false;
@@ -1798,37 +1856,47 @@ namespace sogen
             return false;
         }
         this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
-        this->vulkan_.upload_memory(device, staging_memory, 0, required, tex.backing.data(), required);
+        for (const auto& level : levels)
+        {
+            this->vulkan_.upload_memory(device, staging_memory, level.staging_offset, level.size, level.src, level.size);
+        }
 
         this->vulkan_.reset_fence(device, this->fence_);
         this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
 
-        const vulkan_host::subresource_range range{
-            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        // One barrier over the whole mip chain, then one buffer->image copy per level into its own mip.
+        const vulkan_host::subresource_range range{.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                                   .base_mip_level = 0,
+                                                   .level_count = mip_levels,
+                                                   .base_array_layer = 0,
+                                                   .layer_count = 1};
         // VK_IMAGE_LAYOUT_UNDEFINED is a valid old_layout regardless of the image's actual current
         // layout (Vulkan's "discard previous contents" transition) -- correct here since every upload
-        // fully overwrites mip 0 anyway, whether this is the first upload or a later re-upload.
+        // fully overwrites every level anyway, whether this is the first upload or a later re-upload.
         this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, range);
 
-        const vulkan_host::buffer_image_copy_region region{
-            .buffer_offset = 0,
-            .buffer_row_length = 0,
-            .buffer_image_height = 0,
-            .image_offset_x = 0,
-            .image_offset_y = 0,
-            .image_offset_z = 0,
-            .width = tex.width,
-            .height = tex.height,
-            .depth = 1,
-            .mip_level = 0,
-            .base_array_layer = 0,
-            .layer_count = 1,
-            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
-        };
-        this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, tex.vk_image_id,
-                                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+        for (uint32_t level = 0; level < mip_levels; ++level)
+        {
+            const vulkan_host::buffer_image_copy_region region{
+                .buffer_offset = levels[level].staging_offset,
+                .buffer_row_length = 0,
+                .buffer_image_height = 0,
+                .image_offset_x = 0,
+                .image_offset_y = 0,
+                .image_offset_z = 0,
+                .width = levels[level].width,
+                .height = levels[level].height,
+                .depth = 1,
+                .mip_level = level,
+                .base_array_layer = 0,
+                .layer_count = 1,
+                .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+            };
+            this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, tex.vk_image_id,
+                                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+        }
 
         this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2095,7 +2163,7 @@ namespace sogen
         return d3d_ok;
     }
 
-    int32_t d3d9_host::lock(const uint64_t resource, const uint32_t /*subresource*/, const uint32_t offset, const uint32_t size,
+    int32_t d3d9_host::lock(const uint64_t resource, const uint32_t subresource, const uint32_t offset, const uint32_t size,
                             const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size)
     {
         out_data_size = 0;
@@ -2105,10 +2173,16 @@ namespace sogen
         {
             return d3derr_invalidcall;
         }
+        // subresource != 0 addresses a mip level in extra_mips (see resource_entry); reject an index the
+        // resource doesn't have. Buffers/render targets only ever use subresource 0.
+        if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())
+        {
+            return d3derr_invalidcall;
+        }
 
         this->sync_backing_from_gpu(it->second);
 
-        auto& backing = it->second.backing;
+        auto& backing = it->second.subresource_backing(subresource);
         const size_t requested = size != 0 ? size : backing.size();
         if (offset > backing.size())
         {
@@ -2126,7 +2200,7 @@ namespace sogen
         return d3d_ok;
     }
 
-    int32_t d3d9_host::unlock(const uint64_t resource, const uint32_t /*subresource*/, const uint32_t offset, const void* data,
+    int32_t d3d9_host::unlock(const uint64_t resource, const uint32_t subresource, const uint32_t offset, const void* data,
                               const size_t data_size)
     {
         if (data == nullptr || data_size == 0)
@@ -2139,8 +2213,12 @@ namespace sogen
         {
             return d3derr_invalidcall;
         }
+        if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())
+        {
+            return d3derr_invalidcall;
+        }
 
-        auto& backing = it->second.backing;
+        auto& backing = it->second.subresource_backing(subresource);
         const size_t required_size = static_cast<size_t>(offset) + data_size;
         if (backing.size() < required_size)
         {

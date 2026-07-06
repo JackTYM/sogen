@@ -920,9 +920,10 @@ static_assert(sizeof(D3DDDIARG_CREATERESOURCE) == 60, "size confirmed via real d
 //     DdLockLH is the single builder for the driver-routed path that actually reaches pfnLock, and it
 //     writes 0 there for buffers (correct) and the real level for textures/surfaces; the only other
 //     path (sysmem-routed buffers) has its driver-returned output discarded by the app regardless. So
-//     a future umd_Lock could read this field for every lock without per-call routing detection. This
-//     is DOCUMENTATION ONLY for now -- umd_Lock/umd_Unlock still hardcode subresource 0; wiring real
-//     per-subresource addressing into the UMD and host lock()/unlock() is separate, gated work.
+//     umd_Lock reads this field for every lock without per-call routing detection. As of the real
+//     mip-mapping work, umd_Lock/umd_Unlock DO consume it (replacing the former hardcoded subresource
+//     0): it rides the wire's `subresource` field and addresses the correct per-mip-level backing store
+//     host-side (d3d9_host.cpp's extra_mips / subresource_backing).
 #ifdef _WIN64
 typedef struct _D3DDDIARG_LOCK
 {
@@ -1029,14 +1030,16 @@ typedef struct _D3DDDIARG_LOCK
 #ifdef _WIN64
 typedef struct _D3DDDIARG_UNLOCK
 {
-    HANDLE hResource; // 0 -- confirmed
-    UINT64 Reserved0; // 8 -- confirmed present (same field as D3DDDIARG_LOCK's Reserved0)
+    HANDLE hResource;        // 0 -- confirmed
+    UINT64 SubResourceIndex; // 8 -- same field as D3DDDIARG_LOCK's SubResourceIndex (DdUnlockLH's
+                             // v5[1]); the flattened subresource index. Truncated to 32 bits when read
+                             // (the real value fits a UINT; the high half is always 0 live).
 } D3DDDIARG_UNLOCK;
 #else
 typedef struct _D3DDDIARG_UNLOCK
 {
-    HANDLE hResource; // 0 -- confirmed
-    UINT32 Reserved0; // 4 -- confirmed present (same field as D3DDDIARG_LOCK's Reserved0)
+    HANDLE hResource;        // 0 -- confirmed
+    UINT32 SubResourceIndex; // 4 -- same field as D3DDDIARG_LOCK's SubResourceIndex (DdUnlockLH's v5[1]).
 } D3DDDIARG_UNLOCK;
 #endif
 

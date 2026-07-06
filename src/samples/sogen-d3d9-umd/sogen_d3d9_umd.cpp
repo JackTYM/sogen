@@ -12,7 +12,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <d3d9_command_protocol.hpp>
@@ -1770,12 +1772,15 @@ namespace
     }
 
     // D3DDDIARG_LOCK::pData must point to memory that stays valid until the matching Unlock (the app
-    // writes vertex/index data directly through it), so each outstanding lock owns a persistent
-    // heap buffer here instead of a call-local one. Keyed by the wire resource id (== hResource). The
-    // buffer holds only `[offset, end)` of the resource (see umd_Lock), so g_locked_offsets remembers
-    // which offset it started at, for umd_Unlock to write it back to the right place.
-    std::unordered_map<uint64_t, std::vector<uint8_t>> g_locked_buffers;
-    std::unordered_map<uint64_t, uint32_t> g_locked_offsets;
+    // writes vertex/index/texture data directly through it), so each outstanding lock owns a persistent
+    // heap buffer here instead of a call-local one. Keyed by (wire resource id, subresource index): a
+    // texture can have several mip levels (subresources) locked at once, each with its own independent
+    // pData/backing, so the subresource must be part of the key. Buffers only ever use subresource 0.
+    // The buffer holds only `[offset, end)` of the resource (see umd_Lock), so g_locked_offsets
+    // remembers which offset it started at, for umd_Unlock to write it back to the right place.
+    using locked_key = std::pair<uint64_t, uint32_t>;
+    std::map<locked_key, std::vector<uint8_t>> g_locked_buffers;
+    std::map<locked_key, uint32_t> g_locked_offsets;
 
     HRESULT APIENTRY umd_Lock(HANDLE /*hDevice*/, D3DDDIARG_LOCK* pArgs)
     {
@@ -1791,6 +1796,13 @@ namespace
         // stencil) uses this same struct region for Rect/Box input, not a byte offset.
         const auto raw_handle = reinterpret_cast<uint64_t>(pArgs->hResource);
         const bool is_buffer = g_created_resource_ids.find(raw_handle) == g_created_resource_ids.end();
+
+        // SubResourceIndex (d3d9_ddi.hpp, offset 8 x64 / 4 x86, RE-verified live+static 2026-07-06) is the
+        // flattened subresource index: the real mip level for a LockRect(level) call, and 0 for buffers
+        // (which have no subresources). Safe to read unconditionally for every lock (same argument that
+        // justifies reading OffsetToLock unconditionally -- see d3d9_ddi.hpp). This is what routes a
+        // per-mip-level texture lock to the correct per-level backing store host-side.
+        const uint32_t subresource = pArgs->SubResourceIndex;
 
 #ifdef _WIN64
         // OffsetToLock (d3d9_ddi.hpp, offset 80) is reliable for "driver-routed" buffer locks -- the
@@ -1811,14 +1823,16 @@ namespace
 #endif
 
         const auto resource = resolve_buffer_resource_id(pArgs->hResource, offset);
-        d3d9c::lock_request req{.resource = resource, .subresource = 0, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
+        const locked_key key{resource, subresource};
+        d3d9c::lock_request req{
+            .resource = resource, .subresource = subresource, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
 
         // First call with no output buffer just to learn the true backing size via lock_response
-        // (lock_response::data_size is "bytes available from `offset` to the end of the resource").
+        // (lock_response::data_size is "bytes available from `offset` to the end of the subresource").
         d3d9c::lock_response probe{};
         bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe));
 
-        auto& buffer = g_locked_buffers[resource];
+        auto& buffer = g_locked_buffers[key];
         buffer.assign(probe.data_size, 0);
 
         std::vector<uint8_t> out_buf(sizeof(d3d9c::lock_response) + buffer.size());
@@ -1826,13 +1840,13 @@ namespace
         const auto* resp = reinterpret_cast<const d3d9c::lock_response*>(out_buf.data());
         if (resp->hr != 0)
         {
-            g_locked_buffers.erase(resource);
+            g_locked_buffers.erase(key);
             pArgs->pData = nullptr;
             return E_FAIL;
         }
         std::memcpy(buffer.data(), out_buf.data() + sizeof(*resp), buffer.size());
         pArgs->pData = buffer.data();
-        g_locked_offsets[resource] = offset;
+        g_locked_offsets[key] = offset;
         return S_OK;
     }
 
@@ -1843,26 +1857,31 @@ namespace
             return S_OK;
         }
         const auto resource = resolve_resource_id(pArgs->hResource);
-        const auto it = g_locked_buffers.find(resource);
+        // SubResourceIndex (same field/derivation as D3DDDIARG_LOCK's -- DdUnlockLH's v5[1]) selects which
+        // locked subresource to write back; 0 for buffers. Truncated to 32 bits (x64 stores it in a UINT64
+        // slot whose high half is always 0 live).
+        const uint32_t subresource = static_cast<uint32_t>(pArgs->SubResourceIndex);
+        const locked_key key{resource, subresource};
+        const auto it = g_locked_buffers.find(key);
         if (it == g_locked_buffers.end())
         {
             return S_OK; // nothing to write back (e.g. a failed Lock)
         }
 
-        const auto offset_it = g_locked_offsets.find(resource);
+        const auto offset_it = g_locked_offsets.find(key);
         const uint32_t offset = offset_it != g_locked_offsets.end() ? offset_it->second : 0;
 
         std::vector<uint8_t> buf(sizeof(d3d9c::unlock_request) + it->second.size());
         auto* req = reinterpret_cast<d3d9c::unlock_request*>(buf.data());
         req->resource = resource;
-        req->subresource = 0;
+        req->subresource = subresource;
         req->offset = offset;
         req->data_size = static_cast<uint32_t>(it->second.size());
         std::memcpy(buf.data() + sizeof(*req), it->second.data(), it->second.size());
         bridge_call(gb::ioctl_d3d9_unlock, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
 
         g_locked_buffers.erase(it);
-        g_locked_offsets.erase(resource);
+        g_locked_offsets.erase(key);
         return S_OK;
     }
 

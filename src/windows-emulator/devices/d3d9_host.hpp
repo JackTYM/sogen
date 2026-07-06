@@ -152,10 +152,21 @@ namespace sogen
             uint32_t mip_levels;
             uint32_t usage;
             uint32_t pool;
-            std::vector<std::byte> backing; // host-side shadow copy; kept in sync with vk_image below
+            std::vector<std::byte> backing; // subresource 0 (mip level 0); buffers/RTs use only this
+            // Per-mip-level backing for subresources 1..mip_levels-1 (sampled textures only): each mip is
+            // a different byte size, so a single flat vector can't address them. Empty for buffers, render
+            // targets, and single-mip textures. Indexed as extra_mips[subresource - 1].
+            std::vector<std::vector<std::byte>> extra_mips;
             uint64_t vk_image_id{}; // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{};    // 0 until first drawn to; lazily created, cached per resource
             bool backing_dirty{}; // color RT: GPU image has drawn/cleared pixels not yet copied to backing
+
+            // Selects subresource `index`'s backing store (index 0 == `backing`; higher == a mip level).
+            // Callers must bounds-check index against extra_mips.size() + 1 before calling.
+            std::vector<std::byte>& subresource_backing(const uint32_t index)
+            {
+                return index == 0 ? backing : extra_mips[index - 1];
+            }
         };
 
         struct shader_entry
@@ -367,7 +378,7 @@ namespace sogen
         // back to D3D9's own documented per-state defaults for anything never explicitly set). Created
         // fresh per draw and destroyed after, mirroring execute_draw's own per-draw VS/PS UBO lifecycle --
         // no persistent sampler cache yet.
-        bool build_sampler(uint64_t device, uint32_t sampler_index, uint64_t& out_sampler) const;
+        bool build_sampler(uint64_t device, uint32_t sampler_index, uint32_t mip_levels, uint64_t& out_sampler) const;
         // Returns the cached parsed_vertex_decl for state_.vertex_decl, or nullptr when there's no real
         // declaration to use (state_.vertex_decl == 0, or its cached parse produced no attributes --
         // e.g. a decl containing only unrecognized D3DDECLTYPEs). Shared by ensure_programmable_pipeline
