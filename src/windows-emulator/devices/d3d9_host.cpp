@@ -1012,10 +1012,7 @@ namespace sogen
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
         this->vulkan_.end_command_buffer(this->command_buffer_);
         this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
-        {
-            // Synchronous wait, matching this function's own submit pattern below.
-        }
+        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
         return true;
     }
 
@@ -1622,10 +1619,7 @@ namespace sogen
         this->vulkan_.end_command_buffer(this->command_buffer_);
         this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
 
-        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
-        {
-            // Synchronous wait, matching create_render_target's own submit_clear/readback pattern.
-        }
+        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
         destroy_stream_buffers();
         if (index_buffer_vk != 0)
@@ -1909,10 +1903,7 @@ namespace sogen
 
         this->vulkan_.end_command_buffer(this->command_buffer_);
         this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
-        {
-            // Synchronous wait, matching execute_draw's own submit pattern.
-        }
+        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
         this->vulkan_.destroy_buffer(device, staging_buffer);
         this->vulkan_.free_memory(device, staging_memory);
@@ -2067,9 +2058,7 @@ namespace sogen
 
         this->vulkan_.end_command_buffer(this->command_buffer_);
         this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
-        {
-        }
+        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
         this->vulkan_.destroy_buffer(device, staging_buffer);
         this->vulkan_.free_memory(device, staging_memory);
@@ -2159,9 +2148,7 @@ namespace sogen
 
         this->vulkan_.end_command_buffer(this->command_buffer_);
         this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
-        {
-        }
+        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
         dst.backing_dirty = true;
         return d3d_ok;

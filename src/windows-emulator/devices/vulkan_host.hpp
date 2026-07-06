@@ -131,6 +131,9 @@ namespace sogen
         // Non-blocking: returns VK_SUCCESS if signaled, VK_NOT_READY otherwise. Never waits.
         int32_t get_fence_status(uint64_t fence);
 
+        // Blocks the calling thread until the fence signals or timeout_ns elapses (UINT64_MAX = infinite).
+        int32_t wait_for_fence(uint64_t fence, uint64_t timeout_ns);
+
         int32_t queue_wait_idle(uint64_t queue);
         int32_t device_wait_idle(uint64_t device);
 

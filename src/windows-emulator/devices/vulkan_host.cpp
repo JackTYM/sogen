@@ -2302,6 +2302,23 @@ namespace sogen
         return dev->second.get_fence_status(dev->second.handle, it->second.handle);
     }
 
+    int32_t vulkan_host::wait_for_fence(uint64_t fence, uint64_t timeout_ns)
+    {
+        const auto it = this->impl_->fences.find(fence);
+        if (it == this->impl_->fences.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev = this->impl_->devices.find(it->second.device_id);
+        if (dev == this->impl_->devices.end() || !dev->second.wait_for_fences)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        return dev->second.wait_for_fences(dev->second.handle, 1, &it->second.handle, VK_TRUE, timeout_ns);
+    }
+
     int32_t vulkan_host::create_event(uint64_t device, uint32_t flags, uint64_t& out_event)
     {
         out_event = 0;
