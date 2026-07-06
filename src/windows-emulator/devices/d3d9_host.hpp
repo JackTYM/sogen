@@ -416,6 +416,24 @@ namespace sogen
         // that dirtied it) and fails closed otherwise.
         void sync_backing_from_gpu(resource_entry& rt);
 
+        // pfnColorFill: fills a rect of a color render target's Vulkan image with a single D3DCOLOR.
+        // Implemented as a scoped buffer->image transfer copy on the shared draw command buffer, going
+        // through the same cmd_pipeline_barrier choke point (which keeps render_targets[image]
+        // current_layout authoritative) execute_draw uses; leaves the RT in TRANSFER_SRC_OPTIMAL and
+        // marks backing_dirty so sync_backing_from_gpu picks it up on the next Lock/Present. Assumes the
+        // RT is at its resting TRANSFER_SRC_OPTIMAL layout on entry (post clear/draw), matching
+        // execute_draw's own documented assumption.
+        int32_t color_fill(uint64_t resource, uint32_t subresource, int32_t left, int32_t top, int32_t right, int32_t bottom,
+                           uint32_t color_argb);
+
+        // pfnBlt (StretchRect): blits src_rect of src_resource's image into dst_rect of dst_resource's
+        // image via vkCmdBlitImage (which scales natively when the rects differ in size). Same shared
+        // command buffer / cmd_pipeline_barrier choke point as color_fill; both RTs assumed at their
+        // resting TRANSFER_SRC_OPTIMAL layout on entry. Marks the destination backing_dirty.
+        int32_t blt(uint64_t dst_resource, uint32_t dst_subresource, int32_t dst_left, int32_t dst_top, int32_t dst_right,
+                    int32_t dst_bottom, uint64_t src_resource, uint32_t src_subresource, int32_t src_left, int32_t src_top,
+                    int32_t src_right, int32_t src_bottom, uint32_t filter);
+
         // Present only for indexed draws; execute_draw binds `index_buffer` and calls cmd_draw_indexed
         // instead of cmd_draw when passed. index_format matches set_indices_record::format (0 = 16-bit,
         // 1 = 32-bit indices).

@@ -362,6 +362,43 @@ namespace sogen::d3d9_cmd
         // uint8_t index_data[index_data_size];
     };
 
+    // color_fill: IDirect3DDevice9::ColorFill -> real d3d9.dll pfnColorFill (device-func-table slot 56).
+    // Fills DstRect of the resolved resource's subresource with a single D3DCOLOR (ARGB). The rect is in
+    // D3D9 RECT convention (right/bottom exclusive); see sogen_d3d9_umd.cpp's umd_ColorFill and
+    // D3DDDIARG_COLORFILL in d3d9_ddi.hpp for the RE trail.
+    struct color_fill_record
+    {
+        resource_id resource;
+        uint32_t subresource;
+        uint32_t color_argb; // D3DCOLOR (0xAARRGGBB)
+        int32_t left;
+        int32_t top;
+        int32_t right;
+        int32_t bottom;
+    };
+
+    // blt: IDirect3DDevice9::StretchRect -> real d3d9.dll pfnBlt (device-func-table slot 55). Blits
+    // SrcRect of src_resource into DstRect of dst_resource; when the two rects differ in size the host's
+    // vkCmdBlitImage scales (filter selects nearest/linear). D3D9 RECT convention (right/bottom
+    // exclusive). See sogen_d3d9_umd.cpp's umd_Blt and D3DDDIARG_BLT in d3d9_ddi.hpp for the RE trail.
+    struct blt_record
+    {
+        resource_id dst_resource;
+        resource_id src_resource;
+        uint32_t dst_subresource;
+        uint32_t src_subresource;
+        int32_t dst_left;
+        int32_t dst_top;
+        int32_t dst_right;
+        int32_t dst_bottom;
+        int32_t src_left;
+        int32_t src_top;
+        int32_t src_right;
+        int32_t src_bottom;
+        uint32_t filter; // D3DTEXTUREFILTERTYPE (0 = NONE/POINT, 2 = LINEAR)
+        uint32_t reserved;
+    };
+
     // Portability guard, same rationale as gpu_bridge_protocol.hpp's own asserts: every struct here
     // uses only fixed-width integers/floats and resource_id (a uint64), never size_t/pointers, so a
     // 32-bit WoW64 guest and a 64-bit host agree on layout byte-for-byte.
@@ -398,5 +435,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(draw_indexed_primitive_record) == 24, "wire layout drift");
     static_assert(sizeof(set_stream_source_um_record) == 16, "wire layout drift");
     static_assert(sizeof(set_indices_um_record) == 8, "wire layout drift");
+    static_assert(sizeof(color_fill_record) == 32, "wire layout drift");
+    static_assert(sizeof(blt_record) == 64, "wire layout drift");
 
 } // namespace sogen::d3d9_cmd

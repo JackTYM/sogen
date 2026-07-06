@@ -848,6 +848,15 @@ namespace
         caps->TextureCaps = D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_CUBEMAP |
                             D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPCUBEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP;
         caps->TextureFilterCaps = 0x03070700;
+        // StretchRectFilterCaps gates whether real d3d9.dll lets a SCALED (different-size-rect)
+        // IDirect3DDevice9::StretchRect reach the driver's pfnBlt at all: with this field 0 (the memset
+        // default), CD3DDDIDX10::StretchRect's own validation returns D3DERR_INVALIDCALL before pfnBlt is
+        // ever called for any stretch, and only pure same-size copies dispatch. MINFPOINT|MAGFPOINT|
+        // MINFLINEAR|MAGFLINEAR advertises point+linear stretch so scaled StretchRect reaches pfnBlt
+        // (the host's vkCmdBlitImage then performs the actual scale). Additive/safe: same value shape as
+        // VertexTextureFilterCaps below.
+        caps->StretchRectFilterCaps = D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MAGFPOINT |
+                                      D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR;
         caps->MaxTextureWidth = 8192;
         caps->MaxTextureHeight = 8192;
         caps->MaxVolumeExtent = 2048;
@@ -1132,6 +1141,55 @@ namespace
         d3d9c::tex_blt_request req{.dst_resource = reinterpret_cast<uint64_t>(pArgs->hDstResource),
                                    .src_resource = reinterpret_cast<uint64_t>(pArgs->hSrcResource)};
         bridge_call(gb::ioctl_d3d9_tex_blt, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    // pfnColorFill (device-func-table slot 56), behind IDirect3DDevice9::ColorFill. Reads the RE'd
+    // D3DDDIARG_COLORFILL (see d3d9_ddi.hpp) and records a streamed color_fill so it batches in-order
+    // with the surrounding draw/clear stream, exactly like umd_Clear. hResource is the same direct
+    // resource-id convention every other DDI call in this file uses.
+    HRESULT APIENTRY umd_ColorFill(HANDLE /*hDevice*/, CONST D3DDDIARG_COLORFILL* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
+        const d3d9c::color_fill_record req{.resource = reinterpret_cast<uint64_t>(pArgs->hResource),
+                                           .subresource = pArgs->SubResourceIndex,
+                                           .color_argb = pArgs->Color,
+                                           .left = pArgs->DstRect.left,
+                                           .top = pArgs->DstRect.top,
+                                           .right = pArgs->DstRect.right,
+                                           .bottom = pArgs->DstRect.bottom};
+        record_d3d9(gb::command::d3d9_color_fill, &req, sizeof(req));
+        return S_OK;
+    }
+
+    // pfnBlt (device-func-table slot 55), behind IDirect3DDevice9::StretchRect. Reads the RE'd
+    // D3DDDIARG_BLT (see d3d9_ddi.hpp -- the struct is SRC-first-then-DST, live-confirmed) and records a
+    // streamed blt. Flags carries the StretchRect Filter word; the host infers scaling from the Src/Dst
+    // rect-size ratio.
+    HRESULT APIENTRY umd_Blt(HANDLE /*hDevice*/, CONST D3DDDIARG_BLT* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
+        const d3d9c::blt_record req{.dst_resource = reinterpret_cast<uint64_t>(pArgs->hDstResource),
+                                    .src_resource = reinterpret_cast<uint64_t>(pArgs->hSrcResource),
+                                    .dst_subresource = pArgs->DstSubResourceIndex,
+                                    .src_subresource = pArgs->SrcSubResourceIndex,
+                                    .dst_left = pArgs->DstRect.left,
+                                    .dst_top = pArgs->DstRect.top,
+                                    .dst_right = pArgs->DstRect.right,
+                                    .dst_bottom = pArgs->DstRect.bottom,
+                                    .src_left = pArgs->SrcRect.left,
+                                    .src_top = pArgs->SrcRect.top,
+                                    .src_right = pArgs->SrcRect.right,
+                                    .src_bottom = pArgs->SrcRect.bottom,
+                                    .filter = pArgs->Flags,
+                                    .reserved = 0};
+        record_d3d9(gb::command::d3d9_blt, &req, sizeof(req));
         return S_OK;
     }
 
@@ -1864,6 +1922,8 @@ namespace
             slots[50] = reinterpret_cast<void*>(&umd_SetScissorRect);         // pfnSetScissorRect
             slots[51] = reinterpret_cast<void*>(&umd_SetStreamSource);        // pfnSetStreamSource
             slots[52] = reinterpret_cast<void*>(&umd_SetStreamSourceFreq);    // pfnSetStreamSourceFreq
+            slots[55] = reinterpret_cast<void*>(&umd_Blt);                    // pfnBlt (StretchRect)
+            slots[56] = reinterpret_cast<void*>(&umd_ColorFill);              // pfnColorFill
             slots[62] = reinterpret_cast<void*>(&umd_SetRenderTarget);        // pfnSetRenderTarget
             slots[63] = reinterpret_cast<void*>(&umd_SetDepthStencil);        // pfnSetDepthStencil
             slots[65] = reinterpret_cast<void*>(&umd_SetPixelShaderConstI);   // pfnSetPixelShaderConstI

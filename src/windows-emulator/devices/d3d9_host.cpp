@@ -1899,6 +1899,199 @@ namespace sogen
         }
     }
 
+    int32_t d3d9_host::color_fill(const uint64_t resource, const uint32_t /*subresource*/, const int32_t left, const int32_t top,
+                                  const int32_t right, const int32_t bottom, const uint32_t color_argb)
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end() || it->second.vk_image_id == 0)
+        {
+            return d3derr_invalidcall;
+        }
+        resource_entry& rt = it->second;
+
+        // Clamp to the image extent (D3D9 RECT right/bottom are exclusive). An empty rect is a no-op,
+        // matching real ColorFill on a degenerate rect.
+        const int32_t x0 = std::clamp(left, 0, static_cast<int32_t>(rt.width));
+        const int32_t y0 = std::clamp(top, 0, static_cast<int32_t>(rt.height));
+        const int32_t x1 = std::clamp(right, x0, static_cast<int32_t>(rt.width));
+        const int32_t y1 = std::clamp(bottom, y0, static_cast<int32_t>(rt.height));
+        const uint32_t fill_w = static_cast<uint32_t>(x1 - x0);
+        const uint32_t fill_h = static_cast<uint32_t>(y1 - y0);
+        if (fill_w == 0 || fill_h == 0)
+        {
+            return d3d_ok;
+        }
+
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0 || !this->ensure_draw_infra())
+        {
+            return d3derr_invalidcall;
+        }
+
+        // The RT image is B8G8R8A8_UNORM (create_render_target), whose in-memory byte order is exactly a
+        // little-endian D3DCOLOR (0xAARRGGBB -> bytes B,G,R,A), so a solid buffer of the color dword needs
+        // no channel juggling before the copy.
+        const size_t pixel_count = static_cast<size_t>(fill_w) * fill_h;
+        std::vector<uint32_t> fill_pixels(pixel_count, color_argb);
+        const size_t required = pixel_count * 4;
+
+        uint64_t staging_buffer = 0;
+        if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
+            staging_buffer == 0)
+        {
+            return d3derr_invalidcall;
+        }
+        uint64_t mem_size = 0;
+        uint64_t mem_align = 0;
+        uint32_t mem_type_bits = 0;
+        this->vulkan_.get_buffer_memory_requirements(device, staging_buffer, mem_size, mem_align, mem_type_bits);
+        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
+                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        uint64_t staging_memory = 0;
+        if (memory_type == UINT32_MAX || this->vulkan_.allocate_memory(device, mem_size, memory_type, staging_memory) != 0 ||
+            staging_memory == 0)
+        {
+            this->vulkan_.destroy_buffer(device, staging_buffer);
+            return d3derr_invalidcall;
+        }
+        this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
+        this->vulkan_.upload_memory(device, staging_memory, 0, required, fill_pixels.data(), required);
+
+        this->vulkan_.reset_fence(device, this->fence_);
+        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+
+        const vulkan_host::subresource_range color_range{
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        // Resting layout is TRANSFER_SRC_OPTIMAL (submit_clear / execute_draw leave it there); go through
+        // cmd_pipeline_barrier so render_targets[image].current_layout stays authoritative.
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
+
+        const vulkan_host::buffer_image_copy_region region{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_offset_x = x0,
+            .image_offset_y = y0,
+            .image_offset_z = 0,
+            .width = fill_w,
+            .height = fill_h,
+            .depth = 1,
+            .mip_level = 0,
+            .base_array_layer = 0,
+            .layer_count = 1,
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+        };
+        this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, rt.vk_image_id,
+                                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+
+        this->vulkan_.end_command_buffer(this->command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
+        {
+        }
+
+        this->vulkan_.destroy_buffer(device, staging_buffer);
+        this->vulkan_.free_memory(device, staging_memory);
+
+        rt.backing_dirty = true;
+        return d3d_ok;
+    }
+
+    int32_t d3d9_host::blt(const uint64_t dst_resource, const uint32_t /*dst_subresource*/, const int32_t dst_left,
+                           const int32_t dst_top, const int32_t dst_right, const int32_t dst_bottom, const uint64_t src_resource,
+                           const uint32_t /*src_subresource*/, const int32_t src_left, const int32_t src_top, const int32_t src_right,
+                           const int32_t src_bottom, const uint32_t filter)
+    {
+        const auto dst_it = this->resources_.find(dst_resource);
+        const auto src_it = this->resources_.find(src_resource);
+        if (dst_it == this->resources_.end() || src_it == this->resources_.end() || dst_it->second.vk_image_id == 0 ||
+            src_it->second.vk_image_id == 0)
+        {
+            return d3derr_invalidcall;
+        }
+        resource_entry& dst = dst_it->second;
+        resource_entry& src = src_it->second;
+
+        const int32_t sx0 = std::clamp(src_left, 0, static_cast<int32_t>(src.width));
+        const int32_t sy0 = std::clamp(src_top, 0, static_cast<int32_t>(src.height));
+        const int32_t sx1 = std::clamp(src_right, sx0, static_cast<int32_t>(src.width));
+        const int32_t sy1 = std::clamp(src_bottom, sy0, static_cast<int32_t>(src.height));
+        const int32_t dx0 = std::clamp(dst_left, 0, static_cast<int32_t>(dst.width));
+        const int32_t dy0 = std::clamp(dst_top, 0, static_cast<int32_t>(dst.height));
+        const int32_t dx1 = std::clamp(dst_right, dx0, static_cast<int32_t>(dst.width));
+        const int32_t dy1 = std::clamp(dst_bottom, dy0, static_cast<int32_t>(dst.height));
+        if (sx1 - sx0 == 0 || sy1 - sy0 == 0 || dx1 - dx0 == 0 || dy1 - dy0 == 0)
+        {
+            return d3d_ok;
+        }
+
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0 || !this->ensure_draw_infra())
+        {
+            return d3derr_invalidcall;
+        }
+
+        this->vulkan_.reset_fence(device, this->fence_);
+        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+
+        const vulkan_host::subresource_range color_range{
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        // Both RTs rest in TRANSFER_SRC_OPTIMAL. The source is already blit-ready there; only the
+        // destination needs a TRANSFER_DST_OPTIMAL round trip. Route through cmd_pipeline_barrier so
+        // render_targets[dst].current_layout stays authoritative.
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
+
+        // D3DTEXF_LINEAR (2) -> VK_FILTER_LINEAR; every other value (incl. NONE/POINT) -> NEAREST, which
+        // is an exact copy for same-size blits.
+        const uint32_t vk_filter = filter == 2 /*D3DTEXF_LINEAR*/ ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        const vulkan_host::image_blit_region blit{
+            .src_aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .src_mip_level = 0,
+            .src_base_array_layer = 0,
+            .src_layer_count = 1,
+            .src_offset_x0 = sx0,
+            .src_offset_y0 = sy0,
+            .src_offset_z0 = 0,
+            .src_offset_x1 = sx1,
+            .src_offset_y1 = sy1,
+            .src_offset_z1 = 1,
+            .dst_aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .dst_mip_level = 0,
+            .dst_base_array_layer = 0,
+            .dst_layer_count = 1,
+            .dst_offset_x0 = dx0,
+            .dst_offset_y0 = dy0,
+            .dst_offset_z0 = 0,
+            .dst_offset_x1 = dx1,
+            .dst_offset_y1 = dy1,
+            .dst_offset_z1 = 1,
+            .filter = vk_filter,
+        };
+        this->vulkan_.cmd_blit_image(this->command_buffer_, src.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.vk_image_id,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, blit);
+
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+
+        this->vulkan_.end_command_buffer(this->command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+        while (this->vulkan_.get_fence_status(this->fence_) != 0 /*VK_SUCCESS*/)
+        {
+        }
+
+        dst.backing_dirty = true;
+        return d3d_ok;
+    }
+
     int32_t d3d9_host::lock(const uint64_t resource, const uint32_t /*subresource*/, const uint32_t offset, const uint32_t size,
                             const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size)
     {
@@ -2404,6 +2597,24 @@ namespace sogen
             this->state_.index_format = req.index_element_size == 4 ? 1u : 0u;
             this->state_.index_buffer = 0;
             return d3d_ok;
+        }
+        case gpu_bridge::command::d3d9_color_fill: {
+            d3d9_cmd::color_fill_record req{};
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            return this->color_fill(req.resource, req.subresource, req.left, req.top, req.right, req.bottom, req.color_argb);
+        }
+        case gpu_bridge::command::d3d9_blt: {
+            d3d9_cmd::blt_record req{};
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            return this->blt(req.dst_resource, req.dst_subresource, req.dst_left, req.dst_top, req.dst_right, req.dst_bottom,
+                             req.src_resource, req.src_subresource, req.src_left, req.src_top, req.src_right, req.src_bottom,
+                             req.filter);
         }
         default:
             return d3derr_invalidcall;

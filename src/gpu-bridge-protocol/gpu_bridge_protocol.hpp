@@ -235,6 +235,8 @@ namespace sogen::gpu_bridge
         d3d9_draw_indexed_primitive = 0x936,
         d3d9_set_stream_source_um = 0x937,
         d3d9_set_indices_um = 0x938,
+        d3d9_color_fill = 0x939,
+        d3d9_blt = 0x93A,
     };
 
     // Discriminator for cmd_set_dynamic_u32: the family of extended-dynamic-state setters that all take a
