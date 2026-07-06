@@ -69,6 +69,9 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_mrt_test.cpp \
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_multistream_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-multistream-test-x64.exe -ld3d9 -ld3dcompiler_43
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-test-x64.exe -ld3d9 -ld3dcompiler_43
+
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_scissor_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-scissor-test-x86.exe -ld3d9
 
@@ -80,7 +83,8 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_multistream_test.cpp \
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
-`d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, and `d3d9_multistream_test.cpp` are guest-runtime tests, not driver-side
+`d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`, and
+`d3d9_pipeline_cache_test.cpp` are guest-runtime tests, not driver-side
 files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
@@ -103,6 +107,7 @@ cp d3d9-int-bool-const-test-x64.exe <root>/filesys/c/d3d9-int-bool-const-test.ex
 cp d3d9-scissor-test-x64.exe <root>/filesys/c/d3d9-scissor-test.exe
 cp d3d9-mrt-test-x64.exe <root>/filesys/c/d3d9-mrt-test.exe
 cp d3d9-multistream-test-x64.exe <root>/filesys/c/d3d9-multistream-test.exe
+cp d3d9-pipeline-cache-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
@@ -118,7 +123,7 @@ cp d3d9-multistream-test-x86.exe <root>/filesys/c/d3d9-multistream-test-x86.exe
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
-shader, const, texture, int-bool-const, mrt, and multistream tests. For the x86/WoW64 UMD, the real
+shader, const, texture, int-bool-const, mrt, multistream, and pipeline-cache tests. For the x86/WoW64 UMD, the real
 32-bit Microsoft `d3d9.dll` must already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86
 shader, const, texture, texcoord, int-bool-const, mrt, and multistream tests. (The scissor test is
@@ -137,6 +142,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-scissor-test.exe
 ./analyzer -e <root> -c c:/d3d9-mrt-test.exe
 ./analyzer -e <root> -c c:/d3d9-multistream-test.exe
+./analyzer -e <root> -c c:/d3d9-pipeline-cache-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
@@ -285,6 +291,36 @@ reachable or visible:
 
 All three had to be fixed together before this test produced anything but an unrendered (black) result;
 the host-side dispatch and wire-protocol structs Tasks 6-8 built needed no changes at all.
+
+`d3d9-pipeline-cache-test.exe` is a regression test for the `ensure_programmable_pipeline`/
+`ensure_pipeline` `VkPipeline` cache-key fix (commits `3809d1c8`/`5dd05caa`). Before that fix, the
+cache key for a programmable pipeline was only `(vertex_shader<<32)|pixel_shader` -- it ignored the
+bound render-target count/formats and depth format, even though those are also baked into the built
+pipeline (`VkPipelineRenderingCreateInfo::pColorAttachmentFormats`/`colorAttachmentCount`), so a draw
+with 1 RT bound followed by a draw with 2 RTs bound using the SAME `vs_2_0`/`ps_2_0` pair (the PS
+writes a single solid RED to `COLOR0` only, no `COLOR1` output) would incorrectly reuse the
+first draw's stale 1-color-attachment `VkPipeline` against a 2-attachment dynamic-rendering scope.
+Sub-pass 1 binds RT0 alone, clears it BLUE, draws the full-screen quad, and checks RT0 comes back RED.
+Sub-pass 2 rebinds to BOTH RT0 (slot 0) and a new RT1 (slot 1) -- same VS/PS, never recreated, only the
+bound-RT shape changes -- clears both BLUE, and draws the same quad again: RT0 must still be RED (the
+primary, unambiguous discriminator -- the old bug's stale-pipeline reuse could corrupt attachment 0's
+own output, not just leave a second attachment wrong), and RT1 must read back BLUE, unchanged from its
+own `Clear()`. RT1's expected BLUE (not RED, and not undefined garbage) follows directly from how this
+codebase's shader translation and pipeline creation actually work: `translate_d3d9_shader_pair`
+(`d3d9_shader_translator.cpp`) compiles the PS's SPIR-V straight from its `ps_2_0` tokens with no
+output-signature remapping on the pixel-shader side, so a PS that only writes `oC0` produces a
+fragment module with exactly one declared output, at location 0; `create_graphics_pipeline`
+(`vulkan_host.cpp`) still builds the pipeline with a 2-entry `color_formats`/blend-attachment array
+regardless, so this is a real, valid 2-attachment pipeline whose fragment shader simply has no output
+for attachment 1 -- Vulkan's fragment-output-interface matching leaves an attachment with no matching
+shader output location untouched by that draw, rather than filling it with any fallback value. Before
+committing this test, its own before/after check was run against the pre-`3809d1c8` host code (built
+from `3809d1c8~1`): sub-pass 2's RT0 read back correctly, but RT1 read back all-zero/black instead of
+its BLUE clear color -- a real, observable discrimination of the fixed bug, not a hypothetical one.
+Expect `CreateVertexShader`/`CreatePixelShader`/both `CreateRenderTarget`/every `SetRenderTarget`/both
+`DrawIndexedPrimitive` `hr=0x00000000`, nine `PASS:` lines (three checkpoints for RT0 in sub-pass 1,
+plus three each for RT0 and RT1 in sub-pass 2), and `[d3d9-pipeline-cache-test] ALL CHECKS PASSED`.
+x86/WoW64 port is a separate follow-up task, not covered here.
 
 `d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
 dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a
