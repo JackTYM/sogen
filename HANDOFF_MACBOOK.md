@@ -3148,3 +3148,73 @@ now passing since their cache-key fixes landed — §31/§32), `drawprimitiveup`
 CLOSED, the new "still not done" boundary — pipelining + sampler pooling — recorded), and
 `src/samples/sogen-d3d9-umd/README.md` gained the manydraws build/stage/run entries and a full
 description.
+
+---
+
+## 38. Sampler pooling — the last per-draw allocation-churn item closed, a content-addressed cache
+instead of a positional pool (2026-07-06)
+
+§37.3 left one item on its "explicitly NOT" list: sampler pooling, `build_sampler` still creating and
+destroying a `VkSampler` every draw. Same day, two commits (`67a94a48` feat, `ebf0e622` polish) close it
+out, which also closes out `docs/d3d9-roadmap.md`'s Performance section's "Known remaining limitation"
+note down to a single item.
+
+### 38.1 Why a cache, not a pool
+
+The VB/IB/UBO pools from §37.1 all share one shape: a fixed slot, reused forever, with its *contents*
+rewritten every draw (`ensure_pooled_buffer` grows-or-reuses a buffer at a stream/UBO-register index, then
+`upload_pooled_ubo`/a vertex upload overwrites what's in it). That shape works because a `VkBuffer`'s
+whole point is to be written into repeatedly.
+
+A `VkSampler` is different: it's **immutable** once created — there's no `vkUpdateSampler`. Two draws
+with different `D3DSAMP_MAGFILTER`/`MINFILTER`/`ADDRESSU` etc. genuinely need two distinct `VkSampler`
+objects; you cannot "rewrite" one sampler's filtering mode in place the way you rewrite a UBO's bytes. So
+the positional-pool shape doesn't apply here at all — what's needed instead is a cache keyed by the
+sampler *state itself*, exactly the same shape `programmable_pipelines_`/`ff_pipelines_` already use for
+shader pipelines (also immutable Vulkan objects, also varying per draw by content rather than by slot).
+
+### 38.2 The fix
+
+`d3d9_host.hpp` gains `sampler_cache_key` — a plain struct holding every field `build_sampler` actually
+varies the `VkSampler` on: `mag_filter`, `min_filter`, `mipmap_mode`, `address_u/v/w`,
+`anisotropy_enable`, `max_anisotropy`, `min_lod`, `max_lod` — with a defaulted `operator<=>` — plus a
+`std::map<sampler_cache_key, uint64_t> sampler_cache_` member. `build_sampler` now resolves the D3D9
+sampler state for the given stage into a key, looks it up, and only calls `vulkan_host::create_sampler`
+on a miss; a hit returns the already-cached handle. Cached samplers persist for the device's lifetime —
+`execute_draw`'s per-draw `destroy_tex_samplers` cleanup is gone, since there's no longer anything
+per-draw to destroy.
+
+Four fields are deliberately **excluded** from the key (`compare_enable`/`compare_op`/`border_color`/
+`mip_lod_bias`): `build_sampler` passes hardcoded constants for all four, never derived from D3D9 state,
+so they can never distinguish two real requests and including them would only bloat the key. One
+accepted, documented gap: `max_anisotropy` is folded into the key even when `anisotropy_enable` is off (Vulkan
+then ignores the value), so two D3D9 states differing only in `MAXANISOTROPY` while aniso is disabled miss
+the cache unnecessarily — a minor cache-effectiveness nit, not a correctness issue, and not worth a
+conditional key field for.
+
+**Safety is simpler here than for the VB/IB/UBO pools.** Those pools needed the "draw N's GPU read
+completes before draw N+1's CPU rewrite" argument because their contents mutate. A cached `VkSampler`
+never mutates after creation at all, so there's no hazard to reason about in the first place — every draw
+that hits the cache is just reading an object nothing has ever written to since `vkCreateSampler`
+returned.
+
+### 38.3 Verification
+
+No dedicated new test — the existing `d3d9_miptexture_test.cpp` (§35) already does the job. Its 4
+sub-passes each pin a different `D3DSAMP_MAXMIPLEVEL`/`MIPFILTER` combination to force sampling one exact
+mip level, and check for that level's distinct solid color (RED/GREEN/BLUE). That means each sub-pass is
+also, incidentally, a distinct `sampler_cache_key` — a caching bug (stale reuse of the wrong state, or a
+key collision between two of the four states) would show up as the wrong level's color coming back, the
+same discriminator the test was already built to catch. Full regression sweep (every existing D3D9 guest
+test, x64 and x86/WoW64) stayed pixel-identical after both commits landed, including `miptexture`'s full
+4/4.
+
+### 38.4 What this closes out
+
+Between §37 and this section, **all per-draw allocation churn identified by the original performance
+audit (§24) is now closed**: busy-spin fence-wait, descriptor-set allocation, VB/IB/UBO allocation, and
+now sampler creation/destruction. The one item still genuinely open, unrelated in kind and unchanged by
+either slice, is **multi-frame-in-flight pipelining** — every draw still submits and blocks on a fence
+before the next one starts, so the number of GPU round-trips per frame is exactly what it was before
+either §37 or this section. That's real, separate, larger future work, not something either slice
+attempted to touch.

@@ -85,8 +85,9 @@ pass; `managed-texture` still fails the same documented, permanent, unrelated li
 ### Fixed (genuinely fixed with real code, 2026-07-06): per-draw busy-spin and allocation churn
 
 The two items previously listed here as still-open (busy-spin fence-wait; per-draw buffer/UBO/
-descriptor-set allocation churn) are now **CLOSED**. Five commits: `02b28ada`, `0238dfd7`, `fcfccc00`,
-`36b03142`, `4b0bc778`.
+descriptor-set allocation churn) are now **CLOSED**. A third item this same section originally left open
+below — sampler pooling — has since also closed, same day. Seven commits: `02b28ada`, `0238dfd7`,
+`fcfccc00`, `36b03142`, `4b0bc778`, `67a94a48`, `ebf0e622`.
 
 1. **Busy-spin fence-wait → genuine blocking wait** (`02b28ada`). `execute_draw` (and four other
    `d3d9_host.cpp` call sites: depth-stencil-view, texture-upload, staging-upload) had tight,
@@ -104,12 +105,26 @@ descriptor-set allocation churn) are now **CLOSED**. Five commits: `02b28ada`, `
    per draw. These are now per-device-lifetime pools (`ensure_pooled_buffer`/`upload_pooled_ubo`,
    `pooled_buffer`), created once and regrown only when a draw needs more capacity. Contents are still
    re-uploaded every draw, so output is unchanged.
+4. **Sampler pooling** (`67a94a48`, polish `ebf0e622`). `build_sampler` created a fresh `VkSampler` every
+   draw and destroyed it after (`execute_draw`'s per-draw `destroy_tex_samplers` cleanup). Unlike the
+   VB/IB/UBO pools above (one object per slot, contents rewritten every draw), a `VkSampler` is immutable
+   once created, so differing filter/address-mode/anisotropy/LOD state genuinely needs a distinct
+   object — this is a content-addressed cache, not a positional pool. A new `sampler_cache_key` struct
+   (mag/min/mip filter, address U/V/W, anisotropy enable/max, min/max LOD — every dimension
+   `build_sampler` actually varies the `VkSampler` on) with a defaulted `operator<=>`, plus a
+   `std::map<sampler_cache_key, uint64_t> sampler_cache_` member mirroring `programmable_pipelines_`/
+   `ff_pipelines_`, replace the old create-then-destroy cycle: `build_sampler` resolves the key, returns
+   the cached sampler on a hit, and only calls `create_sampler` on a miss, caching the result. Cached
+   samplers persist for the device's lifetime; the per-draw destroy is gone.
 
-All three are safe because each draw still submits and blocks on a fence before returning, so a prior
-draw's GPU read of a pooled/cached object has completed before a later draw rewrites it. Net effect: the
-confirmed per-draw allocation churn (a dozen-plus `vkAllocateMemory`/`vkFreeMemory`/buffer create+destroy
-pairs per draw) drops to essentially zero after the first draw of a given shader/stream/UBO shape, and
-the CPU-pinning busy-spin is gone.
+All four are safe because each draw still submits and blocks on a fence before returning, so a prior
+draw's GPU read of a pooled/cached object has completed before a later draw rewrites it. The sampler
+cache has an even simpler safety argument than the other three: nothing ever mutates a `VkSampler` after
+creation, so reuse across draws and frames has no synchronization hazard at all — there's no "prior read
+must complete" question to answer in the first place. Net effect: the confirmed per-draw allocation
+churn (a dozen-plus `vkAllocateMemory`/`vkFreeMemory`/buffer create+destroy pairs per draw, plus one
+`vkCreateSampler`/`vkDestroySampler` pair per draw) drops to essentially zero after the first draw of a
+given shader/stream/UBO/sampler-state shape, and the CPU-pinning busy-spin is gone.
 
 **Evidence**: a new guest test, `src/samples/sogen-d3d9-umd/d3d9_manydraws_test.cpp`, issues 768
 `DrawIndexedPrimitive` calls through the SAME cached pipeline in one `BeginScene`/`EndScene`, each draw
@@ -119,7 +134,13 @@ colors if the pooling reused contents incorrectly. Eight spread cells read back 
 and x86/WoW64. Bracketed by `QueryPerformanceCounter`: the same 768-draw loop measured ~383 ms
 (~0.50 ms/draw) against a temporarily-reverted pre-fix host (`b6809cee` = `02b28ada~1`) and ~279 ms
 (~0.36 ms/draw) against fixed HEAD — a real, repeatable ~27% reduction in per-frame draw-loop time
-(emulated guest wall-clock), with identical all-PASS pixel output in both.
+(emulated guest wall-clock), with identical all-PASS pixel output in both. The sampler cache specifically
+is proven by the pre-existing `d3d9_miptexture_test.cpp`, which exercises 4 sub-passes that each pin a
+different `D3DSAMP_MAXMIPLEVEL`/`MIPFILTER` combination within one test run — 4 distinct cache keys, each
+correctly resolving to its own newly-created sampler (a stale/misrouted cache-miss path would read back
+the wrong mip level's color, exactly the discriminator this test was built for); every other sweep test
+that samples the same texture across more than one draw (`texture`, `multitexture`, etc.) exercises the
+cache-hit path the same way, still pixel-identical after the cache landed.
 
 ### Known remaining limitation: this fix does NOT complete the performance story either
 
@@ -129,8 +150,6 @@ and still real, separate remaining work:
   the GPU completes, before the next draw starts). The NUMBER of GPU round-trips per frame is unchanged;
   only each round-trip's cost improved. Having multiple frames' GPU work in flight simultaneously is a
   separate, larger slice.
-- **Sampler pooling** — samplers are still created and destroyed per draw (a smaller, lower-priority
-  remaining item; the VB/IB/UBO/descriptor-set pools above deliberately left it out of scope).
 
 Do not read this fix as having made the D3D9 native path fully pipelined — it didn't.
 
