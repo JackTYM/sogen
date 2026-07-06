@@ -556,7 +556,8 @@ position. This exercises the vertex-side combined-image-sampler wiring in
 combined-image-sampler descriptor-pool count bumped to cover both stages' sets, and `execute_draw`'s
 per-stage vertex-texture upload/descriptor-write loop keyed off `bound_textures[257 + k]`). A 2x2
 `A16B16G16R16F` heightmap (`D3DPOOL_MANAGED`, bound directly without a `CheckDeviceFormat`
-`D3DUSAGE_QUERY_VERTEXTEXTURE` query, which is a separate FORMATOP follow-up) stores height 0.0 in one
+`D3DUSAGE_QUERY_VERTEXTEXTURE` query -- that capability-advertisement gap is now closed for this
+format, see the format-coverage-test section below) stores height 0.0 in one
 texel and 1.0 in another. One triangle's two base vertices sample the 0.0 texel (stay put) while its
 apex samples the 1.0 texel and is displaced up by `height * 0.8333` NDC (200 screen px), moving from
 baseline screen y=300 to y=100. Because ONLY the vertex whose per-vertex UV points at the high texel
