@@ -391,6 +391,10 @@ namespace sogen
         // lazily on first use of a given state and retained for the device's lifetime, exactly like
         // programmable_pipelines_/ff_pipelines_. There is no synchronization hazard: nothing ever mutates
         // a cached sampler after creation, so draws that reuse it across frames only ever read it.
+        //
+        // compare_enable/compare_op/border_color/mip_lod_bias are deliberately NOT here: build_sampler
+        // passes hardcoded constants for all four (see its own implementation), never derived from any
+        // D3D9 state, so they can never distinguish two real requests and are safe to omit from the key.
         struct sampler_cache_key
         {
             uint32_t mag_filter{};
@@ -399,6 +403,9 @@ namespace sogen
             uint32_t address_u{};
             uint32_t address_v{};
             uint32_t address_w{};
+            // Folded in even when disabled (Vulkan then ignores max_anisotropy) -- two D3D9 states
+            // differing only in MAXANISOTROPY while aniso is off miss the cache unnecessarily. An
+            // accepted, minor cache-effectiveness gap, not a correctness issue.
             uint32_t anisotropy_enable{};
             float max_anisotropy{};
             float min_lod{};
