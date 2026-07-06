@@ -477,27 +477,50 @@ namespace sogen
         return &*vdecl_it->second.parsed;
     }
 
-    uint64_t d3d9_host::vertex_shape_key() const
+    d3d9_host::vertex_input_shape d3d9_host::vertex_shape_key() const
     {
+        vertex_input_shape shape{};
         const auto* real_decl = this->find_real_vertex_decl();
         if (real_decl != nullptr)
         {
             // vertex_decl_entry::parsed is populated once, eagerly, at CreateVertexDeclaration time
             // (create_vertex_decl) and never mutated after (no update DDI exists) -- same handle always
-            // implies the same shape, so the raw handle is a safe, sufficient fingerprint. Real decl ids
-            // come from allocate_id() (starts at 0x10000, see next_id_'s comment), so they can never
-            // collide with the two fallback tags below.
-            return this->state_.vertex_decl;
+            // implies the same element types/offsets/usages. Real decl ids come from allocate_id()
+            // (starts at 0x10000, see next_id_'s comment), so they can never collide with the two
+            // fallback tags below.
+            shape.id = this->state_.vertex_decl;
+            // The handle alone is NOT sufficient: ensure_programmable_pipeline's real-decl branch bakes
+            // each binding's VkVertexInputBindingDescription::stride from state_.stream_strides[stream],
+            // which SetStreamSource(stream, buffer, offset, stride) can change without touching the
+            // handle. Snapshot the current stride of every stream this declaration references so two draws
+            // with the same handle but a different bound stride get distinct pipelines instead of reusing
+            // a stale one built for the first stride. Iterate the exact same used_binding_mask the builder
+            // consults; a referenced stream with no SetStreamSource yet contributes 0 (and is excluded
+            // from the built bindings anyway -- usable_vertex_binding_mask), so the two can never disagree.
+            for (uint32_t stream = 0; stream < max_vertex_streams; ++stream)
+            {
+                if ((real_decl->used_binding_mask & (1u << stream)) == 0)
+                {
+                    continue;
+                }
+                const auto stride_it = this->state_.stream_strides.find(stream);
+                shape.strides[stream] =
+                    stride_it != this->state_.stream_strides.end() ? stride_it->second : 0u;
+            }
+            return shape;
         }
         // No real declaration bound (state_.vertex_decl == 0): the fallback stride heuristic (mirrors
         // ensure_programmable_pipeline's own `textured_layout = stride == 20` exactly) is what actually
         // decides the pipeline's vertex-input shape in this branch, NOT state_.vertex_decl (which is
         // always 0 here regardless of which fallback shape applies) -- so a key built from
         // state_.vertex_decl alone would silently collide the two fallback shapes whenever the same
-        // VS/PS pair is drawn with both.
+        // VS/PS pair is drawn with both. The `strides` array stays all-zero here: this branch hardcodes
+        // its binding stride to 16 or 20 (never the raw bound stride) and only ever reads stream 0, so
+        // the tag fully captures its stride-dependence -- there is no per-stream stride to fold in.
         const auto stride_it = this->state_.stream_strides.find(0);
         const uint32_t stride = stride_it != this->state_.stream_strides.end() ? stride_it->second : 16;
-        return stride == 20 ? 2u : 1u; // tags 1/2, disjoint from real decl handles (start at 0x10000)
+        shape.id = stride == 20 ? 2u : 1u; // tags 1/2, disjoint from real decl handles (start at 0x10000)
+        return shape;
     }
 
     uint32_t d3d9_host::usable_vertex_binding_mask(const parsed_vertex_decl& decl) const

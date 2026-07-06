@@ -273,7 +273,8 @@ namespace sogen
         // for the fixed-function pipeline, which never varies these), the bound color-attachment formats
         // (baked into VkPipelineRenderingCreateInfo), the depth format (also feeds build_depth_state,
         // which bakes depthTestEnable/depthWriteEnable/depthCompareOp as STATIC pipeline state), the
-        // vertex-input shape (see vertex_shape_key()), and the depth/blend render-state that
+        // vertex-input shape (declaration identity AND the per-stream vertex-buffer strides the build
+        // reads -- see vertex_input_shape/vertex_shape_key()), and the depth/blend render-state that
         // build_depth_state/build_blend_state bake into the pipeline STATICALLY (not dynamic state):
         // depth is the resolved depthTestEnable/depthWriteEnable/depthCompareOp, blend is the resolved
         // blendEnable and src/dst/op blend factors + write mask. Depth-compare op and depth_format are
@@ -286,13 +287,35 @@ namespace sogen
         // currently hardcoded constants in create_graphics_pipeline/build_blend_state, not yet driven by
         // render_state -- if any of those are ever made render-state-driven, they need the same
         // treatment: fold them into this key, exactly like depth/blend were just added here.
+        // D3D9 vertex streams are addressed by a 32-bit mask (bit i => stream i) throughout this file
+        // (parsed_vertex_decl::used_binding_mask, usable_vertex_binding_mask, ensure_programmable_pipeline's
+        // 0..31 stream loops), so 32 slots cover every stream a declaration can reference. Well above
+        // D3D9's real MaxStreams cap (16); sized to the mask width so a stride snapshot can never truncate.
+        static constexpr uint32_t max_vertex_streams = 32;
+
+        // Full identity of the vertex-input state ensure_programmable_pipeline will BUILD for a draw, so a
+        // cache key computed from it can never disagree with what actually gets built on a miss. `id` is the
+        // real declaration handle (allocate_id(), >= 0x10000) or one of two fallback tags (1/2); see
+        // vertex_shape_key(). `strides` snapshots state_.stream_strides for exactly the streams the build
+        // consumes -- the built VkVertexInputBindingDescription::stride for each binding is read straight
+        // from state_.stream_strides[stream], which SetStreamSource(stream, buffer, offset, stride) can
+        // change WITHOUT changing the declaration handle. Two draws with the same declaration/VS/PS/RT-shape
+        // but a different bound stride are genuinely different pipelines; keying on `id` alone silently
+        // reuses a pipeline built for the first stride and mis-fetches every vertex past index 0.
+        struct vertex_input_shape
+        {
+            uint64_t id{};
+            std::array<uint32_t, max_vertex_streams> strides{};
+            auto operator<=>(const vertex_input_shape&) const = default;
+        };
+
         struct pipeline_cache_key
         {
             uint64_t vertex_shader{};
             uint64_t pixel_shader{};
             std::array<uint32_t, 4> color_formats{}; // slot-order, 0-padded (VK_FORMAT_UNDEFINED == 0, never a real bound format)
             uint32_t depth_format{};
-            uint64_t vertex_shape{};             // see vertex_shape_key()
+            vertex_input_shape vertex_shape{};   // decl identity + per-stream strides the build reads (see vertex_shape_key())
             vulkan_host::depth_state depth{};    // resolved static depth test/write/compare (build_depth_state)
             vulkan_host::color_blend_attachment blend{}; // resolved static blend enable/factors/write-mask (build_blend_state)
             auto operator<=>(const pipeline_cache_key&) const = default;
@@ -349,13 +372,19 @@ namespace sogen
         // Fingerprint of "what vertex-input shape will this draw's pipeline get built with", using the
         // exact same real-decl-vs-fallback-stride branch ensure_programmable_pipeline's vertex-input
         // builder uses, so a cache key computed here can never disagree with what actually gets built on
-        // a miss. Real declaration handles (allocate_id(), starting at 0x10000 -- see next_id_'s comment)
-        // are used directly, since vertex_decl_entry::parsed is populated once, eagerly, at
-        // create_vertex_decl time and never mutated after (no update DDI exists) -- same handle always
-        // implies the same shape. The no-real-declaration fallback returns one of two tags (1 or 2,
-        // disjoint from every real handle, which start at 0x10000) identifying which of the two fallback
-        // strides applies.
-        uint64_t vertex_shape_key() const;
+        // a miss. In the real-declaration branch `id` is the declaration handle (allocate_id(), starting
+        // at 0x10000 -- see next_id_'s comment), since vertex_decl_entry::parsed is populated once,
+        // eagerly, at create_vertex_decl time and never mutated after (no update DDI exists) -- the same
+        // handle always implies the same element types/offsets/usages. But the handle does NOT pin the
+        // per-binding strides: the build reads state_.stream_strides[stream] for each stream the
+        // declaration references (usable_vertex_binding_mask), and SetStreamSource can change a stride
+        // without touching the handle -- so `strides` additionally snapshots the current stride of every
+        // stream in the declaration's used_binding_mask (others left 0). The no-real-declaration fallback
+        // sets `id` to one of two tags (1 or 2, disjoint from every real handle) identifying which of the
+        // two fallback shapes applies and leaves `strides` all-zero: that branch hardcodes its binding
+        // stride to 16 or 20 (never the raw bound stride) and reads only stream 0, so the tag already
+        // captures its entire stride-dependence -- there is no per-stream stride to fold in there.
+        vertex_input_shape vertex_shape_key() const;
         // Filters decl.used_binding_mask down to only streams that ALSO have a real, nonzero stride in
         // state_.stream_strides -- i.e. streams the app has actually called SetStreamSource for. A
         // stream the declaration references but that has no (or a zero) stride is not usable: emitting
