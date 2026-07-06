@@ -322,6 +322,12 @@ namespace sogen
         // No-op (returns true) if ds_entry already has a view. depth_format is ds_entry's own VkFormat.
         bool ensure_depth_stencil_view(uint64_t device, resource_entry& ds_entry, uint32_t depth_format);
 
+        // If this color RT has GPU-side pixels not yet mirrored into `backing`, copy them now (blocking,
+        // same mechanism as the existing per-draw/per-clear readback) and clear the flag. No-op for
+        // buffers/plain textures (backing_dirty never set for them) and for RTs already clean. Safe because
+        // a dirty RT is always left in TRANSFER_SRC_OPTIMAL layout by the draw/clear that dirtied it.
+        void sync_backing_from_gpu(resource_entry& e);
+
         // Present only for indexed draws; execute_draw binds `index_buffer` and calls cmd_draw_indexed
         // instead of cmd_draw when passed. index_format matches set_indices_record::format (0 = 16-bit,
         // 1 = 32-bit indices).

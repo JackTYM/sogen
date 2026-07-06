@@ -1747,6 +1747,23 @@ namespace sogen
         return true;
     }
 
+    void d3d9_host::sync_backing_from_gpu(resource_entry& e)
+    {
+        if (!e.backing_dirty || e.vk_image_id == 0)
+        {
+            return;
+        }
+
+        std::vector<std::byte> pixels;
+        uint32_t readback_width = 0;
+        uint32_t readback_height = 0;
+        if (this->vulkan_.readback_render_target(e.vk_image_id, pixels, readback_width, readback_height) == 0)
+        {
+            e.backing = std::move(pixels);
+            e.backing_dirty = false;
+        }
+    }
+
     int32_t d3d9_host::lock(const uint64_t resource, const uint32_t /*subresource*/, const uint32_t offset, const uint32_t size,
                             const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size)
     {
@@ -1757,6 +1774,8 @@ namespace sogen
         {
             return d3derr_invalidcall;
         }
+
+        this->sync_backing_from_gpu(it->second);
 
         auto& backing = it->second.backing;
         const size_t requested = size != 0 ? size : backing.size();
