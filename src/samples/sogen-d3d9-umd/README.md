@@ -152,12 +152,18 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_format_coverage_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_format_coverage_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-format-coverage-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_vertex_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-vertex-texture-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_vertex_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-vertex-texture-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
 `d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`,
 `d3d9_pipeline_cache_test.cpp`, `d3d9_dimension_discriminator_test.cpp`,
-`d3d9_multitexture_test.cpp`, and `d3d9_pipeline_cache_rs_test.cpp` are guest-runtime tests,
+`d3d9_multitexture_test.cpp`, `d3d9_vertex_texture_test.cpp`, and `d3d9_pipeline_cache_rs_test.cpp` are guest-runtime tests,
 not driver-side files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
@@ -213,6 +219,8 @@ cp d3d9-instancing-test-x64.exe <root>/filesys/c/d3d9-instancing-test.exe
 cp d3d9-instancing-test-x86.exe <root>/filesys/c/d3d9-instancing-test-x86.exe
 cp d3d9-format-coverage-test-x64.exe <root>/filesys/c/d3d9-format-coverage-test.exe
 cp d3d9-format-coverage-test-x86.exe <root>/filesys/c/d3d9-format-coverage-test-x86.exe
+cp d3d9-vertex-texture-test-x64.exe <root>/filesys/c/d3d9-vertex-texture-test.exe
+cp d3d9-vertex-texture-test-x86.exe <root>/filesys/c/d3d9-vertex-texture-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -269,6 +277,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-instancing-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-format-coverage-test.exe
 ./analyzer -e <root> -c c:/d3d9-format-coverage-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-vertex-texture-test.exe
+./analyzer -e <root> -c c:/d3d9-vertex-texture-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -536,6 +546,32 @@ without drawing). The rendered pixel stays the clear color (black), so the analy
 fails cleanly on old code -- a valid pass/fail discriminator, just not a crash. `d3d9-multitexture-test-
 x86.exe` was cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`,
 pixel-exact parity with x64 (`center pixel=B=00 G=FF R=FF A=FF`, `ALL CHECKS PASSED`, exit 0).
+
+`d3d9-vertex-texture-test.exe` proves SM3.0 VERTEX texture fetch (VTF): a real `vs_3_0` VERTEX shader
+samples a texture bound to `D3DVERTEXTEXTURESAMPLER0` (D3D9 sampler stage 257, which real `d3d9.dll`
+forwards through the DDI unmodified) with `tex2Dlod` and uses the sampled height to DISPLACE a vertex
+position. This exercises the vertex-side combined-image-sampler wiring in
+`d3d9_shader_translator.cpp` (VS samplers declared into descriptor set 0 via the shared
+`sampler_binding_for_stage` formula) and `d3d9_host.cpp` (`vs_bindings` sampler slots, the
+combined-image-sampler descriptor-pool count bumped to cover both stages' sets, and `execute_draw`'s
+per-stage vertex-texture upload/descriptor-write loop keyed off `bound_textures[257 + k]`). A 2x2
+`A16B16G16R16F` heightmap (`D3DPOOL_MANAGED`, bound directly without a `CheckDeviceFormat`
+`D3DUSAGE_QUERY_VERTEXTEXTURE` query, which is a separate FORMATOP follow-up) stores height 0.0 in one
+texel and 1.0 in another. One triangle's two base vertices sample the 0.0 texel (stay put) while its
+apex samples the 1.0 texel and is displaced up by `height * 0.8333` NDC (200 screen px), moving from
+baseline screen y=300 to y=100. Because ONLY the vertex whose per-vertex UV points at the high texel
+moves, a correct result cannot be faked by a constant offset or by a pixel shader -- it requires the
+vertex stage to fetch the texel that vertex's own UV selects. The discriminator probe `P_HIGH(320,180)`
+is above the un-displaced apex (y=300) but inside the displaced triangle: it reads ORANGE
+(`B=00 G=80 R=FF`) only if VTF really moved the apex, and the CLEAR color (`B=40`) otherwise. Before/after
+verified: with the VS-sampler binding removed from the translator, `translate_d3d9_shader_pair` fails on
+the VS `texldl` and `execute_draw` degrades gracefully (whole draw skipped), so `P_HIGH` and the
+`P_BASE(320,370)` control both read the clear color and the test FAILS -- a real pass/fail discriminator.
+Expect `VertexShaderVersion=0xfffe0300`, `D3DCompile(vs_3_0)`/`CreateVertexShader`/`CreateTexture(2x2
+A16B16G16R16F)`/`SetTexture(D3DVERTEXTEXTURESAMPLER0)`/`DrawPrimitive` all `hr=0x00000000`, three `PASS:`
+lines, and `[d3d9-vertex-texture-test] ALL CHECKS PASSED`. `d3d9-vertex-texture-test-x86.exe` was
+cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`, pixel-exact
+parity with x64 (`P_HIGH pixel=B=00 G=80 R=FF`, `ALL CHECKS PASSED`, exit 0).
 
 `d3d9-pipeline-cache-rs-test.exe` is a GATE test proving `pipeline_cache_key` (`d3d9_host.hpp`) has a
 real, currently-unfixed cache-key gap: it's keyed by `vertex_shader`/`pixel_shader`/`color_formats[4]`/
