@@ -112,7 +112,7 @@ namespace sogen
         // image by every pfnClear/pfnDrawPrimitive) out for presentation. Returns false if the
         // resource doesn't exist or has no GPU backing (not a render target).
         bool snapshot_resource(uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
-                               uint32_t& out_height) const;
+                               uint32_t& out_height);
 
         // Uploads a plain sampled texture_2d resource's current `backing` shadow into its real
         // vk_image_id via a staging buffer, so it's ready to be sampled by a draw. No dirty tracking --

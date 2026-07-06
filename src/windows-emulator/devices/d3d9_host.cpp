@@ -1733,13 +1733,15 @@ namespace sogen
     }
 
     bool d3d9_host::snapshot_resource(const uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
-                                      uint32_t& out_height) const
+                                      uint32_t& out_height)
     {
         const auto it = this->resources_.find(resource);
         if (it == this->resources_.end() || it->second.vk_image_id == 0 || it->second.backing.empty())
         {
             return false;
         }
+
+        this->sync_backing_from_gpu(it->second);
 
         out_pixels = it->second.backing;
         out_width = it->second.width;
