@@ -1796,9 +1796,13 @@ namespace sogen
 
         // Gather every mip level's tightly-packed size and source backing. Level 0 lives in `backing`,
         // levels 1..N-1 in `extra_mips` (see create_resource) -- subresource_backing() abstracts that.
-        // Each level is concatenated into one staging buffer at its own offset. Bail with "false" (the
-        // same incomplete-data contract the single-mip version had) if any level's pixel data has not
-        // been written yet, so a half-filled mip chain never uploads a partially-garbage image.
+        // Each level is concatenated into one staging buffer at its own offset. Every level's backing is
+        // pre-sized to its exact tight size at create_resource time, so `src.size() < level_size` below
+        // is really just a degenerate-format guard (level_size == 0), not a "was this level ever locked"
+        // check -- an app that creates N mip levels but only ever writes level 0 still uploads levels
+        // 1..N-1, as their zero-initialized (black) backing. That's an intentional, safe default: no
+        // bail, no partially-garbage image, just unwritten levels rendering black under minification
+        // until the app writes them.
         const uint32_t mip_levels = std::max(1u, tex.mip_levels);
         struct level_upload
         {
@@ -1818,7 +1822,7 @@ namespace sogen
             const std::vector<std::byte>& src = tex.subresource_backing(level);
             if (level_size == 0 || src.size() < level_size)
             {
-                return false; // no (or incomplete) pixel data written for this level yet
+                return false; // degenerate format/size only -- see the comment above this loop
             }
             levels.push_back({level_width, level_height, level_size, total_size, src.data()});
             total_size += level_size;
