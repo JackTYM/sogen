@@ -844,47 +844,88 @@ namespace sogen
     void windows_emulator::install_d3d9_caps_patch_hook(const mapped_module& mod)
     {
         // Real Microsoft d3d9.dll unconditionally strips the D3DCAPS2_CANMANAGERESOURCE caps bit
-        // (bit 28) inside its own QueryLHDDICaps: `btr eax, 0x1c` then `mov [rsi+0xc], eax`. Forcing
-        // the bit back on right after the store enables the driver-managed D3DPOOL_MANAGED path.
-        // The RVAs below are specific to the staged x64 system32/d3d9.dll build
-        // (sha256 bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c); the 32-bit
-        // syswow64/d3d9.dll is intentionally left untouched (needs its own RE pass).
+        // (bit 28) inside its own QueryLHDDICaps, then stores the stripped value back into the Caps2
+        // field (offset +0xc of the struct the routine holds a pointer to). Forcing the bit back on
+        // right after that store enables the driver-managed D3DPOOL_MANAGED path. Each architecture's
+        // real d3d9.dll compiles the strip+store differently and keeps the struct pointer in a
+        // different register, so each has its own separately-RE'd pattern/RVAs/register.
         // See docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries for the full investigation/spike history.
+        constexpr uint32_t can_manage_resource_bit = 0x10000000;
         constexpr uint16_t machine_amd64 = 0x8664;
-        if (mod.machine != machine_amd64)
+        constexpr uint16_t machine_i386 = 0x014c;
+
+        if (mod.machine == machine_amd64)
         {
-            return;
-        }
+            // x64 system32/d3d9.dll (sha256 bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c):
+            // `btr eax, 0x1c` then `mov [rsi+0xc], eax`.
+            constexpr uint64_t pattern_rva = 0x158af;
+            constexpr uint64_t post_store_rva = 0x158b6;
+            constexpr std::array<uint8_t, 7> expected_pattern = {0x0F, 0xBA, 0xF0, 0x1C, 0x89, 0x46, 0x0C};
 
-        constexpr uint64_t pattern_rva = 0x158af;
-        constexpr uint64_t post_store_rva = 0x158b6;
-        constexpr std::array<uint8_t, 7> expected_pattern = {0x0F, 0xBA, 0xF0, 0x1C, 0x89, 0x46, 0x0C};
-
-        std::array<uint8_t, 7> actual_pattern{};
-        if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
-            actual_pattern != expected_pattern)
-        {
-            this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
-                           "bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c expected) -- "
-                           "MANAGED-pool caps-forcing disabled for this build\n",
-                           static_cast<unsigned long long>(pattern_rva));
-            return;
-        }
-
-        auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](const uint64_t) {
-            constexpr uint32_t can_manage_resource_bit = 0x10000000;
-            const auto rsi = this->emu().reg<uint64_t>(x86_register::rsi);
-            const auto field_addr = rsi + 0xc;
-            const auto value = this->emu().read_memory<uint32_t>(field_addr);
-            if ((value & can_manage_resource_bit) == 0)
+            std::array<uint8_t, 7> actual_pattern{};
+            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(),
+                                             actual_pattern.size()) ||
+                actual_pattern != expected_pattern)
             {
-                this->emu().write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
+                this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
+                               "bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c expected) -- "
+                               "MANAGED-pool caps-forcing disabled for this build\n",
+                               static_cast<unsigned long long>(pattern_rva));
+                return;
             }
-        });
 
-        this->d3d9_caps_hooks_[mod.image_base] = hook;
-        this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx\n",
-                       static_cast<unsigned long long>(mod.image_base + post_store_rva));
+            auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](const uint64_t) {
+                const auto rsi = this->emu().reg<uint64_t>(x86_register::rsi);
+                const auto field_addr = rsi + 0xc;
+                const auto value = this->emu().read_memory<uint32_t>(field_addr);
+                if ((value & can_manage_resource_bit) == 0)
+                {
+                    this->emu().write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
+                }
+            });
+
+            this->d3d9_caps_hooks_[mod.image_base] = hook;
+            this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx\n",
+                           static_cast<unsigned long long>(mod.image_base + post_store_rva));
+            return;
+        }
+
+        if (mod.machine == machine_i386)
+        {
+            // 32-bit syswow64/d3d9.dll (sha256 99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302):
+            // `and eax, 0xEFFFFFFF` then `mov [ebx+0xc], eax`. The struct pointer is in EBX here (not
+            // RSI), and the strip is a literal AND rather than x64's BTR, so the guard pattern differs.
+            constexpr uint64_t pattern_rva = 0x51c91;
+            constexpr uint64_t post_store_rva = 0x51c99;
+            constexpr std::array<uint8_t, 8> expected_pattern = {0x25, 0xFF, 0xFF, 0xFF, 0xEF, 0x89, 0x43, 0x0C};
+
+            std::array<uint8_t, 8> actual_pattern{};
+            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(),
+                                             actual_pattern.size()) ||
+                actual_pattern != expected_pattern)
+            {
+                this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
+                               "99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302 expected) -- "
+                               "MANAGED-pool caps-forcing disabled for this build\n",
+                               static_cast<unsigned long long>(pattern_rva));
+                return;
+            }
+
+            auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](const uint64_t) {
+                const auto ebx = this->emu().reg<uint32_t>(x86_register::ebx);
+                const auto field_addr = static_cast<uint64_t>(ebx) + 0xc;
+                const auto value = this->emu().read_memory<uint32_t>(field_addr);
+                if ((value & can_manage_resource_bit) == 0)
+                {
+                    this->emu().write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
+                }
+            });
+
+            this->d3d9_caps_hooks_[mod.image_base] = hook;
+            this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx (x86/WoW64)\n",
+                           static_cast<unsigned long long>(mod.image_base + post_store_rva));
+            return;
+        }
     }
 
     void windows_emulator::setup_hooks()

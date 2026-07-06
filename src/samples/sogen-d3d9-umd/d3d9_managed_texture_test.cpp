@@ -14,9 +14,11 @@
 // resources, no MANAGED-specific code needed) already serves a real pixel backing for it. See
 // umd_TexBlt's comment in sogen_d3d9_umd.cpp and docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries for
 // the full trail, including why the caps-reporting approach alone doesn't work.
-// x86/WoW64 scope: this fix is x64-only. The 32-bit syswow64/d3d9.dll build real MW2 (a 32-bit
-// game) would use has not had an equivalent RE pass, so this fix does not yet help a 32-bit guest --
-// separately-scoped follow-up work.
+// x86/WoW64 scope: also FIXED (2026-07-05). install_d3d9_caps_patch_hook gained a parallel I386
+// branch that RE-verifies the 32-bit syswow64/d3d9.dll's own strip+store site (and eax,0xEFFFFFFF /
+// mov [ebx+0xc],eax at RVA 0x51c91) and re-sets the bit the same way, so this test cross-compiled to
+// i686 (d3d9-managed-texture-test-x86.exe) passes on real WoW64 too. Real MW2 is a 32-bit game, so
+// that branch is the one that matters for it. See HANDOFF_MACBOOK.md §29.
 
 #include <windows.h>
 #include <d3d9.h>
