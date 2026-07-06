@@ -591,7 +591,9 @@ namespace sogen
         // UBOs) are declared here unconditionally too, same rationale as binding 1 below -- vkd3d only
         // emits an actual SPIR-V descriptor for a register file a shader statically references, but
         // Vulkan permits a pipeline layout to declare bindings a shader doesn't use. The actual per-draw
-        // UBO creation and descriptor-set binding happens in execute_draw, using descriptor_pool_.
+        // UBO creation happens in execute_draw; the descriptor sets themselves are cached on this
+        // pipeline's programmable_pipeline_entry (see its own comment) and only their contents are
+        // rewritten per draw, not the sets or their pool.
         const std::array<vulkan_host::descriptor_binding, 3> vs_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
