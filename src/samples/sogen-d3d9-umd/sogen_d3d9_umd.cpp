@@ -424,12 +424,12 @@ namespace
     }
 #endif // !_WIN64
 
-    // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): D3DDDIARG_CREATERESOURCE's real field layout (width/
-    // height/usage/pool offsets) is not yet RE-verified -- only offset 0 (Format) and the output
-    // hResource field (48 on x64, 44 on x86 -- see umd_CreateResource's own comment) are confirmed.
-    // Every call is therefore treated as a render-target 2D texture at the test's known backbuffer
-    // size (640x480) until the real struct is pinned; fine for the current fixed-size-window
-    // milestone, wrong in general.
+    // D3DDDIARG_CREATERESOURCE's real field layout (Format/Pool/pSurfList/SurfCount/MipLevels/hResource/
+    // Flags, plus D3DDDI_SURFACEINFO::Width/Height/Depth) is now RE-verified and modeled in d3d9_ddi.hpp,
+    // and umd_CreateResource reads width/height/depth/mip/pool/usage from it instead of the old hardcoded
+    // 640x480 shape. What REMAINS a limitation: `kind` is still forced to texture_2d (cube/volume from
+    // SurfCount>1 is a separate future task), and D3DDDI_SURFACEINFO's pSysMem/pitch fields are inferred,
+    // not live-confirmed (see d3d9_ddi.hpp) -- neither is on this milestone's D3DPOOL_DEFAULT path.
     //
     // Offset 48 for hResource (x64) was found by writing a distinct, identifiable sentinel to every
     // 8-byte-aligned offset (0..80) and observing which one came back unchanged in the very next
@@ -483,25 +483,75 @@ namespace
         return 0; // plain texture, no RT/DS usage bit
     }
 
+    // Translate D3DDDIARG_CREATERESOURCE::Flags (a D3DDDI_RESOURCEFLAGS bitfield) into the D3DUSAGE_* bits
+    // the host's create_resource actually tests. The host only inspects RENDERTARGET (0x1) and
+    // DEPTHSTENCIL (0x2); D3DDDI_RESOURCEFLAGS carries the matching intent in its RenderTarget (bit 0) and
+    // ZBuffer (bit 1) flags, which happen to sit at the same bit positions -- but map them explicitly
+    // rather than pass the raw flags word and rely on that coincidence (the two bitfields diverge above
+    // bit 1). This replaces the Format-based classify_resource_usage heuristic for real resources; that
+    // heuristic is kept only as the fallback for the internal-use synthetic buffer formats below, whose
+    // Flags carry VertexBuffer/IndexBuffer intent, not RT/DS.
+    uint32_t resource_flags_to_usage(uint32_t flags)
+    {
+        constexpr uint32_t k_resflag_render_target = 0x1; // D3DDDI_RESOURCEFLAGS.RenderTarget
+        constexpr uint32_t k_resflag_zbuffer = 0x2;       // D3DDDI_RESOURCEFLAGS.ZBuffer
+        uint32_t usage = 0;
+        if ((flags & k_resflag_render_target) != 0)
+        {
+            usage |= 0x1; // D3DUSAGE_RENDERTARGET
+        }
+        if ((flags & k_resflag_zbuffer) != 0)
+        {
+            usage |= 0x2; // D3DUSAGE_DEPTHSTENCIL
+        }
+        return usage;
+    }
+
     HRESULT APIENTRY umd_CreateResource(HANDLE /*hDevice*/, void* pArgs)
     {
         auto* bytes = reinterpret_cast<unsigned char*>(pArgs);
-        uint32_t format = 0;
-        std::memcpy(&format, bytes, sizeof(format));
+        const auto* args = reinterpret_cast<const D3DDDIARG_CREATERESOURCE*>(pArgs);
+        const uint32_t format = args->Format;
 
-        // KNOWN LIMITATION (see HANDOFF_MACBOOK.md): D3DDDIARG_CREATERESOURCE's real width/height/pool
-        // offsets are still not RE'd -- every call gets this milestone's fixed 640x480 shape. Fine for
-        // every resource this session's tests create (all sized to match the 640x480 window/backbuffer
-        // exactly), wrong in general.
+        // width/height/mip/pool are now READ FROM THE REAL, RE'd struct (see D3DDDIARG_CREATERESOURCE in
+        // d3d9_ddi.hpp), not hardcoded to the old 640x480 shape. Dimensions live in the first
+        // D3DDDI_SURFACEINFO element pSurfList points at (pSurfList is a guest pointer this in-guest UMD
+        // dereferences directly, the same way it reads every other pArgs field). SurfCount is read too:
+        // it is the count of that array (>1 for cube faces / volume slices) -- captured here for a future
+        // cube/volume task; this milestone still creates every resource as a single-subresource
+        // texture_2d (kind below is unconditional), so SurfCount only guards the pSurfList[0] read for now.
+        const uint32_t surf_count = args->SurfCount;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t depth = 1;
+        if (args->pSurfList != nullptr && surf_count > 0)
+        {
+            const D3DDDI_SURFACEINFO& surf0 = args->pSurfList[0];
+            width = surf0.Width;
+            height = surf0.Height;
+            depth = surf0.Depth != 0 ? surf0.Depth : 1;
+        }
+
+        // Usage comes from the real Flags field for genuine resources (see resource_flags_to_usage); the
+        // internal-use synthetic buffer formats (100/101/102, D3DFMT_VERTEXDATA/INDEX16/INDEX32) do not
+        // carry meaningful RT/DS resource flags, so keep the Format heuristic (returns 0) for those. Their
+        // create is orphaned regardless (see the format!=100/101/102 guard on registration below).
+        const bool is_internal_buffer_format = format == 100 || format == 101 || format == 102;
+        const uint32_t usage = is_internal_buffer_format ? classify_resource_usage(format) : resource_flags_to_usage(args->Flags);
+
+        // KNOWN LIMITATION: `kind` is still forced to texture_2d unconditionally -- cube/volume
+        // dimensionality is now CAPTURED (SurfCount above) but not yet acted on (creating a real
+        // texture_cube/texture_volume host resource from SurfCount>1 is deliberately a separate future
+        // task). width/height/mip_levels/pool are no longer hardcoded; they are the app's real values.
         const d3d9c::create_resource_request req{
             .kind = static_cast<uint32_t>(d3d9c::resource_kind::texture_2d),
             .format = format,
-            .width = 640,
-            .height = 480,
-            .depth = 1,
-            .mip_levels = 1,
-            .usage = classify_resource_usage(format),
-            .pool = 0,
+            .width = width,
+            .height = height,
+            .depth = depth,
+            .mip_levels = args->MipLevels,
+            .usage = usage,
+            .pool = args->Pool,
         };
         d3d9c::create_resource_response resp{};
         bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));

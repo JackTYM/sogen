@@ -14,6 +14,7 @@
 #pragma once
 
 #include <windows.h>
+#include <cstddef>
 #include <cstdint>
 
 // --- D3D_UMD_INTERFACE_VERSION values (WDK d3dukmdt.h) ---------------------------------------------
@@ -608,6 +609,120 @@ typedef struct _D3DDDIARG_TEXBLT
     UINT Reserved;            // 36 -- always 0, confirmed via decompile
 } D3DDDIARG_TEXBLT;
 static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt, x86)");
+#endif
+
+// D3DDDI_SURFACEINFO and D3DDDIARG_CREATERESOURCE -- RE'd this session (2026-07-05) the same way the
+// sibling structs above were, and to the same standard: BOTH static decompilation of the real staged
+// d3d9.dll's resource-creation path AND live tracing of the actual field values through a real
+// pfnCreateResource call, on x64 AND x86, with three distinct non-640x480 texture sizes so a
+// coincidental match against this milestone's old hardcoded 640x480 shape could not masquerade as a
+// confirmed offset.
+//
+// INDEPENDENTLY, LIVE-confirmed (a distinct expected value read back at the stated offset for each of
+// the three probe sizes, on both arches): D3DDDIARG_CREATERESOURCE::{Format, Pool, pSurfList, SurfCount,
+// MipLevels, hResource, Flags} and D3DDDI_SURFACEINFO::{Width, Height, Depth}.
+//
+// NOT independently live-confirmed -- INFERRED only: D3DDDI_SURFACEINFO::{pSysMem, SysMemPitch,
+// SysMemSlicePitch}. These were 0 in every probe (consistent with D3DPOOL_DEFAULT resources created
+// with no initial system-memory data), so their offsets are derived from the confirmed element stride
+// (the live-confirmed sizeof one D3DDDI_SURFACEINFO) plus the standard WDK field order, not observed
+// live. Structurally sound but weaker evidence than the dimension fields above -- do not rely on them
+// until a forcing function (a D3DPOOL_SYSTEMMEM create carrying real init data) pins them live.
+typedef struct _D3DDDI_SURFACEINFO
+{
+    UINT Width;            // 0 -- live-confirmed
+    UINT Height;           // 4 -- live-confirmed
+    UINT Depth;            // 8 -- live-confirmed (1 for 2D surfaces)
+    VOID* pSysMem;         // x64:16 / x86:12 -- INFERRED (0 in every probe; see block comment above). On
+                          // x64, 4 bytes of alignment padding precede this (Depth ends at 12, an 8-byte
+                          // pointer aligns up to 16); on x86 the 4-byte pointer already sits at 12.
+    UINT SysMemPitch;      // x64:24 / x86:16 -- INFERRED
+    UINT SysMemSlicePitch; // x64:28 / x86:20 -- INFERRED
+} D3DDDI_SURFACEINFO;
+#ifdef _WIN64
+static_assert(offsetof(D3DDDI_SURFACEINFO, Width) == 0, "D3DDDI_SURFACEINFO x64 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, Height) == 4, "D3DDDI_SURFACEINFO x64 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, Depth) == 8, "D3DDDI_SURFACEINFO x64 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, pSysMem) == 16, "D3DDDI_SURFACEINFO x64 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, SysMemPitch) == 24, "D3DDDI_SURFACEINFO x64 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, SysMemSlicePitch) == 28, "D3DDDI_SURFACEINFO x64 layout");
+static_assert(sizeof(D3DDDI_SURFACEINFO) == 32, "D3DDDI_SURFACEINFO x64 element stride (live-confirmed)");
+#else
+static_assert(offsetof(D3DDDI_SURFACEINFO, Width) == 0, "D3DDDI_SURFACEINFO x86 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, Height) == 4, "D3DDDI_SURFACEINFO x86 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, Depth) == 8, "D3DDDI_SURFACEINFO x86 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, pSysMem) == 12, "D3DDDI_SURFACEINFO x86 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, SysMemPitch) == 16, "D3DDDI_SURFACEINFO x86 layout");
+static_assert(offsetof(D3DDDI_SURFACEINFO, SysMemSlicePitch) == 20, "D3DDDI_SURFACEINFO x86 layout");
+static_assert(sizeof(D3DDDI_SURFACEINFO) == 24, "D3DDDI_SURFACEINFO x86 element stride (live-confirmed)");
+#endif
+
+// hResource@48/44 re-confirms the struct version this UMD sees: umd_CreateResource's own live
+// sentinel-scan (Task 3b, 2026-07-04) already independently pinned that offset the same way, so a fresh
+// build whose resources still round-trip correctly is a standing re-verification that these offsets
+// describe the real struct (see umd_CreateResource's comment). Flags is D3DDDI_RESOURCEFLAGS, whose low
+// two bits (RenderTarget=0x1, ZBuffer=0x2) numerically coincide with the D3DUSAGE_RENDERTARGET/
+// D3DUSAGE_DEPTHSTENCIL bits the host's create_resource actually tests -- umd_CreateResource translates
+// them explicitly rather than relying on that coincidence.
+#ifdef _WIN64
+typedef struct _D3DDDIARG_CREATERESOURCE
+{
+    UINT Format;                         // 0 -- live-confirmed (the only field read pre-RE)
+    UINT Pool;                           // 4 -- live-confirmed (D3DDDI_POOL)
+    UINT MultisampleType;                // 8 -- present
+    UINT MultisampleQuality;             // 12 -- present
+    const D3DDDI_SURFACEINFO* pSurfList; // 16 -- live-confirmed (pointer to per-subresource dim array)
+    UINT SurfCount;                      // 24 -- live-confirmed (array length)
+    UINT MipLevels;                      // 28 -- live-confirmed
+    UINT Fvf;                            // 32
+    UINT VidPnSourceId;                  // 36
+    UINT RefreshRateNumerator;           // 40 -- D3DDDI_RATIONAL.Numerator
+    UINT RefreshRateDenominator;         // 44 -- D3DDDI_RATIONAL.Denominator
+    HANDLE hResource;                    // 48 -- live-confirmed in/out driver handle (umd_CreateResource
+                                         //       writes it here; see its sentinel-scan comment)
+    UINT Flags;                          // 56 -- live-confirmed (D3DDDI_RESOURCEFLAGS usage bitfield)
+    BYTE ReservedTail[12];               // 60..71 -- Rotation/Flags2/etc.: region size-confirmed (total
+                                         //           struct is 72), individual fields not pinned
+} D3DDDIARG_CREATERESOURCE;
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Format) == 0, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Pool) == 4, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MultisampleType) == 8, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MultisampleQuality) == 12, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, pSurfList) == 16, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, SurfCount) == 24, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MipLevels) == 28, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, hResource) == 48, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Flags) == 56, "D3DDDIARG_CREATERESOURCE x64 layout");
+static_assert(sizeof(D3DDDIARG_CREATERESOURCE) == 72, "size confirmed via real d3d9.dll RE (x64)");
+#else
+typedef struct _D3DDDIARG_CREATERESOURCE
+{
+    UINT Format;                         // 0 -- live-confirmed
+    UINT Pool;                           // 4 -- live-confirmed
+    UINT MultisampleType;                // 8 -- present
+    UINT MultisampleQuality;             // 12 -- present
+    const D3DDDI_SURFACEINFO* pSurfList; // 16 -- live-confirmed (4-byte pointer on x86)
+    UINT SurfCount;                      // 20 -- live-confirmed
+    UINT MipLevels;                      // 24 -- live-confirmed
+    UINT Fvf;                            // 28
+    UINT VidPnSourceId;                  // 32
+    UINT RefreshRateNumerator;           // 36
+    UINT RefreshRateDenominator;         // 40
+    HANDLE hResource;                    // 44 -- live-confirmed (sentinel-scan read back 0xAAAA002C,
+                                         //       offset 0x2C = 44; see umd_CreateResource's comment)
+    UINT Flags;                          // 48 -- live-confirmed
+    BYTE ReservedTail[8];                // 52..59 -- region size-confirmed (total struct is 60)
+} D3DDDIARG_CREATERESOURCE;
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Format) == 0, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Pool) == 4, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MultisampleType) == 8, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MultisampleQuality) == 12, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, pSurfList) == 16, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, SurfCount) == 20, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MipLevels) == 24, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, hResource) == 44, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Flags) == 48, "D3DDDIARG_CREATERESOURCE x86 layout");
+static_assert(sizeof(D3DDDIARG_CREATERESOURCE) == 60, "size confirmed via real d3d9.dll RE (x86)");
 #endif
 
 // hResource@0 and pData@40 are RE-verified and reliable across every resource kind and routing path
