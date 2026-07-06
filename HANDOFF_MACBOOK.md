@@ -3546,3 +3546,112 @@ and `resolve_instancing().instance_count` defaults to 1 for any draw that never 
 `SetStreamSourceFreq` with an `INSTANCEDATA`/`INDEXEDDATA` flag. `docs/d3d9-roadmap.md`'s M3 row, M5 row,
 "M3 coverage items" checklist, and "Sequencing recommendation" section all updated to flip
 `stream_frequencies`/instancing from the "still not started" list to done, citing all three commits.
+
+## 42. D3DFORMAT advertisement expansion — RE-gate confirms no opaque wall, full 13-format expansion, and a real R5G6B5 render-target bug caught by code-quality review before it shipped (2026-07-06)
+
+M3's "more formats" gap (§36's cube/volume investigation left this as the other open item on the same
+list) turned out to be a much shallower gap than cube/volume's: the host's `d3d9_format_to_vulkan`
+(`d3d9_format.cpp`) already correctly mapped 13 D3DFORMAT values, but the UMD's own `g_formats` FORMATOP
+table — what real `d3d9.dll` actually consults via `CheckDeviceFormat`/`CreateTexture`/
+`CreateRenderTarget` — only advertised 3-4 of them. Four commits, following the same RE-gate → feature →
+test → polish discipline as §33/§34: `ba83be93` (RE gate), `18b74fcb` (feat), `a9c2f8d3` (test),
+`197cfbd3` (fix + polish).
+
+### 42.1 RE-gate: is advertisement alone sufficient, or is there a hidden wall like cube/volume's? (`ba83be93`)
+
+Before committing to a full table expansion, one new FORMATOP row — `D3DFMT_DXT1`, `FMT_OP_TEXTURE`
+only — was added as a throwaway gate and verified live against the real Microsoft `d3d9.dll`: without
+the row, `CheckDeviceFormat(TEXTURE, DXT1)` returned `D3DERR_NOTAVAILABLE` (`0x8876086a`) and
+`CreateTexture` returned `D3DERR_INVALIDCALL` (`0x8876086c`, null); with it, both returned `S_OK`. This
+resolved the open question in the SAFE direction: unlike cube/volume textures (§36), which are rejected
+before `pfnCreateResource` is ever called by an opaque, transformed internal capability cache inside
+`d3d9.dll` that a UMD-side table edit cannot reach, advertising a brand-new format is a plain, mechanical
+FORMATOP table extension with no hidden wall behind it. The remaining formats were therefore genuinely
+just a table-extension exercise, not a fresh RE investigation each.
+
+### 42.2 Full expansion: the remaining 9 formats (`18b74fcb`)
+
+Each row's op-bit class matches realistic, host-supported usage — no row sets `3DACCELERATION`
+(`0x800`), which `d3d9.dll` requires to co-occur with `DISPLAYMODE` (`0x400`) or the entire driver gets
+disabled:
+- `D24X8` — `FMT_OP_ZSTENCIL` (depth-only variant, matching the already-advertised `D24S8`).
+- `R5G6B5` — initially `RT_TEX` (texture + render target) — see the bug in §42.4.
+- `A8`, `L8` — `FMT_OP_TEXTURE` (single-channel).
+- `V8U8`, `Q8W8V8U8` — `FMT_OP_TEXTURE` (bump/normal maps).
+- `A16B16G16R16F` — `FMT_OP_TEXTURE` only, deliberately: it's 8 bytes/texel, and the host's RT
+  readback/Present/ColorFill paths hardcode a 4-bytes-per-texel assumption (§34.6 first flagged this as a
+  `color_fill` scope boundary) — an 8-byte/texel HDR render target would undersize those buffers. Scoped
+  out from the start, not a bug.
+- `DXT3`, `DXT5` — `FMT_OP_TEXTURE` (compressed, matching the `DXT1` gate precedent).
+
+Also upgraded the existing `A8R8G8B8` row from texture-only to `RT_TEX`, so alpha render targets become
+creatable — safe, since `A8R8G8B8` is host-side `B8G8R8A8_UNORM` (4 bytes/texel), the same format the
+readback path already assumes.
+
+Purely additive on the guest side: full x64+x86 regression sweep was semantically byte-identical to
+before (only nondeterministic pointers and a wall-clock TIMING line differed).
+
+### 42.3 Test: three before/after discriminators (`a9c2f8d3`)
+
+`d3d9_format_coverage_test.cpp` — three sub-passes, each independently confirmed to fail at creation
+(`D3DERR_NOTAVAILABLE`) against the pre-expansion table and pass after it:
+- DXT5 4x4 solid-RED texture: sampled, BC3-decoded, read back == RED.
+- A8R8G8B8 render target: a CYAN source rendered into it, read back == CYAN.
+- L8 4x4 luminance texture (200): sampled, value lands in R via the identity swizzle.
+
+`A16B16G16R16F` was deliberately left untested as a render target (sampled-texture only), keeping the
+host BGRA8-Present-path assumption out of this test's scope on purpose.
+
+### 42.4 The bug: R5G6B5 given render-target capability it should not have had — caught by code-quality review, not by any test (`197cfbd3`)
+
+`18b74fcb` advertised `R5G6B5` as `RT_TEX`. This was wrong, and none of §42.3's three sub-passes would
+have caught it — they tested that the *new* formats worked, not that a format's *capability scope* was
+correct. `R5G6B5` is 2 bytes/texel; every host-side render-target path hardcodes 4 bytes/texel BGRA8:
+`d3d9_host::color_fill`'s size calculation, `vulkan_host::create_render_target`/`readback_render_target`'s
+readback-buffer sizing, and the Present-path `ui_surface_desc` construction in `syscalls/gdi.cpp`/
+`gpu_bridge.cpp` (`.stride = width * 4`, fixed BGRA8 format).
+
+**What would have happened if this had shipped**: not a crash, not an error return. A real app calling
+`CreateRenderTarget(D3DFMT_R5G6B5)` would have gotten a silent `S_OK` success. `vkCmdCopyImageToBuffer`
+packs tightly at the image's real 2 bytes/texel, but every consumer downstream — the readback buffer
+size, the Present stride, the pixel format tag — assumes 4. The result: a render target that appears to
+work, but whose every readback and every Present after the first draw shows visibly corrupted, misaligned
+pixels, with no error anywhere to point at the cause. This is exactly the failure class this codebase's
+own review discipline exists to catch before it reaches a guest test, let alone a real game.
+
+**Fix**: scope `R5G6B5` to `FMT_OP_TEXTURE` only, matching how `A16B16G16R16F` was already correctly
+scoped in the very same `18b74fcb` commit (§42.2) — the inconsistency was specific to `R5G6B5`, not a
+systemic miss. A negative-case sub-pass was added to `d3d9_format_coverage_test.cpp`:
+`CreateTexture(R5G6B5)` must still succeed, but `CreateRenderTarget(R5G6B5)` must now fail
+(`D3DERR_NOTAVAILABLE`) — verified on both x64 and x86/WoW64, proving the capability was genuinely
+withdrawn rather than merely left undocumented.
+
+Two stale comments left by the expansion work were corrected in the same commit:
+`classify_resource_usage`'s comment claiming `X8R8G8B8` is the "only" advertised RT format (both it and
+`A8R8G8B8` are now RT-capable; this function is a dead fallback for real resources, so only the factual
+claim was fixed, no logic change), and a README passage still claiming `A8R8G8B8` render targets fail
+with `D3DERR_INVALIDCALL` (no longer true post-expansion).
+
+### 42.5 Known limitation this leaves open, now confirmed real rather than hypothetical
+
+`d3d9_host::color_fill`'s 4-bytes-per-texel hardcode was first flagged as a scope boundary during §34's
+`StretchRect`/`ColorFill` work, framed then as "correct today... but not generalized if a
+non-4-byte-per-texel RT format is ever added." This session is the first time that hypothetical actually
+happened — `R5G6B5` was that non-4-byte-per-texel format, and it very nearly shipped RT-capable. The
+underlying constraint spans three sites, not just `color_fill`: `color_fill`'s own size calculation,
+`vulkan_host::create_render_target`/`readback_render_target`'s buffer sizing, and the Present-path
+`ui_surface_desc` construction. All three would need to derive byte-per-texel/stride/format from the
+resource's actual VkFormat instead of a hardcoded constant before any 16-bit-color or HDR format could
+become render-target-capable. `docs/d3d9-roadmap.md` now carries this as its own explicit "Known
+limitation" bullet in "M3 coverage items," separate from the (now closed) format-advertisement bullet, so
+a future task doesn't have to rediscover the three sites from scratch.
+
+### 42.6 Verification
+
+Full regression sweep (all ~42 existing D3D9 guest test runs, both x64 and x86/WoW64) verified clean at
+every stage — RE-gate, feature, test, and fix commits — by two independent reviewers.
+
+`docs/d3d9-roadmap.md`'s M3 row, M5 row, "M3 coverage items" checklist, and "Sequencing recommendation"
+section all updated: the format-advertisement bullet flipped from open to closed (citing all four
+commits, with the R5G6B5 bug documented prominently, not glossed over), and a new, separate "Known
+limitation" bullet added for the underlying 4-bytes-per-texel host constraint.
