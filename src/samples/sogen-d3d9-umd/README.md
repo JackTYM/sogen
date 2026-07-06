@@ -418,10 +418,13 @@ programmable-pipeline path when both a VS and a PS are bound). The PS writes two
 colors to a struct return with `COLOR0`/`COLOR1` semantics (D3D9's `ps_2_0` ISA defines `oC0`-`oC3`
 explicitly; MRT output is gated by `D3DCAPS9::NumSimultaneousRTs`, not by shader model). Two 640x480
 off-screen render targets (RT0, RT1, sized to match `pfnCreateResource`'s hardcoded 640x480 KNOWN
-LIMITATION) use `D3DFMT_X8R8G8B8`, not `D3DFMT_A8R8G8B8` -- the UMD's FORMATOP table only flags
-X8R8G8B8 with the offscreen-render-target capability, and creating an A8R8G8B8 render target fails
-client-side with `D3DERR_INVALIDCALL` against the real `d3d9.dll` (checks are RGB-only, so this
-doesn't affect what the test proves). They are bound ONCE at the start
+LIMITATION) use `D3DFMT_X8R8G8B8`. (This passage originally noted that `D3DFMT_A8R8G8B8` render
+targets failed client-side with `D3DERR_INVALIDCALL` because the FORMATOP table only flagged
+X8R8G8B8 as an offscreen render target. As of the format-expansion work that is NO LONGER true --
+A8R8G8B8 now carries the offscreen-RT op-bit and renders correctly; see the `d3d9-format-coverage-test`
+section below, whose sub-pass 2 proves an A8R8G8B8 render target end to end. This test simply keeps
+using X8R8G8B8; the checks are RGB-only, so the choice doesn't affect what it proves.) They are bound
+ONCE at the start
 (`SetRenderTarget(0, RT0)` / `SetRenderTarget(1, RT1)`) and
 never rebound for the rest of the test. Sub-pass 1 draws a full-screen quad and `LockRect`-reads back
 both RTs: RT0 must be entirely RED (`oC0`), RT1 must be entirely GREEN (`oC1`) -- the old, pre-Task-3
@@ -955,12 +958,20 @@ back with `LockRect` (same proven path as `d3d9_texture_test.cpp`/`d3d9_managed_
   only the FORMATOP advertisement gated it.
 - **L8 texture** (`FMT_OP_TEXTURE`): a 4x4 single-channel luminance texture (value 200). Host maps L8 ->
   `VK_FORMAT_R8_UNORM` sampled with identity swizzle, so the value lands in R and G/B read 0.
+- **R5G6B5 negative discriminator** (`FMT_OP_TEXTURE` only): `CreateTexture(D3DFMT_R5G6B5)` must SUCCEED
+  but `CreateRenderTarget(D3DFMT_R5G6B5)` must FAIL. R5G6B5 is 2 bytes/texel host-side
+  (`VK_FORMAT_R5G6B5_UNORM_PACK16`), while the RT readback/Present/ColorFill paths hardcode 4 bytes/texel
+  BGRA8 (same limitation as `A16B16G16R16F`, see below), so its FORMATOP row is scoped texture-only. This
+  sub-pass is the before/after proof of that scoping: the row previously carried `RT_TEX`, so the RT
+  creation would have silently succeeded with corrupt readback.
 
 `A16B16G16R16F` is advertised `FMT_OP_TEXTURE` only (sampled HDR texture), deliberately NOT a render
 target: the host Present/snapshot readback path (`vulkan_host::create_render_target`'s readback buffer,
 plus `d3d9_host`'s RT backing and ColorFill snapshot copy) hardcodes 4 bytes/texel BGRA8, so an
 8-byte/texel HDR render target would undersize those buffers -- renderable HDR support needs that host
-work first, out of scope for this format-advertisement slice. Expect all `CreateTexture`/
-`CreateRenderTarget`/`DrawIndexedPrimitive` `hr=0x00000000`, three `PASS:` lines, and
+work first, out of scope for this format-advertisement slice (the R5G6B5 sub-pass above is the
+negative-case counterpart of this same 4-bytes/texel constraint). Expect the three render sub-passes'
+`CreateTexture`/`CreateRenderTarget`/`DrawIndexedPrimitive` all `hr=0x00000000`, the R5G6B5
+`CreateRenderTarget` to FAIL (a non-zero `hr`, expected), four `PASS:` lines, and
 `[d3d9-format-coverage-test] ALL CHECKS PASSED`. Pixel-byte-identical parity confirmed on x64 and
 x86/WoW64.

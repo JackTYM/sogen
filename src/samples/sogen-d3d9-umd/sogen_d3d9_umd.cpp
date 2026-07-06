@@ -462,17 +462,18 @@ namespace
     // creating its own correctly-sized one.
     std::unordered_map<uint64_t, uint64_t> g_created_resource_ids;
 
-    // pfnCreateResource's real width/height/usage/pool offsets are still not RE'd (see the KNOWN
-    // LIMITATION below), but its Format field (offset 0) IS confirmed, for every resource kind that
-    // reaches this call at all (render targets, depth-stencil surfaces, and plain textures alike).
-    // Classifying the *usage* purely from the requested Format is a real, evidence-backed heuristic
-    // for this bring-up milestone's fixed set of formats, not a guess: D3DFMT_D24S8/D24X8 (75/77) only
-    // ever mean a depth-stencil surface; D3DFMT_X8R8G8B8 (22) is this UMD's own only advertised
-    // display/render-target format (g_formats); everything else this milestone creates (currently just
-    // D3DFMT_A8R8G8B8, 21, for real sampled textures -- see d3d9_texture_test.cpp) is a plain texture
-    // with no RT/DS usage bit. This is what makes a genuinely NEW CreateTexture()-backed sampled
-    // texture (as opposed to Task 2's host-side-only, never-exercised-via-a-real-guest-call plumbing)
-    // land in d3d9_host::create_resource's is_texture branch instead of its is_render_target one.
+    // Format-based usage classification. This is now a DEAD FALLBACK for real resources: every genuine
+    // CreateResource goes through resource_flags_to_usage(args->Flags) instead (see the call site and
+    // resource_flags_to_usage's own comment) -- this function is only ever reached for the internal-use
+    // synthetic buffer formats, whose Flags carry VertexBuffer/IndexBuffer intent, and none of those hit
+    // the color/depth branches below (they fall through to the plain-texture return). It is retained only
+    // as that fallback. The Format->usage guesses it still encodes are historical and NO LONGER a
+    // complete picture of what g_formats advertises: D3DFMT_D24S8/D24X8 (75/77) are the depth-stencil
+    // formats, and D3DFMT_X8R8G8B8 (22) is A render-target format -- but as of the FORMATOP expansion
+    // it is no longer the ONLY one (D3DFMT_A8R8G8B8, 21, now also carries offscreen-RT usage in
+    // g_formats, and would be misclassified as a plain texture here). Real render-target/texture routing
+    // for those formats comes from resource_flags_to_usage, not from this table, so the incompleteness is
+    // inert; do not extend the branches below to compensate.
     uint32_t classify_resource_usage(uint32_t format)
     {
         if (format == 75 || format == 77) // D3DFMT_D24S8 / D3DFMT_D24X8
@@ -1003,7 +1004,16 @@ namespace
         // A8R8G8B8: sampled textures (d3d9_texture_test.cpp) AND offscreen render targets -- alpha
         // render targets are common (MRT/HDR-ish passes); RT_TEX, not DISPLAY_RT (no 3DACCELERATION).
         {21 /*A8R8G8B8    */, RT_TEX, 0, 0, 0},
-        {23 /*R5G6B5      */, RT_TEX, 0, 0, 0},                   // 16-bit color: texture + offscreen RT
+        // R5G6B5: sampled 16-bit texture ONLY -- deliberately NOT a render target, for the exact same
+        // reason as A16B16G16R16F below. R5G6B5 is 2 bytes/texel host-side (VK_FORMAT_R5G6B5_UNORM_PACK16),
+        // but every RT readback/Present/ColorFill path assumes 4 bytes/texel BGRA8: d3d9_host::color_fill
+        // ("KNOWN LIMITATION: hardcodes 4 bytes/texel"), vulkan_host's create_render_target/
+        // readback_render_target size their readback buffer at width*height*4, and the Present paths
+        // (syscalls/gdi.cpp + gpu_bridge.cpp) build ui_surface_desc{.stride = width*4, .format = bgra8}.
+        // The VkBufferImageCopy packs tightly at R5G6B5's real 2 bytes/texel, so a renderable R5G6B5 RT
+        // would be read back with a 2x-too-wide stride and wrong format -- corrupted pixels. Renderable
+        // 16-bit color needs those host paths generalized to per-format bytes/texel first.
+        {23 /*R5G6B5      */, FMT_OP_TEXTURE, 0, 0, 0},
         {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0},           // texture-only single-channel formats
         {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
         {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only

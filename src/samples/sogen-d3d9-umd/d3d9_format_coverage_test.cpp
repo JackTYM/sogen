@@ -21,6 +21,10 @@
 // 3. L8 texture (FMT_OP_TEXTURE): a 4x4 single-channel luminance texture (value 200). Host maps L8 ->
 //    VK_FORMAT_R8_UNORM sampled with IDENTITY swizzle, so the value lands in R and G/B read 0 -- a
 //    single-channel format sampled and confirmed.
+// 4. R5G6B5 negative discriminator (FMT_OP_TEXTURE only): CreateTexture must SUCCEED but
+//    CreateRenderTarget must FAIL. R5G6B5 is 2 bytes/texel host-side while every RT readback/Present/
+//    ColorFill path hardcodes 4 bytes/texel BGRA8, so R5G6B5 is advertised texture-only; before that fix
+//    the row carried RT_TEX and the RT creation would have silently succeeded with corrupt output.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -413,6 +417,38 @@ int main()
     else
     {
         ++failures;
+    }
+
+    // Sub-pass 4 (negative discriminator): R5G6B5 is advertised TEXTURE-ONLY -- CreateTexture must
+    // succeed, but CreateRenderTarget must FAIL. R5G6B5 is 2 bytes/texel host-side, and every RT
+    // readback/Present/ColorFill path hardcodes 4 bytes/texel BGRA8, so a renderable R5G6B5 RT would read
+    // back corrupted; the fix scoped its FORMATOP row to FMT_OP_TEXTURE only. Before that fix the row
+    // carried RT_TEX and this CreateRenderTarget would have SUCCEEDED (silently producing garbage), so a
+    // FAILED HRESULT here is the exact before/after proof the RT capability was withdrawn.
+    IDirect3DTexture9* texR5 = nullptr;
+    HRESULT hr5tex = dev->CreateTexture(4, 4, 1, 0, D3DFMT_R5G6B5, D3DPOOL_MANAGED, &texR5, nullptr);
+    IDirect3DSurface9* rtR5 = nullptr;
+    HRESULT hr5rt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_R5G6B5, D3DMULTISAMPLE_NONE, 0, TRUE,
+                                            &rtR5, nullptr);
+    printf("[d3d9-format-coverage-test] R5G6B5 CreateTexture hr=0x%08lx tex=%p / CreateRenderTarget hr=0x%08lx surf=%p\n",
+           static_cast<unsigned long>(hr5tex), static_cast<void*>(texR5), static_cast<unsigned long>(hr5rt),
+           static_cast<void*>(rtR5));
+    if (SUCCEEDED(hr5tex) && texR5 && FAILED(hr5rt) && !rtR5)
+    {
+        printf("[d3d9-format-coverage-test] PASS: R5G6B5 is texture-creatable but render-target creation is refused\n");
+    }
+    else
+    {
+        printf("[d3d9-format-coverage-test] FAIL: R5G6B5 texture/render-target advertisement is wrong (RT must fail)\n");
+        ++failures;
+    }
+    if (texR5)
+    {
+        texR5->Release();
+    }
+    if (rtR5)
+    {
+        rtR5->Release();
     }
 
     release_all(texDxt5, texRgba, texL8, rtX8, rtA8, vb, ib, vs, ps, dev, d3d);
