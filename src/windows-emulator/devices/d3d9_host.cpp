@@ -43,7 +43,10 @@ namespace sogen
         // into the SAME SetTexture/bound_textures stage-key space as the pixel samplers, starting at
         // D3DVERTEXTEXTURESAMPLER0 == 257 (D3DDMAPSAMPLER + 1). Real d3d9.dll passes these stage numbers
         // through the DDI unmodified, so bound_textures[257 + k] is the texture the guest bound to vertex
-        // sampler s{k}. execute_draw maps that back to the VS's own shader register k (0..3).
+        // sampler s{k}. execute_draw maps that back to the VS's own shader register k (0..3). Confirmed by
+        // umd_SetTexture's RE-verified direct-value-argument signature (sogen_d3d9_umd.cpp -- Stage is
+        // forwarded verbatim with no special-casing by value) and empirically by
+        // d3d9_vertex_texture_test.cpp's passing SetTexture(D3DVERTEXTEXTURESAMPLER0) result.
         constexpr uint32_t d3dvertextexturesampler0 = 257;
 
         // Public D3DRENDERSTATETYPE values (d3d9types.h) needed for real depth-test wiring.
