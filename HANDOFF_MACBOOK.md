@@ -2162,3 +2162,54 @@ routing individual calls through `ioctl_record_commands` one at a time.
 This closes the third and last item §24 left on the table. The other two — the present/submit path's
 busy-spin fence-wait and per-draw buffer/UBO/descriptor-set allocation churn — remain real, separate,
 unaddressed work; see `docs/d3d9-roadmap.md`'s "Performance — D3D9 native path" section.
+
+## 26. Pipeline-cache-key correctness fix — closed out, proven with a discriminator test, ported to x86
+(2026-07-05)
+
+The "Pipeline-key system beyond one shader pair at a time" gap flagged during the MRT/multi-stream work
+(§23, `docs/d3d9-roadmap.md`) is now fixed. `ensure_programmable_pipeline`'s `VkPipeline` cache
+(`programmable_pipelines_`) was keyed ONLY by `(vertex_shader_id << 32 | pixel_shader_id)`, and
+`ensure_pipeline` (the fixed-function sibling) had no per-shape cache at all — a one-shot
+`pipeline_ready_` bool reused for the device's whole lifetime. Neither key covered the bound RT
+color-format list/count or depth format (baked into `VkPipelineRenderingCreateInfo`/`build_depth_state`)
+or the vertex-input shape, so a guest reusing the same VS/PS pair (or, for FF, any draw at all) across a
+different bound-RT shape, depth format, or vertex layout would silently get back a stale pipeline built
+for an earlier draw's shape.
+
+**Fix (`3809d1c8`):** a `pipeline_cache_key` struct (`vertex_shader`, `pixel_shader`, `color_formats[4]`,
+`depth_format`, `vertex_shape`) is now the key for both `programmable_pipelines_` and a new
+`ff_pipelines_` map. `vertex_shape_key()` mirrors the exact real-decl-vs-fallback-stride branch the
+pipeline builder itself uses, so the computed key can never disagree with what actually gets built on a
+cache miss. `5dd05caa` is a follow-up polish pass (dropped a redundant `operator==` now that `<=>` is
+defaulted, documented the FF pipeline's create-once fields).
+
+**Discriminator test (`deebf036`/`e0205851`):** new `d3d9_pipeline_cache_test.cpp` compiles one
+`vs_2_0`/`ps_2_0` pair (PS writes solid RED to `COLOR0` only). Sub-pass 1 binds RT0 alone, clears it
+BLUE, draws — RT0 reads back RED, caching a 1-attachment pipeline for this VS/PS pair. Sub-pass 2 rebinds
+to RT0 (slot 0) + a new RT1 (slot 1) — same VS/PS, never recreated, only the RT shape changes — clears
+both BLUE, draws again. Before the fix this reused the stale 1-attachment pipeline against a
+2-attachment rendering scope; after the fix RT0 stays RED (the primary discriminator — the old bug could
+corrupt attachment 0's own output, not just leave attachment 1 wrong) and RT1 correctly stays BLUE,
+untouched by a PS that never writes `oC1`. Run against the pre-`3809d1c8` host (`3809d1c8~1`) as a
+before/after check: sub-pass 2's RT1 came back black instead of BLUE, a real, observed discrimination of
+the bug, not a hypothetical one.
+
+**x86/WoW64 port:** cross-compiled `d3d9_pipeline_cache_test.cpp` unchanged with `i686-w64-mingw32-g++`
+(no source edits — this fix is entirely host-side C++, no guest UMD/DDI wire-format change) and staged
+it as `d3d9-pipeline-cache-test-x86.exe`. Ran clean on the first try against the real 32-bit `d3d9.dll`:
+all nine `PASS:` lines, `[d3d9-pipeline-cache-test] ALL CHECKS PASSED`, exit 0 — pixel-exact parity with
+the x64 run (RT0 `B=00 G=00 R=FF` at all three checkpoints in both sub-passes; RT1 `B=FF G=00 R=00` in
+sub-pass 2). No new x86-only bug found, consistent with this being a host-only fix.
+
+**Two narrower gaps found while making this fix, deliberately deferred, not fixed here:** (1) D3D9
+render-state that's also baked as static pipeline state — `D3DRS_ZENABLE`/`ZWRITEENABLE`/depth-compare
+and `D3DRS_ALPHABLENDENABLE`/blend-factor — isn't part of `pipeline_cache_key`, so toggling these with
+the same shaders/RT-shape/vertex-shape between draws would still hit a stale cache entry. (2)
+`vertex_shape_key()`'s real-vertex-declaration branch fingerprints only the immutable declaration handle,
+not the mutable per-stream strides that also feed the pipeline's vertex-binding descriptions — rebinding
+a declaration to a differently-strided stream buffer would still hit a stale entry. Neither is exercised
+by any current guest test; both are now tracked in `docs/d3d9-roadmap.md`'s "Pipeline-key system"
+bullets as explicit, known, not-yet-fixed follow-ups.
+
+Full regression (all host gtests, all 19 guest `d3d9-*-test.exe` on x64 and x86, 26/26 smoke test) passes
+identically to before this change.

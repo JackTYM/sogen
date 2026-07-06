@@ -80,6 +80,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_mrt_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_multistream_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-multistream-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -118,6 +121,7 @@ cp d3d9-int-bool-const-test-x86.exe <root>/filesys/c/d3d9-int-bool-const-test-x8
 cp d3d9-scissor-test-x86.exe <root>/filesys/c/d3d9-scissor-test-x86.exe
 cp d3d9-mrt-test-x86.exe <root>/filesys/c/d3d9-mrt-test-x86.exe
 cp d3d9-multistream-test-x86.exe <root>/filesys/c/d3d9-multistream-test-x86.exe
+cp d3d9-pipeline-cache-test-x86.exe <root>/filesys/c/d3d9-pipeline-cache-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -126,7 +130,7 @@ cp d3d9-multistream-test-x86.exe <root>/filesys/c/d3d9-multistream-test-x86.exe
 shader, const, texture, int-bool-const, mrt, multistream, and pipeline-cache tests. For the x86/WoW64 UMD, the real
 32-bit Microsoft `d3d9.dll` must already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86
-shader, const, texture, texcoord, int-bool-const, mrt, and multistream tests. (The scissor test is
+shader, const, texture, texcoord, int-bool-const, mrt, multistream, and pipeline-cache tests. (The scissor test is
 fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 
 ## Run
@@ -151,6 +155,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-scissor-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-mrt-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-multistream-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-pipeline-cache-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
 ```
 
@@ -320,7 +325,9 @@ its BLUE clear color -- a real, observable discrimination of the fixed bug, not 
 Expect `CreateVertexShader`/`CreatePixelShader`/both `CreateRenderTarget`/every `SetRenderTarget`/both
 `DrawIndexedPrimitive` `hr=0x00000000`, nine `PASS:` lines (three checkpoints for RT0 in sub-pass 1,
 plus three each for RT0 and RT1 in sub-pass 2), and `[d3d9-pipeline-cache-test] ALL CHECKS PASSED`.
-x86/WoW64 port is a separate follow-up task, not covered here.
+`d3d9-pipeline-cache-test-x86.exe` was cross-compiled unchanged (this fix is entirely host-side C++, no
+guest UMD/DDI wire-format changes) and passed on the first run against the real 32-bit `d3d9.dll`,
+pixel-exact parity with the x64 result (all nine `PASS:` lines, `ALL CHECKS PASSED`, exit 0).
 
 `d3d9-partial-lock-test.exe` proves a real `D3DLOCK_NOOVERWRITE`-style partial lock on a growing
 dynamic vertex buffer only touches the sub-range it requested. It fills a 256-byte chunk with a
