@@ -841,6 +841,51 @@ namespace sogen
         }
     }
 
+    void windows_emulator::install_d3d9_caps_patch_hook(const mapped_module& mod)
+    {
+        // Real Microsoft d3d9.dll unconditionally strips the D3DCAPS2_CANMANAGERESOURCE caps bit
+        // (bit 28) inside its own QueryLHDDICaps: `btr eax, 0x1c` then `mov [rsi+0xc], eax`. Forcing
+        // the bit back on right after the store enables the driver-managed D3DPOOL_MANAGED path.
+        // The RVAs below are specific to the staged x64 system32/d3d9.dll build
+        // (sha256 bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c); the 32-bit
+        // syswow64/d3d9.dll is intentionally left untouched (needs its own RE pass).
+        constexpr uint16_t machine_amd64 = 0x8664;
+        if (mod.machine != machine_amd64)
+        {
+            return;
+        }
+
+        constexpr uint64_t pattern_rva = 0x158af;
+        constexpr uint64_t post_store_rva = 0x158b6;
+        constexpr std::array<uint8_t, 7> expected_pattern = {0x0F, 0xBA, 0xF0, 0x1C, 0x89, 0x46, 0x0C};
+
+        std::array<uint8_t, 7> actual_pattern{};
+        if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
+            actual_pattern != expected_pattern)
+        {
+            this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
+                           "bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c expected) -- "
+                           "MANAGED-pool caps-forcing disabled for this build\n",
+                           static_cast<unsigned long long>(pattern_rva));
+            return;
+        }
+
+        auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](const uint64_t) {
+            constexpr uint32_t can_manage_resource_bit = 0x10000000;
+            const auto rsi = this->emu().reg<uint64_t>(x86_register::rsi);
+            const auto field_addr = rsi + 0xc;
+            const auto value = this->emu().read_memory<uint32_t>(field_addr);
+            if ((value & can_manage_resource_bit) == 0)
+            {
+                this->emu().write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
+            }
+        });
+
+        this->d3d9_caps_hooks_[mod.image_base] = hook;
+        this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx\n",
+                       static_cast<unsigned long long>(mod.image_base + post_store_rva));
+    }
+
     void windows_emulator::setup_hooks()
     {
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
@@ -857,6 +902,10 @@ namespace sogen
             {
                 this->mod_manager.wow64_modules_.wow64win_dll = &mod;
             }
+            else if (mod.name == "d3d9.dll")
+            {
+                this->install_d3d9_caps_patch_hook(mod);
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
@@ -870,6 +919,12 @@ namespace sogen
                         this->emu().delete_hook(hook);
                     }
                 }
+            }
+
+            const auto d3d9_hook = this->d3d9_caps_hooks_.extract(mod.image_base);
+            if (d3d9_hook && d3d9_hook.mapped())
+            {
+                this->emu().delete_hook(d3d9_hook.mapped());
             }
         });
 
