@@ -92,11 +92,18 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_dimension_discriminator_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_dimension_discriminator_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-dim-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_multitexture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-multitexture-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_multitexture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-multitexture-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
 `d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`,
-`d3d9_pipeline_cache_test.cpp`, and `d3d9_dimension_discriminator_test.cpp` are guest-runtime tests,
+`d3d9_pipeline_cache_test.cpp`, `d3d9_dimension_discriminator_test.cpp`, and
+`d3d9_multitexture_test.cpp` are guest-runtime tests,
 not driver-side files, so they do not need the
 `-I../../d3d9-command-protocol -I../../gpu-bridge-protocol` include paths the UMD build above
 requires; they only talk to `d3d9.dll`/`d3dcompiler_43.dll` through the public D3D9 API. The same
@@ -120,6 +127,7 @@ cp d3d9-scissor-test-x64.exe <root>/filesys/c/d3d9-scissor-test.exe
 cp d3d9-mrt-test-x64.exe <root>/filesys/c/d3d9-mrt-test.exe
 cp d3d9-multistream-test-x64.exe <root>/filesys/c/d3d9-multistream-test.exe
 cp d3d9-pipeline-cache-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-test.exe
+cp d3d9-multitexture-test-x64.exe <root>/filesys/c/d3d9-multitexture-test.exe
 cp sogen_d3d9um-x86.dll <root>/filesys/c/windows/syswow64/sogen_d3d9um.dll
 cp d3d9-triangle-test-x86.exe <root>/filesys/c/d3d9-triangle-test-x86.exe
 cp d3d9-shader-test-x86.exe <root>/filesys/c/d3d9-shader-test-x86.exe
@@ -132,15 +140,16 @@ cp d3d9-scissor-test-x86.exe <root>/filesys/c/d3d9-scissor-test-x86.exe
 cp d3d9-mrt-test-x86.exe <root>/filesys/c/d3d9-mrt-test-x86.exe
 cp d3d9-multistream-test-x86.exe <root>/filesys/c/d3d9-multistream-test-x86.exe
 cp d3d9-pipeline-cache-test-x86.exe <root>/filesys/c/d3d9-pipeline-cache-test-x86.exe
+cp d3d9-multitexture-test-x86.exe <root>/filesys/c/d3d9-multitexture-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
 `d3d9.dll` must already exist at `<root>/filesys/c/windows/system32/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/system32/d3dcompiler_43.dll` for the
-shader, const, texture, int-bool-const, mrt, multistream, and pipeline-cache tests. For the x86/WoW64 UMD, the real
+shader, const, texture, int-bool-const, mrt, multistream, pipeline-cache, and multitexture tests. For the x86/WoW64 UMD, the real
 32-bit Microsoft `d3d9.dll` must already exist at `<root>/filesys/c/windows/syswow64/d3d9.dll`, and
 `d3dcompiler_43.dll` must exist at `<root>/filesys/c/windows/syswow64/d3dcompiler_43.dll` for the x86
-shader, const, texture, managed-texture, texcoord, int-bool-const, mrt, multistream, and pipeline-cache tests. (The scissor test is
+shader, const, texture, managed-texture, texcoord, int-bool-const, mrt, multistream, pipeline-cache, and multitexture tests. (The scissor test is
 fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 
 ## Run
@@ -157,6 +166,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-mrt-test.exe
 ./analyzer -e <root> -c c:/d3d9-multistream-test.exe
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-test.exe
+./analyzer -e <root> -c c:/d3d9-multitexture-test.exe
 ./analyzer -e <root> -c c:/d3d9-shader-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-const-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-texture-test-x86.exe
@@ -167,6 +177,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-mrt-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-multistream-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-multitexture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
 ```
 
@@ -349,6 +360,31 @@ checks all three chunks still hold exactly their own pattern -- in particular th
 `PASS:` lines and `[d3d9-partial-lock-test] ALL CHECKS PASSED`. See the note below (Task 6,
 2026-07-04) for what this fixes and how -- previously this class of lock silently got whole-buffer
 semantics, which would have corrupted chunk 0 and failed this exact test.
+
+`d3d9-multitexture-test.exe` proves a single pixel shader can sample TWO textures bound to different
+D3D9 sampler registers (`s0` and `s1`) in one draw -- the multi-sampler binding work in
+`d3d9_shader_translator.cpp` (`ps_sampler_bindings`) and `d3d9_host.cpp` (`ps_bindings` +
+`execute_draw`'s per-stage sampler loop). Previously the translator declared only `s0`'s
+combined-image-sampler (set 1, binding 1); the scheme now over-declares `s0`..`s3` at bindings
+1/4/5/6 (stepping over the int/bool-const UBOs at bindings 2/3), which is proven inert for shaders that
+don't reference the extra stages. The test builds two solid-color textures -- `texA` pure RED, `texB`
+pure GREEN -- binds them to `s0`/`s1`, and draws one quad with a real `D3DCompile()`'d `ps_2_0` that
+outputs `s0.rgb + s1.rgb`. RED + GREEN = YELLOW (`B=00 G=FF R=FF`), a third color distinct from either
+input, so a correct combined result is unambiguous. Solid textures make the check independent of UV
+interpolation, isolating the test to the sampler-binding path. Expect `CreateTexture(RED/s0)`/
+`CreateTexture(GREEN/s1)`/`DrawIndexedPrimitive` `hr=0x00000000`, one `PASS:` line, and
+`[d3d9-multitexture-test] ALL CHECKS PASSED`.
+
+Before/after discriminator (run against the pre-multi-sampler host code): the test FAILS on the old
+code and PASSES on the new. NOTE: the failure mode is graceful degradation, NOT the vkd3d-shader crash
+the design investigation predicted. On this vkd3d build, referencing `s1` with no `s1` combined-sampler
+binding supplied makes `vkd3d_shader_compile` return an error code (`result < 0`), which
+`compile_stage` already handles by returning false; `translate_d3d9_shader_pair` then fails,
+`ensure_programmable_pipeline` returns nullptr, and `execute_draw` degrades silently (returns `d3d_ok`
+without drawing). The rendered pixel stays the clear color (black), so the analytic YELLOW check still
+fails cleanly on old code -- a valid pass/fail discriminator, just not a crash. `d3d9-multitexture-test-
+x86.exe` was cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`,
+pixel-exact parity with x64 (`center pixel=B=00 G=FF R=FF A=FF`, `ALL CHECKS PASSED`, exit 0).
 
 ## Notes
 
