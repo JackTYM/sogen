@@ -320,6 +320,24 @@ static_assert(sizeof(D3DDDIARG_SETSTREAMSOURCE) == 24, "D3DDDIARG_SETSTREAMSOURC
 static_assert(sizeof(D3DDDIARG_SETSTREAMSOURCE) == 16, "D3DDDIARG_SETSTREAMSOURCE x86 layout");
 #endif
 
+// UP-draw (DrawPrimitiveUP / DrawIndexedPrimitiveUP) stream-source variant. RE-verified live
+// 2026-07-06 (x64 AND x86) by bracketing a real DrawPrimitiveUP call and dumping the
+// pfnSetStreamSourceUm (device-func-table slot 7) argument: the struct carries only
+// { StreamNumber, Stride } -- there is NO hVertexBuffer/Offset (unlike the buffer variant above),
+// because the user vertex data does not live in a buffer. pfnSetStreamSourceUm is a THREE-argument
+// DDI call:
+//   HRESULT APIENTRY (HANDLE hDevice, CONST D3DDDIARG_SETSTREAMSOURCEUM* pArg, CONST VOID* pUMVertices)
+// with the user vertex-array pointer passed as the SEPARATE third argument (x64: r8 / x86: last stack
+// slot), never inside the struct. Verified against two distinct strides (0x14 and 0x20) on both
+// arches; StreamNumber read back as 0 for the UP path (DrawPrimitiveUP always uses stream 0). Two
+// plain UINTs, so the layout is identical for x64 and x86.
+typedef struct _D3DDDIARG_SETSTREAMSOURCEUM
+{
+    UINT StreamNumber;
+    UINT Stride;
+} D3DDDIARG_SETSTREAMSOURCEUM;
+static_assert(sizeof(D3DDDIARG_SETSTREAMSOURCEUM) == 8, "D3DDDIARG_SETSTREAMSOURCEUM layout (identical x64/x86)");
+
 typedef struct _D3DDDIARG_SETSTREAMSOURCEFREQ
 {
     UINT StreamNumber;
@@ -338,6 +356,15 @@ static_assert(sizeof(D3DDDIARG_SETINDICES) == 16, "D3DDDIARG_SETINDICES x64 layo
 // compiler-verified via i686-w64-mingw32-g++.
 static_assert(sizeof(D3DDDIARG_SETINDICES) == 8, "D3DDDIARG_SETINDICES x86 layout");
 #endif
+
+// RE-verified live 2026-07-06 (x64 AND x86): the UP-draw index variant pfnSetIndicesUm (device-func-
+// table slot 9, reached from within DrawIndexedPrimitiveUP) takes NO struct pointer. Like pfnSetTexture
+// above, it is a direct scalar DDI call:
+//   HRESULT APIENTRY (HANDLE hDevice, UINT Stride, CONST VOID* pUMIndices)
+// where Stride is the index element size in BYTES passed as an immediate value (read back as 2 for
+// D3DFMT_INDEX16 and 4 for D3DFMT_INDEX32, both verified, on both arches -- attempting to dereference it
+// as a pointer faults) and pUMIndices is the user index-array pointer (x64: r8 / x86: last stack slot).
+// There is intentionally no D3DDDIARG_SETINDICESUM struct.
 
 typedef struct _D3DDDIARG_SETRENDERTARGET
 {
