@@ -160,21 +160,35 @@ namespace sogen
         }
 
         // Matches d3d9_host.cpp's ensure_programmable_pipeline PS descriptor set (set 1): binding 0 is the
-        // float-const UBO, binding 1 is the combined-image-sampler for texture stage 0. vkd3d's own D3DBC
-        // frontend addresses combined samplers by plain sampler-stage number (resource_index == sampler_index
-        // == the D3D9 s# register), matching SetTexture(stage, ...) directly.
-        const vkd3d_shader_combined_resource_sampler ps_sampler_binding{
-            .resource_space = 0,
-            .resource_index = 0,
-            .sampler_space = 0,
-            .sampler_index = 0,
-            .shader_visibility = VKD3D_SHADER_VISIBILITY_PIXEL,
-            // Must be IMAGE, not BUFFER (unlike the CBV binding above): vkd3d matches this bitwise against
-            // the shader's own declared resource dimension and silently drops the binding on a mismatch --
-            // the sampler variable then never resolves and vkd3d-shader crashes when the shader references it.
-            .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
-            .binding = {.set = 1, .binding = 1, .count = 1},
-        };
+        // float-const UBO, bindings 2/3 the int/bool-const UBOs, and the combined-image-samplers for texture
+        // stages s0..s3 sit at bindings 1, 4, 5, 6 (s0 keeps its original binding 1; s(k) -> 3+k for k>=1,
+        // stepping over the const-UBO bindings). vkd3d's own D3DBC frontend addresses combined samplers by
+        // plain sampler-stage number (resource_index == sampler_index == the D3D9 s# register), while the
+        // Vulkan binding number is fully decoupled from that register -- confirmed against this vkd3d build.
+        //
+        // All four sampler stages are declared unconditionally even though most pixel shaders reference only
+        // s0. Over-declaring combined samplers a shader doesn't actually use is empirically proven inert:
+        // vkd3d's emit_combined_sampler_declarations only visits an entry when the shader statically declares
+        // the matching resource, so unreferenced entries emit zero SPIR-V (verified via SPIR-V disassembly).
+        // That makes this fixed s0..s3 scheme safe for single-sampler shaders. s0..s3 is a D3D9-realistic cap
+        // for real content (diffuse+normal, multi-texturing); raising it toward D3D9's 16-sampler max is a
+        // trivial, mechanical change here plus a matching bump to d3d9_host.cpp's ps_bindings/pool if needed.
+        std::array<vkd3d_shader_combined_resource_sampler, 4> ps_sampler_bindings{};
+        for (unsigned int k = 0; k < ps_sampler_bindings.size(); ++k)
+        {
+            ps_sampler_bindings[k] = {
+                .resource_space = 0,
+                .resource_index = k,
+                .sampler_space = 0,
+                .sampler_index = k,
+                .shader_visibility = VKD3D_SHADER_VISIBILITY_PIXEL,
+                // Must be IMAGE, not BUFFER (unlike the CBV binding above): vkd3d matches this bitwise against
+                // the shader's own declared resource dimension and silently drops the binding on a mismatch --
+                // the sampler variable then never resolves and vkd3d-shader crashes when the shader references it.
+                .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
+                .binding = {.set = 1, .binding = (k == 0 ? 1u : 3u + k), .count = 1},
+            };
+        }
         // varying_map_info is deliberately NOT passed here (unlike the VS call above) -- this is correct,
         // not an asymmetry to fix. vkd3d_shader_varying_map_info remaps the *compiling stage's own output*
         // signature (vsir_program_remap_output_signature in ir.c), and vkd3d-shader's own pipeline
@@ -185,7 +199,8 @@ namespace sogen
         // TEXCOORD0 directly and via d3d9_texture_test.cpp's full run) -- see d3d9_texcoord_test.cpp and
         // docs/d3d9-roadmap.md for the investigation this closed out.
         if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, VKD3D_SHADER_VISIBILITY_PIXEL, 1,
-                            &ps_sampler_binding, 1, out.pixel_spirv))
+                            ps_sampler_bindings.data(),
+                            static_cast<unsigned int>(ps_sampler_bindings.size()), out.pixel_spirv))
         {
             out.vertex_spirv.clear();
             return false;

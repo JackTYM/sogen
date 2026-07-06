@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstring>
 #include <span>
 
@@ -365,9 +366,9 @@ namespace sogen
         const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
             // 2 float UBOs (VS+PS) + 2 int UBOs (VS+PS) + 2 bool UBOs (VS+PS).
             {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 6},
-            // One combined-image-sampler slot: the PS set's binding 1 (see ensure_programmable_pipeline),
-            // for texture stage/sampler 0 -- this slice's minimum-viable single-texture binding.
-            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1},
+            // Four combined-image-sampler slots: the PS set's bindings 1/4/5/6 (see ensure_programmable_
+            // pipeline), one per texture stage s0..s3 that execute_draw may write in a single draw.
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 4},
         }};
         if (this->vulkan_.create_descriptor_pool(device, 2, pool_sizes, this->descriptor_pool_) != 0 ||
             this->descriptor_pool_ == 0)
@@ -579,12 +580,15 @@ namespace sogen
             {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
         }};
-        // Binding 1 (combined image sampler, texture stage/sampler 0) is declared here unconditionally --
-        // Vulkan allows a pipeline layout to declare more bindings than a given shader module statically
-        // uses, so this is safe for a PS that never samples (d3d9_shader_translator.cpp only emits a
-        // SPIR-V sampler variable for a PS that actually reads register s0). execute_draw only writes
-        // this descriptor when a texture is actually bound.
-        const std::array<vulkan_host::descriptor_binding, 4> ps_bindings{{
+        // Combined-image-sampler bindings for texture stages s0..s3 sit at bindings 1, 4, 5, 6 (bindings 2/3
+        // are the int/bool-const UBOs) -- the exact scheme d3d9_shader_translator.cpp pins into the PS SPIR-V,
+        // ps_sampler_binding_for_stage below encodes the same s(k) -> {1,4,5,6} mapping. All four are declared
+        // here unconditionally: Vulkan allows a pipeline layout to declare more bindings than a given shader
+        // module statically uses, so this is safe both for a PS that never samples and for one that samples
+        // fewer than four stages (d3d9_shader_translator.cpp only emits a SPIR-V sampler variable for a stage
+        // the PS actually reads). execute_draw only writes each descriptor when a texture is bound to that
+        // stage. Raising the cap toward D3D9's 16-sampler max is a mechanical change here + the pool sizing.
+        const std::array<vulkan_host::descriptor_binding, 7> ps_bindings{{
             {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
             {.binding = 1, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
@@ -592,6 +596,12 @@ namespace sogen
             {.binding = 2, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
             {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
+            {.binding = 4, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
+            {.binding = 5, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
+             .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
+            {.binding = 6, .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
         }};
         if (this->vulkan_.create_descriptor_set_layout(device, vs_bindings, entry.vs_set_layout) != 0 ||
@@ -862,6 +872,15 @@ namespace sogen
         {
             const auto it = sampler_state.find(tss_key(sampler, d3dsamp_type));
             return it != sampler_state.end() ? it->second : default_value;
+        }
+
+        // Highest PS texture stage execute_draw binds in one draw, and the D3D9 s#-register -> Vulkan
+        // descriptor-set-1 binding map, both mirroring d3d9_shader_translator.cpp's ps_sampler_bindings:
+        // s0 keeps binding 1; s(k) -> 3+k for k>=1, stepping over the int/bool-const UBOs at bindings 2/3.
+        constexpr uint32_t max_ps_sampler_stages = 4;
+        constexpr uint32_t ps_sampler_binding_for_stage(const uint32_t stage)
+        {
+            return stage == 0 ? 1u : 3u + stage;
         }
 
         // VkFormat's contiguous depth/depth-stencil range covers exactly the two depth formats
@@ -1197,9 +1216,18 @@ namespace sogen
         uint64_t vs_ubo_b_memory = 0;
         uint64_t ps_ubo_b = 0;
         uint64_t ps_ubo_b_memory = 0;
-        uint64_t tex_sampler = 0;
-        uint64_t tex_image_view = 0;
+        std::array<uint64_t, max_ps_sampler_stages> tex_samplers{};
+        std::array<uint64_t, max_ps_sampler_stages> tex_image_views{};
         std::array<uint64_t, 2> descriptor_sets{};
+        const auto destroy_tex_samplers = [&]() {
+            for (const uint64_t s : tex_samplers)
+            {
+                if (s != 0)
+                {
+                    this->vulkan_.destroy_sampler(device, s);
+                }
+            }
+        };
         if (use_programmable)
         {
             const auto destroy_const_ubos = [&]() {
@@ -1257,37 +1285,41 @@ namespace sogen
                 return d3d_ok;
             }
 
-            // Combined-image-sampler binding for texture stage/sampler 0 (this slice's minimum-viable
-            // single-texture scope -- see ensure_programmable_pipeline's ps_bindings comment). Only
-            // written into the descriptor set when a real, GPU-backed texture is actually bound; Vulkan
-            // permits an allocated descriptor set to leave a binding unwritten as long as no bound
-            // pipeline's shader statically accesses it -- true for every PS in the current test suite
-            // that doesn't sample (d3d9_shader_translator.cpp only emits a SPIR-V sampler variable for a
-            // PS that actually reads register s0), but a real gap for a PS that does sample with no
-            // texture bound (not exercised by any guest test yet).
-            const auto tex_it = this->state_.bound_textures.find(0);
-            if (tex_it != this->state_.bound_textures.end() && tex_it->second != 0 &&
-                this->ensure_texture_uploaded(tex_it->second))
+            // Combined-image-sampler bindings for texture stages s0..s3 (see ensure_programmable_pipeline's
+            // ps_bindings comment). Each descriptor is only written when a real, GPU-backed texture is
+            // actually bound to that stage; Vulkan permits an allocated descriptor set to leave a binding
+            // unwritten as long as no bound pipeline's shader statically accesses it -- true for every stage
+            // a PS doesn't sample (d3d9_shader_translator.cpp only emits a SPIR-V sampler variable for a stage
+            // the PS actually reads). A PS that samples a stage with no texture bound remains a real gap, same
+            // as the prior single-texture code, and is not exercised by any guest test yet.
+            for (uint32_t stage = 0; stage < max_ps_sampler_stages; ++stage)
             {
-                const auto tex_res_it = this->resources_.find(tex_it->second);
-                if (tex_res_it != this->resources_.end())
+                const auto tex_it = this->state_.bound_textures.find(stage);
+                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0 ||
+                    !this->ensure_texture_uploaded(tex_it->second))
                 {
-                    resource_entry& tex = tex_res_it->second;
-                    if (tex.vk_image_view_id == 0)
+                    continue;
+                }
+                const auto tex_res_it = this->resources_.find(tex_it->second);
+                if (tex_res_it == this->resources_.end())
+                {
+                    continue;
+                }
+                resource_entry& tex = tex_res_it->second;
+                if (tex.vk_image_view_id == 0)
+                {
+                    uint32_t tex_vk_format = 0;
+                    if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
                     {
-                        uint32_t tex_vk_format = 0;
-                        if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
-                        {
-                            this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
-                                                            VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                            VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
-                        }
+                        this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
+                                                        VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
                     }
-                    if (tex.vk_image_view_id != 0 && this->build_sampler(device, 0, tex_sampler))
-                    {
-                        tex_image_view = tex.vk_image_view_id;
-                    }
+                }
+                if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, tex_samplers[stage]))
+                {
+                    tex_image_views[stage] = tex.vk_image_view_id;
                 }
             }
 
@@ -1305,10 +1337,7 @@ namespace sogen
                     this->vulkan_.free_memory(device, index_memory);
                 }
                 destroy_const_ubos();
-                if (tex_sampler != 0)
-                {
-                    this->vulkan_.destroy_sampler(device, tex_sampler);
-                }
+                destroy_tex_samplers();
                 return d3d_ok;
             }
 
@@ -1374,17 +1403,21 @@ namespace sogen
                  .image_view = 0,
                  .image_layout = 0},
             };
-            if (tex_image_view != 0 && tex_sampler != 0)
+            for (uint32_t stage = 0; stage < max_ps_sampler_stages; ++stage)
             {
+                if (tex_image_views[stage] == 0 || tex_samplers[stage] == 0)
+                {
+                    continue;
+                }
                 writes.push_back({.dst_set = descriptor_sets[1],
-                                  .dst_binding = 1,
+                                  .dst_binding = ps_sampler_binding_for_stage(stage),
                                   .dst_array_element = 0,
                                   .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                   .buffer = 0,
                                   .offset = 0,
                                   .range = 0,
-                                  .sampler = tex_sampler,
-                                  .image_view = tex_image_view,
+                                  .sampler = tex_samplers[stage],
+                                  .image_view = tex_image_views[stage],
                                   .image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
             }
             this->vulkan_.update_descriptor_sets(device, writes);
@@ -1538,10 +1571,7 @@ namespace sogen
             this->vulkan_.free_memory(device, vs_ubo_b_memory);
             this->vulkan_.destroy_buffer(device, ps_ubo_b);
             this->vulkan_.free_memory(device, ps_ubo_b_memory);
-            if (tex_sampler != 0)
-            {
-                this->vulkan_.destroy_sampler(device, tex_sampler);
-            }
+            destroy_tex_samplers();
         }
 
         // Mark each bound render target's backing store stale; sync_backing_from_gpu reads it back
