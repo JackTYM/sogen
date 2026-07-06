@@ -104,6 +104,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_rs_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_stride_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-stride-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_drawprimitiveup_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-drawprimitiveup-test-x64.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_drawprimitiveup_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-drawprimitiveup-test-x86.exe -ld3d9
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -149,6 +155,8 @@ cp d3d9-pipeline-cache-test-x86.exe <root>/filesys/c/d3d9-pipeline-cache-test-x8
 cp d3d9-multitexture-test-x86.exe <root>/filesys/c/d3d9-multitexture-test-x86.exe
 cp d3d9-pipeline-cache-rs-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-rs-test.exe
 cp d3d9-pipeline-cache-stride-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-stride-test.exe
+cp d3d9-drawprimitiveup-test-x64.exe <root>/filesys/c/d3d9-drawprimitiveup-test.exe
+cp d3d9-drawprimitiveup-test-x86.exe <root>/filesys/c/d3d9-drawprimitiveup-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -189,7 +197,24 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-rs-test.exe
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-stride-test.exe
+./analyzer -e <root> -c c:/d3d9-drawprimitiveup-test.exe
+./analyzer -e <root> -c c:/d3d9-drawprimitiveup-test-x86.exe
 ```
+
+`d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
+vertex/index arrays, no vertex/index buffers). Real `d3d9.dll` implements these with no dedicated "UP"
+DDI: it binds the user vertex array via `pfnSetStreamSourceUm` (device-func-table slot 7) and the user
+index array via `pfnSetIndicesUm` (slot 9), then reuses the ordinary `pfnDrawPrimitive`/
+`pfnDrawIndexedPrimitive` slot -- RE-verified live in `d3d9_x86.dll` (that RE also corrected
+`pfnDrawPrimitive` to its true 3-arg WDK shape `(HANDLE, D3DDDIARG_DRAWPRIMITIVE*, const UINT* pFlags)`;
+the earlier 2-arg guess desynced the x86 __stdcall stack, invisibly on x64 caller-cleanup). The UMD
+transports the inline user bytes over new `set_stream_source_um`/`set_indices_um` wire records; the host
+stashes them as transient UM-backed stream/index sources that `execute_draw` uploads as throwaway Vulkan
+buffers, composing with the existing resource-id-backed path (fixed-function
+`D3DFVF_XYZRHW|D3DFVF_DIFFUSE`, no shader compile). It draws a RED triangle via `DrawPrimitiveUP` and a
+GREEN quad via `DrawIndexedPrimitiveUP` (both `D3DFMT_INDEX16` and `D3DFMT_INDEX32`), reading each back
+with `LockRect` to check interior pixels match the geometry and corners stay the clear color. Expect all
+`PASS:` lines and `[d3d9-drawprimitiveup-test] ALL CHECKS PASSED`.
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
 
