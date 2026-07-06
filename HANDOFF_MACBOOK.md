@@ -2468,3 +2468,66 @@ covered" to "FIXED on both x64 and x86/WoW64", the bullet's x86-scope note and t
 "32-bit RE pass still unstarted" note both rewritten as done, and the M2/WoW64/M3/M5 milestone-table rows
 plus the sequencing-recommendation summary all corrected to remove the standing x86/WoW64 MW2 risk).
 Real MW2 is 32-bit, so this I386 branch is the one that actually matters for it.
+
+## 31. Pipeline-cache-key gap #1 (static blend/depth render-state) — gate-tested, root-caused, and fixed
+(2026-07-06)
+
+§26 closed the RT-shape/vertex-shape half of the pipeline-cache-key gap but explicitly deferred two
+narrower ones. This section closes the first: `pipeline_cache_key` (`d3d9_host.hpp`) covered
+`vertex_shader`/`pixel_shader`/`color_formats[4]`/`depth_format`/`vertex_shape`, but no `D3DRS_*` render
+state at all — even though `build_depth_state`/`build_blend_state` bake
+`D3DRS_ZENABLE`/`ZWRITEENABLE`/`ZFUNC` and `D3DRS_ALPHABLENDENABLE`/`SRCBLEND`/`DESTBLEND` as STATIC
+pipeline state into every `VkPipeline`. A guest drawing the same VS/PS pair with the same RT/vertex shape
+but different blend or depth render state between draws would collapse to the same cache key and
+silently reuse the first draw's stale pipeline.
+
+**Gate-test-first discipline.** Before touching any host code, `157831bf` added
+`d3d9_pipeline_cache_rs_test.cpp` and ran it against the *unmodified* host to confirm the bug is real and
+reachable, not just theorized. It compiles one `vs_2_0`/`ps_2_0` pair (NDC-passthrough VS, PS hardcoded to
+output solid GREEN at alpha 0.5) and never recreates it. Sub-pass 1 draws with
+`D3DRS_ALPHABLENDENABLE` at its default (disabled) — RT0 correctly reads back unblended `G=FF`. Sub-pass 2
+rebinds `ALPHABLENDENABLE=TRUE`/`SRCBLEND=SRCALPHA`/`DESTBLEND=INVSRCALPHA` (same VS/PS/RT/vertex-shape, so
+the pre-fix cache key is unchanged) and draws the same quad again, asserting the analytically-correct
+`SRCALPHA`/`INVSRCALPHA` blend of GREEN(a=0.5) over the BLACK clear (`G=80`). Run against the pre-fix host:
+sub-pass 1's three checkpoints passed as expected, but all three of sub-pass 2's failed, reading back the
+stale unblended `G=FF` instead of `G=80` — exact wrong-pixel evidence that the gap is real, not
+hypothetical.
+
+**Fix (`5256f980`).** Added `depth`/`blend` fields to `pipeline_cache_key`: the resolved
+`vulkan_host::depth_state` and `color_blend_attachment`, each given a defaulted `operator<=>` (both are
+pure-`uint32_t` PODs, so this is a mechanical addition, not new comparison logic). Both `ensure_pipeline`
+and `ensure_programmable_pipeline` now compute the resolved depth/blend state ONCE at the cache-key site
+and reuse those exact values when building the pipeline on a miss, instead of recomputing them a second
+time right before `create_graphics_pipeline` — so the key can never disagree with what actually gets
+built. Backward-compatible in the sense that matters here: no existing cache entries survive across a
+code change anyway (the maps are populated fresh per emulator run), and every draw that was hitting the
+right pipeline before still computes the identical key now — the new fields only change behavior for the
+draws that were exposing the bug.
+
+**A/B causality proof.** Gate test fails on the pre-fix host (documented above, in `157831bf`) and passes
+on the post-fix host (`5256f980`): sub-pass 2 now reads back the correctly-blended `G=80`. Same
+before/after rigor as every other fix this session — the bug was shown to reproduce without the fix and
+resolve with it, not just asserted fixed.
+
+**Polish (`76c06d53`).** Review of `5256f980` found two stale comments left over from before the fix
+(the `ff_pipelines_`/`programmable_pipelines_` doc blocks still described the pre-fix key shape) and two
+new `operator<=>` additions with no rationale comment — all four fixed. Also added a one-line
+forward-looking note to `pipeline_cache_key`'s own comment: cull mode, fill mode, stencil state, and
+color-write-mask are currently hardcoded (not render-state-driven), so they don't need to be in the key
+yet — but should get the same treatment this fix just applied if that ever changes.
+
+**Verification.** Full regression sweep — all existing D3D9 guest tests on both x64 and x86, plus the
+26/26 smoke test — stayed green at every stage (gate-test commit, fix commit, polish commit), independently
+confirmed by two reviewers.
+
+**Still open — pipeline-cache-key gap #2, deliberately not touched here.** `vertex_shape_key()`'s
+real-vertex-declaration branch still fingerprints only the immutable `D3DVERTEXELEMENT9` declaration
+handle, not the mutable per-stream strides (`state_.stream_strides`) that also feed the pipeline's
+vertex-binding descriptions. Rebinding the same declaration to a differently-strided stream buffer would
+still hit a stale cache entry built with the old stride. Not exercised by any current guest test; tracked
+in `docs/d3d9-roadmap.md`'s "Pipeline-key system" bullets as the one remaining narrower gap from §26.
+
+Roadmap updated: `docs/d3d9-roadmap.md`'s render-state pipeline-cache-key bullet flipped from open to
+fixed (citing `157831bf`/`5256f980`/`76c06d53`), the M3 table row and sequencing-recommendation prose
+both corrected to reflect only the stream-stride gap remaining open, and the stream-stride bullet itself
+left untouched (still open, not this session's work).
