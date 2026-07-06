@@ -1804,7 +1804,7 @@ from the exact same `sogen_d3d9_umd.cpp`; only the x64 copy had been refreshed).
 re-staging it fixed the mismatch completely:
 
 ```
-pixel(320,240)=B=26 G=00 R=FF A=FF   (x86, after rebuild — identical to x64)
+pixel(320,240)=B=26 G=FF R=00 A=FF   (x86, after rebuild — identical to x64)
 PASS: pixel R/G matches the alt-branch color
 PASS: pixel B=26 matches expected 26
 ALL CHECKS PASSED

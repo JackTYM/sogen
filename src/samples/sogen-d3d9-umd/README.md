@@ -541,7 +541,7 @@ semantics, which would have corrupted chunk 0 and failed this exact test.
   the shared `sogen_d3d9_umd.cpp` (the x64 DLL had already been rebuilt and picked up the new DDI slots;
   the x86 DLL predated that rebuild and was still missing them). Rebuilding `sogen_d3d9um-x86.dll` from
   the current source, no code change, produced pixel-exact parity with x64
-  (`pixel(320,240)=B=26 G=00 R=FF A=FF`, both analytic checks passing). See `docs/d3d9-roadmap.md` and
+  (`pixel(320,240)=B=26 G=FF R=00 A=FF`, both analytic checks passing). See `docs/d3d9-roadmap.md` and
   `HANDOFF_MACBOOK.md` §22 for the full design/RE narrative.
 - **Scissor rect, MRT, and multi-stream vertex sources, ported to x86/WoW64 (Task 10, 2026-07-05) --
   ALL THREE found ZERO new x86-only bugs, unlike several earlier ports.** `d3d9-scissor-test-x86.exe`,
