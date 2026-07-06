@@ -128,6 +128,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_miptexture_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_miptexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-miptexture-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_manydraws_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-manydraws-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_manydraws_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-manydraws-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -181,6 +187,8 @@ cp d3d9-stretchrect-test-x64.exe <root>/filesys/c/d3d9-stretchrect-test.exe
 cp d3d9-stretchrect-test-x86.exe <root>/filesys/c/d3d9-stretchrect-test-x86.exe
 cp d3d9-miptexture-test-x64.exe <root>/filesys/c/d3d9-miptexture-test.exe
 cp d3d9-miptexture-test-x86.exe <root>/filesys/c/d3d9-miptexture-test-x86.exe
+cp d3d9-manydraws-test-x64.exe <root>/filesys/c/d3d9-manydraws-test.exe
+cp d3d9-manydraws-test-x86.exe <root>/filesys/c/d3d9-manydraws-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -229,6 +237,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-stretchrect-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-miptexture-test.exe
 ./analyzer -e <root> -c c:/d3d9-miptexture-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-manydraws-test.exe
+./analyzer -e <root> -c c:/d3d9-manydraws-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -551,6 +561,35 @@ color". This test is EXPECTED to fail (`[d3d9-pipeline-cache-stride-test] FAILED
 `vertex_shape_key()`'s real-declaration branch is extended to also fold in the real, current per-stream
 strides of every stream the bound declaration references; it should start passing once that fix lands,
 with no changes to the test itself. Only built/run on x64 so far.
+
+`d3d9-manydraws-test.exe` is the correctness+timing evidence for the per-draw-overhead performance
+slice (commits `02b28ada`/`0238dfd7`/`fcfccc00`/`36b03142`/`4b0bc778`: a blocking fence-wait replacing
+the CPU-pinning busy-spin, plus per-pipeline descriptor-set pooling and per-device vertex/index/UBO
+buffer pooling in `execute_draw`). Within ONE `BeginScene`/`EndScene` it issues 768
+`DrawIndexedPrimitive` calls (a 32x24 grid of 20x20-pixel cells), ALL through the SAME cached
+programmable pipeline -- same `vs_2_0`/`ps_2_0` pair, same 640x480 RT shape, same 4-vertex/6-index
+unit-quad vertex shape, same two constant UBOs -- i.e. exactly the case the pooling optimizes: after the
+first draw nothing is (re)allocated; the pooled VB/IB/descriptor-sets/UBOs are reused and only their
+CONTENTS are rewritten per draw. Each draw fills a distinct cell with a distinct, index-derived color,
+driven per-draw by a real changing VS constant (`c0` = the cell's NDC offset+scale, so the pooled vertex
+data lands in a different place every draw) AND a real changing PS constant (`c0` = the cell color). This
+is the correctness discriminator: if the pooling reused stale contents (a later draw seeing an earlier
+draw's UBO bytes because the pool was rewritten before the GPU finished reading it, or a buffer not
+actually re-uploaded), cells would show the WRONG color or land in the WRONG place. Eight cells spread
+across the whole grid (four corners, center, three interior) are read back and checked against their own
+analytically-derived colors; all eight read back byte-exact on both x64 and x86/WoW64 (e.g.
+`cell(16,12)` = `B=84 G=85 R=83`, `cell(8,5)` = `B=B3 G=37 R=41`, identical on both architectures).
+The draw loop is bracketed by `QueryPerformanceCounter` and prints its wall-clock time; every draw is
+still FULLY SYNCHRONOUS (submit, then block until the GPU completes, before the next draw starts), so
+this slice does NOT change the NUMBER of GPU round-trips per frame -- only the per-round-trip COST. Run
+against a temporarily-reverted pre-fix host (the 4 host files checked out at `02b28ada~1` = `b6809cee`,
+`analyzer` rebuilt), the same 768-draw loop measured ~383 ms (~0.50 ms/draw); against the fixed HEAD it
+measured ~279 ms (~0.36 ms/draw) -- a real, repeatable ~27% reduction in per-frame draw-loop time, with
+identical (all-PASS) pixel output in both. This is emulated guest wall-clock (the guest's own
+`QueryPerformanceCounter` under the analyzer), not host CPU time, so it captures the emulated cost of the
+busy-spin's polling loop and the per-draw allocation churn, not a raw hardware GPU-stall number. Expect
+all `hr=0x00000000` setup lines, `TIMING: 768 draws in ... ms`, eight `PASS:` lines, and
+`[d3d9-manydraws-test] ALL CHECKS PASSED`.
 
 ## Notes
 
