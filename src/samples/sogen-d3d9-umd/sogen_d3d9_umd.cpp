@@ -994,6 +994,11 @@ namespace
         {22 /*X8R8G8B8*/, DISPLAY_RT, 0, 0, 0},
         {75 /*D24S8   */, FMT_OP_ZSTENCIL, 0, 0, 0},
         {21 /*A8R8G8B8*/, FMT_OP_TEXTURE, 0, 0, 0}, // real sampled textures (d3d9_texture_test.cpp)
+        // Task 1 of the format-expansion slice: advertising a brand-new (not just op-bit-widened)
+        // compressed format is sufficient -- real d3d9.dll's CheckDeviceFormat/CreateTexture flip from
+        // D3DERR_NOTAVAILABLE/D3DERR_INVALIDCALL to S_OK purely from this row (before/after gate-verified,
+        // d3d9_dxt1_probe). Host already maps DXT1 -> VK_FORMAT_BC1_RGBA_UNORM_BLOCK (d3d9_format.cpp).
+        {0x31545844 /*DXT1*/, FMT_OP_TEXTURE, 0, 0, 0},
     };
 
     HRESULT APIENTRY umd_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps)
