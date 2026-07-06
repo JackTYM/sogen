@@ -335,30 +335,31 @@ namespace sogen::d3d9_cmd
         uint32_t primitive_count;
     };
 
-    // header immediately followed by vertex_data_size bytes of inline vertex data.
-    struct draw_primitive_up_record
+    // set_stream_source_um: the DrawPrimitiveUP/DrawIndexedPrimitiveUP user-memory vertex source. Real
+    // d3d9.dll does NOT use a dedicated "UP draw" DDI; it binds the user vertex array via
+    // pfnSetStreamSourceUm (device-func-table slot 7) and then reuses the ordinary pfnDrawPrimitive/
+    // pfnDrawIndexedPrimitive slot -- so this only transports the stream binding, with the user vertex
+    // bytes copied inline (they live in app memory, not a buffer). The header is immediately followed by
+    // vertex_data_size bytes of inline vertex data. offset_bytes is always 0 on the UP path but kept for
+    // symmetry with set_stream_source_record. Receipt marks the stream UM-backed (see d3d9_host.cpp).
+    struct set_stream_source_um_record
     {
-        uint32_t primitive_type;
-        uint32_t primitive_count;
-        uint32_t vertex_stride_bytes;
+        uint32_t stream_number;
+        uint32_t stride_bytes;
+        uint32_t offset_bytes;
         uint32_t vertex_data_size;
         // uint8_t vertex_data[vertex_data_size];
     };
 
-    // header immediately followed by index_data_size bytes of inline index data, then
-    // vertex_data_size bytes of inline vertex data.
-    struct draw_indexed_primitive_up_record
+    // set_indices_um: the DrawIndexedPrimitiveUP user-memory index source, bound by real d3d9.dll via
+    // pfnSetIndicesUm (device-func-table slot 9). index_element_size is the raw byte width (2 = 16-bit,
+    // 4 = 32-bit indices). The header is immediately followed by index_data_size bytes of inline index
+    // data. Receipt marks the index source UM-backed (see d3d9_host.cpp).
+    struct set_indices_um_record
     {
-        uint32_t primitive_type;
-        uint32_t min_vertex_index;
-        uint32_t num_vertices;
-        uint32_t primitive_count;
-        uint32_t index_format; // 0 = 16-bit, 1 = 32-bit
+        uint32_t index_element_size;
         uint32_t index_data_size;
-        uint32_t vertex_stride_bytes;
-        uint32_t vertex_data_size;
         // uint8_t index_data[index_data_size];
-        // uint8_t vertex_data[vertex_data_size];
     };
 
     // Portability guard, same rationale as gpu_bridge_protocol.hpp's own asserts: every struct here
@@ -395,7 +396,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(clear_record) == 20, "wire layout drift");
     static_assert(sizeof(draw_primitive_record) == 16, "wire layout drift");
     static_assert(sizeof(draw_indexed_primitive_record) == 24, "wire layout drift");
-    static_assert(sizeof(draw_primitive_up_record) == 16, "wire layout drift");
-    static_assert(sizeof(draw_indexed_primitive_up_record) == 32, "wire layout drift");
+    static_assert(sizeof(set_stream_source_um_record) == 16, "wire layout drift");
+    static_assert(sizeof(set_indices_um_record) == 8, "wire layout drift");
 
 } // namespace sogen::d3d9_cmd

@@ -188,6 +188,12 @@ namespace sogen
             std::unordered_map<uint32_t, uint32_t> stream_strides{};       // key = stream_number
             std::unordered_map<uint32_t, uint32_t> stream_offsets{};       // key = stream_number
             std::unordered_map<uint32_t, uint32_t> stream_frequencies{};   // key = stream_number
+            // DrawPrimitiveUP/DrawIndexedPrimitiveUP user-memory sources: a non-empty entry means that
+            // stream (or the index source) is UM-backed -- execute_draw uploads these raw bytes as a
+            // transient buffer instead of looking up a resource id. Mutually exclusive with a real
+            // stream_sources/index_buffer binding for the same slot (each binding path clears the other).
+            std::unordered_map<uint32_t, std::vector<std::byte>> stream_um_data{}; // key = stream_number
+            std::vector<std::byte> index_um_data{};
             uint64_t index_buffer{};
             uint32_t index_format{};
             uint64_t vertex_decl{};

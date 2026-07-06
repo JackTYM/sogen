@@ -1086,28 +1086,44 @@ namespace sogen
         // from a handle space independent of our own resource ids, and can coincidentally collide with
         // an unrelated resource id -- without this guard that collision would silently draw garbage from
         // whatever resource happens to share the number.
-        const auto vb_it = this->resources_.find(this->state_.stream_sources[0]);
-        if (vb_it == this->resources_.end() || vb_it->second.backing.empty() ||
-            (vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
-             vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+        // A DrawPrimitiveUP/DrawIndexedPrimitiveUP stream 0 carries its vertex bytes inline in
+        // stream_um_data (see the d3d9_set_stream_source_um handler) rather than a resource id, so the
+        // resource-id guard below only applies when stream 0 is not UM-backed.
+        const auto stream0_um_it = this->state_.stream_um_data.find(0);
+        const bool stream0_um = stream0_um_it != this->state_.stream_um_data.end() && !stream0_um_it->second.empty();
+        if (!stream0_um)
         {
-            return d3d_ok; // no real vertex data bound
+            const auto vb_it = this->resources_.find(this->state_.stream_sources[0]);
+            if (vb_it == this->resources_.end() || vb_it->second.backing.empty() ||
+                (vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
+                 vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+            {
+                return d3d_ok; // no real vertex data bound
+            }
         }
 
         const resource_entry* ib_entry = nullptr;
+        const std::vector<std::byte>* ib_um_bytes = nullptr;
         if (indexed != nullptr)
         {
-            const auto ib_it = this->resources_.find(indexed->index_buffer);
-            // Same vertex_buffer/index_buffer kind ambiguity as the stream_sources[0] guard above --
-            // the UMD's resolve_buffer_resource_id resolves every buffer (vertex or index) with kind
-            // vertex_buffer, so index buffers are only ever seen with that kind in practice.
-            if (ib_it == this->resources_.end() || ib_it->second.backing.empty() ||
-                (ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
-                 ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+            if (!this->state_.index_um_data.empty())
             {
-                return d3d_ok; // no real index data bound
+                ib_um_bytes = &this->state_.index_um_data; // DrawIndexedPrimitiveUP: inline index bytes
             }
-            ib_entry = &ib_it->second;
+            else
+            {
+                const auto ib_it = this->resources_.find(indexed->index_buffer);
+                // Same vertex_buffer/index_buffer kind ambiguity as the stream_sources[0] guard above --
+                // the UMD's resolve_buffer_resource_id resolves every buffer (vertex or index) with kind
+                // vertex_buffer, so index buffers are only ever seen with that kind in practice.
+                if (ib_it == this->resources_.end() || ib_it->second.backing.empty() ||
+                    (ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
+                     ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+                {
+                    return d3d_ok; // no real index data bound
+                }
+                ib_entry = &ib_it->second;
+            }
         }
 
         const uint64_t device = this->ensure_vk_device();
@@ -1193,20 +1209,33 @@ namespace sogen
             {
                 continue;
             }
-            const auto src_it = this->state_.stream_sources.find(stream);
-            if (src_it == this->state_.stream_sources.end())
+            // Prefer a UM-backed (DrawPrimitiveUP) inline byte source for this stream; otherwise resolve
+            // the resource-id-backed vertex buffer exactly as before. The two are mutually exclusive per
+            // stream (each bind path clears the other -- see the set_stream_source[_um] handlers).
+            const std::vector<std::byte>* src_bytes = nullptr;
+            const auto um_it = this->state_.stream_um_data.find(stream);
+            if (um_it != this->state_.stream_um_data.end() && !um_it->second.empty())
             {
-                continue;
+                src_bytes = &um_it->second;
             }
-            const auto res_it = this->resources_.find(src_it->second);
-            if (res_it == this->resources_.end() || res_it->second.backing.empty() ||
-                (res_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
-                 res_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+            else
             {
-                continue;
+                const auto src_it = this->state_.stream_sources.find(stream);
+                if (src_it == this->state_.stream_sources.end())
+                {
+                    continue;
+                }
+                const auto res_it = this->resources_.find(src_it->second);
+                if (res_it == this->resources_.end() || res_it->second.backing.empty() ||
+                    (res_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
+                     res_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
+                {
+                    continue;
+                }
+                src_bytes = &res_it->second.backing;
             }
             if (!create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                                              res_it->second.backing, stream_buffers[stream], stream_memories[stream]))
+                                              *src_bytes, stream_buffers[stream], stream_memories[stream]))
             {
                 destroy_stream_buffers();
                 return d3d_ok;
@@ -1217,9 +1246,13 @@ namespace sogen
 
         uint64_t index_buffer_vk = 0;
         uint64_t index_memory = 0;
-        if (ib_entry != nullptr &&
+        // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
+        // index buffer; both upload identically as a transient index buffer.
+        const std::vector<std::byte>* ib_bytes =
+            ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr ? &ib_entry->backing : nullptr);
+        if (ib_bytes != nullptr &&
             !create_and_upload_gpu_buffer(this->vulkan_, device, this->vk_physical_device_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                                          ib_entry->backing, index_buffer_vk, index_memory))
+                                          *ib_bytes, index_buffer_vk, index_memory))
         {
             destroy_stream_buffers();
             return d3d_ok;
@@ -2107,6 +2140,7 @@ namespace sogen
             this->state_.stream_sources[req.stream_number] = req.vertex_buffer;
             this->state_.stream_strides[req.stream_number] = req.stride_bytes;
             this->state_.stream_offsets[req.stream_number] = req.offset_bytes;
+            this->state_.stream_um_data.erase(req.stream_number); // a real buffer bind supersedes UM
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_stream_source_freq: {
@@ -2126,6 +2160,7 @@ namespace sogen
             }
             this->state_.index_buffer = req.index_buffer;
             this->state_.index_format = req.format;
+            this->state_.index_um_data.clear(); // a real index buffer bind supersedes UM
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_vertex_decl: {
@@ -2332,13 +2367,43 @@ namespace sogen
                                        .base_vertex_index = req.base_vertex_index};
             return this->execute_draw(req.primitive_count * 3, 0, &indexed);
         }
-        case gpu_bridge::command::d3d9_draw_primitive_up: {
-            d3d9_cmd::draw_primitive_up_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+        case gpu_bridge::command::d3d9_set_stream_source_um: {
+            d3d9_cmd::set_stream_source_um_record req{};
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            if (size - sizeof(req) < req.vertex_data_size)
+            {
+                return d3derr_invalidcall;
+            }
+            // Bind this stream as a UM (DrawPrimitiveUP) source: stash the inline vertex bytes and clear
+            // any real buffer binding for the slot. stream_strides is populated exactly as the real
+            // buffer path does, so vertex_shape_key()'s per-stream stride keying covers UM streams too.
+            const std::byte* bytes = payload + sizeof(req);
+            this->state_.stream_um_data[req.stream_number].assign(bytes, bytes + req.vertex_data_size);
+            this->state_.stream_strides[req.stream_number] = req.stride_bytes;
+            this->state_.stream_offsets[req.stream_number] = req.offset_bytes;
+            this->state_.stream_sources[req.stream_number] = 0;
+            return d3d_ok;
         }
-        case gpu_bridge::command::d3d9_draw_indexed_primitive_up: {
-            d3d9_cmd::draw_indexed_primitive_up_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+        case gpu_bridge::command::d3d9_set_indices_um: {
+            d3d9_cmd::set_indices_um_record req{};
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            if (size - sizeof(req) < req.index_data_size)
+            {
+                return d3derr_invalidcall;
+            }
+            // Bind the index source as UM (DrawIndexedPrimitiveUP): stash the inline index bytes and
+            // clear any real index buffer binding. index_format mirrors set_indices_record (0/1).
+            const std::byte* bytes = payload + sizeof(req);
+            this->state_.index_um_data.assign(bytes, bytes + req.index_data_size);
+            this->state_.index_format = req.index_element_size == 4 ? 1u : 0u;
+            this->state_.index_buffer = 0;
+            return d3d_ok;
         }
         default:
             return d3derr_invalidcall;

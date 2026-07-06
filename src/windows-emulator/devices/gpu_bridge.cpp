@@ -3195,7 +3195,7 @@ namespace sogen
                     // d3d9_host entry point rather than getting one case each here -- see
                     // d3d9-command-protocol/d3d9_command_protocol.hpp for what each opcode's payload means.
                     if (command >= static_cast<uint32_t>(gpu_bridge::command::d3d9_marker) &&
-                        command <= static_cast<uint32_t>(gpu_bridge::command::d3d9_draw_indexed_primitive_up))
+                        command <= static_cast<uint32_t>(gpu_bridge::command::d3d9_set_indices_um))
                     {
                         return this->d3d9_.execute_recorded(command, payload, size);
                     }

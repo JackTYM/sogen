@@ -248,9 +248,10 @@ namespace
         12, // pfnSetStreamSourceUm -- trailing data ptr
         8,  // pfnSetIndices (real)
         12, // pfnSetIndicesUm -- trailing data ptr
-        8,  // pfnDrawPrimitive (real) -- (HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE*), matches umd_DrawPrimitive's
-            // live-verified 2-arg signature (see umd_DrawPrimitive) -- NOT the 3-arg WDK-documented shape;
-            // don't "fix" this back to 3 args without re-verifying against a live 32-bit trace first.
+        12, // pfnDrawPrimitive (real) -- (HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE*, CONST UINT* pFlags), the
+            // WDK-documented 3-arg shape. RE-verified live in d3d9_x86.dll (both normal and UP draw paths
+            // push three args) -- see umd_DrawPrimitive's own comment. An earlier 2-arg guess desynced the
+            // x86 stack; the mismatch was invisible on x64 (caller-cleanup) until the UP-draw path hit it.
         8,  // pfnDrawIndexedPrimitive (real)
         16, // pfnDrawRectPatch
         16, // pfnDrawTriPatch
@@ -1384,11 +1385,122 @@ namespace
         return S_OK;
     }
 
+    // DrawPrimitiveUP/DrawIndexedPrimitiveUP state. Real d3d9.dll implements the UP draws by binding the
+    // user vertex/index arrays via pfnSetStreamSourceUm (slot 7) / pfnSetIndicesUm (slot 9) and then
+    // reusing the ordinary pfnDrawPrimitive/pfnDrawIndexedPrimitive slot (10/11) -- so those slots see
+    // only a stride + a raw user pointer, never a vertex/primitive count. We therefore stash the pointer
+    // here and, at the subsequent draw (which does carry the counts), copy exactly the referenced bytes
+    // into a set_stream_source_um / set_indices_um wire record before emitting the normal draw record.
+    struct pending_um_stream
+    {
+        bool active = false;
+        uint32_t stream_number = 0;
+        uint32_t stride = 0;
+        const void* data = nullptr;
+    };
+    struct pending_um_indices
+    {
+        bool active = false;
+        uint32_t element_size = 0;
+        const void* data = nullptr;
+    };
+    pending_um_stream g_um_stream;
+    pending_um_indices g_um_indices;
+
+    // Vertex/index element count a primitive draw of `count` primitives of `type` references.
+    // D3DDDIPRIMITIVETYPE values match D3DPRIMITIVETYPE (POINTLIST=1 .. TRIANGLEFAN=6).
+    uint32_t primitive_element_count(UINT type, UINT primitive_count)
+    {
+        switch (type)
+        {
+        case 1: // D3DPT_POINTLIST
+            return primitive_count;
+        case 2: // D3DPT_LINELIST
+            return primitive_count * 2;
+        case 3: // D3DPT_LINESTRIP
+            return primitive_count + 1;
+        case 4: // D3DPT_TRIANGLELIST
+            return primitive_count * 3;
+        case 5: // D3DPT_TRIANGLESTRIP
+        case 6: // D3DPT_TRIANGLEFAN
+            return primitive_count + 2;
+        default:
+            return primitive_count * 3;
+        }
+    }
+
+    void emit_um_stream_source(uint32_t vertex_count)
+    {
+        if (!g_um_stream.active || g_um_stream.data == nullptr)
+        {
+            return;
+        }
+        const size_t data_size = static_cast<size_t>(vertex_count) * g_um_stream.stride;
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_stream_source_um_record) + data_size);
+        auto* req = reinterpret_cast<d3d9c::set_stream_source_um_record*>(buf.data());
+        req->stream_number = g_um_stream.stream_number;
+        req->stride_bytes = g_um_stream.stride;
+        req->offset_bytes = 0;
+        req->vertex_data_size = static_cast<uint32_t>(data_size);
+        std::memcpy(buf.data() + sizeof(*req), g_um_stream.data, data_size);
+        record_d3d9(gb::command::d3d9_set_stream_source_um, buf.data(), static_cast<uint32_t>(buf.size()));
+    }
+
+    void emit_um_indices(uint32_t index_count)
+    {
+        if (!g_um_indices.active || g_um_indices.data == nullptr)
+        {
+            return;
+        }
+        const size_t data_size = static_cast<size_t>(index_count) * g_um_indices.element_size;
+        std::vector<uint8_t> buf(sizeof(d3d9c::set_indices_um_record) + data_size);
+        auto* req = reinterpret_cast<d3d9c::set_indices_um_record*>(buf.data());
+        req->index_element_size = g_um_indices.element_size;
+        req->index_data_size = static_cast<uint32_t>(data_size);
+        std::memcpy(buf.data() + sizeof(*req), g_um_indices.data, data_size);
+        record_d3d9(gb::command::d3d9_set_indices_um, buf.data(), static_cast<uint32_t>(buf.size()));
+    }
+
+    // pfnSetStreamSourceUm (slot 7): (HANDLE, CONST D3DDDIARG_SETSTREAMSOURCEUM*, CONST VOID* pUMVertices).
+    // See D3DDDIARG_SETSTREAMSOURCEUM in d3d9_ddi.hpp -- the user vertex pointer is a separate third arg.
+    HRESULT APIENTRY umd_SetStreamSourceUm(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCEUM* pArgs,
+                                           CONST VOID* pUMVertices)
+    {
+        if (pArgs == nullptr || pUMVertices == nullptr)
+        {
+            g_um_stream.active = false;
+            return S_OK;
+        }
+        g_um_stream = {.active = true,
+                       .stream_number = pArgs->StreamNumber,
+                       .stride = pArgs->Stride,
+                       .data = pUMVertices};
+        return S_OK;
+    }
+
+    // pfnSetIndicesUm (slot 9): (HANDLE, UINT Stride, CONST VOID* pUMIndices). Stride is the raw index
+    // element size in bytes (2 or 4) passed by value, NOT a struct pointer (see d3d9_ddi.hpp's note).
+    HRESULT APIENTRY umd_SetIndicesUm(HANDLE /*hDevice*/, UINT Stride, CONST VOID* pUMIndices)
+    {
+        if (pUMIndices == nullptr)
+        {
+            g_um_indices.active = false;
+            return S_OK;
+        }
+        g_um_indices = {.active = true, .element_size = Stride, .data = pUMIndices};
+        return S_OK;
+    }
+
     HRESULT APIENTRY umd_SetStreamSource(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCE* pArgs)
     {
         if (pArgs == nullptr) // unbind, same convention as the shader/texture slots
         {
             return S_OK;
+        }
+        // A real buffer bind supersedes any pending UP user-memory vertex source for this stream.
+        if (g_um_stream.active && g_um_stream.stream_number == pArgs->StreamNumber)
+        {
+            g_um_stream.active = false;
         }
         // Resolve through the same buffer lazy-bind Lock() uses -- the DDI vertex buffer handle is a
         // small runtime-internal number (never registered via pfnCreateResource) that can otherwise
@@ -1421,6 +1533,8 @@ namespace
         {
             return S_OK;
         }
+        // A real index buffer bind supersedes any pending UP user-memory index source.
+        g_um_indices.active = false;
         // Same buffer lazy-bind reasoning as umd_SetStreamSource.
         d3d9c::set_indices_record req{.index_buffer = resolve_buffer_resource_id(pArgs->hIndexBuffer, 0),
                                       .format = pArgs->Stride == 4 ? 1u : 0u,
@@ -1529,12 +1643,22 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_DrawPrimitive(HANDLE /*hDevice*/, CONST D3DDDIARG_DRAWPRIMITIVE* pArgs)
+    // pfnDrawPrimitive is a THREE-argument DDI: (HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE*, CONST UINT*
+    // pFlagBuffer) -- the WDK-documented shape. RE-verified live in d3d9_x86.dll (both the normal
+    // CD3DDDIDX10_DrawPrimitive at 0x1004DFE0 and the DrawPrimitiveUP path at 0x1013F730 push three
+    // args: pFlags(=0), the D3DDDIARG_DRAWPRIMITIVE*, and hDevice). On x86 __stdcall (callee-cleanup)
+    // the callee's `ret N` MUST pop all 12 bytes or the caller's stack desyncs -- a 2-arg declaration
+    // faults d3d9.dll's /GS check (STATUS_STACK_BUFFER_OVERRUN). The extra pFlagBuffer pointer is unused
+    // by this bring-up. (On x64 caller-cleanup, a 2-arg declaration happened to work, which masked this.)
+    HRESULT APIENTRY umd_DrawPrimitive(HANDLE /*hDevice*/, CONST D3DDDIARG_DRAWPRIMITIVE* pArgs, CONST UINT* /*pFlags*/)
     {
         if (pArgs == nullptr)
         {
             return S_OK;
         }
+        // DrawPrimitiveUP path: flush the pending user-memory vertex source (bound via slot 7) with
+        // exactly the bytes this draw references before recording the reused draw call.
+        emit_um_stream_source(pArgs->VStart + primitive_element_count(pArgs->PrimitiveType, pArgs->PrimitiveCount));
         d3d9c::draw_primitive_record req{.primitive_type = pArgs->PrimitiveType,
                                          .start_vertex = pArgs->VStart,
                                          .primitive_count = pArgs->PrimitiveCount,
@@ -1549,6 +1673,11 @@ namespace
         {
             return S_OK;
         }
+        // DrawIndexedPrimitiveUP path: flush the pending user-memory vertex source (slot 7) and index
+        // source (slot 9) with exactly the bytes this draw references before recording the reused draw
+        // call. Vertices span [0, MinIndex+NumVertices); indices span [0, StartIndex+index_count).
+        emit_um_stream_source(pArgs->MinIndex + pArgs->NumVertices);
+        emit_um_indices(pArgs->StartIndex + primitive_element_count(pArgs->PrimitiveType, pArgs->PrimitiveCount));
         d3d9c::draw_indexed_primitive_record req{.primitive_type = pArgs->PrimitiveType,
                                                  .base_vertex_index = pArgs->BaseVertexIndex,
                                                  .min_vertex_index = pArgs->MinIndex,
@@ -1706,7 +1835,9 @@ namespace
             slots[4] = reinterpret_cast<void*>(&umd_SetTexture);              // pfnSetTexture
             slots[5] = reinterpret_cast<void*>(&umd_SetPixelShader);          // pfnSetPixelShader
             slots[6] = reinterpret_cast<void*>(&umd_SetPixelShaderConst);     // pfnSetPixelShaderConst
+            slots[7] = reinterpret_cast<void*>(&umd_SetStreamSourceUm);       // pfnSetStreamSourceUm
             slots[8] = reinterpret_cast<void*>(&umd_SetIndices);              // pfnSetIndices
+            slots[9] = reinterpret_cast<void*>(&umd_SetIndicesUm);            // pfnSetIndicesUm
             slots[10] = reinterpret_cast<void*>(&umd_DrawPrimitive);          // pfnDrawPrimitive
             slots[11] = reinterpret_cast<void*>(&umd_DrawIndexedPrimitive);   // pfnDrawIndexedPrimitive
             slots[18] = reinterpret_cast<void*>(&umd_TexBlt);                 // pfnTexBlt
