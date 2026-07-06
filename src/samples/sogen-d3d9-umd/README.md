@@ -140,6 +140,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_sm3_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_sm3_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-sm3-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_instancing_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-instancing-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_instancing_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-instancing-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -197,6 +203,8 @@ cp d3d9-manydraws-test-x64.exe <root>/filesys/c/d3d9-manydraws-test.exe
 cp d3d9-manydraws-test-x86.exe <root>/filesys/c/d3d9-manydraws-test-x86.exe
 cp d3d9-sm3-test-x64.exe <root>/filesys/c/d3d9-sm3-test.exe
 cp d3d9-sm3-test-x86.exe <root>/filesys/c/d3d9-sm3-test-x86.exe
+cp d3d9-instancing-test-x64.exe <root>/filesys/c/d3d9-instancing-test.exe
+cp d3d9-instancing-test-x86.exe <root>/filesys/c/d3d9-instancing-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -249,6 +257,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-manydraws-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-sm3-test.exe
 ./analyzer -e <root> -c c:/d3d9-sm3-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-instancing-test.exe
+./analyzer -e <root> -c c:/d3d9-instancing-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -891,3 +901,30 @@ architectures.
   convention), so they were already exercised by the shared x64 test run before this port and needed no
   x86-specific fix. Full regression sweep after this port (every x64/x86 guest test plus the 26/26 smoke
   test) is documented in `docs/d3d9-roadmap.md` and `HANDOFF_MACBOOK.md`.
+
+`d3d9-instancing-test.exe` proves real D3D9 hardware instancing: a single `DrawIndexedPrimitive` draws
+N geometry instances driven entirely by `SetStreamSourceFreq` (no explicit instance-count draw
+argument exists in D3D9 -- the count is the low 30 bits of the `D3DSTREAMSOURCE_INDEXEDDATA` stream's
+divider, and each `D3DSTREAMSOURCE_INSTANCEDATA` stream advances once per instance). This exercises the
+host path added in `resolve_instancing()`/`vertex_shape_key()`/`ensure_programmable_pipeline`/
+`execute_draw` (`d3d9_host.cpp`): the per-instance stream binding gets
+`VK_VERTEX_INPUT_RATE_INSTANCE`, the instance-rate mask is folded into `pipeline_cache_key`'s
+`vertex_input_shape`, and the decoded instance count is passed to `vkCmdDrawIndexed`. A real
+`D3DVERTEXELEMENT9` declaration puts POSITION on stream 0 (`INDEXEDDATA | 4`, per-vertex quad geometry,
+indexed) and a per-instance `float2` offset + `D3DCOLOR` on stream 1 (`INSTANCEDATA | 1`). The VS adds
+the per-instance offset to the per-vertex local position and the PS outputs the per-instance color, so
+one draw paints four disjoint solid quads (RED/GREEN/BLUE/YELLOW) into the four screen quadrants. Double
+discriminator: (a) if the instance count were still 1, only the first instance would draw -- one
+quadrant painted, three left at the BLACK clear color; (b) if the per-instance stream stayed
+`VK_VERTEX_INPUT_RATE_VERTEX`, each of the quad's four corners would pick up a different instance's
+offset+color, rendering one big color-interpolated quad instead of four flat solid ones. The test probes
+all four quadrant centers (plus an interior point per quadrant) and requires four distinct, pure, solid
+colors -- both wrong implementations fail this. Verified against the pre-task host behavior
+(instance_count forced to 1 AND inputRate forced to VERTEX): all four centers read back BLACK, the test
+`FAILED` -- a real, observed discrimination, not a hypothetical one. Expect `CreateVertexDeclaration`/
+`DrawIndexedPrimitive` `hr=0x00000000`, four `PASS:` lines, and `[d3d9-instancing-test] ALL CHECKS
+PASSED`. Pixel-byte-identical parity confirmed on x64 and x86/WoW64 (the feature is entirely host-side
+C++ plus the already-wired `SetStreamSourceFreq` transport, no guest UMD/DDI change). KNOWN LIMITATION:
+only an `INSTANCEDATA` divider of exactly 1 is honored -- a non-1 divider needs
+`VK_EXT_vertex_attribute_divisor`, which is not enabled on the D3D9 Vulkan device, so such a stream is
+left per-vertex (see `resolve_instancing()`'s comment).
