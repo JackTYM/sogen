@@ -101,6 +101,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_multitexture_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_rs_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-rs-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_stride_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-stride-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -145,6 +148,7 @@ cp d3d9-multistream-test-x86.exe <root>/filesys/c/d3d9-multistream-test-x86.exe
 cp d3d9-pipeline-cache-test-x86.exe <root>/filesys/c/d3d9-pipeline-cache-test-x86.exe
 cp d3d9-multitexture-test-x86.exe <root>/filesys/c/d3d9-multitexture-test-x86.exe
 cp d3d9-pipeline-cache-rs-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-rs-test.exe
+cp d3d9-pipeline-cache-stride-test-x64.exe <root>/filesys/c/d3d9-pipeline-cache-stride-test.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -184,6 +188,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-multitexture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-rs-test.exe
+./analyzer -e <root> -c c:/d3d9-pipeline-cache-stride-test.exe
 ```
 
 Expect `[d3d9-spike] CreateDevice hr=0x00000000` and `SUCCESS: IDirect3DDevice9 created`.
@@ -411,6 +416,43 @@ instead of building a blend-ENABLED one, exactly the predicted bug. This test is
 (`[d3d9-pipeline-cache-rs-test] FAILED`, exit 1) until `pipeline_cache_key` is extended to also fold in
 the depth/blend render-state fields that `build_depth_state`/`build_blend_state` actually read; it should
 start passing once that fix lands, with no changes to the test itself. Only built/run on x64 so far.
+
+`d3d9-pipeline-cache-stride-test.exe` is a GATE test proving `vertex_shape_key()`'s (`d3d9_host.cpp`)
+real-declaration branch has a real, currently-unfixed cache-key gap of its own, distinct from both
+`d3d9-pipeline-cache-test.exe` (RT shape) and `d3d9-pipeline-cache-rs-test.exe` (render state): when a
+real `D3DVERTEXELEMENT9` declaration is bound, it fingerprints the pipeline's vertex-input shape with
+ONLY the declaration HANDLE (`return this->state_.vertex_decl;`), reasoning that the same handle always
+implies the same element types/offsets/usages -- true for the declaration's own shape, but the actual
+built `VkVertexInputBindingDescription::stride` for each binding is ALSO read from
+`state_.stream_strides[stream]` (`ensure_programmable_pipeline`'s real-decl branch), which
+`SetStreamSource(stream, buffer, offset, stride)` can change independently of the declaration handle. It
+compiles ONE `vs_2_0`/`ps_2_0` pair (a position-only passthrough VS matching a real declaration with a
+single POSITION element, and a PS hardcoded to output solid RED) and creates the declaration ONCE, never
+recreating VS/PS/declaration across the two sub-passes. Sub-pass 1 binds a 4-vertex buffer with a
+tightly-packed 12-byte stride (`strideA`) forming a quad over the LEFT half of the viewport via
+`SetStreamSource(0, bufA, 0, 12)`, clears the RT BLACK, and draws -- this builds/caches a `VkPipeline`
+with binding-0 stride baked to 12; the left-half checkpoint correctly reads back RED. Sub-pass 2 (the
+actual discriminator) rebinds stream 0 to a SECOND buffer with a distinctively different, larger 32-byte
+stride (`strideB` -- 12 real position bytes plus 20 zeroed pad bytes per record) forming a quad over the
+RIGHT half of the viewport via `SetStreamSource(0, bufB, 0, 32)` -- same declaration/VS/PS/RT-shape as
+sub-pass 1, so `pipeline_cache_key` collapses to the identical value under the current, unfixed
+`vertex_shape_key()`. Re-clears the SAME RT BLACK and draws again: the right-half checkpoint is asserted
+to read back RED (the analytically-correct result once the real stride-32 layout is honored). Run against
+the current, unmodified host code (rebuilt `sogen_d3d9um-x64.dll`/`analyzer` from unmodified
+`d3d9_host.cpp`/`.hpp`, confirmed via `git status`/mtime immediately before the run): sub-pass 1's
+checkpoint correctly reads `B=00 G=00 R=FF` (RED, PASS), but sub-pass 2's checkpoint reads back
+`B=00 G=00 R=00` (BLACK -- its own untouched Clear color) instead of RED, FAIL -- exactly the predicted
+bug. This is not a coincidental result: `ensure_programmable_pipeline` reused sub-pass 1's stale
+stride-12-baked `VkPipeline` against buffer B's real stride-32 data, so index 0's fetch happens to land on
+buffer B's real position (coincidentally correct at offset 0), but indices 1-3 are fetched at the wrong
+byte offsets entirely -- one degenerate (zero-area, never rasterized) triangle and one real-area triangle
+whose vertices (computed from buffer B's actual bytes at the stale 12-byte stride: `(0,-1)`, `(0,0)`,
+`(-1,0.5)` in NDC) all have `x <= 0`, so neither triangle's convex hull can ever reach the right-half
+checkpoint at NDC `x = 0.5` -- it deterministically stays BLACK under the bug, not merely "some wrong
+color". This test is EXPECTED to fail (`[d3d9-pipeline-cache-stride-test] FAILED`, exit 1) until
+`vertex_shape_key()`'s real-declaration branch is extended to also fold in the real, current per-stream
+strides of every stream the bound declaration references; it should start passing once that fix lands,
+with no changes to the test itself. Only built/run on x64 so far.
 
 ## Notes
 
