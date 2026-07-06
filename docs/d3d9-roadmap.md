@@ -126,7 +126,7 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
 | M1.5 | Float constant registers (`c#`) | **Done** | Not in the original plan as a separate milestone; pulled forward because a WVP matrix is needed for M2 anyway. UBO + descriptor-set binding contract now proven for one register set. |
 | M2 | Textured + depth quad (`SetTexture`/sampler, indexed draw, depth, alpha blend) | **Done** | Real GPU-backed 2D textures (single mip, lazy staging upload), real `vulkan_host::create_sampler` + combined-image-sampler binding (RE'd sampler-state DDI encoding), indexed draws, real depth testing (D32_SFLOAT_S8_UINT in place of D24S8 for MoltenVK), real alpha blending, and the SPIR-V-side combined-sampler binding in the shader translator — all proven together by `d3d9_texture_test.cpp` (4/4 analytic pixel checks exact). D3DFORMAT↔VkFormat table covers exactly the locked MW2-first set (13 D3DFORMAT values, collapsing to 11 distinct VkFormat outputs since A8R8G8B8/X8R8G8B8 both map to B8G8R8A8_UNORM and L8/A8 both map to R8_UNORM — see below). Of the two bugs found building the terminal test: `D3DPOOL_MANAGED` got a real code fix for its double-resource-creation half (`pfnTexBlt` now syncs the sysmem/vidmem copies), and its deeper remaining symptom (managed textures sample black) — for a long time confirmed permanently unfixable through this driver's own DDI surface — is now FIXED on both x64 and x86/WoW64 by a different mechanism entirely, a permanent runtime memory patch to `d3d9.dll` itself (see the `D3DPOOL_MANAGED` entry below); TEXCOORD0 interpolation turned out not to be a real bug at all — investigated and does not reproduce, no code change needed. Both are fully investigated, see "Known bugs & limitations carried out of M2" below for the three-way distinction (fixed / confirmed non-bug / confirmed permanent) — `D3DPOOL_MANAGED` has since moved from that third category into the first, on both x64 and x86. The partial-buffer Lock limitation is now genuinely fixed on x64 (still whole-buffer-only on x86, a scoped-out gap) — also below. |
 | WoW64 | WoW64/x86 D3D9 UMD port (32-bit `sogen_d3d9um`, SysWOW64) | **Done** | Not in the original plan's M1-M5 table; pulled forward per the user's own priority order since real games (MW2/BO2/GTA SA) are 32-bit and nothing else matters without a working x86 guest path. Proven: typed per-slot `__stdcall` thunk arities for all 143 `D3DDDI_DEVICEFUNCS` slots (28 real implementations unchanged, the other 115 now get a correctly-sized `stub_args_N` instead of x64's zero-arg `device_stub`, which would desync callee-cleanup x86's stack); x86-specific `D3DDDIARG_*`/`D3DDDI_*` struct layout for every real slot with a HANDLE/pointer field, pinned by `#ifndef _WIN64` `static_assert`s, including a live-RE'd fix for `D3DDDIARG_LOCK`/`D3DDDIARG_UNLOCK` (x86 is a genuinely different two-tier struct shape via `DdLockLH`, not just a pointer-shrunk copy of the x64 layout); `i686-w64-mingw32-g++` build tooling (parallel commands in `src/samples/sogen-d3d9-umd/README.md`) producing `sogen_d3d9um-x86.dll`. End-to-end proof: `d3d9-triangle-test-x86.exe`, cross-compiled to i686 and run through the real WoW64 path against the genuine 32-bit Microsoft `d3d9.dll` (not DXVK), reaches the x86 UMD and reads back the exact same pixel (`B=FF G=80 R=40 A=FF`) as the x64 `d3d9-triangle-test` — full pixel parity. **Now also covered:** `d3d9-shader-test`, `d3d9-const-test`, `d3d9-texture-test`, and `d3d9-texcoord-test` have all been cross-compiled to i686 and pass on x86 too (all analytic pixel checks exact, matching the x64 results) — M1.5/M2's shader, constant-register, texture, depth, blend, and real-`TEXCOORD0` features are now confirmed on the x86 path, not just the fixed-function triangle. Porting these caught two real, x86-only bugs along the way (both fixed): `d3d9_host::allocate_id()`'s shared id counter started at `1ULL << 32`, silently truncating through a 32-bit `HANDLE` on x86 guests (fixed, starts at `0x10000`; commit `c35871ca`); and `D3DDDIARG_CREATERESOURCE`'s output-handle offset is 44 on x86, not 48 as RE'd for x64 (a clean 4-byte shift, fixed; commit `c5dd3d27`) — full narrative for both in `src/samples/sogen-d3d9-umd/README.md`. Full regression sweep after all this session's fixes landed: every x64 and x86 guest test green, smoke test 26/26 (2026-07-04). Partial-buffer Lock support (see below) is x64-only — x86 keeps whole-buffer-lock semantics, a known, explicitly scoped-out gap (its driver-routed `OffsetToLock` offset isn't RE-verified). Five DDI slot arities flagged low-confidence during design (`pfnCheckCounter`, `pfnSetMarker`, `pfnSetMarkerMode`, `pfnCheckCounterInfo`, `pfnFlush1`) remain unverified against the real `d3d9.dll`, since none of the current x86 tests call them — a future x86 test that hits one of these slots could still find a stack-corrupting arity mismatch. **Now also covered (2026-07-05):** `d3d9-scissor-test`, `d3d9-mrt-test`, and `d3d9-multistream-test` have all been cross-compiled to i686 and pass on x86 too, pixel-exact against x64 — unlike several earlier ports, this one found ZERO new x86-only bugs; all three worked unchanged on the first run. Full regression sweep after this session's work: every x64 and x86 guest test green (`d3d9-managed-texture-test` fails by design, permanent limitation, at the time of this sweep — since fixed on both x64 and x86, see the `D3DPOOL_MANAGED` entry below), smoke test 26/26 (2026-07-05). **Now also covered (2026-07-05):** `d3d9-managed-texture-test` has been cross-compiled to i686 and passes on x86 too, pixel-exact against x64 — the `install_d3d9_caps_patch_hook` I386 branch (see the `D3DPOOL_MANAGED` entry below) makes the 32-bit `syswow64/d3d9.dll` path work, closing the last x86/WoW64 D3DPOOL_MANAGED gap. |
-| M3 | DDI coverage (multi-stream, `*_UP` draws, StretchRect/ColorFill, scissor, MRT, cube/vol, more formats) | **In progress** | Int/bool constant registers, originally scoped as part of this milestone, are done (see "Constant registers" below) — pulled forward for the same reason float constants were (real games hit shader flow control early). **Four more M3 items are now done**: multi-stream vertex sources (real per-stream `SetStreamSource` offsets + a new `D3DVERTEXELEMENT9` declaration parser), scissor rect (`D3DRS_SCISSORTESTENABLE`-gated real clipping), multiple render targets (real N-RT rendering + all-bound-RTs `Clear()`), and `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` (real d3d9.dll reuses the ordinary `pfnDrawPrimitive`/`pfnDrawIndexedPrimitive` slots via two new UM-binding DDI calls, `pfnSetStreamSourceUm`/`pfnSetIndicesUm` — no dedicated UP-draw DDI call exists at all) — see the "M3 coverage items" checklist below for the full account of each, including the 3 UMD bugs the multi-stream work found/fixed, the RT-slot-compaction bug found/fixed during MRT work, and the pre-existing `pfnDrawPrimitive` arity bug the UP-draw work incidentally uncovered. Proven pixel-exact on both x64 and x86/WoW64 — the multi-stream/scissor/MRT trio ported to i686 with zero source changes and zero new x86 bugs; the new `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` test was written for x64 and x86 from the start and, on x86 specifically, is what surfaced the `pfnDrawPrimitive` arity bug fixed alongside it (a pre-existing bug, not introduced by this work — see below). **A fifth M3 item is now done: `StretchRect`/`ColorFill`** (2026-07-06, commits `b915658a`/`3dd369f9`/`f7b9696e`/`83c518c6`) — live RE confirmed real `d3d9.dll` routes these through device-func-table slots 56/55 (`pfnColorFill`/`pfnBlt`), with a live-confirmed correction to `D3DDDIARG_BLT`'s field order (SRC-first-then-DST, which static decompilation alone would have gotten backwards), plus a caps-bit fix (`D3DCAPS9::StretchRectFilterCaps`, previously left unset) that unlocks genuine *scaled* StretchRect — see the "M3 coverage items" checklist below for the full account, including the two known, deliberate scope limitations this slice documented rather than silently left. **Still not started**: cube/volume textures, formats beyond the M2 table, SM3.0 caps, mip-mapping, and `stream_frequencies`/instancing. The remaining M3 work inherits (on x86 only) the partial-Lock gap; the pipeline-cache-key system itself has no known open gaps left (RT/vertex-decl-shape, static blend/depth render-state, and real-vertex-decl stream strides are all now fixed — see below) — none of this is M3-net-new work, it's M2 debt M3 must not silently re-break. |
+| M3 | DDI coverage (multi-stream, `*_UP` draws, StretchRect/ColorFill, scissor, MRT, cube/vol, more formats) | **In progress** | Int/bool constant registers, originally scoped as part of this milestone, are done (see "Constant registers" below) — pulled forward for the same reason float constants were (real games hit shader flow control early). **Four more M3 items are now done**: multi-stream vertex sources (real per-stream `SetStreamSource` offsets + a new `D3DVERTEXELEMENT9` declaration parser), scissor rect (`D3DRS_SCISSORTESTENABLE`-gated real clipping), multiple render targets (real N-RT rendering + all-bound-RTs `Clear()`), and `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` (real d3d9.dll reuses the ordinary `pfnDrawPrimitive`/`pfnDrawIndexedPrimitive` slots via two new UM-binding DDI calls, `pfnSetStreamSourceUm`/`pfnSetIndicesUm` — no dedicated UP-draw DDI call exists at all) — see the "M3 coverage items" checklist below for the full account of each, including the 3 UMD bugs the multi-stream work found/fixed, the RT-slot-compaction bug found/fixed during MRT work, and the pre-existing `pfnDrawPrimitive` arity bug the UP-draw work incidentally uncovered. Proven pixel-exact on both x64 and x86/WoW64 — the multi-stream/scissor/MRT trio ported to i686 with zero source changes and zero new x86 bugs; the new `DrawPrimitiveUP`/`DrawIndexedPrimitiveUP` test was written for x64 and x86 from the start and, on x86 specifically, is what surfaced the `pfnDrawPrimitive` arity bug fixed alongside it (a pre-existing bug, not introduced by this work — see below). **A fifth M3 item is now done: `StretchRect`/`ColorFill`** (2026-07-06, commits `b915658a`/`3dd369f9`/`f7b9696e`/`83c518c6`) — live RE confirmed real `d3d9.dll` routes these through device-func-table slots 56/55 (`pfnColorFill`/`pfnBlt`), with a live-confirmed correction to `D3DDDIARG_BLT`'s field order (SRC-first-then-DST, which static decompilation alone would have gotten backwards), plus a caps-bit fix (`D3DCAPS9::StretchRectFilterCaps`, previously left unset) that unlocks genuine *scaled* StretchRect — see the "M3 coverage items" checklist below for the full account, including the two known, deliberate scope limitations this slice documented rather than silently left. **A sixth M3 item is now done: mip-mapping** (2026-07-06, commits `256ea51e`/`080bbbfe`/`8ffb306c`/`625ae525`/`d2d29cd2`) — a gated RE pass confirmed `D3DDDIARG_LOCK::SubResourceIndex` (offset 8 x64 / 4 x86, previously modeled as `Reserved0`), which unblocks real per-mip-level texture data upload via `LockRect(level, ...)`, a real Vulkan mip-chain image/view per texture, and a real sampler LOD range engaging genuine GPU minification — proven pixel-exact on both x64 and x86/WoW64 by a 4-sub-pass discriminator test; this also substantially de-risks cube/volume textures (below), which need the exact same `SubResourceIndex` mechanism for per-face/per-slice uploads. **Still not started**: cube/volume textures (now a narrower "confirm one classifier bit, then plumbing" gap rather than two independent unknowns — see the "M3 coverage items" checklist below), formats beyond the M2 table, SM3.0 caps, and `stream_frequencies`/instancing. The remaining M3 work inherits (on x86 only) the partial-Lock gap; the pipeline-cache-key system itself has no known open gaps left (RT/vertex-decl-shape, static blend/depth render-state, and real-vertex-decl stream strides are all now fixed — see below) — none of this is M3-net-new work, it's M2 debt M3 must not silently re-break. |
 | M4 | Fixed-function synthesis | **Deferred by design** | Original plan: "only if MW2 needs it." MW2 is SM3-heavy; likely skippable. Revisit if a real game draw path turns out to need FF after all. |
 | M5 | MW2 integration (WoW64, SM3, 32-bit UMD) | **Not started, blocked on M3** | The WoW64/x86 UMD port itself is done (see the WoW64 row above), and its shader/texture/constant-register/texcoord features are now confirmed on the x86 path specifically (not just the fixed-function triangle) — the remaining blocker is real MW2 integration work: M3's DDI coverage and SM3 caps. `D3DPOOL_MANAGED` is now fixed on both x64 and x86/WoW64 (see below) via a permanent runtime memory patch, not more DDI coverage — and since the 32-bit `syswow64/d3d9.dll` branch real MW2 (a 32-bit game) actually uses is now RE'd and wired too, MANAGED-pool asset loading is no longer a standing x86-only risk for MW2 integration. |
 
@@ -469,9 +469,9 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   (1) `color_fill` hardcodes 4 bytes/texel — correct today since every RT this codebase creates is
   `B8G8R8A8_UNORM`, but not generalized to a non-4-byte-per-texel RT format if one is ever added; (2)
   both handlers' `subresource`/`dst_subresource`/`src_subresource` parameters are always 0 and unused —
-  single-mip, single-layer resources only, not yet plumbed to a real mip/array level. See the
-  mip-mapping bullet below for what the second limitation means for a future mip-generation consumer of
-  `blt()`.
+  single-mip, single-layer resources only, not yet plumbed to a real mip/array level. (Mip-mapping, once
+  it landed, took a different path entirely — see the mip-mapping bullet below — so this `blt()`
+  limitation remains open on its own terms, not superseded by that work.)
 - [x] **Scissor rect** — done. `D3DRS_SCISSORTESTENABLE` now gates whether `execute_draw`'s
   Vulkan scissor uses the app's real `SetScissorRect` RECT (converted to a Vulkan
   offset/extent) or falls back to the full render-target extent; previously the draw path
@@ -493,18 +493,84 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   confirms both RTs receive their own color (not just RT0), and `Clear()` with both RTs still bound
   confirms both go yellow (not just RT0). Ported to i686/WoW64 with zero source changes and zero new
   x86 bugs found — pixel-exact parity with x64 on the first run.
-- [ ] Mip-mapping — carried in the resource's own mip-level count, not yet consumed; every texture is
-  treated as single-mip today. **Note (2026-07-06)**: the `StretchRect`/`ColorFill` work above added
-  `d3d9_host::blt()`, a reusable Vulkan `vkCmdBlitImage`-based scaling-blit primitive that a future
-  GPU-side mip-generation implementation (successively blitting level N into level N+1) could plausibly
-  reuse — but it is **not yet directly reusable as-is**: per that work's own documented known limitation,
-  `blt()`'s `dst_subresource`/`src_subresource` parameters are accepted but always treated as 0
-  (single-mip, single-layer only) and never threaded through to the underlying `image_blit_region`'s
-  `mip_level`/`base_array_layer` fields, which are hardcoded to 0. Mip-generation work would need to
-  extend that plumbing first, not assume it already exists.
-- [ ] Cube/volume textures — both the resource kind (M2 only handles `texture_2d`) and
-  `d3d9_shader_translator.cpp`'s per-sampler texture-dimension info (`vkd3d_shader_d3dbc_source_info`
-  currently defaults to "2D" for every sampler, which will mispredict cube/volume samplers).
+- [x] **Mip-mapping — done (2026-07-06, commits `256ea51e`/`080bbbfe`/`8ffb306c`/`625ae525`/`d2d29cd2`).**
+  The old limitation: the resource's mip-level count was plumbed through `create_resource` but never
+  consumed — every texture got exactly one Vulkan mip level regardless of how many the app requested, and
+  `build_sampler` pinned `min_lod`/`max_lod` to 0/0 unconditionally, so a sampler could never select
+  anything but level 0. This blocked BOTH remaining Tier-3 M3 items (this one and cube/volume, below) on
+  the same unresolved question: `D3DDDIARG_LOCK` had no known field carrying *which* mip level (or
+  cube face / volume slice) a given `LockRect`/`LockBox` call targeted, so there was no way to route a
+  per-level `LockRect(level, ...)` write to the right place even if the host could store one.
+  **RE (`256ea51e`)**: a gated live-RE pass resolved that question. The field previously modeled as
+  `Reserved0` in `D3DDDIARG_LOCK` is `SubResourceIndex`, at offset 8 (x64) / 4 (x86) — confirmed BOTH
+  statically (`DdLockLH`, the single builder of the struct crossing into `pfnLock` for every resource kind
+  on the driver-routed path, writes the per-subresource index there) and live (a 3-mip texture locked at
+  levels 0/1/2 showed exactly `{0,1,2}` at that offset, nothing else varying; a real vertex-buffer lock
+  reads 0, since buffers have no subresources). **This initially looked like a NO-GO from static analysis
+  alone**: a first static-only reading of `CDriverMipSurface::InternalLockRect`'s 84-byte outer
+  bookkeeping struct genuinely carries no such field — the level only reaches the driver through the much
+  smaller inner struct `DdLockLH` itself builds, which the static-only pass hadn't yet isolated. The live
+  confirmation step — hooking `umd_Lock`'s entry and dumping `pArgs` across three real `LockRect(level)`
+  calls — was the decisive evidence that flipped this from an apparent dead end to a confirmed, safe,
+  unconditionally-readable field (same argument that already justified `OffsetToLock@80`). Additive-only
+  commit: new struct field + `static_assert`s in `d3d9_ddi.hpp`, no wire/UMD/host behavior change.
+  **Implementation (`080bbbfe`)**: `umd_Lock`/`umd_Unlock` read the real `SubResourceIndex` instead of
+  hardcoding 0 and carry it over the wire's `subresource` field (the `#ifdef _WIN64` struct split makes
+  the x64/x86 offset difference automatic); the UMD's per-lock backing maps are now keyed by
+  `(resource, subresource)` so several mip levels of one texture can be locked at once. Host-side,
+  `resource_entry` gained `extra_mips` (per-level backing for subresources 1..N-1, each sized for that
+  level's own halved dimensions) plus a `subresource_backing()` accessor; `create_resource` sizes the
+  whole mip chain and creates the Vulkan image with the real mip count (was hardcoded 1); the sampling
+  image view spans the full mip chain (`levelCount = mip_levels`); `ensure_texture_uploaded` uploads every
+  level to its own mip via one shared staging buffer; `build_sampler` derives a real `min_lod`/`max_lod`
+  from the bound texture's actual mip count and the app's `D3DSAMP_MIPFILTER`/`MAXMIPLEVEL` state (was
+  pinned to 0/0) — a single-mip resource still collapses to `min==max==0`, byte-for-byte unchanged from
+  the old hardcoded behavior. This is real per-app-authored mip data reaching the GPU via the
+  newly-unblocked Lock path, not a GPU-auto-generated fallback — the earlier tentative plan (see the
+  `StretchRect`/`ColorFill` entry above) had flagged `d3d9_host::blt()`'s `vkCmdBlitImage` primitive as
+  *plausibly* reusable for a future successive-blit mip-generation scheme; that path was not needed and
+  was not used. The fix that shipped is more complete/correct than that fallback would have been, since it
+  carries the app's own authored per-level content instead of a synthesized box-filter approximation.
+  **Test evidence (`8ffb306c`)**: `d3d9_miptexture_test.cpp` creates a 64x64 3-level texture, fills each
+  level a distinct solid color (level 0 RED, level 1 GREEN, level 2 BLUE) via its own real
+  `LockRect(level, ...)` call, then renders four sub-passes — three pin `D3DSAMP_MIPFILTER=NONE` +
+  `D3DSAMP_MAXMIPLEVEL=0/1/2` to force the sampler to exactly one level each (readback must be
+  RED/GREEN/BLUE respectively — the GREEN/BLUE passes prove per-level data actually reached the GPU and
+  is sampled; the old hardcoded-0 LOD would have read RED for all three), and a fourth drives genuine
+  minification (a small on-screen quad, full LOD range, no `MAXMIPLEVEL` clamp) so the GPU's own
+  screen-space-derivative LOD selection picks level 2 (BLUE) on its own. All four checks pass
+  pixel-identically on both x64 and x86/WoW64. **Polish (`625ae525`/`d2d29cd2`)**: comment-accuracy fixes
+  found during review — corrected `ensure_texture_uploaded`'s inaccurate "bails on incomplete mip data"
+  claim (every level's backing is pre-sized to its exact tight size at creation, so an app-unwritten level
+  uploads as zero-initialized black, not a detected "incomplete" case; the guard only ever catches a
+  genuine degenerate zero-size case), fixed stale pre-mip-mapping comments in `create_resource` (still
+  said "single mip/layer") and both `D3DDDIARG_LOCK` struct definitions (still said "NOT yet consumed by
+  umd_Lock" directly below a block comment saying the opposite), and added a rationale comment for the
+  storage-model design (why mip level 0 stays in `backing` instead of folding into `extra_mips[0]`, so
+  every pre-existing RT/buffer call site addressing `.backing` directly needed zero changes).
+  **Verification**: full regression sweep — every existing D3D9 guest test, both x64 and x86 — verified
+  clean at every stage by an independent, adversarial reviewer, with `build_sampler`'s single-mip case
+  being byte-identical to the old hardcoded behavior specifically, rigorously re-checked.
+- [ ] **Cube/volume textures — still open, but now a substantially lower-risk gap.** Two independent
+  unknowns previously blocked this: (a) which field carries a per-face/per-slice subresource index for
+  `LockRect(face,level)`/`LockBox(level)` — now resolved, since it's the exact same `SubResourceIndex`
+  mechanism the mip-mapping work above just RE-confirmed and wired (`SubResourceIndex` is documented,
+  from the static side, as the flattened `FaceType*MipLevels + Level` for cube/array — inferred from
+  `CCubeMap::LockRect`'s own array-index formula, not yet live-confirmed for cube/volume specifically, but
+  the mechanism and struct offset are no longer an open question); and (b) the Vulkan image-type/view-type
+  branching (`VK_IMAGE_TYPE_3D`, `VK_IMAGE_VIEW_TYPE_CUBE`, etc.) needed to back a non-2D resource, which
+  needs no new `vulkan_host` signature changes — `create_image`/`create_image_view` already take an
+  image-type/view-type parameter each, currently always called with `VK_IMAGE_TYPE_2D`/
+  `VK_IMAGE_VIEW_TYPE_2D`; the primitives are already fully parameterized for this. What remains open,
+  narrowed from "two independent unknowns" to "confirm one bit, then straightforward plumbing": (1) the
+  resource-dimension classifier itself — `D3DDDIARG_CREATERESOURCE::Flags` (already RE'd and
+  live-confirmed at offset 56 x64 / 48 x86, a `D3DDDI_RESOURCEFLAGS` bitfield) almost certainly carries
+  the CubeMap/Volume distinction M2's `texture_2d`-only classification never needed to look for, but the
+  specific bit positions for those two cases have not been live-confirmed; and (2) the classification +
+  Vulkan image-type/view-type branching plumbing itself — `d3d9_shader_translator.cpp`'s per-sampler
+  texture-dimension info (`vkd3d_shader_d3dbc_source_info` currently defaults to "2D" for every sampler,
+  which will mispredict cube/volume samplers) also needs extending. Not trivial — real plumbing work
+  remains — but no longer blocked by an unknown-risk RE question the way it was before this slice.
 - [ ] Formats beyond M2's locked 11-format MW2-first table (see above) — e.g. paletted formats or
   additional compressed/HDR formats a real game's asset pipeline may use.
 - [ ] SM3.0 caps — `fill_d3d9caps` still reports SM2.0 (`vs_2_0`/`ps_2_0`). Restoring 3.0 needs its
@@ -649,12 +715,28 @@ StretchRect; see "M3 coverage items" above for the full account, including the t
 known limitations (4-byte-texel `color_fill`, subresource always 0) it documented rather than left
 silent.
 
-M3's remaining DDI-coverage items (`stream_frequencies`/
-instancing, cube/volume textures, more formats, SM3.0 caps, mip-mapping) can proceed in roughly the
-order listed above. `D3DPOOL_MANAGED` is now fixed on both x64 and x86/WoW64 (see above) — the 32-bit RE
-pass that was previously the standing MW2-integration risk has been done (the caps-strip site in
-`syswow64/d3d9.dll` was disassembled, its 8-byte pattern confirmed unique, and a second hook branch
-gated on the x86 machine type wired up and proven by the ported `d3d9_managed_texture_test-x86.exe`), so
-this is no longer a budgeted risk for MW2 integration. If x86 partial-buffer Lock support becomes necessary before MW2 integration, budget for
-the same kind of live-RE pass (`D3DDDIARG_LOCK`'s x86 driver-routed `OffsetToLock` offset) that resolved
-the x64 case.
+Mip-mapping is also now done (2026-07-06, commits `256ea51e`/`080bbbfe`/`8ffb306c`/`625ae525`/
+`d2d29cd2`) — a gated RE pass resolved the same `D3DDDIARG_LOCK::SubResourceIndex` question that had
+blocked BOTH remaining Tier-3 M3 items, unblocking real per-mip-level texture upload, a real Vulkan
+mip-chain image/view, and real sampler LOD selection under genuine minification, proven pixel-exact on
+x64 and x86/WoW64 by a 4-sub-pass discriminator test; see "M3 coverage items" above for the full account,
+including why this initially looked like a NO-GO from static analysis alone. This is also a major
+de-risking event for cube/volume textures (below), which needs the exact same `SubResourceIndex`
+mechanism for its own per-face/per-slice uploads — that item is no longer blocked by an unknown-risk RE
+question, only by confirming one classifier bit and then doing straightforward plumbing.
+
+M3's remaining DDI-coverage items (`stream_frequencies`/instancing, cube/volume textures, more formats,
+SM3.0 caps) can proceed in roughly the order listed above. Cube/volume textures in particular are now
+meaningfully lower-risk than before this slice: the per-subresource addressing mechanism they need
+(`D3DDDIARG_LOCK::SubResourceIndex`) is now RE-confirmed and wired end to end, and the Vulkan image-type/
+view-type branching they'll need requires no new `vulkan_host` signature changes (`create_image`/
+`create_image_view` already take an image-type/view-type parameter, currently always called with the 2D
+values). What remains is live-confirming the CubeMap/Volume bit positions within the already-RE'd
+`D3DDDIARG_CREATERESOURCE::Flags` field, then the classification + Vulkan branching plumbing itself — see
+the cube/volume bullet above for the precise scope. `D3DPOOL_MANAGED` is now fixed on both x64 and
+x86/WoW64 (see above) — the 32-bit RE pass that was previously the standing MW2-integration risk has been
+done (the caps-strip site in `syswow64/d3d9.dll` was disassembled, its 8-byte pattern confirmed unique,
+and a second hook branch gated on the x86 machine type wired up and proven by the ported
+`d3d9_managed_texture_test-x86.exe`), so this is no longer a budgeted risk for MW2 integration. If x86
+partial-buffer Lock support becomes necessary before MW2 integration, budget for the same kind of live-RE
+pass (`D3DDDIARG_LOCK`'s x86 driver-routed `OffsetToLock` offset) that resolved the x64 case.

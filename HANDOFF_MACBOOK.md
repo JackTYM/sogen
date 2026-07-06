@@ -2768,3 +2768,156 @@ Roadmap updated: `docs/d3d9-roadmap.md`'s `StretchRect`/`ColorFill` bullet flipp
 (citing all four commits), the M3 table row updated to list it among the now-done items, the
 sequencing-recommendation prose corrected to drop it from the remaining-work list, and the mip-mapping
 bullet given a note on `blt()`'s not-yet-reusable subresource plumbing.
+
+## 35. Mip-mapping — the RE finding that unblocked BOTH remaining Tier-3 M3 items, real per-mip-level
+texture support wired end to end, and cube/volume's risk profile re-scoped (2026-07-06)
+
+Mip-mapping and cube/volume textures were M3's last two Tier-3 items, and both were blocked on the same
+unresolved question: `D3DDDIARG_LOCK` (§16.1, §21) had no known field carrying *which* subresource — mip
+level, cube face, volume slice — a given `LockRect`/`LockBox` call targeted. Without it, there was no way
+to route a per-level `LockRect(level, ...)` write to the right place host-side even if the host could
+store one. This section closes mip-mapping outright and substantially de-risks cube/volume, following the
+same RE-gate → feature → test → polish discipline as §33/§34.
+
+### 35.1 RE (`256ea51e`) — and why it initially looked like a NO-GO
+
+The field previously modeled as `Reserved0` in `D3DDDIARG_LOCK` (offset 8 x64 / 4 x86) is
+`SubResourceIndex` — the flattened subresource index (`Level` for a plain mip texture;
+`FaceType*MipLevels + Level`, inferred from `CCubeMap::LockRect`'s own array-index formula, for
+cube/array) that `LockRect(level)`/`LockRect(face,level)`/`LockBox(level)` targets.
+
+**This initially looked like a dead end from static analysis alone.** The first static pass landed on
+`CDriverMipSurface::InternalLockRect`'s own 84-byte outer bookkeeping struct — the natural place to look
+for a per-level field — and that struct genuinely carries no such field. It took recognizing that the
+level only reaches the driver through a second, much smaller struct — the one `DdLockLH` itself builds
+for the actual `pfnLock` call — to find it. **Live confirmation was the decisive step**: hooking
+`umd_Lock`'s entry (sogen's read-only Python debugger API) and dumping `pArgs` across three real
+`LockRect(level)` calls against a 3-mip 2D texture (`CreateTexture(64,64,3,...)`) showed `hResource@0`
+identical across all three calls and offset 8 (x64) / 4 (x86) holding exactly `{0, 1, 2}` — the level —
+with nothing else in the struct varying. A real vertex-buffer lock reads 0 at that offset, as expected
+(buffers have no subresources). Cross-checked statically too: `DdLockLH`, the single builder of the
+struct that actually crosses into `pfnLock` for every resource kind on the driver-routed path, writes
+`*(DWORD*)(resource_context + 8)` (x64, `DdLockLH @ 0x180030ba0`) / `+4` (x86, `@ 0x10065460`) as the
+struct's 2nd field. Safe to read unconditionally, by the same argument that already justifies
+`OffsetToLock@80` (§21): `DdLockLH` is the sole builder for the path that actually reaches the driver, and
+the only other path (sysmem-routed buffers) has its driver-returned output discarded by the app anyway.
+Commit `256ea51e` is additive-only — new struct field, comment, and `static_assert`s in `d3d9_ddi.hpp` —
+no wire/UMD/host behavior change, matching the RE-gate pattern §19/§33/§34 already established.
+
+### 35.2 Implementation (`080bbbfe`) — real per-mip-level upload and sampling
+
+**UMD** (`sogen_d3d9_umd.cpp`, `d3d9_ddi.hpp`): `umd_Lock`/`umd_Unlock` read the real `SubResourceIndex`
+instead of hardcoding 0 and carry it over the wire's `subresource` field — the `#ifdef _WIN64` struct
+split makes the x64/x86 offset difference automatic, no per-arch branching needed in the handler itself.
+The per-lock backing maps (`g_locked_buffers`/`g_locked_offsets`) are now keyed by
+`(resource, subresource)` instead of bare resource id, so several mip levels of one texture can be locked
+open at once without colliding. `D3DDDIARG_UNLOCK`'s `Reserved0` is renamed `SubResourceIndex` too (same
+field, confirmed via `DdUnlockLH`).
+
+**Host** (`d3d9_host.cpp`/`.hpp`): `resource_entry` gains `extra_mips` — per-level backing for
+subresources 1..N-1, each level sized for its own halved dimensions, since a flat single vector can't
+address levels of differing byte sizes — plus a `subresource_backing(index)` accessor, with level 0
+still served from the pre-existing `backing` member, so every pre-existing RT/buffer call site
+addressing `.backing` directly needed zero changes. `lock()`/`unlock()` now honor the real subresource,
+bounds-checked against
+`extra_mips.size()`. `create_resource` sizes the whole mip chain up front and creates the Vulkan image
+with the real mip count (was hardcoded to 1). The sampling image view spans the full mip chain
+(`levelCount = mip_levels`, was 1). `ensure_texture_uploaded` uploads every level to its own mip via one
+shared staging buffer sized for the whole chain, one `vkCmdCopyBufferToImage` per level. `build_sampler`
+derives a real `min_lod`/`max_lod` from the bound texture's actual mip count and the app's
+`D3DSAMP_MIPFILTER`/`D3DSAMP_MAXMIPLEVEL` state (previously pinned to `0.0f`/`0.0f` unconditionally):
+`MAXMIPLEVEL` clamps `min_lod`, `MIPFILTER == D3DTEXF_NONE` collapses `max_lod` down to `min_lod` (pinning
+to one level), and anything else lets the GPU pick across the full remaining range by its own
+screen-space derivative. **Backward compatibility was the whole ballgame here**: a single-mip resource
+(`mip_levels <= 1`) collapses `min_lod == max_lod == 0.0f`, byte-for-byte identical to the old hardcoded
+behavior — every existing non-mip-mapped texture path is provably unaffected.
+
+### 35.3 Test evidence (`8ffb306c`) — the 4-sub-pass discriminator
+
+`d3d9_miptexture_test.cpp` creates a 64x64 3-level texture and fills each level a *different* solid color
+— level 0 (64x64) RED, level 1 (32x32) GREEN, level 2 (16x16) BLUE — each via its own real
+`LockRect(level, ...)`/`UnlockRect(level)` call, exercising the full per-mip-level path end to end
+(UMD `SubResourceIndex` → wire `subresource` → host `extra_mips[level]`). Four sub-passes:
+
+- **Three pinned-level sub-passes**: `D3DSAMP_MIPFILTER = D3DTEXF_NONE` + `D3DSAMP_MAXMIPLEVEL = 0/1/2`
+  pins the sampler to exactly one level each (`build_sampler` maps that combination to
+  `min_lod == max_lod == k`). Readback must be RED/GREEN/BLUE respectively. The GREEN and BLUE sub-passes
+  are the ones that actually prove something: if per-level upload were broken (only level 0 ever reaching
+  the GPU) they'd read garbage or level-0 RED instead; if the sampler LOD were still pinned to 0 (the old
+  code) all three would read RED regardless of `MAXMIPLEVEL`.
+- **One genuine-minification sub-pass**: a small on-screen quad samples the whole texture with the full
+  LOD range and no `MAXMIPLEVEL` clamp, forcing the GPU's own screen-space-derivative LOD selection to
+  pick the smallest level on its own — BLUE — rather than a level explicitly pinned by the test.
+
+All four checks pass pixel-identically on both x64 and x86/WoW64 against the real Microsoft `d3d9.dll`.
+
+### 35.4 Polish (`625ae525`, `d2d29cd2`) — comment accuracy found during review
+
+Two follow-up commits fixed comments that drifted from what `080bbbfe` actually implemented, the same
+kind of code-quality pass §34's `83c518c6` ran: (1) `ensure_texture_uploaded`'s comment claimed it "bails
+if any level's data is incomplete" — not true in practice, since `create_resource` pre-sizes every mip
+level's backing to its exact tight size at creation time, so an app-unwritten level is zero-initialized
+(black) rather than genuinely "incomplete" in a way the guard detects; the guard only ever catches a real
+degenerate zero-size case. Corrected to describe the actual, still-safe behavior. (2) Three comments
+still described the pre-mip-mapping model directly next to code that had moved on: `create_resource`'s
+`texture_2d` comment still said "single mip/layer" right next to the code now building a real per-level
+chain, and both `D3DDDIARG_LOCK` structs' `SubResourceIndex` fields still said "NOT yet consumed by
+umd_Lock" directly below a block comment saying the opposite. Also added a one-line rationale comment to
+`resource_entry::backing` explaining why level 0 stays there instead of folding into `extra_mips[0]` —
+so every pre-existing RT/buffer call site addressing `.backing` directly needed zero changes for this
+feature to land.
+
+### 35.5 What this is *not*: `blt()`/GPU-auto-generated mips were never used
+
+The roadmap's mip-mapping bullet had previously left a tentative note (added alongside §34's
+`StretchRect`/`ColorFill` work) that `d3d9_host::blt()`'s `vkCmdBlitImage`-based scaling primitive was
+*plausibly* reusable for a future GPU-side mip-generation scheme (successively blitting level N into
+level N+1), while flagging that its subresource parameters weren't yet plumbed through for that. That
+path was not the one taken, and was never needed: this slice's fix carries the app's own authored
+per-level pixel data through the newly-unblocked `SubResourceIndex`/Lock path, not a synthesized,
+GPU-generated approximation. It's a more complete and more correct fix than the tentative GPU-auto-generate
+fallback would have been — a real game's hand-authored mips (often with non-box-filter content, e.g.
+alpha-to-coverage-aware or sharpened mips) come through exactly as authored, rather than being
+approximated. `blt()`'s subresource plumbing remains exactly as incomplete as §34 left it — this work
+didn't touch it, in either direction.
+
+### 35.6 Cube/volume textures — risk profile re-scoped, not solved
+
+Cube/volume textures were previously blocked by two independent unknowns: (a) which field carries a
+per-face/per-slice subresource index, and (b) the Vulkan image-type/view-type branching needed to back a
+non-2D resource. **(a) is now resolved** — it's the exact same `SubResourceIndex` mechanism this section
+just RE-confirmed and wired; the static side of §35.1's RE already documents the flattened
+`FaceType*MipLevels + Level` formula for cube/array, inferred from `CCubeMap::LockRect`'s own indexing,
+though the exact bit hasn't been live-confirmed for a real cube/volume resource specifically (that'll
+still want its own quick live-RE pass, not because the mechanism is in doubt, but because "confirmed for
+2D mips" isn't quite "confirmed for cube/volume"). **(b) needs no new `vulkan_host` signature changes** —
+`create_image`/`create_image_view` already take an image-type/view-type parameter each
+(`src/windows-emulator/devices/vulkan_host.hpp`), just always called today with `VK_IMAGE_TYPE_2D`/
+`VK_IMAGE_VIEW_TYPE_2D`; the primitives are already fully parameterized for `VK_IMAGE_TYPE_3D`/
+`VK_IMAGE_VIEW_TYPE_CUBE` etc.
+
+What's still genuinely open, and should not be overclaimed as trivial: (1) live-confirming the specific
+CubeMap/Volume bit positions within `D3DDDIARG_CREATERESOURCE::Flags` (already RE'd and live-confirmed at
+offset 56 x64 / 48 x86 as a `D3DDDI_RESOURCEFLAGS` bitfield, per §19's `D3DDDIARG_TEXBLT`-adjacent work) —
+the field almost certainly carries the CubeMap/Volume distinction, since M2's `texture_2d`-only
+classification never needed to look for it, but no live trace has isolated the specific bits yet; and (2)
+the actual classification + Vulkan image-type/view-type branching plumbing, plus extending
+`d3d9_shader_translator.cpp`'s per-sampler texture-dimension info (`vkd3d_shader_d3dbc_source_info`
+currently defaults to "2D" for every sampler, which will mispredict cube/volume samplers). Real plumbing
+work remains on both fronts. The change this slice makes to that risk profile is narrow but real: cube/
+volume goes from "two independent unknowns, one of them unbounded RE risk" to "confirm one bit, then
+straightforward, boundable plumbing" — the kind of gap that can be estimated, not the kind that can hide
+an open-ended RE rabbit hole.
+
+### 35.7 Verification
+
+Full regression sweep — every existing D3D9 guest test, both x64 and x86, plus the smoke test — verified
+clean at every stage (RE-gate, feature, test, and both polish commits) by an independent, adversarial
+reviewer, with `build_sampler`'s single-mip case being byte-identical to the old hardcoded behavior
+specifically, rigorously re-checked as its own discrete claim rather than assumed from the general sweep.
+
+Roadmap updated: `docs/d3d9-roadmap.md`'s mip-mapping bullet flipped from open to closed (citing all five
+commits, the RE narrative, the implementation, and the 4-sub-pass test), the M3 table row updated to list
+it among the now-done items, the "Still not started"/sequencing-recommendation prose corrected to drop it
+from the remaining-work list, and the cube/volume bullet rewritten to describe its new, narrower risk
+profile without overclaiming it as trivial.
