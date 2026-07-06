@@ -983,6 +983,7 @@ namespace
         FMT_OP_3DACCELERATION = 0x00000800,
         FMT_OP_CONVERT_TO_ARGB = 0x00002000,
         FMT_OP_OFFSCREENPLAIN = 0x00004000,
+        FMT_OP_VERTEXTEXTURE = 0x00800000, // D3DFORMAT_OP_VERTEXTEXTURE (ddrawint.h): CheckDeviceFormat(QUERY_VERTEXTEXTURE)
     };
 
     constexpr uint32_t RT_TEX = FMT_OP_OFFSCREEN_RENDERTARGET | FMT_OP_SAME_FORMAT_RENDERTARGET | FMT_OP_TEXTURE;
@@ -1018,11 +1019,19 @@ namespace
         {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
         {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only
         {63 /*Q8W8V8U8    */, FMT_OP_TEXTURE, 0, 0, 0},
-        // A16B16G16R16F: sampled HDR texture ONLY -- deliberately NOT a render target. The host
-        // Present/snapshot readback path (vulkan_host::create_render_target's readback buffer, and
-        // d3d9_host's RT backing + ColorFill snapshot copy) hardcodes 4 bytes/texel BGRA8; an 8-byte/
-        // texel RT would undersize those buffers. Renderable HDR support needs that host work first.
-        {113 /*A16B16G16R16F*/, FMT_OP_TEXTURE, 0, 0, 0},
+        // A16B16G16R16F: sampled HDR texture, NOT a render target (see the 4-bytes/texel host limitation
+        // above -- an 8-byte/texel RT would undersize the readback buffers). It IS advertised as
+        // vertex-texture-usable (FMT_OP_VERTEXTEXTURE): the SM3.0 vertex-texture-fetch DDI/draw path is
+        // already proven for this format (d3d9_vertex_texture_test.cpp binds it to D3DVERTEXTEXTURESAMPLER0
+        // and samples it via tex2Dlod), so a well-behaved app that gates on
+        // CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE, ...) first now gets S_OK instead of
+        // D3DERR_NOTAVAILABLE. Float VTF is the historically standard case; the bit is independent of the
+        // 3DACCELERATION/DISPLAYMODE gauntlet constraint above (0x00800000, not 0x800/0x400). The exact
+        // bit was RE-confirmed against real d3d9.dll's CEnum::CheckDeviceFormat, which tests its internal
+        // per-format op-word (a verbatim copy of this driver FORMATOP) for bit 0x00800000 on a
+        // D3DUSAGE_QUERY_VERTEXTEXTURE query -- advertising the documented 0x00400000 (AUTOGENMIPMAP) does
+        // NOT satisfy it.
+        {113 /*A16B16G16R16F*/, FMT_OP_TEXTURE | FMT_OP_VERTEXTEXTURE, 0, 0, 0},
         // Compressed textures -- FMT_OP_TEXTURE only (matches DXT1's gate-verified precedent). Host maps
         // DXT1/3/5 -> VK_FORMAT_BC1/BC2/BC3 (d3d9_format.cpp).
         {0x31545844 /*DXT1*/, FMT_OP_TEXTURE, 0, 0, 0},

@@ -888,16 +888,28 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   including a full regression sweep of every existing D3D9 guest test on both architectures — specifically
   including the PS multi-sampler test above — with zero regression. `8a41b682` added a citation for the
   DDI-passthrough claim that code-quality review caught missing.
-  **Explicitly still open, NOT closed by this work**: real `d3d9.dll`'s
-  `CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE, ...)` does not yet advertise any format as
-  vertex-texture-usable — a FORMATOP capability-table gap, distinct from the DDI/rendering path this
-  slice closed. The raw DDI bind-and-draw path this test exercises works regardless of that gap (the
-  test binds `D3DVERTEXTEXTURESAMPLER0` directly, without querying `CheckDeviceFormat` first), but a
-  well-behaved real app that gates its own vertex-texture-fetch usage on `CheckDeviceFormat` succeeding
-  first would refuse to use VTF against this driver at all until this separate gap is also closed.
-  Whether that's a plain mechanical FORMATOP-table extension (like the D3DFORMAT advertisement bullet
-  above) or hits an opaque internal wall (like cube/volume's `CheckDeviceFormat` gate above) has not been
-  investigated yet — that investigation is itself the first step of this follow-up.
+  **FORMATOP capability-advertisement gap — now also closed (2026-07-06, follow-up commit).** The
+  companion gap this slice deliberately left open: real `d3d9.dll`'s
+  `CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE, ...)` advertised NO format as vertex-texture-usable
+  (returned `D3DERR_NOTAVAILABLE` for every format), so a well-behaved app that gates VTF usage on
+  `CheckDeviceFormat` succeeding first would refuse to use vertex textures even though the DDI bind/draw
+  path above works. Resolved by adding a single FORMATOP op-bit — `FMT_OP_VERTEXTEXTURE` — to the
+  `A16B16G16R16F` row of `g_formats` (the format the VTF test already exercises; no new host-side
+  `d3d9_format_to_vulkan` mapping needed). It turned out to be the SAFE, mechanical-table-extension case
+  (like the D3DFORMAT advertisement bullet above), NOT an opaque internal wall like cube/volume — but
+  with a real RE twist: the correct op-bit is `0x00800000` (ReactOS `ddrawint.h`
+  `D3DFORMAT_OP_VERTEXTEXTURE`), NOT the `0x00400000` a first pass assumed (that value is
+  `D3DFORMAT_OP_AUTOGENMIPMAP`). A gated RE pass on real `d3d9.dll`'s `CEnum::CheckDeviceFormat` showed it
+  tests an internal per-format op-word (a VERBATIM copy of the driver's advertised FORMATOP — proven by
+  every other required bit in its mask-construction matching the DDI value exactly: TEXTURE=0x1,
+  ZSTENCIL=0x40, SRGBREAD=0x8000, SRGBWRITE=0x100000, …) for bit `0x00800000` on a
+  `D3DUSAGE_QUERY_VERTEXTEXTURE` query; advertising `0x00400000` was verified live to STILL return
+  `D3DERR_NOTAVAILABLE`, while `0x00800000` flips it to `S_OK`. Proven by a new sub-pass added to
+  `d3d9_format_coverage_test.cpp` (`CheckDeviceFormat(QUERY_VERTEXTEXTURE, A16B16G16R16F)` → `S_OK`,
+  `L8` → `D3DERR_NOTAVAILABLE`), a genuine before/after discriminator (the new test FAILS against the
+  pre-change UMD with `A16B16G16R16F hr=0x8876086a`), pixel-byte-identical on x64 and x86/WoW64 with a
+  full regression sweep of every existing D3D9 guest test on both architectures showing zero regression.
+  Purely a capability-advertisement bit: no host-side change (the DDI path was already functional).
 
 ### Cross-cutting / infra
 - [x] **WoW64/x86 shader path** — done, see the WoW64 row in the milestone table above. Typed
@@ -1075,12 +1087,17 @@ multi-sampler binding scheme was generalized into one shared source of truth use
 unfakeable-by-a-pixel-shader discriminator test (a vertex shader that displaces one triangle vertex by a
 real sampled height value) proved the fetch pixel-exact on both x64 and x86/WoW64, independently
 reproduced by two reviewers, with zero regression across the full existing D3D9 guest-test sweep. See the
-"M3 coverage items" checklist above for the full design/test account. **Explicitly still open, a separate
-follow-up, not addressed by this closure**: real `d3d9.dll`'s
-`CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE, ...)` doesn't yet advertise any format as
-vertex-texture-usable — a FORMATOP gap that would block a well-behaved real app from using VTF if it
-queries capability before binding, distinct from the now-closed DDI/rendering path (which this session's
-test exercises directly, without going through `CheckDeviceFormat` first).
+"M3 coverage items" checklist above for the full design/test account. The companion **FORMATOP
+capability-advertisement gap is now also closed** (2026-07-06 follow-up): real `d3d9.dll`'s
+`CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE, ...)` advertised no format as vertex-texture-usable,
+which would block a well-behaved app that queries capability before binding. Fixed by advertising the
+`FMT_OP_VERTEXTEXTURE` op-bit on the `A16B16G16R16F` `g_formats` row — the safe, mechanical-table-extension
+case, with the RE twist that the correct bit is `0x00800000` (`D3DFORMAT_OP_VERTEXTEXTURE`), not the
+`0x00400000` (`D3DFORMAT_OP_AUTOGENMIPMAP`) a first pass assumed; RE-confirmed against
+`CEnum::CheckDeviceFormat`, which checks its internal per-format op-word (a verbatim copy of the driver
+FORMATOP) for `0x00800000`. Proven by a new `d3d9_format_coverage_test.cpp` sub-pass, before/after
+discriminator, pixel-identical on x64 and x86/WoW64 with a zero-regression full sweep. See the "M3
+coverage items" checklist above for the full account.
 
 `stream_frequencies`/instancing closed out 2026-07-06 (commits `d3a0318c`/`a6062d66`/`1d4d0ab9`; see the
 M3 row above and the "M3 coverage items" checklist for the full account).

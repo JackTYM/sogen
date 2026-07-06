@@ -1000,14 +1000,29 @@ back with `LockRect` (same proven path as `d3d9_texture_test.cpp`/`d3d9_managed_
   BGRA8 (same limitation as `A16B16G16R16F`, see below), so its FORMATOP row is scoped texture-only. This
   sub-pass is the before/after proof of that scoping: the row previously carried `RT_TEX`, so the RT
   creation would have silently succeeded with corrupt readback.
+- **Vertex-texture-fetch capability** (`FMT_OP_VERTEXTEXTURE` on the `A16B16G16R16F` row): a pure
+  `CheckDeviceFormat` capability query, no render. `CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE,
+  D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16F)` must return `S_OK`, while the same query for `D3DFMT_L8` (which
+  carries no such bit) must still return `D3DERR_NOTAVAILABLE` (0x8876086a) -- proving the capability is
+  format-specific. This closes the FORMATOP gap the SM3.0 vertex-texture-fetch work left open: the DDI
+  bind/draw path was already proven (see `d3d9-vertex-texture-test.exe`), but a well-behaved app that
+  gates on `CheckDeviceFormat` first would have refused to use vertex textures because no format advertised
+  the bit. Before/after: run against the pre-change UMD, this sub-pass genuinely FAILS with
+  `A16B16G16R16F hr=0x8876086a`; after, `hr=0x00000000`. The exact op-bit value (`0x00800000`, matching
+  ReactOS `ddrawint.h` `D3DFORMAT_OP_VERTEXTEXTURE`, **not** the `0x00400000` a first pass assumed -- that
+  is `D3DFORMAT_OP_AUTOGENMIPMAP`) was RE-confirmed against real `d3d9.dll`'s `CEnum::CheckDeviceFormat`,
+  which tests its internal per-format op-word (a verbatim copy of this driver FORMATOP) for bit
+  `0x00800000` on a `D3DUSAGE_QUERY_VERTEXTEXTURE` query -- advertising `0x00400000` does not satisfy it
+  (verified live: it still returned `D3DERR_NOTAVAILABLE`).
 
-`A16B16G16R16F` is advertised `FMT_OP_TEXTURE` only (sampled HDR texture), deliberately NOT a render
-target: the host Present/snapshot readback path (`vulkan_host::create_render_target`'s readback buffer,
-plus `d3d9_host`'s RT backing and ColorFill snapshot copy) hardcodes 4 bytes/texel BGRA8, so an
-8-byte/texel HDR render target would undersize those buffers -- renderable HDR support needs that host
-work first, out of scope for this format-advertisement slice (the R5G6B5 sub-pass above is the
-negative-case counterpart of this same 4-bytes/texel constraint). Expect the three render sub-passes'
-`CreateTexture`/`CreateRenderTarget`/`DrawIndexedPrimitive` all `hr=0x00000000`, the R5G6B5
-`CreateRenderTarget` to FAIL (a non-zero `hr`, expected), four `PASS:` lines, and
+`A16B16G16R16F` is advertised `FMT_OP_TEXTURE | FMT_OP_VERTEXTEXTURE` (sampled HDR texture, usable as a
+vertex texture), deliberately NOT a render target: the host Present/snapshot readback path
+(`vulkan_host::create_render_target`'s readback buffer, plus `d3d9_host`'s RT backing and ColorFill
+snapshot copy) hardcodes 4 bytes/texel BGRA8, so an 8-byte/texel HDR render target would undersize those
+buffers -- renderable HDR support needs that host work first, out of scope for this format-advertisement
+slice (the R5G6B5 sub-pass above is the negative-case counterpart of this same 4-bytes/texel constraint).
+Expect the three render sub-passes' `CreateTexture`/`CreateRenderTarget`/`DrawIndexedPrimitive` all
+`hr=0x00000000`, the R5G6B5 `CreateRenderTarget` to FAIL (a non-zero `hr`, expected), the
+`CheckDeviceFormat(QUERY_VERTEXTEXTURE, A16B16G16R16F)` to return `hr=0x00000000`, five `PASS:` lines, and
 `[d3d9-format-coverage-test] ALL CHECKS PASSED`. Pixel-byte-identical parity confirmed on x64 and
 x86/WoW64.

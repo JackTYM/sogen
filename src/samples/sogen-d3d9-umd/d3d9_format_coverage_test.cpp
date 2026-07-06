@@ -25,6 +25,10 @@
 //    CreateRenderTarget must FAIL. R5G6B5 is 2 bytes/texel host-side while every RT readback/Present/
 //    ColorFill path hardcodes 4 bytes/texel BGRA8, so R5G6B5 is advertised texture-only; before that fix
 //    the row carried RT_TEX and the RT creation would have silently succeeded with corrupt output.
+// 5. Vertex-texture-fetch capability (FMT_OP_VERTEXTEXTURE): a pure CheckDeviceFormat capability check, no
+//    render. A16B16G16R16F must return S_OK for CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE) -- before the
+//    bit was added it returned D3DERR_NOTAVAILABLE for every format, blocking a capability-gating app from
+//    ever using vertex textures. L8 (no bit) must still fail, proving the capability is format-specific.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -449,6 +453,31 @@ int main()
     if (rtR5)
     {
         rtR5->Release();
+    }
+
+    // Sub-pass 5 (vertex-texture-fetch capability advertisement): before the FMT_OP_VERTEXTEXTURE bit was
+    // added to A16B16G16R16F's g_formats row, real d3d9.dll's CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE)
+    // returned D3DERR_NOTAVAILABLE (0x8876086a) for EVERY format, so a well-behaved app that gates on
+    // CheckDeviceFormat before binding a vertex texture would refuse to use VTF even though the DDI bind/draw
+    // path works (proven by d3d9_vertex_texture_test.cpp). This is a pure capability-advertisement check, not
+    // a render: A16B16G16R16F must now return S_OK, and a format WITHOUT the bit (L8) must still return
+    // D3DERR_NOTAVAILABLE -- proving the capability is format-specific, not a blanket "query always succeeds".
+    HRESULT hvtf = d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8,
+                                          D3DUSAGE_QUERY_VERTEXTEXTURE, D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16F);
+    HRESULT hvtfNo = d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8,
+                                            D3DUSAGE_QUERY_VERTEXTEXTURE, D3DRTYPE_TEXTURE, D3DFMT_L8);
+    printf("[d3d9-format-coverage-test] CheckDeviceFormat(QUERY_VERTEXTEXTURE, A16B16G16R16F) hr=0x%08lx / (L8) "
+           "hr=0x%08lx\n",
+           static_cast<unsigned long>(hvtf), static_cast<unsigned long>(hvtfNo));
+    if (SUCCEEDED(hvtf) && FAILED(hvtfNo))
+    {
+        printf("[d3d9-format-coverage-test] PASS: A16B16G16R16F advertised vertex-texture-usable, L8 correctly not\n");
+    }
+    else
+    {
+        printf("[d3d9-format-coverage-test] FAIL: vertex-texture capability advertisement is wrong "
+               "(A16B16G16R16F must be S_OK, L8 must fail)\n");
+        ++failures;
     }
 
     release_all(texDxt5, texRgba, texL8, rtX8, rtA8, vb, ib, vs, ps, dev, d3d);
