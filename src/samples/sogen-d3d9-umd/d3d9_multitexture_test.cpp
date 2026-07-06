@@ -2,9 +2,14 @@
 // distinct textures bound to different D3D9 sampler registers (s0 and s1) in one draw. Before the
 // multi-sampler binding work (see d3d9_shader_translator.cpp's ps_sampler_bindings and
 // d3d9_host.cpp's ps_bindings), the translator declared only s0's combined-image-sampler; a pixel
-// shader that referenced s1 made vkd3d-shader fail translation (the s1 sampler variable never
-// resolved), so this exact test would have failed at CreatePixelShader/first-draw time rather than
-// merely producing a wrong pixel. It is therefore a clean before/after discriminator for that fix.
+// shader that referenced s1 made vkd3d_shader_compile fail (the s1 sampler variable never resolved).
+// This is a HOST-side failure the guest never observes directly: CreatePixelShader/DrawIndexedPrimitive
+// both still report success (hr=0) from the app's point of view -- translate_d3d9_shader_pair returns
+// false, ensure_programmable_pipeline returns nullptr, and execute_draw silently skips the draw,
+// leaving whatever the render target was cleared to. So this exact test would NOT have failed at
+// CreatePixelShader/first-draw time; it would have rendered the CLEAR color instead of YELLOW -- a
+// silent wrong-pixel failure, not a crash. It is still a clean before/after discriminator for that fix,
+// just via graceful degradation rather than a hard failure.
 //
 // Design: two solid-color textures -- texA is pure RED (1,0,0), texB is pure GREEN (0,1,0) -- bound
 // to s0 and s1 respectively. One quad is drawn with a real D3DCompile()'d ps_2_0 that samples both
