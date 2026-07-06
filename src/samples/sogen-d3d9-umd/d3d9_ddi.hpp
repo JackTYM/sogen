@@ -638,6 +638,110 @@ typedef struct _D3DDDIARG_TEXBLT
 static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt, x86)");
 #endif
 
+// D3DDDIARG_COLORFILL -- pfnColorFill, device-func-table slot 56 (behind IDirect3DDevice9::ColorFill).
+// RE'd this session (2026-07-06) to the same standard as D3DDDIARG_TEXBLT above: BOTH static
+// decompilation AND live tracing of the real staged d3d9.dll.
+//   * Static: idasql-decompiled the real builder CD3DDDIDX10::Colorfill (d3d9_x64.dll.i64 @ 0x180042428;
+//     d3d9_x86.dll.i64 @ 0x1013E4C6). It constructs this exact struct field-by-field from its own
+//     parameters (void* hResource-wrapper, D3DDDIRECT* rect, D3DCOLOR color) and passes &struct straight
+//     to the device-func slot -- x64 `(*(v7+448))(...)` (448 = 56*8), x86 `(*(...+224))(...)` (224 = 56*4)
+//     -- confirming slot 56 == pfnColorFill exactly as this file's device-func-table documents it. The
+//     independent batch consumer CBatchFilterI::LHBatchColorFill copies precisely 40 bytes (x64: OWORD@0 +
+//     OWORD@16 + QWORD@36) / 32 bytes (x86: qmemcpy 0x20) and ReferenceResource()s offset 0, cross-
+//     confirming size and the resource-handle position.
+//   * Live (x64): a guest probe called ColorFill(rt, {L=0x11,T=0x22,R=0x33,B=0x44}, 0xDEADBEEF) on a real
+//     default-pool render target; a temporary slot-56 dump handler captured the exact bytes:
+//       05 00 01 00 00 00 00 00 | 00 00 00 00 | 11 00 00 00 22 00 00 00 33 00 00 00 44 00 00 00 |
+//       ef be ad de | 00 00 00 00 00 00 00 00
+//     i.e. hResource=0x10005 @0, SubResourceIndex=0 @8, DstRect{0x11,0x22,0x33,0x44} @12, Color=0xDEADBEEF
+//     @28, trailing 8 zero bytes @32 -- matching the decompile byte-for-byte.
+#ifdef _WIN64
+typedef struct _D3DDDIARG_COLORFILL
+{
+    HANDLE hResource;    // 0
+    UINT SubResourceIndex; // 8 -- read from the hResource wrapper (CD3DDDIDX10::Colorfill's a2[2]);
+                           // 0 observed live (single-subresource surface).
+    D3DDDIRECT DstRect;  // 12, 16 bytes (left/top/right/bottom)
+    UINT Color;          // 28 -- D3DCOLOR (ARGB)
+    UINT Flags;          // 32 -- always 0 (the builder zeroes an 8-byte slot here; the second UINT is
+                         // struct tail padding on x64). Field name per the WDK; value never seen non-zero.
+} D3DDDIARG_COLORFILL;
+static_assert(sizeof(D3DDDIARG_COLORFILL) == 40,
+              "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Colorfill + LHBatchColorFill, x64) + live trace");
+#else
+// x86 shape decompile-RE'd independently (d3d9_x86.dll.i64 CD3DDDIDX10::Colorfill @ 0x1013E4C6 +
+// LHBatchColorFill's qmemcpy 0x20) -- the x64 shape with HANDLE shrunk to 4 bytes and the trailing
+// zero field 4 bytes (int) instead of 8. 32 bytes total. Not live-traced (no x86 probe run this session,
+// matching the D3DDDIARG_TEXBLT x86 precedent); layout is an independent decompile, not an extrapolation.
+typedef struct _D3DDDIARG_COLORFILL
+{
+    HANDLE hResource;    // 0
+    UINT SubResourceIndex; // 4 -- read from the hResource wrapper (a2[1] on x86)
+    D3DDDIRECT DstRect;  // 8, 16 bytes (left/top/right/bottom)
+    UINT Color;          // 24 -- D3DCOLOR (ARGB)
+    UINT Flags;          // 28 -- always 0 (builder's `v10 = 0`)
+} D3DDDIARG_COLORFILL;
+static_assert(sizeof(D3DDDIARG_COLORFILL) == 32,
+              "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Colorfill + LHBatchColorFill, x86)");
+#endif
+
+// D3DDDIARG_BLT -- pfnBlt, device-func-table slot 55 (behind IDirect3DDevice9::StretchRect). A DIFFERENT
+// call from pfnTexBlt: a general source->destination surface blit, not a texture sysmem/vidmem sync.
+// RE'd this session (2026-07-06) to the same BOTH-static-AND-live standard.
+//   * Static: idasql-decompiled the real builder CD3DDDIDX10::Blt (d3d9_x64.dll.i64 @ 0x180031016;
+//     d3d9_x86.dll.i64 @ 0x10062CB0). It builds the struct from two {handle, subresource, rect} pairs
+//     plus a flags word and passes &struct to the device-func slot -- x64 `(*(v14+440))(...)` (440 = 55*8),
+//     x86 `(*(v11+220))(...)` (220 = 55*4) -- confirming slot 55 == pfnBlt. The independent consumer
+//     CBatchFilterI::LHBatchBlt copies precisely 72 bytes (x64) / 56 bytes (x86, qmemcpy 0x38) and
+//     ReferenceResource()s offsets 0 and 32 (x64) / 0 and 24 (x86), cross-confirming size and BOTH handle
+//     positions.
+//   * Live (x64): a guest probe called StretchRect(src, {0x0A,0x0B,0x5A,0x4B}, dst, {0x64,0x65,0xB4,0xA5},
+//     D3DTEXF_NONE) between two real default-pool render targets; a temporary slot-55 dump handler captured:
+//       06 00 01 00 00 00 00 00 | 00 00 00 00 | 0a.. 0b.. 5a.. 4b.. | 01 00 00 00 |
+//       07 00 01 00 00 00 00 00 | 00 00 00 00 | 64.. 65.. b4.. a5.. | 00 00 00 00 | 00 00 00 00
+//     The SOURCE surface (id 0x10006, created before the dest 0x10007) and the SOURCE rect land at
+//     offsets 0/12; the DEST surface and DEST rect at offsets 32/44. This live result CORRECTED the field
+//     ordering: the struct is Src-first-then-Dst (matching the real WDK D3DDDIARG_BLT), which the bare
+//     decompile alone did not disambiguate. Offset 8/40 SubResourceIndex both 0; offset 60 Reserved 0;
+//     offset 64 Flags 0 (D3DTEXF_NONE). Bytes at offset 28 (the x64 alignment pad before hDstResource) and
+//     past offset 68 (tail pad) are uninitialized stack -- not struct fields.
+#ifdef _WIN64
+typedef struct _D3DDDIARG_BLT
+{
+    HANDLE hSrcResource;      // 0
+    UINT SrcSubResourceIndex; // 8  -- 0 observed live
+    D3DDDIRECT SrcRect;       // 12, 16 bytes (left/top/right/bottom)
+    // 4 bytes natural alignment padding here (offset 28) so hDstResource is 8-aligned -- NOT a field.
+    HANDLE hDstResource;      // 32
+    UINT DstSubResourceIndex; // 40 -- 0 observed live
+    D3DDDIRECT DstRect;       // 44, 16 bytes (left/top/right/bottom)
+    UINT Reserved;            // 60 -- always 0 (builder's `v23 = 0`)
+    UINT Flags;               // 64 -- the StretchRect Filter / blt-flags word (CD3DDDIDX10::Blt's last
+                              // arg); 0 == D3DTEXF_NONE observed live. Scaling is inferred by the driver
+                              // from the Src/Dst rect-size ratio (the DDI carries no explicit scale field).
+} D3DDDIARG_BLT;
+static_assert(sizeof(D3DDDIARG_BLT) == 72,
+              "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x64) + live trace");
+#else
+// x86 shape decompile-RE'd independently (d3d9_x86.dll.i64 CD3DDDIDX10::Blt @ 0x10062CB0 + LHBatchBlt's
+// qmemcpy 0x38). Same field ORDER as the x64 layout above (Src-first, cross-validated by the x64 live
+// trace and the WDK), with HANDLEs 4 bytes and no alignment pad (every field is naturally 4-aligned), so
+// hDstResource sits at 24 not 32. 56 bytes total. Not live-traced (matching the TexBlt x86 precedent).
+typedef struct _D3DDDIARG_BLT
+{
+    HANDLE hSrcResource;      // 0
+    UINT SrcSubResourceIndex; // 4
+    D3DDDIRECT SrcRect;       // 8, 16 bytes
+    HANDLE hDstResource;      // 24 -- NOT 32: no alignment pad on x86 (HANDLE is 4 bytes)
+    UINT DstSubResourceIndex; // 28
+    D3DDDIRECT DstRect;       // 32, 16 bytes
+    UINT Reserved;            // 48 -- always 0 (builder's `v20 = 0`)
+    UINT Flags;               // 52 -- Filter / blt-flags (builder's a10)
+} D3DDDIARG_BLT;
+static_assert(sizeof(D3DDDIARG_BLT) == 56,
+              "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x86)");
+#endif
+
 // D3DDDI_SURFACEINFO and D3DDDIARG_CREATERESOURCE -- RE'd this session (2026-07-05) the same way the
 // sibling structs above were, and to the same standard: BOTH static decompilation of the real staged
 // d3d9.dll's resource-creation path AND live tracing of the actual field values through a real
