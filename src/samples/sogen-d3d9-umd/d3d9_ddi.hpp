@@ -891,12 +891,47 @@ static_assert(sizeof(D3DDDIARG_CREATERESOURCE) == 60, "size confirmed via real d
 //
 // x86 note: this x64 layout does NOT carry over -- see the separate x86 definition below. Task 6's
 // live idasql RE (2026-07-04) found the x86 struct is genuinely different, not just pointer-shrunk.
+//
+// SubResourceIndex -- RE-verified (2026-07-06, BOTH live AND static) at offset 8 (x64) / 4 (x86). This
+// is the field that identifies WHICH subresource (mip level, cube face, volume slice) of a resource a
+// LockRect(level)/LockRect(face,level)/LockBox(level) call targets. The field previously modeled here
+// as "Reserved0" IS the SubResourceIndex -- confirmed decisively, refuting an earlier static-only
+// reading of CDriverMipSurface::InternalLockRect (whose 84-byte OUTER bookkeeping struct genuinely
+// carries no such field; the level reaches the driver only through the SMALLER inner struct DdLockLH
+// builds, below).
+//   * Static: DdLockLH -- the single function that builds the struct actually crossing into pfnLock,
+//     for EVERY resource kind and routing path that reaches the driver -- writes, as the 2nd field of
+//     its local wire struct, `*(DWORD*)(resource_context + 8)` (x64, DdLockLH @ 0x180030ba0) /
+//     `*(DWORD*)(resource_context + 4)` (x86, DdLockLH @ 0x10065460), i.e. the per-subresource index
+//     stored on the surface object the runtime selected. This is the same "index derived from the
+//     resource wrapper" mechanism D3DDDIARG_TEXBLT/COLORFILL/BLT already document. d3d9.dll selects the
+//     surface object from the app's Level/FaceType itself (CMipMap::LockRect indexes an array of
+//     per-level surface objects by Level; CCubeMap::LockRect by `Level + FaceType*MipLevels`), so the
+//     flattened subresource value the driver sees is `Level` for a plain mip texture and (inferred from
+//     that array-index formula, not yet live-confirmed for cube/volume specifically)
+//     `FaceType*MipLevels + Level` for cube/array textures.
+//   * Live: a 3-mip 2D texture (CreateTexture(64,64,3,D3DUSAGE_DYNAMIC,...D3DPOOL_DEFAULT)) locked at
+//     levels 0/1/2 with a NULL rect. Hooking umd_Lock's entry (sogen's Python debugger API,
+//     read-only) and dumping pArgs showed hResource@0 identical across all three calls, and offset
+//     8 (x64) / 4 (x86) holding exactly {0, 1, 2} -- the level -- and NOTHING else in the struct
+//     varying. On the buffer path (a real vertex-buffer Lock via the triangle test) the same offset
+//     reads 0, as expected (buffers have no subresources).
+//   * Safe to read UNCONDITIONALLY, by the same argument that already justifies OffsetToLock@80:
+//     DdLockLH is the single builder for the driver-routed path that actually reaches pfnLock, and it
+//     writes 0 there for buffers (correct) and the real level for textures/surfaces; the only other
+//     path (sysmem-routed buffers) has its driver-returned output discarded by the app regardless. So
+//     a future umd_Lock could read this field for every lock without per-call routing detection. This
+//     is DOCUMENTATION ONLY for now -- umd_Lock/umd_Unlock still hardcode subresource 0; wiring real
+//     per-subresource addressing into the UMD and host lock()/unlock() is separate, gated work.
 #ifdef _WIN64
 typedef struct _D3DDDIARG_LOCK
 {
-    HANDLE hResource;    // 0 -- confirmed
-    UINT64 Reserved0;    // 8 -- present, purpose unconfirmed
-    BYTE Reserved1[24];  // 16..39 -- unconfirmed
+    HANDLE hResource;        // 0 -- confirmed
+    UINT SubResourceIndex;   // 8 -- RE-verified live + static 2026-07-06 (see block comment above):
+                             //      flattened subresource index (Level for mips; FaceType*MipLevels +
+                             //      Level for cube/array). 0 for buffers. NOT yet consumed by umd_Lock.
+    UINT Reserved0Hi;        // 12 -- always 0 live (high half of the former UINT64 Reserved0 slot)
+    BYTE Reserved1[24];      // 16..39 -- Range/Box input region (DdLockLH's v30/v31); not modeled
     VOID* pData;         // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
     BYTE Reserved2[32];  // 48..79 -- unconfirmed
     UINT OffsetToLock;   // 80 -- RE-verified live (see comment above): the app's requested byte offset,
@@ -968,7 +1003,10 @@ typedef struct _D3DDDIARG_LOCK
 typedef struct _D3DDDIARG_LOCK
 {
     HANDLE hResource;    // 0 -- RE-verified live 2026-07-04 (see comment above)
-    UINT32 Reserved0;    // 4 -- present, purpose unconfirmed (x86-native 4 bytes; NOT a UINT64)
+    UINT SubResourceIndex; // 4 -- RE-verified live + static 2026-07-06 (see block comment above the x64
+                         //      struct): flattened subresource index (Level for mips; FaceType*MipLevels
+                         //      + Level for cube/array). 0 for buffers. Was "Reserved0"; NOT a UINT64.
+                         //      NOT yet consumed by umd_Lock.
     BYTE Reserved1[24];  // 8..31 -- unconfirmed (OffsetToLock/SizeToLock or Rect/Box input region)
     VOID* pData;         // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
     BYTE Reserved2[12];  // 36..47 -- unconfirmed (Pitch/SlicePitch/Flags; not read by umd_Lock)
@@ -1020,6 +1058,7 @@ typedef struct _D3DDDIARG_PRESENT
 
 #ifdef _WIN64
 static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll RE");
+static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 8, "SubResourceIndex RE-verified live+static 2026-07-06");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll RE (LHBatchPresent copy pattern)");
 #else
@@ -1027,6 +1066,7 @@ static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll
 // comments on the x86 struct definitions above) for why the earlier "alignment padding absorbs the
 // shrinkage" theory was wrong and what the real, live-RE'd x86 sizes (48 / 8 bytes) are.
 static_assert(sizeof(D3DDDIARG_LOCK) == 48, "D3DDDIARG_LOCK x86 layout (RE-verified live 2026-07-04)");
+static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 4, "SubResourceIndex RE-verified live+static 2026-07-06 (x86)");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 8, "D3DDDIARG_UNLOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 36, "D3DDDIARG_PRESENT x86 layout");
 #endif
