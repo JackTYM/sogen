@@ -3655,3 +3655,140 @@ every stage — RE-gate, feature, test, and fix commits — by two independent r
 section all updated: the format-advertisement bullet flipped from open to closed (citing all four
 commits, with the R5G6B5 bug documented prominently, not glossed over), and a new, separate "Known
 limitation" bullet added for the underlying 4-bytes-per-texel host constraint.
+
+---
+
+## 43. Vertex texture fetch (SM3.0 VS texture sampling) — gated DDI trace, one shared PS/VS sampler-binding scheme, and an unfakeable-by-a-pixel-shader discriminator test (2026-07-06)
+
+§40's SM3.0-caps closure left one thing explicitly unresolved in its own "residual uncertainty" note
+(§40.5): vertex texture fetch (`tex2Dlod` sampling `D3DVERTEXTEXTURESAMPLER0..3`) was named as an
+SM3.0-only construct the caps-closure test never exercised, "needed only if a specific MW2 vertex shader
+samples textures." This session answered that with a gated DDI trace, then closed the gap. Three
+commits, following the same investigate → feat → test → polish discipline as the prior few sections:
+(the DDI trace itself, investigation-only, no commit), `fd1fcb46` (feat), `e3aa2adf` (test), `8a41b682`
+(polish).
+
+### 43.1 The gated DDI trace: does real d3d9.dll even forward VTF sampler binds to the DDI? (investigation only)
+
+Before writing any host code, the open question was whether real `d3d9.dll` forwards
+`SetTexture(D3DVERTEXTEXTURESAMPLER0..3, tex)` — the API-level sampler-stage constants 257-260 that mark
+a vertex-texture-fetch binding — down to this driver's DDI surface at all, or whether it intercepts and
+handles VTF some other way before the DDI ever sees it (the same shape of question §36's cube/volume
+investigation asked about `CreateCubeTexture`, and which turned out to hide a genuine wall there). A
+gated, instrumented trace of a real `SetTexture(D3DVERTEXTEXTURESAMPLER0, tex)` call against the genuine
+Microsoft `d3d9.dll` settled it decisively and simply: the call reaches this driver's ordinary
+`pfnSetTexture` DDI slot completely unmodified, with the stage value passed through as a plain argument —
+an identity pass-through, structurally no different from any ordinary PS sampler stage (`s0`..`s3`). No
+opaque cache, no special-cased runtime interception, no separate DDI slot. This was the simplest possible
+outcome the trace could have found, and it is what made the rest of this slice a plumbing exercise rather
+than a fresh RE investigation — the contrast with cube/volume's genuine wall (§36) is worth noting again:
+the same kind of "trace it and see" gate can land on either shape, and there's no way to know which one in
+advance without actually running the trace.
+
+### 43.2 Design: one shared PS/VS sampler-binding scheme, not two parallel ones (`fd1fcb46`)
+
+§30 built the PS multi-sampler scheme as `max_ps_sampler_stages`/`ps_sampler_binding_for_stage` in
+`d3d9_shader_translator.hpp` — PS-only, since nothing needed a VS-side equivalent at the time. Once VTF
+needed the same shape of binding for the VS's own `s0`..`s3` registers, the natural but wrong move would
+have been to copy-paste a second, parallel `vs_sampler_binding_for_stage` alongside it: two independent
+implementations of the identical formula, free to drift the moment either one changed without a
+corresponding change to the other. Instead, the PS-only names were generalized into one canonical,
+stage-agnostic source of truth — `max_sampler_stages`/`sampler_binding_for_stage` — with `ps_`/`vs_`
+prefixed names now thin forwarding aliases onto it. The translator and host sides for both stages read
+the same formula from the same place; there is no way for a future change to update one stage's binding
+math without the compiler forcing the other stage's alias to follow.
+
+VS combined-image-samplers are declared into descriptor set 0 — the VS's own set, distinct from the PS's
+set 1 — keyed off the VS's own `s0`..`s3` registers, replacing what had previously been a hardcoded
+`nullptr`/`0` (no VS sampler declarations existed at all before this). This reuses the exact same
+safety property the PS array already relies on: over-declaring sampler bindings a shader doesn't
+statically reference is empirically inert, since vkd3d-shader only emits SPIR-V for a resource the
+shader's own bytecode actually declares.
+
+On the host side (`d3d9_host.cpp`), `vs_bindings` (descriptor set 0) gained the sampler slots the shared
+formula produces, the descriptor pool's combined-image-sampler count was bumped to cover both the VS and
+PS sets together (previously sized for PS-only), and `execute_draw` gained a new VS-side texture-
+upload/descriptor-write loop, keyed off `bound_textures[257 + k]` (`D3DVERTEXTEXTURESAMPLER0` is API
+constant 257) — a straight mirror of the pre-existing PS loop, just reading the VS's own bound-texture
+slots and writing into the VS's own descriptor set. `build_sampler` needed no changes at all: it's reused
+unchanged, defaulting to POINT filtering with no mipmap, which happens to already match real D3D9's own
+VTF sampling restriction (real hardware VTF is filter-restricted too), so there was nothing to special-
+case here.
+
+### 43.3 Test: an "unfakeable by a pixel shader" discriminator (`e3aa2adf`, `d3d9_vertex_texture_test.cpp`)
+
+The design goal for this test was stronger than "the draw doesn't crash and some texture-driven value
+shows up somewhere" — a pixel shader sampling the same texture and writing to `COLOR0` could produce a
+superficially similar-looking result without the vertex stage ever touching the texture at all, which
+would prove nothing about VTF specifically. The test instead needed a result that is structurally
+impossible to produce any way *except* a genuine vertex-stage texture fetch.
+
+The construct: a real `vs_3_0` vertex shader samples a 2x2 `A16B16G16R16F` heightmap (bound to
+`D3DVERTEXTEXTURESAMPLER0`, `D3DPOOL_MANAGED`, bound directly without a `CheckDeviceFormat` query — see
+§43.4 below for why) with `tex2Dlod`, and uses the sampled height to displace one triangle vertex's own
+position — moving the apex from baseline screen `y=300` up to `y=100` by `height * 0.8333` NDC (200
+screen px). The heightmap stores `0.0` in one texel and `1.0` in another; the triangle's two base
+vertices' UVs land on the `0.0` texel (they don't move), while the apex's own UV lands on the `1.0`
+texel (it does). Because only the specific vertex whose own per-vertex UV selects the high texel moves —
+not both vertices, not a uniform offset applied to the whole triangle — a correct result cannot be
+produced by a constant offset, a per-draw uniform, or (critically) a pixel shader, since a pixel shader
+has no way to selectively reposition one specific vertex based on that vertex's own attribute data. It
+requires the vertex stage itself to have fetched the texel that vertex's own UV points at.
+
+The discriminator probe, `P_HIGH(320,180)`, sits above the un-displaced apex position (`y=300`) but
+inside the footprint the displaced triangle sweeps through — it reads ORANGE (`B=00 G=80 R=FF`) only if
+VTF genuinely moved the apex, and the CLEAR color otherwise. Before/after verified directly: with the
+VS-sampler binding removed from the translator (reverting to the old `nullptr`/`0` declaration),
+`translate_d3d9_shader_pair` fails on the VS's own `texldl` instruction, `ensure_programmable_pipeline`
+returns `nullptr`, and `execute_draw` degrades gracefully — the whole draw is skipped, exactly the same
+graceful-degradation shape §30's PS multi-sampler test found for an unbound PS stage. Both `P_HIGH` and
+the `P_BASE(320,370)` control probe read the clear color in that case, and the test fails cleanly — a
+real, working discriminator, not a hypothetical one.
+
+Passes pixel-exact on both x64 and x86/WoW64 (`P_HIGH pixel=B=00 G=80 R=FF`, identical on both
+architectures), independently reproduced by two separate reviewers. The full existing D3D9 guest-test
+regression sweep — every prior test, both architectures, specifically including §30's PS multi-sampler
+test (the test most likely to regress, since this session's refactor touches the same shared binding
+constants that test also depends on) — stayed clean at every stage, verified independently by both
+reviewers.
+
+### 43.4 Polish: citing the DDI-passthrough claim (`8a41b682`)
+
+Code-quality review of `fd1fcb46` caught a real gap in citation discipline, not a functional bug: the new
+`D3DVERTEXTEXTURESAMPLER0` handling in `d3d9_host.cpp` asserted the DDI-passthrough claim from §43.1
+without citing supporting evidence in the code comment itself, inconsistent with this session's own
+established convention of citing RE evidence directly alongside any RE-derived claim (see, e.g., §40's
+caps-field comments, each pointing at its own validator gate). Fixed by adding a citation to
+`umd_SetTexture`'s own direct-value-argument signature (it takes the stage value with no special-casing
+by its numeric range) plus the new test's own passing result as the empirical confirmation — so a future
+reader hitting this code doesn't have to take the passthrough claim on faith or re-derive it from
+scratch.
+
+### 43.5 Explicit follow-up left open: FORMATOP D3DUSAGE_QUERY_VERTEXTEXTURE, not addressed by this slice
+
+This slice closes the DDI/rendering path for vertex texture fetch — binding a texture to
+`D3DVERTEXTEXTURESAMPLER0..3` and drawing with it genuinely works, proven end to end. It does NOT close a
+separate, adjacent gap: real `d3d9.dll`'s `CheckDeviceFormat(D3DUSAGE_QUERY_VERTEXTEXTURE, ...)` does not
+yet advertise any format as vertex-texture-usable against this driver's current FORMATOP table. This
+session's test is unaffected by that gap only because it binds `D3DVERTEXTEXTURESAMPLER0` directly,
+without ever calling `CheckDeviceFormat` first — but a well-behaved real app (a real game engine, quite
+plausibly including MW2 itself) that gates its own VTF usage on `CheckDeviceFormat` succeeding first
+would refuse to use vertex texture fetch against this driver at all, regardless of the DDI path working
+perfectly underneath, until this separate gap is also closed.
+
+This is deliberately not conflated with the closure above: the DDI/rendering path and the
+capability-advertisement path are two different real gaps, only one of which this slice closes. Whether
+the FORMATOP gap turns out to be a plain, mechanical table extension (the shape §42's D3DFORMAT
+advertisement work found) or hits an opaque internal wall (the shape §36's cube/volume investigation
+found) has not been investigated — that investigation is itself the first step of this follow-up, not
+yet started.
+
+### 43.6 Verification
+
+Full regression sweep of every existing D3D9 guest test, both x64 and x86/WoW64 — specifically including
+§30's PS multi-sampler test — verified clean at every stage, independently reproduced by two separate
+reviewers. `docs/d3d9-roadmap.md`'s SM3.0-caps bullet's residual-uncertainty note, the M3 row, the M5 row,
+a new "Vertex texture fetch" bullet in "M3 coverage items," and the "Sequencing recommendation" section
+are all updated — the DDI/rendering closure is documented as done, citing all three commits, and the
+FORMATOP `D3DUSAGE_QUERY_VERTEXTEXTURE` gap is documented explicitly as a separate, still-open follow-up,
+not folded into the closure.
