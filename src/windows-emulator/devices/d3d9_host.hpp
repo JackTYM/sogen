@@ -272,16 +272,26 @@ namespace sogen
         // Fingerprint of every input that actually varies a built VkPipeline: the bound VS/PS pair (0/0
         // for the fixed-function pipeline, which never varies these), the bound color-attachment formats
         // (baked into VkPipelineRenderingCreateInfo), the depth format (also feeds build_depth_state,
-        // which bakes depthTestEnable/depthWriteEnable/depthCompareOp as STATIC pipeline state), and the
-        // vertex-input shape (see vertex_shape_key()). Two draws that differ in any of these need
-        // genuinely different VkPipeline objects -- caching on a subset silently reuses a stale pipeline.
+        // which bakes depthTestEnable/depthWriteEnable/depthCompareOp as STATIC pipeline state), the
+        // vertex-input shape (see vertex_shape_key()), and the depth/blend render-state that
+        // build_depth_state/build_blend_state bake into the pipeline STATICALLY (not dynamic state):
+        // depth is the resolved depthTestEnable/depthWriteEnable/depthCompareOp, blend is the resolved
+        // blendEnable and src/dst/op blend factors + write mask. Depth-compare op and depth_format are
+        // distinct axes: two draws with the same depth_format but different D3DRS_ZFUNC/ZWRITEENABLE, or
+        // toggling D3DRS_ALPHABLENDENABLE / changing D3DRS_SRCBLEND/DESTBLEND between draws, produce
+        // genuinely different pipelines. Two draws that differ in any of these need genuinely different
+        // VkPipeline objects -- caching on a subset silently reuses a stale pipeline (e.g. omitting blend
+        // makes a blend-enabled draw incorrectly reuse an earlier blend-disabled pipeline and render
+        // transparent geometry opaque).
         struct pipeline_cache_key
         {
             uint64_t vertex_shader{};
             uint64_t pixel_shader{};
             std::array<uint32_t, 4> color_formats{}; // slot-order, 0-padded (VK_FORMAT_UNDEFINED == 0, never a real bound format)
             uint32_t depth_format{};
-            uint64_t vertex_shape{}; // see vertex_shape_key()
+            uint64_t vertex_shape{};             // see vertex_shape_key()
+            vulkan_host::depth_state depth{};    // resolved static depth test/write/compare (build_depth_state)
+            vulkan_host::color_blend_attachment blend{}; // resolved static blend enable/factors/write-mask (build_blend_state)
             auto operator<=>(const pipeline_cache_key&) const = default;
         };
 

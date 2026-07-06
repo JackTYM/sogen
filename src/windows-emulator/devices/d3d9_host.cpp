@@ -390,6 +390,10 @@ namespace sogen
             key.color_formats[i] = color_formats[i];
         }
         key.depth_format = depth_format;
+        // Resolved static depth/blend state are part of the pipeline identity -- compute them ONCE here so
+        // the exact values that key the cache are the same ones fed to create_graphics_pipeline on a miss.
+        key.depth = build_depth_state(this->state_.render_state, depth_format);
+        key.blend = build_blend_state(this->state_.render_state);
 
         const auto cached = this->ff_pipelines_.find(key);
         if (cached != this->ff_pipelines_.end())
@@ -440,15 +444,16 @@ namespace sogen
             {.location = 1, .binding = 0, .format = VK_FORMAT_B8G8R8A8_UNORM, .offset = 16},
         }};
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
-        // D3D9 has no independent per-render-target blend state -- every bound RT gets the same config.
-        const std::vector<vulkan_host::color_blend_attachment> blend(color_formats.size(), build_blend_state(this->state_.render_state));
+        // Reuse the exact depth/blend values already baked into `key` above -- the cache key can never
+        // disagree with what actually gets built. D3D9 has no independent per-render-target blend state --
+        // every bound RT gets the same config.
+        const std::vector<vulkan_host::color_blend_attachment> blend(color_formats.size(), key.blend);
         const vulkan_host::specialization empty_spec{};
 
         uint64_t pipeline = 0;
         const int32_t result = this->vulkan_.create_graphics_pipeline(
             device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings,
-            attributes, depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
+            attributes, key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend,
             pipeline);
         if (result != 0 || pipeline == 0)
@@ -525,6 +530,10 @@ namespace sogen
         }
         key.depth_format = depth_format;
         key.vertex_shape = this->vertex_shape_key();
+        // Resolved static depth/blend state are part of the pipeline identity -- compute them ONCE here so
+        // the exact values that key the cache are the same ones fed to create_graphics_pipeline on a miss.
+        key.depth = build_depth_state(this->state_.render_state, depth_format);
+        key.blend = build_blend_state(this->state_.render_state);
 
         const auto cached = this->programmable_pipelines_.find(key);
         if (cached != this->programmable_pipelines_.end())
@@ -701,14 +710,15 @@ namespace sogen
                                   .offset = 12});
         }
         const std::array<uint32_t, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        const vulkan_host::depth_state depth = build_depth_state(this->state_.render_state, depth_format);
-        // D3D9 has no independent per-render-target blend state -- every bound RT gets the same config.
-        const std::vector<vulkan_host::color_blend_attachment> blend(color_formats.size(), build_blend_state(this->state_.render_state));
+        // Reuse the exact depth/blend values already baked into `key` above -- the cache key can never
+        // disagree with what actually gets built. D3D9 has no independent per-render-target blend state --
+        // every bound RT gets the same config.
+        const std::vector<vulkan_host::color_blend_attachment> blend(color_formats.size(), key.blend);
         const vulkan_host::specialization empty_spec{};
 
         const int32_t result = this->vulkan_.create_graphics_pipeline(
             device, /*render_pass=*/0, entry.pipeline_layout, entry.vs_module, entry.fs_module, width, height, bindings,
-            attributes, depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
+            attributes, key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec,
             blend, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
