@@ -605,10 +605,10 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   tests pass pixel-exact on x64 and x86/WoW64 against the genuine Microsoft `d3d9.dll`; full regression
   sweep of every existing D3D9 guest test (x64+x86) verified clean at every stage by an independent,
   adversarial reviewer.
-  **Two known limitations, documented as deliberate scope boundaries, not silently lost (`83c518c6`)**:
-  (1) `color_fill` hardcodes 4 bytes/texel — see "Known limitation: host render-target/readback path
-  hardcodes 4 bytes/texel" in "M3 coverage items" below for the consolidated, now-confirmed-real account
-  (it caused an actual bug during the later D3DFORMAT-advertisement work, `197cfbd3`); (2)
+  **Two known limitations, documented as deliberate scope boundaries at the time (`83c518c6`)**:
+  (1) `color_fill` hardcoded 4 bytes/texel — closed 2026-07-06, see the "Host render-target/readback
+  path's 4-bytes-per-texel (BGRA8) assumption" entry in "M3 coverage items" below (it caused an actual
+  bug during the later D3DFORMAT-advertisement work, `197cfbd3`, before this fix landed); (2)
   both handlers' `subresource`/`dst_subresource`/`src_subresource` parameters are always 0 and unused —
   single-mip, single-layer resources only, not yet plumbed to a real mip/array level. (Mip-mapping, once
   it landed, took a different path entirely — see the mip-mapping bullet below — so this `blt()`
@@ -780,32 +780,37 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   targets fail.
   Full x64+x86 D3D9 guest-test regression sweep (all ~42 existing test runs) verified clean at every
   stage by two independent reviewers.
-  **Deliberate scope boundary, not closed by this work**: `A16B16G16R16F` and `R5G6B5` are BOTH
-  texture-only, not render-target, for the identical real reason — see "Known limitation: host
-  render-target/readback path hardcodes 4 bytes/texel" immediately below for the actionable follow-up
-  a future task needs.
+  **Deliberate scope boundary at the time, since closed** (see below): `A16B16G16R16F` and `R5G6B5` were
+  BOTH texture-only, not render-target, for the identical real reason.
   **Genuinely still open, distinct from the above**: formats with no host-side VkFormat mapping at all
   yet — e.g. paletted formats (`P8`) — are not part of this closure; this slice only advertised the 13
   formats `d3d9_format_to_vulkan` already handled.
-- [ ] **Known limitation: host render-target/readback path hardcodes 4 bytes/texel (BGRA8) — not yet
-  generalized.** First flagged as a deliberate scope boundary during the `StretchRect`/`ColorFill` work
-  (`83c518c6`, see above) and confirmed as a real, actionable constraint — not just a footnote — when it
-  caused a real bug during the D3DFORMAT-advertisement work above (`197cfbd3`): giving `R5G6B5` (2
-  bytes/texel) render-target capability would have silently corrupted readback/Present output, and
-  `A16B16G16R16F` (8 bytes/texel) was scoped texture-only from the start for the identical reason.
-  Every render-target-capable format this codebase supports today is `B8G8R8A8_UNORM`
-  (`A8R8G8B8`/`X8R8G8B8`), so the hardcoded assumption has never yet been wrong in practice — but it is
-  a real ceiling on future format-capability work, not a hypothetical one. **Exact code sites a future
-  task must generalize before any non-4-byte-per-texel format (16-bit color, HDR, etc.) can become
-  render-target-capable**:
-  - `d3d9_host::color_fill`'s hardcoded size calculation (bytes-per-texel assumed 4).
-  - The Present-path `ui_surface_desc` construction (`syscalls/gdi.cpp` and `gpu_bridge.cpp`), which
-    builds `.stride = width * 4` and a fixed BGRA8 format unconditionally.
-  - `vulkan_host::create_render_target`/`readback_render_target`'s buffer sizing, which allocates the
-    CPU-side readback buffer at `width * height * 4` regardless of the image's actual format.
-  Until all three sites derive their byte-per-texel/stride/format from the resource's real VkFormat
-  instead of a hardcoded constant, `R5G6B5` and `A16B16G16R16F` (and any future non-4-byte-per-texel
-  format) must stay texture-only.
+- [x] **Host render-target/readback path's 4-bytes-per-texel (BGRA8) assumption — closed for off-screen
+  RTs (2026-07-06, commits `c845091e`/`e7248550`, code-quality follow-up `4c933513`).** The old
+  limitation: every RT-sizing site hardcoded `* 4`, so `R5G6B5` (2 bytes/texel) and `A16B16G16R16F` (8
+  bytes/texel) had to stay texture-only — giving either render-target capability would have silently
+  corrupted readback output (the exact bug caught and reverted for `R5G6B5` in `197cfbd3` above).
+  **Fix**: a new shared `vk_format_bytes_per_texel` helper (`d3d9_format.cpp`) is now the single source
+  of truth for every RT-sizing site — `d3d9_host::create_resource`'s RT backing store,
+  `vulkan_host::create_render_target`/`readback_render_target`'s CPU-side buffer sizing, and
+  `d3d9_host::color_fill`, which was rewritten with a genuine per-format texel encoder
+  (`encode_fill_texel` + a round-to-nearest-even `float_to_half` for the half-float case) instead of a
+  raw D3DCOLOR-dword fill. `g_formats` flips `R5G6B5`/`A16B16G16R16F` to render-target-capable
+  (re-confirmed neither sets `3DACCELERATION` without `DISPLAYMODE`, so the HAL-disable gauntlet stays
+  satisfied). Proven by an inverted `d3d9_format_coverage_test.cpp` sub-pass: both formats now byte-exact
+  round-trip through Clear + ColorFill + LockRect at their real tight stride, on x64 and x86/WoW64, with
+  the full existing regression sweep (including `d3d9-colorfill-test`) confirmed pixel-identical to
+  baseline. Independently verified by a spec-compliance reviewer (re-derived the 565-packing and
+  half-float bit patterns by hand, exhaustively tested `float_to_half` against a brute-force reference
+  for all 256 possible ColorFill input values) and a code-quality reviewer (one follow-up applied:
+  collapsed a duplicate format→byte-size map inside `color_fill` down to the one shared helper).
+  **Deliberately still out of scope**: making a non-BGRA8 render target *presentable* to the actual
+  screen. The Present-path `ui_surface_desc` construction (`syscalls/gdi.cpp` and `gpu_bridge.cpp`)
+  still builds `.stride = width * 4` and a fixed BGRA8 format unconditionally — `ui_surface_format` has
+  no HDR/tone-mapping conversion stage, only bgra8/rgba8. `R5G6B5`/`A16B16G16R16F` render targets are
+  therefore usable for off-screen work (ColorFill, StretchRect, Lock-readback) but never as the actual
+  swap-chain back buffer. Not believed to block MW2 (a BGRA8-presenting game); a real future need for a
+  non-BGRA8 swapchain would be a separate, larger task (a genuine present-path format/tone-map stage).
 - [x] **SM3.0 caps — done (2026-07-06, commits `1b940580`/`d82434ff`/`c468e80d`).** The old limitation:
   `fill_d3d9caps` reported SM2.0 only (`VertexShaderVersion`/`PixelShaderVersion` = `D3DVS_VERSION(2,0)`/
   `D3DPS_VERSION(2,0)`), so real `d3d9.dll` would never accept a real `vs_3_0`/`ps_3_0` shader pair — a
@@ -1047,8 +1052,8 @@ ever reached. See "M3 coverage items" above for the full account.
 `83c518c6`) — live RE confirmed the real device-func-table slots (56/55) and corrected `D3DDDIARG_BLT`'s
 field order to SRC-first-then-DST, and a `StretchRectFilterCaps` caps-bit fix unlocked genuine scaled
 StretchRect; see "M3 coverage items" above for the full account, including the two deliberately-scoped
-known limitations (4-byte-texel `color_fill`, subresource always 0) it documented rather than left
-silent.
+known limitations it documented rather than left silent (4-byte-texel `color_fill`, since generalized —
+see below — and subresource always 0, still open).
 
 Mip-mapping is also now done (2026-07-06, commits `256ea51e`/`080bbbfe`/`8ffb306c`/`625ae525`/
 `d2d29cd2`) — a gated RE pass resolved the same `D3DDDIARG_LOCK::SubResourceIndex` question that had
@@ -1107,9 +1112,12 @@ see the M3 row above and the "M3 coverage items" checklist for the full account)
 advertising a new FORMATOP row is a plain mechanical extension with no opaque wall behind it (unlike
 cube/volume, below), the remaining 9 host-mapped formats were added, and a code-quality review caught and
 fixed a real bug in that same expansion: `R5G6B5` was briefly given render-target capability it should
-not have had, given the host's hardcoded 4-bytes-per-texel RT readback/Present/ColorFill assumption — see
-the "Known limitation" bullet in "M3 coverage items" for the underlying constraint this leaves open for a
-future task.
+not have had, given the host's then-hardcoded 4-bytes-per-texel RT readback/Present/ColorFill assumption.
+**That underlying constraint is now closed** (2026-07-06, commits `c845091e`/`e7248550`/`4c933513`):
+`R5G6B5` and `A16B16G16R16F` are both real, byte-exact off-screen render targets today via a shared
+`vk_format_bytes_per_texel` helper — see the "Host render-target/readback path's 4-bytes-per-texel
+(BGRA8) assumption" bullet in "M3 coverage items" for the full account, including the still-open,
+deliberately-scoped-out Present-path (non-BGRA8 swapchain) gap.
 
 M3's one remaining DDI-coverage item — cube/volume textures — can proceed next; it is now the only item
 left on this list, since D3DFORMAT advertisement (the other item this sentence used to list before this

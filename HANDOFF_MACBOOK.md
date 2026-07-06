@@ -3792,3 +3792,104 @@ a new "Vertex texture fetch" bullet in "M3 coverage items," and the "Sequencing 
 are all updated — the DDI/rendering closure is documented as done, citing all three commits, and the
 FORMATOP `D3DUSAGE_QUERY_VERTEXTEXTURE` gap is documented explicitly as a separate, still-open follow-up,
 not folded into the closure.
+
+## 44. Format-aware off-screen render targets — the 4-bytes-per-texel host assumption closed for `R5G6B5`/`A16B16G16R16F`, real texel encoder for `color_fill` (2026-07-06)
+
+§42's D3DFORMAT-advertisement work left an explicit, actionable "Known limitation" bullet behind it: every
+render-target-sizing site in the host hardcoded a 4-bytes-per-texel (BGRA8) assumption, so `R5G6B5` (2
+bytes/texel) and `A16B16G16R16F` (8 bytes/texel) had to stay texture-only — the exact constraint that
+caused the real `R5G6B5` render-target-capability bug §42 caught and reverted before it shipped. This
+session closed that limitation for off-screen render targets specifically. Three commits: `c845091e`
+(core host fix), `e7248550` (UMD FORMATOP flip + test), `4c933513` (code-quality follow-up).
+
+### 44.1 The fix: one shared `vk_format_bytes_per_texel` helper, consumed at every RT-sizing site
+
+Rather than special-casing `R5G6B5`/`A16B16G16R16F` at each of the three sites §42 identified, a new
+shared helper (`vk_format_bytes_per_texel`, alongside `d3d9_format_to_vulkan` in `d3d9_format.cpp`) became
+the single source of truth for every non-block-compressed VkFormat's per-texel byte size. `create_resource`'s
+RT backing-store sizing, `vulkan_host::create_render_target`/`readback_render_target`'s CPU-side readback
+buffer sizing, and `color_fill` all now derive their stride from this one helper instead of an
+independently-hardcoded `* 4`. `render_target_data` gained a `vk_format` field (populated once, in
+`create_render_target`, from the same value already computed there) so the readback path doesn't need to
+re-derive the format from the D3D9-level resource a second time.
+
+The genuinely novel piece was `color_fill`, which previously wrote a raw `std::vector<uint32_t>` of
+D3DCOLOR dwords regardless of the render target's real format — correct only by accident, since every
+prior render-target-capable format happened to be BGRA8. It was rewritten with a real per-format texel
+encoder (`encode_fill_texel`): BGRA8 stays a straight dword passthrough (byte-identical to the old
+behavior — verified directly against the pre-change code), `R5G6B5` packs `((r>>3)<<11)|((g>>2)<<5)|(b>>3)`
+(the standard 5-6-5 bit layout), and `R16G16B16A16_SFLOAT` encodes each of the four 8-bit D3DCOLOR channels
+as a normalized-`[0,1]` IEEE half-float via a new `float_to_half` (round-to-nearest-even). An unencodable
+format fails cleanly (`D3DERR_INVALIDCALL`) rather than corrupting the staging copy — the same fail-clean
+contract `vk_texture_data_size` already uses for block-compressed formats.
+
+On the guest side, `g_formats`' `R5G6B5`/`A16B16G16R16F` rows flip from `FMT_OP_TEXTURE`-only to `RT_TEX`
+— re-confirmed neither sets `3DACCELERATION` (0x800) without `DISPLAYMODE` (0x400), so the HAL-disable
+gauntlet (the same constraint re-checked before every FORMATOP change this session) stays satisfied.
+
+### 44.2 Test: inverted the `R5G6B5` negative sub-pass into a byte-exact positive one, added a matching `A16B16G16R16F` sub-pass
+
+`d3d9_format_coverage_test.cpp`'s `R5G6B5` sub-pass previously asserted `CreateRenderTarget(R5G6B5)` must
+*fail* (the negative case §42 added alongside the bug fix). It's now inverted: create a 64x64 `R5G6B5`
+render target, `Clear` the top half RED and `ColorFill` the bottom half GREEN, `LockRect`, and `memcmp` the
+raw bytes at all four quadrant corners against the exact expected 565-packed pattern (`0xF800` RED,
+`0x07E0` GREEN) at the format's real tight `width*2` stride. A new, structurally identical sub-pass does
+the same for `A16B16G16R16F` at `width*8` stride, checking all four half-float channel bytes per texel.
+
+One notable, honestly-flagged design deviation: `D3DLOCKED_RECT::Pitch` comes back `0` for these render
+targets (real `d3d9.dll` doesn't populate `Pitch` for driver-lockable RTs either, so this isn't a bug —
+just means `Pitch` can't be asserted directly as evidence of the correct stride). Rather than attempting a
+risky, unconfirmed RE of some other field to make `Pitch` assertable, the test instead reads at the
+*known-correct* per-format tight stride and asserts byte-exact content at all four corners including the
+very last texel (`63,63`) — if the buffer weren't actually tightly packed at that stride, the last texel
+would read from the wrong offset and the check would fail. This is a stronger proof of correct layout than
+a `Pitch` assertion would have been anyway, and the `Clear`-path top half (a fully independent GPU code
+path from the `ColorFill` bottom half) reading back correctly at the same stride cross-checks it a second,
+independent way.
+
+Passes byte-exact on both x64 and x86/WoW64. Full regression sweep — every existing D3D9 guest test, both
+architectures, specifically including `d3d9-colorfill-test` (the existing BGRA8 `color_fill` consumer,
+since this is the load-bearing backward-compatibility property for the rewrite) — verified clean.
+
+### 44.3 Independent review: spec-compliance re-derived the math by hand, code-quality found one real duplication
+
+The spec-compliance reviewer did not take any claim on faith: re-derived `vk_format_bytes_per_texel`'s
+return value for every format against real Vulkan format definitions, exhaustively tested `float_to_half`
+against a brute-force round-to-nearest-even reference for all 256 possible ColorFill channel inputs (all
+matched, plus edge cases: `±inf`, NaN-payload preservation, the `65504` max-half boundary, subnormal
+rounding), traced the old `color_fill` against the new BGRA8 branch byte-for-byte to confirm the rewrite is
+genuinely backward-compatible (not just "looks equivalent"), re-derived the 565-packing bit layout by hand,
+independently rebuilt and re-ran the new test sub-passes on both architectures, re-derived the `RT_TEX`
+FORMATOP-gauntlet safety from the raw bit values, and re-ran the *entire* existing guest-test suite (25
+x64, 21 x86) rather than trusting the implementer's claimed count. Verdict: SPEC COMPLIANT, no issues.
+
+Code-quality review found one real (if minor) issue: `encode_fill_texel` carried its own independent
+format→byte-size map (returning the size alongside the encoded texel) — a second source of truth that
+could silently drift from `vk_format_bytes_per_texel` if a future format were added to one map and not the
+other, the exact "builder/consumer must never disagree" hazard this session has caught several times
+before. Fixed directly (`4c933513`): `encode_fill_texel` now returns a plain `bool`, and `color_fill`
+derives its stride from `vk_format_bytes_per_texel` like every other RT-sizing site — one map, one truth.
+Also renamed `fill_pixels` → `fill_bytes` (post-rewrite it's a flat byte buffer, not a pixel array) and
+trimmed a comment that duplicated `encode_fill_texel`'s own doc comment. Rebuilt and re-ran
+`d3d9-colorfill-test` and `d3d9-format-coverage-test` after the fix — byte-identical output confirmed.
+
+### 44.4 Deliberately still out of scope: making non-BGRA8 render targets presentable to the screen
+
+This slice makes `R5G6B5`/`A16B16G16R16F` genuine render targets for off-screen work — `ColorFill`,
+`StretchRect`, `Lock`-based readback all now produce byte-correct output. It does NOT make them
+presentable: the Present-path `ui_surface_desc` construction (`syscalls/gdi.cpp`, `gpu_bridge.cpp`) still
+hardcodes `.stride = width * 4` and a fixed BGRA8 `ui_surface_format` unconditionally, with no HDR/tone-
+mapping conversion stage for a 16-bit or half-float back buffer. A non-BGRA8 render target can never be the
+actual swap-chain back buffer today. Not believed to block MW2 integration (MW2 presents BGRA8) — a real
+future need for a non-BGRA8 swapchain would be a separate, larger task in its own right (a genuine
+present-path format/tone-map stage), not a follow-up to this slice.
+
+### 44.5 Verification
+
+Full regression sweep of every existing D3D9 guest test, both x64 and x86/WoW64 — specifically including
+`d3d9-colorfill-test` — verified clean at every stage, independently reproduced by the spec-compliance
+reviewer (25 x64 + 21 x86 tests) and re-confirmed after the code-quality follow-up landed.
+`docs/d3d9-roadmap.md`'s "Known limitation" bullet is converted to a done-entry (with the still-open
+Present-path gap called out explicitly rather than folded into the closure), and its two upstream
+cross-references (the `StretchRect`/`ColorFill` bullet, the D3DFORMAT-advertisement narrative paragraph)
+are updated to point at the closure instead of the open limitation.
