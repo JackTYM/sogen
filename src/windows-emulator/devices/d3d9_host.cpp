@@ -545,6 +545,10 @@ namespace sogen
 
     d3d9_host::instancing_state d3d9_host::resolve_instancing() const
     {
+        // KNOWN LIMITATION: real D3D9 usage sets INDEXEDDATA on exactly one stream (the per-vertex
+        // geometry stream driving the draw). If an app somehow set it on more than one, whichever one
+        // this unordered_map happens to iterate last wins -- an arbitrary, nondeterministic choice, but
+        // harmless in practice since that usage pattern is itself invalid D3D9 to begin with.
         instancing_state result{};
         for (const auto& [stream, freq] : this->state_.stream_frequencies)
         {
@@ -1644,6 +1648,9 @@ namespace sogen
         }
         else
         {
+            // Real D3D9 hardware instancing requires an indexed draw (see the comment above), so
+            // instance_count is 1 here in every valid usage; passed through anyway for uniformity rather
+            // than special-casing the non-indexed path back to a literal 1.
             this->vulkan_.cmd_draw(this->command_buffer_, vertex_count, instance_count, first_vertex, 0);
         }
 
