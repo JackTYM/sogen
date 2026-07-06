@@ -466,6 +466,13 @@ typedef struct _D3DDDIARG_CREATEVERTEXSHADERDECL
     HANDLE ShaderHandle;    // out (offset 8 on x64: 4 bytes of alignment padding follow NumVertexElements)
     // D3DDDIVERTEXELEMENT elements[NumVertexElements] follow the struct in memory
 } D3DDDIARG_CREATEVERTEXSHADERDECL;
+#ifdef _WIN64
+static_assert(sizeof(D3DDDIARG_CREATEVERTEXSHADERDECL) == 16, "D3DDDIARG_CREATEVERTEXSHADERDECL x64 layout");
+#else
+// x86 layout: HANDLE shrinks from 8 to 4 bytes, and needs no alignment padding after the leading
+// UINT; compiler-verified via i686-w64-mingw32-g++.
+static_assert(sizeof(D3DDDIARG_CREATEVERTEXSHADERDECL) == 8, "D3DDDIARG_CREATEVERTEXSHADERDECL x86 layout");
+#endif
 
 // Matches D3DVERTEXELEMENT9's real 8-byte layout.
 typedef struct _D3DDDIVERTEXELEMENT
