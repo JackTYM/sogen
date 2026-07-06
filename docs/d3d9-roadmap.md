@@ -153,6 +153,61 @@ and still real, separate remaining work:
 
 Do not read this fix as having made the D3D9 native path fully pipelined — it didn't.
 
+### Risk analysis + measurement spike (2026-07-06): multi-frame-in-flight deliberately NOT attempted next; safer alternative identified instead
+
+With busy-spin, descriptor-set, VB/IB/UBO, and sampler-cache pooling all closed (see the per-draw-overhead
+and sampler-pooling entries above), the remaining item on this list — multi-frame-in-flight pipelining —
+was evaluated as the next logical step and deliberately **not** started this session, after a risk
+analysis and a measurement spike. Neither changes the status of that item: **it remains open**, exactly
+as listed above.
+
+**Risk analysis.** Full multi-frame-in-flight pipelining requires every one of this session's
+newly-pooled, single-slot-reused resources (VB/IB/UBO pools, descriptor sets) to become N-buffered — one
+copy per frame-in-flight — instead of today's one-copy-reused-every-draw model. A bug in that redesign
+would manifest as a **silent, timing-dependent, non-deterministic GPU-side data race**: a later frame's
+draw reading a pooled resource while an earlier, not-yet-synchronized frame's draw is concurrently
+rewriting it. This is a fundamentally different failure class from every bug fixed this session (busy-spin,
+allocation churn, sampler lifetime) — all of those failed loudly and reproducibly (wrong pixels, a crash, a
+hang) and were caught by this codebase's deterministic pixel-readback test methodology, which runs one
+fixed instruction sequence with no real scheduling jitter. A cross-frame race is not reliably caught by
+that methodology: it could pass every existing test, every time, in this deterministic environment, and
+still be a live bug once real, variable frame-pacing timing is involved. **Recommendation: do not attempt
+full multi-frame-in-flight now.**
+
+**Measurement spike (temporary instrumentation, reverted after gathering data — confirmed clean via `git
+status`, no commits).** Instead of guessing where the remaining per-draw time goes,
+`d3d9_manydraws_test.cpp` (768 draws in one frame) was run 3 times with timing instrumentation around
+`execute_draw`'s own submit+wait and around the guest's own outer draw loop. Findings, consistent across
+all 3 runs:
+- `execute_draw`'s own submit+wait (`queue_submit` + `wait_for_fence`, i.e. the actual GPU round-trip)
+  accounts for **95.8%-97.6%** of `execute_draw`'s own total time — CPU-side work (descriptor writes,
+  buffer/UBO uploads, pipeline lookup) is only **2.4%-4.2%**, confirming this session's pooling fixes
+  successfully minimized CPU-side per-draw cost.
+- `execute_draw`'s own total time (182-190 ms across the 3 runs) accounts for only **~63-65%** of the full
+  guest-observed 768-draw loop wall-clock (287-294 ms) — the remaining ~35% is overhead entirely OUTSIDE
+  `execute_draw`: guest-side instruction emulation for the per-draw `SetVertexShaderConstantF`/
+  `SetPixelShaderConstantF` calls, DDI/wire-protocol dispatch, and the guest's own
+  `QueryPerformanceCounter` calls. No GPU-side change (batching or pipelining) can touch this portion at
+  all.
+- `submit_count == draw_count == 768` exactly in every run, confirming the current model really is one
+  full submit+wait round-trip per individual draw, with no batching at all.
+
+**Conclusion.** GPU round-trip time is still clearly the dominant cost within the part any GPU-side fix
+could address (~96%+ of `execute_draw`'s own time, ~62% of total loop time) — real evidence FOR the value
+of a follow-up, IF this work is ever prioritized again, but NOT evidence for going straight to full
+multi-frame-in-flight. The identified safer alternative: **batch multiple draws into ONE submission per
+frame, remaining fully synchronous** (submit once, then block until that one submission's fence signals,
+before the next batch starts) — no cross-draw or cross-frame concurrency at all, so none of the
+silent-data-race risk profile above applies. This is still real, non-trivial, **not yet attempted** work
+of its own: it requires converting today's single-slot pooled VB/IB/UBO/descriptor-set resources into
+per-draw sub-allocated ranges within a per-frame arena, so N draws batched into one submission each get
+their own slice of a shared buffer instead of colliding on the one pooled slot — a smaller, fail-loud
+correctness surface than multi-frame-in-flight's (a sizing/offset bug would misrender immediately and
+deterministically, not race), but genuine implementation work, deliberately deferred, not started.
+
+Multi-frame-in-flight pipelining remains the one open item on this list; nothing in this entry closes it
+or reduces its scope — this entry only records why it wasn't attempted next and what was found instead.
+
 ### Fixed (genuinely fixed with real code, 2026-07-05): D3D9 DDI-call wire batching
 
 The item previously listed here as a known remaining limitation — "no wire-protocol batching for D3D9
