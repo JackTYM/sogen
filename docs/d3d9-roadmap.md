@@ -252,6 +252,34 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   now a confirmed, permanent limitation, not an open lead; `d3d9_texture_test.cpp` continues to avoid the
   whole area via `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT`. Full trace: `HANDOFF_MACBOOK.md` §16.3, §17,
   §18, §19.
+- [x] **D3DPOOL_MANAGED — Option-A spike run (2026-07-05): the caps gate CAN be forced open at runtime,
+  but this reveals a second, deeper gap rather than a fix; net result is a corrected, more precise
+  understanding of the limitation above, not a reopened lead.** The prior entry's "structurally
+  uncontrollable" conclusion is about the *reported-caps* surface specifically (no `D3DCAPS9` value any
+  driver reports survives `QueryLHDDICaps`'s unconditional strip) — that part still stands, unchanged.
+  This spike tested a genuinely different mechanism: a live, in-memory, runtime patch (a Python
+  `emu.hooks.memory_execution_at()` callback watching `d3d9.dll+0x158b3`'s caps-strip site and re-setting
+  bit 28 immediately after) that never touches any reported-caps value at all. Disassembly confirmed the
+  exact instruction (`btr eax, 0x1c` / `mov [rsi+0xc], eax` at image-relative `+0x158af`/`+0x158b3`, x64
+  build only, sha256 `bb65372a…`) and the patch does work mechanically: `CBaseDevice+444`'s bit flips from
+  `0xe4628800` to `0xf4628800` live, every run, and `d3d9.dll` demonstrably takes a different internal code
+  path afterward (confirmed by the *different* failure mode below, not merely by the bit read-back).
+  **But the unmodified `d3d9_managed_texture_test.cpp` still does not pass with the gate forced open** —
+  it fails earlier and differently: `CreateTexture(D3DPOOL_MANAGED)` still succeeds, but
+  `Texture->LockRect()` now returns `hr=0x00000000` with `pBits=nullptr` (previously it returned a real,
+  non-null pointer into `d3d9.dll`'s own private sysmem shadow — the old bug). This is because forcing the
+  gate makes `d3d9.dll` hand the lock off to the *driver-managed* path, and this driver's own `umd_Lock`
+  has never had to serve a driver-managed `D3DPOOL_MANAGED` resource before — it has no real sysmem
+  backing to hand back for one, so the app gets a null buffer instead. **This is a genuinely new, concrete,
+  addressable target** (give `umd_CreateResource`/`umd_Lock` a real sysmem allocation for driver-managed
+  MANAGED resources) that did not exist as an option before this spike, since the gate was previously
+  believed to be unforceable by any means. **Not attempted in this spike** (out of the time-box, and it
+  would require productionizing the patch — moving the bit-forcing from a scratch Python harness into a
+  real, permanent emulator-side hook, plus new UMD code, plus a 32-bit RE pass since the RVA is x64-only
+  verified) — this is real, separately-scoped follow-up work, not folded into this entry. The existing
+  test is correctly left unmodified and continues to fail (for its original, pre-spike reason, since the
+  gate-forcing patch was never made permanent) — nothing about its current expected-FAILED status changes
+  as a result of this spike. Full spike detail: `HANDOFF_MACBOOK.md` (dated 2026-07-05 entry).
 - [x] **Partial-buffer `Lock()` — fixed on x64 (2026-07-04, Task 6); x86 keeps the old whole-buffer-only
   behavior, a known, scoped-out gap.** `D3DDDIARG_LOCK`'s `OffsetToLock`/`SizeToLock` have no single,
   routing-path-independent struct offset — real `d3d9.dll` builds this struct two genuinely different

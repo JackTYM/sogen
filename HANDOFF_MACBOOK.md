@@ -2213,3 +2213,50 @@ bullets as explicit, known, not-yet-fixed follow-ups.
 
 Full regression (all host gtests, all 19 guest `d3d9-*-test.exe` on x64 and x86, 26/26 smoke test) passes
 identically to before this change.
+
+## 27. D3DPOOL_MANAGED Option-A spike — gate forced open at runtime, but reveals a second, deeper bug
+instead of a fix (2026-07-05)
+
+§16.3/§17-19 (referenced from `docs/d3d9-roadmap.md`) concluded the `D3DCAPS2_CANMANAGERESOURCE` gate was
+"structurally uncontrollable" — no `D3DCAPS9` value any driver reports survives `d3d9.dll`'s own
+`QueryLHDDICaps`, which unconditionally strips bit 28 after querying the driver. That conclusion is about
+the *reported-caps* surface specifically and still holds. This spike tested a different mechanism: a live
+runtime memory patch, bypassing reported caps entirely.
+
+**Mechanism:** a scratch Python harness (`build/release-py`, `import sogen`) using
+`emu.callbacks.on_module_load` to catch `d3d9.dll`'s live image base, then
+`emu.hooks.memory_execution_at(base + 0x158b6, cb)` — the instruction right after the caps-strip store —
+reading `RSI` (the struct pointer) in the callback and re-OR'ing bit 28 back in via `emu.write_memory`
+before `d3d9.dll`'s own code continues. Disassembly at `image_base+0x158af..0x158b3` confirmed the exact
+instructions: `btr eax, 0x1c` (clear bit 28) then `mov [rsi+0xc], eax` (the store) — matching the
+previously-decompiled `*(a3+12) = v27 & 0xEFFFFFFF` exactly, just compiled as a bit-test-reset rather than
+a literal AND. A second write site at `+0x15a1f` only *reads* the field and toggles a different bit, so
+one intervention point is sufficient — confirmed structurally, not just empirically.
+
+**The patch works mechanically:** the watched field (`CBaseDevice+444`) reads `0xe4628800` (bit 28 clear)
+unpatched, `0xf4628800` (bit 28 set) patched, live, every run, 6 hits/run. `d3d9.dll` genuinely takes a
+different internal code path afterward — proven by the *different* failure mode below, not merely by
+reading the bit back.
+
+**But the unmodified `d3d9_managed_texture_test.cpp` still does not pass.** Unpatched, it fails the way
+§17-19 already documented (app's `LockRect()` pointer diverges from the driver's own pixel buffer — wrong
+pixel, not a crash). Patched, it fails *earlier and differently*: `CreateTexture(D3DPOOL_MANAGED)` still
+returns `hr=0`, but `Texture->LockRect()` now returns `hr=0x00000000` with `pBits=nullptr`. Forcing the
+gate makes `d3d9.dll` hand the lock off to the driver-managed path — and this driver's `umd_Lock` has
+never had to serve a driver-managed `D3DPOOL_MANAGED` resource before, so it has no real sysmem backing to
+hand back for one. The test file's assertions were not touched; it still correctly reports `FAILED`,
+unchanged from before this spike (the patch was never made permanent — it lives only in the scratch
+Python harness).
+
+**Net result — a corrected understanding, not a fix:** the gate is not immovable after all, but forcing it
+trades one broken path for another. The genuinely new, concrete fact this spike bought: a real fix now has
+an addressable target — give `umd_CreateResource`/`umd_Lock` a real sysmem allocation for driver-managed
+MANAGED resources — where before, the gate itself was believed unforceable by any means and there was no
+candidate mechanism at all. Turning this into a real fix would additionally require productionizing the
+bit-forcing patch (a permanent emulator-side hook, not a scratch Python script) and a separate 32-bit RE
+pass, since `+0x158b3` was verified only against the staged x64 `system32/d3d9.dll`
+(sha256 `bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c`) — real MW2 is 32-bit. Neither
+was attempted here; both are real, separately-scoped follow-up work if this path is pursued further.
+
+Scratch harness (not committed, reusable): `managed_spike.py`, `disasm.py`, `d2.py` under this session's
+scratchpad, plus a Python 3.14 venv with `capstone`/`pefile`.
