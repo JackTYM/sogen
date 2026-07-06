@@ -849,6 +849,7 @@ namespace sogen
         // The RVAs below are specific to the staged x64 system32/d3d9.dll build
         // (sha256 bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c); the 32-bit
         // syswow64/d3d9.dll is intentionally left untouched (needs its own RE pass).
+        // See docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries for the full investigation/spike history.
         constexpr uint16_t machine_amd64 = 0x8664;
         if (mod.machine != machine_amd64)
         {
