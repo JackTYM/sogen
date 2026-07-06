@@ -97,6 +97,10 @@ namespace
     // [escape_command_header][in][out]. Mirrors vulkan_shim.cpp's bridge_call.
     bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len)
     {
+        // Every other bridge call may make the host observe D3D9 state (draw, clear, lock, present,
+        // create a resource, ...), so drain any pending batched commands first to keep host-observed
+        // ordering identical to the un-batched path. The `!=` guard also prevents flush_d3d9_batch's
+        // own record_commands call from recursing back into itself.
         if (code != gb::ioctl_record_commands)
         {
             flush_d3d9_batch();
@@ -156,8 +160,8 @@ namespace
             return;
         }
 
-        std::vector<uint8_t> batch(std::move(g_d3d9_command_batch));
-        g_d3d9_command_batch.clear();
+        std::vector<uint8_t> batch;
+        batch.swap(g_d3d9_command_batch);
 
         gb::result_response resp{};
         bridge_call(gb::ioctl_record_commands, batch.data(), static_cast<DWORD>(batch.size()), &resp, sizeof(resp));
