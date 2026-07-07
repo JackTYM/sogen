@@ -406,14 +406,6 @@ namespace sogen
             uint64_t ps_set_layout{};
             uint64_t pipeline_layout{};
             uint64_t pipeline{};
-            // Per-pipeline descriptor pool (maxSets=2) and its two allocated sets (VS at set 0, PS at
-            // set 1), created once on cache miss alongside the objects above. execute_draw rewrites the
-            // sets' CONTENTS every draw but no longer resets/reallocates the SET OBJECTS -- reuse is safe
-            // because every draw submits and blocks on a fence before returning, so draw N's GPU read of
-            // these sets has completed before draw N+1 rewrites them.
-            uint64_t descriptor_pool{};
-            uint64_t vs_descriptor_set{};
-            uint64_t ps_descriptor_set{};
         };
 
         // Keyed by pipeline_cache_key (VS/PS pair, bound RT/depth formats, vertex-input shape, and
@@ -461,6 +453,21 @@ namespace sogen
         // it. Combined VERTEX|INDEX|UNIFORM usage so one buffer serves all three binding points.
         frame_arena vertex_index_uniform_arena_{};
 
+        // Shared descriptor pool that every programmable draw allocates its per-draw VS/PS descriptor-set
+        // pair from, replacing the old per-pipeline pool that pre-allocated exactly two reused sets. Sized
+        // for frame_desc_capacity_draws_ draws (2 sets each), created lazily and grown grow-only. Like the
+        // arena, execute_draw resets it (reset_descriptor_pool) at the start of every draw -- safe because
+        // every draw submits and blocks on a fence before returning, so a prior draw's GPU read of a set
+        // has completed before reset frees it. Per-draw descriptor-type counts (6 UBOs + max_vs_sampler_stages
+        // + max_ps_sampler_stages combined-image-samplers) are scaled by the capacity; see
+        // ensure_frame_descriptor_pool.
+        uint64_t frame_descriptor_pool_{};
+        uint32_t frame_desc_capacity_draws_{}; // how many draws' worth of sets the pool is currently sized for
+        // Initial per-frame descriptor-pool capacity, in draws. One draw needs only 2 sets, so 256 is
+        // ample headroom -- the growth path in ensure_frame_descriptor_pool exists for correctness, not
+        // because a single draw is expected to exceed it.
+        static constexpr uint32_t frame_desc_initial_draws = 256;
+
         uint64_t allocate_id();
         // Hands out a 256-byte-aligned `size`-byte slice of `arena`, returning its byte offset in
         // out_offset and advancing the arena's bump cursor. The single place any arena offset is
@@ -469,6 +476,11 @@ namespace sogen
         // arena buffer (destroy + recreate, high-water mark) when a slice won't fit; returns false only
         // on a Vulkan allocation failure. See the .cpp definition for the 256-byte and growth rationale.
         bool arena_suballoc(frame_arena& arena, size_t size, size_t& out_offset);
+        // Ensures frame_descriptor_pool_ exists and is sized for at least needed_draws draws' worth of
+        // descriptor sets (2 per draw). Creates it lazily at frame_desc_initial_draws capacity, or doubles
+        // and recreates it (dropping the old pool -- every prior draw already fenced) when needed_draws
+        // exceeds the current capacity. Returns false only on a Vulkan allocation failure.
+        bool ensure_frame_descriptor_pool(uint64_t device, uint32_t needed_draws);
         // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
         // Returns 0 on failure.
         uint64_t ensure_vk_device();
