@@ -1075,8 +1075,9 @@ discriminator: each sub-pass is asserted against its OWN face color, so a wrong 
 index or Vulkan array-layer assignment (swapped, or every face reading layer 0) would read the SAME wrong
 color across multiple sub-passes instead of six distinct correct ones. Confirmed live: all six read back
 byte-exact (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`, `-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`,
-`-Z=BFF GFF R00`), and the per-face `LockRect` `pBits` differ, confirming genuinely separate
-per-subresource backing. Expect `CreateCubeTexture(64, 1 level)`/six `LockRect(face=...)`/
+`-Z=BFF GFF R00`) -- the six distinct, correct GPU readbacks are themselves the proof of genuinely
+separate per-subresource backing (the guest-side staging buffer some early `LockRect` calls happen to
+reuse is an unrelated guest-side detail, not evidence either way). Expect `CreateCubeTexture(64, 1 level)`/six `LockRect(face=...)`/
 `CreateRenderTarget`/all six `DrawIndexedPrimitive` `hr=0x00000000`, six `PASS:` lines, and
 `[d3d9-cube-test] ALL CHECKS PASSED`. x64 only for now (x86/WoW64 port is a later task); needs
 `d3dcompiler_43`.
