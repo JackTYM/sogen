@@ -3,7 +3,7 @@
 // D3DDDIARG_LOCK subresource 0 spanning the whole depth extent -> host single VK_IMAGE_TYPE_3D image with
 // a VK_IMAGE_VIEW_TYPE_3D view) and that tex3D() selects the correct depth slice for a given w.
 //
-// A 32x32x4 single-mip volume is filled with a DIFFERENT solid color per depth slice: slice 0 = RED,
+// A 32x32x4 volume is filled with a DIFFERENT solid color per depth slice: slice 0 = RED,
 // slice 1 = GREEN, slice 2 = BLUE, slice 3 = YELLOW. All four slices are written in ONE LockBox(0) call:
 // the host backs subresource 0 as one tightly-packed slice-major block (slice d at byte offset
 // d*width*height*4), so each slice is written at pBits + d*(width*height*4) using a self-computed
@@ -69,6 +69,7 @@ float4 main(PSInput input) : COLOR0
     constexpr int kVolHeight = 32;
     constexpr int kVolDepth = 4;
     constexpr int kMipLevels = 2; // level 0: 32x32x4, level 1: 16x16x2
+    constexpr int kVolDepthL1 = kVolDepth >> 1;
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)
     {
@@ -244,7 +245,7 @@ int main()
         return 1;
     }
 
-    // 32x32x4 single-mip volume. D3DUSAGE_DYNAMIC + D3DPOOL_DEFAULT makes it lockable (same proven path
+    // 32x32x4 volume with two mip levels. D3DUSAGE_DYNAMIC + D3DPOOL_DEFAULT makes it lockable (same proven path
     // d3d9_miptexture_test.cpp uses for 2D); the creation-only d3d9_cube_volume_test.cpp used Usage=0
     // because it never locked.
     IDirect3DVolumeTexture9* vol = nullptr;
@@ -267,7 +268,7 @@ int main()
         D3DCOLOR_ARGB(255, 0, 0, 255),   // slice 2: BLUE
         D3DCOLOR_ARGB(255, 255, 255, 0), // slice 3: YELLOW
     };
-    const DWORD kSliceColorsL1[kVolDepth >> 1] = {
+    const DWORD kSliceColorsL1[kVolDepthL1] = {
         D3DCOLOR_ARGB(255, 255, 0, 255), // slice 0: MAGENTA
         D3DCOLOR_ARGB(255, 0, 255, 255), // slice 1: CYAN
     };
@@ -381,7 +382,6 @@ int main()
     // Two more sub-passes pinned to mip level 1 (MIPFILTER=NONE + MAXMIPLEVEL=1 -> min_lod==max_lod==1);
     // level 1's depth is 2, so w = (d + 0.5) / 2 lands in each of its two slices, asserting its OWN
     // level-1 color -- the proof that the volume mip>0 subresource is uploaded and sampled correctly.
-    constexpr int kVolDepthL1 = kVolDepth >> 1;
     dev->SetSamplerState(0, D3DSAMP_MAXMIPLEVEL, 1);
     failures += run_pass(dev, rt, (0 + 0.5f) / kVolDepthL1, /*B*/ 255, /*G*/ 0, /*R*/ 255, "L1:slice0(MAGENTA)");
     failures += run_pass(dev, rt, (1 + 0.5f) / kVolDepthL1, /*B*/ 255, /*G*/ 255, /*R*/ 0, "L1:slice1(CYAN)");

@@ -4,7 +4,7 @@
 // 6-array-layer VK_IMAGE_VIEW_TYPE_CUBE image) and that texCUBE() selects the correct face for a given
 // sample direction.
 //
-// A 64x64 single-mip cube is filled with a DIFFERENT solid color per face, in the standard D3D9 face
+// A 64x64 cube is filled with a DIFFERENT solid color per face, in the standard D3D9 face
 // order +X/-X/+Y/-Y/+Z/-Z: RED/GREEN/BLUE/YELLOW/MAGENTA/CYAN. Each face is written through its own real
 // LockRect(D3DCUBEMAP_FACE_POSITIVE_X + f, 0, ...)/UnlockRect(...) call.
 //
@@ -261,7 +261,7 @@ int main()
         return 1;
     }
 
-    // 64x64 single-mip cube. D3DUSAGE_DYNAMIC + D3DPOOL_DEFAULT makes each face lockable (the same
+    // 64x64 cube with two mip levels. D3DUSAGE_DYNAMIC + D3DPOOL_DEFAULT makes each face lockable (the same
     // proven lockable-texture path d3d9_miptexture_test.cpp uses for 2D); the creation-only
     // d3d9_cube_volume_test.cpp used Usage=0 because it never locked.
     IDirect3DCubeTexture9* tex = nullptr;
