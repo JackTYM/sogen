@@ -290,10 +290,11 @@ namespace sogen
 
         // A separate, dedicated command buffer/fence for the batched-draw recording, so it never collides
         // with the shared command_buffer_/fence_ that the prep helpers (ensure_texture_uploaded,
-        // ensure_depth_stencil_view) and the clear/blt/color_fill paths submit+wait on synchronously.
+        // ensure_depth_stencil_view), execute_draw, color_fill, and blt submit+wait on synchronously.
         uint64_t batch_command_buffer_{};
         uint64_t batch_fence_{};
         bool batch_open_{false};
+        // Render target the currently-open batch records into; 0 = none.
         [[maybe_unused]] uint64_t batch_rt_{};
 
         // The one hardcoded fixed-function shader pair (see execute_draw's comment), its shader modules
