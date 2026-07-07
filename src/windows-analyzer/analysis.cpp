@@ -722,7 +722,7 @@ namespace sogen
 
         void handle_event_pump(analysis_context& c)
         {
-            if (!c.click_dialog_button || c.dialog_click_injected)
+            if (!c.click_dialog_button)
             {
                 return;
             }
@@ -731,7 +731,7 @@ namespace sogen
 
             for (auto& win : proc.windows | std::views::values)
             {
-                if (!win.is_dialog())
+                if (!win.is_dialog() || c.clicked_dialogs.contains(win.handle))
                 {
                     continue;
                 }
@@ -768,7 +768,7 @@ namespace sogen
                 event.lParam = static_cast<uint32_t>(child_handle);
 
                 c.win_emu->handle_ui_event(event);
-                c.dialog_click_injected = true;
+                c.clicked_dialogs.insert(win.handle);
                 return;
             }
         }

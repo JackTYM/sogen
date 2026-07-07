@@ -862,7 +862,7 @@ namespace sogen
             printf("  --break-start             Pause before executing the first instruction\n");
 #endif
             printf("  -bc, --break-call <count>  In GDB mode, stop before the specified traced function/syscall call\n");
-            printf("  --click-dialog-button <id> Auto-dismiss the first modal dialog by clicking its control (e.g. 1=IDOK, 7=IDNO)\n");
+            printf("  --click-dialog-button <id> Auto-dismiss every modal dialog by clicking its control (e.g. 1=IDOK, 7=IDNO)\n");
             printf("Examples:\n");
             printf("  analyzer -v -e path/to/root myapp.exe\n");
             printf("  analyzer --report run.jsonl test-sample.exe\n");
