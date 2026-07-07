@@ -423,9 +423,9 @@ namespace sogen
         // d3d9_shader_translator.hpp).
         std::map<pipeline_cache_key, programmable_pipeline_entry> programmable_pipelines_{};
 
-        // Content-addressed VkSampler cache. Unlike the VB/IB/UBO pools (which reuse one object per
-        // SLOT and rewrite its CONTENTS every draw), a VkSampler is immutable once created -- differing
-        // filter/address/aniso/LOD state genuinely needs a different object. So this is a cache keyed by
+        // Content-addressed VkSampler cache. Unlike the VB/IB/UBO arena (one buffer whose per-draw
+        // slices are re-sub-allocated and rewritten every draw), a VkSampler is immutable once created --
+        // differing filter/address/aniso/LOD state genuinely needs a different object. So this is a cache keyed by
         // the resolved sampler-state tuple (every field build_sampler varies the VkSampler on), created
         // lazily on first use of a given state and retained for the device's lifetime, exactly like
         // programmable_pipelines_/ff_pipelines_. There is no synchronization hazard: nothing ever mutates

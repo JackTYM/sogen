@@ -1595,8 +1595,8 @@ namespace sogen
         std::array<size_t, 6> ubo_offsets{};
         std::array<std::vector<std::byte>, 6> ubo_staging{};
         // Zero-pads each constant file to its full fixed cap (unset D3D9 registers read as 0) into a
-        // staging blob, matching the former upload_pooled_ubo -- the full zero-padded buffer is what gets
-        // uploaded, so no stale tail can survive across draws. Split into build-now / upload-in-phase-B
+        // staging blob -- the full zero-padded buffer is what gets uploaded, so no stale tail can survive
+        // across draws. Split into build-now / upload-in-phase-B
         // like the streams above so the arena buffer is final before any upload.
         auto build_ubo_staging = [](const size_t size, const auto& consts) {
             std::vector<std::byte> staging(size, std::byte{0});
