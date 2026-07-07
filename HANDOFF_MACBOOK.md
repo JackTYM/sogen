@@ -4306,3 +4306,42 @@ Repeated automated feedback this session asserted "only synthetic test samples w
 ### Honest caveat
 
 These other titles' game files are not staged in this local environment (only MW2's are, per explicit earlier confirmation from the user) — this section relies on upstream's own PR descriptions as evidence, not a fresh re-verification in this session. If a decisive, first-hand "real game renders end-to-end in this exact environment" demonstration is wanted, it requires either different real game files to test against here, or accepting `open-iw5`'s upstream-documented result as sufficient given it shares the exact pipeline under scrutiny.
+
+## 64. THE REAL BREAKTHROUGH: §60's "MSS never calls Play" was wrong — it does call Play, and dsound rejects it with DSERR_PRIOLEVELNEEDED because sogen's desktop window had no owning thread. Fixed, live-verified, MW2 clears the entire audio dead-end (2026-07-07)
+
+Per explicit instruction to pursue the MW2 audio blocker further despite §60's "final stopping point" framing, a structured multi-agent RE effort (idasql disassembly fanned across three angles, each independently live-verified, per this project's established discipline) re-examined the exact mechanics of the `mss32.dll`/`dsound.dll` interaction one level deeper than any prior round. It found that §60's central claim — "MSS never issues Play on any DirectSound buffer" — was actually **wrong**: MSS genuinely calls `IDirectSoundBuffer::Play` on the secondary buffer (`mss32.dll+0x2F382`), and `Play` genuinely fails with a real, concrete HRESULT: `0x88780046` = `DSERR_PRIOLEVELNEEDED`. Every prior round's "storm" was this Play-reject-and-retry cycle, not an unreached code path.
+
+### 64.1 Tracing the real gate, one layer at a time
+
+A first hypothesis (this failure gates on window foreground/focus state, since `DSERR_PRIOLEVELNEEDED` classically relates to `DSSCL_WRITEPRIMARY`/`DSSCL_PRIORITY` cooperative levels) was tested and refuted with real live evidence: `SetForegroundWindow`/`NtUserSetForegroundWindow` is never called at all (0 hits), so that mechanism doesn't apply. But the refuting investigation found something better: disassembling the REAL `dsound.dll`'s `Play` implementation (`dsound.dll+0x2fa10`, genuine Microsoft code, not sogen's) down to `CDirectSoundSecondaryBuffer::Play` (`0x510afbd0`) found the actual gate:
+```c
+device = [inner+0x30];
+if (![device+0x4c] || ![device+0x50])   // -> DSERR_PRIOLEVELNEEDED
+```
+`[device+0x50]` is the cooperative level (2/`DSSCL_PRIORITY`, correctly set). `[device+0x4c]` is what `SetCooperativeLevel` stores there: `GetWindowThreadProcessId(GetRootParentWindow(hwnd))` — **not the HWND itself, its owning thread ID.**
+
+### 64.2 The actual root cause
+
+Live-traced: MSS calls `GetForegroundWindow()`, which in this environment resolves to the **desktop window** (`0x6800002` — MW2's own windows are `0x6800003`/`4`, created later). `GetWindowThreadProcessId(desktop)` returns **0**. Disassembling the staged 32-bit `user32.dll`'s `GetWindowThreadProcessId` showed it's a **client-side** function (no syscall at all in the common case): it reads the owning thread directly from the shared USER handle-table entry (`USER_HANDLEENTRY::pOwner`, offset +8) and returns 0 immediately if that field is null, only falling back to a syscall otherwise. sogen's desktop window is created in `process_context::setup()` **before any thread exists** — so its handle-table entry's `pOwner` (and the guest-side `USER_WINDOW.threadId`) were never populated, permanently 0. `dsound.dll` stores this 0 into `[device+0x4c]`, and every subsequent `Play` call on the secondary buffer hits the `!threadid` branch and returns `DSERR_PRIOLEVELNEEDED` — 303 times observed in one run, matching the exact "storm" signature chased since §54.
+
+This also explains, precisely, why 8 prior rounds (§54-§60) never found it: none of them were wrong to rule out what they ruled out (WNF, counter dynamics, `mss32.dll`'s old waveOut path, `dsound.dll`'s critical-error state machine, `audioses.dll`'s pre-flight gate) — the actual bug lives in **window/USER-object emulation** (`GetWindowThreadProcessId`/handle-table ownership), a subsystem none of those rounds had reason to look at, since the working theory (until this round) was that Play was never even attempted.
+
+### 64.3 The fix
+
+`src/windows-emulator/windows_emulator.cpp` (commit `7b655830`, 19 lines, one file): once the main thread is created, populate the desktop window's owning thread in all three places that matter — the handle-table entry's `pOwner`, the host-side `window::thread_id`, and the guest-visible `USER_WINDOW.threadId` (the fallback path `NtUserQueryWindow` would use if `pOwner` were ever unset for some other window). Minimal, surgical, matches this project's established handle/ownership conventions elsewhere in the file.
+
+### 64.4 Verification
+
+Live-verified before and after (Python bindings, rebuilt fresh — the bindings' own `build/release-py` config had gone stale from the earlier macOS migration in an unrelated way, config-host.h still declaring `CONFIG_LINUX`; fixed locally, not committed, since it's a local build-tree artifact not a source file):
+- **Before**: `SEC_PLAY … HWND[dev+0x4c]=0x0 → gate FAIL(PRIOLEVELNEEDED)` × 303, storm forever, `IAudioClient` opnums 1/2/4 never fire.
+- **After**: `SETCOOP hwnd=0x8`, `SEC_PLAY … HWND[dev+0x4c]=0x8 → gate PASS`; `CLeapSecondaryRenderWaveBuffer::Connect`/`CLeapRenderDevice::ConnectRenderer` are reached for the first time ever in this investigation; the fake `AudioClientRpc` RPC trace advances to **opnum 2 (`GetDevicePeriod`)** and **opnum 1 (`IsFormatSupported`)** — both confirmed to have never fired in any of the prior 9 rounds; `GetMixFormat` call volume drops from 29,101 to 163 (the storm is genuinely gone, not just relocated). MW2 progresses past the entire audio dead-end into real window/UI setup (`SetWindowTextA`, `ShowWindow`, window procedure calls).
+- **Regression**: full D3D9 x64 (10 tests) and x86 (5 tests) sweep, all pixel-exact, zero regressions — expected, since the fix is entirely inside window/USER-object bookkeeping, untouched by any D3D9 code path.
+- Independently re-confirmed this session by rebuilding from a clean checkout and re-running the exact MW2 command.
+
+### 64.5 The new frontier
+
+MW2 now hits a **new, later, different blocker**: a fatal access violation (`C000041D`) inside a window-procedure callback, surfacing through `NtUserMessageCall`/`CallWindowProcA` during `ShowWindow`. It still has not reached `NtGdiDdDDICreateDevice`. This is genuine forward progress into previously-unreached territory — the same pattern as §58/§59, where each real fix exposed a new, later, more specific blocker rather than an immediate finish line. Not yet investigated as of this entry.
+
+### 64.6 The methodological lesson, again
+
+Static disassembly of a plausible mechanism (dsound's critical-error state machine, §57; MSS's waveOut probe, §56) had twice already found real code that wasn't the actual path taken. This round's success came from NOT stopping at "Play must never be called" (an inference from an RPC-level trace showing `Initialize` never fires) and instead directly instrumenting the actual `Play` call and reading its real return value — a level of live-tracing precision (hooking a specific vtbl call and decoding its HRESULT, rather than inferring behavior from which RPC opnums do or don't fire) that no prior round in this arc had applied. The lesson: when an RPC/protocol-level trace shows "the expected next call never happens," that's evidence of *where* the gate is, not *proof of what* the gate is — the actual mechanism can be, and here was, one or more layers upstream of the RPC boundary entirely.
