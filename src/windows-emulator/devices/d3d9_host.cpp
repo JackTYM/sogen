@@ -1105,76 +1105,6 @@ namespace sogen
             }
         }
 
-        // Ensures `pool` holds a host-visible buffer of at least `size` bytes with `usage`, then uploads
-        // `size` bytes from `data` into it. If the pool's existing buffer is already large enough, it's
-        // reused in place (just a mapped re-upload); otherwise any existing buffer/memory is destroyed and
-        // a new one of exactly `size` bytes is created. Pooled buffers persist across draws -- reuse is
-        // safe because execute_draw blocks on a fence before returning, so a prior draw's GPU read of this
-        // buffer has completed before a later draw rewrites it. On failure the pool is left empty (any
-        // partially created buffer freed) so the next draw retries cleanly. Replaces the former
-        // create_and_upload_gpu_buffer, which created and freed a fresh buffer every draw.
-        // Known, accepted tradeoff: growth is exact-fit (no headroom), and a later draw whose `size` is
-        // SMALLER than the pool's already-grown capacity only overwrites its own `size` bytes -- any
-        // bytes beyond that (but still within capacity) retain the PRIOR draw's content. This is benign
-        // for VB/IB (a correct draw only ever reads its own resource's real backing size, never past it)
-        // and irrelevant for UBOs (upload_pooled_ubo below always re-uploads the full fixed size).
-        bool ensure_pooled_buffer(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device,
-                                  pooled_buffer& pool, const void* data, const size_t size, const uint32_t usage)
-        {
-            if (pool.buffer == 0 || pool.capacity < size)
-            {
-                if (pool.buffer != 0)
-                {
-                    vulkan.destroy_buffer(device, pool.buffer);
-                    vulkan.free_memory(device, pool.memory);
-                    pool = {};
-                }
-                if (vulkan.create_buffer(device, size, usage, pool.buffer) != 0 || pool.buffer == 0)
-                {
-                    pool = {};
-                    return false;
-                }
-                uint64_t mem_size = 0;
-                uint64_t mem_align = 0;
-                uint32_t mem_type_bits = 0;
-                vulkan.get_buffer_memory_requirements(device, pool.buffer, mem_size, mem_align, mem_type_bits);
-                const uint32_t memory_type = find_memory_type_index(
-                    vulkan, physical_device, mem_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-                if (memory_type == UINT32_MAX || vulkan.allocate_memory(device, mem_size, memory_type, pool.memory) != 0 ||
-                    pool.memory == 0)
-                {
-                    vulkan.destroy_buffer(device, pool.buffer);
-                    pool = {};
-                    return false;
-                }
-                vulkan.bind_buffer_memory(device, pool.buffer, pool.memory, 0);
-                pool.capacity = size;
-            }
-            vulkan.upload_memory(device, pool.memory, 0, size, data, size);
-            return true;
-        }
-
-        // Re-uploads `data` (zero-padded to `size`) into `pool`'s UBO, growing/creating it if needed via
-        // ensure_pooled_buffer. `size` is the fixed D3D9 constant-register cap (float: VS=4096B/256 float4
-        // regs, PS=512B/32 float4 regs; int/bool: 256B/16 regs, both stages) regardless of how many
-        // registers the app actually set, matching real D3D9 semantics where unset registers read as 0 --
-        // the full zero-padded buffer is re-uploaded every draw so no stale tail can survive across draws.
-        // Since the caps never change, the pool creates its buffer once and reuses it forever after.
-        // Generic over the constant-register element type (float for c#, int32_t for i#, uint32_t for b#).
-        template <typename T>
-        bool upload_pooled_ubo(vulkan_host& vulkan, const uint64_t device, const uint64_t physical_device, pooled_buffer& pool,
-                               const size_t size, const std::vector<T>& data)
-        {
-            std::vector<std::byte> staging(size, std::byte{0});
-            const size_t bytes = std::min(data.size() * sizeof(T), size);
-            if (bytes > 0)
-            {
-                std::memcpy(staging.data(), data.data(), bytes);
-            }
-            return ensure_pooled_buffer(vulkan, device, physical_device, pool, staging.data(), size,
-                                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-        }
-
         // D3DTEXTUREFILTERTYPE (D3DTEXF_NONE=0, POINT=1, LINEAR=2, ANISOTROPIC=3, ...) -> VkFilter.
         // Anisotropic/pyramidal/gaussian quad filters all sample linearly in Vulkan; anisotropy itself is
         // the sampler's separate anisotropyEnable/maxAnisotropy fields (see build_sampler below).
@@ -1333,6 +1263,67 @@ namespace sogen
         return true;
     }
 
+    bool d3d9_host::arena_suballoc(frame_arena& arena, const size_t size, size_t& out_offset)
+    {
+        // 256 is the single alignment used for every slice, because it is simultaneously >= every
+        // per-usage requirement this one buffer serves: >= the real minUniformBufferOffsetAlignment
+        // reported by every target device (so a UBO slice is a legal VkDescriptorBufferInfo offset),
+        // >= any index-element size 2/4 (so an index slice is a legal cmd_bind_index_buffer offset), and
+        // core Vulkan imposes no vertex-buffer bind-offset alignment at all. One constant that satisfies
+        // all three makes every slice trivially correct, at negligible waste for realistic per-draw
+        // range counts.
+        constexpr size_t alignment = 256;
+        const size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
+        if (arena.offset + aligned_size > arena.capacity)
+        {
+            // Grow-only, high-water-mark growth (new capacity = max(needed, 2 * old)). This is
+            // DELIBERATELY different from ensure_pooled_buffer's former exact-fit, no-headroom growth: a
+            // pool held exactly one range per slot, so exact-fit never re-grew once a slot reached its
+            // steady-state size. This arena instead packs MANY ranges whose combined size varies per
+            // draw, so doubling amortizes the destroy/recreate cost to O(log) reallocations over a run
+            // instead of one reallocation per size increase. Growth destroys the current buffer, so every
+            // slice a draw needs must be reserved (this called for all of them) BEFORE any bytes are
+            // uploaded into the arena -- execute_draw does exactly that (reserve phase, then upload phase).
+            const size_t needed = arena.offset + aligned_size;
+            const size_t new_capacity = std::max(needed, arena.capacity * 2);
+            uint64_t new_buffer = 0;
+            if (this->vulkan_.create_buffer(this->vk_device_, new_capacity,
+                                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                            new_buffer) != 0 ||
+                new_buffer == 0)
+            {
+                return false;
+            }
+            uint64_t mem_size = 0;
+            uint64_t mem_align = 0;
+            uint32_t mem_type_bits = 0;
+            this->vulkan_.get_buffer_memory_requirements(this->vk_device_, new_buffer, mem_size, mem_align, mem_type_bits);
+            const uint32_t memory_type =
+                find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            uint64_t new_memory = 0;
+            if (memory_type == UINT32_MAX ||
+                this->vulkan_.allocate_memory(this->vk_device_, mem_size, memory_type, new_memory) != 0 || new_memory == 0)
+            {
+                this->vulkan_.destroy_buffer(this->vk_device_, new_buffer);
+                return false;
+            }
+            this->vulkan_.bind_buffer_memory(this->vk_device_, new_buffer, new_memory, 0);
+            if (arena.buffer != 0)
+            {
+                this->vulkan_.destroy_buffer(this->vk_device_, arena.buffer);
+                this->vulkan_.free_memory(this->vk_device_, arena.memory);
+            }
+            arena.buffer = new_buffer;
+            arena.memory = new_memory;
+            arena.capacity = new_capacity;
+        }
+        out_offset = arena.offset;
+        arena.offset += aligned_size;
+        return true;
+    }
+
     int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex, const indexed_draw* const indexed)
     {
         const auto rt_it = this->resources_.find(this->state_.render_targets[0]);
@@ -1459,6 +1450,12 @@ namespace sogen
             return d3d_ok; // GPU unavailable; degrade silently like the rest of this host does
         }
 
+        // No batching yet: every draw submits and blocks on a fence before the next one runs, so emptying
+        // the shared arena at the start of each draw exactly reproduces the old "one draw fully consumes
+        // its pools before the next" model while proving the sub-allocation math in isolation. When
+        // batching lands, this reset moves to the batch boundary instead.
+        this->vertex_index_uniform_arena_.offset = 0;
+
         const bool use_programmable = this->state_.vertex_shader != 0 && this->state_.pixel_shader != 0;
         const programmable_pipeline_entry* programmable = nullptr;
         if (use_programmable)
@@ -1512,13 +1509,21 @@ namespace sogen
             }
         }
 
-        // Upload the current contents of every referenced stream into its per-stream pooled vertex buffer
-        // (stream_buffer_pool_[stream]) -- reused/regrown across draws rather than reallocated every draw.
-        // Streams the declaration doesn't reference, or that lack a real stride (both already filtered out
-        // of used_binding_mask above), or a referenced+usable stream the app never called SetStreamSource
-        // for, are left at buffer id 0 -- cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
-        std::vector<uint64_t> stream_buffers(highest_binding + 1, 0);
-        std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
+        // Phase A -- RESERVE every arena slice this draw needs (vertex streams, index buffer, the six
+        // UBOs) WITHOUT uploading anything. arena_suballoc grows the arena by destroy+recreate, which
+        // invalidates the buffer id and any bytes already written, so all reservations must complete
+        // before the first upload (phase B) reads the now-final arena buffer. Streams the declaration
+        // doesn't reference, or that lack a real stride (both already filtered out of used_binding_mask
+        // above), or a referenced+usable stream the app never called SetStreamSource for, are left at
+        // buffer id 0 -- cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
+        frame_arena& arena = this->vertex_index_uniform_arena_;
+        struct reserved_range
+        {
+            uint32_t stream;
+            const std::vector<std::byte>* bytes;
+            size_t offset;
+        };
+        std::vector<reserved_range> reserved_streams;
         for (uint32_t stream = 0; stream <= highest_binding; ++stream)
         {
             if ((used_binding_mask & (1u << stream)) == 0)
@@ -1550,29 +1555,22 @@ namespace sogen
                 }
                 src_bytes = &res_it->second.backing;
             }
-            if (!ensure_pooled_buffer(this->vulkan_, device, this->vk_physical_device_, this->stream_buffer_pool_[stream],
-                                      src_bytes->data(), src_bytes->size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+            size_t stream_offset = 0;
+            if (!this->arena_suballoc(arena, src_bytes->size(), stream_offset))
             {
                 return d3d_ok;
             }
-            stream_buffers[stream] = this->stream_buffer_pool_[stream].buffer;
-            const auto off_it = this->state_.stream_offsets.find(stream);
-            stream_bind_offsets[stream] = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
+            reserved_streams.push_back({stream, src_bytes, stream_offset});
         }
 
-        uint64_t index_buffer_vk = 0;
         // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
-        // index buffer; both upload identically into the pooled index buffer.
+        // index buffer; both upload identically into the arena.
         const std::vector<std::byte>* ib_bytes =
             ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr ? &ib_entry->backing : nullptr);
-        if (ib_bytes != nullptr)
+        size_t ib_arena_offset = 0;
+        if (ib_bytes != nullptr && !this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
         {
-            if (!ensure_pooled_buffer(this->vulkan_, device, this->vk_physical_device_, this->index_buffer_pool_,
-                                      ib_bytes->data(), ib_bytes->size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
-            {
-                return d3d_ok;
-            }
-            index_buffer_vk = this->index_buffer_pool_.buffer;
+            return d3d_ok;
         }
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
@@ -1581,8 +1579,8 @@ namespace sogen
         // D3D9 SM3 int/bool constant-register caps (16 registers each, both stages -- fill_d3d9caps),
         // each register expanded to a 16-byte slot (see vs/ps_const_i/b's own comments in d3d9_host.hpp).
         constexpr size_t int_bool_ubo_size = 16 * 4 * sizeof(uint32_t);
-        // Indices into ubo_pool_ (d3d9_host.hpp). Order is fixed -- the descriptor writes below read each
-        // pool by these names.
+        // Order is fixed -- both the reservation/upload here and the descriptor writes below read each UBO
+        // by these names. ubo_sizes is indexed by the same enum.
         enum ubo_index : size_t
         {
             ubo_vs_f = 0,
@@ -1592,6 +1590,63 @@ namespace sogen
             ubo_vs_b = 4,
             ubo_ps_b = 5,
         };
+        const std::array<size_t, 6> ubo_sizes{vs_ubo_size,       ps_ubo_size,       int_bool_ubo_size,
+                                              int_bool_ubo_size, int_bool_ubo_size, int_bool_ubo_size};
+        std::array<size_t, 6> ubo_offsets{};
+        std::array<std::vector<std::byte>, 6> ubo_staging{};
+        // Zero-pads each constant file to its full fixed cap (unset D3D9 registers read as 0) into a
+        // staging blob, matching the former upload_pooled_ubo -- the full zero-padded buffer is what gets
+        // uploaded, so no stale tail can survive across draws. Split into build-now / upload-in-phase-B
+        // like the streams above so the arena buffer is final before any upload.
+        auto build_ubo_staging = [](const size_t size, const auto& consts) {
+            std::vector<std::byte> staging(size, std::byte{0});
+            const size_t bytes = std::min(consts.size() * sizeof(*consts.data()), size);
+            if (bytes > 0)
+            {
+                std::memcpy(staging.data(), consts.data(), bytes);
+            }
+            return staging;
+        };
+        if (use_programmable)
+        {
+            ubo_staging[ubo_vs_f] = build_ubo_staging(vs_ubo_size, this->state_.vs_const_f);
+            ubo_staging[ubo_ps_f] = build_ubo_staging(ps_ubo_size, this->state_.ps_const_f);
+            ubo_staging[ubo_vs_i] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_i);
+            ubo_staging[ubo_ps_i] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_i);
+            ubo_staging[ubo_vs_b] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_b);
+            ubo_staging[ubo_ps_b] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_b);
+            for (size_t i = 0; i < ubo_offsets.size(); ++i)
+            {
+                if (!this->arena_suballoc(arena, ubo_sizes[i], ubo_offsets[i]))
+                {
+                    return d3d_ok;
+                }
+            }
+        }
+
+        // Phase B -- every slice is reserved, so arena.buffer/memory are final. Upload each range at its
+        // recorded offset and bind against the single shared arena buffer. A vertex stream's bind offset
+        // is its arena slice offset plus any D3D9-level SetStreamSource start offset (into the resource),
+        // preserving the pre-arena behavior of fetching the first vertex at that D3D9 offset.
+        std::vector<uint64_t> stream_buffers(highest_binding + 1, 0);
+        std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
+        for (const auto& rs : reserved_streams)
+        {
+            this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+            stream_buffers[rs.stream] = arena.buffer;
+            const auto off_it = this->state_.stream_offsets.find(rs.stream);
+            const uint32_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
+            stream_bind_offsets[rs.stream] = rs.offset + d3d9_stream_offset;
+        }
+
+        uint64_t index_buffer_vk = 0;
+        if (ib_bytes != nullptr)
+        {
+            this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(),
+                                        ib_bytes->size());
+            index_buffer_vk = arena.buffer;
+        }
+
         std::array<uint64_t, max_ps_sampler_stages> tex_samplers{};
         std::array<uint64_t, max_ps_sampler_stages> tex_image_views{};
         // Separate from the PS arrays above so both stages' per-draw sampler/view selection is tracked
@@ -1602,24 +1657,12 @@ namespace sogen
         std::array<uint64_t, 2> descriptor_sets{};
         if (use_programmable)
         {
-            // Re-upload the six constant buffers into their persistent pools (created once, on the first
-            // programmable draw, and reused every draw after -- their sizes are fixed caps that never
-            // change). Contents genuinely change per draw, so the full zero-padded buffer is rewritten
-            // each time; the pool objects are not reallocated.
-            if (!upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_vs_f], vs_ubo_size,
-                                   this->state_.vs_const_f) ||
-                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_ps_f], ps_ubo_size,
-                                   this->state_.ps_const_f) ||
-                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_vs_i], int_bool_ubo_size,
-                                   this->state_.vs_const_i) ||
-                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_ps_i], int_bool_ubo_size,
-                                   this->state_.ps_const_i) ||
-                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_vs_b], int_bool_ubo_size,
-                                   this->state_.vs_const_b) ||
-                !upload_pooled_ubo(this->vulkan_, device, this->vk_physical_device_, this->ubo_pool_[ubo_ps_b], int_bool_ubo_size,
-                                   this->state_.ps_const_b))
+            // Upload the six constant buffers into their reserved arena slices. Contents genuinely change
+            // per draw; the slices were reserved (and the arena grown if needed) in phase A above.
+            for (size_t i = 0; i < ubo_offsets.size(); ++i)
             {
-                return d3d_ok;
+                this->vulkan_.upload_memory(device, arena.memory, ubo_offsets[i], ubo_sizes[i], ubo_staging[i].data(),
+                                            ubo_sizes[i]);
             }
 
             // Combined-image-sampler bindings for texture stages s0..s3 (see ensure_programmable_pipeline's
@@ -1721,8 +1764,8 @@ namespace sogen
                  .dst_binding = 0,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = this->ubo_pool_[ubo_vs_f].buffer,
-                 .offset = 0,
+                 .buffer = arena.buffer,
+                 .offset = ubo_offsets[ubo_vs_f],
                  .range = vs_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -1731,8 +1774,8 @@ namespace sogen
                  .dst_binding = 0,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = this->ubo_pool_[ubo_ps_f].buffer,
-                 .offset = 0,
+                 .buffer = arena.buffer,
+                 .offset = ubo_offsets[ubo_ps_f],
                  .range = ps_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -1741,8 +1784,8 @@ namespace sogen
                  .dst_binding = 2,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = this->ubo_pool_[ubo_vs_i].buffer,
-                 .offset = 0,
+                 .buffer = arena.buffer,
+                 .offset = ubo_offsets[ubo_vs_i],
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -1751,8 +1794,8 @@ namespace sogen
                  .dst_binding = 3,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = this->ubo_pool_[ubo_vs_b].buffer,
-                 .offset = 0,
+                 .buffer = arena.buffer,
+                 .offset = ubo_offsets[ubo_vs_b],
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -1761,8 +1804,8 @@ namespace sogen
                  .dst_binding = 2,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = this->ubo_pool_[ubo_ps_i].buffer,
-                 .offset = 0,
+                 .buffer = arena.buffer,
+                 .offset = ubo_offsets[ubo_ps_i],
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -1771,8 +1814,8 @@ namespace sogen
                  .dst_binding = 3,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                 .buffer = this->ubo_pool_[ubo_ps_b].buffer,
-                 .offset = 0,
+                 .buffer = arena.buffer,
+                 .offset = ubo_offsets[ubo_ps_b],
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -1919,7 +1962,7 @@ namespace sogen
         if (indexed != nullptr)
         {
             const uint32_t index_type = indexed->index_format != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-            this->vulkan_.cmd_bind_index_buffer(this->command_buffer_, index_buffer_vk, 0, index_type);
+            this->vulkan_.cmd_bind_index_buffer(this->command_buffer_, index_buffer_vk, ib_arena_offset, index_type);
             this->vulkan_.cmd_draw_indexed(this->command_buffer_, vertex_count, instance_count, indexed->first_index,
                                            indexed->base_vertex_index, 0);
         }
@@ -1950,10 +1993,10 @@ namespace sogen
 
         this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
-        // Nothing to free here: vertex/index/constant buffers are pooled (retained in
-        // stream_buffer_pool_/index_buffer_pool_/ubo_pool_ for reuse next draw), and samplers are now
-        // content-cached in sampler_cache_ (an immutable VkSampler reused by any later draw with the same
-        // state), both retained for the device's lifetime.
+        // Nothing to free here: vertex/index/constant buffers are all sub-allocated slices of the single
+        // per-frame arena (vertex_index_uniform_arena_), retained and reset to offset 0 at the start of
+        // the next draw, and samplers are content-cached in sampler_cache_ (an immutable VkSampler reused
+        // by any later draw with the same state), both retained for the device's lifetime.
 
         // Mark each bound render target's backing store stale; sync_backing_from_gpu reads it back
         // lazily on the next pfnLock/Present that actually needs the pixels.

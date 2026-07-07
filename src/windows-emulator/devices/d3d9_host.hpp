@@ -34,14 +34,18 @@ namespace sogen
         uint32_t used_binding_mask{}; // bit i set => stream i is referenced by this declaration
     };
 
-    // A GPU buffer + its backing memory, retained across draws and reused in place. `capacity` is the
-    // byte size the buffer was last (re)created with; ensure_pooled_buffer (d3d9_host.cpp) grows it only
-    // when a draw needs more, otherwise it just re-uploads the new contents into the existing buffer.
-    struct pooled_buffer
+    // One host-visible GPU buffer that a draw sub-allocates many distinct ranges from (vertex streams,
+    // the index buffer, and the constant UBOs all live in this single buffer). `capacity` is the byte
+    // size the buffer was last (re)created with; `offset` is the bump-allocator cursor -- arena_suballoc
+    // (d3d9_host.cpp) hands out a 256-byte-aligned slice at `offset` and advances it, growing (destroy +
+    // recreate, high-water mark) only when a draw needs more than `capacity`. execute_draw resets
+    // `offset` to 0 at the start of every draw (see its comment there).
+    struct frame_arena
     {
         uint64_t buffer{};
         uint64_t memory{};
         size_t capacity{};
+        size_t offset{};
     };
 
     // Reinterprets blob as a back-to-back array of d3d9_cmd::vertex_element (8 bytes each; blob.size()
@@ -449,18 +453,22 @@ namespace sogen
         };
         std::map<sampler_cache_key, uint64_t> sampler_cache_{};
 
-        // Per-device-lifetime GPU buffer pools, created once and reused/regrown across draws instead of
-        // being allocated and freed every draw. One vertex-buffer pool per stream (multiple streams can
-        // be bound simultaneously), a single index-buffer pool (only one index buffer per draw), and six
-        // constant-buffer pools (VS/PS x float/int/bool -- fixed sizes, so these only ever create once).
-        // Reuse is safe because execute_draw submits and blocks on a fence before returning, so a prior
-        // draw's GPU read of a pooled buffer has completed before a later draw rewrites it. Indices into
-        // ubo_pool_ match the ubo_index enum in execute_draw.
-        std::array<pooled_buffer, max_vertex_streams> stream_buffer_pool_{};
-        pooled_buffer index_buffer_pool_{};
-        std::array<pooled_buffer, 6> ubo_pool_{};
+        // Single per-device-lifetime GPU buffer backing every vertex/index/uniform range a draw needs.
+        // Each range is a distinct 256-byte-aligned slice handed out by arena_suballoc; the buffer is
+        // created lazily and grown grow-only across draws. execute_draw resets its offset to 0 at the
+        // start of every draw -- reuse is safe because execute_draw submits and blocks on a fence before
+        // returning, so a prior draw's GPU read of the arena has completed before a later draw rewrites
+        // it. Combined VERTEX|INDEX|UNIFORM usage so one buffer serves all three binding points.
+        frame_arena vertex_index_uniform_arena_{};
 
         uint64_t allocate_id();
+        // Hands out a 256-byte-aligned `size`-byte slice of `arena`, returning its byte offset in
+        // out_offset and advancing the arena's bump cursor. The single place any arena offset is
+        // computed, so every consumer (vertex-buffer bind offset, index-buffer bind offset, UBO
+        // descriptor offset) agrees with the buffer the bytes were actually uploaded into. Grows the
+        // arena buffer (destroy + recreate, high-water mark) when a slice won't fit; returns false only
+        // on a Vulkan allocation failure. See the .cpp definition for the 256-byte and growth rationale.
+        bool arena_suballoc(frame_arena& arena, size_t size, size_t& out_offset);
         // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
         // Returns 0 on failure.
         uint64_t ensure_vk_device();
