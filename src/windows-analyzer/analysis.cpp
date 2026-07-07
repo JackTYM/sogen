@@ -729,24 +729,14 @@ namespace sogen
 
             auto& proc = c.win_emu->process;
 
-            for (auto& [index, win] : proc.windows)
+            for (auto& win : proc.windows | std::views::values)
             {
-                (void)index;
                 if (!win.is_dialog())
                 {
                     continue;
                 }
 
-                emulator_thread* owner = nullptr;
-                for (auto& t : proc.threads | std::views::values)
-                {
-                    if (t.id == win.thread_id)
-                    {
-                        owner = &t;
-                        break;
-                    }
-                }
-
+                const emulator_thread* owner = proc.find_thread_by_id(win.thread_id);
                 if (!owner || !(owner->await_msg.has_value() || owner->await_msg_mask.has_value()))
                 {
                     continue;
@@ -755,9 +745,8 @@ namespace sogen
                 const auto target_id = *c.click_dialog_button;
 
                 hwnd child_handle = 0;
-                for (auto& [child_index, child] : proc.windows)
+                for (auto& child : proc.windows | std::views::values)
                 {
-                    (void)child_index;
                     if (child.parent_handle != win.handle)
                     {
                         continue;
@@ -775,7 +764,7 @@ namespace sogen
                 ui_event event{};
                 event.window = win.handle;
                 event.message = WM_COMMAND;
-                event.wParam = target_id & 0xFFFF;
+                event.wParam = target_id & 0xFFFF; // BN_CLICKED=0 in high word
                 event.lParam = static_cast<uint32_t>(child_handle);
 
                 c.win_emu->handle_ui_event(event);
