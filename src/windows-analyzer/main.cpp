@@ -58,6 +58,7 @@ namespace sogen
             bool pause_before_start{false};
 #endif
             std::optional<uint64_t> break_call{};
+            std::optional<uint32_t> click_dialog_button{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
@@ -589,6 +590,7 @@ namespace sogen
             analysis_context context{
                 .settings = &options,
                 .auto_break_before_call = options.break_call,
+                .click_dialog_button = options.click_dialog_button,
             };
 
             const auto concise_logging = options.concise_logging;
@@ -860,6 +862,7 @@ namespace sogen
             printf("  --break-start             Pause before executing the first instruction\n");
 #endif
             printf("  -bc, --break-call <count>  In GDB mode, stop before the specified traced function/syscall call\n");
+            printf("  --click-dialog-button <id> Auto-dismiss the first modal dialog by clicking its control (e.g. 1=IDOK, 7=IDNO)\n");
             printf("Examples:\n");
             printf("  analyzer -v -e path/to/root myapp.exe\n");
             printf("  analyzer --report run.jsonl test-sample.exe\n");
@@ -1099,6 +1102,22 @@ namespace sogen
                     arg_it = args.erase(arg_it);
                     options.break_call = parse_u64_argument(args[0], arg);
                     require_debug_option = arg;
+                }
+                else if (arg == "--click-dialog-button")
+                {
+                    if (args.size() < 2)
+                    {
+                        throw std::runtime_error("No control id provided after --click-dialog-button");
+                    }
+
+                    arg_it = args.erase(arg_it);
+                    const auto control_id = parse_u64_argument(args[0], arg);
+                    if (control_id > 0xFFFF)
+                    {
+                        throw std::runtime_error("Control id should be in range 0-65535");
+                    }
+
+                    options.click_dialog_button = static_cast<uint32_t>(control_id);
                 }
                 else
                 {

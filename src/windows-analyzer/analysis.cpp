@@ -720,6 +720,70 @@ namespace sogen
             return instruction_hook_continuation::run_instruction;
         }
 
+        void handle_event_pump(analysis_context& c)
+        {
+            if (!c.click_dialog_button || c.dialog_click_injected)
+            {
+                return;
+            }
+
+            auto& proc = c.win_emu->process;
+
+            for (auto& [index, win] : proc.windows)
+            {
+                (void)index;
+                if (!win.is_dialog())
+                {
+                    continue;
+                }
+
+                emulator_thread* owner = nullptr;
+                for (auto& t : proc.threads | std::views::values)
+                {
+                    if (t.id == win.thread_id)
+                    {
+                        owner = &t;
+                        break;
+                    }
+                }
+
+                if (!owner || !(owner->await_msg.has_value() || owner->await_msg_mask.has_value()))
+                {
+                    continue;
+                }
+
+                const auto target_id = *c.click_dialog_button;
+
+                hwnd child_handle = 0;
+                for (auto& [child_index, child] : proc.windows)
+                {
+                    (void)child_index;
+                    if (child.parent_handle != win.handle)
+                    {
+                        continue;
+                    }
+
+                    uint32_t control_id = 0;
+                    child.guest.access([&](const USER_WINDOW& gw) { control_id = static_cast<uint32_t>(gw.wID); });
+                    if (control_id == target_id)
+                    {
+                        child_handle = child.handle;
+                        break;
+                    }
+                }
+
+                ui_event event{};
+                event.window = win.handle;
+                event.message = WM_COMMAND;
+                event.wParam = target_id & 0xFFFF;
+                event.lParam = static_cast<uint32_t>(child_handle);
+
+                c.win_emu->handle_ui_event(event);
+                c.dialog_click_injected = true;
+                return;
+            }
+        }
+
         void handle_stdout(analysis_context& c, const std::string_view data)
         {
             c.emit_observation<stdout_chunk_event>([&](auto& event) { event.data = std::string(data); });
@@ -871,6 +935,7 @@ namespace sogen
         cb.on_thread_set_name = make_callback(c, handle_thread_set_name);
 
         cb.on_instruction = make_callback(c, handle_instruction);
+        cb.on_event_pump = make_callback(c, handle_event_pump);
         cb.on_debug_string.add(make_callback(c, handle_debug_string));
         cb.on_generic_access = make_callback(c, handle_generic_access);
         cb.on_generic_activity = make_callback(c, handle_generic_activity);

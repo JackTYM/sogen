@@ -669,6 +669,7 @@ namespace sogen
         while (!switch_to_next_thread(*this))
         {
             this->ui_backend_->pump_events();
+            this->callbacks.on_event_pump();
 
             if (this->use_relative_time_)
             {
@@ -1322,6 +1323,7 @@ namespace sogen
         while (!this->should_stop)
         {
             this->ui_backend_->pump_events();
+            this->callbacks.on_event_pump();
             if (this->switch_thread_ || !this->current_thread().is_thread_ready(*this))
             {
                 if (!this->perform_thread_switch())
