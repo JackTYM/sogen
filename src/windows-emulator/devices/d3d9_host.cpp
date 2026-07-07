@@ -382,9 +382,30 @@ namespace sogen
         {
             return false;
         }
+        if (this->vulkan_.allocate_command_buffer(device, this->command_pool_, 0, this->batch_command_buffer_) != 0 ||
+            this->batch_command_buffer_ == 0)
+        {
+            return false;
+        }
+        if (this->vulkan_.create_fence(device, 0, this->batch_fence_) != 0 || this->batch_fence_ == 0)
+        {
+            return false;
+        }
 
         this->draw_infra_ready_ = true;
         return true;
+    }
+
+    void d3d9_host::flush_batch()
+    {
+        if (!this->batch_open_)
+        {
+            return;
+        }
+        this->vulkan_.end_command_buffer(this->batch_command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->batch_command_buffer_, this->batch_fence_);
+        this->vulkan_.wait_for_fence(this->batch_fence_, UINT64_MAX);
+        this->batch_open_ = false;
     }
 
     bool d3d9_host::ensure_pipeline(const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height,

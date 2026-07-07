@@ -288,6 +288,14 @@ namespace sogen
         uint64_t fence_{};
         bool draw_infra_ready_{false};
 
+        // A separate, dedicated command buffer/fence for the batched-draw recording, so it never collides
+        // with the shared command_buffer_/fence_ that the prep helpers (ensure_texture_uploaded,
+        // ensure_depth_stencil_view) and the clear/blt/color_fill paths submit+wait on synchronously.
+        uint64_t batch_command_buffer_{};
+        uint64_t batch_fence_{};
+        bool batch_open_{false};
+        [[maybe_unused]] uint64_t batch_rt_{};
+
         // The one hardcoded fixed-function shader pair (see execute_draw's comment), its shader modules
         // and pipeline layout -- shape-invariant (FF always uses the same hardcoded XYZRHW+DIFFUSE vertex
         // layout), so these are lazily created once and reused for every FF pipeline variant.
@@ -456,6 +464,9 @@ namespace sogen
         // Returns 0 on failure.
         uint64_t ensure_vk_device();
         bool ensure_draw_infra();
+        // Ends, submits and waits on the open batch command buffer, closing the batch. Inert while
+        // batch_open_ is never set (no code path opens a batch yet).
+        void flush_batch();
         // depth_format is a VkFormat (0 = no depth attachment), matching create_graphics_pipeline's own
         // dynamic-rendering depth_format parameter. color_formats holds one VkFormat per currently-bound
         // render target (slot order), each getting an identical blend-attachment entry -- D3D9 has no
