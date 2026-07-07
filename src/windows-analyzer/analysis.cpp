@@ -729,6 +729,15 @@ namespace sogen
 
             auto& proc = c.win_emu->process;
 
+            // Prune entries whose dialog window no longer exists -- an append-only set would
+            // otherwise let a later, genuinely different dialog silently reuse the destroyed
+            // dialog's now-recycled HWND and get skipped as "already clicked". Only pruning on
+            // destruction (not on the owning thread merely un-parking, which happens almost
+            // immediately after injection) keeps this dialog itself protected from re-injection
+            // spam for as long as it's still on screen.
+            std::erase_if(c.clicked_dialogs,
+                          [&](const uint64_t handle) { return proc.windows.get(static_cast<hwnd>(handle)) == nullptr; });
+
             for (auto& win : proc.windows | std::views::values)
             {
                 if (!win.is_dialog() || c.clicked_dialogs.contains(win.handle))
