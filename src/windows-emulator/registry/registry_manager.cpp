@@ -366,11 +366,19 @@ namespace sogen
                         this->set_value(*props_key, value_name, 4 /* REG_DWORD */,
                                         std::span<const std::byte>(bytes, sizeof(value)));
                     };
-                    // {9c119480-...},1: audio-engine activation counter. dsound reads this before and
-                    // after each GetMixFormat call; the real audioses increments it after processing.
-                    // Seed at 0 so the service-side increment in handle_get_mix_format produces a
-                    // visible change that lets dsound proceed without timing out.
-                    write_dword("{9c119480-ddc2-4954-a150-5bd240d454ad},1", 0);
+                    // {9c119480-...},1 is PKEY_SWD_DeviceInterfaceId, a VT_LPWSTR software-device interface
+                    // path. mmdevapi's CEndpointDevice::GetDeviceInterfacePath polls it in a 5-second loop and
+                    // GetDeviceInterfaceIdFromPropertyStore fails with ERROR_NOT_FOUND unless the value is a
+                    // string (VT_LPWSTR); a REG_DWORD maps to VT_UI4 and never satisfies it. Seed the canonical
+                    // SWD path (\\?\SWD#MMDEVAPI#<endpoint-id>#<interface-class-guid>) so the poll resolves at
+                    // once. The interface class is DEVINTERFACE_AUDIO_RENDER for render endpoints and
+                    // DEVINTERFACE_AUDIO_CAPTURE for capture endpoints.
+                    const std::string_view interface_class = std::string_view(local) == "Render"
+                                                                 ? "{e6327cad-dcec-4949-ae8a-991e976a79d2}"
+                                                                 : "{2eef81be-33fa-4800-9670-1cd474972c3f}";
+                    const std::string swd_path =
+                        R"(\\?\SWD#MMDEVAPI#)" + std::string(*name) + "#" + std::string(interface_class);
+                    write_name("{9c119480-ddc2-4954-a150-5bd240d454ad},1", std::u16string(swd_path.begin(), swd_path.end()));
                     write_dword("{9c119480-ddc2-4954-a150-5bd240d454ad},6", 0);
                     // {83da6326-...}: endpoint builder info (read once at device open).
                     write_dword("{83da6326-97a6-4088-9453-a1923f573b29},6", 0);

@@ -148,7 +148,7 @@ namespace sogen
                     switch (procedure_id)
                     {
                     case k_audio_opnum_get_mix_format:
-                        return handle_get_mix_format(win_emu, writer);
+                        return handle_get_mix_format(writer);
                     case k_audio_opnum_is_format_supported:
                         return handle_is_format_supported(writer);
                     case k_audio_opnum_get_device_period:
@@ -193,46 +193,7 @@ namespace sogen
             // The [out] format is an FC_CSTRUCT (18-byte WAVEFORMATEX base + cbSize-conformant tail) behind a
             // unique pointer. The WASAPI shared-mode mix format is a WAVEFORMATEXTENSIBLE IEEE-float format;
             // report 48 kHz / 2-channel / 32-bit float.
-            //
-            // After writing the response, increment the activation counter property that dsound polls to detect
-            // when the audio-engine has processed the call. The counter is seeded to 0 at endpoint registration
-            // time; each GetMixFormat call bumps it so dsound's pre/post-call poll sees a change.
-            static void bump_activation_counter(windows_emulator& win_emu)
-            {
-                const std::string base =
-                    R"(\Registry\Machine\Software\Microsoft\Windows\CurrentVersion\MMDevices\Audio\RemoteRender)";
-                const auto remote_key = win_emu.registry.get_key(utils::path_key{std::filesystem::path(base)});
-                if (!remote_key)
-                {
-                    return;
-                }
-                constexpr const char* k_counter_prop = "{9c119480-ddc2-4954-a150-5bd240d454ad},1";
-                for (size_t i = 0;; ++i)
-                {
-                    const auto name = win_emu.registry.get_sub_key_name(*remote_key, i);
-                    if (!name)
-                    {
-                        break;
-                    }
-                    const auto props_key =
-                        win_emu.registry.get_key(utils::path_key{std::filesystem::path(base) / std::string(*name) / "Properties"});
-                    if (!props_key)
-                    {
-                        continue;
-                    }
-                    uint32_t counter = 0;
-                    if (const auto v = win_emu.registry.get_value(*props_key, k_counter_prop))
-                    {
-                        counter = v->as_dword().value_or(0);
-                    }
-                    ++counter;
-                    const auto* bytes = reinterpret_cast<const std::byte*>(&counter);
-                    win_emu.registry.set_value(*props_key, k_counter_prop, 4 /* REG_DWORD */,
-                                              std::span<const std::byte>(bytes, sizeof(counter)));
-                }
-            }
-
-            static NTSTATUS handle_get_mix_format(windows_emulator& win_emu, utils::aligned_binary_writer& writer)
+            static NTSTATUS handle_get_mix_format(utils::aligned_binary_writer& writer)
             {
                 // 44100 Hz matches the real captured device mix format; CreateRemoteStream reports the same
                 // nAvgBytesPerSec, so the stream format the client negotiates stays self-consistent.
@@ -266,8 +227,6 @@ namespace sogen
 
                 writer.align_to(sizeof(uint32_t));
                 writer.write(k_hr_ok); // return HRESULT
-
-                bump_activation_counter(win_emu);
                 return STATUS_SUCCESS;
             }
 
