@@ -2435,6 +2435,11 @@ namespace sogen
             return d3derr_invalidcall;
         }
 
+        // Flush any open batch first: ensure_texture_uploaded re-uploads dst's backing into one
+        // persistent GPU image with no per-draw snapshot, so an already-recorded-but-unsubmitted
+        // batched draw that samples dst would otherwise see THIS write's contents once the batch
+        // finally executes, not what it sampled at record time.
+        this->flush_batch();
         dst_it->second.backing = src_it->second.backing;
         return d3d_ok;
     }
