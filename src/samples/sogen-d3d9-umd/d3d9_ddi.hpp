@@ -1009,7 +1009,17 @@ typedef struct _D3DDDIARG_LOCK
                          //      struct): flattened subresource index (Level for mips; FaceType*MipLevels
                          //      + Level for cube/array). 0 for buffers. Was "Reserved0"; NOT a UINT64.
                          //      Consumed by umd_Lock as of the real mip-mapping work.
-    BYTE Reserved1[24];  // 8..31 -- unconfirmed (OffsetToLock/SizeToLock or Rect/Box input region)
+    UINT OffsetToLock;   // 8 -- RE-verified live 2026-07-06: the app's requested byte offset, reliably
+                         // present in the "driver-routed" shape (the x86 analog of the x64 field at 80).
+                         // Two distinctive marker offsets, 0x4321 and 0x8642, both read back exactly here
+                         // as a 32-bit little-endian value, with a Lock(offset=0) baseline reading 0 --
+                         // cross-checked, not a coincidence. In the "sysmem-routed" shape this offset
+                         // holds unrelated data, but that path's driver-returned pData is discarded by
+                         // the app regardless, so umd_Lock reading this field unconditionally for buffer
+                         // resources is safe either way -- the host's own lock() rejects an out-of-range
+                         // offset. SizeToLock is not modeled (no reliable offset; size=0 "to end of
+                         // resource" is exactly the tail-append semantics this enables -- see x64 comment).
+    BYTE Reserved1[20];  // 12..31 -- unconfirmed (SizeToLock or Rect/Box input region)
     VOID* pData;         // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
     BYTE Reserved2[12];  // 36..47 -- unconfirmed (Pitch/SlicePitch/Flags; not read by umd_Lock)
 } D3DDDIARG_LOCK;
@@ -1071,6 +1081,7 @@ static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll
 // shrinkage" theory was wrong and what the real, live-RE'd x86 sizes (48 / 8 bytes) are.
 static_assert(sizeof(D3DDDIARG_LOCK) == 48, "D3DDDIARG_LOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 4, "SubResourceIndex RE-verified live+static 2026-07-06 (x86)");
+static_assert(offsetof(D3DDDIARG_LOCK, OffsetToLock) == 8, "OffsetToLock RE-verified live 2026-07-06 (x86, markers 0x4321/0x8642)");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 8, "D3DDDIARG_UNLOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 36, "D3DDDIARG_PRESENT x86 layout");
 #endif

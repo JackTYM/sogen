@@ -1937,23 +1937,17 @@ namespace
         // per-mip-level texture lock to the correct per-level backing store host-side.
         const uint32_t subresource = pArgs->SubResourceIndex;
 
-#ifdef _WIN64
-        // OffsetToLock (d3d9_ddi.hpp, offset 80) is reliable for "driver-routed" buffer locks -- the
-        // routing this UMD's own DevCaps bits (k_devcaps_driver_managed_pool/_index_pool) make the
-        // common case for D3DPOOL_DEFAULT buffers. "Sysmem-routed" locks read something unrelated from
-        // this offset, but their driver-returned pData is discarded by the app regardless (confirmed
-        // live, HANDOFF_MACBOOK.md #16.1), and an out-of-range offset is safely rejected by the host's
-        // own lock() below rather than misbehaving locally -- so reading it unconditionally for every
-        // buffer lock is safe. SizeToLock still has no reliable offset in either shape (see
-        // d3d9_ddi.hpp) -- size = 0 below means "from offset to the end of the resource", which is
-        // exactly right for the common D3DLOCK_NOOVERWRITE tail-append pattern this fixes: the app
-        // only ever writes forward from OffsetToLock anyway.
+        // OffsetToLock (d3d9_ddi.hpp, offset 80 on x64 / 8 on x86, both RE-verified live) is reliable for
+        // "driver-routed" buffer locks -- the routing this UMD's own DevCaps bits
+        // (k_devcaps_driver_managed_pool/_index_pool) make the common case for D3DPOOL_DEFAULT buffers.
+        // "Sysmem-routed" locks read something unrelated from this offset, but their driver-returned pData
+        // is discarded by the app regardless (confirmed live, HANDOFF_MACBOOK.md #16.1), and an
+        // out-of-range offset is safely rejected by the host's own lock() below rather than misbehaving
+        // locally -- so reading it unconditionally for every buffer lock is safe. SizeToLock still has no
+        // reliable offset in either shape (see d3d9_ddi.hpp) -- size = 0 below means "from offset to the
+        // end of the resource", which is exactly right for the common D3DLOCK_NOOVERWRITE tail-append
+        // pattern this fixes: the app only ever writes forward from OffsetToLock anyway.
         const uint32_t offset = is_buffer ? pArgs->OffsetToLock : 0;
-#else
-        // x86's driver-routed OffsetToLock offset is not yet RE-verified (see d3d9_ddi.hpp's own
-        // D3DDDIARG_LOCK comment) -- keep the pre-existing whole-buffer-lock behavior here.
-        const uint32_t offset = 0;
-#endif
 
         const auto resource = resolve_buffer_resource_id(pArgs->hResource, offset);
         const locked_key key{resource, subresource};

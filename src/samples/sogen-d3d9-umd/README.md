@@ -57,6 +57,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texcoord_test.cpp \
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_partial_lock_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-partial-lock-test-x64.exe -ld3d9
 
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_partial_lock_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-partial-lock-test-x86.exe -ld3d9
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_int_bool_const_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-int-bool-const-test-x64.exe -ld3d9 -ld3dcompiler_43
 
@@ -197,6 +200,7 @@ cp d3d9-texture-test-x64.exe <root>/filesys/c/d3d9-texture-test.exe
 cp d3d9-managed-texture-test-x64.exe <root>/filesys/c/d3d9-managed-texture-test.exe
 cp d3d9-texcoord-test-x64.exe <root>/filesys/c/d3d9-texcoord-test.exe
 cp d3d9-partial-lock-test-x64.exe <root>/filesys/c/d3d9-partial-lock-test.exe
+cp d3d9-partial-lock-test-x86.exe <root>/filesys/c/d3d9-partial-lock-test-x86.exe
 cp d3d9-int-bool-const-test-x64.exe <root>/filesys/c/d3d9-int-bool-const-test.exe
 cp d3d9-scissor-test-x64.exe <root>/filesys/c/d3d9-scissor-test.exe
 cp d3d9-mrt-test-x64.exe <root>/filesys/c/d3d9-mrt-test.exe
@@ -279,6 +283,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-multitexture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-partial-lock-test.exe
+./analyzer -e <root> -c c:/d3d9-partial-lock-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-rs-test.exe
 ./analyzer -e <root> -c c:/d3d9-pipeline-cache-stride-test.exe
 ./analyzer -e <root> -c c:/d3d9-drawprimitiveup-test.exe
