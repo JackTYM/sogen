@@ -1261,17 +1261,18 @@ namespace sogen
         return true;
     }
 
+    // The single alignment used for every arena slice (vertex/index/UBO), because it is simultaneously
+    // >= every per-usage requirement this one buffer serves: >= the real minUniformBufferOffsetAlignment
+    // reported by every target device (so a UBO slice is a legal VkDescriptorBufferInfo offset), >= any
+    // index-element size 2/4 (so an index slice is a legal cmd_bind_index_buffer offset), and core Vulkan
+    // imposes no vertex-buffer bind-offset alignment at all. One constant that satisfies all three makes
+    // every slice trivially correct, at negligible waste for realistic per-draw range counts. execute_draw's
+    // own draw_arena_bytes pre-count must round with this exact same constant -- see its own comment.
+    constexpr size_t arena_alignment = 256;
+
     bool d3d9_host::arena_suballoc(frame_arena& arena, const size_t size, size_t& out_offset)
     {
-        // 256 is the single alignment used for every slice, because it is simultaneously >= every
-        // per-usage requirement this one buffer serves: >= the real minUniformBufferOffsetAlignment
-        // reported by every target device (so a UBO slice is a legal VkDescriptorBufferInfo offset),
-        // >= any index-element size 2/4 (so an index slice is a legal cmd_bind_index_buffer offset), and
-        // core Vulkan imposes no vertex-buffer bind-offset alignment at all. One constant that satisfies
-        // all three makes every slice trivially correct, at negligible waste for realistic per-draw
-        // range counts.
-        constexpr size_t alignment = 256;
-        const size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
+        const size_t aligned_size = (size + arena_alignment - 1) & ~(arena_alignment - 1);
         if (arena.offset + aligned_size > arena.capacity)
         {
             // Grow-only, high-water-mark growth (new capacity = max(needed, 2 * old)). This is
@@ -1611,25 +1612,26 @@ namespace sogen
             ubo_staging[ubo_ps_b] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_b);
         }
 
-        // Total arena bytes this draw's reservations will consume (256-aligned per slice, matching
-        // arena_suballoc). Lets the batch-management step below decide whether this draw still fits in the
-        // open batch's arena without a mid-batch growth (which would destroy the buffer prior recorded
-        // draws reference).
-        auto aligned256 = [](const size_t n) { return (n + 255) & ~static_cast<size_t>(255); };
+        // Total arena bytes this draw's reservations will consume, rounded per slice with the exact same
+        // arena_alignment arena_suballoc itself rounds with (a mismatch here would let this pre-count
+        // underestimate the real requirement, letting arena_suballoc trigger a mid-batch growth that
+        // destroys the buffer prior recorded draws reference). Lets the batch-management step below decide
+        // whether this draw still fits in the open batch's arena without that growth.
+        auto aligned = [](const size_t n) { return (n + arena_alignment - 1) & ~(arena_alignment - 1); };
         size_t draw_arena_bytes = 0;
         for (const auto& rs : reserved_streams)
         {
-            draw_arena_bytes += aligned256(rs.bytes->size());
+            draw_arena_bytes += aligned(rs.bytes->size());
         }
         if (ib_bytes != nullptr)
         {
-            draw_arena_bytes += aligned256(ib_bytes->size());
+            draw_arena_bytes += aligned(ib_bytes->size());
         }
         if (use_programmable)
         {
             for (const size_t s : ubo_sizes)
             {
-                draw_arena_bytes += aligned256(s);
+                draw_arena_bytes += aligned(s);
             }
         }
 

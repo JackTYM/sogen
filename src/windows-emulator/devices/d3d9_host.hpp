@@ -283,18 +283,19 @@ namespace sogen
         uint64_t vk_physical_device_{}; // 0 until lazily created
         uint64_t vk_device_{};          // 0 until lazily created
 
-        // Lazily created once per device: a single command pool/buffer/fence/queue reused for every
-        // draw, submitted and waited on synchronously (simplest correct model for a first triangle --
-        // no double-buffering/pipelining yet).
+        // Lazily created once per device: a single command pool/queue, plus a command_buffer_/fence_
+        // pair reused (submitted and waited on synchronously) by the prep helpers
+        // (ensure_texture_uploaded, ensure_depth_stencil_view), color_fill, and blt -- draws themselves
+        // record into the separate batch_command_buffer_/batch_fence_ below.
         uint64_t queue_{};
         uint64_t command_pool_{};
         uint64_t command_buffer_{};
         uint64_t fence_{};
         bool draw_infra_ready_{false};
 
-        // A separate, dedicated command buffer/fence for the batched-draw recording, so it never collides
-        // with the shared command_buffer_/fence_ that the prep helpers (ensure_texture_uploaded,
-        // ensure_depth_stencil_view), execute_draw, color_fill, and blt submit+wait on synchronously.
+        // A separate, dedicated command buffer/fence for the batched-draw recording, so it never
+        // collides with the shared command_buffer_/fence_ that the prep helpers, color_fill, and blt
+        // submit+wait on synchronously above.
         uint64_t batch_command_buffer_{};
         uint64_t batch_fence_{};
         bool batch_open_{false};
