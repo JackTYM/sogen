@@ -2444,7 +2444,9 @@ namespace sogen
                                                     data.data(), data.size(), data_size);
                 // A render-target Lock is how the frame's rendering is forced to complete for tests that
                 // read pixels back instead of presenting (e.g. d3d9-manydraws); log the frame stats here
-                // too so those runs still emit one draws/submits data point.
+                // too so those runs still emit a data point. A single guest LockRect drives this path
+                // through two host lock DDI calls, so one LockRect logs this line twice -- expected, not
+                // a double-count (the counters are process-lifetime totals, unaffected either way).
                 if (render_target_readback)
                 {
                     this->log_d3d9_frame_stats(win_emu);
