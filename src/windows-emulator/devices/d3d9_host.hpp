@@ -298,8 +298,14 @@ namespace sogen
         uint64_t batch_command_buffer_{};
         uint64_t batch_fence_{};
         bool batch_open_{false};
-        // Render target the currently-open batch records into; 0 = none.
-        [[maybe_unused]] uint64_t batch_rt_{};
+        // Render target (slot-0 handle) the currently-open batch records into; 0 = none. A draw whose
+        // slot-0 render target differs flushes the batch first (execute_draw), so a batch never mixes
+        // render targets.
+        uint64_t batch_rt_{};
+        // Draws recorded into the currently-open batch that consumed a descriptor-set pair (programmable
+        // draws). Reset to 0 on batch open; when the next draw would exceed frame_desc_capacity_draws_ the
+        // batch is flushed first so the pool can be reset (see execute_draw's overflow guard).
+        uint32_t batch_draw_count_{};
 
         // The one hardcoded fixed-function shader pair (see execute_draw's comment), its shader modules
         // and pipeline layout -- shape-invariant (FF always uses the same hardcoded XYZRHW+DIFFUSE vertex
@@ -476,6 +482,11 @@ namespace sogen
         // arena buffer (destroy + recreate, high-water mark) when a slice won't fit; returns false only
         // on a Vulkan allocation failure. See the .cpp definition for the 256-byte and growth rationale.
         bool arena_suballoc(frame_arena& arena, size_t size, size_t& out_offset);
+        // Grows the arena buffer (destroy + recreate) to at least new_capacity, preserving nothing (the
+        // caller resets/repopulates the arena). Destroying the buffer is only safe when no in-flight or
+        // recorded-but-unsubmitted command references it, so callers must flush any open batch first.
+        // Returns false only on a Vulkan allocation failure.
+        bool grow_arena(frame_arena& arena, size_t new_capacity);
         // Ensures frame_descriptor_pool_ exists and is sized for at least needed_draws draws' worth of
         // descriptor sets (2 per draw). Creates it lazily at frame_desc_initial_draws capacity, or doubles
         // and recreates it (dropping the old pool -- every prior draw already fenced) when needed_draws
@@ -485,8 +496,10 @@ namespace sogen
         // Returns 0 on failure.
         uint64_t ensure_vk_device();
         bool ensure_draw_infra();
-        // Ends, submits and waits on the open batch command buffer, closing the batch. Inert while
-        // batch_open_ is never set (no code path opens a batch yet).
+        // Ends, submits and waits on the open batch command buffer, closing the batch (batch_open_ =
+        // false). A no-op when no batch is open. Called at every boundary that must observe the batch's
+        // GPU work before proceeding (readback, clear, color_fill, blt, resource teardown, render-target
+        // change) and at each batching scope boundary inside execute_draw.
         void flush_batch();
         // depth_format is a VkFormat (0 = no depth attachment), matching create_graphics_pipeline's own
         // dynamic-rendering depth_format parameter. color_formats holds one VkFormat per currently-bound
