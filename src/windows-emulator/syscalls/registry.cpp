@@ -206,24 +206,6 @@ namespace sogen
 
             const auto name_8 = u16_to_u8(query_name);
 
-            // Auto-increment the WASAPI audio engine activation counter on each read so that dsound's
-            // poll loop (which reads the counter in pairs, comparing consecutive values) immediately
-            // detects a change and proceeds to Initialize rather than retrying indefinitely.
-            if (name_8.starts_with("{9c119480"))
-            {
-                const auto pre = c.win_emu.registry.get_value(*key, name_8);
-                if (pre && pre->is_dword() && pre->data.size() == sizeof(uint32_t))
-                {
-                    uint32_t counter = 0;
-                    std::memcpy(&counter, pre->data.data(), sizeof(counter));
-                    printf("[reg-dbg] {9c119480}%s read -> %u\n", name_8.c_str() + 9, counter);
-                    ++counter;
-                    const auto* bytes = reinterpret_cast<const std::byte*>(&counter);
-                    c.win_emu.registry.set_value(*key, name_8, pre->type,
-                                                 std::span<const std::byte>(bytes, sizeof(counter)));
-                }
-            }
-
             const auto value = c.win_emu.registry.get_value(*key, name_8);
             if (!value)
             {
