@@ -938,6 +938,8 @@ namespace sogen
             size_t size;
         };
 
+        constexpr uint32_t cube_face_count = 6;
+
         // Ordered per-subresource layout (index -> level/face/extent/byte-size) of a sampled texture of
         // `kind`. Cube: 6*mip_levels entries, subresource index == face*mip_levels + level. Volume:
         // mip_levels entries, index == level, each spanning the level's whole depth extent. 2D:
@@ -951,7 +953,7 @@ namespace sogen
             const uint32_t levels = std::max(1u, mip_levels);
             const bool is_cube = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube);
             const bool is_volume = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume);
-            const uint32_t faces = is_cube ? 6u : 1u;
+            const uint32_t faces = is_cube ? cube_face_count : 1u;
 
             std::vector<texture_subresource> out;
             out.reserve(static_cast<size_t>(faces) * levels);
@@ -982,7 +984,7 @@ namespace sogen
         {
             if (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube))
             {
-                return {VK_IMAGE_VIEW_TYPE_CUBE, 6};
+                return {VK_IMAGE_VIEW_TYPE_CUBE, cube_face_count};
             }
             if (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
             {
@@ -2043,7 +2045,7 @@ namespace sogen
                 uint32_t image_flags = 0;
                 if (is_cube)
                 {
-                    array_layers = 6;
+                    array_layers = cube_face_count;
                     image_flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
                 }
                 else if (is_volume)
@@ -2192,7 +2194,7 @@ namespace sogen
         // One barrier over the whole image, then one buffer->image copy per subresource. A cube's six
         // faces are array layers 0..5 of a single image, so the barrier must span all six; a 2D texture
         // and a 3D volume (which has a single array layer) span one.
-        const uint32_t barrier_layer_count = is_cube ? 6u : 1u;
+        const uint32_t barrier_layer_count = is_cube ? cube_face_count : 1u;
         const vulkan_host::subresource_range range{.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
                                                    .base_mip_level = 0,
                                                    .level_count = mip_levels,
