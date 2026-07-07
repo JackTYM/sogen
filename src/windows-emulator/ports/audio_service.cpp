@@ -444,7 +444,8 @@ namespace sogen
                 writer.write_ndr_u16string(id, true);
                 writer.align_to(sizeof(uint32_t));
 
-                writer.write<uint32_t>(0); // [out] state
+                writer.write<uint32_t>(1); // [out] state -- DEVICE_STATE_ACTIVE, matching the endpoint
+                                           // find_default_endpoint_id just selected on (state == 1)
 
                 writer.write(k_hr_ok); // return HRESULT
                 return STATUS_SUCCESS;
