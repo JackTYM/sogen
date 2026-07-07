@@ -167,6 +167,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_cube_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-volume-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_cube_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-cube-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-volume-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -233,6 +239,8 @@ cp d3d9-vertex-texture-test-x86.exe <root>/filesys/c/d3d9-vertex-texture-test-x8
 cp d3d9-cube-volume-test-x64.exe <root>/filesys/c/d3d9-cube-volume-test.exe
 cp d3d9-cube-test-x64.exe <root>/filesys/c/d3d9-cube-test.exe
 cp d3d9-volume-test-x64.exe <root>/filesys/c/d3d9-volume-test.exe
+cp d3d9-cube-test-x86.exe <root>/filesys/c/d3d9-cube-test-x86.exe
+cp d3d9-volume-test-x86.exe <root>/filesys/c/d3d9-volume-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -294,6 +302,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-cube-volume-test.exe
 ./analyzer -e <root> -c c:/d3d9-cube-test.exe
 ./analyzer -e <root> -c c:/d3d9-volume-test.exe
+./analyzer -e <root> -c c:/d3d9-cube-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-volume-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -966,6 +976,22 @@ architectures.
   convention), so they were already exercised by the shared x64 test run before this port and needed no
   x86-specific fix. Full regression sweep after this port (every x64/x86 guest test plus the 26/26 smoke
   test) is documented in `docs/d3d9-roadmap.md` and `HANDOFF_MACBOOK.md`.
+- **Cube- and volume-texture SAMPLING, ported to x86/WoW64 (Task 7, 2026-07-06) -- ZERO new x86-only
+  bugs, a genuine zero-source-change port.** `d3d9-cube-test-x86.exe` and `d3d9-volume-test-x86.exe`
+  were cross-compiled unchanged from the same `d3d9_cube_test.cpp`/`d3d9_volume_test.cpp` the x64 tests
+  use (no edits to those `.cpp` files, `sogen_d3d9_umd.cpp`, or `d3d9_host.cpp`), and passed on the
+  first run against the real 32-bit `d3d9.dll`, byte-exact parity with x64 on all six cube faces and all
+  four volume slices. This confirms the two DDI fields this feature depends on are already correctly
+  modeled for both architectures under the existing `#ifdef _WIN64` splits in `d3d9_ddi.hpp`:
+  `D3DDDIARG_CREATERESOURCE::Flags` (offset 56 x64 / 48 x86, both static-asserted), whose CubeMap
+  (`0x20000`) / Volume (`0x40000`) bits `resource_flags_to_kind` reads to classify the resource kind,
+  and `D3DDDIARG_LOCK::SubResourceIndex` (offset 8 x64 / 4 x86, both static-asserted), the per-face
+  subresource selector. The whole feature is otherwise host-side C++ (the `VK_IMAGE_VIEW_TYPE_CUBE` /
+  `VK_IMAGE_TYPE_3D` image/upload/view generalization in `d3d9_host.cpp`/`vulkan_host.cpp`, commits
+  `39c8728a`/`fab1bcaa`), so it touches no HANDLE-width-sensitive field the way `d3d9_host::allocate_id()`
+  and `D3DDDIARG_CREATERESOURCE`'s output-handle offset did for the const/texture ports. The shared
+  `g_formats` FORMATOP cube/volume op-bits carry no `_WIN64` split either. Full x86 regression sweep
+  after this port (all 24 x86 D3D9 guest tests) came back green, zero regressions.
 
 `d3d9-instancing-test.exe` proves real D3D9 hardware instancing: a single `DrawIndexedPrimitive` draws
 N geometry instances driven entirely by `SetStreamSourceFreq` (no explicit instance-count draw
@@ -1079,8 +1105,10 @@ byte-exact (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`, `-Y=B00 GFF RF
 separate per-subresource backing (the guest-side staging buffer some early `LockRect` calls happen to
 reuse is an unrelated guest-side detail, not evidence either way). Expect `CreateCubeTexture(64, 1 level)`/six `LockRect(face=...)`/
 `CreateRenderTarget`/all six `DrawIndexedPrimitive` `hr=0x00000000`, six `PASS:` lines, and
-`[d3d9-cube-test] ALL CHECKS PASSED`. x64 only for now (x86/WoW64 port is a later task); needs
-`d3dcompiler_43`.
+`[d3d9-cube-test] ALL CHECKS PASSED`; needs `d3dcompiler_43`. `d3d9-cube-test-x86.exe` was
+cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`, byte-exact
+parity with x64 on all six faces (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`,
+`-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`, `-Z=BFF GFF R00`, `ALL CHECKS PASSED`, exit 0).
 
 `d3d9-volume-test.exe` proves volume-texture SAMPLING end to end (same host-side commits): a real
 `IDirect3DVolumeTexture9` gets all of its depth slices' distinct pixel data to the GPU (one `LockBox(0)`
@@ -1100,5 +1128,7 @@ broken volume image would read the SAME (slice-0) color across all four instead 
 ones. Confirmed live: all four read back byte-exact (`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`,
 `slice2=BFF G00 R00`, `slice3=B00 GFF RFF`). Expect `CreateVolumeTexture(32x32x4, 1 level)`/`LockBox(0)`/
 `CreateRenderTarget`/all four `DrawIndexedPrimitive` `hr=0x00000000`, four `PASS:` lines, and
-`[d3d9-volume-test] ALL CHECKS PASSED`. x64 only for now (x86/WoW64 port is a later task); needs
-`d3dcompiler_43`.
+`[d3d9-volume-test] ALL CHECKS PASSED`; needs `d3dcompiler_43`. `d3d9-volume-test-x86.exe` was
+cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`, byte-exact
+parity with x64 on all four slices (`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`, `slice2=BFF G00 R00`,
+`slice3=B00 GFF RFF`, `ALL CHECKS PASSED`, exit 0).
