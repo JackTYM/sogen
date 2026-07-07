@@ -1114,11 +1114,11 @@ staging buffer some early `LockRect` calls happen to reuse is an unrelated guest
 evidence either way). Expect `CreateCubeTexture(64, 2 levels)`/twelve `LockRect(face=..., level=...)`/
 `CreateRenderTarget`/all twelve `DrawIndexedPrimitive` `hr=0x00000000`, twelve `PASS:` lines, and
 `[d3d9-cube-test] ALL CHECKS PASSED`; needs `d3dcompiler_43`. `d3d9-cube-test-x86.exe` was
-cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`, byte-exact
-parity with x64 on all six faces (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`,
-`-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`, `-Z=BFF GFF R00`, `ALL CHECKS PASSED`, exit 0); that x86 run
-predates the mip level 1 extension above (the x86 rebuild covering the six level-1 sub-passes is a
-pending follow-up).
+cross-compiled unchanged (including the mip level 1 extension above) and passed on the first run
+against the real 32-bit `d3d9.dll`, byte-exact parity with x64 on all twelve sub-passes -- level 0's
+six faces (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`, `-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`,
+`-Z=BFF GFF R00`) and level 1's six half-intensity faces (`+X=R80`, `-X=G80`, `+Y=B80`, `-Y=G80/R80`,
+`+Z=B80/R80`, `-Z=B80/G80`), `ALL CHECKS PASSED`, exit 0 -- zero source changes needed for the port.
 
 `d3d9-volume-test.exe` proves volume-texture SAMPLING end to end (same host-side commits): a real
 `IDirect3DVolumeTexture9` gets all of its depth slices' distinct pixel data to the GPU (one `LockBox(0)`
@@ -1146,8 +1146,9 @@ byte-exact (`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`, `slice2=BFF G00 R00`, `s
 both level-1 slices read back byte-exact (`slice0=BFF G00 RFF`, `slice1=BFF GFF R00`). Expect
 `CreateVolumeTexture(32x32x4, 2 levels)`/`LockBox(0)`/`LockBox(1)`/`CreateRenderTarget`/all six
 `DrawIndexedPrimitive` `hr=0x00000000`, six `PASS:` lines, and `[d3d9-volume-test] ALL CHECKS PASSED`;
-needs `d3dcompiler_43`. `d3d9-volume-test-x86.exe` was cross-compiled unchanged and passed on the first
-run against the real 32-bit `d3d9.dll`, byte-exact parity with x64 on all four slices
-(`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`, `slice2=BFF G00 R00`, `slice3=B00 GFF RFF`,
-`ALL CHECKS PASSED`, exit 0); that x86 run predates the mip level 1 extension above (the x86 rebuild
-covering the two level-1 sub-passes is a pending follow-up).
+needs `d3dcompiler_43`. `d3d9-volume-test-x86.exe` was cross-compiled unchanged (including the mip
+level 1 extension above) and passed on the first run against the real 32-bit `d3d9.dll`, byte-exact
+parity with x64 on all six sub-passes -- level 0's four slices (`slice0=B00 G00 RFF`,
+`slice1=B00 GFF R00`, `slice2=BFF G00 R00`, `slice3=B00 GFF RFF`) and level 1's two
+(`slice0=BFF G00 RFF`, `slice1=BFF GFF R00`), `ALL CHECKS PASSED`, exit 0 -- zero source changes needed
+for the port.

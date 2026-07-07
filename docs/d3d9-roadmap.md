@@ -777,11 +777,18 @@ and the 26-subtest smoke test all pass with unchanged pixel values.
   zero source changes (the DDI offsets this depends on were already correctly `_WIN64`-split), with a
   full existing-guest-test regression sweep clean on both architectures at every stage, independently
   re-verified by spec-compliance and code-quality reviewers throughout.
+  **Mip levels above 0 for cube/volume — closed (2026-07-06, commit `1cd52f2c`/`616e99fd`).** Both
+  `d3d9_cube_test.cpp` and `d3d9_volume_test.cpp` gained a second mip level (`MipLevels=2`) with its own
+  6 distinct face colors / 2 distinct slice colors, sampled via a `D3DSAMP_MAXMIPLEVEL=1` sampler-state
+  clamp (with `MIPFILTER=NONE` already set) that pins the Vulkan `minLod`/`maxLod` both to `1.0` — a
+  hard, deterministic level-1-only selection, not an LOD heuristic that could still land on level 0. All
+  12 cube sub-passes and all 6 volume sub-passes pass byte-exact on both x64 and x86/WoW64 (the x86 port
+  needed zero source changes). No host/UMD change was needed — confirms the `texture_subresource_layout`
+  sizing/indexing math really was already correct for `mip_levels>1`, closing what had been an honestly
+  flagged, untested gap rather than a known-broken one.
   **Deliberately still out of scope**: compressed (BC) volume textures; cube/volume render targets and
-  `D3DPOOL_MANAGED` cube/volume (sampled `D3DPOOL_DEFAULT` only); mip levels above 0 for cube/volume
-  (the sizing/indexing math is mip-aware and not architecturally broken for `mip_levels>1`, but no test
-  proves non-base-level correctness yet — a real gap if a game samples a mip'd cube/volume texture,
-  not merely a documentation nicety); cube arrays (`VK_IMAGE_VIEW_TYPE_CUBE_ARRAY`, not needed, not built).
+  `D3DPOOL_MANAGED` cube/volume (sampled `D3DPOOL_DEFAULT` only); cube arrays
+  (`VK_IMAGE_VIEW_TYPE_CUBE_ARRAY`, not needed, not built).
 - [x] **D3DFORMAT advertisement — done (2026-07-06, commits `ba83be93`/`18b74fcb`/`a9c2f8d3`/`197cfbd3`).**
   The old gap: the host's `d3d9_format_to_vulkan` (`d3d9_format.cpp`) already correctly mapped 13
   D3DFORMAT values to VkFormat, but the UMD's own `g_formats` FORMATOP table — the thing real
