@@ -15,6 +15,15 @@
 // face reading layer 0), multiple sub-passes would read back the SAME wrong color instead of six
 // distinct, correct ones -- so each sub-pass is checked against its own expected color, not merely
 // "not the clear color".
+//
+// The cube is created with TWO real mip levels. Level 1 (32x32) gets a SECOND, distinct set of six
+// half-intensity face colors (none of which equals any level-0 color), so six more sub-passes -- each
+// pinning the sampler to mip level 1 via D3DSAMP_MIPFILTER=NONE + D3DSAMP_MAXMIPLEVEL=1 (the same
+// min_lod==max_lod==1 clamp d3d9_miptexture_test.cpp proves for 2D) -- read back face f's LEVEL-1 color.
+// This proves the flattened index for a NON-ZERO mip (face*mip_levels + 1, not face*1 + 1) is correct
+// and that level 1's backing is genuinely separate from level 0's: if level 1 aliased level 0, or the
+// index dropped the mip term, these passes would read the bright level-0 colors instead of the
+// half-intensity level-1 ones.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -59,6 +68,7 @@ float4 main(PSInput input) : COLOR0
     constexpr int kCanvasWidth = 640;
     constexpr int kCanvasHeight = 480;
     constexpr int kCubeSize = 64;
+    constexpr int kMipLevels = 2; // level 0: 64x64, level 1: 32x32
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)
     {
@@ -255,8 +265,9 @@ int main()
     // proven lockable-texture path d3d9_miptexture_test.cpp uses for 2D); the creation-only
     // d3d9_cube_volume_test.cpp used Usage=0 because it never locked.
     IDirect3DCubeTexture9* tex = nullptr;
-    HRESULT hct = dev->CreateCubeTexture(kCubeSize, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
-    printf("[d3d9-cube-test] CreateCubeTexture(%d, 1 level) hr=0x%08lx tex=%p\n", kCubeSize,
+    HRESULT hct =
+        dev->CreateCubeTexture(kCubeSize, kMipLevels, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
+    printf("[d3d9-cube-test] CreateCubeTexture(%d, %d levels) hr=0x%08lx tex=%p\n", kCubeSize, kMipLevels,
            static_cast<unsigned long>(hct), static_cast<void*>(tex));
     if (FAILED(hct) || !tex)
     {
@@ -265,29 +276,46 @@ int main()
         return 1;
     }
 
-    // Faces 0..5 in the standard D3D9 order +X/-X/+Y/-Y/+Z/-Z.
-    const DWORD kFaceColors[6] = {
-        D3DCOLOR_ARGB(255, 255, 0, 0),   // +X: RED
-        D3DCOLOR_ARGB(255, 0, 255, 0),   // -X: GREEN
-        D3DCOLOR_ARGB(255, 0, 0, 255),   // +Y: BLUE
-        D3DCOLOR_ARGB(255, 255, 255, 0), // -Y: YELLOW
-        D3DCOLOR_ARGB(255, 255, 0, 255), // +Z: MAGENTA
-        D3DCOLOR_ARGB(255, 0, 255, 255), // -Z: CYAN
-    };
-    for (int f = 0; f < 6; ++f)
-    {
-        D3DLOCKED_RECT lr{};
-        const D3DCUBEMAP_FACES face = static_cast<D3DCUBEMAP_FACES>(D3DCUBEMAP_FACE_POSITIVE_X + f);
-        HRESULT htl = tex->LockRect(face, 0, &lr, nullptr, 0);
-        printf("[d3d9-cube-test] LockRect(face=%d) hr=0x%08lx pBits=%p\n", f, static_cast<unsigned long>(htl), lr.pBits);
-        if (FAILED(htl) || !lr.pBits)
+    // Faces 0..5 in the standard D3D9 order +X/-X/+Y/-Y/+Z/-Z, per mip level. Level 1 uses
+    // half-intensity colors so no level-1 color equals any level-0 color -- a level-1 sample that read
+    // level-0 backing (aliasing, or a dropped mip term in the flattened index) would read a bright color.
+    const DWORD kFaceColors[kMipLevels][6] = {
         {
-            printf("[d3d9-cube-test] FAIL: LockRect(face=%d) failed\n", f);
-            release_all(tex, nullptr, nullptr, nullptr, vs, ps, dev, d3d);
-            return 1;
+            D3DCOLOR_ARGB(255, 255, 0, 0),   // +X: RED
+            D3DCOLOR_ARGB(255, 0, 255, 0),   // -X: GREEN
+            D3DCOLOR_ARGB(255, 0, 0, 255),   // +Y: BLUE
+            D3DCOLOR_ARGB(255, 255, 255, 0), // -Y: YELLOW
+            D3DCOLOR_ARGB(255, 255, 0, 255), // +Z: MAGENTA
+            D3DCOLOR_ARGB(255, 0, 255, 255), // -Z: CYAN
+        },
+        {
+            D3DCOLOR_ARGB(255, 128, 0, 0),   // +X: half-RED
+            D3DCOLOR_ARGB(255, 0, 128, 0),   // -X: half-GREEN
+            D3DCOLOR_ARGB(255, 0, 0, 128),   // +Y: half-BLUE
+            D3DCOLOR_ARGB(255, 128, 128, 0), // -Y: half-YELLOW
+            D3DCOLOR_ARGB(255, 128, 0, 128), // +Z: half-MAGENTA
+            D3DCOLOR_ARGB(255, 0, 128, 128), // -Z: half-CYAN
+        },
+    };
+    for (int level = 0; level < kMipLevels; ++level)
+    {
+        const int level_size = kCubeSize >> level;
+        for (int f = 0; f < 6; ++f)
+        {
+            D3DLOCKED_RECT lr{};
+            const D3DCUBEMAP_FACES face = static_cast<D3DCUBEMAP_FACES>(D3DCUBEMAP_FACE_POSITIVE_X + f);
+            HRESULT htl = tex->LockRect(face, level, &lr, nullptr, 0);
+            printf("[d3d9-cube-test] LockRect(face=%d, level=%d) hr=0x%08lx pBits=%p\n", f, level,
+                   static_cast<unsigned long>(htl), lr.pBits);
+            if (FAILED(htl) || !lr.pBits)
+            {
+                printf("[d3d9-cube-test] FAIL: LockRect(face=%d, level=%d) failed\n", f, level);
+                release_all(tex, nullptr, nullptr, nullptr, vs, ps, dev, d3d);
+                return 1;
+            }
+            fill_face(lr.pBits, level_size, kFaceColors[level][f]);
+            tex->UnlockRect(face, level);
         }
-        fill_face(lr.pBits, kCubeSize, kFaceColors[f]);
-        tex->UnlockRect(face, 0);
     }
 
     IDirect3DSurface9* rt = nullptr;
@@ -362,6 +390,17 @@ int main()
     failures += run_pass(dev, rt, 0.0f, -1.0f, 0.0f, /*B*/ 0, /*G*/ 255, /*R*/ 255, "-Y(YELLOW)");
     failures += run_pass(dev, rt, 0.0f, 0.0f, 1.0f, /*B*/ 255, /*G*/ 0, /*R*/ 255, "+Z(MAGENTA)");
     failures += run_pass(dev, rt, 0.0f, 0.0f, -1.0f, /*B*/ 255, /*G*/ 255, /*R*/ 0, "-Z(CYAN)");
+
+    // Six more sub-passes pinned to mip level 1 (MIPFILTER=NONE + MAXMIPLEVEL=1 -> min_lod==max_lod==1),
+    // each asserting face f's OWN half-intensity level-1 color -- the proof that a non-zero mip's
+    // subresource (face*mip_levels + 1) is uploaded and sampled correctly.
+    dev->SetSamplerState(0, D3DSAMP_MAXMIPLEVEL, 1);
+    failures += run_pass(dev, rt, 1.0f, 0.0f, 0.0f, /*B*/ 0, /*G*/ 0, /*R*/ 128, "L1:+X(half-RED)");
+    failures += run_pass(dev, rt, -1.0f, 0.0f, 0.0f, /*B*/ 0, /*G*/ 128, /*R*/ 0, "L1:-X(half-GREEN)");
+    failures += run_pass(dev, rt, 0.0f, 1.0f, 0.0f, /*B*/ 128, /*G*/ 0, /*R*/ 0, "L1:+Y(half-BLUE)");
+    failures += run_pass(dev, rt, 0.0f, -1.0f, 0.0f, /*B*/ 0, /*G*/ 128, /*R*/ 128, "L1:-Y(half-YELLOW)");
+    failures += run_pass(dev, rt, 0.0f, 0.0f, 1.0f, /*B*/ 128, /*G*/ 0, /*R*/ 128, "L1:+Z(half-MAGENTA)");
+    failures += run_pass(dev, rt, 0.0f, 0.0f, -1.0f, /*B*/ 128, /*G*/ 128, /*R*/ 0, "L1:-Z(half-CYAN)");
 
     release_all(tex, rt, vb, ib, vs, ps, dev, d3d);
 

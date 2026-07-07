@@ -16,6 +16,14 @@
 // color. If the depth extent were collapsed to 1, or the sampler always read slice 0, every sub-pass
 // would read back the SAME (slice-0) color instead of four distinct, correct ones -- so each sub-pass is
 // checked against its own expected color.
+//
+// The volume is created with TWO real mip levels. Level 1 (16x16x2, depth halved) is filled through its
+// own LockBox(1) with two colors (MAGENTA/CYAN) distinct from every level-0 slice color. Two more
+// sub-passes pin the sampler to mip level 1 (D3DSAMP_MIPFILTER=NONE + D3DSAMP_MAXMIPLEVEL=1 ->
+// min_lod==max_lod==1, the same clamp d3d9_miptexture_test.cpp proves) and sample w = (d + 0.5) / 2 for
+// d = 0,1, asserting each reads back its OWN level-1 color. This proves the volume mip>0 subresource
+// (index == level) is uploaded with its own shrunk depth extent and sampled correctly: a level-1 sample
+// that read level-0 backing would read one of the four bright level-0 colors instead.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -60,6 +68,7 @@ float4 main(PSInput input) : COLOR0
     constexpr int kVolWidth = 32;
     constexpr int kVolHeight = 32;
     constexpr int kVolDepth = 4;
+    constexpr int kMipLevels = 2; // level 0: 32x32x4, level 1: 16x16x2
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)
     {
@@ -239,10 +248,10 @@ int main()
     // d3d9_miptexture_test.cpp uses for 2D); the creation-only d3d9_cube_volume_test.cpp used Usage=0
     // because it never locked.
     IDirect3DVolumeTexture9* vol = nullptr;
-    HRESULT hcv = dev->CreateVolumeTexture(kVolWidth, kVolHeight, kVolDepth, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8,
-                                           D3DPOOL_DEFAULT, &vol, nullptr);
-    printf("[d3d9-volume-test] CreateVolumeTexture(%dx%dx%d, 1 level) hr=0x%08lx vol=%p\n", kVolWidth, kVolHeight,
-           kVolDepth, static_cast<unsigned long>(hcv), static_cast<void*>(vol));
+    HRESULT hcv = dev->CreateVolumeTexture(kVolWidth, kVolHeight, kVolDepth, kMipLevels, D3DUSAGE_DYNAMIC,
+                                           D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &vol, nullptr);
+    printf("[d3d9-volume-test] CreateVolumeTexture(%dx%dx%d, %d levels) hr=0x%08lx vol=%p\n", kVolWidth, kVolHeight,
+           kVolDepth, kMipLevels, static_cast<unsigned long>(hcv), static_cast<void*>(vol));
     if (FAILED(hcv) || !vol)
     {
         printf("[d3d9-volume-test] FAIL: CreateVolumeTexture failed\n");
@@ -250,41 +259,52 @@ int main()
         return 1;
     }
 
-    const DWORD kSliceColors[kVolDepth] = {
+    // Level 0's four slices, then level 1's two (depth halves to 2). Level 1 uses colors distinct from
+    // every level-0 slice, so a level-1 sample that read level-0 backing would read a wrong bright color.
+    const DWORD kSliceColorsL0[kVolDepth] = {
         D3DCOLOR_ARGB(255, 255, 0, 0),   // slice 0: RED
         D3DCOLOR_ARGB(255, 0, 255, 0),   // slice 1: GREEN
         D3DCOLOR_ARGB(255, 0, 0, 255),   // slice 2: BLUE
         D3DCOLOR_ARGB(255, 255, 255, 0), // slice 3: YELLOW
     };
+    const DWORD kSliceColorsL1[kVolDepth >> 1] = {
+        D3DCOLOR_ARGB(255, 255, 0, 255), // slice 0: MAGENTA
+        D3DCOLOR_ARGB(255, 0, 255, 255), // slice 1: CYAN
+    };
+    const DWORD* const kLevelColors[kMipLevels] = {kSliceColorsL0, kSliceColorsL1};
+    for (int level = 0; level < kMipLevels; ++level)
     {
+        const int level_width = kVolWidth >> level;
+        const int level_height = kVolHeight >> level;
+        const int level_depth = kVolDepth >> level;
         D3DLOCKED_BOX lb{};
-        HRESULT htl = vol->LockBox(0, &lb, nullptr, 0);
-        printf("[d3d9-volume-test] LockBox(0) hr=0x%08lx pBits=%p RowPitch=%ld SlicePitch=%ld\n",
+        HRESULT htl = vol->LockBox(level, &lb, nullptr, 0);
+        printf("[d3d9-volume-test] LockBox(%d) hr=0x%08lx pBits=%p RowPitch=%ld SlicePitch=%ld\n", level,
                static_cast<unsigned long>(htl), lb.pBits, lb.RowPitch, lb.SlicePitch);
         if (FAILED(htl) || !lb.pBits)
         {
-            printf("[d3d9-volume-test] FAIL: LockBox failed\n");
+            printf("[d3d9-volume-test] FAIL: LockBox(%d) failed\n", level);
             release_all(vol, nullptr, nullptr, nullptr, vs, ps, dev, d3d);
             return 1;
         }
-        // The host backs subresource 0 as one tightly-packed slice-major block, so use self-computed
+        // The host backs each subresource as one tightly-packed slice-major block, so use self-computed
         // pitches (not lb.RowPitch/lb.SlicePitch, which this UMD's Lock DDI leaves unpopulated).
-        const LONG row_pitch = kVolWidth * 4;
-        const LONG slice_pitch = row_pitch * kVolHeight;
+        const LONG row_pitch = level_width * 4;
+        const LONG slice_pitch = row_pitch * level_height;
         auto* base = static_cast<unsigned char*>(lb.pBits);
-        for (int d = 0; d < kVolDepth; ++d)
+        for (int d = 0; d < level_depth; ++d)
         {
             auto* slice = base + d * slice_pitch;
-            for (int y = 0; y < kVolHeight; ++y)
+            for (int y = 0; y < level_height; ++y)
             {
                 auto* row = reinterpret_cast<DWORD*>(slice + y * row_pitch);
-                for (int x = 0; x < kVolWidth; ++x)
+                for (int x = 0; x < level_width; ++x)
                 {
-                    row[x] = kSliceColors[d];
+                    row[x] = kLevelColors[level][d];
                 }
             }
         }
-        vol->UnlockBox(0);
+        vol->UnlockBox(level);
     }
 
     IDirect3DSurface9* rt = nullptr;
@@ -357,6 +377,14 @@ int main()
     failures += run_pass(dev, rt, (1 + 0.5f) / kVolDepth, /*B*/ 0, /*G*/ 255, /*R*/ 0, "slice1(GREEN)");
     failures += run_pass(dev, rt, (2 + 0.5f) / kVolDepth, /*B*/ 255, /*G*/ 0, /*R*/ 0, "slice2(BLUE)");
     failures += run_pass(dev, rt, (3 + 0.5f) / kVolDepth, /*B*/ 0, /*G*/ 255, /*R*/ 255, "slice3(YELLOW)");
+
+    // Two more sub-passes pinned to mip level 1 (MIPFILTER=NONE + MAXMIPLEVEL=1 -> min_lod==max_lod==1);
+    // level 1's depth is 2, so w = (d + 0.5) / 2 lands in each of its two slices, asserting its OWN
+    // level-1 color -- the proof that the volume mip>0 subresource is uploaded and sampled correctly.
+    constexpr int kVolDepthL1 = kVolDepth >> 1;
+    dev->SetSamplerState(0, D3DSAMP_MAXMIPLEVEL, 1);
+    failures += run_pass(dev, rt, (0 + 0.5f) / kVolDepthL1, /*B*/ 255, /*G*/ 0, /*R*/ 255, "L1:slice0(MAGENTA)");
+    failures += run_pass(dev, rt, (1 + 0.5f) / kVolDepthL1, /*B*/ 255, /*G*/ 255, /*R*/ 0, "L1:slice1(CYAN)");
 
     release_all(vol, rt, vb, ib, vs, ps, dev, d3d);
 

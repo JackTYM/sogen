@@ -1090,44 +1090,64 @@ real `IDirect3DCubeTexture9` gets each of its six faces' distinct pixel data all
 (per-face `LockRect(D3DCUBEMAP_FACE_POSITIVE_X + f, 0, ...)` -> UMD `D3DDDIARG_LOCK::SubResourceIndex ==
 face*mip_levels + level` -> host per-subresource backing -> a single 6-array-layer
 `VK_IMAGE_VIEW_TYPE_CUBE` image, via the shared `texture_subresource_layout`/`sampled_view_shape_for_kind`
-in `d3d9_host.cpp`), and `texCUBE()` selects the correct face for a sample direction. A 64x64 single-mip
-cube (`D3DUSAGE_DYNAMIC | D3DPOOL_DEFAULT`, the proven-lockable path -- the creation-only test used
-`Usage=0` because it never locked) is filled RED/GREEN/BLUE/YELLOW/MAGENTA/CYAN in the standard D3D9 face
-order `+X/-X/+Y/-Y/+Z/-Z`. Six sub-passes each point `texCUBE` at one face's center direction via a
-`float3` PS constant `c0` (`SetPixelShaderConstantF`, register c0) -- `(1,0,0)`/`(-1,0,0)`/`(0,1,0)`/
-`(0,-1,0)`/`(0,0,1)`/`(0,0,-1)` -- draw a full-screen quad, and read back the center pixel. This is the
-discriminator: each sub-pass is asserted against its OWN face color, so a wrong flattened subresource
-index or Vulkan array-layer assignment (swapped, or every face reading layer 0) would read the SAME wrong
-color across multiple sub-passes instead of six distinct correct ones. Confirmed live: all six read back
+in `d3d9_host.cpp`), and `texCUBE()` selects the correct face for a sample direction. A 64x64 cube with
+TWO real mip levels (`D3DUSAGE_DYNAMIC | D3DPOOL_DEFAULT`, the proven-lockable path -- the creation-only
+test used `Usage=0` because it never locked) is filled per level: level 0 (64x64) with
+RED/GREEN/BLUE/YELLOW/MAGENTA/CYAN in the standard D3D9 face order `+X/-X/+Y/-Y/+Z/-Z`, level 1 (32x32)
+with the six HALF-intensity counterparts (none of which equals any level-0 color). Six level-0 sub-passes
+each point `texCUBE` at one face's center direction via a `float3` PS constant `c0`
+(`SetPixelShaderConstantF`, register c0) -- `(1,0,0)`/`(-1,0,0)`/`(0,1,0)`/`(0,-1,0)`/`(0,0,1)`/
+`(0,0,-1)` -- draw a full-screen quad, and read back the center pixel. This is the discriminator: each
+sub-pass is asserted against its OWN face color, so a wrong flattened subresource index or Vulkan
+array-layer assignment (swapped, or every face reading layer 0) would read the SAME wrong color across
+multiple sub-passes instead of six distinct correct ones. Six MORE sub-passes then pin the sampler to mip
+level 1 (`D3DSAMP_MIPFILTER=NONE` + `D3DSAMP_MAXMIPLEVEL=1` -> `min_lod==max_lod==1`, the same clamp
+`d3d9_miptexture_test.cpp` proves) and assert face f's OWN level-1 half-intensity color -- proving the
+flattened index for a NON-ZERO mip (`face*mip_levels + 1`, not `face*1 + 1`) is correct and that level
+1's backing is genuinely separate from level 0's (a dropped mip term or level-0 aliasing would read a
+bright level-0 color instead of the half-intensity one). Confirmed live: all six level-0 faces read back
 byte-exact (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`, `-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`,
-`-Z=BFF GFF R00`) -- the six distinct, correct GPU readbacks are themselves the proof of genuinely
-separate per-subresource backing (the guest-side staging buffer some early `LockRect` calls happen to
-reuse is an unrelated guest-side detail, not evidence either way). Expect `CreateCubeTexture(64, 1 level)`/six `LockRect(face=...)`/
-`CreateRenderTarget`/all six `DrawIndexedPrimitive` `hr=0x00000000`, six `PASS:` lines, and
+`-Z=BFF GFF R00`) and all six level-1 faces read back byte-exact (`+X=B00 G00 R80`, `-X=B00 G80 R00`,
+`+Y=B80 G00 R00`, `-Y=B00 G80 R80`, `+Z=B80 G00 R80`, `-Z=B80 G80 R00`) -- the twelve distinct, correct
+GPU readbacks are themselves the proof of genuinely separate per-subresource backing (the guest-side
+staging buffer some early `LockRect` calls happen to reuse is an unrelated guest-side detail, not
+evidence either way). Expect `CreateCubeTexture(64, 2 levels)`/twelve `LockRect(face=..., level=...)`/
+`CreateRenderTarget`/all twelve `DrawIndexedPrimitive` `hr=0x00000000`, twelve `PASS:` lines, and
 `[d3d9-cube-test] ALL CHECKS PASSED`; needs `d3dcompiler_43`. `d3d9-cube-test-x86.exe` was
 cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`, byte-exact
 parity with x64 on all six faces (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`,
-`-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`, `-Z=BFF GFF R00`, `ALL CHECKS PASSED`, exit 0).
+`-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`, `-Z=BFF GFF R00`, `ALL CHECKS PASSED`, exit 0); that x86 run
+predates the mip level 1 extension above (the x86 rebuild covering the six level-1 sub-passes is a
+pending follow-up).
 
 `d3d9-volume-test.exe` proves volume-texture SAMPLING end to end (same host-side commits): a real
 `IDirect3DVolumeTexture9` gets all of its depth slices' distinct pixel data to the GPU (one `LockBox(0)`
 writing every slice -> UMD `D3DDDIARG_LOCK` subresource 0 spanning the whole depth extent -> host single
 `VK_IMAGE_TYPE_3D` image with a `VK_IMAGE_VIEW_TYPE_3D` view), and `tex3D()` selects the correct depth
-slice for a given `w`. A 32x32x4 single-mip volume (`D3DUSAGE_DYNAMIC | D3DPOOL_DEFAULT`) is filled
-RED/GREEN/BLUE/YELLOW, one solid color per depth slice, in ONE `LockBox(0)` call. The host backs
-subresource 0 as one tightly-packed slice-major block (slice `d` at byte offset `d*width*height*4`), and
-this UMD's Lock DDI does NOT populate `D3DLOCKED_BOX::RowPitch`/`SlicePitch` (both came back 0, same
-known gap `d3d9_miptexture_test.cpp` documents for `D3DLOCKED_RECT`), so the test writes each slice at
-`pBits + d*(width*height*4)` with self-computed pitches -- exactly the tight layout the host's
-buffer->3D-image copy reads. Four sub-passes each sample `tex3D` at the texture center (`u,v = 0.5,0.5`)
-with `w = (d + 0.5) / 4` (0.125/0.375/0.625/0.875) via a `float3` PS constant `c0`, draw a full-screen
-quad, and read back the center pixel. This is the discriminator targeting the "depth extent collapsed to
-1, or always sample slice 0" failure mode: each sub-pass is asserted against its OWN slice color, so a
-broken volume image would read the SAME (slice-0) color across all four instead of four distinct correct
-ones. Confirmed live: all four read back byte-exact (`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`,
-`slice2=BFF G00 R00`, `slice3=B00 GFF RFF`). Expect `CreateVolumeTexture(32x32x4, 1 level)`/`LockBox(0)`/
-`CreateRenderTarget`/all four `DrawIndexedPrimitive` `hr=0x00000000`, four `PASS:` lines, and
-`[d3d9-volume-test] ALL CHECKS PASSED`; needs `d3dcompiler_43`. `d3d9-volume-test-x86.exe` was
-cross-compiled unchanged and passed on the first run against the real 32-bit `d3d9.dll`, byte-exact
-parity with x64 on all four slices (`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`, `slice2=BFF G00 R00`,
-`slice3=B00 GFF RFF`, `ALL CHECKS PASSED`, exit 0).
+slice for a given `w`. A 32x32x4 volume with TWO real mip levels (`D3DUSAGE_DYNAMIC | D3DPOOL_DEFAULT`)
+is filled per level through its own `LockBox(level)`: level 0 (32x32x4) with RED/GREEN/BLUE/YELLOW, one
+solid color per depth slice, and level 1 (16x16x2, depth halved) with MAGENTA/CYAN (distinct from every
+level-0 slice color). The host backs each subresource as one tightly-packed slice-major block (slice `d`
+at byte offset `d*width*height*4`), and this UMD's Lock DDI does NOT populate
+`D3DLOCKED_BOX::RowPitch`/`SlicePitch` (both came back 0, same known gap `d3d9_miptexture_test.cpp`
+documents for `D3DLOCKED_RECT`), so the test writes each slice at `pBits + d*(width*height*4)` with
+self-computed per-level pitches -- exactly the tight layout the host's buffer->3D-image copy reads. Four
+level-0 sub-passes each sample `tex3D` at the texture center (`u,v = 0.5,0.5`) with `w = (d + 0.5) / 4`
+(0.125/0.375/0.625/0.875) via a `float3` PS constant `c0`, draw a full-screen quad, and read back the
+center pixel. This is the discriminator targeting the "depth extent collapsed to 1, or always sample
+slice 0" failure mode: each sub-pass is asserted against its OWN slice color, so a broken volume image
+would read the SAME (slice-0) color across all four instead of four distinct correct ones. Two MORE
+sub-passes then pin the sampler to mip level 1 (`D3DSAMP_MIPFILTER=NONE` + `D3DSAMP_MAXMIPLEVEL=1` ->
+`min_lod==max_lod==1`) and sample `w = (d + 0.5) / 2` (0.25/0.75) across level 1's two slices, asserting
+each reads back its OWN level-1 color -- proving the volume mip>0 subresource (index == level) is
+uploaded with its own shrunk depth extent and sampled correctly (a level-1 sample that read level-0
+backing would read a bright level-0 color instead). Confirmed live: all four level-0 slices read back
+byte-exact (`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`, `slice2=BFF G00 R00`, `slice3=B00 GFF RFF`) and
+both level-1 slices read back byte-exact (`slice0=BFF G00 RFF`, `slice1=BFF GFF R00`). Expect
+`CreateVolumeTexture(32x32x4, 2 levels)`/`LockBox(0)`/`LockBox(1)`/`CreateRenderTarget`/all six
+`DrawIndexedPrimitive` `hr=0x00000000`, six `PASS:` lines, and `[d3d9-volume-test] ALL CHECKS PASSED`;
+needs `d3dcompiler_43`. `d3d9-volume-test-x86.exe` was cross-compiled unchanged and passed on the first
+run against the real 32-bit `d3d9.dll`, byte-exact parity with x64 on all four slices
+(`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`, `slice2=BFF G00 R00`, `slice3=B00 GFF RFF`,
+`ALL CHECKS PASSED`, exit 0); that x86 run predates the mip level 1 extension above (the x86 rebuild
+covering the two level-1 sub-passes is a pending follow-up).
