@@ -161,6 +161,12 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_vertex_texture_test.cpp \
 
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_cube_volume_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-cube-volume-test-x64.exe -ld3d9
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_cube_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-cube-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-volume-test-x64.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -225,6 +231,8 @@ cp d3d9-format-coverage-test-x86.exe <root>/filesys/c/d3d9-format-coverage-test-
 cp d3d9-vertex-texture-test-x64.exe <root>/filesys/c/d3d9-vertex-texture-test.exe
 cp d3d9-vertex-texture-test-x86.exe <root>/filesys/c/d3d9-vertex-texture-test-x86.exe
 cp d3d9-cube-volume-test-x64.exe <root>/filesys/c/d3d9-cube-volume-test.exe
+cp d3d9-cube-test-x64.exe <root>/filesys/c/d3d9-cube-test.exe
+cp d3d9-volume-test-x64.exe <root>/filesys/c/d3d9-volume-test.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -284,6 +292,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-vertex-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-vertex-texture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-cube-volume-test.exe
+./analyzer -e <root> -c c:/d3d9-cube-test.exe
+./analyzer -e <root> -c c:/d3d9-volume-test.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -1048,3 +1058,46 @@ volume textures are vanishingly rare in real D3D9 usage). Expect `CreateCubeText
 `CreateVolumeTexture(A8R8G8B8)`/`CreateCubeTexture(DXT1)` `hr=0x00000000`, the three negatives
 `hr=0x8876086c`, and `[d3d9-cube-volume-test] ALL CHECKS PASSED`. x64 only for now (x86/WoW64 port is a
 later task, together with the host-side cube/volume GPU image + sampling work).
+
+`d3d9-cube-test.exe` proves cube-texture SAMPLING end to end (the host-side cube GPU image/upload/view
+work, commits `39c8728a`/`fab1bcaa`, on top of the creation-only `d3d9-cube-volume-test.exe` above): a
+real `IDirect3DCubeTexture9` gets each of its six faces' distinct pixel data all the way to the GPU
+(per-face `LockRect(D3DCUBEMAP_FACE_POSITIVE_X + f, 0, ...)` -> UMD `D3DDDIARG_LOCK::SubResourceIndex ==
+face*mip_levels + level` -> host per-subresource backing -> a single 6-array-layer
+`VK_IMAGE_VIEW_TYPE_CUBE` image, via the shared `texture_subresource_layout`/`sampled_view_shape_for_kind`
+in `d3d9_host.cpp`), and `texCUBE()` selects the correct face for a sample direction. A 64x64 single-mip
+cube (`D3DUSAGE_DYNAMIC | D3DPOOL_DEFAULT`, the proven-lockable path -- the creation-only test used
+`Usage=0` because it never locked) is filled RED/GREEN/BLUE/YELLOW/MAGENTA/CYAN in the standard D3D9 face
+order `+X/-X/+Y/-Y/+Z/-Z`. Six sub-passes each point `texCUBE` at one face's center direction via a
+`float3` PS constant `c0` (`SetPixelShaderConstantF`, register c0) -- `(1,0,0)`/`(-1,0,0)`/`(0,1,0)`/
+`(0,-1,0)`/`(0,0,1)`/`(0,0,-1)` -- draw a full-screen quad, and read back the center pixel. This is the
+discriminator: each sub-pass is asserted against its OWN face color, so a wrong flattened subresource
+index or Vulkan array-layer assignment (swapped, or every face reading layer 0) would read the SAME wrong
+color across multiple sub-passes instead of six distinct correct ones. Confirmed live: all six read back
+byte-exact (`+X=B00 G00 RFF`, `-X=B00 GFF R00`, `+Y=BFF G00 R00`, `-Y=B00 GFF RFF`, `+Z=BFF G00 RFF`,
+`-Z=BFF GFF R00`), and the per-face `LockRect` `pBits` differ, confirming genuinely separate
+per-subresource backing. Expect `CreateCubeTexture(64, 1 level)`/six `LockRect(face=...)`/
+`CreateRenderTarget`/all six `DrawIndexedPrimitive` `hr=0x00000000`, six `PASS:` lines, and
+`[d3d9-cube-test] ALL CHECKS PASSED`. x64 only for now (x86/WoW64 port is a later task); needs
+`d3dcompiler_43`.
+
+`d3d9-volume-test.exe` proves volume-texture SAMPLING end to end (same host-side commits): a real
+`IDirect3DVolumeTexture9` gets all of its depth slices' distinct pixel data to the GPU (one `LockBox(0)`
+writing every slice -> UMD `D3DDDIARG_LOCK` subresource 0 spanning the whole depth extent -> host single
+`VK_IMAGE_TYPE_3D` image with a `VK_IMAGE_VIEW_TYPE_3D` view), and `tex3D()` selects the correct depth
+slice for a given `w`. A 32x32x4 single-mip volume (`D3DUSAGE_DYNAMIC | D3DPOOL_DEFAULT`) is filled
+RED/GREEN/BLUE/YELLOW, one solid color per depth slice, in ONE `LockBox(0)` call. The host backs
+subresource 0 as one tightly-packed slice-major block (slice `d` at byte offset `d*width*height*4`), and
+this UMD's Lock DDI does NOT populate `D3DLOCKED_BOX::RowPitch`/`SlicePitch` (both came back 0, same
+known gap `d3d9_miptexture_test.cpp` documents for `D3DLOCKED_RECT`), so the test writes each slice at
+`pBits + d*(width*height*4)` with self-computed pitches -- exactly the tight layout the host's
+buffer->3D-image copy reads. Four sub-passes each sample `tex3D` at the texture center (`u,v = 0.5,0.5`)
+with `w = (d + 0.5) / 4` (0.125/0.375/0.625/0.875) via a `float3` PS constant `c0`, draw a full-screen
+quad, and read back the center pixel. This is the discriminator targeting the "depth extent collapsed to
+1, or always sample slice 0" failure mode: each sub-pass is asserted against its OWN slice color, so a
+broken volume image would read the SAME (slice-0) color across all four instead of four distinct correct
+ones. Confirmed live: all four read back byte-exact (`slice0=B00 G00 RFF`, `slice1=B00 GFF R00`,
+`slice2=BFF G00 R00`, `slice3=B00 GFF RFF`). Expect `CreateVolumeTexture(32x32x4, 1 level)`/`LockBox(0)`/
+`CreateRenderTarget`/all four `DrawIndexedPrimitive` `hr=0x00000000`, four `PASS:` lines, and
+`[d3d9-volume-test] ALL CHECKS PASSED`. x64 only for now (x86/WoW64 port is a later task); needs
+`d3dcompiler_43`.
