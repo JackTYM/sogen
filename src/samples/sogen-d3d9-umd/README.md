@@ -158,6 +158,9 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_vertex_texture_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_vertex_texture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-vertex-texture-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_cube_volume_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-cube-volume-test-x64.exe -ld3d9
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
@@ -221,6 +224,7 @@ cp d3d9-format-coverage-test-x64.exe <root>/filesys/c/d3d9-format-coverage-test.
 cp d3d9-format-coverage-test-x86.exe <root>/filesys/c/d3d9-format-coverage-test-x86.exe
 cp d3d9-vertex-texture-test-x64.exe <root>/filesys/c/d3d9-vertex-texture-test.exe
 cp d3d9-vertex-texture-test-x86.exe <root>/filesys/c/d3d9-vertex-texture-test-x86.exe
+cp d3d9-cube-volume-test-x64.exe <root>/filesys/c/d3d9-cube-volume-test.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -279,6 +283,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-format-coverage-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-vertex-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-vertex-texture-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-cube-volume-test.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -1027,3 +1032,19 @@ Expect the three render sub-passes' `CreateTexture`/`CreateRenderTarget`/`DrawIn
 `CheckDeviceFormat(QUERY_VERTEXTEXTURE, A16B16G16R16F)` to return `hr=0x00000000`, five `PASS:` lines, and
 `[d3d9-format-coverage-test] ALL CHECKS PASSED`. Pixel-byte-identical parity confirmed on x64 and
 x86/WoW64.
+
+`d3d9-cube-volume-test.exe` proves the cube/volume half of that FORMATOP expansion plus the
+`umd_CreateResource` Flags-based kind classification (`resource_flags_to_kind` in `sogen_d3d9_umd.cpp`):
+before the change the `g_formats` table applied `FMT_OP_CUBETEXTURE`/`FMT_OP_VOLUMETEXTURE` to zero rows,
+so real `d3d9.dll` rejected `CreateCubeTexture`/`CreateVolumeTexture` for **every** format with
+`D3DERR_INVALIDCALL` (0x8876086c) -- it gates those entry points on the driver's per-format op-word.
+Scope is **creation only**: cube/volume resources have no host-side GPU backing yet (the host
+`create_resource`/`ensure_texture_uploaded` paths only back plain `texture_2d`), so the test never
+Locks/samples/draws them -- it asserts the creation `HRESULT` and releases. The `A8R8G8B8` cube +
+volume creates must SUCCEED; `L8` (no cube/volume op-bit) must still FAIL both -- the discriminator
+proving the capability is format-specific, not "everything works now"; and `DXT1` must SUCCEED as a cube
+but FAIL as a volume, proving the deliberate cube-yes/volume-no scope for the compressed rows (compressed
+volume textures are vanishingly rare in real D3D9 usage). Expect `CreateCubeTexture(A8R8G8B8)`/
+`CreateVolumeTexture(A8R8G8B8)`/`CreateCubeTexture(DXT1)` `hr=0x00000000`, the three negatives
+`hr=0x8876086c`, and `[d3d9-cube-volume-test] ALL CHECKS PASSED`. x64 only for now (x86/WoW64 port is a
+later task, together with the host-side cube/volume GPU image + sampling work).

@@ -511,6 +511,27 @@ namespace
         return usage;
     }
 
+    // Classify a genuine texture create into a 2D/cube/volume resource_kind from D3DDDIARG_CREATERESOURCE::Flags.
+    // The D3DDDI_RESOURCEFLAGS word carries an unambiguous dimensionality signal, RE-confirmed live against real
+    // d3d9.dll's CreateResource: bit16 (0x10000) marks every texture kind, bit17 (0x20000) additionally marks a
+    // CubeMap, bit18 (0x40000) a Volume; a plain 2D texture has neither bit17 nor bit18. These are independent of
+    // the RenderTarget/ZBuffer bits resource_flags_to_usage reads. SurfCount/Depth are NOT consulted -- the Flags
+    // bits alone are decisive.
+    d3d9c::resource_kind resource_flags_to_kind(uint32_t flags)
+    {
+        constexpr uint32_t k_resflag_cubemap = 0x20000; // D3DDDI_RESOURCEFLAGS.CubeMap
+        constexpr uint32_t k_resflag_volume = 0x40000;  // D3DDDI_RESOURCEFLAGS.Volume
+        if ((flags & k_resflag_cubemap) != 0)
+        {
+            return d3d9c::resource_kind::texture_cube;
+        }
+        if ((flags & k_resflag_volume) != 0)
+        {
+            return d3d9c::resource_kind::texture_volume;
+        }
+        return d3d9c::resource_kind::texture_2d;
+    }
+
     HRESULT APIENTRY umd_CreateResource(HANDLE /*hDevice*/, void* pArgs)
     {
         auto* bytes = reinterpret_cast<unsigned char*>(pArgs);
@@ -520,10 +541,10 @@ namespace
         // width/height/mip/pool are now READ FROM THE REAL, RE'd struct (see D3DDDIARG_CREATERESOURCE in
         // d3d9_ddi.hpp), not hardcoded to the old 640x480 shape. Dimensions live in the first
         // D3DDDI_SURFACEINFO element pSurfList points at (pSurfList is a guest pointer this in-guest UMD
-        // dereferences directly, the same way it reads every other pArgs field). SurfCount is read too:
-        // it is the count of that array (>1 for cube faces / volume slices) -- captured here for a future
-        // cube/volume task; this milestone still creates every resource as a single-subresource
-        // texture_2d (kind below is unconditional), so SurfCount only guards the pSurfList[0] read for now.
+        // dereferences directly, the same way it reads every other pArgs field). SurfCount is the count of
+        // that array (6 for a cube's faces, 1 for a volume whose pSurfList[0].Depth is the real depth); it
+        // guards the pSurfList[0] read here. The resource's cube/volume dimensionality is classified from
+        // Flags below (resource_flags_to_kind), not from SurfCount.
         const uint32_t surf_count = args->SurfCount;
         uint32_t width = 0;
         uint32_t height = 0;
@@ -549,12 +570,16 @@ namespace
         const bool is_internal_buffer_format = format == 100 || format == 101 || format == 102;
         const uint32_t usage = is_internal_buffer_format ? classify_resource_usage(format) : resource_flags_to_usage(args->Flags);
 
-        // KNOWN LIMITATION: `kind` is still forced to texture_2d unconditionally -- cube/volume
-        // dimensionality is now CAPTURED (SurfCount above) but not yet acted on (creating a real
-        // texture_cube/texture_volume host resource from SurfCount>1 is deliberately a separate future
-        // task). width/height/mip_levels/pool are no longer hardcoded; they are the app's real values.
+        // Dimensionality (2D/cube/volume) comes from the real Flags field for genuine resources (see
+        // resource_flags_to_kind). The internal-use synthetic buffer formats (100/101/102) do not carry
+        // meaningful cube/volume flags; keep them texture_2d (their host resource is orphaned regardless --
+        // see the format!=100/101/102 registration guard below -- so the kind is never acted on).
+        const d3d9c::resource_kind kind =
+            is_internal_buffer_format ? d3d9c::resource_kind::texture_2d : resource_flags_to_kind(args->Flags);
+
+        // width/height/mip_levels/pool are the app's real values (read from the RE'd struct above).
         const d3d9c::create_resource_request req{
-            .kind = static_cast<uint32_t>(d3d9c::resource_kind::texture_2d),
+            .kind = static_cast<uint32_t>(kind),
             .format = format,
             .width = width,
             .height = height,
@@ -999,12 +1024,18 @@ namespace
     // d3d9 stamps the whole driver disabled -- so no row below sets 3DACCELERATION; the color render
     // targets use RT_TEX (offscreen RT + texture, no display-mode question) rather than DISPLAY_RT.
     const FORMATOP g_formats[] = {
-        {22 /*X8R8G8B8    */, DISPLAY_RT, 0, 0, 0},
+        // X8R8G8B8: also cube- and volume-texture-creatable (FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE). The
+        // exact bits were RE-confirmed live against real d3d9.dll: adding them flips CreateCubeTexture/
+        // CreateVolumeTexture from D3DERR_INVALIDCALL (0x8876086c) to S_OK. (Host GPU backing for cube/volume
+        // is a later task; only the FORMATOP advertisement + UMD kind classification gate creation.)
+        {22 /*X8R8G8B8    */, DISPLAY_RT | FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE, 0, 0, 0},
         {75 /*D24S8       */, FMT_OP_ZSTENCIL, 0, 0, 0},
         {77 /*D24X8       */, FMT_OP_ZSTENCIL, 0, 0, 0},          // depth-only variant (matches D24S8)
         // A8R8G8B8: sampled textures (d3d9_texture_test.cpp) AND offscreen render targets -- alpha
-        // render targets are common (MRT/HDR-ish passes); RT_TEX, not DISPLAY_RT (no 3DACCELERATION).
-        {21 /*A8R8G8B8    */, RT_TEX, 0, 0, 0},
+        // render targets are common (MRT/HDR-ish passes); RT_TEX, not DISPLAY_RT (no 3DACCELERATION). Also
+        // cube- and volume-texture-creatable (FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE) -- RE-confirmed live:
+        // the bits flip CreateCubeTexture/CreateVolumeTexture from D3DERR_INVALIDCALL (0x8876086c) to S_OK.
+        {21 /*A8R8G8B8    */, RT_TEX | FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE, 0, 0, 0},
         // R5G6B5: 16-bit off-screen render target + texture (RT_TEX). The host RT sizing/readback/ColorFill
         // paths are now per-format bytes-per-texel aware (shared vk_format_bytes_per_texel helper +
         // d3d9_host::color_fill's format-aware texel encoder, added by the off-screen-render-target format
@@ -1037,11 +1068,13 @@ namespace
         // D3DUSAGE_QUERY_VERTEXTEXTURE query -- advertising the documented 0x00400000 (AUTOGENMIPMAP) does
         // NOT satisfy it.
         {113 /*A16B16G16R16F*/, RT_TEX | FMT_OP_VERTEXTEXTURE, 0, 0, 0},
-        // Compressed textures -- FMT_OP_TEXTURE only (matches DXT1's gate-verified precedent). Host maps
-        // DXT1/3/5 -> VK_FORMAT_BC1/BC2/BC3 (d3d9_format.cpp).
-        {0x31545844 /*DXT1*/, FMT_OP_TEXTURE, 0, 0, 0},
-        {0x33545844 /*DXT3*/, FMT_OP_TEXTURE, 0, 0, 0},
-        {0x35545844 /*DXT5*/, FMT_OP_TEXTURE, 0, 0, 0},
+        // Compressed textures -- FMT_OP_TEXTURE plus FMT_OP_CUBETEXTURE (compressed cube maps are common:
+        // skyboxes, IBL/reflection probes). Host maps DXT1/3/5 -> VK_FORMAT_BC1/BC2/BC3 (d3d9_format.cpp).
+        // Deliberately NOT FMT_OP_VOLUMETEXTURE: compressed volume textures are vanishingly rare in real
+        // D3D9 usage, so advertising them is out of scope (YAGNI) until something actually needs it.
+        {0x31545844 /*DXT1*/, FMT_OP_TEXTURE | FMT_OP_CUBETEXTURE, 0, 0, 0},
+        {0x33545844 /*DXT3*/, FMT_OP_TEXTURE | FMT_OP_CUBETEXTURE, 0, 0, 0},
+        {0x35545844 /*DXT5*/, FMT_OP_TEXTURE | FMT_OP_CUBETEXTURE, 0, 0, 0},
     };
 
     HRESULT APIENTRY umd_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps)
