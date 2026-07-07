@@ -513,10 +513,9 @@ namespace
 
     // Classify a genuine texture create into a 2D/cube/volume resource_kind from D3DDDIARG_CREATERESOURCE::Flags.
     // The D3DDDI_RESOURCEFLAGS word carries an unambiguous dimensionality signal, RE-confirmed live against real
-    // d3d9.dll's CreateResource: bit16 (0x10000) marks every texture kind, bit17 (0x20000) additionally marks a
-    // CubeMap, bit18 (0x40000) a Volume; a plain 2D texture has neither bit17 nor bit18. These are independent of
-    // the RenderTarget/ZBuffer bits resource_flags_to_usage reads. SurfCount/Depth are NOT consulted -- the Flags
-    // bits alone are decisive.
+    // d3d9.dll's CreateResource: bit17 (0x20000) marks a CubeMap, bit18 (0x40000) a Volume; a plain 2D texture
+    // has neither bit set. These are independent of the RenderTarget/ZBuffer bits resource_flags_to_usage reads.
+    // SurfCount/Depth are NOT consulted -- the Flags bits alone are decisive.
     d3d9c::resource_kind resource_flags_to_kind(uint32_t flags)
     {
         constexpr uint32_t k_resflag_cubemap = 0x20000; // D3DDDI_RESOURCEFLAGS.CubeMap

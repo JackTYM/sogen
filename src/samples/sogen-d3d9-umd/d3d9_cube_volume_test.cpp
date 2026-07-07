@@ -33,7 +33,7 @@ namespace
     bool check_cube(IDirect3DDevice9* dev, D3DFORMAT format, bool expect_ok, const char* label)
     {
         IDirect3DCubeTexture9* tex = nullptr;
-        HRESULT hr = dev->CreateCubeTexture(64, 1, 0, format, D3DPOOL_DEFAULT, &tex, nullptr);
+        const HRESULT hr = dev->CreateCubeTexture(64, 1, 0, format, D3DPOOL_DEFAULT, &tex, nullptr);
         printf("[d3d9-cube-volume-test] CreateCubeTexture(%s) hr=0x%08lx tex=%p (expect %s)\n", label,
                static_cast<unsigned long>(hr), static_cast<void*>(tex), expect_ok ? "S_OK" : "FAIL");
         const bool ok = expect_ok ? (SUCCEEDED(hr) && tex != nullptr) : (FAILED(hr) && tex == nullptr);
@@ -52,7 +52,7 @@ namespace
     bool check_volume(IDirect3DDevice9* dev, D3DFORMAT format, bool expect_ok, const char* label)
     {
         IDirect3DVolumeTexture9* vol = nullptr;
-        HRESULT hr = dev->CreateVolumeTexture(32, 32, 4, 1, 0, format, D3DPOOL_DEFAULT, &vol, nullptr);
+        const HRESULT hr = dev->CreateVolumeTexture(32, 32, 4, 1, 0, format, D3DPOOL_DEFAULT, &vol, nullptr);
         printf("[d3d9-cube-volume-test] CreateVolumeTexture(%s) hr=0x%08lx vol=%p (expect %s)\n", label,
                static_cast<unsigned long>(hr), static_cast<void*>(vol), expect_ok ? "S_OK" : "FAIL");
         const bool ok = expect_ok ? (SUCCEEDED(hr) && vol != nullptr) : (FAILED(hr) && vol == nullptr);
