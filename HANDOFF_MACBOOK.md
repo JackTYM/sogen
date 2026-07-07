@@ -4048,3 +4048,23 @@ Ran all 38 non-D3D9 sample binaries; 25 exited cleanly, 13 did not. Every one of
 `test-sample.exe` itself re-confirmed 26/26, zero failures, unchanged.
 
 This closes a real verification gap — "tested across the board" now includes explicit confirmation that this session's extensive draw-batching and GPU-bridge restructuring left the broader, non-D3D9 sample suite entirely undisturbed, with one genuinely new positive data point (`ngcs_demo`'s real D3DKMT GPU path) rather than merely an absence of new failures. No production code was touched by this verification pass.
+
+## 51. `--click-dialog-button`: a general analyzer CLI feature for headless dialog dismissal (2026-07-06)
+
+MW2's `iw4sp.exe` (§ earlier this session) blocked on a real "did not exit cleanly, run in safe mode?" MessageBoxA dialog with no human present to click it. Rather than working around this one dialog by touching the game's own files (explicitly not done, per the user's own decision), this slice built a genuinely general, reusable analyzer capability: `--click-dialog-button <control-id>`, which synthesizes a click on any modal dialog's button for any future headless/automated run of any app. Two commits: `2404cf5a` (feature), `e8585f80` (code-quality polish).
+
+### 51.1 The machinery already existed end-to-end
+
+A scoping investigation found the emulator already has real, production-exercised message-queue and window-tracking infrastructure — real human SDL clicks already flow through the exact mechanism this feature needed: a per-thread `message_queue` (`emulator_thread.hpp`), `windows_emulator::handle_ui_event` (already constructing a synthetic `WM_COMMAND` for real button clicks), and an iterable `process.windows` registry with `is_dialog()`/child-control `wID` tracking. This meant the feature was small and mechanical rather than a from-scratch undertaking: a new `emulator_callbacks::on_event_pump` hook (fired from both the idle-thread-switch loop and the main `start()` loop, since the idle loop is the only context alive while a lone dialog thread is parked), a new `handle_event_pump` that detects a parked dialog thread and reuses the EXISTING `handle_ui_event` to deliver an identical-shaped `WM_COMMAND`, and a CLI flag.
+
+### 51.2 The correctness-critical piece: parked-thread detection
+
+The one genuinely correctness-sensitive design question — does the "parked" check correctly identify a thread that's actually blocked forever without a synthetic message, vs. a thread merely idle-but-about-to-proceed on its own — was independently verified exactly correct: `handle_NtUserGetMessage`/`handle_NtUserWaitMessage` set `await_msg`/`await_msg_mask` ONLY when the message queue is genuinely empty at that call, and both are cleared exclusively by `mark_as_ready` the instant a real message arrives. The new hook's check for `await_msg.has_value() || await_msg_mask.has_value()` cannot produce a false positive — it's true if and only if the thread is genuinely parked.
+
+### 51.3 Proof: generalizes across control IDs, not hardcoded to one dialog
+
+Verified against the existing `messagebox-sample.exe` (a `MessageBoxA(..., MB_YESNO)` test, unrelated to MW2): `--click-dialog-button 7` (IDNO) makes the guest observe IDNO and print `clicked: no`; `--click-dialog-button 6` (IDYES) makes it observe IDYES and print `clicked: yes` — genuinely different guest-observed behavior per control ID, proving this is a real, general click-injection, not a fixed dismiss-any-dialog shortcut. With no flag, the same run hangs indefinitely (confirmed via an independent, bounded-timeout re-run), proving the dialog really is what blocks and the flag is genuinely what unblocks it. Fires exactly once per run (a `dialog_click_injected` latch), verified robust against a pump loop calling the hook many times per second.
+
+Code-quality review found one real DRY issue (a hand-rolled thread-by-id scan where `process_context::find_thread_by_id` — a public helper with a cache fast-path — was a clean, better fit) and a minor loop-style inconsistency (mixing structured-binding-with-discarded-index loops with a `views::values` loop in the same function) — both fixed in `e8585f80`, along with adding the same wParam-masking WHY-comment the existing real-click code already carries.
+
+Full 29-test D3D9 x64 regression sweep verified clean at both commits — this touches the universal event-pump loop every emulation run goes through, so this was the load-bearing check, not a formality.
