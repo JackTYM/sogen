@@ -926,6 +926,71 @@ namespace sogen
             }
         }
 
+        // One subresource of a sampled texture: its mip level, its extent, its array layer (a cube
+        // face; 0 for 2D/volume), and its tightly-packed byte size.
+        struct texture_subresource
+        {
+            uint32_t level;
+            uint32_t width;
+            uint32_t height;
+            uint32_t depth;            // 1 for 2D/cube; the level's depth extent for a volume
+            uint32_t base_array_layer; // cube face index; 0 for 2D/volume
+            size_t size;
+        };
+
+        // Ordered per-subresource layout (index -> level/face/extent/byte-size) of a sampled texture of
+        // `kind`. Cube: 6*mip_levels entries, subresource index == face*mip_levels + level. Volume:
+        // mip_levels entries, index == level, each spanning the level's whole depth extent. 2D:
+        // mip_levels entries, index == level. This ONE mapping both sizes the per-subresource backing
+        // store (create_resource) AND drives the staging upload (ensure_texture_uploaded), so the two can
+        // never disagree about which subresource index holds which (level, face).
+        std::vector<texture_subresource> texture_subresource_layout(const uint32_t kind, const uint32_t vk_format,
+                                                                    const uint32_t width, const uint32_t height,
+                                                                    const uint32_t depth, const uint32_t mip_levels)
+        {
+            const uint32_t levels = std::max(1u, mip_levels);
+            const bool is_cube = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube);
+            const bool is_volume = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume);
+            const uint32_t faces = is_cube ? 6u : 1u;
+
+            std::vector<texture_subresource> out;
+            out.reserve(static_cast<size_t>(faces) * levels);
+            for (uint32_t face = 0; face < faces; ++face)
+            {
+                for (uint32_t level = 0; level < levels; ++level)
+                {
+                    const uint32_t level_width = std::max(1u, width >> level);
+                    const uint32_t level_height = std::max(1u, height >> level);
+                    const uint32_t level_depth = is_volume ? std::max(1u, depth >> level) : 1u;
+                    const size_t size = vk_texture_data_size(vk_format, level_width, level_height) * level_depth;
+                    out.push_back({level, level_width, level_height, level_depth, face, size});
+                }
+            }
+            return out;
+        }
+
+        // View dimensionality for sampling a resource of `kind`: cube -> CUBE / 6 layers, volume ->
+        // 3D / 1 layer, everything else -> 2D / 1 layer. The PS and VS sampler-binding sites both call
+        // this so a cube/volume view can never be built 2D at one site and cube/3D at the other.
+        struct sampled_view_shape
+        {
+            uint32_t view_type;
+            uint32_t layer_count;
+        };
+
+        sampled_view_shape sampled_view_shape_for_kind(const uint32_t kind)
+        {
+            if (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube))
+            {
+                return {VK_IMAGE_VIEW_TYPE_CUBE, 6};
+            }
+            if (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
+            {
+                return {VK_IMAGE_VIEW_TYPE_3D, 1};
+            }
+            return {VK_IMAGE_VIEW_TYPE_2D, 1};
+        }
+
         // Converts an IEEE-754 single-precision float to a half-precision (binary16) bit pattern, with
         // round-to-nearest-even and correct handling of zero/subnormal/overflow -- used to encode a
         // ColorFill's normalized channel value for R16G16B16A16_SFLOAT render targets.
@@ -1561,12 +1626,15 @@ namespace sogen
                     if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
                     {
                         // Sampling view spans the texture's full mip chain (levelCount = mip_levels) so the
-                        // sampler can select any level; single-mip textures still get levelCount 1.
+                        // sampler can select any level; single-mip textures still get levelCount 1. View
+                        // type/layer-count follow the resource kind (cube/volume/2D) via the shared helper.
                         const uint32_t view_levels = std::max(1u, tex.mip_levels);
+                        const sampled_view_shape view_shape = sampled_view_shape_for_kind(tex.kind);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
-                                                        VK_IMAGE_VIEW_TYPE_2D, 0, view_levels, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        view_shape.view_type, 0, view_levels, 0, view_shape.layer_count,
                                                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        tex.vk_image_view_id);
                     }
                 }
                 if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, std::max(1u, tex.mip_levels), tex_samplers[stage]))
@@ -1604,10 +1672,12 @@ namespace sogen
                     if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
                     {
                         const uint32_t view_levels = std::max(1u, tex.mip_levels);
+                        const sampled_view_shape view_shape = sampled_view_shape_for_kind(tex.kind);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
-                                                        VK_IMAGE_VIEW_TYPE_2D, 0, view_levels, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        view_shape.view_type, 0, view_levels, 0, view_shape.layer_count,
                                                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                        tex.vk_image_view_id);
                     }
                 }
                 if (tex.vk_image_view_id != 0 &&
@@ -1884,19 +1954,32 @@ namespace sogen
 
         // Buffers (vertex/index) size their backing store directly from `width` (the byte count, per
         // d3d9_cmd::create_resource_request's convention). Render-target/depth-stencil 2D textures get
-        // real GPU backing (see the class comment); other texture kinds still get a plain host-side
-        // shadow, no GPU backing yet.
+        // real GPU backing (see the class comment); sampled 2D/cube/volume textures get a real sampled
+        // GPU image (below).
         const bool is_buffer = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) ||
                                kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer);
         const bool is_render_target = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) &&
                                       (usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
-        // Plain sampled texture_2d: real GPU backing with a real mip chain (see below, extra_mips);
-        // cube/volume are still M3. Unrecognized formats fall through with no GPU image, matching this
+        const bool is_cube = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube);
+        const bool is_volume = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume);
+        // Every sampled texture kind (2D, cube, volume) that isn't a render target gets a real sampled
+        // GPU image. This one predicate decides both "does this resource get a GPU image" and (via the
+        // shared texture_subresource_layout below) how its per-subresource backing is sized, so the two
+        // can never disagree. Unrecognized formats fall through with no GPU image, matching this
         // function's existing "unrecognized -> no backing" behavior rather than crashing.
-        const bool is_texture = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) && !is_render_target;
+        const bool is_texture = (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) || is_cube || is_volume) &&
+                                !is_render_target;
         uint32_t texture_vk_format = 0;
         const bool texture_format_ok = is_texture && d3d9_format_to_vulkan(format, texture_vk_format);
-        const size_t texture_backing_size = texture_format_ok ? vk_texture_data_size(texture_vk_format, width, height) : 0;
+        const uint32_t texture_mip_levels = std::max(1u, mip_levels);
+
+        // The one shared subresource layout: index 0 -> `backing`, indices 1..N-1 -> extra_mips. The same
+        // helper drives the staging upload in ensure_texture_uploaded, so both agree on the index->(level,
+        // face) mapping. Empty (no GPU image) for buffers/RTs/unrecognized formats.
+        const std::vector<texture_subresource> subresources =
+            texture_format_ok ? texture_subresource_layout(kind, texture_vk_format, width, height, depth, texture_mip_levels)
+                              : std::vector<texture_subresource>{};
+        const size_t texture_backing_size = subresources.empty() ? 0 : subresources.front().size;
 
         // A render target's host-side shadow (backing) must be sized at its real per-format stride, not a
         // hardcoded 4 bytes/texel BGRA8, so a non-BGRA8 RT (R5G6B5, A16B16G16R16F) reads back the correct
@@ -1908,20 +1991,14 @@ namespace sogen
                 ? static_cast<size_t>(width) * height * vk_format_bytes_per_texel(render_target_vk_format)
                 : 0;
 
-        // A sampled texture can carry a real mip chain (mip_levels levels). Level 0 lives in `backing`
-        // (below); levels 1..N-1 each get their own byte vector in `extra_mips`, sized for that level's
-        // halved dimensions (min 1) -- a flat single vector can't hold them since each level differs in
-        // size. Non-texture resources and single-mip textures leave extra_mips empty.
-        const uint32_t texture_mip_levels = std::max(1u, mip_levels);
+        // Subresources 1..N-1 each get their own byte vector in `extra_mips` (subresource 0 lives in
+        // `backing`). Each cube face's mip chain and each volume level is a different byte size, so a flat
+        // single vector can't hold them. Non-texture resources and single-subresource textures leave
+        // extra_mips empty.
         std::vector<std::vector<std::byte>> extra_mips;
-        if (texture_format_ok)
+        for (size_t s = 1; s < subresources.size(); ++s)
         {
-            for (uint32_t level = 1; level < texture_mip_levels; ++level)
-            {
-                const uint32_t level_width = std::max(1u, width >> level);
-                const uint32_t level_height = std::max(1u, height >> level);
-                extra_mips.emplace_back(vk_texture_data_size(texture_vk_format, level_width, level_height));
-            }
+            extra_mips.emplace_back(subresources[s].size);
         }
 
         const size_t backing_size = is_buffer ? width
@@ -1960,9 +2037,23 @@ namespace sogen
             {
                 uint64_t vk_image = 0;
                 constexpr uint32_t sampled_usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                uint32_t image_type = VK_IMAGE_TYPE_2D;
+                uint32_t image_depth = 1;
+                uint32_t array_layers = 1;
+                uint32_t image_flags = 0;
+                if (is_cube)
+                {
+                    array_layers = 6;
+                    image_flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+                }
+                else if (is_volume)
+                {
+                    image_type = VK_IMAGE_TYPE_3D;
+                    image_depth = std::max(1u, depth);
+                }
                 if (this->vulkan_.create_image(device, texture_vk_format, width, height, sampled_usage, VK_IMAGE_TILING_OPTIMAL,
-                                               /*samples=*/1, VK_IMAGE_TYPE_2D, /*depth=*/1, texture_mip_levels, /*array_layers=*/1,
-                                               /*flags=*/0, vk_image) == 0 &&
+                                               /*samples=*/1, image_type, image_depth, texture_mip_levels, array_layers, image_flags,
+                                               vk_image) == 0 &&
                     vk_image != 0)
                 {
                     uint64_t image_mem_size = 0;
@@ -2004,10 +2095,12 @@ namespace sogen
             return false;
         }
         resource_entry& tex = it->second;
-        if (tex.vk_image_id == 0 || tex.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) ||
-            (tex.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0)
+        const bool is_sampled_kind = tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) ||
+                                     tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube) ||
+                                     tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume);
+        if (tex.vk_image_id == 0 || !is_sampled_kind || (tex.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0)
         {
-            return false; // not a plain sampled texture with real GPU backing
+            return false; // not a sampled texture with real GPU backing
         }
 
         uint32_t vk_format = 0;
@@ -2016,38 +2109,44 @@ namespace sogen
             return false;
         }
 
-        // Gather every mip level's tightly-packed size and source backing. Level 0 lives in `backing`,
-        // levels 1..N-1 in `extra_mips` (see create_resource) -- subresource_backing() abstracts that.
-        // Each level is concatenated into one staging buffer at its own offset. Every level's backing is
-        // pre-sized to its exact tight size at create_resource time, so `src.size() < level_size` below
-        // is really just a degenerate-format guard (level_size == 0), not a "was this level ever locked"
-        // check -- an app that creates N mip levels but only ever writes level 0 still uploads levels
-        // 1..N-1, as their zero-initialized (black) backing. That's an intentional, safe default: no
-        // bail, no partially-garbage image, just unwritten levels rendering black under minification
+        // Gather every subresource's tightly-packed size and source backing via the SAME shared layout
+        // create_resource used to size the backing store, so the index->(level, face) mapping can never
+        // disagree. Subresource 0 lives in `backing`, 1..N-1 in `extra_mips` (see create_resource) --
+        // subresource_backing() abstracts that. Each is concatenated into one staging buffer at its own
+        // offset. Every subresource's backing is pre-sized to its exact tight size at create_resource
+        // time, so `src.size() < sub.size` below is really just a degenerate-format guard (size == 0),
+        // not a "was this ever locked" check -- an app that creates N subresources but only ever writes
+        // one still uploads the rest, as their zero-initialized (black) backing. That's an intentional,
+        // safe default: no bail, no partially-garbage image, just unwritten faces/levels rendering black
         // until the app writes them.
         const uint32_t mip_levels = std::max(1u, tex.mip_levels);
-        struct level_upload
+        const bool is_cube = tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube);
+        const std::vector<texture_subresource> subresources =
+            texture_subresource_layout(tex.kind, vk_format, tex.width, tex.height, tex.depth, mip_levels);
+        struct subresource_upload
         {
             uint32_t width;
             uint32_t height;
+            uint32_t depth;
+            uint32_t mip_level;
+            uint32_t base_array_layer;
             size_t size;
             uint64_t staging_offset;
             const std::byte* src;
         };
-        std::vector<level_upload> levels;
+        std::vector<subresource_upload> uploads;
         uint64_t total_size = 0;
-        for (uint32_t level = 0; level < mip_levels; ++level)
+        for (uint32_t index = 0; index < subresources.size(); ++index)
         {
-            const uint32_t level_width = std::max(1u, tex.width >> level);
-            const uint32_t level_height = std::max(1u, tex.height >> level);
-            const size_t level_size = vk_texture_data_size(vk_format, level_width, level_height);
-            const std::vector<std::byte>& src = tex.subresource_backing(level);
-            if (level_size == 0 || src.size() < level_size)
+            const texture_subresource& sub = subresources[index];
+            const std::vector<std::byte>& src = tex.subresource_backing(index);
+            if (sub.size == 0 || src.size() < sub.size)
             {
                 return false; // degenerate format/size only -- see the comment above this loop
             }
-            levels.push_back({level_width, level_height, level_size, total_size, src.data()});
-            total_size += level_size;
+            uploads.push_back(
+                {sub.width, sub.height, sub.depth, sub.level, sub.base_array_layer, sub.size, total_size, src.data()});
+            total_size += sub.size;
         }
 
         const uint64_t device = this->ensure_vk_device();
@@ -2082,20 +2181,23 @@ namespace sogen
             return false;
         }
         this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
-        for (const auto& level : levels)
+        for (const auto& up : uploads)
         {
-            this->vulkan_.upload_memory(device, staging_memory, level.staging_offset, level.size, level.src, level.size);
+            this->vulkan_.upload_memory(device, staging_memory, up.staging_offset, up.size, up.src, up.size);
         }
 
         this->vulkan_.reset_fence(device, this->fence_);
         this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
 
-        // One barrier over the whole mip chain, then one buffer->image copy per level into its own mip.
+        // One barrier over the whole image, then one buffer->image copy per subresource. A cube's six
+        // faces are array layers 0..5 of a single image, so the barrier must span all six; a 2D texture
+        // and a 3D volume (which has a single array layer) span one.
+        const uint32_t barrier_layer_count = is_cube ? 6u : 1u;
         const vulkan_host::subresource_range range{.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
                                                    .base_mip_level = 0,
                                                    .level_count = mip_levels,
                                                    .base_array_layer = 0,
-                                                   .layer_count = 1};
+                                                   .layer_count = barrier_layer_count};
         // VK_IMAGE_LAYOUT_UNDEFINED is a valid old_layout regardless of the image's actual current
         // layout (Vulkan's "discard previous contents" transition) -- correct here since every upload
         // fully overwrites every level anyway, whether this is the first upload or a later re-upload.
@@ -2103,20 +2205,20 @@ namespace sogen
                                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, range);
 
-        for (uint32_t level = 0; level < mip_levels; ++level)
+        for (const auto& up : uploads)
         {
             const vulkan_host::buffer_image_copy_region region{
-                .buffer_offset = levels[level].staging_offset,
+                .buffer_offset = up.staging_offset,
                 .buffer_row_length = 0,
                 .buffer_image_height = 0,
                 .image_offset_x = 0,
                 .image_offset_y = 0,
                 .image_offset_z = 0,
-                .width = levels[level].width,
-                .height = levels[level].height,
-                .depth = 1,
-                .mip_level = level,
-                .base_array_layer = 0,
+                .width = up.width,
+                .height = up.height,
+                .depth = up.depth,
+                .mip_level = up.mip_level,
+                .base_array_layer = up.base_array_layer,
                 .layer_count = 1,
                 .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
             };
