@@ -192,7 +192,7 @@ namespace sogen
             // {D574D111} opnum 0: AudioServerGetMixFormat(endpointId, VadServerSettings*, [out] WAVEFORMATEX**).
             // The [out] format is an FC_CSTRUCT (18-byte WAVEFORMATEX base + cbSize-conformant tail) behind a
             // unique pointer. The WASAPI shared-mode mix format is a WAVEFORMATEXTENSIBLE IEEE-float format;
-            // report 48 kHz / 2-channel / 32-bit float.
+            // report 44.1 kHz / 2-channel / 32-bit float.
             static NTSTATUS handle_get_mix_format(utils::aligned_binary_writer& writer)
             {
                 // 44100 Hz matches the real captured device mix format; CreateRemoteStream reports the same
