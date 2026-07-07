@@ -657,34 +657,33 @@ color". This test is EXPECTED to fail (`[d3d9-pipeline-cache-stride-test] FAILED
 strides of every stream the bound declaration references; it should start passing once that fix lands,
 with no changes to the test itself. Only built/run on x64 so far.
 
-`d3d9-manydraws-test.exe` is the correctness+timing evidence for the per-draw-overhead performance
-slice (commits `02b28ada`/`0238dfd7`/`fcfccc00`/`36b03142`/`4b0bc778`: a blocking fence-wait replacing
-the CPU-pinning busy-spin, plus per-pipeline descriptor-set pooling and per-device vertex/index/UBO
-buffer pooling in `execute_draw`). Within ONE `BeginScene`/`EndScene` it issues 768
-`DrawIndexedPrimitive` calls (a 32x24 grid of 20x20-pixel cells), ALL through the SAME cached
-programmable pipeline -- same `vs_2_0`/`ps_2_0` pair, same 640x480 RT shape, same 4-vertex/6-index
-unit-quad vertex shape, same two constant UBOs -- i.e. exactly the case the pooling optimizes: after the
-first draw nothing is (re)allocated; the pooled VB/IB/descriptor-sets/UBOs are reused and only their
-CONTENTS are rewritten per draw. Each draw fills a distinct cell with a distinct, index-derived color,
-driven per-draw by a real changing VS constant (`c0` = the cell's NDC offset+scale, so the pooled vertex
-data lands in a different place every draw) AND a real changing PS constant (`c0` = the cell color). This
-is the correctness discriminator: if the pooling reused stale contents (a later draw seeing an earlier
-draw's UBO bytes because the pool was rewritten before the GPU finished reading it, or a buffer not
-actually re-uploaded), cells would show the WRONG color or land in the WRONG place. Eight cells spread
-across the whole grid (four corners, center, three interior) are read back and checked against their own
-analytically-derived colors; all eight read back byte-exact on both x64 and x86/WoW64 (e.g.
-`cell(16,12)` = `B=84 G=85 R=83`, `cell(8,5)` = `B=B3 G=37 R=41`, identical on both architectures).
-The draw loop is bracketed by `QueryPerformanceCounter` and prints its wall-clock time; every draw is
-still FULLY SYNCHRONOUS (submit, then block until the GPU completes, before the next draw starts), so
-this slice does NOT change the NUMBER of GPU round-trips per frame -- only the per-round-trip COST. Run
-against a temporarily-reverted pre-fix host (the 4 host files checked out at `02b28ada~1` = `b6809cee`,
-`analyzer` rebuilt), the same 768-draw loop measured ~383 ms (~0.50 ms/draw); against the fixed HEAD it
-measured ~279 ms (~0.36 ms/draw) -- a real, repeatable ~27% reduction in per-frame draw-loop time, with
-identical (all-PASS) pixel output in both. This is emulated guest wall-clock (the guest's own
-`QueryPerformanceCounter` under the analyzer), not host CPU time, so it captures the emulated cost of the
-busy-spin's polling loop and the per-draw allocation churn, not a raw hardware GPU-stall number. Expect
-all `hr=0x00000000` setup lines, `TIMING: 768 draws in ... ms`, eight `PASS:` lines, and
-`[d3d9-manydraws-test] ALL CHECKS PASSED`.
+`d3d9-manydraws-test.exe` is the correctness+timing evidence for two performance slices: the original
+per-draw-overhead fix (commits `02b28ada`/`0238dfd7`/`fcfccc00`/`36b03142`/`4b0bc778` -- a blocking
+fence-wait replacing the CPU-pinning busy-spin, plus per-pipeline descriptor-set pooling and per-device
+vertex/index/UBO buffer pooling), and the later per-frame draw-batching effort (commits `f3dadff0`
+through `e24387ed` -- batching multiple draws into one Vulkan submission per scope instead of one
+submit+wait per draw). Within ONE `BeginScene`/`EndScene` it issues 768 `DrawIndexedPrimitive` calls
+(a 32x24 grid of 20x20-pixel cells), ALL through the SAME cached programmable pipeline -- same
+`vs_2_0`/`ps_2_0` pair, same 640x480 RT shape, same 4-vertex/6-index unit-quad vertex shape, same two
+constant UBOs. Each draw fills a distinct cell with a distinct, index-derived color, driven per-draw by
+a real changing VS constant (`c0` = the cell's NDC offset+scale, so the per-draw arena-allocated vertex
+data lands in a different place every draw) AND a real changing PS constant (`c0` = the cell color).
+This is the correctness discriminator for BOTH the pooling and the batching: if either reused/aliased
+stale contents (a later draw's arena/descriptor-set slice overlapping an earlier, still-unsubmitted
+draw's within an open batch, or a buffer not actually re-uploaded), cells would show the WRONG color or
+land in the WRONG place. **All 768 cell centers** (not a sample) are read back and checked against their
+own analytically-derived colors -- upgraded from an earlier 8-cell sample specifically because an
+arena/descriptor-overlap bug corrupts a CONTIGUOUS run of draws, which a sparse sample could miss
+entirely; all 768 read back byte-exact on both x64 and x86/WoW64. The host also logs
+`[d3d9-host] frame: draws=768 submits=10` (twice, once per host lock DDI call the one guest `LockRect`
+drives -- see `gpu_bridge.cpp`'s `handle_d3d9_lock` comment) -- the direct proof that batching is real,
+not just correct: 768 draws collapsed into 10 actual Vulkan submissions. The draw loop is bracketed by
+`QueryPerformanceCounter` and prints its wall-clock time; pre-batching (fully synchronous, one
+submit+wait per draw) this loop measured ~288 ms; post-batching it measures ~150 ms -- a real,
+repeatable ~2x reduction in per-frame draw-loop time, with identical (all-768-PASS) pixel output before
+and after. This is emulated guest wall-clock (the guest's own `QueryPerformanceCounter` under the
+analyzer), not host CPU time. Expect all `hr=0x00000000` setup lines, `TIMING: 768 draws in ... ms`,
+`checked all 768 cell centers, 768 passed, 0 failed`, and `[d3d9-manydraws-test] ALL CHECKS PASSED`.
 
 `d3d9-sm3-test.exe` proves the Shader Model 3.0 caps delta in `fill_d3d9caps` (`sogen_d3d9_umd.cpp`)
 makes real Microsoft `d3d9.dll` accept AND render a genuine `vs_3_0`/`ps_3_0` shader pair end to end.

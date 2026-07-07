@@ -195,18 +195,56 @@ all 3 runs:
 **Conclusion.** GPU round-trip time is still clearly the dominant cost within the part any GPU-side fix
 could address (~96%+ of `execute_draw`'s own time, ~62% of total loop time) — real evidence FOR the value
 of a follow-up, IF this work is ever prioritized again, but NOT evidence for going straight to full
-multi-frame-in-flight. The identified safer alternative: **batch multiple draws into ONE submission per
-frame, remaining fully synchronous** (submit once, then block until that one submission's fence signals,
-before the next batch starts) — no cross-draw or cross-frame concurrency at all, so none of the
-silent-data-race risk profile above applies. This is still real, non-trivial, **not yet attempted** work
-of its own: it requires converting today's single-slot pooled VB/IB/UBO/descriptor-set resources into
-per-draw sub-allocated ranges within a per-frame arena, so N draws batched into one submission each get
-their own slice of a shared buffer instead of colliding on the one pooled slot — a smaller, fail-loud
-correctness surface than multi-frame-in-flight's (a sizing/offset bug would misrender immediately and
-deterministically, not race), but genuine implementation work, deliberately deferred, not started.
+multi-frame-in-flight. The identified safer alternative — **batch multiple draws into ONE submission per
+scope, remaining fully synchronous** — is now done (see below); full multi-frame-in-flight itself remains
+deliberately NOT attempted, for the same silent-data-race reason given above.
 
-Multi-frame-in-flight pipelining remains the one open item on this list; nothing in this entry closes it
-or reduces its scope — this entry only records why it wasn't attempted next and what was found instead.
+### Batched draw submission — done (2026-07-06, commits `f3dadff0` through `e24387ed`)
+
+The safer alternative identified above is now implemented: multiple consecutive, same-render-target,
+non-depth draws record into one shared Vulkan command buffer and submit together, with a real, blocking
+`wait_for_fence` at each flush boundary — no cross-draw or cross-frame concurrency at any point, so none
+of multi-frame-in-flight's silent-data-race risk profile applies. Six commits, each independently
+spec-compliance- and code-quality-reviewed: `f3dadff0`/`6d653a4a` (inert batch command-buffer/fence
+infrastructure, zero behavior change, proven byte-for-byte identical against baseline), `5d579f8a`/
+`9ea79713` (single-slot VB/IB/UBO pools converted to per-draw sub-allocated ranges within one per-frame
+arena, still one submit per draw — isolates the sub-allocation math from the batching flip itself),
+`c7387ac4`/`352d2a8d` (per-pipeline descriptor-set pools converted to a shared, per-frame pool handing
+out fresh per-draw sets, still one submit per draw), `fdd0c77f`/`59e688b7`/`efb73bda` (the actual flip
+to batched submission, with real flush-boundary logic), and `2b879bc3`/`e24387ed` (draw/submit-count
+instrumentation, proving the batching quantitatively, not just via timing).
+
+**Flush boundaries** (a batch submits and blocks before any of these run): any readback (`LockRect`/
+Present, via `sync_backing_from_gpu`), `Clear`, `ColorFill`, `StretchRect`, resource destruction, a
+render-target change, and — deliberately excluded from batching in this first slice — any depth-stencil
+draw, which flushes any open color batch, records and submits as its own single-draw batch, then flushes
+again immediately, so depth-using draws behave EXACTLY as before batching existed (one submission each,
+never sharing a batch with anything else). `UpdateSurface`/`UpdateTexture` (`tex_blt`) also flushes — a
+real, if narrow, correctness gap independent-review caught: it mutates a sampled texture's CPU-side
+backing with no GPU submit of its own, but `ensure_texture_uploaded` re-uploads that backing into one
+persistent GPU image with no per-draw snapshot, so an unflushed batched draw sampling that texture could
+otherwise observe a LATER `UpdateSurface`'s contents once the batch finally executes, not what it
+sampled at record time — fixed before it could bite (`59e688b7`).
+
+**Proof, not just correctness.** `d3d9_manydraws_test.cpp` (768 `DrawIndexedPrimitive` calls in one
+scene, each filling a distinct, index-derived-color cell) was upgraded from an 8-cell sample to checking
+**all 768 cell centers** — specifically because an arena/descriptor-overlap bug corrupts a CONTIGUOUS
+run of draws, which a sparse sample could miss entirely. All 768 read back byte-exact on both x64 and
+x86/WoW64 (zero source changes needed for the x86 port — this is a host-side-only change). The host
+additionally logs `[d3d9-host] frame: draws=768 submits=10` — direct, quantitative proof that batching is
+real: 768 draws collapsed into 10 actual Vulkan submissions, not merely inferred from timing. Wall-clock
+for the 768-draw loop dropped from ~288 ms (pre-batching, one submit+wait per draw) to ~150 ms
+(post-batching) — a real, repeatable ~2x reduction, with identical pixel output before and after. Full
+existing D3D9 guest-test regression sweep (every test, both x64 and x86/WoW64) stayed green at every one
+of the six commits' review stages.
+
+**Deliberately still out of scope, matching this session's honesty-about-limits discipline**: batching
+across a render-target change or across depth-stencil draws (both flush instead — a genuine, real future
+optimization opportunity, not attempted here); full multi-frame-in-flight pipelining (the item this whole
+investigation was about, and the reason it remains NOT attempted — see the risk analysis above, unchanged
+by this work); eliminating the per-draw color-attachment TRANSFER_SRC↔COLOR_ATTACHMENT round-trip barrier
+within a batch (kept as-is — it's cheap and provides free, correct inter-draw serialization to the same
+render target, so removing it would be a throughput refinement, not a correctness requirement).
 
 ### Fixed (genuinely fixed with real code, 2026-07-05): D3D9 DDI-call wire batching
 
