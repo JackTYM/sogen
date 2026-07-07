@@ -430,9 +430,9 @@ namespace
     // D3DDDIARG_CREATERESOURCE's real field layout (Format/Pool/pSurfList/SurfCount/MipLevels/hResource/
     // Flags, plus D3DDDI_SURFACEINFO::Width/Height/Depth) is now RE-verified and modeled in d3d9_ddi.hpp,
     // and umd_CreateResource reads width/height/depth/mip/pool/usage from it instead of the old hardcoded
-    // 640x480 shape. What REMAINS a limitation: `kind` is still forced to texture_2d (cube/volume from
-    // SurfCount>1 is a separate future task), and D3DDDI_SURFACEINFO's pSysMem/pitch fields are inferred,
-    // not live-confirmed (see d3d9_ddi.hpp) -- neither is on this milestone's D3DPOOL_DEFAULT path.
+    // 640x480 shape. `kind` is classified via Flags' live-confirmed CubeMap/Volume bits (see
+    // resource_flags_to_kind). What REMAINS a limitation: D3DDDI_SURFACEINFO's pSysMem/pitch fields are
+    // inferred, not live-confirmed (see d3d9_ddi.hpp) -- not on this milestone's D3DPOOL_DEFAULT path.
     //
     // Offset 48 for hResource (x64) was found by writing a distinct, identifiable sentinel to every
     // 8-byte-aligned offset (0..80) and observing which one came back unchanged in the very next
