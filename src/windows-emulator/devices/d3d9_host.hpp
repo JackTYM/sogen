@@ -155,6 +155,17 @@ namespace sogen
         // execute_recorded_command's own int32_t convention.
         int32_t execute_recorded(uint32_t opcode, const std::byte* payload, size_t size);
 
+        // Process-lifetime diagnostic counters exposed for gpu_bridge's per-frame draw/submit logging
+        // (see the members' own comment). draw_count() is every execute_draw call; batch_submit_count()
+        // is every real batch submit -- together they make the batching win (draws >> submits) directly
+        // observable rather than only inferable from wall-clock timing.
+        uint64_t draw_count() const { return this->draw_count_; }
+        uint64_t batch_submit_count() const { return this->batch_submit_count_; }
+        // True if `resource` is a render-target-kind resource -- the frame-output image whose pixels a
+        // Lock/Present reads back. Lets gpu_bridge fire its draw/submit summary only at a real frame
+        // completion (a render-target Lock), not on every vertex/index-buffer Lock.
+        bool is_render_target(uint64_t resource) const;
+
       private:
         struct resource_entry
         {
@@ -307,6 +318,14 @@ namespace sogen
         // draws). Reset to 0 on batch open; when the next draw would exceed frame_desc_capacity_draws_ the
         // batch is flushed first so the pool can be reset (see execute_draw's overflow guard).
         uint32_t batch_draw_count_{};
+
+        // Process-lifetime instrumentation, never reset: draw_count_ increments once per execute_draw
+        // call, batch_submit_count_ once per real flush_batch() submit (an open batch actually
+        // ended+submitted+waited, not a no-op flush). gpu_bridge logs both at each frame-completion point
+        // so batching's draws-per-submit ratio is directly observable. Distinct from batch_draw_count_
+        // above, which is a per-batch descriptor-pool bookkeeping counter that resets every batch.
+        uint64_t draw_count_{};
+        uint64_t batch_submit_count_{};
 
         // The one hardcoded fixed-function shader pair (see execute_draw's comment), its shader modules
         // and pipeline layout -- shape-invariant (FF always uses the same hardcoded XYZRHW+DIFFUSE vertex

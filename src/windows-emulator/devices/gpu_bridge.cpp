@@ -2439,8 +2439,16 @@ namespace sogen
                                              : 0;
                 std::vector<std::byte> data(out_capacity);
                 uint32_t data_size = 0;
+                const bool render_target_readback = this->d3d9_.is_render_target(request.resource);
                 const int32_t hr = this->d3d9_.lock(request.resource, request.subresource, request.offset, request.size, request.flags,
                                                     data.data(), data.size(), data_size);
+                // A render-target Lock is how the frame's rendering is forced to complete for tests that
+                // read pixels back instead of presenting (e.g. d3d9-manydraws); log the frame stats here
+                // too so those runs still emit one draws/submits data point.
+                if (render_target_readback)
+                {
+                    this->log_d3d9_frame_stats(win_emu);
+                }
 
                 if (!context.output_buffer || context.output_buffer_length < sizeof(d3d9_cmd::lock_response))
                 {
@@ -2562,6 +2570,18 @@ namespace sogen
                 return 0;
             }
 
+            // One data point per frame completion (a Present, or a render-target Lock readback): how many
+            // execute_draw calls the frame issued vs. how many real GPU submits they collapsed into. Makes
+            // the draw-batching win directly observable (draws >> submits) rather than only inferable from
+            // wall-clock timing. Counters are process-lifetime totals (d3d9_host never resets them), so a
+            // multi-frame app's per-frame counts are the delta between consecutive lines.
+            void log_d3d9_frame_stats(windows_emulator& win_emu)
+            {
+                win_emu.log.info("[d3d9-host] frame: draws=%llu submits=%llu\n",
+                                 static_cast<unsigned long long>(this->d3d9_.draw_count()),
+                                 static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
+            }
+
             NTSTATUS handle_d3d9_present(windows_emulator& win_emu, const io_device_context& context)
             {
                 d3d9_cmd::present_request request{};
@@ -2593,6 +2613,7 @@ namespace sogen
                     hr = d3derr_invalidcall;
                 }
 
+                this->log_d3d9_frame_stats(win_emu);
                 return write_output(win_emu, context, d3d9_cmd::present_response{.hr = hr, .reserved = 0});
             }
 

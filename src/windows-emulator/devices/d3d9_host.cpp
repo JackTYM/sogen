@@ -406,6 +406,7 @@ namespace sogen
         this->vulkan_.queue_submit(this->queue_, this->batch_command_buffer_, this->batch_fence_);
         this->vulkan_.wait_for_fence(this->batch_fence_, UINT64_MAX);
         this->batch_open_ = false;
+        ++this->batch_submit_count_;
     }
 
     bool d3d9_host::ensure_pipeline(const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height,
@@ -1333,6 +1334,8 @@ namespace sogen
 
     int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex, const indexed_draw* const indexed)
     {
+        ++this->draw_count_;
+
         const auto rt_it = this->resources_.find(this->state_.render_targets[0]);
         if (rt_it == this->resources_.end() || rt_it->second.vk_image_id == 0)
         {
@@ -2461,6 +2464,18 @@ namespace sogen
         out_width = it->second.width;
         out_height = it->second.height;
         return true;
+    }
+
+    bool d3d9_host::is_render_target(const uint64_t resource) const
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end())
+        {
+            return false;
+        }
+        // Same predicate create_resource uses to decide a resource gets render-target GPU backing.
+        return it->second.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) &&
+               (it->second.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
     }
 
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)

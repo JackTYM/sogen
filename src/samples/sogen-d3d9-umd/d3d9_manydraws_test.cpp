@@ -349,36 +349,32 @@ int main()
         constexpr LONG kStride = kCanvasWidth * 4;
         auto pixel_at = [&](const int col, const int row) { return base + row * kStride + col * 4; };
 
-        // Eight cells spread across the whole grid -- corners, center, and a few interior cells.
-        const int check_cells[8][2] = {
-            {0, 0}, {kGridCols - 1, 0}, {0, kGridRows - 1}, {kGridCols - 1, kGridRows - 1},
-            {kGridCols / 2, kGridRows / 2}, {8, 5}, {24, 18}, {15, 10},
-        };
-        for (const auto& cell : check_cells)
+        // Check EVERY cell's center pixel, not a sample: a batching arena/descriptor-overlap bug corrupts
+        // a CONTIGUOUS RUN of draws, and a sparse sample could miss a corrupted run entirely. Checking all
+        // 768 guarantees detection regardless of which range, if any, is wrong. Only FAILs are printed
+        // per-cell (768 PASS lines would drown the output); a final count reports full coverage.
+        for (int gy = 0; gy < kGridRows; ++gy)
         {
-            const int gx = cell[0];
-            const int gy = cell[1];
-            const int col = gx * kCellW + kCellW / 2;
-            const int row = gy * kCellH + kCellH / 2;
-            int r = 0;
-            int g = 0;
-            int b = 0;
-            color_for(gx, gy, r, g, b);
-            const unsigned char* p = pixel_at(col, row);
-            printf("[d3d9-manydraws-test] cell(%d,%d) pixel(%d,%d)=B=%02X G=%02X R=%02X (expected B=%02X G=%02X R=%02X)\n",
-                   gx, gy, col, row, p[0], p[1], p[2], b, g, r);
-            if (!channel_close(p[0], b, 2) || !channel_close(p[1], g, 2) || !channel_close(p[2], r, 2))
+            for (int gx = 0; gx < kGridCols; ++gx)
             {
-                printf("[d3d9-manydraws-test] FAIL: cell(%d,%d) wrong color -- pooled per-draw content is stale or "
-                       "misplaced\n",
-                       gx, gy);
-                ++failures;
-            }
-            else
-            {
-                printf("[d3d9-manydraws-test] PASS: cell(%d,%d) matches its index-derived color\n", gx, gy);
+                const int col = gx * kCellW + kCellW / 2;
+                const int row = gy * kCellH + kCellH / 2;
+                int r = 0;
+                int g = 0;
+                int b = 0;
+                color_for(gx, gy, r, g, b);
+                const unsigned char* p = pixel_at(col, row);
+                if (!channel_close(p[0], b, 2) || !channel_close(p[1], g, 2) || !channel_close(p[2], r, 2))
+                {
+                    printf("[d3d9-manydraws-test] FAIL: cell(%d,%d) pixel(%d,%d)=B=%02X G=%02X R=%02X (expected "
+                           "B=%02X G=%02X R=%02X) -- pooled per-draw content is stale or misplaced\n",
+                           gx, gy, col, row, p[0], p[1], p[2], b, g, r);
+                    ++failures;
+                }
             }
         }
+        printf("[d3d9-manydraws-test] checked all %d cell centers, %d passed, %d failed\n", kDrawCount,
+               kDrawCount - failures, failures);
         rt->UnlockRect();
     }
     else
