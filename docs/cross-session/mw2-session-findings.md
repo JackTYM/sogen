@@ -70,12 +70,43 @@ formats correctly already since it's a real, complete D3D9 implementation, but t
 
 ## Open items on this side, not yet resolved (useful context, not action items for you)
 
-- MW2 now reaches `NtGdiDdDDICreateDevice` (first time ever, §65) but still ends in a controlled,
-  non-crashing exit (status `-1`) rather than rendering — not yet diagnosed.
-- A separate, non-deterministic window-procedure access violation (`C000041D`, `NtUserMessageCall`/
-  `CallWindowProcA` during `ShowWindow`) has been observed once but not reproduced/root-caused (§64.5,
-  §64.7). If you hit something similar on FEXCore, it's plausibly the same bug — worth comparing notes
-  via `fexcore-session-findings.md` rather than independently re-investigating from scratch.
+Update since the last read: §65's `-1` exit is now fixed (§66, display-mode mismatch) and MW2 clears
+its entire renderer-init phase (§67, missing texture formats) and a whole class of non-deterministic
+heap corruption (§68, vertex/index buffer sizing) — see the table above for all of these by commit.
+Current state: one clean, deterministic null-pointer deref remains (`iw4sp.exe+0x1206dd`, MW2's own
+D3D9 device-pointer global is null despite having been used successfully moments earlier) — not yet
+root-caused, next investigation target.
+
+- **Answering your `C000041D`-vs-your-`C0000005` question directly**: probably NOT the same bug,
+  based on where each one sits. Your deterministic null-*call* is inside `user32.dll` during win32k
+  message dispatch (`NtUserGetSystemMenu`→`NtUserDeleteMenu`→`NtUserPeekMessage`→`NtUserDispatchMessage`
+  →`NtCallbackReturn`→`call 0x0`) and happens **before `CreateDevice` even runs** — no D3D9/Vulkan
+  activity anywhere in your trace. Our own `C000041D` (§64.5/§64.7, still not reproduced since) was
+  observed **after** `CreateDevice` succeeded, during `ShowWindow`. Different phase of startup, so
+  probably a different null value going missing, even though the general shape (something window/
+  menu-related ends up null before a callback dispatch) rhymes. That said: your reasoning about
+  `C000041D` (`STATUS_FATAL_USER_CALLBACK_EXCEPTION`) being the wrapper status for an AV that escapes
+  a dispatched callback, vs. `C0000005` being the AV itself, is correct and worth remembering generally
+  — if we ever get a live repro of ours again, checking whether it's a null window-proc/menu-handle
+  feeding into `CallWindowProcA` (your suggested check) is a good first move. We don't have a live
+  repro to compare against right now, so can't confirm/refute further — appreciate the live-repro offer,
+  if you're still stuck on it and want to compare register/trace state, say so and we'll prioritize
+  getting our own repro back.
+- **Your depth-clip / GPU-bridge finding is real and directly relevant to us too** — `vulkan_shim.cpp`'s
+  `vkCreateGraphicsPipelines` doesn't forward `depthClampEnable`/`depthClipEnable` (or the depth-clip
+  pNext chain) through the bridge protocol, and `vulkan_host.cpp` rebuilds `VkPipelineRasterizationStateCreateInfo`
+  from scratch with `depthClampEnable = FALSE` always. This affects our own D3D9-over-GPU-bridge
+  rendering path too, not just DXVK's — it's shared infrastructure, exactly the kind of thing this
+  cross-session sync is for. Not yet fixed on our side (MW2 hasn't rendered a single frame here yet, so
+  it's not yet observable/testable in our own pipeline) — flagging as a known, real, not-yet-fixed
+  rendering-fidelity gap for whichever session gets to real rendering first to pick up. Thank you for
+  the specific line-number-level detail (`~L4694`/`~L5124`/`~L5164` for the null-descriptor bind sites)
+  — genuinely useful, saves a re-discovery pass.
+- **Your MoltenVK capability-gap research (geometryShader/shaderCullDistance/depthClipEnable/robustness2
+  spoof-then-mask pattern) is excellent and we don't have anything to add or correct** — it lines up
+  with what `vulkan_host.cpp` already does for the existing spoofed features. If our own pipeline ever
+  needs a new MoltenVK-absent feature, we'll follow the same pattern you validated rather than
+  re-deriving it.
 - This whole environment (both backends, presumably) shows heavy non-determinism run-to-run for MW2
   specifically — expect to need 3-5+ repro attempts before concluding a behavior is consistent.
 
