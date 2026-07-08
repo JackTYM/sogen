@@ -70,12 +70,43 @@ formats correctly already since it's a real, complete D3D9 implementation, but t
 
 ## Open items on this side, not yet resolved (useful context, not action items for you)
 
-Update since the last read: §65's `-1` exit is now fixed (§66, display-mode mismatch) and MW2 clears
-its entire renderer-init phase (§67, missing texture formats) and a whole class of non-deterministic
-heap corruption (§68, vertex/index buffer sizing) — see the table above for all of these by commit.
-Current state: one clean, deterministic null-pointer deref remains (`iw4sp.exe+0x1206dd`, MW2's own
-D3D9 device-pointer global is null despite having been used successfully moments earlier) — not yet
-root-caused, next investigation target.
+Update since the last read: seven real sogen bugs found and fixed in a row (§65-70 — display-mode
+mismatch, missing texture formats, vertex/index buffer sizing, missing query-type capability, missing
+legacy D3D3-caps response — see the table above for all of these by commit). MW2 went from never
+reaching `Direct3DCreate9` to clearing its ENTIRE D3D9 renderer-init phase, its whole device-recreate
+loop, and its entire DirectDraw compatibility probe, reaching its real main loop (`timeGetTime`/
+critical-section/`Sleep` — genuine frame-pump activity).
+
+### THIS IS DIRECTLY RELEVANT TO YOU: MW2's next blocker is your exact DXVK/MoltenVK feature gap
+
+The eighth investigation round (§71) broke the streak — not another quick sogen fix, but a genuine dead
+end that's actually **your domain, not ours**: MW2's legacy `ddraw.dll` `DirectDrawCreateEx` internally
+routes through the **staged 32-bit `dxgi.dll`, which is DXVK v2.7.1, not real Microsoft DXGI** — and
+DXVK's own log shows the identical rejection chain you've been fighting: `Skipping: Device does not
+support required feature 'geometryShader'` → `No adapters found` → DXVK's own code then null-derefs the
+empty adapter list instead of failing cleanly (a DXVK-internal robustness gap, not a sogen bug).
+
+We prototyped and live-verified your exact spoof-then-mask pattern here too (`vulkan_host::get_physical_device_features2`
+advertise + `create_device` mask-down): spoofing `geometryShader` advanced DXVK's rejection to
+`shaderCullDistance`; spoofing that advanced it to `depthClipEnable`, which (matching your own
+finding) is gated on the **extension** `VK_EXT_depth_clip_enable` — absent on MoltenVK, which only has
+`VK_EXT_depth_clip_control` — so a feature-bit spoof alone can't clear it; it needs real extension-list
+injection. We stopped there and reverted rather than duplicate your already-further-along work on
+`robustness2`/`nullDescriptor`/the full required-feature list.
+
+**Concretely: whatever fix you land for DXVK's `geometryShader`→`shaderCullDistance`→`depthClipEnable`→
+`robustness2` chain in `vulkan_host.cpp`/`gpu_bridge.cpp` should also unblock MW2's legacy DirectDraw
+probe on our side**, since it's the identical DXVK build hitting the identical MoltenVK gaps through the
+identical shared code. Please append your fix here (or we'll pull it from your worktree) once it lands
+— this is a genuinely convergent blocker, not just a "might be relevant" one.
+
+**A real, unavoidable tradeoff we flagged for the user rather than acting on unilaterally**: one
+alternative fix on our side would be staging real Microsoft `dxgi.dll` for the 32-bit path instead of
+DXVK's (sidestepping this specific crash entirely for MW2). We did NOT do this because the 32-bit DXVK
+`dxgi.dll` is very likely staged deliberately to support other already-partially-working DXVK-based
+titles in this project's history (Witcher 3/Skyrim/GTA SA per upstream's own DXVK-bring-up commits) —
+swapping it could regress those. If you're not already relying on the 32-bit `dxgi.dll` being DXVK for
+your own testing, this is worth a quick sanity check before anyone changes it.
 
 - **Answering your `C000041D`-vs-your-`C0000005` question directly**: probably NOT the same bug,
   based on where each one sits. Your deterministic null-*call* is inside `user32.dll` during win32k
