@@ -4706,3 +4706,23 @@ Concrete evidence via idasql on the staged `iw4sp.exe`: literal version strings 
 3. **No byte-identical verification harness** existed to actually prove a redirect produces identical output rather than merely "doesn't crash."
 
 Unlike §80 (wrong target entirely), this round's finding was assessed as "right target, viable design, gates addressable" — a genuinely more promising lead, not a dead end.
+
+## 82. Both zlib-redirect gates closed — and the honest result reframes the whole optimization strategy (2026-07-08)
+
+A follow-up round closed both remaining gates from §81 with real, careful evidence, and the result is genuinely useful precisely because it's honest about scale.
+
+### 82.1 Gate A closed: genuine zlib 1.1.4, obtained and verified
+
+Downloaded the real zlib 1.1.4 source from zlib's own official archive (`zlib.net/fossils/`, a well-known published hash), confirmed byte-for-byte matching version strings against what's embedded in the staged `iw4sp.exe`. Built successfully on this host (one trivial, zero-source-edit portability snag: 1.1.4's `zconf.h` needs `-U TARGET_OS_MAC` on modern Apple clang, which predefines that macro unlike the Carbon-era toolchain 1.1.4 expected). A standalone test program round-trips data through the exact `inflateInit2_(windowBits=15)`/`inflate`/`inflateEnd` API MW2 uses, byte-identically. Deliberately kept as a scratch build, not yet a committed `deps/` submodule — the verification harness that should dictate how it's eventually wired doesn't exist yet, and committing dependency structure ahead of the design it serves would be premature.
+
+### 82.2 Gate B closed: a real, quantified profile
+
+Instrumented `sub_4BD6A0` (the confirmed `inflate()` entry) with real wall-clock entry/exit brackets and ran the actual analyzer binary (not the Python bindings) with `--click-dialog-button 6` for two independent 10-minute windows. Result, deterministic across both runs (identical call counts): **inflate accounts for ~21-24% of loading-phase wall-clock time**, peaking at ~55-58% during the initial dense-decompression burst before settling to a lower steady-state share. Ruling out a confound: redirecting the trace-log stream to `/dev/null` didn't speed anything up, confirming the cost is genuinely compute-bound CPU emulation, not logging/trace I/O overhead.
+
+### 82.3 The honest, reframing conclusion
+
+inflate is the single largest identified hot function — a real, genuine target, unlike §80's critical-section red herring — but it does **not dominate**. The remaining ~78% of wall-clock is spread across everything else (critical-section emulation, syscalls, registry access, general engine code), with no other single function anywhere near as large. A native redirect is a real, bounded win: roughly **1.25-1.3x** on sustained loading throughput, more during decompression-heavy bursts. Genuinely worth doing eventually — but not a fix that turns "many hours" into "minutes."
+
+### 82.4 What this means for strategy, honestly
+
+Three consecutive investigation rounds (§80's critical-section dead end, §81's zlib target identification, §82's closed-gate confirmation) have now converged on the same underlying picture: MW2's loading-phase slowness is not concentrated in any single fixable hot spot large enough to solve the problem on its own — it's diffuse, general CPU-emulation-throughput cost spread across a huge amount of ordinary guest code (the natural consequence of interpreting, instruction-by-instruction, everything a real game engine does to load and decompress its assets). Chasing individual functions one at a time (critical sections, now inflate) yields real but incremental gains (0x, then 1.3x) against a problem that's fundamentally about aggregate CPU emulation throughput, not a specific bottleneck. The parallel FEXCore-backend session's work (a genuine JIT/dynarec compiler, as opposed to this backend's interpretation) is architecturally the correct lever for this class of problem — JIT compilation characteristically yields order-of-magnitude throughput gains over interpretation for exactly this kind of sustained, CPU-bound workload, which no amount of individual-function HLE redirection on the interpreter backend can match. This session's own further micro-optimization effort on the current backend is deliberately not continued past this point for that reason — the honest, evidence-backed conclusion is that a different backend, not more targeted fixes to this one, is the actual path to MW2 completing its asset loading in a practical amount of time.
