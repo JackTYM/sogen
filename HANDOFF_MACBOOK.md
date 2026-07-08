@@ -4437,3 +4437,23 @@ MW2 now hits a clean, deterministic null-pointer dereference at `iw4sp.exe+0x120
 ### 68.5 Cross-session note
 
 The parallel FEXCore-backend session (`.worktrees/fex-mac-silicon`, using DXVK for graphics) independently hit a deterministic null-pointer *call* (not just a null deref) inside `user32.dll` during win32k message dispatch (`NtUserGetSystemMenu`→`NtUserDeleteMenu`→`NtUserPeekMessage`→`NtUserDispatchMessage`→`NtCallbackReturn`→`call 0x0`), and asked whether it's the same underlying bug as the not-yet-reproduced `C000041D` window-proc crash noted in §64.5/§64.7. Their crash happens *before* `CreateDevice` even runs (win32k/USER-object message dispatch, backend-and-graphics-agnostic); this entry's §68.4 null-pointer-global crash happens well *after* device/buffer creation succeeds, inside MW2's own D3D9 render-setup code — different call sites, likely different bugs, though both are worth keeping in mind together since they're both "something goes null between two points that should agree." See `docs/cross-session/mw2-session-findings.md` for the full exchange.
+
+## 69. A SIXTH real bug: missing `D3DQUERYTYPE_EVENT` capability caused a redundant device recreation that transiently nulled MW2's own device pointer (2026-07-07)
+
+§68.4's null-pointer-global crash was investigated and, once again, turned out to be a small, well-evidenced, sogen-owned gap rather than anything deep in MW2's own logic.
+
+### 69.1 The mechanism
+
+MW2's device-pointer global (`dword_1C8C088`) genuinely IS written correctly by the first `CreateDevice` and used successfully for hundreds of `Create2DTexture` calls across two threads. It goes null because MW2 **re-enters its own device-create path** — its create loop (`sub_50BAA0`) iterates a second time because the first attempt's render-target-init step (`sub_50ADB0`) failed, specifically at `IDirect3DDevice9::CreateQuery(D3DQUERYTYPE_EVENT)`. Real `d3d9.dll`'s `CD3DBase::ValidateQueryCreate` rejects **every** query type with `D3DERR_NOTAVAILABLE` unless it appears in a driver-supplied list, whose count comes from `GetCaps(GETD3DQUERYCOUNT=6)` — sogen's `umd_GetCaps` had no case for query-count/query-list types 6/7 at all, falling to a `default` branch that zeroed the buffer (count 0), so `d3d9.dll` never even asked for the actual type list. With no usable query type, render-target init failed, forcing a second `CreateDevice` — and `d3d9.dll`'s *second* call zeroes its `ppReturnedDeviceInterface` out-param (which is the same global MW2's own code stores) right at entry, creating a window where a second thread (the render-worker thread) dereferences the transiently-null global and crashes with `C0000005`.
+
+### 69.2 The fix
+
+Commit `1b3f60d1`. `umd_GetCaps` now handles `GETD3DQUERYCOUNT`/`GETD3DQUERYDATA`, advertising `D3DQUERYTYPE_EVENT` — universally supported by every real D3D9 HAL driver, and exact (not an approximation) for sogen's synchronous GPU model, since the existing `IssueQuery`/`GetQueryData` stubs already correctly report "already signalled" S_OK. `D3DQUERYTYPE_OCCLUSION` was deliberately left unadvertised — a stubbed pixel count could silently cull real geometry, a correctness risk with no synchronous-GPU justification the way EVENT has; MW2 tolerates OCCLUSION's absence.
+
+### 69.3 Verification
+
+Before: device recreated, global transiently nulled, render-worker thread null-derefs at `iw4sp.exe+0x1206dd`. After (clean rebuild + restage): exactly one `CreateDevice`, the global stays populated throughout, render-target init succeeds (no "Event query" failure), and `d3d9.dll` now issues `GetCaps Type=7` (the query-list follow-up call) — confirming the count was accepted. Full regression sweep clean on both x64 and x86 (smoke test, triangle — pixel-verified, `Present hr=0` — shader, const, texture, managed-texture, format-coverage, partial-lock, multistream, drawprimitiveup, manydraws).
+
+### 69.4 The new frontier
+
+MW2 now clears the device-recreate loop entirely and reaches its **real main loop** (`timeGetTime`/critical-section/`Sleep` activity — genuine frame-pump behavior, not initialization). `pfnPresent` still hasn't fired. The next blocker is a new, unrelated crash: a write to `null+0xb8` inside `ddraw.dll` (`Mapping violation: 0xb8 (4) -w- at 0x6d68c52`), reached shortly after MW2's own `RaiseException` activity — a separate null-pointer bug in the legacy DirectDraw compatibility layer, not the D3D9 device path. Not yet investigated as of this entry.
