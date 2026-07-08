@@ -4582,3 +4582,27 @@ Before: deterministic `C0000005` null-deref inside `directxdatabasehelper.dll` o
 ### 75.6 Where this leaves things
 
 This closes out the entire multi-round §70-75 legacy-DirectDraw-probe investigative thread as a genuine, verified fix rather than a dead end — the ninth real forward-progress milestone this arc (§64-70, §72-73, this entry), following two more honestly-refuted hypotheses along the way (bringing this arc's total honest-negative-result count to five: §60, §71, and now two more within §74/§75, alongside nine real fixes). The next, distinct, cleanly-characterized blocker for a future round: the `C000008F` floating-point exception, not yet investigated.
+
+## 76. A TENTH real fix, and a genuinely general one: guest threads started with every FPU/SSE exception unmasked (2026-07-08)
+
+The `C000008F` (`STATUS_FLOAT_INVALID_OPERATION`) crash from §75.5 was investigated and found to be a real, project-wide correctness gap — not MW2-specific, not even D3D9-specific.
+
+### 76.1 The mechanism
+
+MW2's CRT startup called `floor(0.5)` — an entirely ordinary, valid operation — inside `__floor_default`, which raised a fatal FP exception via `_except1`/`RaiseException`. Live instrumentation at the guest entry point captured the actual cause: the backend's x87 control word and MXCSR were both **`0x0000`** at process start (every FP exception unmasked), instead of real Windows' default (`0x027F`/`0x1F80`, everything masked). The CRT's own `_control87(_PC_53, _MCW_PC)` call only ever sets precision bits, never touches the exception masks — so a zeroed starting state stays zeroed, and the very first floating-point operation that would normally just produce a masked, silent result instead raises a hardware exception.
+
+### 76.2 Root cause
+
+`emulator_thread::setup_registers()` builds each new thread's initial `CONTEXT` via `cpu_context::save()`, which reads back whatever FP control state the backend currently holds — and nothing ever seeds it. Real Windows would normally have `wow64cpu.dll` load an initial control word from `WOW64_CPURESERVED` for WoW64 guests, but sogen's WoW64 path bypasses `wow64cpu.dll` entirely (a "heaven's gate" style transition), so that seeding never happens — and for **native 64-bit threads**, nothing seeded it either, since the whole assumption was that the backend's own defaults would already be correct (they aren't; Unicorn's default is all-zero).
+
+### 76.3 The fix
+
+Commit `d3fb8c21`. `setup_registers()` now explicitly seeds `fpcw=0x037F`, `fptag=0xFFFF`, `mxcsr=0x1F80` (Windows' real defaults) before `cpu_context::save()` bakes them into the initial `CONTEXT` that `LdrInitializeThunk`/`NtContinue` restores — keeping the backend and the saved context consistent from the very first instruction. This is a general fix affecting every guest thread, native and WoW64 alike, not something specific to MW2 or D3D9.
+
+### 76.4 Verification
+
+Before: deterministic `C000008F` at the first `floor()` call, on every run. After: the crash is gone; MW2 runs ~10.56 million more trace lines into genuinely new D3D9 render-setup territory. Full regression sweep clean: smoke test 26/26, D3D9 x64 28/28, D3D9 x86 26/26 — zero regressions, as expected for a fix that only corrects a previously-wrong (never-right) default rather than changing any existing behavior real tests depended on.
+
+### 76.5 The new frontier
+
+MW2 now hits a new, distinct, deterministic crash well past the FP exception: a null-pointer read at address `0x44` inside real `d3d9.dll` (`d3d9.dll+0xbebfa`), reached after `Direct3DShaderValidatorCreate9`/`DebugSetLevel` activity — deep inside real Microsoft `d3d9.dll`'s own render/device bring-up, dereferencing a null object at a specific member offset. Not yet root-caused — whether this traces back to a missing/wrong sogen DDI response leaving some object null, or a different gap, is the next concrete question. `pfnPresent` has still not been reached.
