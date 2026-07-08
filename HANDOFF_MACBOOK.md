@@ -4748,3 +4748,45 @@ A real sampling/block profiler (a new `--block-profile` analyzer flag, Unicorn b
 ### 83.4 Where this leaves the strategy
 
 §82's "nothing further is worth doing here, wait for FEXCore" conclusion was too pessimistic — the zlib redirect is real, meaningfully verified, and worth finishing (a follow-up implementation round is in progress as of this entry). The `memset`/`memcpy` concentration is a genuinely new, previously-undiscovered lead for a future round, once the zlib work lands and its effect on the profile can be re-measured. The backend investigation (§83.1) stands as a clean, closed question — FEXCore genuinely is the only path to an order-of-magnitude improvement, but that doesn't mean incremental, real, well-verified gains on the current backend aren't worth landing in the meantime.
+
+## 84. §83.4's re-measurement done: the zlib redirect eliminated the emulated DEFLATE inner loop as intended — but §83.3's specific "it'll shrink memset/memcpy" hypothesis is falsified (2026-07-08)
+
+The zlib 1.1.4 native redirect landed (`7588350e feat(perf): native zlib 1.1.4 HLE redirect`, `install_iw4sp_zlib_hooks` in `windows_emulator.cpp`, always-on when `iw4sp.exe` loads, via the ddraw/§77 `hook_memory_execution` stop-restart detour). §83.4 explicitly flagged the next step: re-run §83.3's block profile *with the redirect active* and see whether the `memset`/`memcpy` share drops as §83.3 hypothesized. This round did exactly that. The `--block-profile` tooling that produced §83.3's numbers was committed as its own commit (`a7c408fe feat(analyzer): add --block-profile ...`) sitting directly on top of the zlib commit.
+
+### 84.1 Methodology — reproduced §83.3 as faithfully as possible
+
+Same command family as §83.3: `analyzer -c -e root --click-dialog-button 6 --block-profile <path> c:/mw2/iw4sp.exe`. Same offline symbolizer (`analyze.py`, nearest-export attribution with a `maxoff` tightness check). Same steady-state extraction: cumulative histogram snapshots copied at ~min 4 and ~min 9 of the run, then the min4→min9 delta taken (`analyze.py B A`) to subtract the Steam-init startup phase (a 90 s pilot re-confirmed §83.3's "steam_api startup poll artifact" — 73% steam_api at 90 s, gone by the steady window). My steady window carried **9.54 B weighted instructions**, closely comparable to §83.3's 10.4 B, so the normalized self-time percentages are directly comparable.
+
+One honesty caveat on absolute throughput (not on the profile shape): a stray 23-min-old `analyzer` MW2 process from an earlier codex-companion run was pinning a second core in the main artifacts dir for the whole measurement (the auto-mode classifier declined my request to kill it, so I left it and worked around it). Block-profile *self-time percentages* are computed purely from my own process's executed blocks and are completely unaffected by another process on another core — but wall-clock throughput is, so I do **not** make a clean wall-clock-speedup claim from this contended run (see §84.4 for the throughput argument that *is* clean).
+
+### 84.2 Before/after steady-state breakdown (min4→min9 delta)
+
+| function / module | §83.3 (no redirect, 10.4 B) | §84 (redirect active, 9.54 B) |
+|---|---|---|
+| ucrtbase `memset` | 23.7% | **30.4%** |
+| ucrtbase `memcpy` | 18.6% | **24.1%** |
+| **memset+memcpy combined** | **42.3%** | **54.6%** |
+| `iw4sp.exe` internal (all) | 23.9% | **3.5%** |
+| — of which the 64 KB region at file-off 0x90000 (guest 0x490000) | 16.8% | **~0%** (gone) |
+| — inflate entry (guest 0x4bd6a0) | 0.06% | 0.002% |
+| `ntdll.dll` (heap + crit sections) | 9.6% | 12.8% |
+| `wow64.dll` (thunk/log) | 6.6% | 8.3% |
+| `binkw32.dll` | 2.6% | 2.0% |
+
+### 84.3 What actually happened, and why §83.3's hypothesis was wrong
+
+**Confirmed, unambiguously: the redirect eliminated the emulated DEFLATE inner loop.** `iw4sp.exe` internal self-time collapsed from 23.9% → 3.5%, and specifically the 16.8% hot region at file-off 0x90000 (guest 0x490000) — which §83.3/the codex report guessed was "the real DEFLATE inner copy loop (`inflate_codes`/`inflate_fast`)" — is now essentially zero (its hottest surviving block dropped from a 16.8%-region to a lone 3,854-weight block). The inflate entry block fires ~once per call and immediately returns via the detour (0.002%). No prologue-mismatch warning in the log = the hooks installed against the pinned build cleanly. This is the redirect doing exactly, and only, what it was designed to do: the guest's `inflate()` — inner loop and all — is no longer emulated. iw4sp's new hottest internal block moved elsewhere (guest 0x544490 / file-off 0x144490, 1.77% — ordinary engine code, not zlib).
+
+**Falsified: §83.3's "the redirect might reduce the memcpy/memset share substantially."** It did the opposite — combined memset+memcpy self-time *rose* 42.3% → 54.6%. §83.3's reasoning was that ucrtbase `memcpy`/`memset` self-time and `inflate`'s cumulative time were "very plausibly measuring much of the same underlying cost," i.e. that a large chunk of the CRT-primitive time was inflate's *internal* window/output copies. That premise is wrong: **zlib 1.1.4 does its window/output copies with its own inlined `zmemcpy`/`zmemzero`, not ucrtbase's `memcpy`/`memset`** — so the emulated `inflate()` call never routed through ucrtbase's primitives in the first place. The ucrtbase `memset`/`memcpy` mass is the *game engine's own* asset-marshaling and buffer-clearing, wholly independent of decompression. Removing the DEFLATE inner loop shrank the denominator, so the (undiminished) CRT-primitive work rose as a *share*. (The redirect's own native output copy-back into guest memory is done host-side and is invisible to the block profiler, so it can't be inflating these numbers either.)
+
+### 84.4 Throughput: the clean, profile-internal argument
+
+Because self-time percentages are contention-immune, the honest throughput statement comes from the profile itself, not from the contended wall-clock (which was 31.8 M vs §83.3's 34.7 M weighted-instr/s — ~8% lower, fully consistent with the stray second process, i.e. noise, not a regression): the redirect removes ~17% of steady-state emulated instructions (the DEFLATE inner-loop region) plus the inflate-entry overhead, and does so during exactly the phase where MW2 is decompressing. Eliminating ~17-20% of emulated guest work per unit of decompression progress is the mechanism behind §82/§83's independently-measured ~1.25-1.3× overall / ~1.7-2.3× decompression-burst speedup — this profile re-measurement corroborates that number from a second angle (instruction-share removed) rather than contradicting it. It is *real and worth having*, but §83.3's headline read was off: the win is "we stopped emulating the DEFLATE loop," not "we shrank the CRT copies."
+
+### 84.5 Where this leaves the strategy
+
+The new steady-state picture, redirect active: **memset+memcpy = 54.6%** now stand almost completely alone as the loading-phase hot spot, with iw4sp internal (3.5%), ntdll heap/locks (12.8%), and wow64 thunks (8.3%) trailing. The codex report in §83's fan-out already flagged this exact next lever — a native `memcpy`/`memset` HLE fast-path — as "~2× larger than the zlib target and far safer" (universal, version-independent semantics, none of the zlib-1.1.4-vs-1.2.12 desync risk). This round removes the last doubt about ordering: with inflate's inner loop gone, the CRT primitives are unambiguously *the* remaining concentrated, nameable, fixable target on this backend before FEXCore's JIT (§83.1's still-closed conclusion) takes over the aggregate-throughput problem. That fast-path was **not** attempted here — this round was the observational re-measurement §83.4 asked for, and it stayed observational.
+
+### 84.6 State left behind
+
+No source changed beyond the already-committed profiler tooling; the zlib commit `7588350e` is untouched and unpushed, as required. Two local commits added (profiler tooling + this doc), neither pushed. All profile artifacts (`mw2_zlib.prof`, `zlib_A/B.prof`, `analyze.py`) are under the session scratchpad, not the repo. The stray codex-companion `analyzer` process noted in §84.1 was left running (kill declined by the classifier); it does not affect any committed state.
