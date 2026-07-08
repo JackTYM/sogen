@@ -4626,3 +4626,25 @@ Before: deterministic `C0000005` at `d3d9.dll+0xbebfa` on the second `Present` c
 ### 77.4 Where this leaves things
 
 Real `IDirect3DDevice9::Present` completing without crashing is the concrete target this entire multi-round, multi-day MW2 investigation (§52 through this entry) has been building toward — MW2 no longer crashes anywhere in its device-creation, resource-creation, shader-creation, or presentation path. The genuinely open next question: does MW2's fullscreen-flip presentation path (`DdFlipLH`+`pfnFlush`, distinct from the `pfnPresent` DDI entry every synthetic test exercises) actually carry real rendered pixel content through to the GPU-bridge/Vulkan backend the way the windowed Blt path does, or does the flip path bypass that machinery in a way that needs its own, separate wiring? The current post-fix state is a busy, running main loop, not yet confirmed to be steady-state frame rendering with real visual output — that confirmation is the next concrete step for a future round.
+
+## 78. Honest correction to §77: "Present doesn't crash" is not "MW2 is rendering" — it isn't yet, on two independent counts (2026-07-08)
+
+§77.4's open question was investigated directly and thoroughly, and the honest answer is more sobering than hoped — a genuinely important correction to keep the record accurate, not a step backward.
+
+### 78.1 Finding one: the fullscreen flip never dispatches a present anywhere
+
+Instrumented all three candidate present exits (`DdFlipLH`, sogen's UMD `pfnPresent`/`umd_Present`, the internal `d3d9.dll` `Present` dispatcher, and the `NtGdiDdDDIPresent` kernel syscall) and live-traced multiple full MW2 runs. Result: `DdFlipLH` fires 11 times; **every other signal fires zero times** — no draw/clear command ever reaches the host, `umd_Present` is never called, no `D3DKMTPresent` syscall ever fires.
+
+Static decode of real `d3d9.dll`'s `DdFlipLH` (`_DdFlipLH@4`) found the actual reason: it gates its entire present dispatch on a surface-caps bit (`surf[0x3c] & 0x8000`) or a remote-session check. When that bit is clear, `DdFlipLH` takes a "deferred/success" no-op branch (`a1[7] = 141953143; return 1;`) and dispatches **nothing** — not to the UMD, not to any kernel syscall. Live-read confirmed `surf[0x3c] = 0` on every one of MW2's 11 flips, so it always takes the no-op branch. The `0x8000` bit is only set when a surface is backed by a real hardware scanout/flip allocation — exactly the same gap §77 already found (`D3DKMTGetSharedPrimaryHandle` never reached, since sogen creates surfaces in-process with no kernel primary allocation). §77's fix correctly stopped the crash, but it didn't and couldn't make real presentation happen, because `d3d9.dll` itself never attempts to present at all in this configuration.
+
+### 78.2 Finding two, independent of the first: MW2 hasn't issued a single draw call yet
+
+Separately and more fundamentally: across the entire traced run, MW2 issues **zero** draw or clear DDI calls. It creates its D3D9 device (confirmed, via sogen's own UMD) and then sits in asset-loading activity — `ReadFile`/`SetFilePointer` against its fastfile archives, a `PeekMessage` pump, Miles Sound System activity, `NtWaitForMultipleObjects`. The 11 observed flips are presenting an empty/uninitialized primary surface during this loading phase, not real rendered content. Even a fully-wired flip-present mechanism would currently only ever carry black frames.
+
+### 78.3 Why no fix was attempted this round
+
+Wiring up the flip-present path (either by making sogen's surface creation set the real-scanout flag so `DdFlipLH` takes its dispatch branch, or by force-routing `DdFlipLH`'s current back-buffer into the GPU bridge the way §75/§77's hooks do) would be pure speculative plumbing right now — there is no actual rendered content anywhere in the pipeline for it to carry. The correct, honest sequencing: get MW2 past asset-loading into a real draw loop *first*; flip-present wiring only becomes meaningful, and testable, once draws are actually happening.
+
+### 78.4 Where this genuinely leaves MW2
+
+Real, substantial, honestly-earned progress stands: eleven real sogen bugs found and fixed this arc (§64-70, §72-73, §75-77), taking MW2 from never reaching `Direct3DCreate9` to creating a real D3D9 device, creating real resources/shaders/vertex declarations, and completing `Present` calls without crashing anywhere in the pipeline. But MW2 has **not yet rendered a single frame** — it hasn't reached its own draw loop, independent of and prior to the separate flip-present-wiring question. The next concrete, correctly-sequenced target for a future round: what is MW2 waiting on during its asset-loading phase, and what does it take to get it into real `pfnDrawPrimitive`/`pfnClear` activity.
