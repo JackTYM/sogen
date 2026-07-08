@@ -246,14 +246,21 @@ namespace sogen
             // {D574D111} opnum 2: AudioServerGetDevicePeriod(endpointId, mixParams, flags,
             //   [in,out,unique] *defaultPeriod, [in,out,unique] *minimumPeriod), both in 100-ns units. Report the
             //   standard shared-mode engine periods (10 ms default, 3 ms minimum).
+            //
+            // NDR marshals TOP-LEVEL pointer parameters as [referent id][pointee] per parameter, in parameter
+            // order -- the pointee is NOT deferred (deferral only applies to pointers embedded in a constructed
+            // type). audioses's _NdrClientCall4 unmarshals each [out] param completely before the next, so the two
+            // REFERENCE_TIME pointers must be interleaved (ref, hyper, ref, hyper), not (ref, ref, hyper, hyper).
+            // The earlier deferred layout made audioses read a bad HRESULT, so dsound's CEngineRendererConnection::
+            // Initialize aborted right after this call and never created a render stream.
             static NTSTATUS handle_get_device_period(utils::aligned_binary_writer& writer)
             {
                 constexpr int64_t default_period = 100000; // 10 ms
                 constexpr int64_t minimum_period = 30000;  // 3 ms
                 writer.write_ndr_pointer(true);            // defaultPeriod referent
+                writer.write<int64_t>(default_period);     // defaultPeriod pointee (8-byte aligned)
                 writer.write_ndr_pointer(true);            // minimumPeriod referent
-                writer.write<int64_t>(default_period);
-                writer.write<int64_t>(minimum_period);
+                writer.write<int64_t>(minimum_period);     // minimumPeriod pointee (8-byte aligned)
                 writer.align_to(sizeof(uint32_t));
                 writer.write(k_hr_ok);
                 return STATUS_SUCCESS;
