@@ -1109,6 +1109,19 @@ namespace
         {0x35545844 /*DXT5*/, FMT_OP_TEXTURE | FMT_OP_CUBETEXTURE, 0, 0, 0},
     };
 
+    // Query types the driver advertises to d3d9's CD3DBase::ValidateQueryCreate, which rejects any
+    // CreateQuery whose type is absent from this list with D3DERR_NOTAVAILABLE *before* dispatching to
+    // the pfnCreateQuery DDI. d3d9 fetches the count via GetCaps(GETD3DQUERYCOUNT=6) and, if non-zero,
+    // the array via GetCaps(GETD3DQUERYDATA=7). Only D3DQUERYTYPE_EVENT is advertised: it is universally
+    // supported by every real D3D9 HAL and is semantically exact here -- the pfnIssueQuery/pfnGetQueryData
+    // stubs return S_OK, i.e. "already signalled", which is correct for sogen's synchronous GPU (no async
+    // fence to wait on). OCCLUSION is deliberately left out: the stub can't produce a real pixel count, and
+    // callers (e.g. MW2's render-target init) treat its absence as "occlusion queries disabled" and render
+    // unculled -- strictly safer than feeding back a fabricated visible-pixel count.
+    static const UINT g_query_types[] = {
+        D3DQUERYTYPE_EVENT,
+    };
+
     HRESULT APIENTRY umd_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps)
     {
         log_line("[sogen-d3d9-umd] GetCaps Type=%u DataSize=%u pData=%p\n", pCaps->Type, pCaps->DataSize, pCaps->pData);
@@ -1130,6 +1143,18 @@ namespace
             if (pCaps->pData && pCaps->DataSize >= sizeof(g_formats))
             {
                 std::memcpy(pCaps->pData, g_formats, sizeof(g_formats));
+            }
+            break;
+        case SOGEN_D3DDDICAPS_GETD3DQUERYCOUNT:
+            if (pCaps->pData && pCaps->DataSize >= sizeof(UINT))
+            {
+                *static_cast<UINT*>(pCaps->pData) = static_cast<UINT>(sizeof(g_query_types) / sizeof(g_query_types[0]));
+            }
+            break;
+        case SOGEN_D3DDDICAPS_GETD3DQUERYDATA:
+            if (pCaps->pData && pCaps->DataSize >= sizeof(g_query_types))
+            {
+                std::memcpy(pCaps->pData, g_query_types, sizeof(g_query_types));
             }
             break;
         default:
