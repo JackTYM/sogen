@@ -4790,3 +4790,19 @@ The new steady-state picture, redirect active: **memset+memcpy = 54.6%** now sta
 ### 84.6 State left behind
 
 No source changed beyond the already-committed profiler tooling; the zlib commit `7588350e` is untouched and unpushed, as required. Two local commits added (profiler tooling + this doc), neither pushed. All profile artifacts (`mw2_zlib.prof`, `zlib_A/B.prof`, `analyze.py`) are under the session scratchpad, not the repo. The stray codex-companion `analyzer` process noted in §84.1 was left running (kill declined by the classifier); it does not affect any committed state.
+
+## 85. The zlib HLE redirect (commit `7588350e`) is reverted — a policy decision, not a technical one (2026-07-08)
+
+§77-84 built, rigorously verified (8,361 real captured calls, zero mismatches), and re-profiled a native zlib 1.1.4 redirect for MW2's asset decompression. It was never pushed, pending the user's explicit authorization decision flagged by the platform's permission classifier when it was first implemented (vendoring a new external dependency without prior sign-off). Asked directly, the user chose to revert rather than keep it — separately, in response to a live memset/memcpy redirect investigation this round dispatched, the user stated a general preference: "let's avoid doing this, prefer native behavior" for now, meaning host-native HLE redirects as a class (not just this specific instance) are out of scope until further notice, regardless of how well-verified any individual one turns out to be.
+
+### 85.1 What changed
+
+`git revert --no-edit 7588350e` (new commit `9ab2e990`), cleanly removing `deps/zlib114/` (the vendored source), `deps/zlib114.cmake`, the `deps/CMakeLists.txt` include, and `install_iw4sp_zlib_hooks` from `windows_emulator.cpp`/`.hpp` — a clean revert with no conflicts, since the two commits layered on top (`a7c408fe`'s profiler tooling, `d0f9537d`'s docs-only §84 entry) touch entirely disjoint files. Rebuilt (`cmake --build --preset=release`, clean) and re-ran the smoke test (all subtests, including 'Native Exceptions', 'MMIO', etc. — Success) to confirm the revert introduced no regression. MW2's zlib `inflate`/`inflateInit2_`/`inflateEnd` calls are back to full instruction-by-instruction emulation, exactly as before §81 first investigated a redirect.
+
+### 85.2 Why this matters going forward
+
+This is a genuine, standing course correction for this investigation arc, not a one-off: **host-native redirects of guest code (HLE-style substitution of an emulated call with a native host implementation) are off the table for now**, independent of how rigorously any individual instance is verified. The still-open memset/memcpy investigation (dispatched this same round, before this instruction arrived) was redirected mid-flight to stop short of implementation — it will land as a diagnostic-only entry (§86), not a fix. Future rounds should not propose this class of fix without checking in first; the diffuse-CPU-throughput problem this whole arc (§79-84) has been chasing incrementally via HLE redirects remains real, but its correct long-term answer stays what §82-83 already concluded: a genuine x86-to-ARM64 JIT (FEXCore, the parallel session's work), not more targeted native substitutions on this interpreter backend.
+
+### 85.3 Net effect on MW2's state
+
+No functional change from where §84 left off — MW2's D3D9 device/resource/shader creation and `Present` completion (§75-77) are unaffected (the zlib redirect never touched that code path), and asset-loading throughput reverts to its pre-§81 baseline (the ~1-4 reads/sec figure from §79, not the redirect's measured ~1.25-1.3x improvement). The `--block-profile` tooling (`a7c408fe`) stays committed — it's pure in-repo diagnostic code with no external dependency and no redirect behavior, unaffected by this policy.
