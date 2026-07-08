@@ -1052,6 +1052,7 @@ namespace
         {23 /*R5G6B5      */, RT_TEX, 0, 0, 0},
         {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0},           // texture-only single-channel formats
         {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
+        {51 /*A8L8        */, FMT_OP_TEXTURE, 0, 0, 0},           // luminance-alpha (host maps to R8G8_UNORM)
         {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only
         {63 /*Q8W8V8U8    */, FMT_OP_TEXTURE, 0, 0, 0},
         // A16B16G16R16F: HDR off-screen render target + texture (RT_TEX), plus vertex-texture-usable. The
@@ -1074,6 +1075,10 @@ namespace
         // D3DUSAGE_QUERY_VERTEXTEXTURE query -- advertising the documented 0x00400000 (AUTOGENMIPMAP) does
         // NOT satisfy it.
         {113 /*A16B16G16R16F*/, RT_TEX | FMT_OP_VERTEXTEXTURE, 0, 0, 0},
+        // R32F: single-channel 32-bit float off-screen render target + texture (RT_TEX). Same float-RT
+        // shape as A16B16G16R16F above; MW2 allocates a screen-sized "$floatz" R32F linear-depth target.
+        // Host maps to VK_FORMAT_R32_SFLOAT (4 bytes/texel, universally RT-capable incl. MoltenVK).
+        {114 /*R32F        */, RT_TEX, 0, 0, 0},
         // Compressed textures -- FMT_OP_TEXTURE plus FMT_OP_CUBETEXTURE (compressed cube maps are common:
         // skyboxes, IBL/reflection probes). Host maps DXT1/3/5 -> VK_FORMAT_BC1/BC2/BC3 (d3d9_format.cpp).
         // Deliberately NOT FMT_OP_VOLUMETEXTURE: compressed volume textures are vanishingly rare in real

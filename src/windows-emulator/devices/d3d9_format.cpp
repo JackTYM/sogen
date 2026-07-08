@@ -10,11 +10,13 @@ namespace sogen
         constexpr uint32_t d3dfmt_r5g6b5 = 23;
         constexpr uint32_t d3dfmt_a8 = 28;
         constexpr uint32_t d3dfmt_l8 = 50;
+        constexpr uint32_t d3dfmt_a8l8 = 51;
         constexpr uint32_t d3dfmt_v8u8 = 60;
         constexpr uint32_t d3dfmt_q8w8v8u8 = 63;
         constexpr uint32_t d3dfmt_d24s8 = 75;
         constexpr uint32_t d3dfmt_d24x8 = 77;
         constexpr uint32_t d3dfmt_a16b16g16r16f = 113;
+        constexpr uint32_t d3dfmt_r32f = 114;
         // FOURCC('D','X','T','1'/'3'/'5'), per d3d9types.h's MAKEFOURCC macro (little-endian packing).
         constexpr uint32_t d3dfmt_dxt1 = 0x31545844;
         constexpr uint32_t d3dfmt_dxt3 = 0x33545844;
@@ -30,6 +32,7 @@ namespace sogen
         // VkFormat values, verified against deps/Vulkan-Headers/include/vulkan/vulkan_core.h.
         constexpr uint32_t vk_format_r5g6b5_unorm_pack16 = 4;
         constexpr uint32_t vk_format_r8_unorm = 9;
+        constexpr uint32_t vk_format_r8g8_unorm = 16;
         constexpr uint32_t vk_format_r8g8_snorm = 17;
         constexpr uint32_t vk_format_r8g8b8a8_snorm = 38;
         constexpr uint32_t vk_format_b8g8r8a8_unorm = 44;
@@ -63,6 +66,13 @@ namespace sogen
         case d3dfmt_l8:
             out_vk_format = vk_format_r8_unorm;
             return true;
+        case d3dfmt_a8l8:
+            // Two-channel luminance-alpha. R8G8_UNORM is the byte-exact match (byte 0 = L -> R, byte 1 =
+            // A -> G). Sampling uses the same identity swizzle as L8/A8 above, so the luminance channel is
+            // not replicated across RGB (a pre-existing, test-accepted approximation for the single-channel
+            // luminance formats); creation and tightly-packed 2-byte-per-texel upload are exact.
+            out_vk_format = vk_format_r8g8_unorm;
+            return true;
         case d3dfmt_v8u8:
             out_vk_format = vk_format_r8g8_snorm;
             return true;
@@ -87,6 +97,9 @@ namespace sogen
         case d3dfmt_a16b16g16r16f:
             out_vk_format = vk_format_r16g16b16a16_sfloat;
             return true;
+        case d3dfmt_r32f:
+            out_vk_format = vk_format_r32_sfloat;
+            return true;
         case d3dfmt_dxt1:
             out_vk_format = vk_format_bc1_rgba_unorm_block;
             return true;
@@ -108,10 +121,12 @@ namespace sogen
         case vk_format_r8_unorm:
             return 1;
         case vk_format_r5g6b5_unorm_pack16:
+        case vk_format_r8g8_unorm:
         case vk_format_r8g8_snorm:
             return 2;
         case vk_format_r8g8b8a8_snorm:
         case vk_format_b8g8r8a8_unorm:
+        case vk_format_r32_sfloat:
         case vk_format_d32_sfloat:
             return 4;
         case vk_format_r16g16b16a16_sfloat:

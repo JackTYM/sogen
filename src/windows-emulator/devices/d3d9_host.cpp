@@ -929,10 +929,12 @@ namespace sogen
             case VK_FORMAT_R8_UNORM:
                 return static_cast<size_t>(width) * height;
             case VK_FORMAT_R5G6B5_UNORM_PACK16:
+            case VK_FORMAT_R8G8_UNORM:
             case VK_FORMAT_R8G8_SNORM:
                 return static_cast<size_t>(width) * height * 2;
             case VK_FORMAT_B8G8R8A8_UNORM:
             case VK_FORMAT_R8G8B8A8_SNORM:
+            case VK_FORMAT_R32_SFLOAT:
                 return static_cast<size_t>(width) * height * 4;
             case VK_FORMAT_R16G16B16A16_SFLOAT:
                 return static_cast<size_t>(width) * height * 8;
@@ -1097,6 +1099,13 @@ namespace sogen
                     float_to_half(static_cast<float>(a) / 255.0f),
                 };
                 std::memcpy(out.data(), halves, sizeof(halves));
+                return true;
+            }
+            case VK_FORMAT_R32_SFLOAT: {
+                // Single-channel float RT: store the red channel as a normalized [0,1] float32 (matches the
+                // per-channel normalization the half-float RT path above uses).
+                const float value = static_cast<float>(r) / 255.0f;
+                std::memcpy(out.data(), &value, sizeof(value));
                 return true;
             }
             default:
