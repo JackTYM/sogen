@@ -948,6 +948,93 @@ namespace sogen
         }
     }
 
+    void windows_emulator::install_ddraw_vidmem_hook(const mapped_module& mod)
+    {
+        // MW2's legacy DirectDraw-compatibility probe calls IDirectDraw7::GetAvailableVidMem (vtbl
+        // index 23, offset +0x5c) right after a successful DirectDrawCreateEx. On a modern WDDM
+        // config that method routes through dxgi.dll -> directxdatabasehelper.dll -> dxcore.dll's
+        // private adapter-enumeration factory, which -- in this GPU-less emulation environment --
+        // returns S_OK with a NULL IDXCoreAdapterList and then hard null-derefs inside
+        // directxdatabasehelper.dll (directxdatabasehelper.dll+0x14930, `mov eax,[eax]`). That is a
+        // robustness bug in closed-source Microsoft code that cannot be fixed at the source level.
+        // We intercept the ddraw.dll method entry and synthesize a *successful* GetAvailableVidMem --
+        // reporting a plausible amount of video memory -- so the crashing dxcore-backed body never
+        // runs. Success is the most faithful emulation: on real hardware this legacy query succeeds
+        // and returns the adapter's video memory, and the guest uses the value only to pick the
+        // adapter with the most memory (an unsigned max), so a plausible amount keeps behaviour
+        // identical to a real single-GPU machine. This mirrors install_d3d9_caps_patch_hook: a
+        // runtime, in-memory behavior patch keyed to a specific, SHA256-pinned Microsoft DLL build,
+        // never an on-disk modification. See HANDOFF_MACBOOK.md's §70-75 DirectDraw-probe arc.
+        constexpr uint16_t machine_i386 = 0x014c;
+
+        // Only the 32-bit syswow64/ddraw.dll matters (real MW2 is a 32-bit/WoW64 guest) and only that
+        // build has been RE'd; a 64-bit ddraw.dll would need its own separately-verified RVA.
+        if (mod.machine != machine_i386)
+        {
+            return;
+        }
+
+        // 32-bit syswow64/ddraw.dll (sha256 37113406...0566b0): GetAvailableVidMem entry at RVA
+        // 0x10dc0. Two relocation-invariant guard bands re-verify the build/RVA before hooking: the
+        // hotpatch+SEH prologue at the entry, and the distinctive 4-argument spill sequence at +0x38.
+        constexpr uint64_t entry_rva = 0x10dc0;
+        constexpr uint64_t argspill_rva = 0x10df8;
+        constexpr std::array<uint8_t, 7> entry_pattern = {0x8B, 0xFF, 0x55, 0x8B, 0xEC, 0x6A, 0xFE};
+        constexpr std::array<uint8_t, 18> argspill_pattern = {0x8B, 0x45, 0x08, 0x89, 0x45, 0xB8, 0x8B, 0x75, 0x0C,
+                                                              0x8B, 0x7D, 0x10, 0x8B, 0x45, 0x14, 0x89, 0x45, 0xBC};
+
+        std::array<uint8_t, 7> actual_entry{};
+        std::array<uint8_t, 18> actual_argspill{};
+        if (!this->emu().try_read_memory(mod.image_base + entry_rva, actual_entry.data(), actual_entry.size()) ||
+            actual_entry != entry_pattern ||
+            !this->emu().try_read_memory(mod.image_base + argspill_rva, actual_argspill.data(),
+                                         actual_argspill.size()) ||
+            actual_argspill != argspill_pattern)
+        {
+            this->log.warn("ddraw.dll GetAvailableVidMem RVA pattern mismatch at image_base+0x%llx (sha256 "
+                           "37113406967162585c9a67c252005757459d8efe87684bbc0ce184907d0566b0 expected) -- "
+                           "DirectDraw vidmem-probe crash-guard disabled for this build\n",
+                           static_cast<unsigned long long>(entry_rva));
+            return;
+        }
+
+        // Overwrite the method prologue in the guest's mapped image (an in-memory detour; the on-disk
+        // DLL is never touched) with a tiny stub that reports a plausible amount of video memory and
+        // returns S_OK, so the crashing dxcore-backed body never runs. On entry the __stdcall frame is
+        //   [esp]      return address        [esp+4]    this (LPDIRECTDRAW7)
+        //   [esp+8]    lpDDSCaps2            [esp+0xc]  lpdwTotal    [esp+0x10] lpdwFree
+        // and the stub is:
+        //   mov eax,[esp+0xC]; test eax,eax; jz +6; mov dword[eax],0x20000000   ; *lpdwTotal
+        //   mov eax,[esp+0x10];test eax,eax; jz +6; mov dword[eax],0x20000000   ; *lpdwFree
+        //   xor eax,eax                                                          ; S_OK
+        //   ret 0x10                                                             ; __stdcall cleanup
+        // A native `ret 0x10` is used rather than an execution hook that rewrites RIP/RSP, because a
+        // single-instruction UC_HOOK_CODE on this backend does not redirect RIP -- only the RSP write
+        // would take effect, walking the stack pointer off the top of the thread's stack.
+        constexpr std::array<uint8_t, 33> stub = {
+            0x8B, 0x44, 0x24, 0x0C,             // mov eax, [esp+0xC]
+            0x85, 0xC0,                         // test eax, eax
+            0x74, 0x06,                         // jz +6
+            0xC7, 0x00, 0x00, 0x00, 0x00, 0x20, // mov dword ptr [eax], 0x20000000
+            0x8B, 0x44, 0x24, 0x10,             // mov eax, [esp+0x10]
+            0x85, 0xC0,                         // test eax, eax
+            0x74, 0x06,                         // jz +6
+            0xC7, 0x00, 0x00, 0x00, 0x00, 0x20, // mov dword ptr [eax], 0x20000000
+            0x33, 0xC0,                         // xor eax, eax  (S_OK)
+            0xC2, 0x10, 0x00,                   // ret 0x10
+        };
+
+        if (!this->emu().try_write_memory(mod.image_base + entry_rva, stub.data(), stub.size()))
+        {
+            this->log.warn("ddraw.dll GetAvailableVidMem crash-guard: failed to patch prologue at 0x%llx\n",
+                           static_cast<unsigned long long>(mod.image_base + entry_rva));
+            return;
+        }
+
+        this->log.info("ddraw.dll GetAvailableVidMem crash-guard installed at 0x%llx (x86/WoW64)\n",
+                       static_cast<unsigned long long>(mod.image_base + entry_rva));
+    }
+
     void windows_emulator::setup_hooks()
     {
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
@@ -967,6 +1054,10 @@ namespace sogen
             else if (mod.name == "d3d9.dll")
             {
                 this->install_d3d9_caps_patch_hook(mod);
+            }
+            else if (mod.name == "ddraw.dll")
+            {
+                this->install_ddraw_vidmem_hook(mod);
             }
         });
 
