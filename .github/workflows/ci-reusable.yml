@@ -154,6 +154,12 @@ jobs:
           echo "C:\\msys64\\mingw64\\bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=C:\\msys64\\mingw64" >> "$GITHUB_ENV"
 
+      - name: Install Freetype (vcpkg)
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install freetype:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+
       - name: CMake Build
         run: cmake --preset=release && cmake --build --preset=release -t dump-apiset
 
