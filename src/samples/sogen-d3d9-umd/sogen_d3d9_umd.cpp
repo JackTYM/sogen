@@ -854,9 +854,16 @@ namespace
         // this bit set, CreateDriverIndexBuffer is used instead and pfnLock/pfnUnlock's real return
         // values genuinely reach the app.
         constexpr DWORD k_devcaps_driver_managed_index_pool = 0x04000000;
+        // D3DDEVCAPS_DRAWPRIMITIVES2EX (0x8000, plus its 2 baseline 0x2000) is a DX7-era cap that every real
+        // D3D9 HAL device reports; this UMD had omitted it. Modern Warfare 2's renderer-init caps validator
+        // (iw4sp.exe sub_543F30) reads DevCaps at struct offset 0x1C and fatally aborts with "Video card or
+        // driver is not at least DirectX 7 compliant" when bit 0x8000 is clear (live-RE'd against the game's
+        // own requirement table at 0x71A800: record 6, required=0x8000, severity=fatal). Additive and safe for
+        // a WDDM UMD -- the down-level DDI is fixed by the reported DDI version, so these app-visible legacy
+        // caps don't reroute d3d9.dll onto the XP DP2 token stream.
         caps->DevCaps = D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_PUREDEVICE |
-                        D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY | k_devcaps_driver_managed_pool |
-                        k_devcaps_driver_managed_index_pool;
+                        D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY | D3DDEVCAPS_DRAWPRIMITIVES2 |
+                        D3DDEVCAPS_DRAWPRIMITIVES2EX | k_devcaps_driver_managed_pool | k_devcaps_driver_managed_index_pool;
         // PrimitiveMiscCaps bit 0x2000 has no name in the public D3DPMISCCAPS_* set (the defined bits jump
         // from D3DPMISCCAPS_NULLREFERENCE=0x1000 straight past it to D3DPMISCCAPS_INDEPENDENTWRITEMASKS=
         // 0x4000) -- found via objdump disassembly of d3d9.dll's VS/PS-2.0+ HAL-enable validator (the
