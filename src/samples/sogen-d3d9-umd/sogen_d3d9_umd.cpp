@@ -573,8 +573,19 @@ namespace
         // resource_flags_to_kind). The internal-use synthetic buffer formats (100/101/102) do not carry
         // meaningful cube/volume flags; keep them texture_2d (their host resource is orphaned regardless --
         // see the format!=100/101/102 registration guard below -- so the kind is never acted on).
-        const d3d9c::resource_kind kind =
-            is_internal_buffer_format ? d3d9c::resource_kind::texture_2d : resource_flags_to_kind(args->Flags);
+        // The internal buffer formats DO carry their real byte size in pSurfList[0].Width (read into
+        // `width` above -- live-confirmed: MW2's CreateVertexBuffer(81920) arrives here as format=100
+        // width=81920). Send them as the matching buffer kind (100=D3DFMT_VERTEXDATA -> vertex_buffer;
+        // 101/102=D3DFMT_INDEX16/INDEX32 -> index_buffer) so the host sizes the resource's backing to
+        // that real width. The old code sent them as texture_2d, whose backing sized to 0 (these formats
+        // aren't in the host's texture-format table), forcing every buffer Lock down the 64 KB-floored
+        // resolve_buffer_resource_id lazy path -- which silently truncated any buffer larger than 64 KB
+        // and let the app's Lock() write run past the end of the too-small backing (MW2's 80 KB vertex
+        // buffer overran its 64 KB lock buffer by 16 KB, corrupting the guest heap).
+        const d3d9c::resource_kind kind = is_internal_buffer_format
+                                              ? (format == 100 ? d3d9c::resource_kind::vertex_buffer
+                                                               : d3d9c::resource_kind::index_buffer)
+                                              : resource_flags_to_kind(args->Flags);
 
         // width/height/mip_levels/pool are the app's real values (read from the RE'd struct above).
         const d3d9c::create_resource_request req{
@@ -641,6 +652,16 @@ namespace
             if (format != 100 && format != 101 && format != 102)
             {
                 g_created_resource_ids[resp.resource] = resp.resource;
+            }
+            else
+            {
+                // Buffer (vertex/index) resources: now created with the correct kind + real byte size
+                // (see the `kind` comment above), so register the handle in the lazy-bind map. The
+                // runtime echoes resp.resource back as the Lock hResource, so resolve_buffer_resource_id
+                // finds this correctly-sized resource here instead of synthesizing a 64 KB-floored guess.
+                // They stay OUT of g_created_resource_ids so umd_Lock keeps treating them as buffers
+                // (reading OffsetToLock), which textures/render targets must not do.
+                g_resource_ids[resp.resource] = resp.resource;
             }
         }
         return S_OK;
