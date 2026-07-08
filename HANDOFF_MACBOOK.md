@@ -4668,3 +4668,25 @@ A native fast-path for critical sections is real, valuable, high-leverage work �
 ### 79.4 Where this leaves things
 
 MW2 is not stuck — it's legitimately, verifiably loading real game data, just slowly, at a rate (roughly 1-4 reads/sec during the inflate-bound phase) that would realistically take many hours to fully decompress MW2's asset set under emulation at current throughput. The single highest-leverage, evidence-backed next step for a future round: a native `RtlEnterCriticalSection`/`RtlLeaveCriticalSection` fast path — the correct focus for actually reaching MW2's draw loop in a practical amount of time, but a larger, more careful undertaking than this arc's other fixes, deliberately not started here.
+
+## 80. §79's proposed fast-path corrected, not implemented: it targets the wrong bottleneck, and the mechanism doesn't work the way assumed on this backend (2026-07-08)
+
+Given the elevated correctness stakes of touching a core synchronization primitive used by every guest program (not just MW2), this task was deliberately approached with more rigor and less speed than this arc's eleven prior fixes — and correctly concluded that implementing anything here would be a mistake, on two independent, decisive grounds.
+
+### 80.1 Confirmed mechanics: modern bit-lock, not the classic sentinel
+
+Disassembling the real staged `ntdll.dll` (both architectures) confirmed sogen's critical sections are the modern Windows 10+ bit-lock design (`lock btr`/`lock cmpxchg` on a lock-word bit), not the classic `LockCount == -1` sentinel form. The real uncontended fast path is genuinely tiny (~10 instructions), entirely in user-mode guest code with no syscall at all — sogen faithfully emulates exactly this, instruction by instruction, via its normal CPU emulation plus the global per-instruction execution hook every guest instruction already pays.
+
+### 80.2 Two decisive reasons NOT to implement the proposed native fast path
+
+1. **The interception mechanism itself would be a net loss on this backend.** Sogen's CPU backend is a cooperative, single-guest-thread-at-a-time emulator; the only way this project has ever gotten a memory-execution hook to actually skip/redirect guest code (confirmed via §77's own finding on the ddraw fix) is `emu().stop()` + restarting the outer dispatch loop — a mechanism costing roughly 1µs, versus the ~100ns the real 10-instruction uncontended lock/unlock leaf already takes to execute. Using the "correct" hook mechanism to skip this tiny leaf would make each call roughly **10x slower**, not faster. Overwriting the guest prologue with equivalent code (the other established interception pattern) saves nothing, since the guest code being replaced is already this cheap.
+
+2. **§79's own numbers were a call-count artifact, not the actual time sink.** 4.85 million lock calls over ~15 minutes is only ~5,400 calls/sec — a small fraction of a percent of the instructions this backend executes per second running flat-out. During the actual slow, many-hours-projected phase specifically (1-4 `ReadFile`s/sec, ~19 lock-pairs per read), lock-pair activity is only ~20-80/sec — genuinely negligible. That phase is **zlib-inflate-bound** (in-guest decompression of the asset data), not lock-bound. "91.6% of all traced calls" measured call *frequency*, not wall-clock *time* — the two are very different things when the calls being counted are each individually nearly free.
+
+### 80.3 The corrected next lever
+
+The real, evidence-backed bottleneck for MW2's loading throughput is in-guest zlib inflate performance, not critical-section overhead — a native decompression fast-path (or a fundamentally faster CPU backend for this workload) is the actual correct target, not the critical-section idea §79 proposed. This wasn't attempted this round; an instruction-level per-function profile of the inflate-bound phase specifically would be the right next step before committing to any fix here, given how decisively §79's own leading hypothesis turned out to be a red herring once actually checked carefully.
+
+### 80.4 Why this negative result matters
+
+No code was written, and none was needed — this is exactly the outcome this task's elevated-stakes framing was designed to produce if the confidence bar wasn't met, and it wasn't forced. This also stands as a genuinely valuable methodological note for this whole arc: even a rigorously profiled, seemingly obvious "here's the bottleneck, 91.6% of calls" finding (§79) turned out to be measuring the wrong dimension (frequency vs. time) once someone checked carefully before implementing against it — the same "verify before implementing" discipline that made all eleven of this arc's real fixes land correctly on the first attempt worked exactly as intended here too, just producing a "don't do this" answer instead of a fix.
