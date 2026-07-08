@@ -4457,3 +4457,23 @@ Before: device recreated, global transiently nulled, render-worker thread null-d
 ### 69.4 The new frontier
 
 MW2 now clears the device-recreate loop entirely and reaches its **real main loop** (`timeGetTime`/critical-section/`Sleep` activity — genuine frame-pump behavior, not initialization). `pfnPresent` still hasn't fired. The next blocker is a new, unrelated crash: a write to `null+0xb8` inside `ddraw.dll` (`Mapping violation: 0xb8 (4) -w- at 0x6d68c52`), reached shortly after MW2's own `RaiseException` activity — a separate null-pointer bug in the legacy DirectDraw compatibility layer, not the D3D9 device path. Not yet investigated as of this entry.
+
+## 70. A SEVENTH real bug: legacy D3D3-caps DDI query answered with an all-zero, zero-`dwSize` struct, crashing real `ddraw.dll`'s `DirectDrawCreateEx` (2026-07-07)
+
+§69.4's `ddraw.dll` crash was investigated and, like every prior blocker this session, turned out to be a small, well-evidenced, sogen-owned answer-quality gap rather than anything in MW2's own logic — and the preceding `RaiseException` activity that looked suspicious was confirmed benign (standard `MS_VC_EXCEPTION`/`0x406D1388` thread-naming, unrelated to the crash).
+
+### 70.1 The mechanism
+
+MW2 calls `DirectDrawCreateEx`, which real `ddraw.dll`'s `DirectDrawObjectCreate` implements by calling the D3D9 UMD's `pfnGetCaps(Type=8, ...)` (`D3DDDICAPS_GETD3D3CAPS`, a legacy `D3DHAL_GLOBALDRIVERDATA` struct) **twice** — once into a stack buffer, then gating a second, real allocation on `pD3dDriverData[0]` (the returned struct's `dwSize` field) being non-zero. sogen's `umd_GetCaps` had no case for `Type=8` at all, falling to a `default:` branch that zero-fills the buffer — so `dwSize` came back 0, the gate failed, and `ddraw.dll` fed itself a NULL buffer on the second pass, unconditionally writing through it (`*(pD3dDriverData + 0x2E) = hdc`, i.e. offset `0xB8`) and crashing with `C0000005`.
+
+### 70.2 The fix
+
+Commit `68333609`. Added `SOGEN_D3DDDICAPS_GETD3D3CAPS = 8` to `d3d9_ddi.hpp` and a real `Type=8` case in `umd_GetCaps`: zero-fill the buffer (matching the existing default behavior for the struct's contents, since MW2 doesn't need real legacy D3D3 driver data) but set `dwSize = DataSize` — the one field real `ddraw.dll` actually gates on.
+
+### 70.3 Verification
+
+Before: `GetCaps Type=8` returned an all-zero, zero-sized struct → `ddraw.dll` crash on every run. After (3 independent runs): zero occurrences of the old crash; `Type=8` now returns valid buffers on both passes; MW2 clears `DirectDrawCreateEx` and makes further DirectDraw calls, advancing into `ddraw.dll`'s DXGI-backed path. Full regression sweep clean on both x64 and x86 (smoke test; triangle — pixel-exact; shader, const, texture, managed-texture, format-coverage — "ALL CHECKS PASSED"; partial-lock, multistream, drawprimitiveup, manydraws — 768/768).
+
+### 70.4 The new frontier
+
+MW2 now survives its entire DirectDraw probe (a previously hard-crashing path) and reaches a **new, deterministic** null-pointer read inside `dxgi.dll` (`dxgi.dll+0x2cb7df`, `cmp dword ptr [eax+0Ch], 14h` with `eax` a bogus small pointer), reached when a DirectDraw vtable method routes into DXGI's adapter/presentation path — `ddraw.dll` on modern Windows is itself a thin compatibility shim over DXGI, and this looks like a bad object handle crossing that boundary. A separate, deeper investigation from the D3DDDICAPS gap above — not yet started as of this entry.
