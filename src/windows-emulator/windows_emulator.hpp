@@ -321,6 +321,7 @@ namespace sogen
 
         void setup_hooks();
         void install_d3d9_caps_patch_hook(const mapped_module& mod);
+        void install_d3d9_flip_target_hook(const mapped_module& mod);
         void install_ddraw_vidmem_hook(const mapped_module& mod);
         void setup_process();
         void on_instruction_execution(uint64_t address);

@@ -944,8 +944,77 @@ namespace sogen
             this->d3d9_caps_hooks_[mod.image_base] = hook;
             this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx (x86/WoW64)\n",
                            static_cast<unsigned long long>(mod.image_base + post_store_rva));
+
+            this->install_d3d9_flip_target_hook(mod);
             return;
         }
+    }
+
+    void windows_emulator::install_d3d9_flip_target_hook(const mapped_module& mod)
+    {
+        // MW2 (and any fullscreen-exclusive D3DSWAPEFFECT app) presents through d3d9's own DDraw
+        // flip path: IDirect3DDevice9::Present -> CSwapChain::PresentMain -> FlipToSurface -> the
+        // DDraw HAL Flip thunk DdFlipLH (32-bit d3d9.dll RVA 0xbebe0). DdFlipLH's first act is
+        //   ebx = flipData->lpSurfTarg;  device = *(ebx + 0x44);
+        // i.e. it fetches the flip's device from the *target* surface's kernel handle.
+        //
+        // In a fullscreen flip chain d3d9 gives every buffer a "kernel handle" (a driver-side
+        // DDraw surface local). The back buffers get one via the in-process create-surface DDI,
+        // but the fullscreen primary/scanout surface never does in sogen's headless GPU model:
+        // there is no real scanout allocation to back it, so CreateSurfaceLH leaves its handle
+        // null (the path that would fill it, D3DKMTGetSharedPrimaryHandle, is never reached for
+        // this surface). The first Present still succeeds because the rendered back buffer's
+        // handle is valid, but FlipToSurface's tail rotation then cascades the primary's null
+        // handle into the back buffer, so the second Present hands DdFlipLH a null lpSurfTarg and
+        // it faults reading offset +0x44 of a null object.
+        //
+        // lpSurfCurr (the current/front surface, flip-data offset +4) is always valid and carries
+        // the same device pointer at +0x44. When lpSurfTarg is null we substitute lpSurfCurr as
+        // the flip target: a faithful no-op "flip to self" for a headless swap chain (there is no
+        // scanout to page-flip), which lets DdFlipLH obtain the device and Flush normally instead
+        // of dereferencing null. Mirrors install_d3d9_caps_patch_hook's "intercept one specific
+        // broken call and make it succeed" pattern.
+        constexpr uint16_t machine_i386 = 0x014c;
+        if (mod.machine != machine_i386)
+        {
+            return;
+        }
+
+        // Guard on DdFlipLH's prologue (`mov edi,edi; push ebp; mov ebp,esp; and esp,...`) so a
+        // differently-compiled d3d9 is not silently patched at the wrong address.
+        constexpr uint64_t flip_rva = 0xbebe0;
+        constexpr std::array<uint8_t, 6> expected_prologue = {0x8b, 0xff, 0x55, 0x8b, 0xec, 0x83};
+        std::array<uint8_t, 6> actual_prologue{};
+        if (!this->emu().try_read_memory(mod.image_base + flip_rva, actual_prologue.data(), actual_prologue.size()) ||
+            actual_prologue != expected_prologue)
+        {
+            this->log.warn("d3d9.dll DdFlipLH prologue mismatch at image_base+0x%llx -- fullscreen-flip null-target guard "
+                           "disabled for this build\n",
+                           static_cast<unsigned long long>(flip_rva));
+            return;
+        }
+
+        auto* hook = this->emu().hook_memory_execution(mod.image_base + flip_rva, [this](const uint64_t) {
+            uint32_t flip_data = 0;
+            const auto esp = this->emu().reg<uint32_t>(x86_register::esp);
+            if (!this->emu().try_read_memory(esp + 4, &flip_data, sizeof(flip_data)) || flip_data == 0)
+            {
+                return;
+            }
+
+            uint32_t surf_targ = 0;
+            uint32_t surf_curr = 0;
+            this->emu().try_read_memory(flip_data + 0x8, &surf_targ, sizeof(surf_targ));
+            this->emu().try_read_memory(flip_data + 0x4, &surf_curr, sizeof(surf_curr));
+            if (surf_targ == 0 && surf_curr != 0)
+            {
+                this->emu().write_memory<uint32_t>(flip_data + 0x8, surf_curr);
+            }
+        });
+
+        this->d3d9_caps_hooks_[mod.image_base + flip_rva] = hook;
+        this->log.info("d3d9.dll fullscreen-flip null-target guard installed at 0x%llx (x86/WoW64)\n",
+                       static_cast<unsigned long long>(mod.image_base + flip_rva));
     }
 
     void windows_emulator::install_ddraw_vidmem_hook(const mapped_module& mod)
