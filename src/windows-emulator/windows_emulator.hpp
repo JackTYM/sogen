@@ -319,10 +319,17 @@ namespace sogen
         std::map<uint64_t, std::vector<emulator_hook*>> section_first_execution_hooks_{};
         std::map<uint64_t, emulator_hook*> d3d9_caps_hooks_{};
 
+        // Native zlib 1.1.4 redirect for MW2's iw4sp.exe (see install_iw4sp_zlib_hooks). Host
+        // z_stream objects are stored opaquely (void*) keyed by the guest stream address to keep
+        // zlib.h out of this header; the .cpp owns them and frees them on module unload.
+        std::vector<emulator_hook*> iw4sp_zlib_hooks_{};
+        std::map<uint64_t, void*> iw4sp_zlib_streams_{};
+
         void setup_hooks();
         void install_d3d9_caps_patch_hook(const mapped_module& mod);
         void install_d3d9_flip_target_hook(const mapped_module& mod);
         void install_ddraw_vidmem_hook(const mapped_module& mod);
+        void install_iw4sp_zlib_hooks(const mapped_module& mod);
         void setup_process();
         void on_instruction_execution(uint64_t address);
 
