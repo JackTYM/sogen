@@ -148,6 +148,8 @@ namespace sogen::py
         nb::class_<sogen_windows_emulator>(m, "Emulator")
             .def("start", &sogen_windows_emulator::start, nb::arg("count") = 0, nb::call_guard<nb::gil_scoped_release>())
             .def("stop", &sogen_windows_emulator::stop)
+            .def("enable_block_profiler", &sogen_windows_emulator::enable_block_profiler)
+            .def("get_block_profile", &sogen_windows_emulator::get_block_profile)
             .def("save_snapshot", &sogen_windows_emulator::save_snapshot)
             .def("restore_snapshot", &sogen_windows_emulator::restore_snapshot)
             .def("serialize_state", &sogen_windows_emulator::serialize_state)

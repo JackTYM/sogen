@@ -226,8 +226,21 @@ namespace sogen::py
         std::unique_ptr<windows_emulator> emu{};
         std::shared_ptr<callback_registry> callbacks{};
         std::shared_ptr<hook_registry> hooks{};
+        std::shared_ptr<std::unordered_map<uint64_t, uint64_t>> block_profile_{
+            std::make_shared<std::unordered_map<uint64_t, uint64_t>>()};
 
         explicit sogen_windows_emulator(std::unique_ptr<windows_emulator> emulator);
+
+        void enable_block_profiler() const
+        {
+            auto profile = this->block_profile_;
+            this->emu->emu().hook_basic_block(
+                [profile](const sogen::basic_block& block) { (*profile)[block.address] += block.instruction_count; });
+        }
+        std::unordered_map<uint64_t, uint64_t> get_block_profile() const
+        {
+            return *this->block_profile_;
+        }
 
         windows_emulator& native() const
         {
