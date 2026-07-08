@@ -4690,3 +4690,19 @@ The real, evidence-backed bottleneck for MW2's loading throughput is in-guest zl
 ### 80.4 Why this negative result matters
 
 No code was written, and none was needed — this is exactly the outcome this task's elevated-stakes framing was designed to produce if the confidence bar wasn't met, and it wasn't forced. This also stands as a genuinely valuable methodological note for this whole arc: even a rigorously profiled, seemingly obvious "here's the bottleneck, 91.6% of calls" finding (§79) turned out to be measuring the wrong dimension (frequency vs. time) once someone checked carefully before implementing against it — the same "verify before implementing" discipline that made all eleven of this arc's real fixes land correctly on the first attempt worked exactly as intended here too, just producing a "don't do this" answer instead of a fix.
+
+## 81. §80's corrected target investigated: a native zlib redirect is the right idea, viable design, but real, specific gates remain before it's safely implementable (2026-07-08)
+
+§80 redirected attention to in-guest zlib decompression as the real throughput bottleneck. This round investigated a native host-side "high-level emulation" (HLE) redirect for it — a well-established emulator technique (recognize a well-known standard-library algorithm's compiled entry point, substitute a native host call producing guaranteed-identical output) — with the same elevated rigor as §80, given that getting this specific kind of fix wrong risks silent data corruption rather than a visible crash.
+
+### 81.1 Confirmed: MW2 statically links stock zlib 1.1.4 (2002)
+
+Concrete evidence via idasql on the staged `iw4sp.exe`: literal version strings (`"inflate 1.1.4 Copyright 1995-2002 Mark Adler"`, `"deflate 1.1.4 ...Jean-loup Gailly"`), the `ZLIB_VERSION` `"1.1.4"` string passed to init, and the complete, unmodified 1.1.4 `inftrees` error-string set. `SteamAPIUpdater.dll` also embeds the same zlib 1.1.4 build independently. Exact entry points identified: `inflate()`, `inflateInit2_()` (windowBits=15, standard framing), `inflateEnd()`, called from at least four distinct consumers — a 16KB-block gzread-style reader (matching §79's "16384-byte inflate reads" exactly), a fastfile loader with 256KB double-buffered async reads and cross-call leftover-input carry-over, a 1-byte-at-a-time bitstream reader, and a one-shot stateless rawfile decompressor.
+
+### 81.2 Why it wasn't implemented in the first pass: three concrete, addressable gates
+
+1. **Version mismatch risk.** The host only has zlib 1.2.12 available; zlib's inflate engine was fully rewritten between 1.1.4 and 1.2.0, and the exact bytes consumed at an output-limited stop (bit-buffer/lookahead state) is implementation-defined — using a different major version for the streaming consumers' cross-call leftover-input handoff could silently desync `total_in` by a few bytes, corrupting all downstream decompressed assets invisibly. Only the stateless one-shot path would be safe with 1.2.12, and it isn't the bottleneck.
+2. **No real profile yet** confirming inflate specifically dominates wall-clock time (as opposed to raw instruction-emulation overhead generally, or another cost) — the same "measure before you build" gate that caught §80's call-count-vs-time-cost confusion.
+3. **No byte-identical verification harness** existed to actually prove a redirect produces identical output rather than merely "doesn't crash."
+
+Unlike §80 (wrong target entirely), this round's finding was assessed as "right target, viable design, gates addressable" — a genuinely more promising lead, not a dead end.
