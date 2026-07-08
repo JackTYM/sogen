@@ -1167,6 +1167,18 @@ namespace sogen
         CONTEXT64 ctx{};
         ctx.ContextFlags = CONTEXT64_ALL;
 
+        // Windows initializes a fresh thread's FPU/SSE control state with every exception
+        // masked (x87 control word 0x037F, MXCSR 0x1F80). sogen bypasses wow64cpu.dll (which
+        // would normally load this from WOW64_CPURESERVED) and the backend's default control
+        // state is all-zero, i.e. every FP exception UNMASKED. Without seeding it, the CRT
+        // startup's _control87(_PC_53, _MCW_PC) reads 0x0000 and writes back 0x0200 (masks
+        // still clear), so the first floor()/ceil()/SSE math on an ordinary value raises a
+        // fatal STATUS_FLOAT_INVALID_OPERATION. Save() below bakes these into the CONTEXT that
+        // LdrInitializeThunk restores via NtContinue, keeping backend and saved state in sync.
+        emu.reg<uint16_t>(x86_register::fpcw, 0x037F);
+        emu.reg<uint16_t>(x86_register::fptag, 0xFFFF);
+        emu.reg<uint32_t>(x86_register::mxcsr, 0x1F80);
+
         unalign_stack(emu);
         cpu_context::save(emu, ctx);
 
