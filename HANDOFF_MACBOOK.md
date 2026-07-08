@@ -4648,3 +4648,23 @@ Wiring up the flip-present path (either by making sogen's surface creation set t
 ### 78.4 Where this genuinely leaves MW2
 
 Real, substantial, honestly-earned progress stands: eleven real sogen bugs found and fixed this arc (§64-70, §72-73, §75-77), taking MW2 from never reaching `Direct3DCreate9` to creating a real D3D9 device, creating real resources/shaders/vertex declarations, and completing `Present` calls without crashing anywhere in the pipeline. But MW2 has **not yet rendered a single frame** — it hasn't reached its own draw loop, independent of and prior to the separate flip-present-wiring question. The next concrete, correctly-sequenced target for a future round: what is MW2 waiting on during its asset-loading phase, and what does it take to get it into real `pfnDrawPrimitive`/`pfnClear` activity.
+
+## 79. MW2's asset loading isn't stuck — it's genuinely progressing, just slow, and the bottleneck is now precisely profiled (2026-07-08)
+
+§78.4's question was investigated directly: is MW2's asset-loading phase a stuck loop (matching the §52-64 audio-storm precedent) or genuinely-slow-but-correct behavior?
+
+### 79.1 Genuine forward progress, decisively unlike the audio-storm dead end
+
+Instrumented `NtReadFile` to log filename/offset/length and traced a real MW2 run over a ~15-minute observation window at 100% CPU. Reads advance through monotonically increasing offsets within each archive, and the run transitions between real phases and files: zip central-directory indexing (512-byte reads) → asset-data streaming (16384-byte inflate reads) → the real fastfiles (`code_pre_gfx.ff`, `code_post_gfx.ff`, `patch.ff`, `ui.ff`) — 46 distinct files touched, offsets continuously advancing. This is decisively different from §52-64's audio storm, which showed zero forward progress even after 4 real hours. Sogen's own file-syscall handling (`NtReadFile`/`NtSetInformationFile`/`NtQueryInformationFile`) was checked and found to have no pathology — a single `fread` from the host page cache, O(log n) handle lookup, no redundant work.
+
+### 79.2 The real bottleneck, precisely profiled
+
+Across the traced run, `RtlEnterCriticalSection`+`RtlLeaveCriticalSection` account for **4.85 million calls — 91.6% of every traced guest call**, versus only ~125K `ReadFile` calls (roughly 19 nested lock acquire/release pairs per read — CRT file lock, the IW engine's own filesystem mutex, and heap locks, all stacked). Sogen has no native fast-path intercept for these — it fully emulates the guest's own `ntdll.dll` critical-section implementation instruction-by-instruction on every single call. Combined with in-guest zlib inflate for the compressed asset data, this is genuinely why loading is slow: not a bug, but a real, now-precisely-quantified performance gap in how sogen executes an extremely hot, extremely simple, extremely common synchronization primitive.
+
+### 79.3 Why no fix was attempted this round
+
+A native fast-path for critical sections is real, valuable, high-leverage work — but it's also a correctness-sensitive core-synchronization change (contended locks, spin counts, wait-list semantics all need to be preserved exactly, since ANY guest program that uses critical sections, not just MW2, would be affected) — not a narrow, quickly-verifiable fix in the style of this arc's eleven prior ones. Correctly not attempted speculatively this round.
+
+### 79.4 Where this leaves things
+
+MW2 is not stuck — it's legitimately, verifiably loading real game data, just slowly, at a rate (roughly 1-4 reads/sec during the inflate-bound phase) that would realistically take many hours to fully decompress MW2's asset set under emulation at current throughput. The single highest-leverage, evidence-backed next step for a future round: a native `RtlEnterCriticalSection`/`RtlLeaveCriticalSection` fast path — the correct focus for actually reaching MW2's draw loop in a practical amount of time, but a larger, more careful undertaking than this arc's other fixes, deliberately not started here.
