@@ -73,6 +73,11 @@ namespace sogen
         // Public D3DRENDERSTATETYPE value (d3d9types.h) needed for real scissor-test wiring.
         constexpr uint32_t d3drs_scissortestenable = 174;
 
+        // Public D3DRENDERSTATETYPE value (d3d9types.h). Default TRUE (clipping on); FALSE tells the driver
+        // the geometry is inside the guard band and skips clipping, incl. near/far depth clipping -- which
+        // maps to VkPipelineRasterizationStateCreateInfo::depthClampEnable (clamp instead of clip in Z).
+        constexpr uint32_t d3drs_clipping = 136;
+
         // Public D3DBLEND values (d3d9types.h), D3DRS_SRCBLEND/DESTBLEND's value space.
         constexpr uint32_t d3dblend_zero = 1;
         constexpr uint32_t d3dblend_one = 2;
@@ -422,6 +427,9 @@ namespace sogen
         // the exact values that key the cache are the same ones fed to create_graphics_pipeline on a miss.
         key.depth = build_depth_state(this->state_.render_state, depth_format);
         key.blend = build_blend_state(this->state_.render_state);
+        // D3DRS_CLIPPING (default TRUE) drives depthClampEnable in the built pipeline, so it is part of the
+        // pipeline identity -- normalized to 0/1 so distinct truthy values don't fragment the cache.
+        key.depth_clip_enable = render_state_or(this->state_.render_state, d3drs_clipping, 1) != 0 ? 1u : 0u;
 
         const auto cached = this->ff_pipelines_.find(key);
         if (cached != this->ff_pipelines_.end())
@@ -485,7 +493,7 @@ namespace sogen
             device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings,
             attributes, key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend,
-            pipeline);
+            key.depth_clip_enable, pipeline);
         if (result != 0 || pipeline == 0)
         {
             return false;
@@ -629,6 +637,9 @@ namespace sogen
         // the exact values that key the cache are the same ones fed to create_graphics_pipeline on a miss.
         key.depth = build_depth_state(this->state_.render_state, depth_format);
         key.blend = build_blend_state(this->state_.render_state);
+        // D3DRS_CLIPPING (default TRUE) drives depthClampEnable in the built pipeline, so it is part of the
+        // pipeline identity -- normalized to 0/1 so distinct truthy values don't fragment the cache.
+        key.depth_clip_enable = render_state_or(this->state_.render_state, d3drs_clipping, 1) != 0 ? 1u : 0u;
 
         const auto cached = this->programmable_pipelines_.find(key);
         if (cached != this->programmable_pipelines_.end())
@@ -840,7 +851,7 @@ namespace sogen
             device, /*render_pass=*/0, entry.pipeline_layout, entry.vs_module, entry.fs_module, width, height, bindings,
             attributes, key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec,
-            blend, entry.pipeline);
+            blend, key.depth_clip_enable, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);

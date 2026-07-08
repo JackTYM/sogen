@@ -2102,7 +2102,7 @@ namespace sogen
                     request.device, request.render_pass, request.pipeline_layout, request.vertex_shader, request.fragment_shader,
                     request.width, request.height, bindings, attributes, depth, color_formats, request.depth_format, request.stencil_format,
                     request.rasterization_samples, request.primitive_topology, request.primitive_restart_enable, dynamic_states, vs_spec,
-                    fs_spec, blend_attachments, pipeline);
+                    fs_spec, blend_attachments, /*depth_clip_enable=*/1, pipeline);
                 if (result != 0)
                 {
                     win_emu.log.error(

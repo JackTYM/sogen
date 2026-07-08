@@ -193,6 +193,7 @@ namespace sogen
             uint64_t instance_id{};
             VkPhysicalDevice physical_device{}; // the device this was created from (for memory queries)
             uint32_t queue_family_index{};      // the single family this device was created with
+            bool depth_clamp_enabled{};         // whether the depthClamp feature was enabled (gates pipeline depthClampEnable)
             PFN_vkDestroyDevice destroy_device{};
             PFN_vkGetDeviceQueue get_device_queue{};
             PFN_vkQueueWaitIdle queue_wait_idle{};
@@ -1646,6 +1647,27 @@ namespace sogen
             }
         }
 
+        // Depth clamping (VkPipelineRasterizationStateCreateInfo::depthClampEnable) is required to honor a
+        // guest disabling primitive clipping (D3D9 D3DRS_CLIPPING = FALSE): with clamping the near/far
+        // planes clamp instead of clip. A pipeline may only set depthClampEnable when the depthClamp device
+        // feature is enabled, so force it on here whenever the physical device advertises support -- a core
+        // Vulkan 1.0 feature (universally available, incl. MoltenVK). Gated on support so this can never turn
+        // a successful vkCreateDevice into VK_ERROR_FEATURE_NOT_PRESENT; create_graphics_pipeline reads
+        // depth_clamp_enabled back and never sets depthClampEnable = VK_TRUE unless it was actually enabled.
+        bool depth_clamp_enabled = false;
+        if (instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDeviceFeatures2 supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            instance->second.get_physical_device_features2(pd->second.handle, &supported);
+            if (supported.features.depthClamp)
+            {
+                features2.features.depthClamp = VK_TRUE;
+                has_features = true;
+                depth_clamp_enabled = true;
+            }
+        }
+
         VkDeviceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
@@ -1671,6 +1693,7 @@ namespace sogen
         data.instance_id = pd->second.instance_id;
         data.physical_device = pd->second.handle;
         data.queue_family_index = primary_family;
+        data.depth_clamp_enabled = depth_clamp_enabled;
 
         if (const auto gdpa = instance->second.get_device_proc_addr)
         {
@@ -4693,7 +4716,8 @@ namespace sogen
                                                   uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
                                                   uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                                   const specialization& vs_spec, const specialization& fs_spec,
-                                                  std::span<const color_blend_attachment> blend_attachments_in, uint64_t& out_pipeline)
+                                                  std::span<const color_blend_attachment> blend_attachments_in,
+                                                  uint32_t depth_clip_enable, uint64_t& out_pipeline)
     {
         out_pipeline = 0;
         const auto dev = this->impl_->devices.find(device);
@@ -4822,6 +4846,10 @@ namespace sogen
 
         VkPipelineRasterizationStateCreateInfo rasterization{};
         rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        // depth_clip_enable == 0 (guest disabled clipping) clamps near/far instead of clipping. Only honor it
+        // when the device enabled the depthClamp feature -- otherwise depthClampEnable = VK_TRUE is invalid
+        // usage, so fall back to VK_FALSE (clip), which is also the default whenever clipping stays enabled.
+        rasterization.depthClampEnable = (depth_clip_enable == 0 && dev->second.depth_clamp_enabled) ? VK_TRUE : VK_FALSE;
         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
         rasterization.cullMode = VK_CULL_MODE_NONE;
         rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;

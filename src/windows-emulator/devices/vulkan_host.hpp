@@ -534,6 +534,8 @@ namespace sogen
         // depth test. Empty vertex input (no bindings/attributes) leaves vertices to be baked into the shader.
         // When render_pass == 0 the pipeline is built for dynamic rendering (VK_KHR_dynamic_rendering) using
         // color_formats/depth_format/stencil_format, with viewport and scissor as dynamic state.
+        // depth_clip_enable != 0 (the D3D9 default, D3DRS_CLIPPING = TRUE) leaves depthClampEnable = VK_FALSE
+        // (near/far depth clipping on); 0 clamps instead of clips, but only if the device enabled depthClamp.
         int32_t create_graphics_pipeline(uint64_t device, uint64_t render_pass, uint64_t pipeline_layout, uint64_t vertex_shader,
                                          uint64_t fragment_shader, uint32_t width, uint32_t height,
                                          std::span<const vertex_binding> bindings, std::span<const vertex_attribute> attributes,
@@ -541,7 +543,8 @@ namespace sogen
                                          uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
                                          uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                          const specialization& vs_spec, const specialization& fs_spec,
-                                         std::span<const color_blend_attachment> blend_attachments, uint64_t& out_pipeline);
+                                         std::span<const color_blend_attachment> blend_attachments, uint32_t depth_clip_enable,
+                                         uint64_t& out_pipeline);
         int32_t create_compute_pipeline(uint64_t device, uint64_t pipeline_layout, uint64_t shader_module, uint64_t& out_pipeline);
         void destroy_pipeline(uint64_t device, uint64_t pipeline);
 
