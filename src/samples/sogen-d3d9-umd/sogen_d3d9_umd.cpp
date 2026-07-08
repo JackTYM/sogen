@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -95,6 +96,44 @@ namespace
 
     void flush_d3d9_batch();
 
+    // Writes the escape_command_header prefix of a [header][in][out] private-data buffer. Every byte of
+    // the 32-byte header (8 packed 4-byte fields, no padding) is assigned here, so the buffer region it
+    // covers needs no prior zero-init.
+    void fill_escape_header(uint8_t* buffer, uint32_t code, uint32_t in_len, uint32_t out_len)
+    {
+        const uint32_t header_size = sizeof(gb::escape_command_header);
+        auto* header = reinterpret_cast<gb::escape_command_header*>(buffer);
+        header->magic = gb::escape_magic;
+        header->command_id = code;
+        header->input_offset = header_size;
+        header->input_size = in_len;
+        header->output_offset = header_size + in_len;
+        header->output_size = out_len;
+        header->result = 0;
+        header->reserved = 0;
+    }
+
+    // Issues a fully-built [escape_command_header][in][out] private-data buffer over the D3DKMT Escape
+    // channel. Returns true when the escape transport itself succeeded (the caller inspects
+    // header->result for the command outcome). Split out of bridge_call so callers that already own a
+    // contiguous [header][payload] buffer (umd_Unlock) can send it without a second staging copy.
+    bool send_escape(uint8_t* private_data, size_t size)
+    {
+        static pfn_d3dkmt escape = load_win32u("NtGdiDdDDIEscape");
+        const uint32_t adapter = ensure_adapter();
+        if (!escape || adapter == 0)
+        {
+            return false;
+        }
+
+        kmt_escape esc{};
+        esc.h_adapter = adapter;
+        esc.type = 0;
+        esc.private_data = private_data;
+        esc.private_data_size = static_cast<uint32_t>(size);
+        return escape(&esc) == 0;
+    }
+
     // Carries one D3D9 command to the host over the D3DKMT Escape channel:
     // [escape_command_header][in][out]. Mirrors vulkan_shim.cpp's bridge_call.
     bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len)
@@ -108,44 +147,29 @@ namespace
             flush_d3d9_batch();
         }
 
-        static pfn_d3dkmt escape = load_win32u("NtGdiDdDDIEscape");
-        const uint32_t adapter = ensure_adapter();
-        if (!escape || adapter == 0)
-        {
-            return false;
-        }
-
+        // The header region is fully written by fill_escape_header, the input region by the memcpy
+        // below, and the output region by the host's escape write-back (every wire command's host
+        // handler fills the full output_size it is given), so the staging buffer needs no zero-init.
         const uint32_t header_size = sizeof(gb::escape_command_header);
-        std::vector<uint8_t> buffer(header_size + in_len + out_len);
-        auto* header = reinterpret_cast<gb::escape_command_header*>(buffer.data());
-        header->magic = gb::escape_magic;
-        header->command_id = code;
-        header->input_offset = header_size;
-        header->input_size = in_len;
-        header->output_offset = header_size + in_len;
-        header->output_size = out_len;
-        header->result = 0;
-        header->reserved = 0;
+        const size_t total = static_cast<size_t>(header_size) + in_len + out_len;
+        auto storage = std::make_unique_for_overwrite<uint8_t[]>(total);
+        uint8_t* buffer = storage.get();
+        fill_escape_header(buffer, code, in_len, out_len);
         if (in != nullptr && in_len != 0)
         {
-            std::memcpy(buffer.data() + header_size, in, in_len);
+            std::memcpy(buffer + header_size, in, in_len);
         }
 
-        kmt_escape esc{};
-        esc.h_adapter = adapter;
-        esc.type = 0;
-        esc.private_data = buffer.data();
-        esc.private_data_size = static_cast<uint32_t>(buffer.size());
-        if (escape(&esc) != 0)
+        if (!send_escape(buffer, total))
         {
             return false;
         }
 
         if (out != nullptr && out_len != 0)
         {
-            std::memcpy(out, buffer.data() + header_size + in_len, out_len);
+            std::memcpy(out, buffer + header_size + in_len, out_len);
         }
-        return header->result >= 0;
+        return reinterpret_cast<gb::escape_command_header*>(buffer)->result >= 0;
     }
 
     // Batched D3D9 streamed opcodes: same wire mechanism vulkan_shim.cpp's g_command_streams/
@@ -2035,18 +2059,24 @@ namespace
         bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe));
 
         auto& buffer = g_locked_buffers[key];
-        buffer.assign(probe.data_size, 0);
 
-        std::vector<uint8_t> out_buf(sizeof(d3d9c::lock_response) + buffer.size());
-        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), out_buf.data(), static_cast<DWORD>(out_buf.size()));
-        const auto* resp = reinterpret_cast<const d3d9c::lock_response*>(out_buf.data());
+        // The host fills the whole [lock_response][data] output region (handle_d3d9_lock writes
+        // lock_response + min(capacity, data_size) bytes, and this real call's data_size equals the
+        // probe's since the request is identical), so out_buf needs no zero-init. The data payload is
+        // then copied once, directly into the persistent app-facing buffer via range-assign -- no
+        // separate zero-fill of `buffer` (the old buffer.assign(N, 0) was fully overwritten here).
+        const size_t out_buf_size = sizeof(d3d9c::lock_response) + probe.data_size;
+        auto out_buf = std::make_unique_for_overwrite<uint8_t[]>(out_buf_size);
+        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), out_buf.get(), static_cast<DWORD>(out_buf_size));
+        const auto* resp = reinterpret_cast<const d3d9c::lock_response*>(out_buf.get());
         if (resp->hr != 0)
         {
             g_locked_buffers.erase(key);
             pArgs->pData = nullptr;
             return E_FAIL;
         }
-        std::memcpy(buffer.data(), out_buf.data() + sizeof(*resp), buffer.size());
+        const uint8_t* data_ptr = out_buf.get() + sizeof(d3d9c::lock_response);
+        buffer.assign(data_ptr, data_ptr + probe.data_size);
         pArgs->pData = buffer.data();
         g_locked_offsets[key] = offset;
         return S_OK;
@@ -2073,14 +2103,28 @@ namespace
         const auto offset_it = g_locked_offsets.find(key);
         const uint32_t offset = offset_it != g_locked_offsets.end() ? offset_it->second : 0;
 
-        std::vector<uint8_t> buf(sizeof(d3d9c::unlock_request) + it->second.size());
-        auto* req = reinterpret_cast<d3d9c::unlock_request*>(buf.data());
-        req->resource = resource;
-        req->subresource = subresource;
-        req->offset = offset;
-        req->data_size = static_cast<uint32_t>(it->second.size());
-        std::memcpy(buf.data() + sizeof(*req), it->second.data(), it->second.size());
-        bridge_call(gb::ioctl_d3d9_unlock, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0);
+        // Build the escape buffer in place -- [escape_command_header][unlock_request][data] -- and send
+        // it directly. Going through bridge_call would first pack [unlock_request][data] into a local
+        // buffer and then have bridge_call copy that whole (data-sized) buffer again into its own
+        // [header][in][out] staging; the locked data is instead copied exactly once, straight into the
+        // wire buffer's payload region. The header and request regions are fully written below, so the
+        // buffer needs no zero-init (the value-initialized `req` carries zeroed struct padding).
+        const uint32_t header_size = sizeof(gb::escape_command_header);
+        const uint32_t data_size = static_cast<uint32_t>(it->second.size());
+        const uint32_t in_len = sizeof(d3d9c::unlock_request) + data_size;
+        const size_t total = static_cast<size_t>(header_size) + in_len;
+        auto storage = std::make_unique_for_overwrite<uint8_t[]>(total);
+        uint8_t* buf = storage.get();
+        fill_escape_header(buf, gb::ioctl_d3d9_unlock, in_len, 0);
+        const d3d9c::unlock_request req{
+            .resource = resource, .subresource = subresource, .offset = offset, .data_size = data_size};
+        std::memcpy(buf + header_size, &req, sizeof(req));
+        std::memcpy(buf + header_size + sizeof(req), it->second.data(), it->second.size());
+
+        // unlock makes the host observe resource state, so drain the batch first -- the same
+        // ordering guarantee bridge_call's flush-on-every-other-call guard provides.
+        flush_d3d9_batch();
+        send_escape(buf, total);
 
         g_locked_buffers.erase(it);
         g_locked_offsets.erase(key);
