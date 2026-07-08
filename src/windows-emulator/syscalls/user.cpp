@@ -3457,7 +3457,7 @@ namespace sogen
 
             if (mode_num == ENUM_CURRENT_SETTINGS || mode_num == ENUM_REGISTRY_SETTINGS)
             {
-                fill_mode(1920, 1080);
+                fill_mode(c.proc.current_display_width, c.proc.current_display_height);
                 return STATUS_SUCCESS;
             }
 
@@ -3470,13 +3470,28 @@ namespace sogen
             return STATUS_UNSUCCESSFUL;
         }
 
-        // The emulator owns a single virtual display whose mode never actually changes; accept any requested mode
-        // (including CDS_TEST probes) by reporting DISP_CHANGE_SUCCESSFUL so the renderer proceeds to window setup.
-        LONG handle_NtUserChangeDisplaySettings(const syscall_context& /*c*/,
+        // The emulator owns a single virtual display whose mode never actually changes on the host, but the
+        // requested width/height must still be remembered: d3d9.dll's fullscreen device-reset path calls this,
+        // then immediately reads the mode back via NtUserEnumDisplaySettings(ENUM_CURRENT_SETTINGS) to confirm
+        // it took effect, retrying (and eventually failing the whole CreateDevice with D3DERR_NOTAVAILABLE) if
+        // the readback doesn't match what it just requested. Accept any requested mode (including CDS_TEST
+        // probes -- there is no real hardware mode-switch risk here) by reporting DISP_CHANGE_SUCCESSFUL, and
+        // persist the requested size so that readback matches.
+        LONG handle_NtUserChangeDisplaySettings(const syscall_context& c,
                                                 const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*device_name*/,
-                                                const emulator_object<EMU_DEVMODEW> /*dev_mode*/, const hwnd /*window*/,
+                                                const emulator_object<EMU_DEVMODEW> dev_mode, const hwnd /*window*/,
                                                 const DWORD /*flags*/, const uint64_t /*param*/)
         {
+            if (dev_mode)
+            {
+                const auto dm = dev_mode.read();
+                if (dm.dmPelsWidth != 0 && dm.dmPelsHeight != 0)
+                {
+                    c.proc.current_display_width = dm.dmPelsWidth;
+                    c.proc.current_display_height = dm.dmPelsHeight;
+                }
+            }
+
             return 0; // DISP_CHANGE_SUCCESSFUL
         }
 

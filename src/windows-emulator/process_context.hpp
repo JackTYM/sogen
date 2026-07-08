@@ -454,6 +454,12 @@ namespace sogen
         user_handle_table user_handles;
         handle default_monitor_handle{};
         handle default_desktop_window_handle{};
+        // The mode last accepted via NtUserChangeDisplaySettings, reported back by
+        // NtUserEnumDisplaySettings(ENUM_CURRENT_SETTINGS). Defaults to the emulator's fixed virtual
+        // display size (1920x1080) so a caller that queries the current mode before ever changing it
+        // sees the same value NtUserGetDisplayConfigBufferSizes/GetSystemMetrics report.
+        uint32_t current_display_width{1920};
+        uint32_t current_display_height{1080};
         handle_store<handle_types::event, event> events{};
         handle_store<handle_types::keyed_event, keyed_event> keyed_events{};
         handle_store<handle_types::file, file> files{};
