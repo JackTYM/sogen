@@ -4393,3 +4393,23 @@ Full regression sweep clean (smoke test 26/26; triangle/shader/const/texture/man
 ### 66.4 Where this leaves things
 
 Real, distinct progress: three sogen bugs (§64 audio, §65 caps, §66 display-mode) fixed this session, each independently verified to remove a genuine blocker MW2 previously hit. The device-creation retry storm and its user-visible error are both gone. **Still open**: even with `CreateDevice` completing cleanly and reporting a fully-wired device-function table, MW2 never calls `pfnCreateResource` or `pfnPresent` — it does a few more `GetCaps` queries, some background `DirectSound playback reset` activity continues, and the process eventually self-terminates cleanly (status 0) without ever creating the implicit swap chain or rendering a frame. Not yet root-caused as of this entry — the next concrete question for a future round.
+
+## 67. A FOURTH real bug: two unadvertised D3D9 texture formats blocked `CreateTexture` before the DDI was ever reached — fixed, MW2 clears the entire renderer-init phase (2026-07-07)
+
+Following up on §66.4's open question ("why does MW2 never call `pfnCreateResource`/`pfnPresent`"), a dedicated investigation found the answer directly in MW2's own decoded error output — the same pattern as §65/§66, where a real, informative message existed the whole time and just needed to be surfaced.
+
+### 67.1 The mechanism
+
+MW2's own `MessageBoxA` calls, decoded live: `Create2DTexture( line_horizontal, 64, 2, 0, 51 ) failed: 8876086c = Invalid call`, then (after working around the first) `Create2DTexture( $floatz, 1024, 768, 0, 114 ) failed: 8876086c`. `0x8876086C` is `D3DERR_INVALIDCALL`. Format 51 is `D3DFMT_A8L8`; format 114 is `D3DFMT_R32F` (MW2's screen-sized `$floatz` linear-depth render target). Neither was present in sogen's vendor UMD's `FORMATOP` capability table — real `d3d9.dll`'s own `CreateTexture` runtime validates the requested format against the driver's advertised format list and rejects unadvertised formats with `D3DERR_INVALIDCALL` **before ever dispatching to the DDI** — explaining exactly why `pfnCreateResource` was never called despite `CreateDevice` succeeding cleanly (§66).
+
+### 67.2 The fix
+
+Commit `0de02d01`. Wired both formats through every layer that has to agree with each other (this project's established "producer/consumer format switches must stay in lockstep" invariant, first documented in the cube/volume-texture work): vendor UMD `g_formats` (`FMT_OP_TEXTURE` for A8L8, `RT_TEX` for R32F), `d3d9_format_to_vulkan`/`vk_format_bytes_per_texel` (`d3d9_format.cpp`), `vk_texture_data_size`/`encode_fill_texel` (`d3d9_host.cpp`) — A8L8 → `VK_FORMAT_R8G8_UNORM` (2 B/texel), R32F → `VK_FORMAT_R32_SFLOAT` (4 B/texel, same shape as the existing `A16B16G16R16F` off-screen-float handling). One real mid-course catch: the first A8L8 pass omitted `vk_texture_data_size`, zero-sizing the texture backing so `Lock` returned a null `pBits`, which MW2's own 2-byte-per-texel copy then wrote through — a live, concrete demonstration of why that invariant is load-bearing, not just documentation.
+
+### 67.3 Verification
+
+Live-verified: at baseline, `pfnCreateResource` was **never** called. After the fix, one run showed (decoded from the GPU-bridge escape ops) `d3d9_create_resource` ×127, `Lock` ×428, `Unlock` ×210, `CreateVertexShader` ×42, `CreatePixelShader` ×61, `CreateVertexDecl` ×77 — the full resource/shader/vertex-declaration pipeline running, all zero before. Both `D3DERR_INVALIDCALL` abort dialogs are gone. Full regression sweep clean: smoke test, plus triangle/shader/const/texture/managed-texture/**format-coverage** on both x64 and x86, all pixel-exact.
+
+### 67.4 The new frontier
+
+MW2 has now cleared its **entire D3D9 renderer-init phase** — real asset, shader, and vertex-declaration creation, a milestone with no precedent anywhere in this arc. It still has not called `pfnPresent`. It now crashes during asset loading in a **completely different, non-graphics subsystem**: a fatal access violation reading a wild pointer inside `ntdll.dll`, reached through `cfgmgr32.dll` (PnP Configuration Manager) called from `rpcrt4.dll` (RPC runtime), while enumerating `MMDevices\Audio\Render` device properties. This shares a registry area with the closed §52-64 audio arc but is a genuinely different bug (a crash/wild-pointer read, not the audio-initialization dead-end) — not yet root-caused as of this entry, and the correct next target.
