@@ -44,7 +44,7 @@ endif()
 find_package(Freetype REQUIRED)
 
 target_link_libraries(windows-emulator PUBLIC emulator minidump)
-target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers Freetype::Freetype zlib114)
+target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers Freetype::Freetype)
 
 if(SOGEN_HAS_VKD3D_SHADER)
   target_link_libraries(windows-emulator PRIVATE vkd3d-shader-bridge)

@@ -16,19 +16,6 @@
 #include "memory_permission_ext.hpp"
 #include "devices/gpu_bridge.hpp"
 
-// Vendored zlib 1.1.4 (deps/zlib114) -- used to natively service MW2's guest zlib
-// inflate calls. All of zlib.h's macros are Z_/inflate*/deflate*-prefixed and do
-// not collide with any identifier in this translation unit.
-//
-// Modern Apple toolchains predefine TARGET_OS_MAC, which makes 1.1.4's zconf.h skip
-// its `typedef unsigned char Byte` and its zutil.h try to #include <unix.h>. Undefine
-// it just for this include so the vendored header parses (mirrors the -U TARGET_OS_MAC
-// build flag applied to the zlib114 library itself). Nothing below this point uses it.
-#ifdef TARGET_OS_MAC
-#undef TARGET_OS_MAC
-#endif
-#include <zlib.h>
-
 namespace sogen
 {
     constexpr auto MAX_INSTRUCTIONS_PER_TIME_SLICE = 0x20000;
@@ -1117,205 +1104,6 @@ namespace sogen
                        static_cast<unsigned long long>(mod.image_base + entry_rva));
     }
 
-    void windows_emulator::install_iw4sp_zlib_hooks(const mapped_module& mod)
-    {
-        // MW2's iw4sp.exe statically links stock zlib 1.1.4 and decompresses all of its game
-        // assets through it; §80-83 established that emulating those inflate() calls
-        // instruction-by-instruction is the single largest identified hot spot of the loading
-        // phase. This installs a high-level-emulation redirect: recognise the guest's compiled
-        // inflate/inflateInit2_/inflateEnd entry points and service them with native calls into
-        // the *same* zlib version (deps/zlib114), which §83.2 verified produces byte-identical
-        // output across 8,361 real captured calls (including the cross-call streaming
-        // leftover-input carry). The exact entry points, the 32-bit z_stream layout, and the
-        // byte-identical guarantee are all pinned to this one specific iw4sp.exe build; the
-        // per-entry prologue guard bands below re-verify that build before any hook is armed, so
-        // no other zlib-using guest program can ever be affected. Mirrors
-        // install_d3d9_caps_patch_hook / install_ddraw_vidmem_hook: a runtime, in-memory redirect
-        // keyed to a SHA256-pinned binary, never an on-disk modification.
-        //
-        // Target build: iw4sp.exe SHA-256
-        //   4dd53fabf9677980aaf081009584ade99d6bf440330046e5c8950e87ef0547d9  (image base 0x400000).
-        // Confirmed cdecl entry RVAs and their prologue guard bytes:
-        //   inflate        RVA 0xbd6a0 : 56 8B 74 24 08 85 F6              (push esi; mov esi,[esp+8]; test esi,esi)
-        //   inflateInit2_  RVA 0xb1e00 : 8B 44 24 0C 57 33 FF 3B C7        (mov eax,[esp+0xC]; push edi; xor edi,edi; cmp)
-        //   inflateEnd     RVA 0x59220 : 56 8B 74 24 08 85 F6 74 39 8B 46 1C
-        // z_stream (32-bit, sizeof 0x34): next_in+0x0 avail_in+0x4 total_in+0x8 next_out+0xC
-        //   avail_out+0x10 total_out+0x14 msg+0x18 state+0x1C.
-        constexpr uint16_t machine_i386 = 0x014c;
-        if (mod.machine != machine_i386)
-        {
-            return;
-        }
-
-        struct zlib_entry
-        {
-            const char* name;
-            uint64_t rva;
-            std::vector<uint8_t> guard;
-        };
-        const std::array<zlib_entry, 3> entries = {{
-            {"inflate", 0xbd6a0, {0x56, 0x8B, 0x74, 0x24, 0x08, 0x85, 0xF6}},
-            {"inflateInit2_", 0xb1e00, {0x8B, 0x44, 0x24, 0x0C, 0x57, 0x33, 0xFF, 0x3B, 0xC7}},
-            {"inflateEnd", 0x59220, {0x56, 0x8B, 0x74, 0x24, 0x08, 0x85, 0xF6, 0x74, 0x39, 0x8B, 0x46, 0x1C}},
-        }};
-
-        for (const auto& e : entries)
-        {
-            std::vector<uint8_t> actual(e.guard.size());
-            if (!this->emu().try_read_memory(mod.image_base + e.rva, actual.data(), actual.size()) ||
-                actual != e.guard)
-            {
-                this->log.warn("iw4sp.exe zlib %s prologue mismatch at image_base+0x%llx (sha256 "
-                               "4dd53fab...0547d9 expected) -- native zlib redirect disabled for this build\n",
-                               e.name, static_cast<unsigned long long>(e.rva));
-                return;
-            }
-        }
-
-        auto read_u32 = [this](uint64_t addr) { return this->emu().read_memory<uint32_t>(addr); };
-        auto write_u32 = [this](uint64_t addr, uint32_t v) { this->emu().write_memory<uint32_t>(addr, v); };
-
-        const uint64_t inflate_addr = mod.image_base + 0xbd6a0;
-        const uint64_t init_addr = mod.image_base + 0xb1e00;
-        const uint64_t end_addr = mod.image_base + 0x59220;
-
-        // A single-instruction UC_HOOK_CODE on this backend cannot redirect RIP (§75/§77), so each
-        // redirect is: an execution hook does the host-side work and sets EAX to the zlib return
-        // code, and the entry's first byte is overwritten (in the guest's mapped image only, never
-        // on disk) with a bare `ret` (0xC3) so the original guest body never runs and control
-        // returns to the caller with EAX carrying the result. All three functions are cdecl (caller
-        // cleans args), so a bare near-`ret` is the correct epilogue.
-
-        // inflateInit2_(z_streamp strm, int windowBits, const char* version, int stream_size)
-        this->iw4sp_zlib_hooks_.push_back(this->emu().hook_memory_execution(init_addr, [this, read_u32,
-                                                                                        write_u32](const uint64_t) {
-            const auto esp = this->emu().reg<uint32_t>(x86_register::esp);
-            const auto strm = read_u32(esp + 4);
-            const auto window_bits = static_cast<int32_t>(read_u32(esp + 8));
-
-            auto& slot = this->iw4sp_zlib_streams_[strm];
-            if (slot)
-            {
-                inflateEnd(static_cast<z_stream*>(slot));
-                delete static_cast<z_stream*>(slot);
-                slot = nullptr;
-            }
-
-            auto* hzs = new z_stream{};
-            hzs->zalloc = Z_NULL;
-            hzs->zfree = Z_NULL;
-            hzs->opaque = Z_NULL;
-            const int ret = inflateInit2_(hzs, window_bits, ZLIB_VERSION, static_cast<int>(sizeof(z_stream)));
-            if (ret == Z_OK)
-            {
-                slot = hzs;
-                // Mirror what real inflateInit2_ leaves in the guest stream: totals cleared, no
-                // message, a non-null state so any guest "is this stream initialised?" check passes.
-                write_u32(strm + 0x08, 0);    // total_in
-                write_u32(strm + 0x14, 0);    // total_out
-                write_u32(strm + 0x18, 0);    // msg = Z_NULL
-                write_u32(strm + 0x1C, strm); // state (non-null sentinel)
-            }
-            else
-            {
-                delete hzs;
-                this->iw4sp_zlib_streams_.erase(strm);
-            }
-            this->emu().reg(x86_register::eax, static_cast<uint32_t>(ret));
-        }));
-
-        // inflate(z_streamp strm, int flush)
-        this->iw4sp_zlib_hooks_.push_back(this->emu().hook_memory_execution(inflate_addr, [this, read_u32,
-                                                                                           write_u32](const uint64_t) {
-            const auto esp = this->emu().reg<uint32_t>(x86_register::esp);
-            const auto strm = read_u32(esp + 4);
-            const auto flush = static_cast<int32_t>(read_u32(esp + 8));
-
-            const auto it = this->iw4sp_zlib_streams_.find(strm);
-            if (it == this->iw4sp_zlib_streams_.end() || !it->second)
-            {
-                this->emu().reg(x86_register::eax, static_cast<uint32_t>(Z_STREAM_ERROR));
-                return;
-            }
-            auto* hzs = static_cast<z_stream*>(it->second);
-
-            const auto next_in = read_u32(strm + 0x00);
-            const auto avail_in = read_u32(strm + 0x04);
-            const auto total_in = read_u32(strm + 0x08);
-            const auto next_out = read_u32(strm + 0x0C);
-            const auto avail_out = read_u32(strm + 0x10);
-            const auto total_out = read_u32(strm + 0x14);
-
-            std::vector<uint8_t> in_buf(avail_in);
-            if (avail_in && !this->emu().try_read_memory(next_in, in_buf.data(), avail_in))
-            {
-                this->emu().reg(x86_register::eax, static_cast<uint32_t>(Z_STREAM_ERROR));
-                return;
-            }
-            std::vector<uint8_t> out_buf(avail_out);
-
-            // zlib null-checks next_in even when avail_in==0, so hand it a valid pointer either way.
-            static uint8_t dummy_in;
-            hzs->next_in = avail_in ? in_buf.data() : &dummy_in;
-            hzs->avail_in = avail_in;
-            hzs->next_out = avail_out ? out_buf.data() : Z_NULL;
-            hzs->avail_out = avail_out;
-
-            const int ret = inflate(hzs, flush);
-
-            const uint32_t consumed = avail_in - hzs->avail_in;
-            const uint32_t produced = avail_out - hzs->avail_out;
-            if (produced && !this->emu().try_write_memory(next_out, out_buf.data(), produced))
-            {
-                this->emu().reg(x86_register::eax, static_cast<uint32_t>(Z_STREAM_ERROR));
-                return;
-            }
-
-            write_u32(strm + 0x00, next_in + consumed);
-            write_u32(strm + 0x04, hzs->avail_in);
-            write_u32(strm + 0x08, total_in + consumed);
-            write_u32(strm + 0x0C, next_out + produced);
-            write_u32(strm + 0x10, hzs->avail_out);
-            write_u32(strm + 0x14, total_out + produced);
-            write_u32(strm + 0x18, 0); // msg: host pointer is not guest-valid; Z_NULL matches success
-            write_u32(strm + 0x2C, static_cast<uint32_t>(hzs->data_type));
-            write_u32(strm + 0x30, static_cast<uint32_t>(hzs->adler));
-
-            this->emu().reg(x86_register::eax, static_cast<uint32_t>(ret));
-        }));
-
-        // inflateEnd(z_streamp strm)
-        this->iw4sp_zlib_hooks_.push_back(this->emu().hook_memory_execution(end_addr, [this, read_u32,
-                                                                                       write_u32](const uint64_t) {
-            const auto esp = this->emu().reg<uint32_t>(x86_register::esp);
-            const auto strm = read_u32(esp + 4);
-
-            int ret = Z_OK;
-            const auto it = this->iw4sp_zlib_streams_.find(strm);
-            if (it != this->iw4sp_zlib_streams_.end() && it->second)
-            {
-                ret = inflateEnd(static_cast<z_stream*>(it->second));
-                delete static_cast<z_stream*>(it->second);
-                this->iw4sp_zlib_streams_.erase(it);
-            }
-            write_u32(strm + 0x1C, 0); // state = Z_NULL
-            write_u32(strm + 0x18, 0); // msg = Z_NULL
-            this->emu().reg(x86_register::eax, static_cast<uint32_t>(ret));
-        }));
-
-        // Overwrite each entry's first byte with `ret` so the emulated guest body never executes.
-        for (const uint64_t addr : {inflate_addr, init_addr, end_addr})
-        {
-            constexpr uint8_t ret_opcode = 0xC3;
-            this->emu().write_memory(addr, &ret_opcode, 1);
-        }
-
-        this->log.info("iw4sp.exe native zlib 1.1.4 inflate redirect installed (inflate=0x%llx "
-                       "inflateInit2_=0x%llx inflateEnd=0x%llx)\n",
-                       static_cast<unsigned long long>(inflate_addr),
-                       static_cast<unsigned long long>(init_addr), static_cast<unsigned long long>(end_addr));
-    }
-
     void windows_emulator::setup_hooks()
     {
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
@@ -1340,10 +1128,6 @@ namespace sogen
             {
                 this->install_ddraw_vidmem_hook(mod);
             }
-            else if (mod.name == "iw4sp.exe")
-            {
-                this->install_iw4sp_zlib_hooks(mod);
-            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
@@ -1363,27 +1147,6 @@ namespace sogen
             if (d3d9_hook && d3d9_hook.mapped())
             {
                 this->emu().delete_hook(d3d9_hook.mapped());
-            }
-
-            if (mod.name == "iw4sp.exe")
-            {
-                for (auto* hook : this->iw4sp_zlib_hooks_)
-                {
-                    if (hook)
-                    {
-                        this->emu().delete_hook(hook);
-                    }
-                }
-                this->iw4sp_zlib_hooks_.clear();
-                for (auto& [key, stream] : this->iw4sp_zlib_streams_)
-                {
-                    if (stream)
-                    {
-                        inflateEnd(static_cast<z_stream*>(stream));
-                        delete static_cast<z_stream*>(stream);
-                    }
-                }
-                this->iw4sp_zlib_streams_.clear();
             }
         });
 
