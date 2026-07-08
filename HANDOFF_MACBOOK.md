@@ -4520,3 +4520,19 @@ Full regression sweep clean (smoke test 26/26; triangle, shader, managed-texture
 ### 72.3 Where this leaves things
 
 The DXVK dependency for MW2 specifically is now fully removed, matching the stated direction, without needing to touch sogen's own D3D9-over-GPU-bridge rendering path (which never used DXVK at all) or risk regressing any other DXVK-dependent title's D3D10/11 path (untouched files, confirmed). This is the eighth real, distinct forward-progress milestone in this arc (§64-70, this entry) — MW2 keeps advancing every time a real blocker gets removed, with no ceiling found yet.
+
+## 73. Standalone rendering-correctness fix: `D3DRS_CLIPPING` was never plumbed to Vulkan, depth clip was unconditionally ON for every pipeline (2026-07-08)
+
+Independent of the MW2 investigation thread: the parallel FEXCore session flagged (via `docs/cross-session/fexcore-session-findings.md`) that sogen's shared `vulkan_host::create_graphics_pipeline` never set `depthClampEnable`, so depth clipping was always forced on regardless of what the guest requested. Since `d3d9_host.cpp` calls this exact function for sogen's own D3D9-over-GPU-bridge rendering (not just DXVK's generic Vulkan passthrough), this affected every D3D9 pipeline sogen itself builds, not only DXVK-rendered titles.
+
+### 73.1 The gap
+
+Confirmed genuinely unplumbed end-to-end: `D3DRS_CLIPPING` (render state 136) was tracked nowhere in `d3d9_host.cpp` (unlike `D3DRS_ZENABLE`/`ZFUNC`/`ALPHABLENDENABLE`, which `build_depth_state`/`build_blend_state` already read), and `create_graphics_pipeline`'s `VkPipelineRasterizationStateCreateInfo` was zero-initialized with no `depthClampEnable` handling at all.
+
+### 73.2 The fix
+
+Commit `55a87bc7`. `create_graphics_pipeline` gained a `depth_clip_enable` parameter; `create_device` force-enables the Vulkan `depthClamp` feature only when the physical device advertises it (recorded per-device), and the pipeline builder only ever emits `depthClampEnable=VK_TRUE` when that feature is actually on — always falls back to the pre-existing clip-on behavior otherwise, so this can never produce an invalid device/pipeline on a host lacking the feature. `d3d9_host.cpp` now reads `D3DRS_CLIPPING` (default TRUE, matching real D3D9) via the established `render_state_or` pattern, folds it into `pipeline_cache_key` (so clip-on/off are genuinely distinct cached pipelines), and passes it at both the fixed-function and programmable pipeline call sites. `gpu_bridge.cpp` (DXVK's path) passes a hardcoded `1`, preserving its exact prior behavior unchanged — extending real depth-clip forwarding through DXVK's own generic-Vulkan marshaling is flagged as separate, FEXCore-session-territory work (the wire protocol has no field for it yet).
+
+### 73.3 Verification
+
+New `d3d9_depthclip_test.cpp` (x64+x86): draws a full-screen quad with vertices explicitly beyond the far clip plane, once with `D3DRS_CLIPPING` on (must stay clipped/clear) and once off (must clamp and render red) — a genuine discriminator, confirmed by temporarily forcing the old always-clip behavior and watching the "off" case fail exactly as expected. Full regression sweep: **62/62 pass**, zero regressions, on both x64 and x86 (every existing D3D9 sample plus the two new depth-clip sub-tests).
