@@ -4413,3 +4413,27 @@ Live-verified: at baseline, `pfnCreateResource` was **never** called. After the 
 ### 67.4 The new frontier
 
 MW2 has now cleared its **entire D3D9 renderer-init phase** — real asset, shader, and vertex-declaration creation, a milestone with no precedent anywhere in this arc. It still has not called `pfnPresent`. It now crashes during asset loading in a **completely different, non-graphics subsystem**: a fatal access violation reading a wild pointer inside `ntdll.dll`, reached through `cfgmgr32.dll` (PnP Configuration Manager) called from `rpcrt4.dll` (RPC runtime), while enumerating `MMDevices\Audio\Render` device properties. This shares a registry area with the closed §52-64 audio arc but is a genuinely different bug (a crash/wild-pointer read, not the audio-initialization dead-end) — not yet root-caused as of this entry, and the correct next target.
+
+## 68. A FIFTH real bug: sogen's own D3D9 UMD silently under-sized vertex/index buffers, causing non-deterministic heap corruption (2026-07-07)
+
+The "cfgmgr32/RPC wild-pointer crash" framing from §67.4 turned out to be a red herring — a real, live-verified investigation found the crash is heap corruption from a completely different, much earlier cause, which merely happened to *surface* during audio/COM enumeration because that's where the next allocation landed after the corruption.
+
+### 68.1 The mechanism
+
+D3D9 vertex/index buffers reach sogen's vendor UMD via `pfnCreateResource` with internal formats `D3DFMT_VERTEXDATA`/`INDEX16`/`INDEX32` (100/101/102), carrying their real byte size in `pSurfList[0].Width`. `umd_CreateResource` read that width but then sent the resource as `kind=texture_2d` (backing sized to 0, since these formats aren't in the host texture-format table) and deliberately left the handle unregistered — so every `Lock` on such a buffer fell through to `resolve_buffer_resource_id`'s 64 KB-floored lazy guess. Any buffer larger than 64 KB (e.g. MW2's 80 KB vertex buffer, `CreateVertexBuffer(81920)`) was handed a 64 KB lock backing; MW2's fixed 1024-record fill loop then wrote its full 80 KB, overrunning by 16 KB into adjacent heap memory. Depending on exact allocation layout, this corrupted either a heap free-list `Flink` pointer (tripping `RtlpAllocateHeap`'s safe-unlink check on a later, unrelated allocation — which is what made it look like an audio/cfgmgr32/RPC problem) or ran directly off the end of a mapped page.
+
+### 68.2 The fix
+
+Commit `8699151a`. For buffer formats 100/101/102, `umd_CreateResource` now sends the correct `kind` (`vertex_buffer`/`index_buffer`, so the host sizes the backing to the real requested width) and registers the handle in the lazy-bind map so `Lock` resolves to the correctly-sized resource (kept out of `g_created_resource_ids` so `umd_Lock` still reads `OffsetToLock` as before — a narrow, additive change).
+
+### 68.3 Verification
+
+Before: non-deterministic crash on every run (manifesting either as an `ntdll` heap free-list corruption or a direct unmapped-page write, same root cause). After: 3 independent runs all deterministically clear the crash and reach a new, different blocker. Full regression sweep clean on both x64 and x86 (smoke test, triangle, shader, const, texture, managed-texture, format-coverage, partial-lock, multistream, drawprimitiveup, manydraws — zero AV/FAIL anywhere).
+
+### 68.4 The new frontier
+
+MW2 now hits a clean, deterministic null-pointer dereference at `iw4sp.exe+0x1206dd` (`mov eax, dword_1C8C088; mov ecx,[eax]`) — MW2's own D3D9 device-pointer global is null at this call site, despite having successfully been used moments earlier for `CreateVertexBuffer`. Something in the intervening render-setup path resets or fails to (re)populate this global. Not yet investigated as of this entry — the whole non-deterministic-corruption class of crash is gone, replaced by one clean, reproducible target.
+
+### 68.5 Cross-session note
+
+The parallel FEXCore-backend session (`.worktrees/fex-mac-silicon`, using DXVK for graphics) independently hit a deterministic null-pointer *call* (not just a null deref) inside `user32.dll` during win32k message dispatch (`NtUserGetSystemMenu`→`NtUserDeleteMenu`→`NtUserPeekMessage`→`NtUserDispatchMessage`→`NtCallbackReturn`→`call 0x0`), and asked whether it's the same underlying bug as the not-yet-reproduced `C000041D` window-proc crash noted in §64.5/§64.7. Their crash happens *before* `CreateDevice` even runs (win32k/USER-object message dispatch, backend-and-graphics-agnostic); this entry's §68.4 null-pointer-global crash happens well *after* device/buffer creation succeeds, inside MW2's own D3D9 render-setup code — different call sites, likely different bugs, though both are worth keeping in mind together since they're both "something goes null between two points that should agree." See `docs/cross-session/mw2-session-findings.md` for the full exchange.
