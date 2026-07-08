@@ -1157,6 +1157,23 @@ namespace
                 std::memcpy(pCaps->pData, g_query_types, sizeof(g_query_types));
             }
             break;
+        case SOGEN_D3DDDICAPS_GETD3D3CAPS:
+            // Legacy Direct3D (D3D3/DDraw-compat) global driver data. The output buffer is a
+            // D3DHAL_GLOBALDRIVERDATA (192 bytes) whose first UINT is dwSize. ddraw.dll's
+            // DirectDrawObjectCreate calls DdQueryDirectDrawObject twice: the first (stack-buffer)
+            // pass feeds this into a `pD3dCallbacks[0] && pD3dDriverData[0]` gate, and only if it
+            // passes does it allocate the real driver-data buffer for the second pass. A zeroed
+            // dwSize fails the gate, so ddraw passes a NULL buffer to the second DdQueryDirectDrawObject
+            // and crashes on an unguarded `pD3dDriverData[46] = hdc` write (null+0xB8). RE-verified
+            // live against the staged 32-bit ddraw.dll. Real WDDM UMDs return the populated legacy
+            // caps here; advertising a valid dwSize is the minimal answer that keeps ddraw on its
+            // guarded path. The remaining fields stay zero (no legacy fixed-function surface caps).
+            if (pCaps->pData && pCaps->DataSize >= sizeof(UINT))
+            {
+                std::memset(pCaps->pData, 0, pCaps->DataSize);
+                *static_cast<UINT*>(pCaps->pData) = pCaps->DataSize;
+            }
+            break;
         default:
             if (pCaps->pData && pCaps->DataSize)
             {
