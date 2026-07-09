@@ -280,14 +280,28 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            // {D574D111} opnum 4: the IAudioClient::Initialize "open stream" prep call.
+            // {D574D111} opnum 4: the IAudioClient::Initialize "open stream" prep call
+            //   (CAudioClient::InitializeAudioServer, procnum 4).
             //   [in]  endpointId, sharemode, flags, WAVEFORMATEX*, GUID*, request-struct
-            //   [out] LPWSTR*       (unique pointer, optional)
+            //   [out] LPWSTR*       (unique pointer) -- the audio SESSION display name
             //   [out] context_handle (the stream handle, reused as the binding for follow-on RPCs)
             //   returns HRESULT
+            //
+            // The [out] string is NOT optional in practice: InitializeAudioServer copies it straight into the
+            // raw LPWSTR at CAudioClient+112 (the constructor zero-inits that slot -- it is a bare pointer, not a
+            // constructed CStringT), and CAudioClient::GetAudioSessionService later hands CAudioClient+112 to
+            // MakeAndInitialize<CAudioSessionControl>, whose RuntimeClassInitialize does wcslen() on it
+            // (syswow64/audioses.dll @0x10055397). Returning a null referent here left CAudioClient+112 == NULL, so
+            // IAudioClient::GetService(IID_IAudioSessionControl) deterministically faulted (C0000005) during audio
+            // setup -- the crash MW2 hit right after the opnum 6/26 session-control handshake. A WASAPI shared-mode
+            // session has an empty display name by default (apps set one later via SetDisplayName), so an
+            // empty-but-non-null wide string is the Windows-consistent value: it makes CAudioClient+112 a valid
+            // pointer to L"" and wcslen() returns 0 instead of dereferencing NULL.
             static NTSTATUS handle_open_stream(utils::aligned_binary_writer& writer)
             {
-                writer.write_ndr_pointer(false); // [out] string: null
+                writer.write_ndr_pointer(true);         // [out] session display name: non-null referent
+                writer.write_ndr_u16string(u"", true);  // empty, NUL-terminated -> valid L"" (default session name)
+                writer.align_to(sizeof(uint32_t));
 
                 writer.write<uint32_t>(0);                                                   // context handle: attributes
                 writer.write(k_stream_context_uuid.data(), k_stream_context_uuid.size(), 1); // context handle: uuid
