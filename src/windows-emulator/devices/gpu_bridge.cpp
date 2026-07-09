@@ -33,6 +33,20 @@ namespace sogen
             NTSTATUS dispatch(windows_emulator& win_emu, const io_device_context& context)
             {
                 win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
+#ifdef SOGEN_HAS_VKD3D_SHADER
+                if (getenv("EMULATOR_D3D9_DRAWDIAG"))
+                {
+                    static uint64_t last_draws = 0;
+                    const uint64_t draws = this->d3d9_.draw_count();
+                    if (draws != last_draws)
+                    {
+                        last_draws = draws;
+                        win_emu.log.warn("[d3d9-drawdiag] draws=%llu submits=%llu\n",
+                                         static_cast<unsigned long long>(draws),
+                                         static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
+                    }
+                }
+#endif
                 switch (context.io_control_code)
                 {
                 case gpu_bridge::ioctl_get_version:

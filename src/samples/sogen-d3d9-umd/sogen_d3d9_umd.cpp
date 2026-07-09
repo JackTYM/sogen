@@ -2197,8 +2197,12 @@ namespace
             slots[68] = reinterpret_cast<void*>(&umd_DeletePixelShader);      // pfnDeletePixelShader
         }
         pArgs->hDevice = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xD9D90001));
-        pArgs->CommandBuffer = 0; // no initial command buffer for this bring-up
-        log_line("[sogen-d3d9-umd] CreateDevice returning S_OK (device funcs stubbed)\n");
+        pArgs->CommandBuffer = 0; // no WDDM command buffer: the UMD submits via D3DKMTEscape, not a GPU-VA ring
+        // NOTE: the device function table above is REAL, not stubbed -- pfnDrawPrimitive/pfnClear/
+        // pfnCreateResource/pfnLock/pfnPresent/shader slots all carry live handlers; only slots this UMD
+        // does not implement fall back to the generic arity stub. (An earlier "device funcs stubbed" log
+        // string here misled HANDOFF §93 into re-implementing already-wired DDI -- see §94.)
+        log_line("[sogen-d3d9-umd] CreateDevice returning S_OK (device func table populated)\n");
         return S_OK;
     }
 
