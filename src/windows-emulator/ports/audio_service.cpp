@@ -438,6 +438,21 @@ namespace sogen
                 {
                     win_emu.emu().write_memory(backing, render_control_header.data(), render_control_header.size());
                     render_section.backing_address = backing;
+
+                    // Register the render section so the per-context-switch audio-engine tick can advance its
+                    // read cursor (see process_context::audio_render_stream). Dedupe by backing and keep only a
+                    // few recent streams -- MW2 churns stream creation until playback stabilizes, and advancing a
+                    // stale (still-allocated) backing is harmless.
+                    auto& streams = win_emu.process.audio_render_streams;
+                    if (std::none_of(streams.begin(), streams.end(), [&](const auto& s) { return s.control_base == backing; }))
+                    {
+                        streams.push_back({backing, 0});
+                        constexpr size_t max_tracked_streams = 4;
+                        if (streams.size() > max_tracked_streams)
+                        {
+                            streams.erase(streams.begin(), streams.end() - max_tracked_streams);
+                        }
+                    }
                 }
 
                 const auto section_handle = win_emu.process.sections.store(std::move(render_section));

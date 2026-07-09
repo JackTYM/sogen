@@ -509,6 +509,20 @@ namespace sogen
         // rather than reading the handle attribute directly. Transient (valid only until the next reply).
         std::vector<alpc_reply_handle> pending_alpc_message_handles{};
 
+        // Transient (not serialized) WASAPI render-engine simulation. sogen has no host audio engine draining
+        // the shared ring, so dsound opens its stream event-driven (AUDCLNT_STREAMFLAGS_EVENTCALLBACK) and its
+        // render thread would block forever on the buffer-ready event a real engine signals every period. We
+        // model that engine on the per-context-switch tick: signal the auto-reset events dsound registered via
+        // IAudioClient::SetEventHandle so it produces, and advance the shared read cursor at real time so its
+        // DirectSound play cursor moves and MSS's "non-moving playback cursor" watchdog stops resetting.
+        struct audio_render_stream
+        {
+            uint64_t control_base{};  // guest backing address of the "DCPE" render-section control header
+            uint64_t start_time_ns{}; // steady-clock ns anchor for the read cursor (0 = anchor on first tick)
+        };
+        std::vector<audio_render_stream> audio_render_streams{};
+        std::vector<handle> audio_render_events{};
+
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx
         uint64_t last_extended_params_numa_node{0};

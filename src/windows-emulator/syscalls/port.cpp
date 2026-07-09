@@ -204,10 +204,91 @@ namespace sogen
             attributes.write(header);
         }
 
+        // IAudioClient::SetEventHandle (audioses!CCrossProcessBaseClientEndpoint::SetEventHandle) forwards
+        // dsound's render buffer-ready event to the audio server by sending it as an ALPC HANDLE message
+        // attribute with DesiredAccess = SYNCHRONIZE|EVENT_MODIFY_STATE (0x100002). sogen has no audio server
+        // to receive and periodically signal it, so we capture the handle here and let the per-context-switch
+        // audio-engine tick signal it (see perform_context_switch_work). Without this, dsound's event-driven
+        // render thread blocks forever, never submits a WASAPI buffer, and its DirectSound play cursor stays 0.
+        bool capture_audio_render_event(const syscall_context& c, const emulator_object<ALPC_MESSAGE_ATTRIBUTES>& attributes)
+        {
+            if (!attributes)
+            {
+                return false;
+            }
+
+            const auto header = attributes.read();
+            if (!(header.ValidAttributes & ALPC_MESSAGE_HANDLE_ATTRIBUTE))
+            {
+                return false;
+            }
+
+            const bool wow64 = c.proc.is_wow64_process;
+            uint64_t offset = sizeof(ALPC_MESSAGE_ATTRIBUTES);
+            if (header.ValidAttributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE)
+                offset += wow64 ? 0x0c : 0x20;
+            if (header.ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)
+                offset += wow64 ? 0x10 : 0x20;
+            if (header.ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
+                offset += wow64 ? 0x14 : 0x20;
+
+            const auto attr_base = attributes.value() + offset;
+            const auto handle_value = wow64 ? uint64_t{emulator_object<uint32_t>{c.emu, attr_base + 4}.read()}
+                                            : emulator_object<uint64_t>{c.emu, attr_base + 8}.read();
+            const auto desired_access =
+                wow64 ? emulator_object<ULONG>{c.emu, attr_base + 0x0c}.read() : emulator_object<ULONG>{c.emu, attr_base + 0x14}.read();
+
+            constexpr ULONG event_signal_access = 0x100002; // SYNCHRONIZE | EVENT_MODIFY_STATE
+            if ((desired_access & event_signal_access) != event_signal_access)
+            {
+                return false;
+            }
+
+            const auto h = make_handle(handle_value);
+            auto* event = c.proc.events.get(h);
+            if (!event || event->type != SynchronizationEvent)
+            {
+                return false; // only the auto-reset render event SetEventHandle forwards
+            }
+
+            auto& events = c.proc.audio_render_events;
+            if (std::none_of(events.begin(), events.end(), [&](const handle e) { return e.bits == h.bits; }))
+            {
+                events.push_back(h);
+                constexpr size_t max_tracked_events = 4;
+                if (events.size() > max_tracked_events)
+                {
+                    events.erase(events.begin(), events.end() - max_tracked_events);
+                }
+            }
+            return true;
+        }
+
+        // SetEventHandle sends its registration to a notification ALPC port whose name the real audio server
+        // hands back during stream setup; sogen never supplies one, so the client connects to an empty-named
+        // port that resolves to dummy_port and replies STATUS_NOT_SUPPORTED. That makes SetEventHandle fail,
+        // which fails CEngineRendererConnection::Initialize and drives dsound's create->fail->destroy churn --
+        // so the event-driven render thread that would wait on the captured event is never even created. Once
+        // we have captured the event, acknowledge the send with an empty successful LPC reply so the client's
+        // event-driven Initialize completes and its render thread starts.
+        void write_empty_success_reply(const emulator_object<PORT_MESSAGE64>& send_message,
+                                       const emulator_object<PORT_MESSAGE64>& receive_message)
+        {
+            if (!receive_message || !send_message)
+            {
+                return;
+            }
+
+            auto reply = lpc_port_message::read(send_message);
+            reply.native.u2.s2.Type = LPC_REPLY;
+            reply.native.u1.s1.DataLength = 0;
+            reply.native.u1.s1.TotalLength = static_cast<CSHORT>(reply.wire_size());
+            reply.write(receive_message);
+        }
+
         NTSTATUS handle_NtAlpcSendWaitReceivePort(const syscall_context& c, const handle port_handle, const ULONG /*flags*/,
                                                   const emulator_object<PORT_MESSAGE64> send_message,
-                                                  const emulator_object<ALPC_MESSAGE_ATTRIBUTES>
-                                                  /*send_message_attributes*/,
+                                                  const emulator_object<ALPC_MESSAGE_ATTRIBUTES> send_message_attributes,
                                                   const emulator_object<PORT_MESSAGE64> receive_message,
                                                   const emulator_object<EmulatorTraits<Emu64>::SIZE_T> buffer_length,
                                                   const emulator_object<ALPC_MESSAGE_ATTRIBUTES> receive_message_attributes,
@@ -217,6 +298,16 @@ namespace sogen
             if (!port)
             {
                 return STATUS_INVALID_HANDLE;
+            }
+
+            if (capture_audio_render_event(c, send_message_attributes))
+            {
+                write_empty_success_reply(send_message, receive_message);
+                if (buffer_length && receive_message)
+                {
+                    buffer_length.write(static_cast<typename EmulatorTraits<Emu64>::SIZE_T>(lpc_port_message::read(send_message).wire_size()));
+                }
+                return STATUS_SUCCESS;
             }
 
             lpc_message_context context{c.emu};

@@ -266,6 +266,83 @@ namespace sogen
             return false;
         }
 
+        // Simulate the WASAPI render engine sogen otherwise lacks. dsound opens its stream event-driven, so its
+        // render thread blocks on a buffer-ready event a real engine signals every period; we signal the events
+        // dsound registered via SetEventHandle (captured in capture_audio_render_event) so it produces, then
+        // advance the shared render section's read cursor at real time. dsound's DirectSound play cursor is the
+        // engine-consumed byte position (control offset +0x18); moving it is what stops MSS's "non-moving
+        // playback cursor" watchdog from continuously resetting the stream and lets MW2 proceed past audio setup.
+        void drive_audio_render_engine(windows_emulator& win_emu)
+        {
+            auto& process = win_emu.process;
+            if (process.audio_render_streams.empty() && process.audio_render_events.empty())
+            {
+                return;
+            }
+
+            // Wake dsound's render thread(s): the buffer-ready event is auto-reset, so a set that no thread is
+            // waiting on is simply consumed by the next wait. Drop handles that no longer resolve to an event.
+            std::erase_if(process.audio_render_events, [&](const handle e) {
+                auto* event = process.events.get(e);
+                if (!event)
+                {
+                    return true;
+                }
+                event->signaled = true;
+                return false;
+            });
+
+            constexpr uint64_t bytes_per_second = 44100ULL * 2ULL * 4ULL; // 44100 Hz, 2ch, 32-bit float
+            constexpr uint64_t block_align = 2ULL * 4ULL;
+            constexpr uint64_t write_cursor_offset = 0x10;
+            constexpr uint64_t read_cursor_offset = 0x18;
+            constexpr uint64_t clock_position_offset = 0x98;
+
+            const auto now_ns =
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+
+            // The guest maps and later unmaps each render section (dsound churns stream setup until playback
+            // stabilizes), so a tracked section's backing can become unmapped. Probe with try_read and prune
+            // any stream whose control block is no longer accessible rather than faulting the emulator.
+            std::erase_if(process.audio_render_streams, [&](auto& stream) {
+                uint64_t write_cursor = 0;
+                if (!win_emu.emu().try_read_memory(stream.control_base + write_cursor_offset, &write_cursor, sizeof(write_cursor)))
+                {
+                    return true; // section unmapped -> stop tracking it
+                }
+
+                if (write_cursor == 0)
+                {
+                    return false; // dsound has not submitted any audio on this stream yet
+                }
+
+                if (stream.start_time_ns == 0)
+                {
+                    stream.start_time_ns = now_ns; // anchor real-time consumption at first submission
+                    if (getenv("EMULATOR_AUDIO_DIAG"))
+                    {
+                        win_emu.log.error("[audio-submit] stream base=0x%llx first write cursor=%llu\n",
+                                          static_cast<unsigned long long>(stream.control_base),
+                                          static_cast<unsigned long long>(write_cursor));
+                    }
+                }
+
+                const auto elapsed_ns = now_ns - stream.start_time_ns;
+                const auto consumed = std::min<uint64_t>(elapsed_ns * bytes_per_second / 1'000'000'000ULL, write_cursor);
+
+                uint64_t read_cursor = 0;
+                if (win_emu.emu().try_read_memory(stream.control_base + read_cursor_offset, &read_cursor, sizeof(read_cursor)) &&
+                    consumed > read_cursor)
+                {
+                    const uint64_t clock = consumed / block_align;
+                    win_emu.emu().try_write_memory(stream.control_base + read_cursor_offset, &consumed, sizeof(consumed));
+                    win_emu.emu().try_write_memory(stream.control_base + clock_position_offset, &clock, sizeof(clock));
+                }
+                return false;
+            });
+        }
+
         void perform_context_switch_work(windows_emulator& win_emu)
         {
             auto& threads = win_emu.process.threads;
@@ -311,6 +388,8 @@ namespace sogen
             {
                 pump_gpu_presents(gpu_processor.get(), win_emu);
             }
+
+            drive_audio_render_engine(win_emu);
         }
 
         emulator_thread* get_thread_by_id(process_context& process, const uint32_t id)
