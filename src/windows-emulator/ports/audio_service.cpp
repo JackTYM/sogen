@@ -22,8 +22,11 @@ namespace sogen
         constexpr uint32_t k_audio_opnum_is_format_supported = 1;   // AudioClientRpc AudioServerIsFormatSupported
         constexpr uint32_t k_audio_opnum_get_device_period = 2;     // AudioClientRpc AudioServerGetDevicePeriod
         constexpr uint32_t k_audio_opnum_open_stream = 4;           // AudioClientRpc (Initialize prep)
+        constexpr uint32_t k_audio_opnum_get_audio_session = 6;     // AudioClientRpc AudioServerGetAudioSession
         constexpr uint32_t k_audio_opnum_create_stream = 7;         // AudioClientRpc CreateRemoteStream
         constexpr uint32_t k_audio_opnum_destroy_stream = 13;       // AudioClientRpc AudioServerDestroyStream
+        constexpr uint32_t k_audio_opnum_session_get_state = 26;    // AudioClientRpc CAudioSessionControl::GetState
+        constexpr uint32_t k_audio_opnum_session_destroy = 54;      // AudioClientRpc CAudioSessionControl::DestroyAudioSession
         constexpr uint32_t k_audio_opnum_post_create_a = 8;         // AudioClientRpc post-CreateRemoteStream (returns S_OK)
         constexpr uint32_t k_audio_opnum_post_create_b = 9;         // AudioClientRpc post-CreateRemoteStream (returns S_OK)
 
@@ -33,6 +36,11 @@ namespace sogen
         // client stores this and passes it back as the binding for the follow-on stream RPCs.
         constexpr std::array<uint8_t, 16> k_stream_context_uuid = {0x53, 0x6f, 0x67, 0x65, 0x6e, 0x41, 0x75, 0x64,
                                                                    0x69, 0x6f, 0x53, 0x74, 0x72, 0x6d, 0x00, 0x01};
+
+        // A distinct [out] context handle for the audio-session interface returned by opnum 6
+        // (AudioServerGetAudioSession). The client discards it, but keep it distinct from the stream handle.
+        constexpr std::array<uint8_t, 16> k_session_context_uuid = {0x53, 0x6f, 0x67, 0x65, 0x6e, 0x41, 0x75, 0x64,
+                                                                    0x69, 0x6f, 0x53, 0x65, 0x73, 0x73, 0x00, 0x01};
 
         // The audio endpoint database lives in the registry under
         // HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render,Capture}. Each endpoint is a
@@ -157,6 +165,12 @@ namespace sogen
                         return handle_post_create(writer);
                     case k_audio_opnum_open_stream:
                         return handle_open_stream(writer);
+                    case k_audio_opnum_get_audio_session:
+                        return handle_get_audio_session(writer);
+                    case k_audio_opnum_session_get_state:
+                        return handle_session_get_state(writer);
+                    case k_audio_opnum_session_destroy:
+                        return handle_session_destroy(writer);
                     case k_audio_opnum_create_stream:
                         return handle_create_stream(win_emu, writer, reply_handles);
                     case 5:
@@ -278,6 +292,55 @@ namespace sogen
                 writer.write<uint32_t>(0);                                                   // context handle: attributes
                 writer.write(k_stream_context_uuid.data(), k_stream_context_uuid.size(), 1); // context handle: uuid
 
+                writer.align_to(sizeof(uint32_t));
+                writer.write(k_hr_ok); // return HRESULT
+                return STATUS_SUCCESS;
+            }
+
+            // {D574D111} opnum 6: AudioServerGetAudioSession(([in] stream ctx handle), [out] session ctx handle).
+            //   Reached from IAudioClient::GetService(IID_IAudioSessionControl) via CAudioClient::GetService ->
+            //   CAudioClient::GetAudioSessionService (syswow64/audioses.dll @0x100B98CD). Decoding the RPC proc
+            //   format (procnum 6 @ pFormat 0x10010826): param 2 is an NDR context handle with flags 0xA0
+            //   (HANDLE_PARAM_IS_OUT) -- structurally identical to opnum 4's stream handle, NOT a COM interface.
+            //   The client discards the returned handle (var_20 is never read after the call) and constructs the
+            //   IAudioSessionControl object locally via MakeAndInitialize<CAudioSessionControl>; only a well-formed
+            //   [out] context handle + S_OK is needed for the call to succeed and the stream to survive. Previously
+            //   unhandled, so NdrClientCall4 faulted and dsound tore the stream down (opnum 13) right after setup.
+            static NTSTATUS handle_get_audio_session(utils::aligned_binary_writer& writer)
+            {
+                writer.write<uint32_t>(0);                                                   // context handle: attributes
+                writer.write(k_session_context_uuid.data(), k_session_context_uuid.size(), 1); // context handle: uuid
+                writer.align_to(sizeof(uint32_t));
+                writer.write(k_hr_ok); // return HRESULT
+                return STATUS_SUCCESS;
+            }
+
+            // {D574D111} opnum 26: CAudioSessionControl::GetState (syswow64/audioses.dll AudioServerGetState
+            //   @0x100B8479, IAudioSessionControl::GetState). dsound calls this on the session-control object right
+            //   after GetService; a fault here is what tore the stream down (opnum 54 DestroyAudioSession + opnum 13
+            //   DestroyStream follow in the observed create->query->destroy watchdog loop). Decoding the RPC proc
+            //   format (procnum 26 @ pFormat 0x10010C3A): param 1 is an [in,out] context handle (re-marshalled in
+            //   the reply, 20 bytes), param 2 is an [out] pointer to an FC_ENUM16 AudioSessionState (2 wire bytes),
+            //   then the HRESULT. Report AudioSessionStateActive so dsound treats the session as live.
+            static NTSTATUS handle_session_get_state(utils::aligned_binary_writer& writer)
+            {
+                constexpr uint16_t audio_session_state_active = 1; // AudioSessionStateActive
+                writer.write<uint32_t>(0);                                                     // [in,out] ctx handle: attributes
+                writer.write(k_session_context_uuid.data(), k_session_context_uuid.size(), 1); // [in,out] ctx handle: uuid
+                writer.write<uint16_t>(audio_session_state_active);                            // [out] state (FC_ENUM16)
+                writer.align_to(sizeof(uint32_t));
+                writer.write(k_hr_ok); // return HRESULT
+                return STATUS_SUCCESS;
+            }
+
+            // {D574D111} opnum 54: CAudioSessionControl::DestroyAudioSession (syswow64/audioses.dll @0x100B96C7).
+            //   Session-teardown call: param 1 is the [in,out] context handle (re-marshalled in the reply, 20 bytes)
+            //   plus the HRESULT; the client nulls its handle afterward regardless. Handled so the teardown path
+            //   doesn't fault.
+            static NTSTATUS handle_session_destroy(utils::aligned_binary_writer& writer)
+            {
+                writer.write<uint32_t>(0);                                                     // [in,out] ctx handle: attributes
+                writer.write(k_session_context_uuid.data(), k_session_context_uuid.size(), 1); // [in,out] ctx handle: uuid
                 writer.align_to(sizeof(uint32_t));
                 writer.write(k_hr_ok); // return HRESULT
                 return STATUS_SUCCESS;
