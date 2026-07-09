@@ -296,7 +296,7 @@ namespace sogen
         this->win32u = this->map_module_or_throw(win32u_path, logger, true);
     }
 
-    void module_manager::load_wow64_modules(const windows_path& executable_path, const windows_path& ntdll_path,
+    void module_manager::load_wow64_modules(x86_64_emulator& emu, const windows_path& executable_path, const windows_path& ntdll_path,
                                             const windows_path& win32u_path, const windows_path& ntdll32_path,
                                             windows_version_manager& version, const logger& logger)
     {
@@ -375,10 +375,10 @@ namespace sogen
         this->memory_->write_memory(ldr_init_block_addr, &init_block, static_cast<size_t>(init_block_size));
 
         // Install the WOW64 Heaven's Gate trampoline used for compat-mode -> 64-bit transitions.
-        this->install_wow64_heaven_gate(logger);
+        this->install_wow64_heaven_gate(emu, logger);
     }
 
-    void module_manager::install_wow64_heaven_gate(const logger& logger)
+    void module_manager::install_wow64_heaven_gate(x86_64_emulator& emu, const logger& logger)
     {
         using wow64::heaven_gate::kCodeBase;
         using wow64::heaven_gate::kCodeSize;
@@ -414,6 +414,18 @@ namespace sogen
                 this->memory_->protect_memory(kCodeBase, kCodeSize,
                                               nt_memory_permission(memory_permission::read | memory_permission::exec));
                 code_initialized = true;
+
+                // KVM/Unicorn genuinely execute the trampoline's real machine code (a real CS-segment
+                // mode switch via retf/iretq) - real|exec is correct and sufficient for them, so
+                // register_gate_crossing is a no-op default there. A JIT-based backend (FEXCore)
+                // cannot execute that at all (bitness fixed per compiled Context - see
+                // notify_process_bitness's doc comment) and instead intercepts execution reaching this
+                // page before any of it is ever JIT-compiled, then synthesizes the mode switch itself
+                // (marshal register state into its other-bitness Context and flip which one runs) -
+                // see register_gate_crossing / gate_crossing_kind::heaven_gate (arch_emulator.hpp).
+                // The trampoline is driven with the confirmed convention RAX=RIP, RBX=RSP, RCX=CS,
+                // RDX=SS (see exception_dispatch.cpp), which the FEX crossing handler decodes.
+                emu.register_gate_crossing(kCodeBase, kCodeSize, x86_64_emulator::gate_crossing_kind::heaven_gate);
             }
 
             if (code_initialized && this->modules_.contains(kCodeBase))
@@ -448,8 +460,8 @@ namespace sogen
         }
     }
 
-    void module_manager::map_main_modules(const windows_path& executable_path, windows_version_manager& version, process_context& context,
-                                          const logger& logger)
+    void module_manager::map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
+                                          process_context& context, const logger& logger)
     {
         const auto& system_root = version.get_system_root();
         const auto system32_path = system_root / "System32";
@@ -458,6 +470,15 @@ namespace sogen
         current_execution_mode_ = detect_execution_mode(executable_path, logger);
         context.is_wow64_process = (current_execution_mode_ == execution_mode::wow64_32bit);
 
+        // Must happen before any module gets mapped below: a JIT-based backend (FEXCore) needs to
+        // know the bitness before compiling its first block (see notify_process_bitness's doc
+        // comment), and a 32-bit process's own image/ntdll32 map into the low 4GB - a range some
+        // backends must steer real host allocations away from for a 64-bit process, but must NOT for
+        // a 32-bit one (see reserve_host_memory_ranges's doc comment) - so the reservation has to be
+        // recomputed now that the bitness is known, before either module is mapped.
+        emu.notify_process_bitness(context.is_wow64_process);
+        this->memory_->reset_host_memory_ranges();
+
         switch (current_execution_mode_)
         {
         case execution_mode::native_64bit:
@@ -465,7 +486,74 @@ namespace sogen
             break;
 
         case execution_mode::wow64_32bit:
-            load_wow64_modules(executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
+            // Data-driven interception of the real WoW64 CPU-simulation dispatcher: unlike
+            // ntdll32/win32u/native-ntdll (mapped directly by load_wow64_modules), wow64cpu.dll is
+            // never mapped by sogen - real ntdll loads it dynamically through the guest loader (task
+            // #27), which flows through map_module_core and fires on_module_load. When it appears,
+            // register its turbo-thunk dispatcher (TurboDispatchJumpAddressStart..End - the address
+            // ntdll32's Wow64Transition points at) as a gate crossing so a JIT backend intercepts the
+            // 32<->64 mode switch there instead of mis-compiling that 64-bit dispatch code. A no-op on
+            // native-execution backends (register_gate_crossing's default). See fex_x86_64_emulator's
+            // perform_gate_crossing for the (not-yet-decodable) wow64cpu_dispatch convention.
+            this->callbacks_->on_module_load.add([emu_ptr = &emu](mapped_module& mod) {
+                if (mod.name != "wow64cpu.dll")
+                {
+                    return;
+                }
+                const auto dispatch_start = mod.find_export("TurboDispatchJumpAddressStart");
+                if (dispatch_start == 0)
+                {
+                    return;
+                }
+                // wow64cpu.dll layout (decoded by hand from the shipped binary, cross-checked by
+                // objdump; all RVAs relative to the image base, which we recover from the
+                // TurboDispatchJumpAddressStart export @ 0x17a6 so everything tracks ASLR):
+                //   BTCpuSimulate (export, 0x11c0) = `L: call RunSimulatedCode; jmp L`;
+                //   RunSimulatedCode (0x1650, NOT an export) = the 64->32 forward transition;
+                //   TurboDispatchJumpAddressStart (export, 0x17a6) = the 64-bit turbo dispatcher tail;
+                //   the WOW64SVC far-transition thunk (0x2010) = the 32->64 reverse gate.
+                constexpr uint64_t turbo_dispatch_start_rva = 0x17a6;
+                const auto image_base = dispatch_start - turbo_dispatch_start_rva;
+
+                // Register the forward (64->32) transition, RunSimulatedCode. Its body contains the
+                // un-JIT-able `mov gs, cx`; registering the span makes a JIT backend intercept it at
+                // its entry and marshal the 32-bit register block itself instead of compiling those
+                // bytes. See the FEX backend's enter_wow64_32bit_from_run_simulated_code
+                // (gate_crossing_kind::wow64_run_simulated_code).
+                constexpr uint64_t run_simulated_code_rva = 0x1650;
+                emu_ptr->register_gate_crossing(image_base + run_simulated_code_rva, turbo_dispatch_start_rva - run_simulated_code_rva,
+                                                x86_64_emulator::gate_crossing_kind::wow64_run_simulated_code);
+
+                // Register the reverse (32->64) transition. The 32-bit ntdll syscall stub reaches the
+                // WOW64SVC thunk @ 0x2010 via `call fs:[0xC0]` (Wow64Transition); the thunk does a far
+                // `ljmp 0x33:...` into 64-bit mode, which the fixed-bitness 32-bit Context cannot do.
+                // Registering the 32-bit portion of the thunk [0x2010, 0x2024) makes the JIT intercept
+                // it, marshal the 32-bit state, and hand control to the real 64-bit TurboDispatch so
+                // wow64.dll services the syscall (see enter_wow64_64bit_from_wow64svc_thunk,
+                // gate_crossing_kind::wow64cpu_dispatch). NOTE: TurboDispatchJumpAddressStart itself is
+                // deliberately NOT registered - that 64-bit dispatch code MUST execute to translate the
+                // 32-bit service number and issue the real 64-bit syscall sogen hooks.
+                constexpr uint64_t wow64svc_thunk_rva = 0x2010;
+                constexpr uint64_t wow64svc_thunk_size = 0x14;
+                emu_ptr->register_gate_crossing(image_base + wow64svc_thunk_rva, wow64svc_thunk_size,
+                                                x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
+
+                // BTCpuProcessInit enables "turbo thunks" by default (it sets the flag at RVA 0x4590),
+                // so BTCpuGetBopCode (RVA 0x11e0) returns the W64SVC *turbo* bop (RVA 0x6000) instead of
+                // the WOW64SVC thunk (0x2010). The 32-bit syscall stub's `call fs:[0xC0]` (Wow64Transition)
+                // therefore targets 0x6000, whose `ljmp 0x33:...; jmp [r15+0xf8]` is the same un-executable
+                // 32-bit bitness switch. Register it as a reverse gate too, routed to the SAME handler:
+                // enter_wow64_64bit_from_wow64svc_thunk is bop-agnostic - it marshals the live 32-bit
+                // register file into the CONTEXT block and resumes the 64-bit TurboDispatch, never executing
+                // the thunk bytes - so the reverse transition works whichever bop code BTCpuGetBopCode
+                // hands the guest.
+                constexpr uint64_t w64svc_turbo_bop_rva = 0x6000;
+                constexpr uint64_t w64svc_turbo_bop_size = 0x10;
+                emu_ptr->register_gate_crossing(image_base + w64svc_turbo_bop_rva, w64svc_turbo_bop_size,
+                                                x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
+            });
+
+            load_wow64_modules(emu, executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
                                version, logger);
             break;
 

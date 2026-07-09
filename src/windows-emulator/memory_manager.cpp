@@ -298,7 +298,7 @@ namespace sogen
 
     bool memory_manager::allocate_mmio(const uint64_t address, const size_t size, mmio_read_callback read_cb, mmio_write_callback write_cb)
     {
-        if (this->overlaps_reserved_region(address, size))
+        if (this->overlaps_reserved_region(address, size, true))
         {
             return false;
         }
@@ -351,8 +351,72 @@ namespace sogen
         return true;
     }
 
+    void memory_manager::reserve_host_memory_ranges()
+    {
+        // Cheap, hot-path-safe: only ever adds newly-discovered ranges, never releases existing
+        // ones - safe to call frequently (e.g. before every dynamic allocation, so a backend's later
+        // host-side claims like JIT code buffers are seen too - see the size-only allocate_memory
+        // overload). Existing host_reserved entries are left completely alone, so this can't shrink
+        // or momentarily drop a reservation - unlike reset_host_memory_ranges below, which does need
+        // to release first and is reserved for the rare case that actually requires it.
+        for (const auto& range : this->memory_->reserved_host_ranges())
+        {
+            // Best effort: if a range is already reserved (e.g. overlapping entries from the
+            // backend's own enumeration, or one already tracked from an earlier call), there is
+            // nothing more to do - it is already unavailable to future allocations either way.
+            // Tagged host_reserved (not private_allocation) so allocate_mmio can still claim
+            // addresses in here - see its doc comment. Uses allocate_memory_raw (not the public
+            // allocate_memory(address, ...), which itself calls this function first) to avoid
+            // infinite recursion.
+            if (this->allocate_memory_raw(range.address, range.size, nt_memory_permission{}, true, memory_region_kind::host_reserved))
+            {
+                this->host_reserved_addresses_.push_back(range.address);
+            }
+        }
+    }
+
+    void memory_manager::reset_host_memory_ranges()
+    {
+        // Unlike reserve_host_memory_ranges (safe to call frequently, only ever adds), this releases
+        // every previously-tracked host_reserved range first - needed specifically when the
+        // backend's answer can genuinely change (e.g. a JIT backend learning a process's bitness -
+        // see module_manager::map_main_modules), not for routine re-scanning. Calling this from a hot
+        // path would double the syscall count of every dynamic allocation for no benefit, widening
+        // the race window against anything else in the process that maps host memory concurrently -
+        // confirmed to actually happen (a spurious ENOMEM on a normal 64-bit process's own default
+        // allocation base) - so this must stay a rare, explicit, one-time call.
+        for (const auto addr : this->host_reserved_addresses_)
+        {
+            this->release_memory(addr, 0);
+        }
+        this->host_reserved_addresses_.clear();
+
+        this->reserve_host_memory_ranges();
+    }
+
     bool memory_manager::allocate_memory(const uint64_t address, const size_t size, const nt_memory_permission permissions,
                                          const bool reserve_only, const memory_region_kind kind)
+    {
+        // Unlike the size-only overload (which always rescans via reserve_host_memory_ranges before
+        // picking an address - see its call above), this fixed-address overload used to check only
+        // overlaps_reserved_region, i.e. sogen's own bookkeeping as of the last rescan. For a backend
+        // sharing the guest address space with the host process (FEX on Apple), a host framework can
+        // claim a guest-owned VA *after* that last rescan (e.g. AppKit/SkyLight lazily vm_allocate'ing
+        // a window-tag shared page into a gap freed by an earlier guest DLL unload) - invisible here
+        // until refreshed. This path is exactly what module preferred-base loads
+        // (try_map_module_at_current_base) go through on every DLL map/remap, so a stale view here
+        // silently let a guest module's fixed-address mmap clobber that foreign host page. Rescanning
+        // first makes such a collision show up as an ordinary overlaps_reserved_region hit, which
+        // already routes relocatable modules through the existing find_free_allocation_base fallback.
+        // Uses allocate_memory_raw (not reserve_host_memory_ranges's own internal calls) to avoid
+        // recursing back into this rescan for every backend-reported host range.
+        this->reserve_host_memory_ranges();
+
+        return this->allocate_memory_raw(address, size, permissions, reserve_only, kind);
+    }
+
+    bool memory_manager::allocate_memory_raw(const uint64_t address, const size_t size, const nt_memory_permission permissions,
+                                             const bool reserve_only, const memory_region_kind kind)
     {
         if (this->overlaps_reserved_region(address, size))
         {
@@ -649,8 +713,29 @@ namespace sogen
     uint64_t memory_manager::allocate_memory(const size_t size, const nt_memory_permission permissions, const bool reserve_only,
                                              uint64_t start, const memory_region_kind kind)
     {
+        // Backends sharing the guest address space with this process (e.g. FEX) can allocate their
+        // own host-side memory (JIT code buffers, thread stacks) at any point during execution, not
+        // just at startup - a one-time reservation snapshot can't see those later claims. Re-scanning
+        // here (a no-op for backends with an independent guest address space - see
+        // reserved_host_ranges) keeps find_free_allocation_base from picking an address the backend
+        // already owns.
+        this->reserve_host_memory_ranges();
         const auto allocation_base = this->find_free_allocation_base(size, start);
-        if (!allocate_memory(allocation_base, size, permissions, reserve_only, kind))
+
+        // Claim the range at the host OS level immediately, even though it may only be reserve-only
+        // (not yet backed by map_memory) - see reserve_guest_address_range's doc comment. Only done
+        // here, for a freshly-picked address sogen doesn't already know about; unlike
+        // reserve_host_memory_ranges' fixed-address reservations (the *host* process's own existing,
+        // already-mapped memory), which must never be re-mmap'd.
+        this->memory_->reserve_guest_address_range(allocation_base, size);
+
+        // Uses allocate_memory_raw (not the public allocate_memory(address, ...), which itself
+        // rescans via reserve_host_memory_ranges) - a rescan here would immediately re-discover the
+        // reserve_guest_address_range call just above as a "foreign" host allocation (it is a real
+        // host mmap, made before reserved_regions_ knows about it) and mark allocation_base
+        // host_reserved, making the allocate_memory_raw call right below self-conflict and fail. The
+        // rescan at the top of this function already covers this call.
+        if (!this->allocate_memory_raw(allocation_base, size, permissions, reserve_only, kind))
         {
             return 0;
         }
@@ -902,10 +987,15 @@ namespace sogen
         return entry;
     }
 
-    bool memory_manager::overlaps_reserved_region(const uint64_t address, const size_t size) const
+    bool memory_manager::overlaps_reserved_region(const uint64_t address, const size_t size, const bool ignore_host_reserved) const
     {
         for (const auto& region : this->reserved_regions_)
         {
+            if (ignore_host_reserved && region.second.kind == memory_region_kind::host_reserved)
+            {
+                continue;
+            }
+
             if (regions_with_length_intersect(address, size, region.first, region.second.length))
             {
                 return true;

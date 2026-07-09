@@ -28,9 +28,21 @@ namespace sogen
 
 #define STACK_SIZE       0x40000ULL // 256KB
 
-#define GDT_ADDR         0x35000
-#define GDT_LIMIT        0x1000
-#define GDT_ENTRY_SIZE   0x8
+#ifdef __APPLE__
+// Darwin refuses MAP_FIXED anywhere in the low ~4GB regardless of ASLR (the standard 64-bit
+// Mach-O __PAGEZERO convention, enforced at the mmap syscall level) - a backend sharing the guest
+// address space with the host process (guest VA == host VA, e.g. FEX) can never place anything
+// there. GDT_ADDR is a fixed constant sogen always uses directly (not chosen dynamically via
+// find_free_allocation_base, so the reserved-host-ranges mechanism can't route around it), so it
+// has to live well above that floor here. Chosen far from typical host dyld/heap/stack placement
+// (which stays within a few GB above 4GB) to also avoid the *dynamic*, ASLR-dependent collisions
+// that reserved-host-ranges handles for everything else.
+#define GDT_ADDR 0x7ffff0000000ULL
+#else
+#define GDT_ADDR 0x35000
+#endif
+#define GDT_LIMIT      0x1000
+#define GDT_ENTRY_SIZE 0x8
 
     // Each vCPU gets its own GDT page. Most descriptors are identical, but the WOW64 FS descriptor
     // (selector 0x53) holds a per-thread 32-bit TEB base that the guest reloads on every 64<->32
@@ -41,8 +53,15 @@ namespace sogen
     }
 
 // TODO: Get rid of that
-#define WOW64_NATIVE_STACK_SIZE 0x40000ULL
-#define WOW64_32BIT_STACK_SIZE  (1 << 20)
+#define WOW64_NATIVE_STACK_SIZE      0x40000ULL
+#define WOW64_32BIT_STACK_SIZE       (1 << 20)
+
+// A WoW64 thread's *native* 64-bit stack must live in the low 4GB: wow64win.dll's win32k
+// callback-marshaling thunks (e.g. fnINLPCREATESTRUCT for WM_NCCREATE) build the 32-bit call
+// frame on the native stack and truncate the 64-bit stack pointer to 32 bits before handing it
+// to the 32-bit window proc. Search from a base above the 32-bit module/heap region to avoid the
+// low-address collisions that made a raw 0x10000-default allocation land structurally wrong.
+#define WOW64_NATIVE_STACK_BASE_HINT 0x70000000ULL
 
     struct emulator_settings;
     struct application_settings;
@@ -401,7 +420,7 @@ namespace sogen
         // Persistent per-top-level-window paint surface; child controls composite into it at their offset.
         std::map<uint32_t, gdi_bitmap_surface> gdi_window_surfaces{};
         dxgk_state dxgk{};
-        std::optional<handle> etw_notification_event{};
+        std::vector<handle> etw_notification_events{};
         hwnd mouse_capture_window{};
         // The window that currently holds keyboard focus / is the foreground window, and the last known
         // cursor position in screen coordinates. Games poll these via GetForegroundWindow/GetActiveWindow
@@ -493,6 +512,11 @@ namespace sogen
         static constexpr uint32_t process_id = 4;
         uint32_t spawned_thread_count{0};
         handle_store<handle_types::thread, emulator_thread> threads{};
+
+        // Handles delivered with the most recent ALPC reply message (NtAlpcSendWaitReceivePort). rpcrt4's
+        // system-handle import retrieves them via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation)
+        // rather than reading the handle attribute directly. Transient (valid only until the next reply).
+        std::vector<alpc_reply_handle> pending_alpc_message_handles{};
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx

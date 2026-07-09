@@ -103,6 +103,54 @@ namespace sogen
                         return write_response(sha256_output_data);
                     }
 
+                    if (algorithm_name == u"SHA1" || algorithm_name == u"MD5" || algorithm_name == u"MD4" || algorithm_name == u"MD2")
+                    {
+                        // All hash algorithms share the same structure; only the name differs.
+                        std::array<std::uint8_t, sizeof(sha256_output_data)> hash_output_data{};
+                        std::ranges::copy(sha256_output_data, hash_output_data.begin());
+                        std::ranges::fill_n(hash_output_data.begin() + 0x50, 0x10, std::uint8_t{0});
+                        std::memcpy(hash_output_data.data() + 0x50, algorithm_name.data(), algorithm_name.size() * sizeof(char16_t));
+
+                        return write_response(hash_output_data);
+                    }
+
+                    if (algorithm_name == u"RSA")
+                    {
+                        // BCRYPT_ASYMMETRIC_ENCRYPTION_INTERFACE = 3
+                        // rng_output_data has an 8-byte name slot at 0x50 ("RNG\0") — safe for 3-char names.
+                        std::array<std::uint8_t, sizeof(rng_output_data)> rsa_output_data{};
+                        std::ranges::copy(rng_output_data, rsa_output_data.begin());
+                        rsa_output_data[0x18] = 0x03;
+                        constexpr std::array<char16_t, 4> rsa_name{u'R', u'S', u'A', u'\0'};
+                        std::memcpy(rsa_output_data.data() + 0x50, rsa_name.data(), rsa_name.size() * sizeof(char16_t));
+
+                        return write_response(rsa_output_data);
+                    }
+
+                    if (algorithm_name == u"DSA")
+                    {
+                        // BCRYPT_SIGNATURE_INTERFACE = 5
+                        std::array<std::uint8_t, sizeof(rng_output_data)> sig_output_data{};
+                        std::ranges::copy(rng_output_data, sig_output_data.begin());
+                        sig_output_data[0x18] = 0x05;
+                        constexpr std::array<char16_t, 4> dsa_name{u'D', u'S', u'A', u'\0'};
+                        std::memcpy(sig_output_data.data() + 0x50, dsa_name.data(), dsa_name.size() * sizeof(char16_t));
+
+                        return write_response(sig_output_data);
+                    }
+
+                    if (algorithm_name == u"AES" || algorithm_name == u"DES" || algorithm_name == u"RC2" || algorithm_name == u"RC4")
+                    {
+                        // BCRYPT_CIPHER_INTERFACE = 1
+                        std::array<std::uint8_t, sizeof(rng_output_data)> cipher_output_data{};
+                        std::ranges::copy(rng_output_data, cipher_output_data.begin());
+                        cipher_output_data[0x18] = 0x01;
+                        std::ranges::fill_n(cipher_output_data.begin() + 0x50, 0x08, std::uint8_t{0});
+                        std::memcpy(cipher_output_data.data() + 0x50, algorithm_name.data(), algorithm_name.size() * sizeof(char16_t));
+
+                        return write_response(cipher_output_data);
+                    }
+
                     return write_response(rng_output_data);
                 }
 

@@ -117,23 +117,40 @@ namespace sogen
             const auto export_directory = buffer.as<IMAGE_EXPORT_DIRECTORY>(export_directory_entry.VirtualAddress).get();
 
             const auto names_count = export_directory.NumberOfNames;
-            // const auto function_count = export_directory.NumberOfFunctions;
+            const auto function_count = export_directory.NumberOfFunctions;
 
             const auto names = buffer.as<DWORD>(export_directory.AddressOfNames);
             const auto ordinals = buffer.as<WORD>(export_directory.AddressOfNameOrdinals);
             const auto functions = buffer.as<DWORD>(export_directory.AddressOfFunctions);
 
-            binary.exports.reserve(names_count);
+            binary.exports.reserve(function_count);
 
-            for (DWORD i = 0; i < names_count; i++)
+            // Walk every ordinal slot (AddressOfFunctions), not just the named ones
+            // (AddressOfNames/AddressOfNameOrdinals) - a DLL can export a function by ordinal only,
+            // with no name at all (common for internal/undocumented APIs, e.g. wow64cpu.dll's own
+            // low-level CPU-simulation entry points), and such an export must still be resolvable
+            // when something imports it by ordinal (see collect_imports's snap_by_ordinal path).
+            for (DWORD ordinal = 0; ordinal < function_count; ordinal++)
             {
-                const auto ordinal = ordinals.get(i);
+                const auto rva = functions.get(ordinal);
+                if (rva == 0)
+                {
+                    continue; // Empty slot in a sparse ordinal range - not a real export.
+                }
 
                 exported_symbol symbol{};
                 symbol.ordinal = export_directory.Base + ordinal;
-                symbol.rva = functions.get(ordinal);
+                symbol.rva = rva;
                 symbol.address = binary.image_base + symbol.rva;
-                symbol.name = buffer.as_string(names.get(i));
+
+                for (DWORD i = 0; i < names_count; i++)
+                {
+                    if (ordinals.get(i) == static_cast<WORD>(ordinal))
+                    {
+                        symbol.name = buffer.as_string(names.get(i));
+                        break;
+                    }
+                }
 
                 binary.exports.push_back(std::move(symbol));
             }

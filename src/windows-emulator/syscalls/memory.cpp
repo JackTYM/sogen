@@ -481,6 +481,14 @@ namespace sogen
             auto potential_base = requested_base;
             if (!potential_base)
             {
+                // Refresh the reserved-host-ranges view before searching for a free base. Without this,
+                // find_free_allocation_base can pick a base against a stale snapshot that the subsequent
+                // allocate_memory() call (which rescans host ranges first) then rejects as overlapping a
+                // live host region, failing the auto-placement with STATUS_MEMORY_NOT_ALLOCATED. This
+                // mirrors the rescan the size-only allocate_memory overload already performs before its
+                // own find_free_allocation_base call, and matters for backends that run guest VA == host
+                // VA (FEX on Apple), where the host process's own mappings share the guest address space.
+                c.win_emu.memory.reserve_host_memory_ranges();
                 potential_base =
                     c.win_emu.memory.find_free_allocation_base(static_cast<size_t>(allocation_bytes), 0, address_requirements.alignment,
                                                                address_requirements.lowest_address, address_requirements.highest_address);
