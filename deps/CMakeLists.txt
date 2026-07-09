@@ -185,8 +185,28 @@ if(SOGEN_ENABLE_FEX)
   # headers land in the same directory later, when FEXCore_shared builds.
   file(MAKE_DIRECTORY "${BINARY_DIR}/include")
 
+  # ExternalProject builds FEXCore_shared into its own nested build tree
+  # (${BINARY_DIR}/FEXCore/Source/), which is NOT the sogen artifact directory
+  # (${CMAKE_LIBRARY_OUTPUT_DIRECTORY}, set by sogen_set_new_artifact_directory() at the top level).
+  # Every sogen executable/shared-lib relies on an @loader_path/$ORIGIN rpath to find its colocated
+  # sibling shared libraries (see cmake/compiler-env.cmake) - anything that links fexcore (directly
+  # via fex-emulator, or transitively via the Python bindings module) needs libFEXCore itself to
+  # physically live alongside them in that one shared directory, or the dynamic loader can't find
+  # it at runtime (observed as "Library not loaded: @rpath/libFEXCore.dylib" when the Python wheel
+  # build's stub generator actually imports the built extension module). Copy it there explicitly.
+  add_custom_command(
+    OUTPUT "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/${_FEXCORE_SHARED_LIB}"
+    COMMAND ${CMAKE_COMMAND} -E copy
+      "${BINARY_DIR}/FEXCore/Source/${_FEXCORE_SHARED_LIB}"
+      "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/${_FEXCORE_SHARED_LIB}"
+    DEPENDS fex_external
+    COMMENT "Copying FEXCore shared library into the sogen artifact directory")
+  add_custom_target(fexcore_artifact ALL
+    DEPENDS "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/${_FEXCORE_SHARED_LIB}")
+
   # Imported view of the FEXCore shared library for consumers (fex-emulator). The consuming target
-  # must also add_dependencies(... fex_external) so the ExternalProject builds first.
+  # must also add_dependencies(... fex_external fexcore_artifact) so the ExternalProject builds and
+  # the artifact-directory copy above completes first.
   #
   # FEXCore's public headers transitively include FEX's vendored fmt (LogManager.h) and
   # unordered_dense (fextl/robin_map.h), so consumers need those include dirs too. FMT_HEADER_ONLY
@@ -194,9 +214,12 @@ if(SOGEN_ENABLE_FEX)
   # hidden-visibility FEXCore library does not re-export. FEXCore also generates some of its own
   # headers at build time (Config/ConfigValues.inl, IR/IRDefines.inc, ...) into its binary dir's
   # include/ - consumers need that include dir too.
+  #
+  # IMPORTED_LOCATION points at the artifact-directory copy (not the raw ExternalProject build
+  # tree) so the file actually used for linking is the same one that ends up on the runtime rpath.
   add_library(fexcore SHARED IMPORTED GLOBAL)
   set_target_properties(fexcore PROPERTIES
-    IMPORTED_LOCATION "${BINARY_DIR}/FEXCore/Source/${_FEXCORE_SHARED_LIB}"
+    IMPORTED_LOCATION "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/${_FEXCORE_SHARED_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${_FEX_SRC}/FEXCore/include;${BINARY_DIR}/include;${_FEX_SRC}/External/fmt/include;${_FEX_SRC}/External/unordered_dense/include"
     INTERFACE_COMPILE_DEFINITIONS "FMT_HEADER_ONLY=1")
 endif()

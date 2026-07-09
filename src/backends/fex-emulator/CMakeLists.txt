@@ -18,8 +18,9 @@ target_link_libraries(fex-emulator PUBLIC emulator)
 target_link_libraries(fex-emulator PRIVATE emulator-common)
 
 # FEXCore is built standalone via ExternalProject (see deps/CMakeLists.txt) and consumed as the
-# imported FEXCore shared library. The dependency forces the ExternalProject to build before this target.
+# imported FEXCore shared library. fex_external builds it; fexcore_artifact copies the result into
+# the sogen artifact directory, which is where the fexcore IMPORTED_LOCATION actually points.
 target_link_libraries(fex-emulator PRIVATE fexcore)
-add_dependencies(fex-emulator fex_external)
+add_dependencies(fex-emulator fex_external fexcore_artifact)
 
 sogen_strip_target(fex-emulator)

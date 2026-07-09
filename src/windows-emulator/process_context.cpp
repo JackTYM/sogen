@@ -125,18 +125,28 @@ namespace sogen
         // real ntdll's PEB.AnsiCodePageData/OemCodePageData point at a CPTABLEINFO describing the
         // process's ANSI/OEM codepage - sogen has never populated either (both were commented out
         // here), leaving the pointers null. Build a minimal, single-byte-codepage-1252-shaped
-        // identity table: WideCharTable[byte] treats every byte 0-255 as its own Unicode code
-        // point (correct for the printable ASCII range, imprecise for cp1252's 0x80-0x9F, but a
-        // real, non-null table beats a null-pointer crash). MultiByteTable mirrors it for the
-        // reverse direction. Also reused to fill NLSTABLEINFO's own embedded OemTableInfo/
-        // AnsiTableInfo sub-structs, which were left zeroed alongside UpperCaseTable/LowerCaseTable.
+        // identity table. MultiByteTable maps a raw byte (0-255) to its Unicode code point and is
+        // correctly sized at 0x100 entries. WideCharTable is the reverse direction, but real ntdll's
+        // RtlUnicodeToCustomCPN/RtlpUnicodeToCustomCPN (guest-executed code, not ours) indexes it
+        // directly by the FULL 16-bit wide character being converted, exactly like NLSTABLEINFO's
+        // own UpperCaseTable/LowerCaseTable - it therefore needs 0x10000 entries, not 0x100. Sizing
+        // it at 0x100 let any wide character above U+00FF read past the end of the 512-byte guest
+        // allocation; ntdll happily used the garbage it read back as a converted byte value, which
+        // only surfaced as guest heap corruption much later (during CRT thread-locale setup on the
+        // first NtCreateThreadEx, well downstream of the out-of-bounds read itself) - a `Null-pointer
+        // call to 0x50` was the FIRST symptom of this whole table being unpopulated; this OOB read
+        // was a second, latent bug in the fix for that, exposed only once real ntdll code started
+        // actually walking a long-enough string of code points through this exact table.
         void fill_identity_codepage_table(emulator_allocator& allocator, CPTABLEINFO& t)
         {
-            std::vector<uint16_t> wide_char_table(0x100);
+            std::vector<uint16_t> wide_char_table(0x10000);
             std::vector<uint16_t> multi_byte_table(0x100);
-            for (uint32_t i = 0; i < 0x100; ++i)
+            for (uint32_t i = 0; i < wide_char_table.size(); ++i)
             {
-                wide_char_table[i] = static_cast<uint16_t>(i);
+                wide_char_table[i] = i < 0x100 ? static_cast<uint16_t>(i) : u'?';
+            }
+            for (uint32_t i = 0; i < multi_byte_table.size(); ++i)
+            {
                 multi_byte_table[i] = static_cast<uint16_t>(i);
             }
 
