@@ -338,8 +338,7 @@ namespace sogen
             // instead of that slot silently populates the wrong entry, leaving the real window's pOwner
             // unset and making client-side same-thread dispatch fail its ownership check.
             const auto ahe_slot = user_handle_table::handle_index_to_ahe_slot(index);
-            c.proc.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = owner; },
-                                                           ahe_slot);
+            c.proc.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = owner; }, ahe_slot);
         }
 
         void invalidate_window(const syscall_context& c, window& win, const std::optional<RECT>& update_rect, bool erase);
