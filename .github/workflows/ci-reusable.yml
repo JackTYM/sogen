@@ -100,6 +100,39 @@ jobs:
               libdbus-1-dev libudev-dev \
               libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
 
+      - name: Install Linux vkd3d-shader Build Dependencies
+        if: "${{ matrix.platform == 'Linux' }}"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 15
+          retry_wait_seconds: 60
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              perl flex bison libtool mingw-w64-tools libjson-perl \
+              spirv-headers libvulkan-dev libfreetype-dev
+
+      - name: Install Windows vkd3d-shader Build Tools
+        if: "${{ startsWith(matrix.platform, 'Windows') }}"
+        shell: cmd
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-x86_64-tools mingw-w64-x86_64-vulkan-devel"
+
+      - name: Add MSYS2 Tools to Path
+        if: "${{ startsWith(matrix.platform, 'Windows') }}"
+        shell: bash
+        run: |
+          echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
+          echo "C:\\msys64\\mingw64\\bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=C:\\msys64\\mingw64" >> "$GITHUB_ENV"
+
+      - name: Install Freetype (vcpkg)
+        if: "${{ startsWith(matrix.platform, 'Windows') }}"
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install freetype:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+
       - name: CMake Build
         run: cmake --workflow --preset=tidy
 
@@ -256,11 +289,13 @@ jobs:
             devcmd_arch: x86
             msys-arch: i686
             msys-prefix: mingw32
+            vcpkg-triplet: x86-windows
           - platform: Windows x86_64
             runner: windows-latest
             devcmd_arch: x64
             msys-arch: x86_64
             msys-prefix: mingw64
+            vcpkg-triplet: x64-windows
           - platform: MinGW x86_64
             runner: ubuntu-24.04
             rust-target: x86_64-pc-windows-gnu
@@ -350,7 +385,9 @@ jobs:
           max_attempts: 5
           timeout_minutes: 15
           retry_wait_seconds: 60
-          command: brew install autoconf automake perl flex bison libtool mingw-w64 vulkan-headers spirv-headers vulkan-loader
+          command: |
+            brew install autoconf automake perl flex bison libtool mingw-w64 vulkan-headers spirv-headers vulkan-loader cpanminus
+            cpanm --notest JSON
 
       - name: Enable Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1.13.0
@@ -370,6 +407,13 @@ jobs:
           echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
           echo "C:\\msys64\\${{ matrix.msys-prefix }}\\bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=C:\\msys64\\${{ matrix.msys-prefix }}" >> "$GITHUB_ENV"
+
+      - name: Install Freetype (vcpkg)
+        if: "${{ matrix.vcpkg-triplet }}"
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install freetype:${{ matrix.vcpkg-triplet }}
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
 
       - uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -412,8 +456,8 @@ jobs:
           command: |
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends \
-              perl flex bison libtool mingw-w64-tools \
-              vulkan-headers spirv-headers libvulkan-dev
+              perl flex bison libtool mingw-w64-tools libjson-perl \
+              spirv-headers libvulkan-dev libfreetype-dev
 
       - name: CMake Build
         run: cmake --preset=${{matrix.preset}} ${{matrix.cmake-options}} && cmake --build --preset=${{matrix.preset}}
@@ -1034,6 +1078,54 @@ jobs:
               libdbus-1-dev libudev-dev \
               libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
 
+      - name: Install Linux vkd3d-shader Build Dependencies
+        if: "${{ startsWith(matrix.runner, 'ubuntu') }}"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 15
+          retry_wait_seconds: 60
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              perl flex bison libtool mingw-w64-tools libjson-perl \
+              spirv-headers libvulkan-dev libfreetype-dev
+
+      - name: Install macOS vkd3d-shader Build Dependencies
+        if: "${{ startsWith(matrix.runner, 'macos') }}"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 15
+          retry_wait_seconds: 60
+          command: |
+            brew install autoconf automake perl flex bison libtool mingw-w64 vulkan-headers spirv-headers vulkan-loader cpanminus
+            cpanm --notest JSON
+
+      - name: Enable Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        if: "${{ startsWith(matrix.runner, 'windows') }}"
+
+      - name: Install Windows vkd3d-shader Build Tools
+        if: "${{ startsWith(matrix.runner, 'windows') }}"
+        shell: cmd
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-x86_64-tools mingw-w64-x86_64-vulkan-devel"
+
+      - name: Add MSYS2 Tools to Path
+        if: "${{ startsWith(matrix.runner, 'windows') }}"
+        shell: bash
+        run: |
+          echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
+          echo "C:\\msys64\\mingw64\\bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=C:\\msys64\\mingw64" >> "$GITHUB_ENV"
+
+      - name: Install Freetype (vcpkg)
+        if: "${{ startsWith(matrix.runner, 'windows') }}"
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install freetype:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+
       - name: Build wheel
         run: python -m build "${{ github.workspace }}" --wheel --outdir dist
         env:
@@ -1166,6 +1258,18 @@ jobs:
       # Intentionally NOT installing the SDL build dependencies here: this job
       # proves that a source install builds headless. pyproject.toml sets
       # SDL_UNIX_CONSOLE_BUILD=ON so the bundled SDL3 builds without X11/Wayland.
+      - name: Install Linux vkd3d-shader Build Dependencies
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 15
+          retry_wait_seconds: 60
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              perl flex bison libtool mingw-w64-tools libjson-perl \
+              spirv-headers libvulkan-dev libfreetype-dev
+
       - name: Install sdist
         run: python -m pip install --upgrade pip && python -m pip install --force-reinstall dist/*.tar.gz
 

@@ -41,10 +41,36 @@ if(NOT SOGEN_ENABLE_CLANG_TIDY)
   target_precompile_headers(windows-emulator PRIVATE std_include.hpp)
 endif()
 
-find_package(Freetype REQUIRED)
+# Real GDI text rendering (font_renderer.cpp) needs Freetype on every platform. Android/iOS have no
+# system package and no package-manager triplet covering them (vcpkg's community Android triplets
+# don't cover this project's ABIs either); unlike vkd3d-shader, Freetype is a small, plain-CMake
+# project with no autotools/widl dependency, so it's simplest to vendor and build it from source
+# for just those two platforms via the project's own cross-compilation toolchain files. Emscripten
+# ships Freetype as a built-in port instead (no vendoring needed there).
+if(ANDROID OR IOS)
+  set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/deps/freetype ${CMAKE_BINARY_DIR}/deps/freetype EXCLUDE_FROM_ALL)
+  set(SOGEN_FREETYPE_TARGET freetype)
+elseif(NOT EMSCRIPTEN)
+  find_package(Freetype REQUIRED)
+  set(SOGEN_FREETYPE_TARGET Freetype::Freetype)
+endif()
 
 target_link_libraries(windows-emulator PUBLIC emulator minidump)
-target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers Freetype::Freetype)
+target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers)
+
+if(SOGEN_FREETYPE_TARGET)
+  target_link_libraries(windows-emulator PRIVATE ${SOGEN_FREETYPE_TARGET})
+endif()
+
+if(EMSCRIPTEN)
+  target_compile_options(windows-emulator PRIVATE "-sUSE_FREETYPE=1")
+  target_link_options(windows-emulator PUBLIC "-sUSE_FREETYPE=1")
+endif()
 
 if(SOGEN_HAS_VKD3D_SHADER)
   target_link_libraries(windows-emulator PRIVATE vkd3d-shader-bridge)

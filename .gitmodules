@@ -53,3 +53,7 @@
 [submodule "deps/vkd3d"]
 	path = deps/vkd3d
 	url = https://gitlab.winehq.org/wine/vkd3d.git
+[submodule "deps/freetype"]
+	path = deps/freetype
+	url = https://github.com/freetype/freetype.git
+	shallow = true

@@ -46,8 +46,12 @@ if(CMAKE_MATCH_1 LESS 2 OR (CMAKE_MATCH_1 EQUAL 2 AND CMAKE_MATCH_2 LESS 5))
 endif()
 get_filename_component(VKD3D_SHADER_BISON_BINDIR ${VKD3D_SHADER_BISON} DIRECTORY)
 
+# Prefer the project's own vendored Vulkan-Headers submodule over a system/apt package: it's
+# always present (every build already needs it for the vulkan-headers CMake target) and Ubuntu's
+# actual apt package name for standalone Vulkan headers has moved around across releases.
 find_path(VKD3D_SHADER_VULKAN_INCLUDE_DIR vulkan/vulkan.h
-    HINTS /opt/homebrew/opt/vulkan-headers/include /usr/local/opt/vulkan-headers/include
+    HINTS ${CMAKE_CURRENT_LIST_DIR}/../Vulkan-Headers/include
+          /opt/homebrew/opt/vulkan-headers/include /usr/local/opt/vulkan-headers/include
 )
 find_path(VKD3D_SHADER_SPIRV_INCLUDE_DIR spirv/unified1/spirv.h
     HINTS /opt/homebrew/opt/spirv-headers/include /usr/local/opt/spirv-headers/include
