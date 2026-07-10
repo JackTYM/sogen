@@ -1072,6 +1072,43 @@ namespace sogen
             {
                 this->install_section_first_execution_hook(mod, i);
             }
+
+            // TEMP-DIAG: capture the error-type arg (RCX/ECX, __fastcall a1) and caller return address
+            // at ntdll!RtlpHpHeapHandleError's entry (RVA 0x10d040 in this build's 64-bit ntdll.dll)
+            // to identify the specific segment-heap corruption type + detecting routine during the
+            // STATUS_HEAP_CORRUPTION investigation.
+            if (mod.name == "ntdll.dll" && mod.machine == 0x8664 /*IMAGE_FILE_MACHINE_AMD64*/)
+            {
+                const auto hook_addr = mod.image_base + 0x1adb0;
+                this->emu().hook_memory_execution(hook_addr, [this](cpu_interface& cpu, uint64_t) {
+                    auto& vcpu = this->vcpu(cpu.index());
+                    auto& acting = vcpu.cpu;
+                    const auto rsp = acting.reg(x86_register::rsp);
+                    const auto rdx = acting.reg(x86_register::rdx);
+
+                    // Only the misaligned (STATUS_HEAP_CORRUPTION-triggering) call is interesting -
+                    // RtlpFreeHeapInternal fires thousands of times normally.
+                    if ((rdx & 0xF) == 0)
+                    {
+                        return;
+                    }
+
+                    for (uint64_t off = 0; off <= 0x100; off += 8)
+                    {
+                        uint64_t stack_val = 0;
+                        if (!acting.try_read_memory(rsp + off, &stack_val, sizeof(stack_val)))
+                        {
+                            break;
+                        }
+
+                        const auto* mod2 = this->mod_manager.find_by_address(stack_val);
+                        this->log.error("[MISALIGN-DIAG] rdx=0x%llx [rsp+0x%llx]=0x%llx (%s+0x%llx)\n",
+                                        static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(off),
+                                        static_cast<unsigned long long>(stack_val), mod2 ? mod2->name.c_str() : "?",
+                                        mod2 ? static_cast<unsigned long long>(stack_val - mod2->image_base) : stack_val);
+                    }
+                });
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
@@ -1794,6 +1831,15 @@ namespace sogen
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
+
+        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never
+        // ran map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered - without
+        // this, any thread created after deserialize (in this object) would fall back to the
+        // non-heap-allocated NlsCache placeholder and hit the STATUS_HEAP_CORRUPTION class of bug this
+        // resolver exists to prevent. Idempotent, so this is also a harmless no-op when map_main_modules
+        // already registered it (the common case: deserializing into an already-running emulator).
+        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
+
         this->restore_ui_backend();
     }
 
@@ -1952,6 +1998,15 @@ namespace sogen
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
+
+        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never
+        // ran map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered - without
+        // this, any thread created after deserialize (in this object) would fall back to the
+        // non-heap-allocated NlsCache placeholder and hit the STATUS_HEAP_CORRUPTION class of bug this
+        // resolver exists to prevent. Idempotent, so this is also a harmless no-op when map_main_modules
+        // already registered it (the common case: deserializing into an already-running emulator).
+        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
+
         this->restore_ui_backend();
     }
 

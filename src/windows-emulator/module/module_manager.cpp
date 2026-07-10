@@ -460,6 +460,65 @@ namespace sogen
         }
     }
 
+    void module_manager::ensure_kernelbase_nls_cache_hook(process_context& context)
+    {
+        if (!this->kernelbase_nls_cache_hook_registered_)
+        {
+            this->kernelbase_nls_cache_hook_registered_ = true;
+
+            // Resolve kernelbase.dll's private (non-exported) gNlsProcessLocalCache global as soon as
+            // it's mapped, for emulator_thread.cpp's TEB64.NlsCache setup - real Windows points every
+            // thread's TEB.NlsCache at this shared, process-wide fallback structure until that thread
+            // does its own locale/NLS API work, and kernelbase.dll's BaseNlsThreadCleanup
+            // (DLL_THREAD_DETACH) relies on pointer equality with it to know whether to RtlFreeHeap the
+            // TEB's NlsCache value.
+            //
+            // kernelbase.dll is never a parameter to process_context::setup() - unlike ntdll/win32u, it
+            // is not mapped eagerly here; it loads later via the guest loader's own import resolution
+            // (see load_native_64bit_modules/load_wow64_modules, which only map exe+ntdll+win32u
+            // upfront) - so this must be resolved on_module_load, not at setup() time (a prior attempt
+            // to resolve it there found kernelbase.dll never mapped yet and always fell back to the
+            // placeholder, below, for every thread). By the time this fires, the only thread that
+            // exists is the initial one, which is fine: it never reaches BaseNlsThreadCleanup via
+            // DLL_THREAD_DETACH (that only fires for a thread exiting while others remain live - the
+            // process's own final exit instead goes through DLL_PROCESS_DETACH, a separate code path
+            // that never touches NlsCache at all) - every thread the guest's own code spawns afterwards
+            // (i.e. any real DLL_THREAD_DETACH candidate) is created well after this callback has
+            // already run, since kernelbase.dll loads during the loader's own import resolution,
+            // strictly before the app's own code can call CreateThread. Its RVA is specific to the
+            // exact kernelbase.dll shipped in this build's root filesystem (identified via static
+            // analysis of that binary). Registered only once per module_manager instance - safe, since
+            // the callback captures `context` by reference and every caller of this function passes the
+            // SAME process_context the module_manager was constructed for.
+            this->callbacks_->on_module_load.add([&context](mapped_module& mod) {
+                if (mod.name != "kernelbase.dll")
+                {
+                    return;
+                }
+
+                constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
+                context.kernelbase_nls_process_local_cache = mod.image_base + kernelbase_gnls_process_local_cache_rva;
+            });
+        }
+
+        // Unlike the registration above, this must run every time this function is called, not just
+        // once: a windows_emulator's deserialize()/restore_snapshot() calls this AFTER resetting both
+        // mod_manager's module list and process_context back to a snapshot's state, but
+        // kernelbase_nls_process_local_cache is deliberately not part of process_context's own
+        // serialized state (it is host-side bookkeeping meant to be re-derived, not guest state) - so
+        // without this, a reset to a snapshot taken BEFORE kernelbase.dll loaded would leave
+        // context.kernelbase_nls_process_local_cache holding a stale, no-longer-valid guest address
+        // left over from whatever ran on this object before the reset, instead of correctly falling
+        // back to 0 (which resolve_nls_cache, emulator_thread.cpp, treats as "not resolved yet, use the
+        // placeholder"). Resolve from the CURRENT module list every time: if kernelbase.dll is mapped
+        // right now, point at its cache global; if it isn't (e.g. right after a reset to a
+        // pre-kernelbase.dll-load snapshot), reset to 0 so a thread created before the on_module_load
+        // callback above fires again gets the placeholder instead of a stale/invalid address.
+        constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
+        const auto* kernelbase = this->find_by_name("kernelbase.dll");
+        context.kernelbase_nls_process_local_cache = kernelbase ? kernelbase->image_base + kernelbase_gnls_process_local_cache_rva : 0;
+    }
+
     void module_manager::map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
                                           process_context& context, const logger& logger)
     {
@@ -478,6 +537,8 @@ namespace sogen
         // recomputed now that the bitness is known, before either module is mapped.
         emu.notify_process_bitness(context.is_wow64_process);
         this->memory_->reset_host_memory_ranges();
+
+        this->ensure_kernelbase_nls_cache_hook(context);
 
         switch (current_execution_mode_)
         {

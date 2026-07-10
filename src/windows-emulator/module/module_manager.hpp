@@ -96,6 +96,19 @@ namespace sogen
         void map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
                               process_context& context, const logger& logger);
 
+        // Registers the kernelbase.dll gNlsProcessLocalCache resolver (see the .cpp's own doc comment
+        // for the full rationale) if it hasn't been already, then unconditionally re-resolves
+        // context.kernelbase_nls_process_local_cache from the CURRENT module list (0 if kernelbase.dll
+        // isn't currently mapped). The registration is normally established by map_main_modules for a
+        // freshly-launched process, but a windows_emulator constructed purely as a deserialize() target
+        // (create_empty_emulator-style) never calls map_main_modules at all - so windows_emulator::
+        // deserialize()/restore_snapshot() call this directly to make sure the hook still exists. The
+        // re-resolve step also matters on an object where map_main_modules already ran once before: it
+        // is what prevents a reset back to a pre-kernelbase.dll-load snapshot (see
+        // SerializationTest.ResettingEmulatorWorks) from leaving a stale, no-longer-valid cache address
+        // behind from whatever ran on this object before the reset. Safe to call repeatedly.
+        void ensure_kernelbase_nls_cache_hook(process_context& context);
+
         std::optional<uint64_t> get_module_load_count_by_path(const windows_path& path);
         mapped_module* map_module(windows_path file, const logger& logger, bool is_static = false, bool allow_duplicate = false);
         mapped_module* map_module_or_throw(const windows_path& file, const logger& logger, bool is_static = false,
@@ -184,6 +197,7 @@ namespace sogen
 
         mapping_strategy_factory strategy_factory_;
         execution_mode current_execution_mode_ = execution_mode::unknown;
+        bool kernelbase_nls_cache_hook_registered_{false};
 
         mapped_module* map_module_core(const pe_detection_result& detection_result, const std::function<mapped_module()>& mapper,
                                        const logger& logger, bool is_static);
