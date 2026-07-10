@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "module_mapping.hpp"
 #include <address_utils.hpp>
+#include <algorithm>
 
 #include <utils/io.hpp>
 #include <utils/buffer_accessor.hpp>
@@ -372,6 +373,97 @@ namespace sogen
             }
         }
 
+        // Applies one relocation block's fixups against a host-side mirror of the block's guest byte
+        // span, then commits the whole span with a single memory.write_memory call. A freshly-mapped
+        // module has not executed a single instruction yet at this point in the load sequence (this
+        // runs before protect_module_memory and before the module's entry point), so - unlike the
+        // general write_memory caller population, which can legitimately alias code (e.g. a syscall
+        // output buffer) - every one of these writes is provably invalidating a range that cannot yet
+        // hold a JIT translation. Reading, fixing up, and writing the whole block as one range still
+        // performs that (harmless-here) invalidation, but once per block instead of once per fixup,
+        // collapsing what can be thousands of individually-invalidating guest writes per module down
+        // to one per relocation block (typically ~one page's worth of fixups).
+        template <typename T>
+        void apply_relocation_block(memory_manager& memory, const uint64_t image_base, const IMAGE_BASE_RELOCATION& relocation,
+                                    const std::span<const uint16_t> entries, const uint64_t delta)
+        {
+            uint64_t min_offset = 0;
+            uint64_t max_end = 0;
+            bool has_fixup = false;
+
+            for (const auto entry : entries)
+            {
+                const int type = entry >> 12;
+                const auto offset = static_cast<uint16_t>(entry & 0xfff);
+                const auto total_offset = static_cast<uint64_t>(relocation.VirtualAddress) + offset;
+
+                size_t width = 0;
+                switch (type)
+                {
+                case IMAGE_REL_BASED_ABSOLUTE:
+                    continue;
+                case IMAGE_REL_BASED_HIGHLOW:
+                    width = sizeof(DWORD);
+                    break;
+                case IMAGE_REL_BASED_DIR64:
+                    width = sizeof(ULONGLONG);
+                    break;
+                default:
+                    throw std::runtime_error("Unknown relocation type: " + std::to_string(type));
+                }
+
+                if (!has_fixup)
+                {
+                    min_offset = total_offset;
+                    max_end = total_offset + width;
+                    has_fixup = true;
+                }
+                else
+                {
+                    min_offset = std::min(min_offset, total_offset);
+                    max_end = std::max(max_end, total_offset + width);
+                }
+            }
+
+            if (!has_fixup)
+            {
+                return;
+            }
+
+            const auto span_size = static_cast<size_t>(max_end - min_offset);
+            std::vector<std::byte> block_buffer(span_size);
+            memory.read_memory(image_base + min_offset, block_buffer.data(), span_size);
+
+            const utils::safe_buffer_accessor<std::byte> block{block_buffer};
+
+            for (const auto entry : entries)
+            {
+                const int type = entry >> 12;
+                const auto offset = static_cast<uint16_t>(entry & 0xfff);
+                const auto total_offset = static_cast<uint64_t>(relocation.VirtualAddress) + offset;
+                const auto local_offset = total_offset - min_offset;
+
+                switch (type)
+                {
+                case IMAGE_REL_BASED_ABSOLUTE:
+                    break;
+
+                case IMAGE_REL_BASED_HIGHLOW:
+                    apply_relocation<DWORD>(block, local_offset, delta);
+                    break;
+
+                case IMAGE_REL_BASED_DIR64:
+                    apply_relocation<ULONGLONG>(block, local_offset, delta);
+                    break;
+
+                default:
+                    throw std::runtime_error("Unknown relocation type: " + std::to_string(type));
+                }
+            }
+
+            memory.write_memory(image_base + min_offset, block_buffer.data(), span_size);
+        }
+
         template <typename T>
         void apply_relocations(const mapped_module& binary, memory_manager& memory, const PEOptionalHeader_t<T>& optional_header)
         {
@@ -390,6 +482,8 @@ namespace sogen
             auto relocation_offset = directory->VirtualAddress;
             const auto relocation_end = relocation_offset + directory->Size;
 
+            std::vector<uint16_t> entries{};
+
             while (relocation_offset < relocation_end)
             {
                 const auto relocation = read_mapped_object<IMAGE_BASE_RELOCATION>(memory, binary.image_base + relocation_offset);
@@ -400,37 +494,19 @@ namespace sogen
                 }
 
                 const auto data_size = relocation.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION);
-                const auto entry_count = data_size / sizeof(uint16_t);
+                const auto entry_count = static_cast<size_t>(data_size / sizeof(uint16_t));
                 const auto entries_base = binary.image_base + relocation_offset + sizeof(IMAGE_BASE_RELOCATION);
 
                 relocation_offset += relocation.SizeOfBlock;
 
-                for (size_t i = 0; i < entry_count; ++i)
+                // Read every entry descriptor for this block in one guest read instead of one per entry.
+                entries.resize(entry_count);
+                if (entry_count > 0)
                 {
-                    const auto entry = read_mapped_object<uint16_t>(memory, entries_base + i * sizeof(uint16_t));
-
-                    const int type = entry >> 12;
-                    const auto offset = static_cast<uint16_t>(entry & 0xfff);
-                    const auto total_offset = relocation.VirtualAddress + offset;
-                    const auto target_address = binary.image_base + total_offset;
-
-                    switch (type)
-                    {
-                    case IMAGE_REL_BASED_ABSOLUTE:
-                        break;
-
-                    case IMAGE_REL_BASED_HIGHLOW:
-                        apply_relocation<DWORD>(memory, target_address, delta);
-                        break;
-
-                    case IMAGE_REL_BASED_DIR64:
-                        apply_relocation<ULONGLONG>(memory, target_address, delta);
-                        break;
-
-                    default:
-                        throw std::runtime_error("Unknown relocation type: " + std::to_string(type));
-                    }
+                    memory.read_memory(entries_base, entries.data(), entry_count * sizeof(uint16_t));
                 }
+
+                apply_relocation_block<T>(memory, binary.image_base, relocation, entries, delta);
             }
         }
 

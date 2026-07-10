@@ -97,6 +97,13 @@ namespace sogen
             return {*memory_, handle_table_addr_};
         }
 
+        // Map an internal handle id to the aheList slot the guest computes from the HANDLE's low 16 bits.
+        // Handles are 4-aligned (id at bit 2), so the slot is id << 2; keep it within the table bounds.
+        static uint32_t handle_index_to_ahe_slot(uint32_t index)
+        {
+            return static_cast<uint32_t>(make_handle(index, handle_types::window, false).bits & 0xFFFFu);
+        }
+
         emulator_object<USER_DISPINFO> get_display_info() const
         {
             return {*memory_, display_info_addr_};
@@ -295,13 +302,6 @@ namespace sogen
             message.maxMsgs = WND_MESSAGE_BITS.at(index).max_msgs;
             message.abMsgs = wnd_message_bits_addrs_.at(index);
             return message;
-        }
-
-        // Map an internal handle id to the aheList slot the guest computes from the HANDLE's low 16 bits.
-        // Handles are 4-aligned (id at bit 2), so the slot is id << 2; keep it within the table bounds.
-        static uint32_t handle_index_to_ahe_slot(uint32_t index)
-        {
-            return static_cast<uint32_t>(make_handle(index, handle_types::window, false).bits & 0xFFFFu);
         }
 
         uint32_t find_free_index() const

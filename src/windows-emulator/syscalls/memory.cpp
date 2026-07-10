@@ -27,6 +27,12 @@ namespace sogen
                 return value != 0 && (value & (value - 1)) == 0;
             }
 
+            // Backstop for the auto-placement pick/confirm loop below (see its own comment). Every
+            // non-settling iteration does a full reserve_host_memory_ranges() rescan, which is
+            // guaranteed to make find_free_allocation_base's next pick skip the offending range, so
+            // this only guards against pathological churn.
+            constexpr int max_host_reserved_retries = 8;
+
             std::optional<uint64_t> checked_add(const uint64_t lhs, const uint64_t rhs)
             {
                 if (lhs > UINT64_MAX - rhs)
@@ -481,17 +487,39 @@ namespace sogen
             auto potential_base = requested_base;
             if (!potential_base)
             {
-                // Refresh the reserved-host-ranges view before searching for a free base. Without this,
-                // find_free_allocation_base can pick a base against a stale snapshot that the subsequent
-                // allocate_memory() call (which rescans host ranges first) then rejects as overlapping a
-                // live host region, failing the auto-placement with STATUS_MEMORY_NOT_ALLOCATED. This
-                // mirrors the rescan the size-only allocate_memory overload already performs before its
-                // own find_free_allocation_base call, and matters for backends that run guest VA == host
-                // VA (FEX on Apple), where the host process's own mappings share the guest address space.
-                c.win_emu.memory.reserve_host_memory_ranges();
-                potential_base =
-                    c.win_emu.memory.find_free_allocation_base(static_cast<size_t>(allocation_bytes), 0, address_requirements.alignment,
-                                                               address_requirements.lowest_address, address_requirements.highest_address);
+                // Pick a base from sogen's current view, then confirm just that window is still free at
+                // the host level (host_window_is_free - a bounded, usually single-syscall probe) before
+                // committing to it. Without some fresh check here, find_free_allocation_base can pick a
+                // base against a stale snapshot that the subsequent allocate_memory() call (which itself
+                // only confirms its own window, not the whole address space) then either rejects as
+                // overlapping a live host region - failing auto-placement with
+                // STATUS_MEMORY_NOT_ALLOCATED - or, worse, clobbers with a MAP_FIXED mmap on backends
+                // that run guest VA == host VA (FEX on Apple), where the host process's own mappings
+                // (JIT code buffers, a framework's lazy allocation, a GCD worker stack) share the guest
+                // address space and can appear at any point during execution. Only on an actual
+                // collision - rare - pay for a full reserve_host_memory_ranges() rescan (which records
+                // every currently-foreign range so the next pick skips them) and retry, mirroring the
+                // pick/confirm/retry loop the size-only memory_manager::allocate_memory overload uses
+                // for the same reason.
+                for (int attempt = 0;; ++attempt)
+                {
+                    potential_base = c.win_emu.memory.find_free_allocation_base(
+                        static_cast<size_t>(allocation_bytes), 0, address_requirements.alignment, address_requirements.lowest_address,
+                        address_requirements.highest_address);
+
+                    if (!potential_base || c.win_emu.memory.host_window_is_free(potential_base, static_cast<size_t>(allocation_bytes)))
+                    {
+                        break;
+                    }
+
+                    if (attempt >= max_host_reserved_retries)
+                    {
+                        potential_base = 0;
+                        break;
+                    }
+
+                    c.win_emu.memory.reserve_host_memory_ranges();
+                }
             }
             else
             {

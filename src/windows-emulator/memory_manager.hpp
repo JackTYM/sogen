@@ -99,6 +99,18 @@ namespace sogen
         // and re-query from scratch.
         void reserve_host_memory_ranges();
 
+        // Windowed form of reserve_host_memory_ranges: reserves only backend host ranges intersecting
+        // [address, size). Used by the fixed-address allocate_memory overload, which only needs its
+        // own target window checked, not a full-address-space rescan on every module (re)map.
+        void reserve_host_memory_ranges_in(uint64_t address, size_t size);
+
+        // True if no foreign host mapping currently intersects [address, size), via a bounded,
+        // windowed backend probe (usually a single query, unlike reserve_host_memory_ranges' full
+        // address-space rescan). Records nothing - a pure check, for callers that only want to
+        // confirm a candidate before committing to it (see the size-only allocate_memory overload
+        // and handle_NtAllocateVirtualMemoryEx) rather than track the result.
+        bool host_window_is_free(uint64_t address, size_t size) const;
+
         // Like reserve_host_memory_ranges, but first releases every previously-tracked range before
         // re-querying the backend - needed only when the backend's answer can genuinely change (e.g.
         // a JIT backend learning a process's bitness, see module_manager::map_main_modules). Not

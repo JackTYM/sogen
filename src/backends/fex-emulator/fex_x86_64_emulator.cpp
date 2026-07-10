@@ -675,15 +675,19 @@ namespace sogen::fex
             bool owned = true; // false for map_host_memory aliases we must not munmap
         };
 
-        // FEX runs the guest natively with guest VA == host VA. This backend's only current MMIO
-        // consumer, KUSER_SHARED_DATA, sits at a fixed guest address (0x7ffe0000) that falls inside
-        // the low range every 64-bit Mach-O process reserves as __PAGEZERO - the kernel refuses any
-        // real mapping there (confirmed via both mmap(MAP_FIXED) and mach_vm_allocate), so the region
-        // is deliberately left unmapped rather than backed by real memory. The access therefore always
-        // faults; the fault handler (see handle_fault_signal) recognizes an address inside a
-        // registered mmio_region, decodes the single faulting ARM64 load instruction, satisfies it via
-        // read_cb, writes the result into the destination register, and resumes past it. Read-only:
-        // this backend's only consumer treats guest writes as a no-op, so a write here is left to
+        // FEX runs the guest natively with guest VA == host VA, so there is no per-instruction hook to
+        // intercept a specific address the way an interpreted backend can - every access to this
+        // backend's only current MMIO consumer, KUSER_SHARED_DATA, would otherwise cost a real
+        // hardware fault + signal round-trip (measured as the dominant cost of a whole run when guest
+        // code polls it at high frequency, e.g. a loading-screen timer). At its raw guest address
+        // (0x7ffe0000) the region falls inside __PAGEZERO and truly cannot be backed by real memory
+        // (confirmed via both mmap(MAP_FIXED) and mach_vm_allocate) - but for a wow64 process it is
+        // rebased above 4GB like any other sub-4GB guest address (see wow64_guest_rebase), where real
+        // backing is possible. map_mmio opportunistically mmaps read-only real memory there and keeps
+        // it fresh once per quantum (see refresh_mmio_backings); host_backing stays null wherever the
+        // real mapping isn't possible (e.g. a native 64-bit process), and the region falls back to the
+        // original always-unmapped, fault-and-emulate behavior via handle_mmio_fault. Read-only either
+        // way: this backend's only consumer treats guest writes as a no-op, so a write here is left to
         // surface as a normal access violation, matching real Windows (KUSER_SHARED_DATA is read-only
         // user-mapped memory there too) - not a general MMIO implementation.
         struct mmio_region
@@ -691,6 +695,8 @@ namespace sogen::fex
             uint64_t address = 0;
             size_t size = 0;
             mmio_read_callback read_cb;
+            void* host_backing = nullptr;
+            size_t host_backing_size = 0;
         };
 
         struct hook_entry
@@ -1151,6 +1157,8 @@ namespace sogen::fex
 
         void start(size_t count) override
         {
+            this->refresh_mmio_backings();
+
             if (count != 0)
             {
                 // FEX has CompileRIPCount() for bounded execution, but wiring exact instruction counts
@@ -1657,6 +1665,23 @@ namespace sogen::fex
 
         bool try_write_memory(uint64_t address, const void* data, size_t size) override
         {
+            return this->try_write_memory_impl(address, data, size, /*invalidate_translations=*/true);
+        }
+
+        // Writes WoW64 gate-crossing CPU-state marshaling data (the CpuArea i386-CONTEXT block at
+        // TEB64+0x1488+0x80, and the 64-bit RunSimulatedCode stack frame) into guest memory. These
+        // targets are pure data structures that never hold JIT-compiled guest code, so the code-cache
+        // invalidation try_write_memory normally performs is a guaranteed no-op in every FEXCore
+        // context - skip it to avoid a GetCodeInvalidationMutex lock + Apple pthread_jit_write_protect
+        // toggle pair per marshaled register (~25 per WoW64 syscall round-trip). If such an address
+        // were ever repurposed as code, map_memory/apply_memory_protection would invalidate independently.
+        bool write_marshal_state(uint64_t address, const void* data, size_t size)
+        {
+            return this->try_write_memory_impl(address, data, size, /*invalidate_translations=*/false);
+        }
+
+        bool try_write_memory_impl(uint64_t address, const void* data, size_t size, bool invalidate_translations)
+        {
             if (!this->is_range_mapped(address, size))
             {
                 return false;
@@ -1685,8 +1710,11 @@ namespace sogen::fex
                 this->set_temporary_write_access(address, size, declared, false);
             }
 
-            // Writing to a mapped region may overwrite already-translated code; drop FEX's cache for it.
-            this->invalidate_code_range(address, size);
+            if (invalidate_translations)
+            {
+                // Writing to a mapped region may overwrite already-translated code; drop FEX's cache for it.
+                this->invalidate_code_range(address, size);
+            }
             return true;
         }
 
@@ -1908,6 +1936,57 @@ namespace sogen::fex
             }
             return ranges;
         }
+
+        std::vector<host_reserved_range> reserved_host_ranges_in(uint64_t address, size_t size) const override
+        {
+            // Targeted equivalent of reserved_host_ranges() for a single query window. The fixed-
+            // address allocate_memory overload only needs to know whether THIS window has been
+            // claimed by a foreign host mapping since sogen last released it - not to re-enumerate
+            // every region in the process, whose count (and thus that walk's cost) grows unbounded
+            // over a long session. mach_vm_region's start-address parameter lets the kernel skip
+            // straight to the first region at or above the (rebased) window, so this visits only
+            // regions actually inside the window (usually none).
+            //
+            // The arena and the __PAGEZERO gap are captured into reserved_regions_ by the first full
+            // scan at startup and never released, so overlaps_reserved_region already rejects a
+            // target landing in them without help here; the only thing a rescan of an otherwise-free
+            // window can add is a foreign mapping in a gap an earlier guest unmap munmap'd back to
+            // the OS - which is exactly what a bare "is anything mapped in this host window" probe finds.
+            std::vector<host_reserved_range> ranges;
+
+            const auto rebase = rebase_for(this->is_wow64_process_, address);
+            const mach_vm_address_t window_start = address + rebase;
+            const mach_vm_address_t window_end = window_start + size;
+
+            mach_vm_address_t probe = window_start;
+            while (probe < window_end)
+            {
+                mach_vm_address_t region_addr = probe;
+                mach_vm_size_t region_size = 0;
+                vm_region_basic_info_data_64_t info{};
+                mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+                mach_port_t object_name = MACH_PORT_NULL;
+                if (mach_vm_region(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+                                   reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name) != KERN_SUCCESS)
+                {
+                    break;
+                }
+                if (region_addr >= window_end)
+                {
+                    break;
+                }
+
+                // Report in guest (unrebased) coordinates, matching reserved_host_ranges() and what
+                // reserved_regions_ is keyed by.
+                const uint64_t hit_start = std::max<uint64_t>(region_addr, window_start);
+                const uint64_t hit_end = std::min<uint64_t>(region_addr + region_size, window_end);
+                ranges.push_back({.address = hit_start - rebase, .size = static_cast<size_t>(hit_end - hit_start)});
+
+                probe = region_addr + region_size;
+            }
+
+            return ranges;
+        }
 #endif
 
       private:
@@ -1917,14 +1996,55 @@ namespace sogen::fex
 
         void map_mmio(uint64_t address, size_t size, mmio_read_callback read_cb, mmio_write_callback /*write_cb*/) override
         {
-            // See mmio_region's doc comment: deliberately not backed by real memory - the address
-            // stays unmapped and every access faults into handle_fault_signal.
+            // See mmio_region's doc comment for the real-backing/fault-and-emulate split.
             if (!is_page_aligned(address) || !is_page_aligned(size))
             {
                 throw std::runtime_error("FEX MMIO mappings must be page aligned");
             }
 
-            this->mmio_regions_.emplace_back(mmio_region{.address = address, .size = size, .read_cb = std::move(read_cb)});
+            void* host_backing = nullptr;
+            size_t host_backing_size = 0;
+
+#ifdef __APPLE__
+            const auto rebase = rebase_for(this->is_wow64_process_, address);
+            host_backing_size = host_page_align_up_apple(size);
+            void* result = ::mmap(reinterpret_cast<void*>(address + rebase), host_backing_size, PROT_READ | PROT_WRITE,
+                                  MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (result != MAP_FAILED && result == reinterpret_cast<void*>(address + rebase))
+            {
+                host_backing = result;
+            }
+#endif
+
+            if (host_backing != nullptr)
+            {
+                read_cb(0, host_backing, size);
+                ::mprotect(host_backing, host_backing_size, PROT_READ);
+            }
+
+            this->mmio_regions_.emplace_back(mmio_region{.address = address,
+                                                          .size = size,
+                                                          .read_cb = std::move(read_cb),
+                                                          .host_backing = host_backing,
+                                                          .host_backing_size = host_backing_size});
+        }
+
+        // Rewrites every MMIO region's real backing (see mmio_region's doc comment) with fresh
+        // content, run from the guest-execution thread itself at each quantum boundary (see start())
+        // so it can never race a guest read of the same page.
+        void refresh_mmio_backings()
+        {
+            for (const auto& region : this->mmio_regions_)
+            {
+                if (region.host_backing == nullptr)
+                {
+                    continue;
+                }
+
+                ::mprotect(region.host_backing, region.host_backing_size, PROT_READ | PROT_WRITE);
+                region.read_cb(0, region.host_backing, region.size);
+                ::mprotect(region.host_backing, region.host_backing_size, PROT_READ);
+            }
         }
 
         void map_memory(uint64_t address, size_t size, memory_permission permissions) override
@@ -2074,9 +2194,21 @@ namespace sogen::fex
 
         void unmap_memory(uint64_t address, size_t size) override
         {
-            // MMIO regions (see mmio_region's doc comment) were never really mapped - nothing to undo
-            // at the host level.
-            if (std::erase_if(this->mmio_regions_, [address](const mmio_region& region) { return region.address == address; }))
+            // MMIO regions (see mmio_region's doc comment) were never really mapped at the host level
+            // beyond their own optional host_backing, which is torn down here if present.
+            if (std::erase_if(this->mmio_regions_,
+                              [address](const mmio_region& region)
+                              {
+                                  if (region.address != address)
+                                  {
+                                      return false;
+                                  }
+                                  if (region.host_backing != nullptr)
+                                  {
+                                      ::munmap(region.host_backing, region.host_backing_size);
+                                  }
+                                  return true;
+                              }))
             {
                 return;
             }
@@ -2763,7 +2895,7 @@ namespace sogen::fex
                 const uint64_t entry_rsp = state64.gregs[detail::greg_rsp];
                 const auto spill = [&](uint64_t below_entry, int greg) {
                     const uint64_t value = state64.gregs[greg];
-                    this->try_write_memory(entry_rsp - below_entry, &value, sizeof(value));
+                    this->write_marshal_state(entry_rsp - below_entry, &value, sizeof(value));
                 };
                 spill(0x08, 15); // r15
                 spill(0x10, 14); // r14
@@ -2886,7 +3018,7 @@ namespace sogen::fex
             // 0x1779 does for the GPRs, plus xmm0..5 so the block is the authoritative 32-bit state
             // across the dispatch - the forward re-entry reads xmm back unconditionally). wow64.dll
             // overwrites CONTEXT.Eax@0x34 with the syscall result before that re-entry.
-            const auto write32 = [&](uint64_t offset, uint32_t value) { this->try_write_memory(block + offset, &value, sizeof(value)); };
+            const auto write32 = [&](uint64_t offset, uint32_t value) { this->write_marshal_state(block + offset, &value, sizeof(value)); };
             write32(0x20, edi);
             write32(0x24, esi);
             write32(0x28, ebx);
@@ -2899,7 +3031,7 @@ namespace sogen::fex
             write32(0x48, esp + 4);
             for (int i = 0; i < 6; ++i)
             {
-                this->try_write_memory(block + 0xf0 + static_cast<uint64_t>(i) * 0x10, &src32.xmm.avx.data[i][0], 16);
+                this->write_marshal_state(block + 0xf0 + static_cast<uint64_t>(i) * 0x10, &src32.xmm.avx.data[i][0], 16);
             }
 
             // Set up the 64-bit engine to resume at the generic dispatcher (0x17af), which does
