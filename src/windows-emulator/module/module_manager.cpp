@@ -16,6 +16,39 @@ namespace sogen
 
     namespace
     {
+        // kernelbase_gnls_process_local_cache_rva (below) is a hardcoded offset derived once via static
+        // analysis of a specific kernelbase.dll build - it silently drifts across different Windows
+        // servicing/OS-build combinations (confirmed: a newer kernelbase.dll build relocates
+        // gNlsProcessLocalCache out of .data into .rdata, making the same RVA land on a READ-ONLY page).
+        // Since real ntdll/kernelbase code eventually WRITES through whatever TEB.NlsCache points at,
+        // resolving to a stale RVA that now falls on a read-only page is a guaranteed guest access
+        // violation rather than a silent correctness gap - so validate against the module's own section
+        // table (parsed from the real PE headers at map time, so it's always accurate for THIS build)
+        // before trusting the hardcoded constant.
+        bool address_is_in_writable_section(const mapped_module& mod, const uint64_t address)
+        {
+            for (const auto& section : mod.sections)
+            {
+                const auto& region = section.region;
+                if (address >= region.start && address - region.start < region.length)
+                {
+                    return (region.permissions & memory_permission::write) != memory_permission::none;
+                }
+            }
+
+            return false;
+        }
+
+        // Returns 0 (unresolved) rather than a guaranteed-wrong address if the hardcoded RVA falls
+        // outside kernelbase's own writable data for THIS specific build - see
+        // address_is_in_writable_section's doc comment.
+        uint64_t resolve_kernelbase_nls_cache_address(const mapped_module& kernelbase)
+        {
+            constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
+            const auto address = kernelbase.image_base + kernelbase_gnls_process_local_cache_rva;
+            return address_is_in_writable_section(kernelbase, address) ? address : 0;
+        }
+
         uint64_t get_system_dll_init_block_size(const windows_version_manager& version)
         {
             if (version.is_build_after_or_equal(WINDOWS_VERSION::WINDOWS_11_24H2))
@@ -486,18 +519,19 @@ namespace sogen
             // (i.e. any real DLL_THREAD_DETACH candidate) is created well after this callback has
             // already run, since kernelbase.dll loads during the loader's own import resolution,
             // strictly before the app's own code can call CreateThread. Its RVA is specific to the
-            // exact kernelbase.dll shipped in this build's root filesystem (identified via static
-            // analysis of that binary). Registered only once per module_manager instance - safe, since
-            // the callback captures `context` by reference and every caller of this function passes the
-            // SAME process_context the module_manager was constructed for.
+            // exact kernelbase.dll build it was originally identified against (via static analysis) -
+            // resolve_kernelbase_nls_cache_address validates it still lands on writable data before
+            // trusting it, since that drifts across Windows builds. Registered only once per
+            // module_manager instance - safe, since the callback captures `context` by reference and
+            // every caller of this function passes the SAME process_context the module_manager was
+            // constructed for.
             this->callbacks_->on_module_load.add([&context](mapped_module& mod) {
                 if (mod.name != "kernelbase.dll")
                 {
                     return;
                 }
 
-                constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
-                context.kernelbase_nls_process_local_cache = mod.image_base + kernelbase_gnls_process_local_cache_rva;
+                context.kernelbase_nls_process_local_cache = resolve_kernelbase_nls_cache_address(mod);
             });
         }
 
@@ -514,9 +548,8 @@ namespace sogen
         // right now, point at its cache global; if it isn't (e.g. right after a reset to a
         // pre-kernelbase.dll-load snapshot), reset to 0 so a thread created before the on_module_load
         // callback above fires again gets the placeholder instead of a stale/invalid address.
-        constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
         const auto* kernelbase = this->find_by_name("kernelbase.dll");
-        context.kernelbase_nls_process_local_cache = kernelbase ? kernelbase->image_base + kernelbase_gnls_process_local_cache_rva : 0;
+        context.kernelbase_nls_process_local_cache = kernelbase ? resolve_kernelbase_nls_cache_address(*kernelbase) : 0;
     }
 
     void module_manager::map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
