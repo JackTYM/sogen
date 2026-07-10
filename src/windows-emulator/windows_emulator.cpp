@@ -807,10 +807,9 @@ namespace sogen
             const auto desktop_thread_id = this->current_thread().id;
             desktop->thread_id = desktop_thread_id;
             desktop->guest.access([&](USER_WINDOW& window) { window.threadId = desktop_thread_id; });
-            const auto ahe_slot = user_handle_table::handle_index_to_ahe_slot(
-                static_cast<uint32_t>(context.default_desktop_window_handle.value.id));
-            context.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = desktop_thread_id; },
-                                                           ahe_slot);
+            const auto ahe_slot =
+                user_handle_table::handle_index_to_ahe_slot(static_cast<uint32_t>(context.default_desktop_window_handle.value.id));
+            context.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = desktop_thread_id; }, ahe_slot);
         }
     }
 

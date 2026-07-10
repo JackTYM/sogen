@@ -2023,10 +2023,10 @@ namespace sogen::fex
             }
 
             this->mmio_regions_.emplace_back(mmio_region{.address = address,
-                                                          .size = size,
-                                                          .read_cb = std::move(read_cb),
-                                                          .host_backing = host_backing,
-                                                          .host_backing_size = host_backing_size});
+                                                         .size = size,
+                                                         .read_cb = std::move(read_cb),
+                                                         .host_backing = host_backing,
+                                                         .host_backing_size = host_backing_size});
         }
 
         // Rewrites every MMIO region's real backing (see mmio_region's doc comment) with fresh
@@ -2196,19 +2196,17 @@ namespace sogen::fex
         {
             // MMIO regions (see mmio_region's doc comment) were never really mapped at the host level
             // beyond their own optional host_backing, which is torn down here if present.
-            if (std::erase_if(this->mmio_regions_,
-                              [address](const mmio_region& region)
-                              {
-                                  if (region.address != address)
-                                  {
-                                      return false;
-                                  }
-                                  if (region.host_backing != nullptr)
-                                  {
-                                      ::munmap(region.host_backing, region.host_backing_size);
-                                  }
-                                  return true;
-                              }))
+            if (std::erase_if(this->mmio_regions_, [address](const mmio_region& region) {
+                    if (region.address != address)
+                    {
+                        return false;
+                    }
+                    if (region.host_backing != nullptr)
+                    {
+                        ::munmap(region.host_backing, region.host_backing_size);
+                    }
+                    return true;
+                }))
             {
                 return;
             }

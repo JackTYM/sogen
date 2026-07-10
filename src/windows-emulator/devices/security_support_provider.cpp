@@ -80,8 +80,7 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                const auto operation =
-                    win_emu.emu().read_memory<uint16_t>(c.input_buffer + offsetof(ksec_algorithm_request, operation));
+                const auto operation = win_emu.emu().read_memory<uint16_t>(c.input_buffer + offsetof(ksec_algorithm_request, operation));
 
                 if (operation == 1)
                 {
