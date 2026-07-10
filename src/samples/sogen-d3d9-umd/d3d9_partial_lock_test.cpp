@@ -50,8 +50,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9partiallocktest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "partial-lock-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640,
-                                 480, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "partial-lock-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480, nullptr,
+                                nullptr, wc.hInstance, nullptr);
     printf("[d3d9-partial-lock-test] hwnd=%p\n", static_cast<void*>(hwnd));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -87,10 +87,8 @@ int main()
     // this suite already uses to route through the DevCaps-gated driver path instead of the sysmem
     // fast path (see fill_d3d9caps's k_devcaps_driver_managed_pool).
     IDirect3DVertexBuffer9* vb = nullptr;
-    HRESULT hcvb =
-        dev->CreateVertexBuffer(kTotalSize, D3DUSAGE_DYNAMIC, D3DFVF_XYZ, D3DPOOL_DEFAULT, &vb, nullptr);
-    printf("[d3d9-partial-lock-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb),
-           static_cast<void*>(vb));
+    HRESULT hcvb = dev->CreateVertexBuffer(kTotalSize, D3DUSAGE_DYNAMIC, D3DFVF_XYZ, D3DPOOL_DEFAULT, &vb, nullptr);
+    printf("[d3d9-partial-lock-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
     if (FAILED(hcvb) || !vb)
     {
         printf("[d3d9-partial-lock-test] FAIL: CreateVertexBuffer hr=0x%08lx\n", static_cast<unsigned long>(hcvb));
@@ -146,12 +144,12 @@ int main()
                     break;
                 }
             }
-            printf("[d3d9-partial-lock-test] chunk%u expected=0x%02X first_byte=0x%02X %s\n", chunk, expected,
-                   region[0], all_match ? "MATCH" : "MISMATCH");
+            printf("[d3d9-partial-lock-test] chunk%u expected=0x%02X first_byte=0x%02X %s\n", chunk, expected, region[0],
+                   all_match ? "MATCH" : "MISMATCH");
             if (!all_match)
             {
-                printf("[d3d9-partial-lock-test] FAIL: chunk%u byte %u is 0x%02X, expected 0x%02X\n", chunk,
-                       first_bad_index, first_bad_value, expected);
+                printf("[d3d9-partial-lock-test] FAIL: chunk%u byte %u is 0x%02X, expected 0x%02X\n", chunk, first_bad_index,
+                       first_bad_value, expected);
                 ++failures;
             }
             else

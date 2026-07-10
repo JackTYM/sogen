@@ -80,9 +80,9 @@ float4 main(PSInput input) : COLOR0
         return std::abs(static_cast<int>(actual) - expected) <= tolerance;
     }
 
-    void release_all(IDirect3DTexture9* t0, IDirect3DTexture9* t1, IDirect3DTexture9* t2, IDirect3DSurface9* rtX8,
-                     IDirect3DSurface9* rtA8, IDirect3DVertexBuffer9* vb, IDirect3DIndexBuffer9* ib,
-                     IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DTexture9* t0, IDirect3DTexture9* t1, IDirect3DTexture9* t2, IDirect3DSurface9* rtX8, IDirect3DSurface9* rtA8,
+                     IDirect3DVertexBuffer9* vb, IDirect3DIndexBuffer9* ib, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps,
+                     IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (t0)
         {
@@ -132,8 +132,7 @@ float4 main(PSInput input) : COLOR0
 
     // A 4x4 solid-color texture in `format` (MANAGED). `block` points at the format's tightly-packed
     // 4x4 payload (16 bytes DXT5/L8-... callers pass the right size). Returns null on any failure.
-    IDirect3DTexture9* make_solid_4x4(IDirect3DDevice9* dev, D3DFORMAT format, const void* block, size_t block_size,
-                                      const char* label)
+    IDirect3DTexture9* make_solid_4x4(IDirect3DDevice9* dev, D3DFORMAT format, const void* block, size_t block_size, const char* label)
     {
         IDirect3DTexture9* tex = nullptr;
         HRESULT hc = dev->CreateTexture(4, 4, 1, 0, format, D3DPOOL_MANAGED, &tex, nullptr);
@@ -145,8 +144,7 @@ float4 main(PSInput input) : COLOR0
         }
         D3DLOCKED_RECT lr{};
         HRESULT hl = tex->LockRect(0, &lr, nullptr, 0);
-        printf("[d3d9-format-coverage-test] LockRect(%s) hr=0x%08lx pBits=%p\n", label, static_cast<unsigned long>(hl),
-               lr.pBits);
+        printf("[d3d9-format-coverage-test] LockRect(%s) hr=0x%08lx pBits=%p\n", label, static_cast<unsigned long>(hl), lr.pBits);
         if (FAILED(hl) || !lr.pBits)
         {
             tex->Release();
@@ -222,17 +220,16 @@ float4 main(PSInput input) : COLOR0
     // driver-lockable render targets, same gap d3d9_colorfill_test.cpp documents), so the readback uses the
     // format's known tight stride width*bpp -- the same convention every other guest test here uses. The
     // reported Pitch is logged for visibility but not asserted on.
-    bool run_offscreen_rt_format_subpass(IDirect3DDevice9* dev, D3DFORMAT format, int bpp, D3DCOLOR colorTop,
-                                         D3DCOLOR colorBot, const unsigned char* enc_top, const unsigned char* enc_bot,
-                                         const char* label)
+    bool run_offscreen_rt_format_subpass(IDirect3DDevice9* dev, D3DFORMAT format, int bpp, D3DCOLOR colorTop, D3DCOLOR colorBot,
+                                         const unsigned char* enc_top, const unsigned char* enc_bot, const char* label)
     {
         constexpr int kW = 64;
         constexpr int kH = 64;
 
         IDirect3DSurface9* rt = nullptr;
         HRESULT hcrt = dev->CreateRenderTarget(kW, kH, format, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-        printf("[d3d9-format-coverage-test] CreateRenderTarget(%s) hr=0x%08lx surf=%p\n", label,
-               static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
+        printf("[d3d9-format-coverage-test] CreateRenderTarget(%s) hr=0x%08lx surf=%p\n", label, static_cast<unsigned long>(hcrt),
+               static_cast<void*>(rt));
         if (FAILED(hcrt) || !rt)
         {
             printf("[d3d9-format-coverage-test] FAIL: %s render target creation must SUCCEED (now RT-capable)\n", label);
@@ -248,8 +245,8 @@ float4 main(PSInput input) : COLOR0
 
         RECT bottom = {0, kH / 2, kW, kH};
         HRESULT hcf = dev->ColorFill(rt, &bottom, colorBot);
-        printf("[d3d9-format-coverage-test] %s ColorFill(bottom-half, 0x%08lX) hr=0x%08lx\n", label,
-               static_cast<unsigned long>(colorBot), static_cast<unsigned long>(hcf));
+        printf("[d3d9-format-coverage-test] %s ColorFill(bottom-half, 0x%08lX) hr=0x%08lx\n", label, static_cast<unsigned long>(colorBot),
+               static_cast<unsigned long>(hcf));
 
         D3DLOCKED_RECT lr{};
         HRESULT hl = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
@@ -323,8 +320,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9formatcoveragetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "format-coverage-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "format-coverage-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -346,8 +343,7 @@ int main()
 
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-format-coverage-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    printf("[d3d9-format-coverage-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();
@@ -356,12 +352,12 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* ps_blob = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, nullptr);
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, nullptr);
-    printf("[d3d9-format-coverage-test] D3DCompile(vs) hr=0x%08lx D3DCompile(ps) hr=0x%08lx\n",
-           static_cast<unsigned long>(hvsc), static_cast<unsigned long>(hpsc));
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, nullptr);
+    HRESULT hpsc =
+        D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob, nullptr);
+    printf("[d3d9-format-coverage-test] D3DCompile(vs) hr=0x%08lx D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hvsc),
+           static_cast<unsigned long>(hpsc));
     if (FAILED(hvsc) || FAILED(hpsc) || !vs_blob || !ps_blob)
     {
         if (vs_blob)
@@ -382,8 +378,8 @@ int main()
     HRESULT hcps = dev->CreatePixelShader(static_cast<const DWORD*>(ps_blob->GetBufferPointer()), &ps);
     vs_blob->Release();
     ps_blob->Release();
-    printf("[d3d9-format-coverage-test] CreateVertexShader hr=0x%08lx CreatePixelShader hr=0x%08lx\n",
-           static_cast<unsigned long>(hcvs), static_cast<unsigned long>(hcps));
+    printf("[d3d9-format-coverage-test] CreateVertexShader hr=0x%08lx CreatePixelShader hr=0x%08lx\n", static_cast<unsigned long>(hcvs),
+           static_cast<unsigned long>(hcps));
     if (FAILED(hcvs) || FAILED(hcps) || !vs || !ps)
     {
         release_all(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, vs, ps, dev, d3d);
@@ -394,8 +390,7 @@ int main()
     // DXT5 (BC3) solid RED: [alpha block: a0=a1=0xFF, indices 0 -> alpha 255 everywhere]
     // [color block: color0=RED(565 0xF800), color1=0, indices 0 -> color0 everywhere]. 0xF800 decodes
     // to 8-bit (255,0,0).
-    const unsigned char kDxt5Red[16] = {0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                        0x00, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    const unsigned char kDxt5Red[16] = {0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     unsigned char kL8[16];
     std::memset(kL8, 0xC8, sizeof(kL8)); // luminance 200
     // A8R8G8B8 solid CYAN (0,255,255), stored little-endian BGRA per texel.
@@ -411,15 +406,13 @@ int main()
 
     // --- Render targets ----------------------------------------------------------------------------
     IDirect3DSurface9* rtX8 = nullptr;
-    HRESULT hrtx = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE,
-                                           &rtX8, nullptr);
+    HRESULT hrtx = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rtX8, nullptr);
     IDirect3DSurface9* rtA8 = nullptr;
-    HRESULT hrta = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE,
-                                           &rtA8, nullptr);
-    printf("[d3d9-format-coverage-test] CreateRenderTarget(X8R8G8B8) hr=0x%08lx surf=%p\n",
-           static_cast<unsigned long>(hrtx), static_cast<void*>(rtX8));
-    printf("[d3d9-format-coverage-test] CreateRenderTarget(A8R8G8B8) hr=0x%08lx surf=%p\n",
-           static_cast<unsigned long>(hrta), static_cast<void*>(rtA8));
+    HRESULT hrta = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rtA8, nullptr);
+    printf("[d3d9-format-coverage-test] CreateRenderTarget(X8R8G8B8) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hrtx),
+           static_cast<void*>(rtX8));
+    printf("[d3d9-format-coverage-test] CreateRenderTarget(A8R8G8B8) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hrta),
+           static_cast<void*>(rtA8));
 
     // --- Geometry ----------------------------------------------------------------------------------
     IDirect3DVertexBuffer9* vb = nullptr;
@@ -474,8 +467,8 @@ int main()
     // Sub-pass 1: DXT5 solid RED -> X8R8G8B8 RT.
     if (render_and_read_center(dev, texDxt5, rtX8, px, "DXT5"))
     {
-        printf("[d3d9-format-coverage-test] DXT5 center B=%02X G=%02X R=%02X A=%02X (expected RED B=00 G=00 R=FF)\n",
-               px[0], px[1], px[2], px[3]);
+        printf("[d3d9-format-coverage-test] DXT5 center B=%02X G=%02X R=%02X A=%02X (expected RED B=00 G=00 R=FF)\n", px[0], px[1], px[2],
+               px[3]);
         if (channel_close(px[0], 0, 4) && channel_close(px[1], 0, 4) && channel_close(px[2], 255, 4))
         {
             printf("[d3d9-format-coverage-test] PASS: DXT5 block decoded to the expected RED\n");
@@ -516,8 +509,7 @@ int main()
     // value lands in R; G/B read 0.
     if (render_and_read_center(dev, texL8, rtX8, px, "L8"))
     {
-        printf("[d3d9-format-coverage-test] L8 center B=%02X G=%02X R=%02X A=%02X (expected R=C8 G=00 B=00)\n", px[0],
-               px[1], px[2], px[3]);
+        printf("[d3d9-format-coverage-test] L8 center B=%02X G=%02X R=%02X A=%02X (expected R=C8 G=00 B=00)\n", px[0], px[1], px[2], px[3]);
         if (channel_close(px[2], 200, 4) && channel_close(px[1], 0, 4) && channel_close(px[0], 0, 4))
         {
             printf("[d3d9-format-coverage-test] PASS: L8 single-channel value sampled into R\n");
@@ -562,8 +554,8 @@ int main()
     {
         const unsigned char enc_red_565[2] = {0x00, 0xF8};
         const unsigned char enc_green_565[2] = {0xE0, 0x07};
-        if (!run_offscreen_rt_format_subpass(dev, D3DFMT_R5G6B5, 2, D3DCOLOR_ARGB(255, 255, 0, 0),
-                                             D3DCOLOR_ARGB(255, 0, 255, 0), enc_red_565, enc_green_565, "R5G6B5-RT"))
+        if (!run_offscreen_rt_format_subpass(dev, D3DFMT_R5G6B5, 2, D3DCOLOR_ARGB(255, 255, 0, 0), D3DCOLOR_ARGB(255, 0, 255, 0),
+                                             enc_red_565, enc_green_565, "R5G6B5-RT"))
         {
             ++failures;
         }
@@ -577,9 +569,8 @@ int main()
     {
         const unsigned char enc_red_half[8] = {0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C};
         const unsigned char enc_green_half[8] = {0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x3C};
-        if (!run_offscreen_rt_format_subpass(dev, D3DFMT_A16B16G16R16F, 8, D3DCOLOR_ARGB(255, 255, 0, 0),
-                                             D3DCOLOR_ARGB(255, 0, 255, 0), enc_red_half, enc_green_half,
-                                             "A16B16G16R16F-RT"))
+        if (!run_offscreen_rt_format_subpass(dev, D3DFMT_A16B16G16R16F, 8, D3DCOLOR_ARGB(255, 255, 0, 0), D3DCOLOR_ARGB(255, 0, 255, 0),
+                                             enc_red_half, enc_green_half, "A16B16G16R16F-RT"))
         {
             ++failures;
         }
@@ -592,10 +583,10 @@ int main()
     // path works (proven by d3d9_vertex_texture_test.cpp). This is a pure capability-advertisement check, not
     // a render: A16B16G16R16F must now return S_OK, and a format WITHOUT the bit (L8) must still return
     // D3DERR_NOTAVAILABLE -- proving the capability is format-specific, not a blanket "query always succeeds".
-    HRESULT hvtf = d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8,
-                                          D3DUSAGE_QUERY_VERTEXTEXTURE, D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16F);
-    HRESULT hvtfNo = d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8,
-                                            D3DUSAGE_QUERY_VERTEXTEXTURE, D3DRTYPE_TEXTURE, D3DFMT_L8);
+    HRESULT hvtf = d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, D3DUSAGE_QUERY_VERTEXTEXTURE,
+                                          D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16F);
+    HRESULT hvtfNo = d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, D3DUSAGE_QUERY_VERTEXTEXTURE,
+                                            D3DRTYPE_TEXTURE, D3DFMT_L8);
     printf("[d3d9-format-coverage-test] CheckDeviceFormat(QUERY_VERTEXTEXTURE, A16B16G16R16F) hr=0x%08lx / (L8) "
            "hr=0x%08lx\n",
            static_cast<unsigned long>(hvtf), static_cast<unsigned long>(hvtfNo));

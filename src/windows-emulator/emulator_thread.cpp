@@ -70,7 +70,7 @@ namespace sogen
         }
 
         wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id,
-                                          const std::chrono::steady_clock::time_point now = {})
+                                         const std::chrono::steady_clock::time_point now = {})
         {
             const auto type = h.value.type;
 

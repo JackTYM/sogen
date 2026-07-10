@@ -144,7 +144,7 @@ namespace sogen
             // \Device\MMCSS\MmThread: the Multimedia Class Scheduler. avrt!AvSetMmThreadCharacteristics opens it
             // to register dsound's now-running audio render thread for real-time priority scheduling. sogen has
             // no MMCSS, but the thread only needs the open + control IOCTLs to succeed to keep streaming.
-            || device == u"MMCSS\\MmThread"     //
+            || device == u"MMCSS\\MmThread" //
             || device == u"MMCSS")
         {
             return std::make_unique<dummy_device>();

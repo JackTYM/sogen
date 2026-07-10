@@ -191,9 +191,8 @@ float4 main(PSInput input) : COLOR0
     // this file's header comment). Also prints the register type/number of every IF's and REP's source
     // operand, to independently confirm which physical b#/i# register the compiler actually bound
     // useAltColor/useAltColor2/loopTripCount to.
-    void scan_for_loop_opcode(const uint32_t* tokens, const size_t token_count, bool& out_saw_loop,
-                               bool& out_saw_rep, bool& out_saw_if_reading_bool0,
-                               bool& out_saw_if_reading_bool1)
+    void scan_for_loop_opcode(const uint32_t* tokens, const size_t token_count, bool& out_saw_loop, bool& out_saw_rep,
+                              bool& out_saw_if_reading_bool0, bool& out_saw_if_reading_bool1)
     {
         out_saw_loop = false;
         out_saw_rep = false;
@@ -235,8 +234,7 @@ float4 main(PSInput input) : COLOR0
                 const uint32_t reg_token = tokens[i + 1];
                 const uint32_t reg_type = register_type_of(reg_token);
                 const uint32_t reg_number = register_number_of(reg_token);
-                printf("[d3d9-int-bool-const-test]   opcode=0x%02X operand register type=0x%02X number=%u\n", opcode,
-                       reg_type, reg_number);
+                printf("[d3d9-int-bool-const-test]   opcode=0x%02X operand register type=0x%02X number=%u\n", opcode, reg_type, reg_number);
                 if (opcode == kD3dsioIf && reg_type == kVkd3dSm1RegConstBool && reg_number == 0)
                 {
                     out_saw_if_reading_bool0 = true;
@@ -252,8 +250,8 @@ float4 main(PSInput input) : COLOR0
                 const uint32_t reg_token_b = tokens[i + 2];
                 printf("[d3d9-int-bool-const-test]   opcode=0x%02X (IFC) operandA type=0x%02X number=%u operandB "
                        "type=0x%02X number=%u\n",
-                       opcode, register_type_of(reg_token_a), register_number_of(reg_token_a),
-                       register_type_of(reg_token_b), register_number_of(reg_token_b));
+                       opcode, register_type_of(reg_token_a), register_number_of(reg_token_a), register_type_of(reg_token_b),
+                       register_number_of(reg_token_b));
             }
 
             i += 1 + length;
@@ -271,8 +269,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9intboolconsttest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "int-bool-const-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                 640, 480, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "int-bool-const-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480, nullptr,
+                                nullptr, wc.hInstance, nullptr);
     printf("[d3d9-int-bool-const-test] hwnd=%p\n", static_cast<void*>(hwnd));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -295,10 +293,8 @@ int main()
     pp.hDeviceWindow = hwnd;
 
     IDirect3DDevice9* dev = nullptr;
-    HRESULT hr =
-        d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-int-bool-const-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
+    printf("[d3d9-int-bool-const-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         printf("[d3d9-int-bool-const-test] FAIL: CreateDevice hr=0x%08lx\n", static_cast<unsigned long>(hr));
@@ -308,15 +304,14 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-int-bool-const-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
         if (vs_errors)
         {
-            printf("[d3d9-int-bool-const-test] VS compile errors: %s\n",
-                   static_cast<const char*>(vs_errors->GetBufferPointer()));
+            printf("[d3d9-int-bool-const-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
             vs_errors->Release();
         }
         dev->Release();
@@ -327,8 +322,7 @@ int main()
     {
         const auto* vs_tokens = static_cast<const uint32_t*>(vs_blob->GetBufferPointer());
         const size_t vs_token_count = vs_blob->GetBufferSize() / sizeof(uint32_t);
-        printf("[d3d9-int-bool-const-test] VS bytecode size=%zu bytes (%zu tokens)\n", vs_blob->GetBufferSize(),
-               vs_token_count);
+        printf("[d3d9-int-bool-const-test] VS bytecode size=%zu bytes (%zu tokens)\n", vs_blob->GetBufferSize(), vs_token_count);
         bool saw_loop = false;
         bool saw_rep = false;
         bool saw_if_bool0 = false;
@@ -336,8 +330,7 @@ int main()
         scan_for_loop_opcode(vs_tokens, vs_token_count, saw_loop, saw_rep, saw_if_bool0, saw_if_bool1);
         printf("[d3d9-int-bool-const-test] VS bytecode opcode scan: saw_LOOP/ENDLOOP=%s saw_REP/ENDREP=%s "
                "saw_IF(b0)=%s saw_IF(b1)=%s\n",
-               saw_loop ? "yes" : "no", saw_rep ? "yes" : "no", saw_if_bool0 ? "yes" : "no",
-               saw_if_bool1 ? "yes" : "no");
+               saw_loop ? "yes" : "no", saw_rep ? "yes" : "no", saw_if_bool0 ? "yes" : "no", saw_if_bool1 ? "yes" : "no");
         if (!saw_loop && !saw_rep)
         {
             printf("[d3d9-int-bool-const-test] WARNING: neither a LOOP nor a REP opcode was found in the VS "
@@ -357,15 +350,14 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-int-bool-const-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
         if (ps_errors)
         {
-            printf("[d3d9-int-bool-const-test] PS compile errors: %s\n",
-                   static_cast<const char*>(ps_errors->GetBufferPointer()));
+            printf("[d3d9-int-bool-const-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
             ps_errors->Release();
         }
         vs_blob->Release();
@@ -408,8 +400,7 @@ int main()
     constexpr DWORD kFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
     IDirect3DVertexBuffer9* vb = nullptr;
     HRESULT hcvb = dev->CreateVertexBuffer(3 * sizeof(Vertex), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
-    printf("[d3d9-int-bool-const-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb),
-           static_cast<void*>(vb));
+    printf("[d3d9-int-bool-const-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
     if (!vb)
     {
         if (vs)
@@ -437,8 +428,7 @@ int main()
 
     IDirect3DSurface9* rt = nullptr;
     HRESULT hcrt = dev->CreateRenderTarget(640, 480, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-    printf("[d3d9-int-bool-const-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    printf("[d3d9-int-bool-const-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-int-bool-const-test] FAIL: CreateRenderTarget hr=0x%08lx\n", static_cast<unsigned long>(hcrt));
@@ -475,8 +465,8 @@ int main()
 
     D3DLOCKED_RECT lr{};
     HRESULT hlr = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
-    printf("[d3d9-int-bool-const-test] LockRect hr=0x%08lx pBits=%p Pitch=%ld\n", static_cast<unsigned long>(hlr),
-           lr.pBits, static_cast<long>(lr.Pitch));
+    printf("[d3d9-int-bool-const-test] LockRect hr=0x%08lx pBits=%p Pitch=%ld\n", static_cast<unsigned long>(hlr), lr.pBits,
+           static_cast<long>(lr.Pitch));
     if (SUCCEEDED(hlr) && lr.pBits)
     {
         const auto* base = static_cast<const unsigned char*>(lr.pBits);
@@ -485,8 +475,7 @@ int main()
         // (col=320, row=240) -> NDC (~0.0, ~0.0), well inside the triangle (the output color is
         // uniform across the whole triangle, so any interior point works equally for both checks).
         const unsigned char* pixel = base + 240 * kStride + 320 * 4;
-        printf("[d3d9-int-bool-const-test] pixel(320,240)=B=%02X G=%02X R=%02X A=%02X\n", pixel[0], pixel[1],
-               pixel[2], pixel[3]);
+        printf("[d3d9-int-bool-const-test] pixel(320,240)=B=%02X G=%02X R=%02X A=%02X\n", pixel[0], pixel[1], pixel[2], pixel[3]);
 
         // Bool check: b0=FALSE and b1=TRUE together must select the "alt2" branch (R=0,G=255) -- neither
         // the "alt" branch (b0 wrongly read true: R=255,G=0) nor the "neither" branch (b1 wrongly read
@@ -507,8 +496,7 @@ int main()
         }
 
         // Int check: i1.x=3 loop iterations, each accumulating kAccumDelta into the blue channel.
-        const int expected_b =
-            static_cast<int>(static_cast<float>(kLoopTripCount[0]) * kAccumDelta * 255.0f + 0.5f);
+        const int expected_b = static_cast<int>(static_cast<float>(kLoopTripCount[0]) * kAccumDelta * 255.0f + 0.5f);
         if (!channel_close(pixel[0], expected_b))
         {
             printf("[d3d9-int-bool-const-test] FAIL: pixel B=%02X does not match expected %02X -- int constant "

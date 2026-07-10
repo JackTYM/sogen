@@ -76,9 +76,9 @@ namespace sogen
         // Bare names rely on the dynamic linker's default search path, which covers Intel
         // Homebrew's /usr/local/lib but not Apple Silicon Homebrew's /opt/homebrew/lib unless
         // DYLD_LIBRARY_PATH is set; the absolute paths below are a fallback for that case.
-        constexpr std::array<const char*, 5> vulkan_loader_names{
-            "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib", "/opt/homebrew/lib/libvulkan.1.dylib",
-            "/opt/homebrew/lib/libMoltenVK.dylib"};
+        constexpr std::array<const char*, 5> vulkan_loader_names{"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
+                                                                 "/opt/homebrew/lib/libvulkan.1.dylib",
+                                                                 "/opt/homebrew/lib/libMoltenVK.dylib"};
 #else
         constexpr std::array<const char*, 2> vulkan_loader_names{"libvulkan.so.1", "libvulkan.so"};
 #endif
@@ -1582,10 +1582,9 @@ namespace sogen
                 if (instance->second.enumerate_device_extension_properties(pd->second.handle, nullptr, &count, available.data()) ==
                     VK_SUCCESS)
                 {
-                    const auto has_portability_subset =
-                        std::any_of(available.begin(), available.end(), [](const VkExtensionProperties& e) {
-                            return std::string_view{e.extensionName} == "VK_KHR_portability_subset";
-                        });
+                    const auto has_portability_subset = std::any_of(available.begin(), available.end(), [](const VkExtensionProperties& e) {
+                        return std::string_view{e.extensionName} == "VK_KHR_portability_subset";
+                    });
                     const auto already_requested = std::any_of(extensions.begin(), extensions.end(), [](const char* name) {
                         return std::string_view{name} == "VK_KHR_portability_subset";
                     });
@@ -4716,8 +4715,8 @@ namespace sogen
                                                   uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
                                                   uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                                   const specialization& vs_spec, const specialization& fs_spec,
-                                                  std::span<const color_blend_attachment> blend_attachments_in,
-                                                  uint32_t depth_clip_enable, uint64_t& out_pipeline)
+                                                  std::span<const color_blend_attachment> blend_attachments_in, uint32_t depth_clip_enable,
+                                                  uint64_t& out_pipeline)
     {
         out_pipeline = 0;
         const auto dev = this->impl_->devices.find(device);
@@ -5772,8 +5771,8 @@ namespace sogen
         // DEPTH_STENCIL_ATTACHMENT usage instead of COLOR_ATTACHMENT, or using the image as a depth
         // attachment (see d3d9_host::execute_draw) would be invalid.
         image_info.usage = is_depth_format(vk_format)
-                                ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
-                                : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+                               ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+                               : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)

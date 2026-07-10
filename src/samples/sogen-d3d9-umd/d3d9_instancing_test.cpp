@@ -108,8 +108,7 @@ float4 main(PSInput input) : COLOR0
         };
         for (int i = 0; i < kInstanceCount; ++i)
         {
-            if (channel_close(p[0], pures[i].b, 2) && channel_close(p[1], pures[i].g, 2) &&
-                channel_close(p[2], pures[i].r, 2))
+            if (channel_close(p[0], pures[i].b, 2) && channel_close(p[1], pures[i].g, 2) && channel_close(p[2], pures[i].r, 2))
             {
                 return i;
             }
@@ -117,9 +116,9 @@ float4 main(PSInput input) : COLOR0
         return -1;
     }
 
-    void release_all(IDirect3DVertexDeclaration9* decl, IDirect3DVertexBuffer9* pos_vb,
-                     IDirect3DVertexBuffer9* inst_vb, IDirect3DIndexBuffer9* ib, IDirect3DSurface9* rt,
-                     IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DVertexDeclaration9* decl, IDirect3DVertexBuffer9* pos_vb, IDirect3DVertexBuffer9* inst_vb,
+                     IDirect3DIndexBuffer9* ib, IDirect3DSurface9* rt, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps,
+                     IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (decl)
         {
@@ -170,8 +169,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9instancingtest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "instancing-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "instancing-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -202,8 +201,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-instancing-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -218,8 +217,8 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-instancing-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -328,8 +327,7 @@ int main()
     const WORD kIndices[6] = {0, 1, 2, 0, 2, 3};
     IDirect3DIndexBuffer9* ib = nullptr;
     HRESULT hcib = dev->CreateIndexBuffer(sizeof(kIndices), 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &ib, nullptr);
-    printf("[d3d9-instancing-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib),
-           static_cast<void*>(ib));
+    printf("[d3d9-instancing-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib), static_cast<void*>(ib));
     if (FAILED(hcib) || !ib)
     {
         printf("[d3d9-instancing-test] FAIL: index buffer creation failed\n");
@@ -347,10 +345,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt,
-                                           nullptr);
-    printf("[d3d9-instancing-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-instancing-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-instancing-test] FAIL: render target creation failed\n");
@@ -403,15 +399,14 @@ int main()
         struct Quadrant
         {
             const char* name;
-            int col, row;         // quadrant center
+            int col, row;             // quadrant center
             int inner_col, inner_row; // a second probe pulled toward screen center (solidity check)
         };
         const Quadrant quads[kInstanceCount] = {
             {"top-left", kCanvasWidth / 4, kCanvasHeight / 4, kCanvasWidth / 4 + 40, kCanvasHeight / 4 + 30},
             {"top-right", 3 * kCanvasWidth / 4, kCanvasHeight / 4, 3 * kCanvasWidth / 4 - 40, kCanvasHeight / 4 + 30},
             {"bottom-left", kCanvasWidth / 4, 3 * kCanvasHeight / 4, kCanvasWidth / 4 + 40, 3 * kCanvasHeight / 4 - 30},
-            {"bottom-right", 3 * kCanvasWidth / 4, 3 * kCanvasHeight / 4, 3 * kCanvasWidth / 4 - 40,
-             3 * kCanvasHeight / 4 - 30},
+            {"bottom-right", 3 * kCanvasWidth / 4, 3 * kCanvasHeight / 4, 3 * kCanvasWidth / 4 - 40, 3 * kCanvasHeight / 4 - 30},
         };
 
         int seen[kInstanceCount] = {0, 0, 0, 0};
@@ -421,8 +416,8 @@ int main()
             const unsigned char* inner = pixel_at(q.inner_col, q.inner_row);
             const int cls = classify_color(c);
             const int inner_cls = classify_color(inner);
-            printf("[d3d9-instancing-test] %s center(%d,%d)=B=%02X G=%02X R=%02X A=%02X class=%d inner class=%d\n",
-                   q.name, q.col, q.row, c[0], c[1], c[2], c[3], cls, inner_cls);
+            printf("[d3d9-instancing-test] %s center(%d,%d)=B=%02X G=%02X R=%02X A=%02X class=%d inner class=%d\n", q.name, q.col, q.row,
+                   c[0], c[1], c[2], c[3], cls, inner_cls);
             if (cls < 0)
             {
                 // Discriminator (a): a clear/black or blended center means this instance never drew (still

@@ -83,7 +83,6 @@ namespace sogen
                 }
             }
 
-
             if (!name.empty())
             {
                 for (auto& entry : c.proc.mutants)

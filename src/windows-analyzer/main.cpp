@@ -854,8 +854,7 @@ namespace sogen
                 const auto profile_path = options.block_profile;
                 auto histogram = profile_histogram;
 
-                win_emu->emu().hook_basic_block([histogram, counter, last_flush, mod_manager,
-                                                 profile_path](const basic_block& block) {
+                win_emu->emu().hook_basic_block([histogram, counter, last_flush, mod_manager, profile_path](const basic_block& block) {
                     (*histogram)[block.address] += (block.instruction_count != 0 ? block.instruction_count : block.size);
                     if ((++(*counter) & 0xFFFFF) == 0)
                     {

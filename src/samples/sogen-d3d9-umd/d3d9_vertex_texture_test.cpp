@@ -78,12 +78,18 @@ float4 main(PSInput input) : COLOR0
     // unambiguous.
     constexpr int kClearR = 0, kClearG = 0, kClearB = 64;
 
-    float to_ndc_x(const int screen_x) { return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f; }
+    float to_ndc_x(const int screen_x)
+    {
+        return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f;
+    }
 
     // NDC Y uses this pipeline's unflipped Vulkan convention: y=-1 at the TOP of the screen, y=+1 at the
     // bottom (see d3d9_texture_test.cpp / d3d9_texcoord_test.cpp for the live-confirmed finding). So a
     // smaller screen Y is a more-negative NDC Y, and the VS subtracting from Y moves the apex UP.
-    float to_ndc_y(const int screen_y) { return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f; }
+    float to_ndc_y(const int screen_y)
+    {
+        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+    }
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)
     {
@@ -110,8 +116,8 @@ float4 main(PSInput input) : COLOR0
         return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13));
     }
 
-    void release_all(IDirect3DTexture9* tex, IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb,
-                     IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DTexture9* tex, IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb, IDirect3DVertexShader9* vs,
+                     IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (tex)
         {
@@ -154,8 +160,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9vertextexturetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "vertex-texture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "vertex-texture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -177,8 +183,7 @@ int main()
 
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-vertex-texture-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    printf("[d3d9-vertex-texture-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();
@@ -200,15 +205,14 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_3_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_3_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-vertex-texture-test] D3DCompile(vs_3_0) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
         if (vs_errors)
         {
-            printf("[d3d9-vertex-texture-test] VS compile errors: %s\n",
-                   static_cast<const char*>(vs_errors->GetBufferPointer()));
+            printf("[d3d9-vertex-texture-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
             vs_errors->Release();
         }
         release_all(nullptr, nullptr, nullptr, nullptr, nullptr, dev, d3d);
@@ -217,15 +221,14 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_3_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_3_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-vertex-texture-test] D3DCompile(ps_3_0) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
         if (ps_errors)
         {
-            printf("[d3d9-vertex-texture-test] PS compile errors: %s\n",
-                   static_cast<const char*>(ps_errors->GetBufferPointer()));
+            printf("[d3d9-vertex-texture-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
             ps_errors->Release();
         }
         vs_blob->Release();
@@ -257,8 +260,8 @@ int main()
     constexpr int kTexH = 2;
     IDirect3DTexture9* tex = nullptr;
     HRESULT hct = dev->CreateTexture(kTexW, kTexH, 1, 0, D3DFMT_A16B16G16R16F, D3DPOOL_MANAGED, &tex, nullptr);
-    printf("[d3d9-vertex-texture-test] CreateTexture(2x2 A16B16G16R16F) hr=0x%08lx tex=%p\n",
-           static_cast<unsigned long>(hct), static_cast<void*>(tex));
+    printf("[d3d9-vertex-texture-test] CreateTexture(2x2 A16B16G16R16F) hr=0x%08lx tex=%p\n", static_cast<unsigned long>(hct),
+           static_cast<void*>(tex));
     if (FAILED(hct) || !tex)
     {
         printf("[d3d9-vertex-texture-test] FAIL: heightmap CreateTexture failed\n");
@@ -268,8 +271,7 @@ int main()
     {
         D3DLOCKED_RECT lr{};
         HRESULT htl = tex->LockRect(0, &lr, nullptr, 0);
-        printf("[d3d9-vertex-texture-test] heightmap LockRect hr=0x%08lx pBits=%p\n", static_cast<unsigned long>(htl),
-               lr.pBits);
+        printf("[d3d9-vertex-texture-test] heightmap LockRect hr=0x%08lx pBits=%p\n", static_cast<unsigned long>(htl), lr.pBits);
         if (FAILED(htl) || !lr.pBits)
         {
             printf("[d3d9-vertex-texture-test] FAIL: heightmap LockRect failed\n");
@@ -300,10 +302,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt,
-                                           nullptr);
-    printf("[d3d9-vertex-texture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-vertex-texture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-vertex-texture-test] FAIL: render target creation failed\n");
@@ -316,11 +316,11 @@ int main()
     // (420,400); apex (uv -> high texel, height 1) at baseline screen (320,300). The VS moves the apex up
     // by 0.8333 NDC == 200 screen px, landing it at screen y=100. Base UV = center of texel (0,0) =
     // (0.25,0.25); apex UV = center of texel (1,0) = (0.75,0.25).
-    constexpr float kLowU = 0.25f, kLowV = 0.25f;  // texel (col 0,row 0) -> height 0
+    constexpr float kLowU = 0.25f, kLowV = 0.25f;   // texel (col 0,row 0) -> height 0
     constexpr float kHighU = 0.75f, kHighV = 0.25f; // texel (col 1,row 0) -> height 1
     const Vertex verts[3] = {
-        {to_ndc_x(220), to_ndc_y(400), 0.5f, kLowU, kLowV},  // base-left
-        {to_ndc_x(420), to_ndc_y(400), 0.5f, kLowU, kLowV},  // base-right
+        {to_ndc_x(220), to_ndc_y(400), 0.5f, kLowU, kLowV},   // base-left
+        {to_ndc_x(420), to_ndc_y(400), 0.5f, kLowU, kLowV},   // base-right
         {to_ndc_x(320), to_ndc_y(300), 0.5f, kHighU, kHighV}, // apex (baseline y=300, displaced to y=100)
     };
 
@@ -349,8 +349,7 @@ int main()
     // Bind the heightmap to the VERTEX sampler (D3DVERTEXTEXTURESAMPLER0 == 257) -- NOT the pixel sampler.
     // The pixel shader never samples, so a wrong binding here shows up directly as an un-displaced apex.
     HRESULT hst = dev->SetTexture(D3DVERTEXTEXTURESAMPLER0, tex);
-    printf("[d3d9-vertex-texture-test] SetTexture(D3DVERTEXTEXTURESAMPLER0) hr=0x%08lx\n",
-           static_cast<unsigned long>(hst));
+    printf("[d3d9-vertex-texture-test] SetTexture(D3DVERTEXTEXTURESAMPLER0) hr=0x%08lx\n", static_cast<unsigned long>(hst));
     dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
     dev->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
@@ -374,8 +373,8 @@ int main()
         // ORANGE = (R=255, G=128, B=0) -> BGRA bytes B=00 G=80 R=FF.
         auto expect_orange = [&](const char* name, const int x, const int y) {
             const unsigned char* p = pixel_at(x, y);
-            printf("[d3d9-vertex-texture-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X (expected ORANGE B=00 G=80 R=FF)\n",
-                   name, x, y, p[0], p[1], p[2]);
+            printf("[d3d9-vertex-texture-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X (expected ORANGE B=00 G=80 R=FF)\n", name, x, y, p[0],
+                   p[1], p[2]);
             if (!channel_close(p[0], 0, 4) || !channel_close(p[1], 128, 6) || !channel_close(p[2], 255, 4))
             {
                 printf("[d3d9-vertex-texture-test] FAIL: %s is not ORANGE\n", name);
@@ -386,8 +385,8 @@ int main()
         };
         auto expect_clear = [&](const char* name, const int x, const int y) {
             const unsigned char* p = pixel_at(x, y);
-            printf("[d3d9-vertex-texture-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X (expected CLEAR B=%02X G=%02X R=%02X)\n",
-                   name, x, y, p[0], p[1], p[2], kClearB, kClearG, kClearR);
+            printf("[d3d9-vertex-texture-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X (expected CLEAR B=%02X G=%02X R=%02X)\n", name, x, y,
+                   p[0], p[1], p[2], kClearB, kClearG, kClearR);
             if (!channel_close(p[0], kClearB, 4) || !channel_close(p[1], kClearG, 4) || !channel_close(p[2], kClearR, 4))
             {
                 printf("[d3d9-vertex-texture-test] FAIL: %s is not the CLEAR color\n", name);

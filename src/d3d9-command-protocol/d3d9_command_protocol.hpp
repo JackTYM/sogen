@@ -52,10 +52,10 @@ namespace sogen::d3d9_cmd
 
     struct create_resource_request
     {
-        uint32_t kind;       // resource_kind
-        uint32_t format;     // D3DFORMAT (0 for buffers)
-        uint32_t width;      // byte size for buffers
-        uint32_t height;     // volume/array depth for texture_volume; unused for buffers
+        uint32_t kind;   // resource_kind
+        uint32_t format; // D3DFORMAT (0 for buffers)
+        uint32_t width;  // byte size for buffers
+        uint32_t height; // volume/array depth for texture_volume; unused for buffers
         uint32_t depth;
         uint32_t mip_levels;
         uint32_t usage; // D3DUSAGE_* bits
@@ -92,7 +92,7 @@ namespace sogen::d3d9_cmd
         resource_id resource;
         uint32_t subresource;
         uint32_t offset;
-        uint32_t size; // 0 = whole resource
+        uint32_t size;  // 0 = whole resource
         uint32_t flags; // D3DLOCK_* bits
         uint32_t reserved;
     };
@@ -138,8 +138,8 @@ namespace sogen::d3d9_cmd
         uint16_t stream;
         uint16_t offset;
         uint8_t type;   // D3DDECLTYPE
-        uint8_t method;  // D3DDECLMETHOD
-        uint8_t usage;   // D3DDECLUSAGE
+        uint8_t method; // D3DDECLMETHOD
+        uint8_t usage;  // D3DDECLUSAGE
         uint8_t usage_index;
     };
 

@@ -275,9 +275,9 @@ namespace
         8,  // pfnSetIndices (real)
         12, // pfnSetIndicesUm -- trailing data ptr
         12, // pfnDrawPrimitive (real) -- (HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE*, CONST UINT* pFlags), the
-            // WDK-documented 3-arg shape. RE-verified live in d3d9_x86.dll (both normal and UP draw paths
-            // push three args) -- see umd_DrawPrimitive's own comment. An earlier 2-arg guess desynced the
-            // x86 stack; the mismatch was invisible on x64 (caller-cleanup) until the UP-draw path hit it.
+        // WDK-documented 3-arg shape. RE-verified live in d3d9_x86.dll (both normal and UP draw paths
+        // push three args) -- see umd_DrawPrimitive's own comment. An earlier 2-arg guess desynced the
+        // x86 stack; the mismatch was invisible on x64 (caller-cleanup) until the UP-draw path hit it.
         8,  // pfnDrawIndexedPrimitive (real)
         16, // pfnDrawRectPatch
         16, // pfnDrawTriPatch
@@ -368,41 +368,41 @@ namespace
         8,  // pfnRename
 #if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WIN7)
         // --- WIN7 : 22 entries ---
-        8,  // pfnCreateVideoProcessor
-        8,  // pfnSetVideoProcessBltState
-        8,  // pfnGetVideoProcessBltStatePrivate
-        8,  // pfnSetVideoProcessStreamState
-        8,  // pfnGetVideoProcessStreamStatePrivate
-        8,  // pfnVideoProcessBltHD
-        8,  // pfnDestroyVideoProcessor
-        8,  // pfnCreateAuthenticatedChannel
-        8,  // pfnAuthenticatedChannelKeyExchange
-        8,  // pfnQueryAuthenticatedChannel
-        8,  // pfnConfigureAuthenticatedChannel
-        8,  // pfnDestroyAuthenticatedChannel
-        8,  // pfnCreateCryptoSession
-        8,  // pfnCryptoSessionKeyExchange
-        8,  // pfnDestroyCryptoSession
-        8,  // pfnEncryptionBlt
-        8,  // pfnGetPitch
-        8,  // pfnStartSessionKeyRefresh
-        8,  // pfnFinishSessionKeyRefresh
-        8,  // pfnGetEncryptionBltKey
-        8,  // pfnDecryptionBlt
-        8,  // pfnResolveSharedResource
+        8, // pfnCreateVideoProcessor
+        8, // pfnSetVideoProcessBltState
+        8, // pfnGetVideoProcessBltStatePrivate
+        8, // pfnSetVideoProcessStreamState
+        8, // pfnGetVideoProcessStreamStatePrivate
+        8, // pfnVideoProcessBltHD
+        8, // pfnDestroyVideoProcessor
+        8, // pfnCreateAuthenticatedChannel
+        8, // pfnAuthenticatedChannelKeyExchange
+        8, // pfnQueryAuthenticatedChannel
+        8, // pfnConfigureAuthenticatedChannel
+        8, // pfnDestroyAuthenticatedChannel
+        8, // pfnCreateCryptoSession
+        8, // pfnCryptoSessionKeyExchange
+        8, // pfnDestroyCryptoSession
+        8, // pfnEncryptionBlt
+        8, // pfnGetPitch
+        8, // pfnStartSessionKeyRefresh
+        8, // pfnFinishSessionKeyRefresh
+        8, // pfnGetEncryptionBltKey
+        8, // pfnDecryptionBlt
+        8, // pfnResolveSharedResource
 #endif
 #if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WIN8)
         // --- WIN8 : 10 entries ---
-        8,  // pfnVolBlt1
-        8,  // pfnBufBlt1
-        8,  // pfnTexBlt1
-        8,  // pfnDiscard
-        8,  // pfnOfferResources
-        8,  // pfnReclaimResources
-        8,  // pfnCheckDirectFlipSupport
-        8,  // pfnCreateResource2
-        8,  // pfnCheckMultiPlaneOverlaySupport
-        8,  // pfnPresentMultiPlaneOverlay
+        8, // pfnVolBlt1
+        8, // pfnBufBlt1
+        8, // pfnTexBlt1
+        8, // pfnDiscard
+        8, // pfnOfferResources
+        8, // pfnReclaimResources
+        8, // pfnCheckDirectFlipSupport
+        8, // pfnCreateResource2
+        8, // pfnCheckMultiPlaneOverlaySupport
+        8, // pfnPresentMultiPlaneOverlay
 #endif
 #if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM1_3)
         // --- WDDM1.3 : 9 entries ---
@@ -410,12 +410,12 @@ namespace
         8,  // pfnFlush1 -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
         8,  // pfnCheckCounterInfo -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever hit
         24, // pfnCheckCounter -- LOW CONFIDENCE (many out-params, the biggest outlier), verify
-            // against d3d9_x86.dll.i64 if ever actually hit
-        8,  // pfnUpdateSubresourceUP
-        8,  // pfnPresent1
-        8,  // pfnCheckPresentDurationSupport
-        8,  // pfnSetMarker -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
-        8,  // pfnSetMarkerMode -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
+        // against d3d9_x86.dll.i64 if ever actually hit
+        8, // pfnUpdateSubresourceUP
+        8, // pfnPresent1
+        8, // pfnCheckPresentDurationSupport
+        8, // pfnSetMarker -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
+        8, // pfnSetMarkerMode -- LOW CONFIDENCE, verify against d3d9_x86.dll.i64 if ever actually hit
 #endif
 #if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM2_0)
         8, // pfnTrimResidencySet
@@ -426,8 +426,7 @@ namespace
 #endif
     };
 
-    static_assert(sizeof(k_device_func_arity) / sizeof(k_device_func_arity[0]) ==
-                      sizeof(D3DDDI_DEVICEFUNCS) / sizeof(void*),
+    static_assert(sizeof(k_device_func_arity) / sizeof(k_device_func_arity[0]) == sizeof(D3DDDI_DEVICEFUNCS) / sizeof(void*),
                   "k_device_func_arity must have exactly one entry per D3DDDI_DEVICEFUNCS slot");
 
     void* stub_for_arity(uint8_t bytes)
@@ -607,8 +606,7 @@ namespace
         // and let the app's Lock() write run past the end of the too-small backing (MW2's 80 KB vertex
         // buffer overran its 64 KB lock buffer by 16 KB, corrupting the guest heap).
         const d3d9c::resource_kind kind = is_internal_buffer_format
-                                              ? (format == 100 ? d3d9c::resource_kind::vertex_buffer
-                                                               : d3d9c::resource_kind::index_buffer)
+                                              ? (format == 100 ? d3d9c::resource_kind::vertex_buffer : d3d9c::resource_kind::index_buffer)
                                               : resource_flags_to_kind(args->Flags);
 
         // width/height/mip_levels/pool are the app's real values (read from the RE'd struct above).
@@ -822,8 +820,8 @@ namespace
             .kind = static_cast<uint32_t>(d3d9c::resource_kind::vertex_buffer),
             .format = 0,
             .width = std::max<uint32_t>(byte_size, 64 * 1024), // no real total size is knowable here,
-                                                                // so guess a floor and grow it if a
-                                                                // known offset needs more than that.
+                                                               // so guess a floor and grow it if a
+                                                               // known offset needs more than that.
             .height = 0,
             .depth = 1,
             .mip_levels = 1,
@@ -859,9 +857,8 @@ namespace
         caps->PixelShaderVersion = D3DPS_VERSION(3, 0);
         caps->MaxVertexShaderConst = 256;
         caps->PixelShader1xMaxValue = 8.0f;
-        caps->DeclTypes = D3DDTCAPS_UBYTE4 | D3DDTCAPS_UBYTE4N | D3DDTCAPS_SHORT2N | D3DDTCAPS_SHORT4N |
-                          D3DDTCAPS_USHORT2N | D3DDTCAPS_USHORT4N | D3DDTCAPS_UDEC3 | D3DDTCAPS_DEC3N |
-                          D3DDTCAPS_FLOAT16_2 | D3DDTCAPS_FLOAT16_4;
+        caps->DeclTypes = D3DDTCAPS_UBYTE4 | D3DDTCAPS_UBYTE4N | D3DDTCAPS_SHORT2N | D3DDTCAPS_SHORT4N | D3DDTCAPS_USHORT2N |
+                          D3DDTCAPS_USHORT4N | D3DDTCAPS_UDEC3 | D3DDTCAPS_DEC3N | D3DDTCAPS_FLOAT16_2 | D3DDTCAPS_FLOAT16_4;
         caps->Caps2 = D3DCAPS2_DYNAMICTEXTURES | D3DCAPS2_FULLSCREENGAMMA | D3DCAPS2_CANAUTOGENMIPMAP;
         caps->Caps3 = D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD | D3DCAPS3_COPY_TO_VIDMEM | D3DCAPS3_COPY_TO_SYSTEMMEM;
         // d3d9's HAL-enable path (sub_1004B19B branch-3, ddcreate.cpp:860) stamps the driver disabled
@@ -906,9 +903,9 @@ namespace
         // own requirement table at 0x71A800: record 6, required=0x8000, severity=fatal). Additive and safe for
         // a WDDM UMD -- the down-level DDI is fixed by the reported DDI version, so these app-visible legacy
         // caps don't reroute d3d9.dll onto the XP DP2 token stream.
-        caps->DevCaps = D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_PUREDEVICE |
-                        D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_TEXTUREVIDEOMEMORY | D3DDEVCAPS_DRAWPRIMITIVES2 |
-                        D3DDEVCAPS_DRAWPRIMITIVES2EX | k_devcaps_driver_managed_pool | k_devcaps_driver_managed_index_pool;
+        caps->DevCaps = D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_PUREDEVICE | D3DDEVCAPS_DRAWPRIMTLVERTEX |
+                        D3DDEVCAPS_TEXTUREVIDEOMEMORY | D3DDEVCAPS_DRAWPRIMITIVES2 | D3DDEVCAPS_DRAWPRIMITIVES2EX |
+                        k_devcaps_driver_managed_pool | k_devcaps_driver_managed_index_pool;
         // PrimitiveMiscCaps bit 0x2000 has no name in the public D3DPMISCCAPS_* set (the defined bits jump
         // from D3DPMISCCAPS_NULLREFERENCE=0x1000 straight past it to D3DPMISCCAPS_INDEPENDENTWRITEMASKS=
         // 0x4000) -- found via objdump disassembly of d3d9.dll's VS/PS-2.0+ HAL-enable validator (the
@@ -932,18 +929,18 @@ namespace
         // reintroduce the mismatch.) Live-confirmed part of the working SM3.0 delta (see d3d9_sm3_test.cpp).
         constexpr DWORD k_primitivemisc_independentwritemasks = 0x00004000;
         constexpr DWORD k_primitivemisc_mrtpostpixelshaderblending = 0x00080000;
-        caps->PrimitiveMiscCaps = D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW |
-                                  D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP |
-                                  D3DPMISCCAPS_SEPARATEALPHABLEND | k_primitivemisc_vs20_gate |
-                                  k_primitivemisc_independentwritemasks | k_primitivemisc_mrtpostpixelshaderblending;
+        caps->PrimitiveMiscCaps = D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW |
+                                  D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP | D3DPMISCCAPS_SEPARATEALPHABLEND |
+                                  k_primitivemisc_vs20_gate | k_primitivemisc_independentwritemasks |
+                                  k_primitivemisc_mrtpostpixelshaderblending;
         // The same validator also requires D3DPRASTERCAPS_FOGVERTEX (0x80, bit 7 of RasterCaps) once
         // VertexShaderVersion >= 2.0, via objdump on the same function.
         // SM3.0 additionally requires D3DPRASTERCAPS_COLORPERSPECTIVE (0x00400000) in RasterCaps: the SM3.0
         // RasterCaps mask IsD3DHALSupported checks is the SM2.0 mask this set already fully satisfied plus
         // exactly this one bit (live-traced -- every other bit the SM3 mask needs is already ORed in here).
-        caps->RasterCaps = D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_SCISSORTEST |
-                           D3DPRASTERCAPS_DEPTHBIAS | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS |
-                           D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ANISOTROPY | D3DPRASTERCAPS_COLORPERSPECTIVE;
+        caps->RasterCaps = D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_SCISSORTEST | D3DPRASTERCAPS_DEPTHBIAS |
+                           D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS | D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ANISOTROPY |
+                           D3DPRASTERCAPS_COLORPERSPECTIVE;
         caps->ZCmpCaps = 0xFF;
         // The validator also requires D3DPBLENDCAPS_BLENDFACTOR (0x2000, a real documented bit) set in both
         // Src/DestBlendCaps once VertexShaderVersion >= 2.0 (`and eax,0x3fff/0x23ff; cmp; jne <fail>`).
@@ -960,9 +957,9 @@ namespace
         constexpr DWORD k_texturecaps_perspective = 0x00000001;
         constexpr DWORD k_texturecaps_texrepeatnotscaledbysize = 0x00000040;
         constexpr DWORD k_texturecaps_projected = 0x00000400;
-        caps->TextureCaps = D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_CUBEMAP |
-                            D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPCUBEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP |
-                            k_texturecaps_perspective | k_texturecaps_texrepeatnotscaledbysize | k_texturecaps_projected;
+        caps->TextureCaps = D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_VOLUMEMAP |
+                            D3DPTEXTURECAPS_MIPCUBEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP | k_texturecaps_perspective |
+                            k_texturecaps_texrepeatnotscaledbysize | k_texturecaps_projected;
         caps->TextureFilterCaps = 0x03070700;
         // The following four fields were previously left at the memset-to-0 default (they passed the SM2.0
         // validator unset). IsD3DHALSupported's SM3.0 branch reads all four directly and rejects the adapter
@@ -984,8 +981,8 @@ namespace
         // MINFLINEAR|MAGFLINEAR advertises point+linear stretch so scaled StretchRect reaches pfnBlt
         // (the host's vkCmdBlitImage then performs the actual scale). Additive/safe: same value shape as
         // VertexTextureFilterCaps below.
-        caps->StretchRectFilterCaps = D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MAGFPOINT |
-                                      D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR;
+        caps->StretchRectFilterCaps =
+            D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR;
         caps->MaxTextureWidth = 8192;
         caps->MaxTextureHeight = 8192;
         caps->MaxVolumeExtent = 2048;
@@ -1017,8 +1014,8 @@ namespace
         caps->VS20Caps.DynamicFlowControlDepth = D3DVS20_MAX_DYNAMICFLOWCONTROLDEPTH;
         caps->VS20Caps.NumTemps = 32;
         caps->VS20Caps.StaticFlowControlDepth = D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
-        caps->PS20Caps.Caps = D3DPS20CAPS_ARBITRARYSWIZZLE | D3DPS20CAPS_GRADIENTINSTRUCTIONS |
-                              D3DPS20CAPS_PREDICATION | D3DPS20CAPS_NODEPENDENTREADLIMIT | D3DPS20CAPS_NOTEXINSTRUCTIONLIMIT;
+        caps->PS20Caps.Caps = D3DPS20CAPS_ARBITRARYSWIZZLE | D3DPS20CAPS_GRADIENTINSTRUCTIONS | D3DPS20CAPS_PREDICATION |
+                              D3DPS20CAPS_NODEPENDENTREADLIMIT | D3DPS20CAPS_NOTEXINSTRUCTIONLIMIT;
         caps->PS20Caps.DynamicFlowControlDepth = D3DPS20_MAX_DYNAMICFLOWCONTROLDEPTH;
         caps->PS20Caps.NumTemps = 32;
         caps->PS20Caps.StaticFlowControlDepth = D3DPS20_MAX_STATICFLOWCONTROLDEPTH;
@@ -1081,7 +1078,7 @@ namespace
         // is a later task; only the FORMATOP advertisement + UMD kind classification gate creation.)
         {22 /*X8R8G8B8    */, DISPLAY_RT | FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE, 0, 0, 0},
         {75 /*D24S8       */, FMT_OP_ZSTENCIL, 0, 0, 0},
-        {77 /*D24X8       */, FMT_OP_ZSTENCIL, 0, 0, 0},          // depth-only variant (matches D24S8)
+        {77 /*D24X8       */, FMT_OP_ZSTENCIL, 0, 0, 0}, // depth-only variant (matches D24S8)
         // A8R8G8B8: sampled textures (d3d9_texture_test.cpp) AND offscreen render targets -- alpha
         // render targets are common (MRT/HDR-ish passes); RT_TEX, not DISPLAY_RT (no 3DACCELERATION). Also
         // cube- and volume-texture-creatable (FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE) -- RE-confirmed live:
@@ -1095,10 +1092,10 @@ namespace
         // the OS window is a separate, out-of-scope architectural item (ui_surface_format has no 16-bit
         // stage), so no DISPLAYMODE/3DACCELERATION -- off-screen use only, matching real G-buffer patterns.
         {23 /*R5G6B5      */, RT_TEX, 0, 0, 0},
-        {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0},           // texture-only single-channel formats
+        {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0}, // texture-only single-channel formats
         {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
-        {51 /*A8L8        */, FMT_OP_TEXTURE, 0, 0, 0},           // luminance-alpha (host maps to R8G8_UNORM)
-        {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only
+        {51 /*A8L8        */, FMT_OP_TEXTURE, 0, 0, 0}, // luminance-alpha (host maps to R8G8_UNORM)
+        {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0}, // bump/normal map, texture-only
         {63 /*Q8W8V8U8    */, FMT_OP_TEXTURE, 0, 0, 0},
         // A16B16G16R16F: HDR off-screen render target + texture (RT_TEX), plus vertex-texture-usable. The
         // former 8-byte/texel readback-buffer undersizing is fixed: the host RT sizing/readback/ColorFill
@@ -1246,26 +1243,40 @@ namespace
     {
         switch (ddi_state)
         {
-        case 13: return D3DSAMP_ADDRESSU;
-        case 14: return D3DSAMP_ADDRESSV;
-        case 25: return D3DSAMP_ADDRESSW;
-        case 15: return D3DSAMP_BORDERCOLOR;
-        case 16: return D3DSAMP_MAGFILTER;
-        case 17: return D3DSAMP_MINFILTER;
-        case 18: return D3DSAMP_MIPFILTER;
-        case 19: return D3DSAMP_MIPMAPLODBIAS;
-        case 20: return D3DSAMP_MAXMIPLEVEL;
-        case 21: return D3DSAMP_MAXANISOTROPY;
+        case 13:
+            return D3DSAMP_ADDRESSU;
+        case 14:
+            return D3DSAMP_ADDRESSV;
+        case 25:
+            return D3DSAMP_ADDRESSW;
+        case 15:
+            return D3DSAMP_BORDERCOLOR;
+        case 16:
+            return D3DSAMP_MAGFILTER;
+        case 17:
+            return D3DSAMP_MINFILTER;
+        case 18:
+            return D3DSAMP_MIPFILTER;
+        case 19:
+            return D3DSAMP_MIPMAPLODBIAS;
+        case 20:
+            return D3DSAMP_MAXMIPLEVEL;
+        case 21:
+            return D3DSAMP_MAXANISOTROPY;
         // Confirmed sampler-shaped (present in every sampler's default-init sequence, distinct from any
         // TSS default) but never individually round-tripped through an explicit non-default
         // SetSamplerState() call, so their real D3DSAMPLERSTATETYPE identity (candidates: SRGBTEXTURE/
         // ELEMENTINDEX/DMAPOFFSET, D3DSAMP 11-13) isn't confirmed. Still routed to the sampler bucket
         // (the correct category) under reserved values outside D3DSAMPLERSTATETYPE's real range, instead
         // of guessing a specific identity or silently misfiling them as texture-stage-state.
-        case 29: return 1029;
-        case 30: return 1030;
-        case 31: return 1031;
-        default: return 0; // a genuine D3DTEXTURESTAGESTATETYPE value; 0 is never a real D3DSAMPLERSTATETYPE
+        case 29:
+            return 1029;
+        case 30:
+            return 1030;
+        case 31:
+            return 1031;
+        default:
+            return 0; // a genuine D3DTEXTURESTAGESTATETYPE value; 0 is never a real D3DSAMPLERSTATETYPE
         }
     }
 
@@ -1277,8 +1288,7 @@ namespace
         }
         if (const uint32_t sampler_state = sampler_state_for_ddi_tss_state(pArgs->State); sampler_state != 0)
         {
-            d3d9c::set_sampler_state_record req{
-                .sampler = pArgs->Stage, .state = sampler_state, .value = pArgs->Value, .reserved = 0};
+            d3d9c::set_sampler_state_record req{.sampler = pArgs->Stage, .state = sampler_state, .value = pArgs->Value, .reserved = 0};
             record_d3d9(gb::command::d3d9_set_sampler_state, &req, sizeof(req));
             return S_OK;
         }
@@ -1572,8 +1582,7 @@ namespace
 
     // pArgs is the fixed {Register, Count} header; the float data is a separate third DDI argument
     // (see D3DDDIARG_SETVERTEXSHADERCONST's header comment), not trailing bytes after pArgs.
-    HRESULT APIENTRY umd_SetVertexShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONST* pArgs,
-                                              CONST FLOAT* pRegisters)
+    HRESULT APIENTRY umd_SetVertexShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONST* pArgs, CONST FLOAT* pRegisters)
     {
         if (pArgs == nullptr || pRegisters == nullptr)
         {
@@ -1589,8 +1598,7 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetPixelShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONST* pArgs,
-                                             CONST FLOAT* pRegisters)
+    HRESULT APIENTRY umd_SetPixelShaderConst(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONST* pArgs, CONST FLOAT* pRegisters)
     {
         if (pArgs == nullptr || pRegisters == nullptr)
         {
@@ -1609,8 +1617,7 @@ namespace
     // pArgs is the fixed {Register, Count} header; the INT data is a separate third DDI argument
     // (see D3DDDIARG_SETVERTEXSHADERCONSTI's header comment), RE-confirmed the same shape as
     // umd_SetVertexShaderConst's CONST FLOAT* -- not trailing bytes after pArgs.
-    HRESULT APIENTRY umd_SetVertexShaderConstI(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONSTI* pArgs,
-                                               CONST INT* pRegisters)
+    HRESULT APIENTRY umd_SetVertexShaderConstI(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONSTI* pArgs, CONST INT* pRegisters)
     {
         if (pArgs == nullptr || pRegisters == nullptr)
         {
@@ -1626,8 +1633,7 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetVertexShaderConstB(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONSTB* pArgs,
-                                               CONST BOOL* pRegisters)
+    HRESULT APIENTRY umd_SetVertexShaderConstB(HANDLE /*hDevice*/, CONST D3DDDIARG_SETVERTEXSHADERCONSTB* pArgs, CONST BOOL* pRegisters)
     {
         if (pArgs == nullptr || pRegisters == nullptr)
         {
@@ -1643,8 +1649,7 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetPixelShaderConstI(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONSTI* pArgs,
-                                              CONST INT* pRegisters)
+    HRESULT APIENTRY umd_SetPixelShaderConstI(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONSTI* pArgs, CONST INT* pRegisters)
     {
         if (pArgs == nullptr || pRegisters == nullptr)
         {
@@ -1660,8 +1665,7 @@ namespace
         return S_OK;
     }
 
-    HRESULT APIENTRY umd_SetPixelShaderConstB(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONSTB* pArgs,
-                                              CONST BOOL* pRegisters)
+    HRESULT APIENTRY umd_SetPixelShaderConstB(HANDLE /*hDevice*/, CONST D3DDDIARG_SETPIXELSHADERCONSTB* pArgs, CONST BOOL* pRegisters)
     {
         if (pArgs == nullptr || pRegisters == nullptr)
         {
@@ -1757,18 +1761,14 @@ namespace
     // See D3DDDIARG_SETSTREAMSOURCEUM in d3d9_ddi.hpp -- the user vertex pointer is a separate third arg.
     // This binding is transient: a later real umd_SetStreamSource() targeting the same stream clears it
     // (see the comment there) -- the two are mutually exclusive, matching real D3D9's own UP semantics.
-    HRESULT APIENTRY umd_SetStreamSourceUm(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCEUM* pArgs,
-                                           CONST VOID* pUMVertices)
+    HRESULT APIENTRY umd_SetStreamSourceUm(HANDLE /*hDevice*/, CONST D3DDDIARG_SETSTREAMSOURCEUM* pArgs, CONST VOID* pUMVertices)
     {
         if (pArgs == nullptr || pUMVertices == nullptr)
         {
             g_um_stream.active = false;
             return S_OK;
         }
-        g_um_stream = {.active = true,
-                       .stream_number = pArgs->StreamNumber,
-                       .stride = pArgs->Stride,
-                       .data = pUMVertices};
+        g_um_stream = {.active = true, .stream_number = pArgs->StreamNumber, .stride = pArgs->Stride, .data = pUMVertices};
         return S_OK;
     }
 
@@ -1832,9 +1832,8 @@ namespace
         // A real index buffer bind supersedes any pending UP user-memory index source.
         g_um_indices.active = false;
         // Same buffer lazy-bind reasoning as umd_SetStreamSource.
-        d3d9c::set_indices_record req{.index_buffer = resolve_buffer_resource_id(pArgs->hIndexBuffer, 0),
-                                      .format = pArgs->Stride == 4 ? 1u : 0u,
-                                      .reserved = 0};
+        d3d9c::set_indices_record req{
+            .index_buffer = resolve_buffer_resource_id(pArgs->hIndexBuffer, 0), .format = pArgs->Stride == 4 ? 1u : 0u, .reserved = 0};
         record_d3d9(gb::command::d3d9_set_indices, &req, sizeof(req));
         return S_OK;
     }
@@ -1845,9 +1844,8 @@ namespace
         {
             return S_OK;
         }
-        d3d9c::set_render_target_record req{.render_target_index = pArgs->RenderTargetIndex,
-                                            .reserved = 0,
-                                            .surface = resolve_resource_id(pArgs->hRenderTarget)};
+        d3d9c::set_render_target_record req{
+            .render_target_index = pArgs->RenderTargetIndex, .reserved = 0, .surface = resolve_resource_id(pArgs->hRenderTarget)};
         record_d3d9(gb::command::d3d9_set_render_target, &req, sizeof(req));
         return S_OK;
     }
@@ -1932,8 +1930,8 @@ namespace
         auto* wire_rects = reinterpret_cast<d3d9c::set_scissor_record*>(buf.data() + sizeof(*req));
         for (UINT i = 0; i < NumRect; ++i)
         {
-            wire_rects[i] = d3d9c::set_scissor_record{
-                .left = pRect[i].left, .top = pRect[i].top, .right = pRect[i].right, .bottom = pRect[i].bottom};
+            wire_rects[i] =
+                d3d9c::set_scissor_record{.left = pRect[i].left, .top = pRect[i].top, .right = pRect[i].right, .bottom = pRect[i].bottom};
         }
         record_d3d9(gb::command::d3d9_clear, buf.data(), static_cast<uint32_t>(buf.size()));
         return S_OK;
@@ -1955,10 +1953,8 @@ namespace
         // DrawPrimitiveUP path: flush the pending user-memory vertex source (bound via slot 7) with
         // exactly the bytes this draw references before recording the reused draw call.
         emit_um_stream_source(pArgs->VStart + primitive_element_count(pArgs->PrimitiveType, pArgs->PrimitiveCount));
-        d3d9c::draw_primitive_record req{.primitive_type = pArgs->PrimitiveType,
-                                         .start_vertex = pArgs->VStart,
-                                         .primitive_count = pArgs->PrimitiveCount,
-                                         .reserved = 0};
+        d3d9c::draw_primitive_record req{
+            .primitive_type = pArgs->PrimitiveType, .start_vertex = pArgs->VStart, .primitive_count = pArgs->PrimitiveCount, .reserved = 0};
         record_d3d9(gb::command::d3d9_draw_primitive, &req, sizeof(req));
         return S_OK;
     }
@@ -2050,8 +2046,7 @@ namespace
 
         const auto resource = resolve_buffer_resource_id(pArgs->hResource, offset);
         const locked_key key{resource, subresource};
-        d3d9c::lock_request req{
-            .resource = resource, .subresource = subresource, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
+        d3d9c::lock_request req{.resource = resource, .subresource = subresource, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
 
         // First call with no output buffer just to learn the true backing size via lock_response
         // (lock_response::data_size is "bytes available from `offset` to the end of the subresource").
@@ -2116,8 +2111,7 @@ namespace
         auto storage = std::make_unique_for_overwrite<uint8_t[]>(total);
         uint8_t* buf = storage.get();
         fill_escape_header(buf, gb::ioctl_d3d9_unlock, in_len, 0);
-        const d3d9c::unlock_request req{
-            .resource = resource, .subresource = subresource, .offset = offset, .data_size = data_size};
+        const d3d9c::unlock_request req{.resource = resource, .subresource = subresource, .offset = offset, .data_size = data_size};
         std::memcpy(buf + header_size, &req, sizeof(req));
         std::memcpy(buf + header_size + sizeof(req), it->second.data(), it->second.size());
 
@@ -2133,8 +2127,8 @@ namespace
 
     HRESULT APIENTRY umd_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE* pArgs)
     {
-        log_line("[sogen-d3d9-umd] CreateDevice reached Interface=0x%x Version=0x%x pDeviceFuncs=%p Flags=0x%x\n",
-                 pArgs->Interface, pArgs->Version, pArgs->pDeviceFuncs, pArgs->Flags);
+        log_line("[sogen-d3d9-umd] CreateDevice reached Interface=0x%x Version=0x%x pDeviceFuncs=%p Flags=0x%x\n", pArgs->Interface,
+                 pArgs->Version, pArgs->pDeviceFuncs, pArgs->Flags);
         if (pArgs->pDeviceFuncs)
         {
             void** slots = reinterpret_cast<void**>(pArgs->pDeviceFuncs);
@@ -2172,9 +2166,9 @@ namespace
             slots[24] = reinterpret_cast<void*>(&umd_SetVertexShaderConst);   // pfnSetVertexShaderConst
             slots[27] = reinterpret_cast<void*>(&umd_SetViewport);            // pfnSetViewport
             slots[28] = reinterpret_cast<void*>(&umd_SetZRange);              // pfnSetZRange
-            slots[35] = reinterpret_cast<void*>(&umd_Lock);                    // pfnLock
-            slots[36] = reinterpret_cast<void*>(&umd_Unlock);                  // pfnUnlock
-            slots[37] = reinterpret_cast<void*>(&umd_CreateResource);          // pfnCreateResource
+            slots[35] = reinterpret_cast<void*>(&umd_Lock);                   // pfnLock
+            slots[36] = reinterpret_cast<void*>(&umd_Unlock);                 // pfnUnlock
+            slots[37] = reinterpret_cast<void*>(&umd_CreateResource);         // pfnCreateResource
             slots[40] = reinterpret_cast<void*>(&umd_Present);                // pfnPresent
             slots[41] = reinterpret_cast<void*>(&umd_Flush);                  // pfnFlush
             slots[42] = reinterpret_cast<void*>(&umd_CreateVertexShaderFunc); // pfnCreateVertexShaderFunc
@@ -2215,8 +2209,8 @@ namespace
 
 extern "C" __declspec(dllexport) HRESULT APIENTRY OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
 {
-    log_line("[sogen-d3d9-umd] OpenAdapter reached Interface=0x%x Version=0x%x pAdapterFuncs=%p pCallbacks=%p\n",
-             pArgs->Interface, pArgs->Version, pArgs->pAdapterFuncs, pArgs->pAdapterCallbacks);
+    log_line("[sogen-d3d9-umd] OpenAdapter reached Interface=0x%x Version=0x%x pAdapterFuncs=%p pCallbacks=%p\n", pArgs->Interface,
+             pArgs->Version, pArgs->pAdapterFuncs, pArgs->pAdapterCallbacks);
     if (!pArgs->pAdapterFuncs)
     {
         return E_INVALIDARG;

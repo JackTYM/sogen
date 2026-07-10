@@ -90,8 +90,14 @@ float4 main(PSInput input) : COLOR0
     constexpr int kCellH = kCanvasHeight / kGridRows; // 20
     constexpr int kDrawCount = kGridCols * kGridRows; // 768
 
-    float to_ndc_x(const int screen_x) { return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f; }
-    float to_ndc_y(const int screen_y) { return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f; }
+    float to_ndc_x(const int screen_x)
+    {
+        return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f;
+    }
+    float to_ndc_y(const int screen_y)
+    {
+        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+    }
 
     // Deterministic, index-derived color for cell (gx, gy). Adjacent cells differ by well more than the
     // +-2 channel tolerance in every channel (R steps ~8/col, G steps ~11/row, B steps by 13/col and
@@ -108,8 +114,8 @@ float4 main(PSInput input) : COLOR0
         return std::abs(static_cast<int>(actual) - expected) <= tolerance;
     }
 
-    void release_all(IDirect3DIndexBuffer9* ib, IDirect3DVertexBuffer9* vb, IDirect3DSurface9* rt,
-                     IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DIndexBuffer9* ib, IDirect3DVertexBuffer9* vb, IDirect3DSurface9* rt, IDirect3DVertexShader9* vs,
+                     IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (ib)
         {
@@ -152,8 +158,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9manydrawstest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "manydraws-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "manydraws-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -174,10 +180,8 @@ int main()
     pp.hDeviceWindow = hwnd;
 
     IDirect3DDevice9* dev = nullptr;
-    HRESULT hr =
-        d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-manydraws-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
+    printf("[d3d9-manydraws-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();
@@ -186,15 +190,14 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-manydraws-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
         if (vs_errors)
         {
-            printf("[d3d9-manydraws-test] VS compile errors: %s\n",
-                   static_cast<const char*>(vs_errors->GetBufferPointer()));
+            printf("[d3d9-manydraws-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
             vs_errors->Release();
         }
         release_all(nullptr, nullptr, nullptr, nullptr, nullptr, dev, d3d);
@@ -203,15 +206,14 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-manydraws-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
         if (ps_errors)
         {
-            printf("[d3d9-manydraws-test] PS compile errors: %s\n",
-                   static_cast<const char*>(ps_errors->GetBufferPointer()));
+            printf("[d3d9-manydraws-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
             ps_errors->Release();
         }
         vs_blob->Release();
@@ -244,8 +246,7 @@ int main()
 
     IDirect3DVertexBuffer9* vb = nullptr;
     HRESULT hcvb = dev->CreateVertexBuffer(sizeof(kQuad), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
-    printf("[d3d9-manydraws-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb),
-           static_cast<void*>(vb));
+    printf("[d3d9-manydraws-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
     if (FAILED(hcvb) || !vb)
     {
         release_all(nullptr, nullptr, nullptr, vs, ps, dev, d3d);
@@ -263,8 +264,7 @@ int main()
 
     IDirect3DIndexBuffer9* ib = nullptr;
     HRESULT hcib = dev->CreateIndexBuffer(sizeof(kIndices), 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &ib, nullptr);
-    printf("[d3d9-manydraws-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib),
-           static_cast<void*>(ib));
+    printf("[d3d9-manydraws-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib), static_cast<void*>(ib));
     if (FAILED(hcib) || !ib)
     {
         release_all(nullptr, vb, nullptr, vs, ps, dev, d3d);
@@ -281,10 +281,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE,
-                                           &rt, nullptr);
-    printf("[d3d9-manydraws-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-manydraws-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         release_all(ib, vb, nullptr, vs, ps, dev, d3d);
@@ -324,8 +322,8 @@ int main()
             int g = 0;
             int b = 0;
             color_for(gx, gy, r, g, b);
-            const float cell_color[4] = {static_cast<float>(r) / 255.0f, static_cast<float>(g) / 255.0f,
-                                         static_cast<float>(b) / 255.0f, 1.0f};
+            const float cell_color[4] = {static_cast<float>(r) / 255.0f, static_cast<float>(g) / 255.0f, static_cast<float>(b) / 255.0f,
+                                         1.0f};
             dev->SetPixelShaderConstantF(0, cell_color, 1);
 
             dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2);
@@ -336,8 +334,7 @@ int main()
     dev->EndScene();
 
     const double elapsed_ms = 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(freq.QuadPart);
-    printf("[d3d9-manydraws-test] TIMING: %d draws in %.3f ms (%.4f ms/draw)\n", kDrawCount, elapsed_ms,
-           elapsed_ms / kDrawCount);
+    printf("[d3d9-manydraws-test] TIMING: %d draws in %.3f ms (%.4f ms/draw)\n", kDrawCount, elapsed_ms, elapsed_ms / kDrawCount);
 
     int failures = 0;
     D3DLOCKED_RECT lr{};
@@ -373,8 +370,7 @@ int main()
                 }
             }
         }
-        printf("[d3d9-manydraws-test] checked all %d cell centers, %d passed, %d failed\n", kDrawCount,
-               kDrawCount - failures, failures);
+        printf("[d3d9-manydraws-test] checked all %d cell centers, %d passed, %d failed\n", kDrawCount, kDrawCount - failures, failures);
         rt->UnlockRect();
     }
     else

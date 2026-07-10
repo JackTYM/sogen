@@ -240,6 +240,7 @@ pub enum X86Register {
     Fdp,
     Fds,
     Fop,
+    Xcr0,
     End, // Must be last
 }
 

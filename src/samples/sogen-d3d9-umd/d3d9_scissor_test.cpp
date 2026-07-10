@@ -93,10 +93,9 @@ namespace
         {
             const Check& c = checks[i];
             const unsigned char* p = pixel_at(c.col, c.row);
-            printf("[d3d9-scissor-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, c.name, c.col, c.row,
-                   p[0], p[1], p[2], p[3]);
-            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) ||
-                !channel_close(p[2], c.expected_r, 2))
+            printf("[d3d9-scissor-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, c.name, c.col, c.row, p[0], p[1],
+                   p[2], p[3]);
+            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) || !channel_close(p[2], c.expected_r, 2))
             {
                 printf("[d3d9-scissor-test] FAIL: %s %s does not match the expected color\n", pass_name, c.name);
                 ++failures;
@@ -122,8 +121,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9scissortest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "scissor-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
-                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "scissor-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -153,8 +152,7 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
     printf("[d3d9-scissor-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {

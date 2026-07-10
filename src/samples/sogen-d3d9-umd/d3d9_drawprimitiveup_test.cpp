@@ -59,8 +59,7 @@ namespace
         int failures = 0;
         D3DLOCKED_RECT lr{};
         HRESULT hlr = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
-        printf("[d3d9-drawprimitiveup-test] %s LockRect hr=0x%08lx pBits=%p\n", pass_name, static_cast<unsigned long>(hlr),
-               lr.pBits);
+        printf("[d3d9-drawprimitiveup-test] %s LockRect hr=0x%08lx pBits=%p\n", pass_name, static_cast<unsigned long>(hlr), lr.pBits);
         if (FAILED(hlr) || !lr.pBits)
         {
             printf("[d3d9-drawprimitiveup-test] FAIL: %s LockRect failed\n", pass_name);
@@ -75,10 +74,9 @@ namespace
         {
             const Check& c = checks[i];
             const unsigned char* p = pixel_at(c.col, c.row);
-            printf("[d3d9-drawprimitiveup-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, c.name, c.col,
-                   c.row, p[0], p[1], p[2], p[3]);
-            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) ||
-                !channel_close(p[2], c.expected_r, 2))
+            printf("[d3d9-drawprimitiveup-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, c.name, c.col, c.row, p[0],
+                   p[1], p[2], p[3]);
+            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) || !channel_close(p[2], c.expected_r, 2))
             {
                 printf("[d3d9-drawprimitiveup-test] FAIL: %s %s does not match the expected color\n", pass_name, c.name);
                 ++failures;
@@ -104,8 +102,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9drawprimitiveuptest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "drawprimitiveup-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "drawprimitiveup-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -127,8 +125,7 @@ int main()
 
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-drawprimitiveup-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    printf("[d3d9-drawprimitiveup-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();
@@ -136,10 +133,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-    printf("[d3d9-drawprimitiveup-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-drawprimitiveup-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-drawprimitiveup-test] FAIL: render target creation failed\n");

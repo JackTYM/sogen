@@ -88,8 +88,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9managedtexturetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "managed-texture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "managed-texture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -120,15 +120,14 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-managed-texture-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
         if (vs_errors)
         {
-            printf("[d3d9-managed-texture-test] VS compile errors: %s\n",
-                   static_cast<const char*>(vs_errors->GetBufferPointer()));
+            printf("[d3d9-managed-texture-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
             vs_errors->Release();
         }
         dev->Release();
@@ -138,15 +137,14 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-managed-texture-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
         if (ps_errors)
         {
-            printf("[d3d9-managed-texture-test] PS compile errors: %s\n",
-                   static_cast<const char*>(ps_errors->GetBufferPointer()));
+            printf("[d3d9-managed-texture-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
             ps_errors->Release();
         }
         vs_blob->Release();
@@ -165,8 +163,10 @@ int main()
     ps_blob->Release();
     if (FAILED(hcvs) || FAILED(hcps))
     {
-        if (vs) vs->Release();
-        if (ps) ps->Release();
+        if (vs)
+            vs->Release();
+        if (ps)
+            ps->Release();
         dev->Release();
         d3d->Release();
         return 1;
@@ -182,8 +182,10 @@ int main()
     if (FAILED(hct) || !tex)
     {
         printf("[d3d9-managed-texture-test] FAIL: CreateTexture failed\n");
-        if (vs) vs->Release();
-        if (ps) ps->Release();
+        if (vs)
+            vs->Release();
+        if (ps)
+            ps->Release();
         dev->Release();
         d3d->Release();
         return 1;
@@ -196,8 +198,10 @@ int main()
         {
             printf("[d3d9-managed-texture-test] FAIL: texture LockRect failed\n");
             tex->Release();
-            if (vs) vs->Release();
-            if (ps) ps->Release();
+            if (vs)
+                vs->Release();
+            if (ps)
+                ps->Release();
             dev->Release();
             d3d->Release();
             return 1;
@@ -217,14 +221,15 @@ int main()
 
     IDirect3DSurface9* rt = nullptr;
     HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-    printf("[d3d9-managed-texture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    printf("[d3d9-managed-texture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-managed-texture-test] FAIL: render target creation failed\n");
         tex->Release();
-        if (vs) vs->Release();
-        if (ps) ps->Release();
+        if (vs)
+            vs->Release();
+        if (ps)
+            ps->Release();
         dev->Release();
         d3d->Release();
         return 1;
@@ -273,12 +278,16 @@ int main()
     if (!vb || !ib)
     {
         printf("[d3d9-managed-texture-test] FAIL: vertex/index buffer creation failed\n");
-        if (vb) vb->Release();
-        if (ib) ib->Release();
+        if (vb)
+            vb->Release();
+        if (ib)
+            ib->Release();
         rt->Release();
         tex->Release();
-        if (vs) vs->Release();
-        if (ps) ps->Release();
+        if (vs)
+            vs->Release();
+        if (ps)
+            ps->Release();
         dev->Release();
         d3d->Release();
         return 1;
@@ -349,8 +358,10 @@ int main()
     tex->Release();
     vb->Release();
     ib->Release();
-    if (vs) vs->Release();
-    if (ps) ps->Release();
+    if (vs)
+        vs->Release();
+    if (ps)
+        ps->Release();
     dev->Release();
     d3d->Release();
 

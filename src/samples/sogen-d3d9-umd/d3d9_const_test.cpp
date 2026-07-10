@@ -71,8 +71,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9consttest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "const-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480,
-                                nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "const-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480, nullptr, nullptr,
+                                wc.hInstance, nullptr);
     printf("[d3d9-const-test] hwnd=%p\n", static_cast<void*>(hwnd));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -106,8 +106,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-const-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -123,8 +123,8 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-const-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -264,8 +264,8 @@ int main()
         const int expected_g_a = static_cast<int>(kPsConst[1] * 255.0f + 0.5f);
         const int expected_r_a = static_cast<int>(kPsConst[0] * 255.0f + 0.5f);
         const int expected_a_a = static_cast<int>(kPsConst[3] * 255.0f + 0.5f);
-        printf("[d3d9-const-test] pixelA(320,240)=B=%02X G=%02X R=%02X A=%02X (expected c0 B=%02X G=%02X R=%02X A=%02X)\n",
-               pixel_a[0], pixel_a[1], pixel_a[2], pixel_a[3], expected_b_a, expected_g_a, expected_r_a, expected_a_a);
+        printf("[d3d9-const-test] pixelA(320,240)=B=%02X G=%02X R=%02X A=%02X (expected c0 B=%02X G=%02X R=%02X A=%02X)\n", pixel_a[0],
+               pixel_a[1], pixel_a[2], pixel_a[3], expected_b_a, expected_g_a, expected_r_a, expected_a_a);
         if (!channel_close(pixel_a[0], expected_b_a) || !channel_close(pixel_a[1], expected_g_a) ||
             !channel_close(pixel_a[2], expected_r_a) || !channel_close(pixel_a[3], expected_a_a))
         {

@@ -114,8 +114,14 @@ float4 main(PSInput input) : COLOR0
     constexpr int kPadDwordCount = 5;
     constexpr DWORD kColorPadBytes = kPadDwordCount * sizeof(DWORD); // 20 bytes, nonzero SetStreamSource offset
 
-    float to_ndc_x(const int screen_x) { return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f; }
-    float to_ndc_y(const int screen_y) { return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f; }
+    float to_ndc_x(const int screen_x)
+    {
+        return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f;
+    }
+    float to_ndc_y(const int screen_y)
+    {
+        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+    }
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)
     {
@@ -123,8 +129,7 @@ float4 main(PSInput input) : COLOR0
     }
 
     void release_all(IDirect3DVertexDeclaration9* decl, IDirect3DVertexBuffer9* pos_vb, IDirect3DVertexBuffer9* color_vb,
-                     IDirect3DSurface9* rt, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev,
-                     IDirect3D9* d3d)
+                     IDirect3DSurface9* rt, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (decl)
         {
@@ -171,8 +176,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9multistreamtest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "multistream-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "multistream-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -203,8 +208,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-multistream-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -219,8 +224,8 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-multistream-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -348,10 +353,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt,
-                                           nullptr);
-    printf("[d3d9-multistream-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-multistream-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-multistream-test] FAIL: render target creation failed\n");
@@ -397,13 +400,10 @@ int main()
         for (const auto& c : checks)
         {
             const unsigned char* p = pixel_at(c.col, c.row);
-            printf("[d3d9-multistream-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", c.name, c.col, c.row, p[0],
-                   p[1], p[2], p[3]);
-            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) ||
-                !channel_close(p[2], c.expected_r, 2))
+            printf("[d3d9-multistream-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", c.name, c.col, c.row, p[0], p[1], p[2], p[3]);
+            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) || !channel_close(p[2], c.expected_r, 2))
             {
-                printf("[d3d9-multistream-test] FAIL: %s does not match the expected per-vertex stream-1 color\n",
-                       c.name);
+                printf("[d3d9-multistream-test] FAIL: %s does not match the expected per-vertex stream-1 color\n", c.name);
                 ++failures;
             }
             else

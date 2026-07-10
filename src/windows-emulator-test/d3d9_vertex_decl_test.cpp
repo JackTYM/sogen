@@ -13,14 +13,18 @@ namespace sogen::test
         // Mirrors d3d9_cmd::vertex_element's 8-byte wire layout (stream/offset:u16, then four u8
         // fields) without pulling in d3d9-command-protocol's target -- this test only needs the raw
         // bytes parse_vertex_decl itself operates on.
-        void append_element(std::vector<std::byte>& blob, const uint16_t stream, const uint16_t offset,
-                            const uint8_t type, const uint8_t usage, const uint8_t usage_index)
+        void append_element(std::vector<std::byte>& blob, const uint16_t stream, const uint16_t offset, const uint8_t type,
+                            const uint8_t usage, const uint8_t usage_index)
         {
             const std::array<uint8_t, 8> raw{
-                static_cast<uint8_t>(stream & 0xFF),   static_cast<uint8_t>(stream >> 8),
-                static_cast<uint8_t>(offset & 0xFF),   static_cast<uint8_t>(offset >> 8),
-                type,                                  0, // D3DDECLMETHOD_DEFAULT
-                usage,                                 usage_index,
+                static_cast<uint8_t>(stream & 0xFF),
+                static_cast<uint8_t>(stream >> 8),
+                static_cast<uint8_t>(offset & 0xFF),
+                static_cast<uint8_t>(offset >> 8),
+                type,
+                0, // D3DDECLMETHOD_DEFAULT
+                usage,
+                usage_index,
             };
             const auto* bytes = reinterpret_cast<const std::byte*>(raw.data());
             blob.insert(blob.end(), bytes, bytes + raw.size());

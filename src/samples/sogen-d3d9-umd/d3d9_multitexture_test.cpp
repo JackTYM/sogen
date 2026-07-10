@@ -110,9 +110,9 @@ float4 main(PSInput input) : COLOR0
         }
     }
 
-    void release_all(IDirect3DTexture9* tex_a, IDirect3DTexture9* tex_b, IDirect3DSurface9* rt,
-                     IDirect3DVertexBuffer9* vb, IDirect3DIndexBuffer9* ib, IDirect3DVertexShader9* vs,
-                     IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DTexture9* tex_a, IDirect3DTexture9* tex_b, IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb,
+                     IDirect3DIndexBuffer9* ib, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev,
+                     IDirect3D9* d3d)
     {
         if (tex_a)
         {
@@ -156,8 +156,7 @@ float4 main(PSInput input) : COLOR0
     IDirect3DTexture9* make_solid_texture(IDirect3DDevice9* dev, const DWORD argb, const char* label)
     {
         IDirect3DTexture9* tex = nullptr;
-        HRESULT hct = dev->CreateTexture(kCanvasWidth, kCanvasHeight, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
-                                         &tex, nullptr);
+        HRESULT hct = dev->CreateTexture(kCanvasWidth, kCanvasHeight, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
         printf("[d3d9-multitexture-test] CreateTexture(%s) hr=0x%08lx tex=%p\n", label, static_cast<unsigned long>(hct),
                static_cast<void*>(tex));
         if (FAILED(hct) || !tex)
@@ -166,8 +165,7 @@ float4 main(PSInput input) : COLOR0
         }
         D3DLOCKED_RECT lr{};
         HRESULT htl = tex->LockRect(0, &lr, nullptr, 0);
-        printf("[d3d9-multitexture-test] LockRect(%s) hr=0x%08lx pBits=%p\n", label, static_cast<unsigned long>(htl),
-               lr.pBits);
+        printf("[d3d9-multitexture-test] LockRect(%s) hr=0x%08lx pBits=%p\n", label, static_cast<unsigned long>(htl), lr.pBits);
         if (FAILED(htl) || !lr.pBits)
         {
             tex->Release();
@@ -189,8 +187,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9multitexturetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "multitexture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "multitexture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -212,8 +210,7 @@ int main()
 
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-multitexture-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    printf("[d3d9-multitexture-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();
@@ -222,15 +219,14 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-multitexture-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
         if (vs_errors)
         {
-            printf("[d3d9-multitexture-test] VS compile errors: %s\n",
-                   static_cast<const char*>(vs_errors->GetBufferPointer()));
+            printf("[d3d9-multitexture-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
             vs_errors->Release();
         }
         release_all(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, dev, d3d);
@@ -239,15 +235,14 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-multitexture-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
         if (ps_errors)
         {
-            printf("[d3d9-multitexture-test] PS compile errors: %s\n",
-                   static_cast<const char*>(ps_errors->GetBufferPointer()));
+            printf("[d3d9-multitexture-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
             ps_errors->Release();
         }
         vs_blob->Release();
@@ -279,10 +274,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt,
-                                           nullptr);
-    printf("[d3d9-multitexture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-multitexture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-multitexture-test] FAIL: render target creation failed\n");
@@ -358,8 +351,8 @@ int main()
         constexpr LONG kStride = kCanvasWidth * 4;
         // Center of the quad -- both textures are solid, so any covered pixel is s0(RED)+s1(GREEN).
         const unsigned char* p = base + (120 + kQuadH / 2) * kStride + (170 + kQuadW / 2) * 4;
-        printf("[d3d9-multitexture-test] center pixel=B=%02X G=%02X R=%02X A=%02X (expected YELLOW: B=00 G=FF R=FF)\n",
-               p[0], p[1], p[2], p[3]);
+        printf("[d3d9-multitexture-test] center pixel=B=%02X G=%02X R=%02X A=%02X (expected YELLOW: B=00 G=FF R=FF)\n", p[0], p[1], p[2],
+               p[3]);
         if (!channel_close(p[0], 0, 2) || !channel_close(p[1], 255, 2) || !channel_close(p[2], 255, 2))
         {
             printf("[d3d9-multitexture-test] FAIL: combined pixel is not the RED+GREEN=YELLOW sum of both samplers\n");

@@ -76,10 +76,9 @@ namespace
         {
             const Check& c = checks[i];
             const unsigned char* p = pixel_at(c.col, c.row);
-            printf("[d3d9-stretchrect-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, c.name, c.col, c.row,
-                   p[0], p[1], p[2], p[3]);
-            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) ||
-                !channel_close(p[2], c.expected_r, 2))
+            printf("[d3d9-stretchrect-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, c.name, c.col, c.row, p[0], p[1],
+                   p[2], p[3]);
+            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) || !channel_close(p[2], c.expected_r, 2))
             {
                 printf("[d3d9-stretchrect-test] FAIL: %s %s does not match expected B=%02X G=%02X R=%02X\n", pass_name, c.name,
                        c.expected_b, c.expected_g, c.expected_r);
@@ -154,17 +153,17 @@ int main()
 
     IDirect3DSurface9* src = nullptr;
     IDirect3DSurface9* dst = nullptr;
-    HRESULT hcs =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &src, nullptr);
-    HRESULT hcd =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &dst, nullptr);
+    HRESULT hcs = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &src, nullptr);
+    HRESULT hcd = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &dst, nullptr);
     printf("[d3d9-stretchrect-test] CreateRenderTarget src hr=0x%08lx dst hr=0x%08lx\n", static_cast<unsigned long>(hcs),
            static_cast<unsigned long>(hcd));
     if (FAILED(hcs) || FAILED(hcd) || !src || !dst)
     {
         printf("[d3d9-stretchrect-test] FAIL: render target creation failed\n");
-        if (src) src->Release();
-        if (dst) dst->Release();
+        if (src)
+            src->Release();
+        if (dst)
+            dst->Release();
         dev->Release();
         d3d->Release();
         return 1;
@@ -206,8 +205,10 @@ int main()
     if (!vb || !ib)
     {
         printf("[d3d9-stretchrect-test] FAIL: buffer creation failed\n");
-        if (ib) ib->Release();
-        if (vb) vb->Release();
+        if (ib)
+            ib->Release();
+        if (vb)
+            vb->Release();
         src->Release();
         dst->Release();
         dev->Release();
@@ -273,8 +274,7 @@ int main()
         }
         else
         {
-            failures += run_checks(dst, "scaled-copy", kScaledChecks,
-                                   static_cast<int>(sizeof(kScaledChecks) / sizeof(kScaledChecks[0])));
+            failures += run_checks(dst, "scaled-copy", kScaledChecks, static_cast<int>(sizeof(kScaledChecks) / sizeof(kScaledChecks[0])));
         }
     }
 

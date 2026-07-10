@@ -80,7 +80,7 @@ float4 main(PSInput input) : COLOR0
     }
 
     void release_all(IDirect3DIndexBuffer9* ib, IDirect3DVertexBuffer9* vb, IDirect3DSurface9* rt, IDirect3DTexture9* tex,
-                      IDirect3DPixelShader9* ps, IDirect3DVertexShader9* vs, IDirect3DDevice9* dev, IDirect3D9* d3d)
+                     IDirect3DPixelShader9* ps, IDirect3DVertexShader9* vs, IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (ib)
         {
@@ -127,8 +127,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9dimtest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "dim-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
-                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "dim-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -159,8 +159,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* ps_blob = nullptr;
-    HRESULT hvsc =
-        D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0, &vs_blob, nullptr);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, nullptr);
     HRESULT hpsc =
         D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob, nullptr);
     printf("[d3d9-dim-test] D3DCompile vs=0x%08lx ps=0x%08lx\n", static_cast<unsigned long>(hvsc), static_cast<unsigned long>(hpsc));
@@ -317,8 +317,8 @@ int main()
 
         auto check = [&](const char* name, int col, int row, int eb, int eg, int er) {
             const unsigned char* p = pixel_at(col, row);
-            printf("[d3d9-dim-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X (expected B=%02X G=%02X R=%02X)\n", name, col, row,
-                   p[0], p[1], p[2], eb, eg, er);
+            printf("[d3d9-dim-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X (expected B=%02X G=%02X R=%02X)\n", name, col, row, p[0], p[1],
+                   p[2], eb, eg, er);
             if (!channel_close(p[0], eb, 4) || !channel_close(p[1], eg, 4) || !channel_close(p[2], er, 4))
             {
                 printf("[d3d9-dim-test] FAIL: %s mismatch\n", name);

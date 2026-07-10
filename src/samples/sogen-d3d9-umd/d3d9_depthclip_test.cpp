@@ -44,8 +44,8 @@ namespace
         {
             return false;
         }
-        const auto* px = static_cast<const unsigned char*>(lr.pBits) + static_cast<size_t>(kCenterY) * lr.Pitch +
-                         static_cast<size_t>(kCenterX) * 4;
+        const auto* px =
+            static_cast<const unsigned char*>(lr.pBits) + static_cast<size_t>(kCenterY) * lr.Pitch + static_cast<size_t>(kCenterX) * 4;
         b = px[0];
         g = px[1];
         r = px[2];
@@ -64,8 +64,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9depthclip";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "depthclip", WS_OVERLAPPEDWINDOW, 0, 0, 640, 480, nullptr, nullptr,
-                                wc.hInstance, nullptr);
+    HWND hwnd =
+        CreateWindowExA(0, wc.lpszClassName, "depthclip", WS_OVERLAPPEDWINDOW, 0, 0, 640, 480, nullptr, nullptr, wc.hInstance, nullptr);
 
     IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
     if (!d3d)
@@ -93,9 +93,7 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    if (FAILED(dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt,
-                                       nullptr)) ||
-        !rt)
+    if (FAILED(dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr)) || !rt)
     {
         printf("[d3d9-depthclip] FAIL: CreateRenderTarget\n");
         dev->Release();
@@ -173,8 +171,7 @@ int main()
         }
         else
         {
-            printf("[d3d9-depthclip] pass A (clipping=ON)  center B=%02X G=%02X R=%02X (expect clear B=FF G=80 R=40)\n", b, g,
-                   r);
+            printf("[d3d9-depthclip] pass A (clipping=ON)  center B=%02X G=%02X R=%02X (expect clear B=FF G=80 R=40)\n", b, g, r);
             if (!(b == 0xFF && g == 0x80 && r == 0x40))
             {
                 printf("[d3d9-depthclip] FAIL: pass A did not stay clear -- geometry not actually out of range\n");
@@ -199,8 +196,7 @@ int main()
         }
         else
         {
-            printf("[d3d9-depthclip] pass B (clipping=OFF) center B=%02X G=%02X R=%02X (expect red B=00 G=00 R=FF)\n", b, g,
-                   r);
+            printf("[d3d9-depthclip] pass B (clipping=OFF) center B=%02X G=%02X R=%02X (expect red B=00 G=00 R=FF)\n", b, g, r);
             if (!(b == 0x00 && g == 0x00 && r == 0xFF))
             {
                 printf("[d3d9-depthclip] FAIL: pass B was clipped -- depthClampEnable not honored for D3DRS_CLIPPING=FALSE\n");

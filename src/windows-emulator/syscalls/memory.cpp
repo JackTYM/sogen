@@ -339,8 +339,7 @@ namespace sogen
 
             // Kernel: zero size, wrap-around, or above user-space ceiling → STATUS_INVALID_PARAMETER
             constexpr uint64_t user_space_ceiling = 0x7FFFFFFEFFFFULL;
-            if (orig_length == 0 || orig_start + orig_length - 1 < orig_start ||
-                orig_start + orig_length - 1 > user_space_ceiling)
+            if (orig_length == 0 || orig_start + orig_length - 1 < orig_start || orig_start + orig_length - 1 > user_space_ceiling)
             {
                 return STATUS_INVALID_PARAMETER;
             }

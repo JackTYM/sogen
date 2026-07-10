@@ -14,9 +14,11 @@ namespace sogen
         bool scan_signature(const void* tokens, const size_t token_size_bytes, vkd3d_shader_scan_signature_info& info,
                             vkd3d_shader_signature& out_output_or_input, const bool want_output)
         {
-            info = vkd3d_shader_scan_signature_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_SCAN_SIGNATURE_INFO};
+            info = vkd3d_shader_scan_signature_info{};
+            info.type = VKD3D_SHADER_STRUCTURE_TYPE_SCAN_SIGNATURE_INFO;
 
-            vkd3d_shader_compile_info compile_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO};
+            vkd3d_shader_compile_info compile_info{};
+            compile_info.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;
             compile_info.next = &info;
             compile_info.source.code = tokens;
             compile_info.source.size = token_size_bytes;
@@ -37,15 +39,15 @@ namespace sogen
             return true;
         }
 
-        bool compile_stage(const void* tokens, const size_t token_size_bytes,
-                           const vkd3d_shader_varying_map_info* varying_map_info,
+        bool compile_stage(const void* tokens, const size_t token_size_bytes, const vkd3d_shader_varying_map_info* varying_map_info,
                            const vkd3d_shader_visibility shader_visibility, const unsigned int descriptor_set,
-                           const vkd3d_shader_combined_resource_sampler* combined_samplers,
-                           const unsigned int combined_sampler_count, std::vector<uint32_t>& out_spirv)
+                           const vkd3d_shader_combined_resource_sampler* combined_samplers, const unsigned int combined_sampler_count,
+                           std::vector<uint32_t>& out_spirv)
         {
-            vkd3d_shader_spirv_target_info spirv_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO};
-            spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
+            vkd3d_shader_spirv_target_info spirv_info{};
+            spirv_info.type = VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO;
             spirv_info.next = varying_map_info;
+            spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
 
             // Matches d3d9_host.cpp's ensure_programmable_pipeline bindings: float-const UBO at binding
             // 0, int-const UBO at binding 2, bool-const UBO at binding 3 (binding 1 is the PS-only
@@ -79,20 +81,22 @@ namespace sogen
                 },
             }};
 
-            vkd3d_shader_interface_info interface_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_INTERFACE_INFO};
+            vkd3d_shader_interface_info interface_info{};
+            interface_info.type = VKD3D_SHADER_STRUCTURE_TYPE_INTERFACE_INFO;
             interface_info.next = &spirv_info;
             interface_info.bindings = const_buffer_bindings.data();
             interface_info.binding_count = static_cast<unsigned int>(const_buffer_bindings.size());
             interface_info.combined_samplers = combined_samplers;
             interface_info.combined_sampler_count = combined_sampler_count;
 
-            vkd3d_shader_compile_info compile_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO};
+            vkd3d_shader_compile_info compile_info{};
+            compile_info.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;
+            compile_info.next = &interface_info;
             compile_info.source.code = tokens;
             compile_info.source.size = token_size_bytes;
             compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
             compile_info.target_type = VKD3D_SHADER_TARGET_SPIRV_BINARY;
             compile_info.log_level = VKD3D_SHADER_LOG_NONE;
-            compile_info.next = &interface_info;
 
             vkd3d_shader_code out{};
             char* messages = nullptr;
@@ -147,7 +151,8 @@ namespace sogen
         vkd3d_shader_free_scan_signature_info(&vs_scan);
         vkd3d_shader_free_scan_signature_info(&ps_scan);
 
-        vkd3d_shader_varying_map_info varying_map_info{.type = VKD3D_SHADER_STRUCTURE_TYPE_VARYING_MAP_INFO};
+        vkd3d_shader_varying_map_info varying_map_info{};
+        varying_map_info.type = VKD3D_SHADER_STRUCTURE_TYPE_VARYING_MAP_INFO;
         varying_map_info.varying_map = varying_map.data();
         varying_map_info.varying_count = varying_count;
 
@@ -174,9 +179,8 @@ namespace sogen
                 .binding = {.set = 0, .binding = vs_sampler_binding_for_stage(k), .count = 1},
             };
         }
-        if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, VKD3D_SHADER_VISIBILITY_VERTEX, 0,
-                            vs_sampler_bindings.data(), static_cast<unsigned int>(vs_sampler_bindings.size()),
-                            out.vertex_spirv))
+        if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, VKD3D_SHADER_VISIBILITY_VERTEX, 0, vs_sampler_bindings.data(),
+                           static_cast<unsigned int>(vs_sampler_bindings.size()), out.vertex_spirv))
         {
             return false;
         }
@@ -220,9 +224,8 @@ namespace sogen
         // byte-for-byte inert (same SPIR-V, same rendered pixels, both via a diagnostic PS visualizing
         // TEXCOORD0 directly and via d3d9_texture_test.cpp's full run) -- see d3d9_texcoord_test.cpp and
         // docs/d3d9-roadmap.md for the investigation this closed out.
-        if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, VKD3D_SHADER_VISIBILITY_PIXEL, 1,
-                            ps_sampler_bindings.data(),
-                            static_cast<unsigned int>(ps_sampler_bindings.size()), out.pixel_spirv))
+        if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, VKD3D_SHADER_VISIBILITY_PIXEL, 1, ps_sampler_bindings.data(),
+                           static_cast<unsigned int>(ps_sampler_bindings.size()), out.pixel_spirv))
         {
             out.vertex_spirv.clear();
             return false;

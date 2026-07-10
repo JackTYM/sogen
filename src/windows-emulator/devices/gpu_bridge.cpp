@@ -41,8 +41,7 @@ namespace sogen
                     if (draws != last_draws)
                     {
                         last_draws = draws;
-                        win_emu.log.warn("[d3d9-drawdiag] draws=%llu submits=%llu\n",
-                                         static_cast<unsigned long long>(draws),
+                        win_emu.log.warn("[d3d9-drawdiag] draws=%llu submits=%llu\n", static_cast<unsigned long long>(draws),
                                          static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
                     }
                 }
@@ -2413,8 +2412,8 @@ namespace sogen
                 }
 
                 uint64_t resource = d3d9_cmd::null_resource;
-                const int32_t hr = this->d3d9_.create_resource(request.kind, request.format, request.width, request.height,
-                                                               request.depth, request.mip_levels, request.usage, request.pool, resource);
+                const int32_t hr = this->d3d9_.create_resource(request.kind, request.format, request.width, request.height, request.depth,
+                                                               request.mip_levels, request.usage, request.pool, resource);
                 return write_output(win_emu, context, d3d9_cmd::create_resource_response{.hr = hr, .reserved = 0, .resource = resource});
             }
 
@@ -2449,8 +2448,8 @@ namespace sogen
                 }
 
                 const auto out_capacity = context.output_buffer_length > sizeof(d3d9_cmd::lock_response)
-                                             ? context.output_buffer_length - sizeof(d3d9_cmd::lock_response)
-                                             : 0;
+                                              ? context.output_buffer_length - sizeof(d3d9_cmd::lock_response)
+                                              : 0;
                 std::vector<std::byte> data(out_capacity);
                 uint32_t data_size = 0;
                 const bool render_target_readback = this->d3d9_.is_render_target(request.resource);
@@ -2495,8 +2494,7 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                const int32_t hr =
-                    this->d3d9_.unlock(request.resource, request.subresource, request.offset, data.data(), data.size());
+                const int32_t hr = this->d3d9_.unlock(request.resource, request.subresource, request.offset, data.data(), data.size());
                 return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             }
 
@@ -2593,8 +2591,7 @@ namespace sogen
             // multi-frame app's per-frame counts are the delta between consecutive lines.
             void log_d3d9_frame_stats(windows_emulator& win_emu)
             {
-                win_emu.log.info("[d3d9-host] frame: draws=%llu submits=%llu\n",
-                                 static_cast<unsigned long long>(this->d3d9_.draw_count()),
+                win_emu.log.info("[d3d9-host] frame: draws=%llu submits=%llu\n", static_cast<unsigned long long>(this->d3d9_.draw_count()),
                                  static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
             }
 
@@ -2618,10 +2615,10 @@ namespace sogen
                     if (window != 0)
                     {
                         win_emu.ui().present_surface(window, ui_surface_desc{.width = static_cast<int>(width),
-                                                                              .height = static_cast<int>(height),
-                                                                              .stride = static_cast<int>(width * 4),
-                                                                              .format = ui_surface_format::bgra8,
-                                                                              .pixels = pixels.data()});
+                                                                             .height = static_cast<int>(height),
+                                                                             .stride = static_cast<int>(width * 4),
+                                                                             .format = ui_surface_format::bgra8,
+                                                                             .pixels = pixels.data()});
                     }
                 }
                 else

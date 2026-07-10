@@ -97,14 +97,13 @@ PSOutput main()
     };
     constexpr int kCheckPointCount = 3;
 
-    int check_surface_uniform(IDirect3DSurface9* surf, const char* surf_name, const char* pass_name,
-                               const int expected_b, const int expected_g, const int expected_r)
+    int check_surface_uniform(IDirect3DSurface9* surf, const char* surf_name, const char* pass_name, const int expected_b,
+                              const int expected_g, const int expected_r)
     {
         int failures = 0;
         D3DLOCKED_RECT lr{};
         HRESULT hlr = surf->LockRect(&lr, nullptr, D3DLOCK_READONLY);
-        printf("[d3d9-mrt-test] %s %s LockRect hr=0x%08lx pBits=%p\n", pass_name, surf_name,
-               static_cast<unsigned long>(hlr), lr.pBits);
+        printf("[d3d9-mrt-test] %s %s LockRect hr=0x%08lx pBits=%p\n", pass_name, surf_name, static_cast<unsigned long>(hlr), lr.pBits);
         if (FAILED(hlr) || !lr.pBits)
         {
             printf("[d3d9-mrt-test] FAIL: %s %s LockRect failed\n", pass_name, surf_name);
@@ -118,19 +117,16 @@ PSOutput main()
         for (const auto& pt : kCheckPoints)
         {
             const unsigned char* p = pixel_at(pt.col, pt.row);
-            printf("[d3d9-mrt-test] %s %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, surf_name,
-                   pt.name, pt.col, pt.row, p[0], p[1], p[2], p[3]);
-            if (!channel_close(p[0], expected_b, 2) || !channel_close(p[1], expected_g, 2) ||
-                !channel_close(p[2], expected_r, 2))
+            printf("[d3d9-mrt-test] %s %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, surf_name, pt.name, pt.col, pt.row,
+                   p[0], p[1], p[2], p[3]);
+            if (!channel_close(p[0], expected_b, 2) || !channel_close(p[1], expected_g, 2) || !channel_close(p[2], expected_r, 2))
             {
-                printf("[d3d9-mrt-test] FAIL: %s %s %s does not match the expected color\n", pass_name, surf_name,
-                       pt.name);
+                printf("[d3d9-mrt-test] FAIL: %s %s %s does not match the expected color\n", pass_name, surf_name, pt.name);
                 ++failures;
             }
             else
             {
-                printf("[d3d9-mrt-test] PASS: %s %s %s matches the expected color\n", pass_name, surf_name,
-                       pt.name);
+                printf("[d3d9-mrt-test] PASS: %s %s %s matches the expected color\n", pass_name, surf_name, pt.name);
             }
         }
 
@@ -149,8 +145,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9mrttest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "mrt-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
-                                 kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "mrt-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -181,8 +177,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-mrt-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -198,8 +194,8 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-mrt-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -245,10 +241,8 @@ int main()
     // widen here (test-only task). The test's checks are RGB-only, so the missing real alpha channel is
     // irrelevant.
     IDirect3DSurface9* rt0 = nullptr;
-    HRESULT hcrt0 =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt0, nullptr);
-    printf("[d3d9-mrt-test] CreateRenderTarget(RT0) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt0),
-           static_cast<void*>(rt0));
+    HRESULT hcrt0 = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt0, nullptr);
+    printf("[d3d9-mrt-test] CreateRenderTarget(RT0) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt0), static_cast<void*>(rt0));
     if (FAILED(hcrt0) || !rt0)
     {
         printf("[d3d9-mrt-test] FAIL: RT0 creation failed\n");
@@ -260,10 +254,8 @@ int main()
     }
 
     IDirect3DSurface9* rt1 = nullptr;
-    HRESULT hcrt1 =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt1, nullptr);
-    printf("[d3d9-mrt-test] CreateRenderTarget(RT1) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt1),
-           static_cast<void*>(rt1));
+    HRESULT hcrt1 = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt1, nullptr);
+    printf("[d3d9-mrt-test] CreateRenderTarget(RT1) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt1), static_cast<void*>(rt1));
     if (FAILED(hcrt1) || !rt1)
     {
         printf("[d3d9-mrt-test] FAIL: RT1 creation failed\n");
@@ -279,8 +271,8 @@ int main()
     // see this file's header comment on the pipeline-cache RT-shape caveat.
     HRESULT hsrt0 = dev->SetRenderTarget(0, rt0);
     HRESULT hsrt1 = dev->SetRenderTarget(1, rt1);
-    printf("[d3d9-mrt-test] SetRenderTarget(0,RT0) hr=0x%08lx SetRenderTarget(1,RT1) hr=0x%08lx\n",
-           static_cast<unsigned long>(hsrt0), static_cast<unsigned long>(hsrt1));
+    printf("[d3d9-mrt-test] SetRenderTarget(0,RT0) hr=0x%08lx SetRenderTarget(1,RT1) hr=0x%08lx\n", static_cast<unsigned long>(hsrt0),
+           static_cast<unsigned long>(hsrt1));
 
     // Full-screen quad in NDC (-1,-1)-(1,1) -- covers the whole viewport regardless of which Y
     // convention (flipped or not) this pipeline uses, since all four corners are at the extremes.
@@ -289,8 +281,7 @@ int main()
     constexpr WORD kQuadIndices[6] = {0, 1, 2, 0, 2, 3};
     IDirect3DVertexBuffer9* vb = nullptr;
     HRESULT hcvb = dev->CreateVertexBuffer(4 * sizeof(Vertex), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
-    printf("[d3d9-mrt-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb),
-           static_cast<void*>(vb));
+    printf("[d3d9-mrt-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
     if (FAILED(hcvb) || !vb)
     {
         printf("[d3d9-mrt-test] FAIL: vertex buffer creation failed\n");
@@ -318,8 +309,7 @@ int main()
 
     IDirect3DIndexBuffer9* ib = nullptr;
     HRESULT hcib = dev->CreateIndexBuffer(6 * sizeof(WORD), 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &ib, nullptr);
-    printf("[d3d9-mrt-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib),
-           static_cast<void*>(ib));
+    printf("[d3d9-mrt-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib), static_cast<void*>(ib));
     if (FAILED(hcib) || !ib)
     {
         printf("[d3d9-mrt-test] FAIL: index buffer creation failed\n");

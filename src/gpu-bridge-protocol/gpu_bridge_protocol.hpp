@@ -395,13 +395,11 @@ namespace sogen::gpu_bridge
     // there (commits ecda4363, e1ec179a, 87863527, 5bac1070). d3d9_host's execute_recorded is agnostic
     // to which path delivered it either way.
     inline constexpr uint32_t ioctl_d3d9_set_render_state = make_ioctl(static_cast<uint32_t>(command::d3d9_set_render_state));
-    inline constexpr uint32_t ioctl_d3d9_set_texture_stage_state =
-        make_ioctl(static_cast<uint32_t>(command::d3d9_set_texture_stage_state));
+    inline constexpr uint32_t ioctl_d3d9_set_texture_stage_state = make_ioctl(static_cast<uint32_t>(command::d3d9_set_texture_stage_state));
     inline constexpr uint32_t ioctl_d3d9_set_sampler_state = make_ioctl(static_cast<uint32_t>(command::d3d9_set_sampler_state));
     inline constexpr uint32_t ioctl_d3d9_set_texture = make_ioctl(static_cast<uint32_t>(command::d3d9_set_texture));
     inline constexpr uint32_t ioctl_d3d9_set_stream_source = make_ioctl(static_cast<uint32_t>(command::d3d9_set_stream_source));
-    inline constexpr uint32_t ioctl_d3d9_set_stream_source_freq =
-        make_ioctl(static_cast<uint32_t>(command::d3d9_set_stream_source_freq));
+    inline constexpr uint32_t ioctl_d3d9_set_stream_source_freq = make_ioctl(static_cast<uint32_t>(command::d3d9_set_stream_source_freq));
     inline constexpr uint32_t ioctl_d3d9_set_indices = make_ioctl(static_cast<uint32_t>(command::d3d9_set_indices));
     inline constexpr uint32_t ioctl_d3d9_set_vertex_decl = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vertex_decl));
     inline constexpr uint32_t ioctl_d3d9_set_vertex_shader = make_ioctl(static_cast<uint32_t>(command::d3d9_set_vertex_shader));

@@ -62,6 +62,6 @@ namespace sogen
     // no semantic-based inter-stage linking; vkd3d-shader instead requires an explicit varying map
     // built from both shaders' scanned signatures. Returns false on translation failure (malformed or
     // unsupported bytecode, or a scan/link/compile failure); out is left empty in that case.
-    bool translate_d3d9_shader_pair(const void* vs_tokens, size_t vs_token_size_bytes, const void* ps_tokens,
-                                    size_t ps_token_size_bytes, shader_pair_spirv& out);
+    bool translate_d3d9_shader_pair(const void* vs_tokens, size_t vs_token_size_bytes, const void* ps_tokens, size_t ps_token_size_bytes,
+                                    shader_pair_spirv& out);
 } // namespace sogen

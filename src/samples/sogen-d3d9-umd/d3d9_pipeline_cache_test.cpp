@@ -110,14 +110,14 @@ float4 main() : COLOR0
     };
     constexpr int kCheckPointCount = 3;
 
-    int check_surface_uniform(IDirect3DSurface9* surf, const char* surf_name, const char* pass_name,
-                               const int expected_b, const int expected_g, const int expected_r)
+    int check_surface_uniform(IDirect3DSurface9* surf, const char* surf_name, const char* pass_name, const int expected_b,
+                              const int expected_g, const int expected_r)
     {
         int failures = 0;
         D3DLOCKED_RECT lr{};
         HRESULT hlr = surf->LockRect(&lr, nullptr, D3DLOCK_READONLY);
-        printf("[d3d9-pipeline-cache-test] %s %s LockRect hr=0x%08lx pBits=%p\n", pass_name, surf_name,
-               static_cast<unsigned long>(hlr), lr.pBits);
+        printf("[d3d9-pipeline-cache-test] %s %s LockRect hr=0x%08lx pBits=%p\n", pass_name, surf_name, static_cast<unsigned long>(hlr),
+               lr.pBits);
         if (FAILED(hlr) || !lr.pBits)
         {
             printf("[d3d9-pipeline-cache-test] FAIL: %s %s LockRect failed\n", pass_name, surf_name);
@@ -131,19 +131,16 @@ float4 main() : COLOR0
         for (const auto& pt : kCheckPoints)
         {
             const unsigned char* p = pixel_at(pt.col, pt.row);
-            printf("[d3d9-pipeline-cache-test] %s %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name,
-                   surf_name, pt.name, pt.col, pt.row, p[0], p[1], p[2], p[3]);
-            if (!channel_close(p[0], expected_b, 2) || !channel_close(p[1], expected_g, 2) ||
-                !channel_close(p[2], expected_r, 2))
+            printf("[d3d9-pipeline-cache-test] %s %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, surf_name, pt.name, pt.col,
+                   pt.row, p[0], p[1], p[2], p[3]);
+            if (!channel_close(p[0], expected_b, 2) || !channel_close(p[1], expected_g, 2) || !channel_close(p[2], expected_r, 2))
             {
-                printf("[d3d9-pipeline-cache-test] FAIL: %s %s %s does not match the expected color\n", pass_name,
-                       surf_name, pt.name);
+                printf("[d3d9-pipeline-cache-test] FAIL: %s %s %s does not match the expected color\n", pass_name, surf_name, pt.name);
                 ++failures;
             }
             else
             {
-                printf("[d3d9-pipeline-cache-test] PASS: %s %s %s matches the expected color\n", pass_name, surf_name,
-                       pt.name);
+                printf("[d3d9-pipeline-cache-test] PASS: %s %s %s matches the expected color\n", pass_name, surf_name, pt.name);
             }
         }
 
@@ -151,9 +148,8 @@ float4 main() : COLOR0
         return failures;
     }
 
-    void release_all(IDirect3DVertexBuffer9* vb, IDirect3DIndexBuffer9* ib, IDirect3DSurface9* rt0,
-                     IDirect3DSurface9* rt1, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps,
-                     IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DVertexBuffer9* vb, IDirect3DIndexBuffer9* ib, IDirect3DSurface9* rt0, IDirect3DSurface9* rt1,
+                     IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (ib)
         {
@@ -200,8 +196,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9pipelinecachetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "pipeline-cache-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "pipeline-cache-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -222,10 +218,8 @@ int main()
     pp.hDeviceWindow = hwnd;
 
     IDirect3DDevice9* dev = nullptr;
-    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp,
-                                   &dev);
-    printf("[d3d9-pipeline-cache-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
+    printf("[d3d9-pipeline-cache-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();
@@ -234,15 +228,14 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-pipeline-cache-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
         if (vs_errors)
         {
-            printf("[d3d9-pipeline-cache-test] VS compile errors: %s\n",
-                   static_cast<const char*>(vs_errors->GetBufferPointer()));
+            printf("[d3d9-pipeline-cache-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
             vs_errors->Release();
         }
         release_all(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, dev, d3d);
@@ -251,15 +244,14 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-pipeline-cache-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
         if (ps_errors)
         {
-            printf("[d3d9-pipeline-cache-test] PS compile errors: %s\n",
-                   static_cast<const char*>(ps_errors->GetBufferPointer()));
+            printf("[d3d9-pipeline-cache-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
             ps_errors->Release();
         }
         vs_blob->Release();
@@ -284,8 +276,7 @@ int main()
     // D3DFMT_X8R8G8B8, not D3DFMT_A8R8G8B8: the UMD's FORMATOP table only flags X8R8G8B8 with
     // FMT_OP_OFFSCREEN_RENDERTARGET (see d3d9_mrt_test.cpp's header comment for the full account).
     IDirect3DSurface9* rt0 = nullptr;
-    HRESULT hcrt0 = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0,
-                                            TRUE, &rt0, nullptr);
+    HRESULT hcrt0 = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt0, nullptr);
     printf("[d3d9-pipeline-cache-test] CreateRenderTarget(RT0) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt0),
            static_cast<void*>(rt0));
     if (FAILED(hcrt0) || !rt0)
@@ -301,8 +292,7 @@ int main()
     constexpr WORD kQuadIndices[6] = {0, 1, 2, 0, 2, 3};
     IDirect3DVertexBuffer9* vb = nullptr;
     HRESULT hcvb = dev->CreateVertexBuffer(4 * sizeof(Vertex), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
-    printf("[d3d9-pipeline-cache-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb),
-           static_cast<void*>(vb));
+    printf("[d3d9-pipeline-cache-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
     if (FAILED(hcvb) || !vb)
     {
         printf("[d3d9-pipeline-cache-test] FAIL: vertex buffer creation failed\n");
@@ -325,8 +315,7 @@ int main()
 
     IDirect3DIndexBuffer9* ib = nullptr;
     HRESULT hcib = dev->CreateIndexBuffer(6 * sizeof(WORD), 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &ib, nullptr);
-    printf("[d3d9-pipeline-cache-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib),
-           static_cast<void*>(ib));
+    printf("[d3d9-pipeline-cache-test] CreateIndexBuffer hr=0x%08lx ib=%p\n", static_cast<unsigned long>(hcib), static_cast<void*>(ib));
     if (FAILED(hcib) || !ib)
     {
         printf("[d3d9-pipeline-cache-test] FAIL: index buffer creation failed\n");
@@ -360,8 +349,7 @@ int main()
         dev->BeginScene();
         dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 255), 1.0f, 0);
         HRESULT hd = dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2);
-        printf("[d3d9-pipeline-cache-test] sub-pass 1 DrawIndexedPrimitive hr=0x%08lx\n",
-               static_cast<unsigned long>(hd));
+        printf("[d3d9-pipeline-cache-test] sub-pass 1 DrawIndexedPrimitive hr=0x%08lx\n", static_cast<unsigned long>(hd));
         dev->EndScene();
 
         failures += check_surface_uniform(rt0, "RT0", "sub-pass-1 (1 RT bound)", 0, 0, 255);
@@ -370,8 +358,7 @@ int main()
     // Sub-pass 2 (the discriminator): create RT1, rebind to BOTH RT0 (slot 0) and RT1 (slot 1) -- SAME
     // vs/ps, DIFFERENT bound-RT-count/shape (1 -> 2) -- and draw again.
     IDirect3DSurface9* rt1 = nullptr;
-    HRESULT hcrt1 = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0,
-                                            TRUE, &rt1, nullptr);
+    HRESULT hcrt1 = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt1, nullptr);
     printf("[d3d9-pipeline-cache-test] CreateRenderTarget(RT1) hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt1),
            static_cast<void*>(rt1));
     if (FAILED(hcrt1) || !rt1)
@@ -389,8 +376,7 @@ int main()
         dev->BeginScene();
         dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 255), 1.0f, 0);
         HRESULT hd = dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2);
-        printf("[d3d9-pipeline-cache-test] sub-pass 2 DrawIndexedPrimitive hr=0x%08lx\n",
-               static_cast<unsigned long>(hd));
+        printf("[d3d9-pipeline-cache-test] sub-pass 2 DrawIndexedPrimitive hr=0x%08lx\n", static_cast<unsigned long>(hd));
         dev->EndScene();
 
         // Primary, unambiguous discriminator: RT0 (the attachment the PS DOES write, oC0) must still be

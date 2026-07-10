@@ -18,8 +18,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9triangle";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "triangle", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480, nullptr,
-                                nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "triangle", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480, nullptr, nullptr,
+                                wc.hInstance, nullptr);
     printf("[d3d9-triangle] hwnd=%p\n", static_cast<void*>(hwnd));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -42,8 +42,7 @@ int main()
     pp.hDeviceWindow = hwnd;
 
     IDirect3DDevice9* dev = nullptr;
-    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp,
-                                   &dev);
+    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
     printf("[d3d9-triangle] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
 
     if (FAILED(hr) || !dev)
@@ -171,8 +170,8 @@ int main()
         if (SUCCEEDED(hlr) && lr.pBits)
         {
             const auto* pixel = static_cast<const unsigned char*>(lr.pBits);
-            printf("[d3d9-triangle] pixel[0]=B=%02X G=%02X R=%02X A=%02X (expected B=FF G=80 R=40)\n", pixel[0], pixel[1],
-                   pixel[2], pixel[3]);
+            printf("[d3d9-triangle] pixel[0]=B=%02X G=%02X R=%02X A=%02X (expected B=FF G=80 R=40)\n", pixel[0], pixel[1], pixel[2],
+                   pixel[3]);
             rt->UnlockRect();
         }
         else

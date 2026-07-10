@@ -735,8 +735,7 @@ namespace sogen
             // destruction (not on the owning thread merely un-parking, which happens almost
             // immediately after injection) keeps this dialog itself protected from re-injection
             // spam for as long as it's still on screen.
-            std::erase_if(c.clicked_dialogs,
-                          [&](const uint64_t handle) { return proc.windows.get(static_cast<hwnd>(handle)) == nullptr; });
+            std::erase_if(c.clicked_dialogs, [&](const uint64_t handle) { return proc.windows.get(static_cast<hwnd>(handle)) == nullptr; });
 
             for (auto& win : proc.windows | std::views::values)
             {

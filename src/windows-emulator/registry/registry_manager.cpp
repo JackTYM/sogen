@@ -363,8 +363,7 @@ namespace sogen
                     // endpoint registration time, eventually timing out and returning DSERR_PRIOLEVELNEEDED.
                     const auto write_dword = [&](const char* value_name, const uint32_t value) {
                         const auto* bytes = reinterpret_cast<const std::byte*>(&value);
-                        this->set_value(*props_key, value_name, 4 /* REG_DWORD */,
-                                        std::span<const std::byte>(bytes, sizeof(value)));
+                        this->set_value(*props_key, value_name, 4 /* REG_DWORD */, std::span<const std::byte>(bytes, sizeof(value)));
                     };
                     // {9c119480-...},1 is PKEY_SWD_DeviceInterfaceId, a VT_LPWSTR software-device interface
                     // path. mmdevapi's CEndpointDevice::GetDeviceInterfacePath polls it in a 5-second loop and
@@ -373,11 +372,9 @@ namespace sogen
                     // SWD path (\\?\SWD#MMDEVAPI#<endpoint-id>#<interface-class-guid>) so the poll resolves at
                     // once. The interface class is DEVINTERFACE_AUDIO_RENDER for render endpoints and
                     // DEVINTERFACE_AUDIO_CAPTURE for capture endpoints.
-                    const std::string_view interface_class = std::string_view(local) == "Render"
-                                                                 ? "{e6327cad-dcec-4949-ae8a-991e976a79d2}"
-                                                                 : "{2eef81be-33fa-4800-9670-1cd474972c3f}";
-                    const std::string swd_path =
-                        R"(\\?\SWD#MMDEVAPI#)" + std::string(*name) + "#" + std::string(interface_class);
+                    const std::string_view interface_class = std::string_view(local) == "Render" ? "{e6327cad-dcec-4949-ae8a-991e976a79d2}"
+                                                                                                 : "{2eef81be-33fa-4800-9670-1cd474972c3f}";
+                    const std::string swd_path = R"(\\?\SWD#MMDEVAPI#)" + std::string(*name) + "#" + std::string(interface_class);
                     write_name("{9c119480-ddc2-4954-a150-5bd240d454ad},1", std::u16string(swd_path.begin(), swd_path.end()));
                     write_dword("{9c119480-ddc2-4954-a150-5bd240d454ad},6", 0);
                     // {83da6326-...}: endpoint builder info (read once at device open).

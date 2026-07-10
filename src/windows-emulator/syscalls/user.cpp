@@ -3479,8 +3479,8 @@ namespace sogen
         // persist the requested size so that readback matches.
         LONG handle_NtUserChangeDisplaySettings(const syscall_context& c,
                                                 const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*device_name*/,
-                                                const emulator_object<EMU_DEVMODEW> dev_mode, const hwnd /*window*/,
-                                                const DWORD /*flags*/, const uint64_t /*param*/)
+                                                const emulator_object<EMU_DEVMODEW> dev_mode, const hwnd /*window*/, const DWORD /*flags*/,
+                                                const uint64_t /*param*/)
         {
             if (dev_mode)
             {
@@ -4257,9 +4257,9 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, const UINT32 /*flags*/,
-                                                 const emulator_pointer num_elements, const emulator_pointer path_array,
-                                                 const emulator_pointer mode_array, const emulator_pointer current_topology_id)
+        NTSTATUS handle_NtUserQueryDisplayConfig(const syscall_context& c, const UINT32 /*flags*/, const emulator_pointer num_elements,
+                                                 const emulator_pointer path_array, const emulator_pointer mode_array,
+                                                 const emulator_pointer current_topology_id)
         {
             // NtUserQueryDisplayConfig is a 5-argument syscall (win32u stub returns $0x14). wow64win packs the
             // two output counts (pNumPathArrayElements / pNumModeInfoArrayElements) into one buffer exactly like

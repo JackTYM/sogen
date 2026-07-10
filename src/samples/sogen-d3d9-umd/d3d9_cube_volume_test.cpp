@@ -34,8 +34,8 @@ namespace
     {
         IDirect3DCubeTexture9* tex = nullptr;
         const HRESULT hr = dev->CreateCubeTexture(64, 1, 0, format, D3DPOOL_DEFAULT, &tex, nullptr);
-        printf("[d3d9-cube-volume-test] CreateCubeTexture(%s) hr=0x%08lx tex=%p (expect %s)\n", label,
-               static_cast<unsigned long>(hr), static_cast<void*>(tex), expect_ok ? "S_OK" : "FAIL");
+        printf("[d3d9-cube-volume-test] CreateCubeTexture(%s) hr=0x%08lx tex=%p (expect %s)\n", label, static_cast<unsigned long>(hr),
+               static_cast<void*>(tex), expect_ok ? "S_OK" : "FAIL");
         const bool ok = expect_ok ? (SUCCEEDED(hr) && tex != nullptr) : (FAILED(hr) && tex == nullptr);
         if (tex)
         {
@@ -53,8 +53,8 @@ namespace
     {
         IDirect3DVolumeTexture9* vol = nullptr;
         const HRESULT hr = dev->CreateVolumeTexture(32, 32, 4, 1, 0, format, D3DPOOL_DEFAULT, &vol, nullptr);
-        printf("[d3d9-cube-volume-test] CreateVolumeTexture(%s) hr=0x%08lx vol=%p (expect %s)\n", label,
-               static_cast<unsigned long>(hr), static_cast<void*>(vol), expect_ok ? "S_OK" : "FAIL");
+        printf("[d3d9-cube-volume-test] CreateVolumeTexture(%s) hr=0x%08lx vol=%p (expect %s)\n", label, static_cast<unsigned long>(hr),
+               static_cast<void*>(vol), expect_ok ? "S_OK" : "FAIL");
         const bool ok = expect_ok ? (SUCCEEDED(hr) && vol != nullptr) : (FAILED(hr) && vol == nullptr);
         if (vol)
         {
@@ -78,8 +78,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9cubevolumetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "cube-volume-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0,
-                                kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "cube-volume-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -101,8 +101,7 @@ int main()
 
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-cube-volume-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    printf("[d3d9-cube-volume-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();

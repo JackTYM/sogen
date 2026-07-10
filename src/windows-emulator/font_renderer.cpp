@@ -31,7 +31,7 @@ namespace sogen
 
         class ft_font_renderer
         {
-        public:
+          public:
             ft_font_renderer()
             {
                 if (FT_Init_FreeType(&library_) != 0)
@@ -79,7 +79,10 @@ namespace sogen
             ft_font_renderer(const ft_font_renderer&) = delete;
             ft_font_renderer& operator=(const ft_font_renderer&) = delete;
 
-            bool loaded() const { return loaded_; }
+            bool loaded() const
+            {
+                return loaded_;
+            }
 
             const cached_glyph* get_glyph(const char32_t codepoint)
             {
@@ -119,8 +122,8 @@ namespace sogen
                 return &*ins->second;
             }
 
-            void draw(gdi_bitmap_surface& surface, const int x, const int y, const char32_t codepoint,
-                      const uint32_t color, const RECT* clip)
+            void draw(gdi_bitmap_surface& surface, const int x, const int y, const char32_t codepoint, const uint32_t color,
+                      const RECT* clip)
             {
                 const auto* g = get_glyph(codepoint);
                 if (g == nullptr)
@@ -154,8 +157,7 @@ namespace sogen
                             continue;
                         }
 
-                        if (clip != nullptr &&
-                            (px < clip->left || px >= clip->right || py < clip->top || py >= clip->bottom))
+                        if (clip != nullptr && (px < clip->left || px >= clip->right || py < clip->top || py >= clip->bottom))
                         {
                             continue;
                         }
@@ -166,7 +168,7 @@ namespace sogen
                 }
             }
 
-        private:
+          private:
             FT_Library library_{};
             FT_Face face_{};
             bool loaded_{false};
@@ -180,8 +182,8 @@ namespace sogen
         }
     }
 
-    bool ft_draw_glyph(gdi_bitmap_surface& surface, const int x, const int y, const char32_t codepoint,
-                       const uint32_t color, const RECT* clip)
+    bool ft_draw_glyph(gdi_bitmap_surface& surface, const int x, const int y, const char32_t codepoint, const uint32_t color,
+                       const RECT* clip)
     {
         auto& r = get_renderer();
         if (!r.loaded())

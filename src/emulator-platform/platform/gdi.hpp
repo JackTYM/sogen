@@ -195,7 +195,7 @@ namespace sogen
     struct EMU_D3DKMT_CREATEPAGINGQUEUE
     {
         UINT32 hDevice;
-        INT32  Priority;
+        INT32 Priority;
         UINT32 hPagingQueue;
         UINT32 hSyncObject;
         UINT64 FenceValueCPUVirtualAddress;
@@ -205,15 +205,15 @@ namespace sogen
 
     struct EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT
     {
-        UINT32 hDevice;       // +0x00
-        UINT32 pad;           // +0x04
-        UINT32 InfoType;      // +0x08
-        UINT32 InfoFlags;     // +0x0C
-        UINT64 InfoData[8];   // +0x10 (64 bytes of union payload)
+        UINT32 hDevice;          // +0x00
+        UINT32 pad;              // +0x04
+        UINT32 InfoType;         // +0x08
+        UINT32 InfoFlags;        // +0x0C
+        UINT64 InfoData[8];      // +0x10 (64 bytes of union payload)
         UINT32 InfoSharedHandle; // +0x50
-        UINT32 pad2;          // +0x54
-        UINT32 hSyncObject;   // +0x58
-        UINT32 pad3;          // +0x5C
+        UINT32 pad2;             // +0x54
+        UINT32 hSyncObject;      // +0x58
+        UINT32 pad3;             // +0x5C
     };
     static_assert(sizeof(EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT) == 0x60);
 

@@ -99,14 +99,17 @@ namespace sogen
         // shared, not a second GPU connection. Its instance/device are created lazily, on first
         // render-target-kind resource creation, mirroring handle_NtGdiDdDDICreateDevice's own
         // lazy-init pattern for the DXGK path.
-        explicit d3d9_host(vulkan_host& vulkan) : vulkan_(vulkan) {}
+        explicit d3d9_host(vulkan_host& vulkan)
+            : vulkan_(vulkan)
+        {
+        }
 
         // ---------------------------------------------------------------------------------------
         // Sync commands
         // ---------------------------------------------------------------------------------------
 
-        int32_t create_resource(uint32_t kind, uint32_t format, uint32_t width, uint32_t height, uint32_t depth,
-                                uint32_t mip_levels, uint32_t usage, uint32_t pool, uint64_t& out_resource);
+        int32_t create_resource(uint32_t kind, uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t mip_levels,
+                                uint32_t usage, uint32_t pool, uint64_t& out_resource);
         void destroy_resource(uint64_t resource);
 
         // Real pfnTexBlt handler: copies src_resource's host-side pixel backing into dst_resource's.
@@ -122,14 +125,13 @@ namespace sogen
         // Copies up to out_capacity bytes of the resource's host-side shadow copy into out.
         // out_data_size always receives the true backing-store size.
         int32_t lock(uint64_t resource, uint32_t subresource, uint32_t offset, uint32_t size, uint32_t flags, void* out,
-                    size_t out_capacity, uint32_t& out_data_size);
+                     size_t out_capacity, uint32_t& out_data_size);
         int32_t unlock(uint64_t resource, uint32_t subresource, uint32_t offset, const void* data, size_t data_size);
 
         // Copies the resource's current host-side pixel backing (BGRA8) out for presentation. Lazily
         // syncs from the GPU image first via sync_backing_from_gpu if pfnClear/pfnDrawPrimitive left it
         // dirty. Returns false if the resource doesn't exist or has no GPU backing (not a render target).
-        bool snapshot_resource(uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
-                               uint32_t& out_height);
+        bool snapshot_resource(uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width, uint32_t& out_height);
 
         // Uploads a plain sampled texture_2d resource's current `backing` shadow into its real
         // vk_image_id via a staging buffer, so it's ready to be sampled by a draw. No dirty tracking --
@@ -159,8 +161,14 @@ namespace sogen
         // (see the members' own comment). draw_count() is every execute_draw call; batch_submit_count()
         // is every real batch submit -- together they make the batching win (draws >> submits) directly
         // observable rather than only inferable from wall-clock timing.
-        uint64_t draw_count() const { return this->draw_count_; }
-        uint64_t batch_submit_count() const { return this->batch_submit_count_; }
+        uint64_t draw_count() const
+        {
+            return this->draw_count_;
+        }
+        uint64_t batch_submit_count() const
+        {
+            return this->batch_submit_count_;
+        }
         // True if `resource` is a render-target-kind resource -- the frame-output image whose pixels a
         // Lock/Present reads back. Lets gpu_bridge fire its draw/submit summary only at a real frame
         // completion (a render-target Lock), not on every vertex/index-buffer Lock.
@@ -187,9 +195,9 @@ namespace sogen
             // a different byte size, so a single flat vector can't address them. Empty for buffers, render
             // targets, and single-mip textures. Indexed as extra_mips[subresource - 1].
             std::vector<std::vector<std::byte>> extra_mips;
-            uint64_t vk_image_id{}; // 0 = no GPU backing (plain buffer); set for render targets and textures
-            uint64_t vk_image_view_id{};    // 0 until first drawn to; lazily created, cached per resource
-            bool backing_dirty{}; // color RT: GPU image has drawn/cleared pixels not yet copied to backing
+            uint64_t vk_image_id{};      // 0 = no GPU backing (plain buffer); set for render targets and textures
+            uint64_t vk_image_view_id{}; // 0 until first drawn to; lazily created, cached per resource
+            bool backing_dirty{};        // color RT: GPU image has drawn/cleared pixels not yet copied to backing
 
             // Selects subresource `index`'s backing store (index 0 == `backing`; higher == a mip level).
             // Callers must bounds-check index against extra_mips.size() + 1 before calling.
@@ -223,13 +231,13 @@ namespace sogen
         struct device_state
         {
             std::unordered_map<uint32_t, uint32_t> render_state{};
-            std::unordered_map<uint64_t, uint32_t> texture_stage_state{};  // key = (stage << 32) | state
-            std::unordered_map<uint64_t, uint32_t> sampler_state{};        // key = (sampler << 32) | state
-            std::unordered_map<uint32_t, uint64_t> bound_textures{};       // key = stage
-            std::unordered_map<uint32_t, uint64_t> stream_sources{};       // key = stream_number
-            std::unordered_map<uint32_t, uint32_t> stream_strides{};       // key = stream_number
-            std::unordered_map<uint32_t, uint32_t> stream_offsets{};       // key = stream_number
-            std::unordered_map<uint32_t, uint32_t> stream_frequencies{};   // key = stream_number
+            std::unordered_map<uint64_t, uint32_t> texture_stage_state{}; // key = (stage << 32) | state
+            std::unordered_map<uint64_t, uint32_t> sampler_state{};       // key = (sampler << 32) | state
+            std::unordered_map<uint32_t, uint64_t> bound_textures{};      // key = stage
+            std::unordered_map<uint32_t, uint64_t> stream_sources{};      // key = stream_number
+            std::unordered_map<uint32_t, uint32_t> stream_strides{};      // key = stream_number
+            std::unordered_map<uint32_t, uint32_t> stream_offsets{};      // key = stream_number
+            std::unordered_map<uint32_t, uint32_t> stream_frequencies{};  // key = stream_number
             // DrawPrimitiveUP/DrawIndexedPrimitiveUP user-memory sources: a non-empty entry means that
             // stream (or the index source) is UM-backed -- execute_draw uploads these raw bytes as a
             // transient buffer instead of looking up a resource id. Mutually exclusive with a real
@@ -409,10 +417,10 @@ namespace sogen
             uint64_t pixel_shader{};
             std::array<uint32_t, 4> color_formats{}; // slot-order, 0-padded (VK_FORMAT_UNDEFINED == 0, never a real bound format)
             uint32_t depth_format{};
-            vertex_input_shape vertex_shape{};   // decl identity + per-stream strides the build reads (see vertex_shape_key())
-            vulkan_host::depth_state depth{};    // resolved static depth test/write/compare (build_depth_state)
+            vertex_input_shape vertex_shape{};           // decl identity + per-stream strides the build reads (see vertex_shape_key())
+            vulkan_host::depth_state depth{};            // resolved static depth test/write/compare (build_depth_state)
             vulkan_host::color_blend_attachment blend{}; // resolved static blend enable/factors/write-mask (build_blend_state)
-            uint32_t depth_clip_enable{1};       // D3DRS_CLIPPING, baked into depthClampEnable (default TRUE = clip on)
+            uint32_t depth_clip_enable{1};               // D3DRS_CLIPPING, baked into depthClampEnable (default TRUE = clip on)
             auto operator<=>(const pipeline_cache_key&) const = default;
         };
 
@@ -576,7 +584,7 @@ namespace sogen
         uint32_t usable_vertex_binding_mask(const parsed_vertex_decl& decl) const;
         // color_formats: see ensure_pipeline's own comment above.
         const programmable_pipeline_entry* ensure_programmable_pipeline(std::span<const uint32_t> color_formats, uint32_t width,
-                                                                         uint32_t height, uint32_t depth_format);
+                                                                        uint32_t height, uint32_t depth_format);
         // Lazily creates ds_entry's depth image view and, on that same first use, clears it once to
         // D3D9's own default far-plane depth (1.0) -- see the .cpp definition's comment for why.
         // No-op (returns true) if ds_entry already has a view. depth_format is ds_entry's own VkFormat.

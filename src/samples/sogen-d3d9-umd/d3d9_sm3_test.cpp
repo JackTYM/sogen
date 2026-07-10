@@ -142,8 +142,8 @@ float4 main(PSInput input) : COLOR0
         return false;
     }
 
-    void release_all(IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb, IDirect3DPixelShader9* ps,
-                     IDirect3DVertexShader9* vs, IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb, IDirect3DPixelShader9* ps, IDirect3DVertexShader9* vs,
+                     IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (rt)
         {
@@ -182,8 +182,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9sm3test";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "sm3-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480,
-                                nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "sm3-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 640, 480, nullptr, nullptr,
+                                wc.hInstance, nullptr);
     printf("[d3d9-sm3-test] hwnd=%p\n", static_cast<void*>(hwnd));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -208,13 +208,11 @@ int main()
     printf("[d3d9-sm3-test] MaxVertexShader30InstructionSlots=%lu MaxPixelShader30InstructionSlots=%lu\n",
            static_cast<unsigned long>(caps.MaxVertexShader30InstructionSlots),
            static_cast<unsigned long>(caps.MaxPixelShader30InstructionSlots));
-    if (FAILED(hgdc) || caps.VertexShaderVersion != D3DVS_VERSION(3, 0) ||
-        caps.PixelShaderVersion != D3DPS_VERSION(3, 0))
+    if (FAILED(hgdc) || caps.VertexShaderVersion != D3DVS_VERSION(3, 0) || caps.PixelShaderVersion != D3DPS_VERSION(3, 0))
     {
         printf("[d3d9-sm3-test] FAIL: GetDeviceCaps did not report vs_3_0/ps_3_0 (got VS=0x%08lx PS=0x%08lx, "
                "expected 0x%08lx/0x%08lx)\n",
-               static_cast<unsigned long>(caps.VertexShaderVersion),
-               static_cast<unsigned long>(caps.PixelShaderVersion),
+               static_cast<unsigned long>(caps.VertexShaderVersion), static_cast<unsigned long>(caps.PixelShaderVersion),
                static_cast<unsigned long>(D3DVS_VERSION(3, 0)), static_cast<unsigned long>(D3DPS_VERSION(3, 0)));
         d3d->Release();
         return 1;
@@ -231,10 +229,8 @@ int main()
     pp.hDeviceWindow = hwnd;
 
     IDirect3DDevice9* dev = nullptr;
-    HRESULT hr =
-        d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
-    printf("[d3d9-sm3-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
+    printf("[d3d9-sm3-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         printf("[d3d9-sm3-test] FAIL: CreateDevice hr=0x%08lx\n", static_cast<unsigned long>(hr));
@@ -246,10 +242,9 @@ int main()
     {
         ID3DBlob* ps20_blob = nullptr;
         ID3DBlob* ps20_errors = nullptr;
-        HRESULT h20 = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr,
-                                 "main", "ps_2_0", 0, 0, &ps20_blob, &ps20_errors);
-        printf("[d3d9-sm3-test] D3DCompile(ps, ps_2_0) hr=0x%08lx (expected failure)\n",
-               static_cast<unsigned long>(h20));
+        HRESULT h20 = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0,
+                                 &ps20_blob, &ps20_errors);
+        printf("[d3d9-sm3-test] D3DCompile(ps, ps_2_0) hr=0x%08lx (expected failure)\n", static_cast<unsigned long>(h20));
         if (SUCCEEDED(h20))
         {
             printf("[d3d9-sm3-test] FAIL: the loop pixel shader unexpectedly compiled as ps_2_0 -- it is not a "
@@ -273,8 +268,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_3_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_3_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-sm3-test] D3DCompile(vs, vs_3_0) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -290,8 +285,8 @@ int main()
     // Part 2 (discriminator, positive half): the SAME source compiles as ps_3_0.
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_3_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_3_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-sm3-test] D3DCompile(ps, ps_3_0) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -310,8 +305,7 @@ int main()
         const auto* ps_tokens = static_cast<const uint32_t*>(ps_blob->GetBufferPointer());
         const size_t ps_token_count = ps_blob->GetBufferSize() / sizeof(uint32_t);
         const bool saw_loop = scan_for_loop_opcode(ps_tokens, ps_token_count);
-        printf("[d3d9-sm3-test] ps_3_0 bytecode size=%zu bytes, saw_LOOP/REP=%s\n", ps_blob->GetBufferSize(),
-               saw_loop ? "yes" : "no");
+        printf("[d3d9-sm3-test] ps_3_0 bytecode size=%zu bytes, saw_LOOP/REP=%s\n", ps_blob->GetBufferSize(), saw_loop ? "yes" : "no");
         if (!saw_loop)
         {
             printf("[d3d9-sm3-test] FAIL: no LOOP/REP opcode in the ps_3_0 bytecode -- the loop was unrolled or "
@@ -326,13 +320,11 @@ int main()
 
     IDirect3DVertexShader9* vs = nullptr;
     HRESULT hcvs = dev->CreateVertexShader(static_cast<const DWORD*>(vs_blob->GetBufferPointer()), &vs);
-    printf("[d3d9-sm3-test] CreateVertexShader hr=0x%08lx vs=%p\n", static_cast<unsigned long>(hcvs),
-           static_cast<void*>(vs));
+    printf("[d3d9-sm3-test] CreateVertexShader hr=0x%08lx vs=%p\n", static_cast<unsigned long>(hcvs), static_cast<void*>(vs));
 
     IDirect3DPixelShader9* ps = nullptr;
     HRESULT hcps = dev->CreatePixelShader(static_cast<const DWORD*>(ps_blob->GetBufferPointer()), &ps);
-    printf("[d3d9-sm3-test] CreatePixelShader hr=0x%08lx ps=%p\n", static_cast<unsigned long>(hcps),
-           static_cast<void*>(ps));
+    printf("[d3d9-sm3-test] CreatePixelShader hr=0x%08lx ps=%p\n", static_cast<unsigned long>(hcps), static_cast<void*>(ps));
 
     vs_blob->Release();
     ps_blob->Release();
@@ -354,8 +346,7 @@ int main()
     constexpr DWORD kFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
     IDirect3DVertexBuffer9* vb = nullptr;
     HRESULT hcvb = dev->CreateVertexBuffer(3 * sizeof(Vertex), 0, kFvf, D3DPOOL_DEFAULT, &vb, nullptr);
-    printf("[d3d9-sm3-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb),
-           static_cast<void*>(vb));
+    printf("[d3d9-sm3-test] CreateVertexBuffer hr=0x%08lx vb=%p\n", static_cast<unsigned long>(hcvb), static_cast<void*>(vb));
     if (!vb)
     {
         release_all(nullptr, nullptr, ps, vs, dev, d3d);
@@ -374,8 +365,7 @@ int main()
 
     IDirect3DSurface9* rt = nullptr;
     HRESULT hcrt = dev->CreateRenderTarget(640, 480, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-    printf("[d3d9-sm3-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    printf("[d3d9-sm3-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         release_all(nullptr, vb, ps, vs, dev, d3d);
@@ -410,8 +400,8 @@ int main()
     const int expected_r = to_byte(acc);
     const int expected_g = to_byte(acc * 0.5f);
     const int expected_b = to_byte(acc * 1.5f);
-    printf("[d3d9-sm3-test] expected interior pixel B=%02X G=%02X R=%02X (acc=%.4f over %d iterations)\n",
-           expected_b, expected_g, expected_r, static_cast<double>(acc), kLoopCountVec[0]);
+    printf("[d3d9-sm3-test] expected interior pixel B=%02X G=%02X R=%02X (acc=%.4f over %d iterations)\n", expected_b, expected_g,
+           expected_r, static_cast<double>(acc), kLoopCountVec[0]);
 
     D3DLOCKED_RECT lr{};
     HRESULT hlr = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
@@ -422,10 +412,8 @@ int main()
         const auto* base = static_cast<const unsigned char*>(lr.pBits);
         constexpr LONG kStride = 640 * 4;
         const unsigned char* pixel = base + 240 * kStride + 320 * 4; // (320,240): well inside the triangle.
-        printf("[d3d9-sm3-test] interior pixel(320,240)=B=%02X G=%02X R=%02X A=%02X\n", pixel[0], pixel[1],
-               pixel[2], pixel[3]);
-        if (channel_close(pixel[2], expected_r) && channel_close(pixel[1], expected_g) &&
-            channel_close(pixel[0], expected_b))
+        printf("[d3d9-sm3-test] interior pixel(320,240)=B=%02X G=%02X R=%02X A=%02X\n", pixel[0], pixel[1], pixel[2], pixel[3]);
+        if (channel_close(pixel[2], expected_r) && channel_close(pixel[1], expected_g) && channel_close(pixel[0], expected_b))
         {
             printf("[d3d9-sm3-test] PASS: rendered pixel matches the analytic SM3.0 loop result -- genuine "
                    "end-to-end vs_3_0/ps_3_0 translation and render\n");
@@ -442,8 +430,7 @@ int main()
         // was scoped to the geometry and not a whole-surface fill.
         const unsigned char* corner = base + 10 * kStride + 10 * 4;
         printf("[d3d9-sm3-test] corner pixel(10,10)=B=%02X G=%02X R=%02X\n", corner[0], corner[1], corner[2]);
-        if (channel_close(corner[0], kBackgroundB) && channel_close(corner[1], kBackgroundG) &&
-            channel_close(corner[2], kBackgroundR))
+        if (channel_close(corner[0], kBackgroundB) && channel_close(corner[1], kBackgroundG) && channel_close(corner[2], kBackgroundR))
         {
             printf("[d3d9-sm3-test] PASS: corner pixel stayed the clear color\n");
         }

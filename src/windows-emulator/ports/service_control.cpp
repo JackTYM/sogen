@@ -93,8 +93,8 @@ namespace sogen
                     {
                         // The change-mask is an [in] parameter so it is NOT echoed in the output NDR.
                         // Output layout: referent (non-null), return value, deferred WNF_STATE_NAME.
-                        writer.write<uint32_t>(0x00020000);        // unique pointer referent (non-null)
-                        writer.write<uint32_t>(k_error_success);   // return value
+                        writer.write<uint32_t>(0x00020000);      // unique pointer referent (non-null)
+                        writer.write<uint32_t>(k_error_success); // return value
                         // Deferred pointee: WNF_STATE_NAME (8 bytes), written as two uint32 so the
                         // binary_writer does not insert 8-byte-alignment padding before them.
                         constexpr uint64_t k_wnf_audiosrv_running = 0x41C200A1700AC3C5ULL;

@@ -131,8 +131,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9texturetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "texture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
-                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "texture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -163,8 +163,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-texture-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -180,8 +180,8 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-texture-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -225,8 +225,7 @@ int main()
     // see sogen_d3d9_umd.cpp), so this test's own texture is sized to match that exactly rather than
     // hit the same wrong-shape bug it does not otherwise need to exercise.
     IDirect3DTexture9* tex = nullptr;
-    HRESULT hct = dev->CreateTexture(kCanvasWidth, kCanvasHeight, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex,
-                                     nullptr);
+    HRESULT hct = dev->CreateTexture(kCanvasWidth, kCanvasHeight, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
     printf("[d3d9-texture-test] CreateTexture hr=0x%08lx tex=%p\n", static_cast<unsigned long>(hct), static_cast<void*>(tex));
     if (FAILED(hct) || !tex)
     {
@@ -342,10 +341,10 @@ int main()
         vb->Lock(0, 16 * sizeof(Vertex), reinterpret_cast<void**>(&v), 0);
         if (v)
         {
-            fill_quad(v + 0, 40, 40, 40 + kQuadW, 40 + kQuadH, 0.5f);          // quad 0: textured check
-            fill_quad(v + 4, 280, 40, 280 + kQuadW, 40 + kQuadH, 0.2f);        // quad 1: depth near
-            fill_quad(v + 8, 280, 40, 280 + kQuadW, 40 + kQuadH, 0.8f);        // quad 2: depth far (same rect)
-            fill_quad(v + 12, 40, 260, 40 + kQuadW, 260 + kQuadH, 0.5f);       // quad 3: blend check
+            fill_quad(v + 0, 40, 40, 40 + kQuadW, 40 + kQuadH, 0.5f);    // quad 0: textured check
+            fill_quad(v + 4, 280, 40, 280 + kQuadW, 40 + kQuadH, 0.2f);  // quad 1: depth near
+            fill_quad(v + 8, 280, 40, 280 + kQuadW, 40 + kQuadH, 0.8f);  // quad 2: depth far (same rect)
+            fill_quad(v + 12, 40, 260, 40 + kQuadW, 260 + kQuadH, 0.5f); // quad 3: blend check
             vb->Unlock();
         }
     }
@@ -459,10 +458,8 @@ int main()
         // no-op (srcAlpha=1) -- the result must be the exact texture color.
         {
             const unsigned char* p = pixel_at(90, 80);
-            printf("[d3d9-texture-test] textured pixel(90,80)=B=%02X G=%02X R=%02X A=%02X (expected RED)\n", p[0], p[1],
-                   p[2], p[3]);
-            if (!channel_close(p[0], 0, 2) || !channel_close(p[1], 0, 2) || !channel_close(p[2], 255, 2) ||
-                !channel_close(p[3], 255, 2))
+            printf("[d3d9-texture-test] textured pixel(90,80)=B=%02X G=%02X R=%02X A=%02X (expected RED)\n", p[0], p[1], p[2], p[3]);
+            if (!channel_close(p[0], 0, 2) || !channel_close(p[1], 0, 2) || !channel_close(p[2], 255, 2) || !channel_close(p[3], 255, 2))
             {
                 printf("[d3d9-texture-test] FAIL: textured pixel does not match the known texture color\n");
                 ++failures;
@@ -487,8 +484,7 @@ int main()
             printf("[d3d9-texture-test] depth pixel(430,160)=B=%02X G=%02X R=%02X A=%02X (expected near-quad B=%02X "
                    "G=%02X R=%02X)\n",
                    p[0], p[1], p[2], p[3], expected_b, expected_g, expected_r);
-            if (!channel_close(p[0], expected_b, 3) || !channel_close(p[1], expected_g, 3) ||
-                !channel_close(p[2], expected_r, 3))
+            if (!channel_close(p[0], expected_b, 3) || !channel_close(p[1], expected_g, 3) || !channel_close(p[2], expected_r, 3))
             {
                 printf("[d3d9-texture-test] FAIL: depth pixel shows the far (occluded) quad's color -- depth testing "
                        "is not real\n");
@@ -512,8 +508,7 @@ int main()
             printf("[d3d9-texture-test] blend pixel(190,380)=B=%02X G=%02X R=%02X A=%02X (expected B=%02X G=%02X "
                    "R=%02X)\n",
                    p[0], p[1], p[2], p[3], expected_b, expected_g, expected_r);
-            if (!channel_close(p[0], expected_b, 3) || !channel_close(p[1], expected_g, 3) ||
-                !channel_close(p[2], expected_r, 3))
+            if (!channel_close(p[0], expected_b, 3) || !channel_close(p[1], expected_g, 3) || !channel_close(p[2], expected_r, 3))
             {
                 printf("[d3d9-texture-test] FAIL: blend pixel does not match the analytically-computed blend result\n");
                 ++failures;

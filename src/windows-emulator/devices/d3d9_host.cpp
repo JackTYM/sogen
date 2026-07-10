@@ -197,7 +197,7 @@ namespace sogen
         }
 
         uint32_t render_state_or(const std::unordered_map<uint32_t, uint32_t>& render_state, const uint32_t state,
-                                  const uint32_t default_value)
+                                 const uint32_t default_value)
         {
             const auto it = render_state.find(state);
             return it != render_state.end() ? it->second : default_value;
@@ -209,23 +209,31 @@ namespace sogen
         {
             switch (d3dcmp)
             {
-            case d3dcmp_never: return VK_COMPARE_OP_NEVER;
-            case d3dcmp_less: return VK_COMPARE_OP_LESS;
-            case d3dcmp_equal: return VK_COMPARE_OP_EQUAL;
-            case d3dcmp_lessequal: return VK_COMPARE_OP_LESS_OR_EQUAL;
-            case d3dcmp_greater: return VK_COMPARE_OP_GREATER;
-            case d3dcmp_notequal: return VK_COMPARE_OP_NOT_EQUAL;
-            case d3dcmp_greaterequal: return VK_COMPARE_OP_GREATER_OR_EQUAL;
-            case d3dcmp_always: return VK_COMPARE_OP_ALWAYS;
-            default: return VK_COMPARE_OP_LESS_OR_EQUAL; // D3D9's own documented default for D3DRS_ZFUNC
+            case d3dcmp_never:
+                return VK_COMPARE_OP_NEVER;
+            case d3dcmp_less:
+                return VK_COMPARE_OP_LESS;
+            case d3dcmp_equal:
+                return VK_COMPARE_OP_EQUAL;
+            case d3dcmp_lessequal:
+                return VK_COMPARE_OP_LESS_OR_EQUAL;
+            case d3dcmp_greater:
+                return VK_COMPARE_OP_GREATER;
+            case d3dcmp_notequal:
+                return VK_COMPARE_OP_NOT_EQUAL;
+            case d3dcmp_greaterequal:
+                return VK_COMPARE_OP_GREATER_OR_EQUAL;
+            case d3dcmp_always:
+                return VK_COMPARE_OP_ALWAYS;
+            default:
+                return VK_COMPARE_OP_LESS_OR_EQUAL; // D3D9's own documented default for D3DRS_ZFUNC
             }
         }
 
         // Builds the pipeline's depth-test state from the app's accumulated render state. depth_format ==
         // 0 (no bound depth-stencil with real GPU backing) always yields test_enable == 0, matching this
         // function's pre-depth-testing behavior exactly for every draw that never binds one.
-        vulkan_host::depth_state build_depth_state(const std::unordered_map<uint32_t, uint32_t>& render_state,
-                                                    const uint32_t depth_format)
+        vulkan_host::depth_state build_depth_state(const std::unordered_map<uint32_t, uint32_t>& render_state, const uint32_t depth_format)
         {
             if (depth_format == 0 || render_state_or(render_state, d3drs_zenable, 0) == 0)
             {
@@ -244,20 +252,34 @@ namespace sogen
         {
             switch (d3dblend)
             {
-            case d3dblend_zero: return VK_BLEND_FACTOR_ZERO;
-            case d3dblend_one: return VK_BLEND_FACTOR_ONE;
-            case d3dblend_srccolor: return VK_BLEND_FACTOR_SRC_COLOR;
-            case d3dblend_invsrccolor: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
-            case d3dblend_srcalpha: return VK_BLEND_FACTOR_SRC_ALPHA;
-            case d3dblend_invsrcalpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            case d3dblend_destalpha: return VK_BLEND_FACTOR_DST_ALPHA;
-            case d3dblend_invdestalpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
-            case d3dblend_destcolor: return VK_BLEND_FACTOR_DST_COLOR;
-            case d3dblend_invdestcolor: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-            case d3dblend_srcalphasat: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
-            case d3dblend_blendfactor: return VK_BLEND_FACTOR_CONSTANT_COLOR;
-            case d3dblend_invblendfactor: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
-            default: return VK_BLEND_FACTOR_ONE; // D3D9's own documented default for D3DRS_SRCBLEND
+            case d3dblend_zero:
+                return VK_BLEND_FACTOR_ZERO;
+            case d3dblend_one:
+                return VK_BLEND_FACTOR_ONE;
+            case d3dblend_srccolor:
+                return VK_BLEND_FACTOR_SRC_COLOR;
+            case d3dblend_invsrccolor:
+                return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+            case d3dblend_srcalpha:
+                return VK_BLEND_FACTOR_SRC_ALPHA;
+            case d3dblend_invsrcalpha:
+                return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case d3dblend_destalpha:
+                return VK_BLEND_FACTOR_DST_ALPHA;
+            case d3dblend_invdestalpha:
+                return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            case d3dblend_destcolor:
+                return VK_BLEND_FACTOR_DST_COLOR;
+            case d3dblend_invdestcolor:
+                return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+            case d3dblend_srcalphasat:
+                return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+            case d3dblend_blendfactor:
+                return VK_BLEND_FACTOR_CONSTANT_COLOR;
+            case d3dblend_invblendfactor:
+                return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+            default:
+                return VK_BLEND_FACTOR_ONE; // D3D9's own documented default for D3DRS_SRCBLEND
             }
         }
 
@@ -267,12 +289,18 @@ namespace sogen
         {
             switch (d3dblendop)
             {
-            case d3dblendop_add: return VK_BLEND_OP_ADD;
-            case d3dblendop_subtract: return VK_BLEND_OP_SUBTRACT;
-            case d3dblendop_revsubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
-            case d3dblendop_min: return VK_BLEND_OP_MIN;
-            case d3dblendop_max: return VK_BLEND_OP_MAX;
-            default: return VK_BLEND_OP_ADD; // D3D9's own documented default for D3DRS_BLENDOP
+            case d3dblendop_add:
+                return VK_BLEND_OP_ADD;
+            case d3dblendop_subtract:
+                return VK_BLEND_OP_SUBTRACT;
+            case d3dblendop_revsubtract:
+                return VK_BLEND_OP_REVERSE_SUBTRACT;
+            case d3dblendop_min:
+                return VK_BLEND_OP_MIN;
+            case d3dblendop_max:
+                return VK_BLEND_OP_MAX;
+            default:
+                return VK_BLEND_OP_ADD; // D3D9's own documented default for D3DRS_BLENDOP
             }
         }
 
@@ -296,8 +324,7 @@ namespace sogen
                         .color_write_mask = 0xF};
             }
             const uint32_t src_factor = d3dblend_to_vk_blend_factor(render_state_or(render_state, d3drs_srcblend, d3dblend_one));
-            const uint32_t dst_factor =
-                d3dblend_to_vk_blend_factor(render_state_or(render_state, d3drs_destblend, d3dblend_zero));
+            const uint32_t dst_factor = d3dblend_to_vk_blend_factor(render_state_or(render_state, d3drs_destblend, d3dblend_zero));
             const uint32_t blend_op = d3dblendop_to_vk_blend_op(render_state_or(render_state, d3drs_blendop, d3dblendop_add));
             return {.blend_enable = 1,
                     .src_color_blend_factor = src_factor,
@@ -378,8 +405,7 @@ namespace sogen
         {
             return false;
         }
-        if (this->vulkan_.allocate_command_buffer(device, this->command_pool_, 0, this->command_buffer_) != 0 ||
-            this->command_buffer_ == 0)
+        if (this->vulkan_.allocate_command_buffer(device, this->command_pool_, 0, this->command_buffer_) != 0 || this->command_buffer_ == 0)
         {
             return false;
         }
@@ -448,8 +474,8 @@ namespace sogen
         // shaders and layout never depend on bound RT/depth format) -- created once and reused by every
         // cache miss below, unlike ff_pipelines_'s entries which vary per pipeline_cache_key.
         if (this->vs_module_ == 0 &&
-            (this->vulkan_.create_shader_module(device, k_ff_vertex_shader_spirv.data(),
-                                                k_ff_vertex_shader_spirv.size() * sizeof(uint32_t), this->vs_module_) != 0 ||
+            (this->vulkan_.create_shader_module(device, k_ff_vertex_shader_spirv.data(), k_ff_vertex_shader_spirv.size() * sizeof(uint32_t),
+                                                this->vs_module_) != 0 ||
              this->vs_module_ == 0))
         {
             return false;
@@ -465,8 +491,7 @@ namespace sogen
         // One push-constant range (vec2 viewportSize) in the vertex stage, no descriptor sets -- this
         // minimal shader pair needs neither textures nor uniform buffers.
         if (this->pipeline_layout_ == 0 &&
-            (this->vulkan_.create_pipeline_layout(device, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 2, {},
-                                                  this->pipeline_layout_) != 0 ||
+            (this->vulkan_.create_pipeline_layout(device, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 2, {}, this->pipeline_layout_) != 0 ||
              this->pipeline_layout_ == 0))
         {
             return false;
@@ -490,10 +515,9 @@ namespace sogen
 
         uint64_t pipeline = 0;
         const int32_t result = this->vulkan_.create_graphics_pipeline(
-            device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings,
-            attributes, key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend,
-            key.depth_clip_enable, pipeline);
+            device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings, attributes,
+            key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, pipeline);
         if (result != 0 || pipeline == 0)
         {
             return false;
@@ -546,8 +570,7 @@ namespace sogen
                     continue;
                 }
                 const auto stride_it = this->state_.stream_strides.find(stream);
-                shape.strides[stream] =
-                    stride_it != this->state_.stream_strides.end() ? stride_it->second : 0u;
+                shape.strides[stream] = stride_it != this->state_.stream_strides.end() ? stride_it->second : 0u;
             }
             return shape;
         }
@@ -621,8 +644,9 @@ namespace sogen
         return result;
     }
 
-    const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(
-        const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height, const uint32_t depth_format)
+    const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(const std::span<const uint32_t> color_formats,
+                                                                                          const uint32_t width, const uint32_t height,
+                                                                                          const uint32_t depth_format)
     {
         pipeline_cache_key key{};
         key.vertex_shader = this->state_.vertex_shader;
@@ -668,14 +692,14 @@ namespace sogen
         }
 
         programmable_pipeline_entry entry{};
-        if (this->vulkan_.create_shader_module(device, spirv.vertex_spirv.data(),
-                                               spirv.vertex_spirv.size() * sizeof(uint32_t), entry.vs_module) != 0 ||
+        if (this->vulkan_.create_shader_module(device, spirv.vertex_spirv.data(), spirv.vertex_spirv.size() * sizeof(uint32_t),
+                                               entry.vs_module) != 0 ||
             entry.vs_module == 0)
         {
             return nullptr;
         }
-        if (this->vulkan_.create_shader_module(device, spirv.pixel_spirv.data(),
-                                               spirv.pixel_spirv.size() * sizeof(uint32_t), entry.fs_module) != 0 ||
+        if (this->vulkan_.create_shader_module(device, spirv.pixel_spirv.data(), spirv.pixel_spirv.size() * sizeof(uint32_t),
+                                               entry.fs_module) != 0 ||
             entry.fs_module == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
@@ -698,11 +722,17 @@ namespace sogen
         // so a VS that never samples (the common case) is unaffected; execute_draw only writes a
         // descriptor when a vertex texture is actually bound to that stage.
         std::array<vulkan_host::descriptor_binding, 3 + max_vs_sampler_stages> vs_bindings{{
-            {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+            {.binding = 0,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
-            {.binding = 2, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+            {.binding = 2,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
-            {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+            {.binding = 3,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
         }};
         for (uint32_t stage = 0; stage < max_vs_sampler_stages; ++stage)
@@ -724,11 +754,17 @@ namespace sogen
         // the cap toward D3D9's 16-sampler max is a mechanical change to max_ps_sampler_stages + the pool
         // sizing (this constant is now the only place that needs to change for the bindings themselves).
         std::array<vulkan_host::descriptor_binding, 3 + max_ps_sampler_stages> ps_bindings{{
-            {.binding = 0, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+            {.binding = 0,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
-            {.binding = 2, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+            {.binding = 2,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
-            {.binding = 3, .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 1,
+            {.binding = 3,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
         }};
         for (uint32_t stage = 0; stage < max_ps_sampler_stages; ++stage)
@@ -738,15 +774,13 @@ namespace sogen
                                       .descriptor_count = 1,
                                       .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT};
         }
-        if (this->vulkan_.create_descriptor_set_layout(device, vs_bindings, entry.vs_set_layout) != 0 ||
-            entry.vs_set_layout == 0)
+        if (this->vulkan_.create_descriptor_set_layout(device, vs_bindings, entry.vs_set_layout) != 0 || entry.vs_set_layout == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
             return nullptr;
         }
-        if (this->vulkan_.create_descriptor_set_layout(device, ps_bindings, entry.ps_set_layout) != 0 ||
-            entry.ps_set_layout == 0)
+        if (this->vulkan_.create_descriptor_set_layout(device, ps_bindings, entry.ps_set_layout) != 0 || entry.ps_set_layout == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
@@ -755,8 +789,7 @@ namespace sogen
         }
 
         const std::array<uint64_t, 2> set_layouts{entry.vs_set_layout, entry.ps_set_layout};
-        if (this->vulkan_.create_pipeline_layout(device, 0, 0, set_layouts, entry.pipeline_layout) != 0 ||
-            entry.pipeline_layout == 0)
+        if (this->vulkan_.create_pipeline_layout(device, 0, 0, set_layouts, entry.pipeline_layout) != 0 || entry.pipeline_layout == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
@@ -800,8 +833,8 @@ namespace sogen
                     continue;
                 }
                 const auto stride_it = this->state_.stream_strides.find(stream);
-                const uint32_t input_rate = (instance_mask & (1u << stream)) != 0 ? VK_VERTEX_INPUT_RATE_INSTANCE
-                                                                                  : VK_VERTEX_INPUT_RATE_VERTEX;
+                const uint32_t input_rate =
+                    (instance_mask & (1u << stream)) != 0 ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
                 bindings.push_back({.binding = stream, .stride = stride_it->second, .input_rate = input_rate});
             }
             attributes.reserve(real_decl->attributes.size());
@@ -811,8 +844,7 @@ namespace sogen
                 {
                     continue; // references a binding that didn't make it into `bindings` above
                 }
-                attributes.push_back(
-                    {.location = attr.location, .binding = attr.binding, .format = attr.vk_format, .offset = attr.offset});
+                attributes.push_back({.location = attr.location, .binding = attr.binding, .format = attr.vk_format, .offset = attr.offset});
             }
         }
         else
@@ -832,8 +864,7 @@ namespace sogen
             // Always per-vertex: this fallback is a single stream-0-only shape with no vertex declaration,
             // so there is no second stream to carry per-instance data (instancing needs a real multi-stream
             // declaration, which takes the real-decl branch above).
-            bindings.push_back(
-                {.binding = 0, .stride = textured_layout ? 20u : 16u, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX});
+            bindings.push_back({.binding = 0, .stride = textured_layout ? 20u : 16u, .input_rate = VK_VERTEX_INPUT_RATE_VERTEX});
             attributes.push_back({.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0});
             attributes.push_back({.location = 1,
                                   .binding = 0,
@@ -848,10 +879,9 @@ namespace sogen
         const vulkan_host::specialization empty_spec{};
 
         const int32_t result = this->vulkan_.create_graphics_pipeline(
-            device, /*render_pass=*/0, entry.pipeline_layout, entry.vs_module, entry.fs_module, width, height, bindings,
-            attributes, key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1,
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec,
-            blend, key.depth_clip_enable, entry.pipeline);
+            device, /*render_pass=*/0, entry.pipeline_layout, entry.vs_module, entry.fs_module, width, height, bindings, attributes,
+            key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
@@ -979,9 +1009,8 @@ namespace sogen
         // mip_levels entries, index == level. This ONE mapping both sizes the per-subresource backing
         // store (create_resource) AND drives the staging upload (ensure_texture_uploaded), so the two can
         // never disagree about which subresource index holds which (level, face).
-        std::vector<texture_subresource> texture_subresource_layout(const uint32_t kind, const uint32_t vk_format,
-                                                                    const uint32_t width, const uint32_t height,
-                                                                    const uint32_t depth, const uint32_t mip_levels)
+        std::vector<texture_subresource> texture_subresource_layout(const uint32_t kind, const uint32_t vk_format, const uint32_t width,
+                                                                    const uint32_t height, const uint32_t depth, const uint32_t mip_levels)
         {
             const uint32_t levels = std::max(1u, mip_levels);
             const bool is_cube = kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube);
@@ -1095,8 +1124,7 @@ namespace sogen
             case VK_FORMAT_R5G6B5_UNORM_PACK16: {
                 // VK_FORMAT_R5G6B5_UNORM_PACK16 packs R in bits 11..15, G in 5..10, B in 0..4 -- the exact
                 // D3DFMT_R5G6B5 layout (see d3d9_format_to_vulkan).
-                const uint16_t packed =
-                    static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                const uint16_t packed = static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
                 std::memcpy(out.data(), &packed, sizeof(packed));
                 return true;
             }
@@ -1142,11 +1170,16 @@ namespace sogen
         {
             switch (d3d9_address)
             {
-            case 2: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-            case 3: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-            case 4: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-            case 5: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
-            default: return VK_SAMPLER_ADDRESS_MODE_REPEAT; // WRAP (1) and any unrecognized value
+            case 2:
+                return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+            case 3:
+                return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            case 4:
+                return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            case 5:
+                return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+            default:
+                return VK_SAMPLER_ADDRESS_MODE_REPEAT; // WRAP (1) and any unrecognized value
             }
         }
 
@@ -1174,8 +1207,7 @@ namespace sogen
         }
     } // namespace
 
-    bool d3d9_host::build_sampler(const uint64_t device, const uint32_t sampler_index, const uint32_t mip_levels,
-                                  uint64_t& out_sampler)
+    bool d3d9_host::build_sampler(const uint64_t device, const uint32_t sampler_index, const uint32_t mip_levels, uint64_t& out_sampler)
     {
         out_sampler = 0;
         const auto& ss = this->state_.sampler_state;
@@ -1184,8 +1216,7 @@ namespace sogen
         // MAXANISOTROPY to 1), confirmed live in this task's own default-init capture (HANDOFF_MACBOOK.md).
         const uint32_t mag_filter = d3d9_filter_to_vk_filter(sampler_state_or(ss, sampler_index, d3dsamp_magfilter, 1));
         const uint32_t min_filter = d3d9_filter_to_vk_filter(sampler_state_or(ss, sampler_index, d3dsamp_minfilter, 1));
-        const uint32_t mipmap_mode =
-            d3d9_mip_filter_to_vk_mipmap_mode(sampler_state_or(ss, sampler_index, d3dsamp_mipfilter, 0));
+        const uint32_t mipmap_mode = d3d9_mip_filter_to_vk_mipmap_mode(sampler_state_or(ss, sampler_index, d3dsamp_mipfilter, 0));
         const uint32_t address_u = d3d9_address_to_vk(sampler_state_or(ss, sampler_index, d3dsamp_addressu, 1));
         const uint32_t address_v = d3d9_address_to_vk(sampler_state_or(ss, sampler_index, d3dsamp_addressv, 1));
         const uint32_t address_w = d3d9_address_to_vk(sampler_state_or(ss, sampler_index, d3dsamp_addressw, 1));
@@ -1210,9 +1241,9 @@ namespace sogen
         // Every argument below that create_sampler varies the resulting VkSampler on is folded into the
         // cache key; the rest (compare_enable/compare_op/border_color/mip_lod_bias) are hardcoded
         // constants here, so they never distinguish two states and are left out of the key.
-        const sampler_cache_key key{mag_filter,       min_filter, mipmap_mode, address_u,
-                                    address_v,        address_w,  anisotropy_enable,
-                                    static_cast<float>(max_anisotropy), min_lod, max_lod};
+        const sampler_cache_key key{mag_filter, min_filter, mipmap_mode,       address_u,
+                                    address_v,  address_w,  anisotropy_enable, static_cast<float>(max_anisotropy),
+                                    min_lod,    max_lod};
         if (const auto it = this->sampler_cache_.find(key); it != this->sampler_cache_.end())
         {
             out_sampler = it->second;
@@ -1227,8 +1258,7 @@ namespace sogen
         // is actually used with a non-default border color.
         if (this->vulkan_.create_sampler(device, mag_filter, min_filter, address_u, address_v, address_w, mipmap_mode,
                                          /*compare_enable=*/0, /*compare_op=*/0, anisotropy_enable, /*border_color=*/0,
-                                         /*mip_lod_bias=*/0.0f, static_cast<float>(max_anisotropy), min_lod, max_lod,
-                                         out_sampler) != 0 ||
+                                         /*mip_lod_bias=*/0.0f, static_cast<float>(max_anisotropy), min_lod, max_lod, out_sampler) != 0 ||
             out_sampler == 0)
         {
             out_sampler = 0;
@@ -1247,10 +1277,9 @@ namespace sogen
         }
 
         const uint32_t depth_aspect = depth_aspect_mask(depth_format);
-        if (this->vulkan_.create_image_view(device, ds_entry.vk_image_id, depth_format, depth_aspect, VK_IMAGE_VIEW_TYPE_2D, 0,
-                                            1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                            ds_entry.vk_image_view_id) != 0 ||
+        if (this->vulkan_.create_image_view(device, ds_entry.vk_image_id, depth_format, depth_aspect, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1,
+                                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                            VK_COMPONENT_SWIZZLE_IDENTITY, ds_entry.vk_image_view_id) != 0 ||
             ds_entry.vk_image_view_id == 0)
         {
             return false;
@@ -1267,10 +1296,10 @@ namespace sogen
         this->vulkan_.reset_fence(device, this->fence_);
         this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
         this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, depth_range);
-        this->vulkan_.cmd_clear_depth_stencil_image(this->command_buffer_, ds_entry.vk_image_id,
-                                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1.0f, 0, depth_range);
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, depth_range);
+        this->vulkan_.cmd_clear_depth_stencil_image(this->command_buffer_, ds_entry.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1.0f,
+                                                    0, depth_range);
         this->vulkan_.cmd_pipeline_barrier(
             this->command_buffer_, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1330,12 +1359,11 @@ namespace sogen
         uint64_t mem_align = 0;
         uint32_t mem_type_bits = 0;
         this->vulkan_.get_buffer_memory_requirements(this->vk_device_, new_buffer, mem_size, mem_align, mem_type_bits);
-        const uint32_t memory_type =
-            find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
-                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
+                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         uint64_t new_memory = 0;
-        if (memory_type == UINT32_MAX ||
-            this->vulkan_.allocate_memory(this->vk_device_, mem_size, memory_type, new_memory) != 0 || new_memory == 0)
+        if (memory_type == UINT32_MAX || this->vulkan_.allocate_memory(this->vk_device_, mem_size, memory_type, new_memory) != 0 ||
+            new_memory == 0)
         {
             this->vulkan_.destroy_buffer(this->vk_device_, new_buffer);
             return false;
@@ -1503,8 +1531,8 @@ namespace sogen
             }
             if (this->vulkan_.create_image_view(device, brt.entry->vk_image_id, brt.vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                 VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                VK_COMPONENT_SWIZZLE_IDENTITY, brt.entry->vk_image_view_id) != 0 ||
+                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                brt.entry->vk_image_view_id) != 0 ||
                 brt.entry->vk_image_view_id == 0)
             {
                 return d3d_ok;
@@ -1754,8 +1782,7 @@ namespace sogen
         uint64_t index_buffer_vk = 0;
         if (ib_bytes != nullptr)
         {
-            this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(),
-                                        ib_bytes->size());
+            this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
             index_buffer_vk = arena.buffer;
         }
 
@@ -1773,8 +1800,7 @@ namespace sogen
             // per draw; the slices were reserved (and the arena grown if needed) in phase A above.
             for (size_t i = 0; i < ubo_offsets.size(); ++i)
             {
-                this->vulkan_.upload_memory(device, arena.memory, ubo_offsets[i], ubo_sizes[i], ubo_staging[i].data(),
-                                            ubo_sizes[i]);
+                this->vulkan_.upload_memory(device, arena.memory, ubo_offsets[i], ubo_sizes[i], ubo_staging[i].data(), ubo_sizes[i]);
             }
 
             // Combined-image-sampler bindings for texture stages s0..s3 (see ensure_programmable_pipeline's
@@ -1787,8 +1813,7 @@ namespace sogen
             for (uint32_t stage = 0; stage < max_ps_sampler_stages; ++stage)
             {
                 const auto tex_it = this->state_.bound_textures.find(stage);
-                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0 ||
-                    !this->ensure_texture_uploaded(tex_it->second))
+                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0 || !this->ensure_texture_uploaded(tex_it->second))
                 {
                     continue;
                 }
@@ -1811,8 +1836,7 @@ namespace sogen
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                         view_shape.view_type, 0, view_levels, 0, view_shape.layer_count,
                                                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        tex.vk_image_view_id);
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
                     }
                 }
                 if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, std::max(1u, tex.mip_levels), tex_samplers[stage]))
@@ -1833,8 +1857,7 @@ namespace sogen
             {
                 const uint32_t vs_stage = d3dvertextexturesampler0 + k;
                 const auto tex_it = this->state_.bound_textures.find(vs_stage);
-                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0 ||
-                    !this->ensure_texture_uploaded(tex_it->second))
+                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0 || !this->ensure_texture_uploaded(tex_it->second))
                 {
                     continue;
                 }
@@ -1854,12 +1877,10 @@ namespace sogen
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                         view_shape.view_type, 0, view_levels, 0, view_shape.layer_count,
                                                         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        tex.vk_image_view_id);
+                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
                     }
                 }
-                if (tex.vk_image_view_id != 0 &&
-                    this->build_sampler(device, vs_stage, std::max(1u, tex.mip_levels), vs_tex_samplers[k]))
+                if (tex.vk_image_view_id != 0 && this->build_sampler(device, vs_stage, std::max(1u, tex.mip_levels), vs_tex_samplers[k]))
                 {
                     vs_tex_image_views[k] = tex.vk_image_view_id;
                 }
@@ -1877,8 +1898,8 @@ namespace sogen
             }
             const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
             uint32_t set_count = 0;
-            if (this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_, set_layouts, descriptor_sets,
-                                                       set_count) != 0 ||
+            if (this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_, set_layouts, descriptor_sets, set_count) !=
+                    0 ||
                 set_count != descriptor_sets.size())
             {
                 return d3d_ok;
@@ -2054,9 +2075,12 @@ namespace sogen
                                                    VK_PIPELINE_BIND_POINT_GRAPHICS, {});
         }
 
-        const std::array<vulkan_host::viewport_entry, 1> viewports{
-            {{.x = 0, .y = 0, .width = static_cast<float>(rt.width), .height = static_cast<float>(rt.height), .min_depth = 0.0f,
-              .max_depth = 1.0f}}};
+        const std::array<vulkan_host::viewport_entry, 1> viewports{{{.x = 0,
+                                                                     .y = 0,
+                                                                     .width = static_cast<float>(rt.width),
+                                                                     .height = static_cast<float>(rt.height),
+                                                                     .min_depth = 0.0f,
+                                                                     .max_depth = 1.0f}}};
         this->vulkan_.cmd_set_viewport(this->batch_command_buffer_, 0, false, viewports);
         vulkan_host::scissor_entry scissor{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height};
         if (render_state_or(this->state_.render_state, d3drs_scissortestenable, 0) != 0)
@@ -2111,10 +2135,9 @@ namespace sogen
                 continue; // gap slot -- no real image to transition
             }
             this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, brt.entry->vk_image_id,
-                                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                               VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+                                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
         }
 
         // The batch is NOT submitted here -- it stays open, accumulating subsequent same-render-target
@@ -2168,8 +2191,8 @@ namespace sogen
         // shared texture_subresource_layout below) how its per-subresource backing is sized, so the two
         // can never disagree. Unrecognized formats fall through with no GPU image, matching this
         // function's existing "unrecognized -> no backing" behavior rather than crashing.
-        const bool is_texture = (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) || is_cube || is_volume) &&
-                                !is_render_target;
+        const bool is_texture =
+            (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) || is_cube || is_volume) && !is_render_target;
         uint32_t texture_vk_format = 0;
         const bool texture_format_ok = is_texture && d3d9_format_to_vulkan(format, texture_vk_format);
         const uint32_t texture_mip_levels = std::max(1u, mip_levels);
@@ -2202,9 +2225,7 @@ namespace sogen
             extra_mips.emplace_back(subresources[s].size);
         }
 
-        const size_t backing_size = is_buffer ? width
-                                    : is_render_target ? render_target_backing_size
-                                                        : texture_backing_size;
+        const size_t backing_size = is_buffer ? width : is_render_target ? render_target_backing_size : texture_backing_size;
 
         resource_entry entry{
             .kind = kind,
@@ -2262,7 +2283,7 @@ namespace sogen
                     uint32_t image_mem_type_bits = 0;
                     this->vulkan_.get_image_memory_requirements(device, vk_image, image_mem_size, image_mem_align, image_mem_type_bits);
                     const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, image_mem_type_bits,
-                                                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                                                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
                     uint64_t image_memory = 0;
                     if (memory_type != UINT32_MAX &&
                         this->vulkan_.allocate_memory(device, image_mem_size, memory_type, image_memory) == 0 && image_memory != 0 &&
@@ -2345,8 +2366,7 @@ namespace sogen
             {
                 return false; // degenerate format/size only -- see the comment above this loop
             }
-            uploads.push_back(
-                {sub.width, sub.height, sub.depth, sub.level, sub.base_array_layer, sub.size, total_size, src.data()});
+            uploads.push_back({sub.width, sub.height, sub.depth, sub.level, sub.base_array_layer, sub.size, total_size, src.data()});
             total_size += sub.size;
         }
 
@@ -2363,8 +2383,7 @@ namespace sogen
         // execute_draw (the only caller so far) can add its own caching if re-uploading every draw turns
         // out to matter.
         uint64_t staging_buffer = 0;
-        if (this->vulkan_.create_buffer(device, total_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
-            staging_buffer == 0)
+        if (this->vulkan_.create_buffer(device, total_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 || staging_buffer == 0)
         {
             return false;
         }
@@ -2373,7 +2392,7 @@ namespace sogen
         uint32_t mem_type_bits = 0;
         this->vulkan_.get_buffer_memory_requirements(device, staging_buffer, mem_size, mem_align, mem_type_bits);
         const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
-                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         uint64_t staging_memory = 0;
         if (memory_type == UINT32_MAX || this->vulkan_.allocate_memory(device, mem_size, memory_type, staging_memory) != 0 ||
             staging_memory == 0)
@@ -2428,9 +2447,8 @@ namespace sogen
         }
 
         this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                           VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, range);
+                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, range);
 
         this->vulkan_.end_command_buffer(this->command_buffer_);
         this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
@@ -2575,8 +2593,7 @@ namespace sogen
         }
 
         uint64_t staging_buffer = 0;
-        if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 ||
-            staging_buffer == 0)
+        if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 || staging_buffer == 0)
         {
             return d3derr_invalidcall;
         }
@@ -2622,8 +2639,8 @@ namespace sogen
             .layer_count = 1,
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
         };
-        this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, rt.vk_image_id,
-                                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+        this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, rt.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                               region);
 
         this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
@@ -2640,8 +2657,8 @@ namespace sogen
         return d3d_ok;
     }
 
-    int32_t d3d9_host::blt(const uint64_t dst_resource, const uint32_t /*dst_subresource*/, const int32_t dst_left,
-                           const int32_t dst_top, const int32_t dst_right, const int32_t dst_bottom, const uint64_t src_resource,
+    int32_t d3d9_host::blt(const uint64_t dst_resource, const uint32_t /*dst_subresource*/, const int32_t dst_left, const int32_t dst_top,
+                           const int32_t dst_right, const int32_t dst_bottom, const uint64_t src_resource,
                            const uint32_t /*src_subresource*/, const int32_t src_left, const int32_t src_top, const int32_t src_right,
                            const int32_t src_bottom, const uint32_t filter)
     {
@@ -3045,9 +3062,8 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_f
-                              ? this->state_.vs_const_f
-                              : this->state_.ps_const_f;
+            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_f ? this->state_.vs_const_f
+                                                                                                                : this->state_.ps_const_f;
             const size_t required = static_cast<size_t>(req.start_register) * 4 + float_count;
             if (target.size() < required)
             {
@@ -3069,9 +3085,8 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_i
-                              ? this->state_.vs_const_i
-                              : this->state_.ps_const_i;
+            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_i ? this->state_.vs_const_i
+                                                                                                                : this->state_.ps_const_i;
             const size_t required = static_cast<size_t>(req.start_register) * 4 + int_count;
             if (target.size() < required)
             {
@@ -3092,9 +3107,8 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_b
-                              ? this->state_.vs_const_b
-                              : this->state_.ps_const_b;
+            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_b ? this->state_.vs_const_b
+                                                                                                                : this->state_.ps_const_b;
             const size_t required = (static_cast<size_t>(req.start_register) + req.count) * 4;
             if (target.size() < required)
             {
@@ -3271,8 +3285,7 @@ namespace sogen
                 return d3derr_invalidcall;
             }
             return this->blt(req.dst_resource, req.dst_subresource, req.dst_left, req.dst_top, req.dst_right, req.dst_bottom,
-                             req.src_resource, req.src_subresource, req.src_left, req.src_top, req.src_right, req.src_bottom,
-                             req.filter);
+                             req.src_resource, req.src_subresource, req.src_left, req.src_top, req.src_right, req.src_bottom, req.filter);
         }
         default:
             return d3derr_invalidcall;

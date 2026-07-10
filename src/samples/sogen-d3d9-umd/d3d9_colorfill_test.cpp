@@ -71,13 +71,11 @@ namespace
         for (const Check& c : kChecks)
         {
             const unsigned char* p = pixel_at(c.col, c.row);
-            printf("[d3d9-colorfill-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", c.name, c.col, c.row, p[0], p[1], p[2],
-                   p[3]);
-            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) ||
-                !channel_close(p[2], c.expected_r, 2))
+            printf("[d3d9-colorfill-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", c.name, c.col, c.row, p[0], p[1], p[2], p[3]);
+            if (!channel_close(p[0], c.expected_b, 2) || !channel_close(p[1], c.expected_g, 2) || !channel_close(p[2], c.expected_r, 2))
             {
-                printf("[d3d9-colorfill-test] FAIL: %s does not match expected B=%02X G=%02X R=%02X\n", c.name, c.expected_b,
-                       c.expected_g, c.expected_r);
+                printf("[d3d9-colorfill-test] FAIL: %s does not match expected B=%02X G=%02X R=%02X\n", c.name, c.expected_b, c.expected_g,
+                       c.expected_r);
                 ++failures;
             }
             else
@@ -101,8 +99,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9colorfilltest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "colorfill-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
-                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "colorfill-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -132,10 +130,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-    printf("[d3d9-colorfill-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-colorfill-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-colorfill-test] FAIL: render target creation failed\n");
@@ -154,8 +150,8 @@ int main()
     const D3DCOLOR red = D3DCOLOR_ARGB(255, 255, 0, 0);
     RECT fill = kFillRect;
     HRESULT hcf = dev->ColorFill(rt, &fill, red);
-    printf("[d3d9-colorfill-test] ColorFill({%ld,%ld,%ld,%ld}, 0x%08lX) hr=0x%08lx\n", fill.left, fill.top, fill.right,
-           fill.bottom, static_cast<unsigned long>(red), static_cast<unsigned long>(hcf));
+    printf("[d3d9-colorfill-test] ColorFill({%ld,%ld,%ld,%ld}, 0x%08lX) hr=0x%08lx\n", fill.left, fill.top, fill.right, fill.bottom,
+           static_cast<unsigned long>(red), static_cast<unsigned long>(hcf));
 
     int failures = 0;
     if (FAILED(hcf))

@@ -381,8 +381,7 @@ namespace sogen
 
             static_assert(offsetof(USER_SHAREDINFO, awmControl) == 0x28);
             constexpr size_t k_wndmsg_awm_index = 14;
-            const uint64_t awm14_addr =
-                destination + offsetof(USER_SHAREDINFO, awmControl) + k_wndmsg_awm_index * sizeof(USER_WNDMSG);
+            const uint64_t awm14_addr = destination + offsetof(USER_SHAREDINFO, awmControl) + k_wndmsg_awm_index * sizeof(USER_WNDMSG);
 
             USER_WNDMSG awm14{};
             awm14.maxMsgs = k_wow64_wndmsg_count;

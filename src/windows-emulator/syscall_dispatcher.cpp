@@ -120,8 +120,7 @@ namespace sogen
                 const auto status = static_cast<uint32_t>(emu.reg<uint64_t>(x86_register::rax));
                 if (c.write_status && !c.retrigger_syscall && !c.run_callback && (status & 0xC0000000) == 0xC0000000)
                 {
-                    win_emu.log.error("[NTSTATUS_PROBE] %s -> 0x%08X (ip=0x%" PRIx64 ")\n", entry->second.name.c_str(), status,
-                                      address);
+                    win_emu.log.error("[NTSTATUS_PROBE] %s -> 0x%08X (ip=0x%" PRIx64 ")\n", entry->second.name.c_str(), status, address);
                 }
             }
 #endif

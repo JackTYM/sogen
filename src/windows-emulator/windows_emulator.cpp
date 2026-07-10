@@ -298,9 +298,8 @@ namespace sogen
             constexpr uint64_t read_cursor_offset = 0x18;
             constexpr uint64_t clock_position_offset = 0x98;
 
-            const auto now_ns =
-                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-                                          .count());
+            const auto now_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 
             // The guest maps and later unmaps each render section (dsound churns stream setup until playback
             // stabilizes), so a tracked section's backing can become unmapped. Probe with try_read and prune
@@ -746,9 +745,8 @@ namespace sogen
             const auto desktop_thread_id = this->current_thread().id;
             desktop->thread_id = desktop_thread_id;
             desktop->guest.access([&](USER_WINDOW& window) { window.threadId = desktop_thread_id; });
-            context.user_handles.get_handle_table().access(
-                [&](USER_HANDLEENTRY& entry) { entry.pOwner = desktop_thread_id; },
-                static_cast<uint32_t>(context.default_desktop_window_handle.value.id));
+            context.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = desktop_thread_id; },
+                                                           static_cast<uint32_t>(context.default_desktop_window_handle.value.id));
         }
     }
 
@@ -962,8 +960,7 @@ namespace sogen
             constexpr std::array<uint8_t, 7> expected_pattern = {0x0F, 0xBA, 0xF0, 0x1C, 0x89, 0x46, 0x0C};
 
             std::array<uint8_t, 7> actual_pattern{};
-            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(),
-                                             actual_pattern.size()) ||
+            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
                 actual_pattern != expected_pattern)
             {
                 this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
@@ -999,8 +996,7 @@ namespace sogen
             constexpr std::array<uint8_t, 8> expected_pattern = {0x25, 0xFF, 0xFF, 0xFF, 0xEF, 0x89, 0x43, 0x0C};
 
             std::array<uint8_t, 8> actual_pattern{};
-            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(),
-                                             actual_pattern.size()) ||
+            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
                 actual_pattern != expected_pattern)
             {
                 this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
@@ -1135,8 +1131,7 @@ namespace sogen
         std::array<uint8_t, 18> actual_argspill{};
         if (!this->emu().try_read_memory(mod.image_base + entry_rva, actual_entry.data(), actual_entry.size()) ||
             actual_entry != entry_pattern ||
-            !this->emu().try_read_memory(mod.image_base + argspill_rva, actual_argspill.data(),
-                                         actual_argspill.size()) ||
+            !this->emu().try_read_memory(mod.image_base + argspill_rva, actual_argspill.data(), actual_argspill.size()) ||
             actual_argspill != argspill_pattern)
         {
             this->log.warn("ddraw.dll GetAvailableVidMem RVA pattern mismatch at image_base+0x%llx (sha256 "
@@ -1404,123 +1399,121 @@ namespace sogen
             }
         });
 
-        this->emu().hook_memory_violation(
-            [&](const uint64_t address, const size_t size, const memory_operation operation, const memory_violation_type type) {
-                if (this->emu().reg<uint16_t>(x86_register::cs) == 0x33)
+        this->emu().hook_memory_violation([&](const uint64_t address, const size_t size, const memory_operation operation,
+                                              const memory_violation_type type) {
+            if (this->emu().reg<uint16_t>(x86_register::cs) == 0x33)
+            {
+                // loading gs selector only works in 64-bit mode
+                const auto required_gs_base = this->current_thread().gs_segment->get_base();
+                const auto actual_gs_base = this->emu().get_segment_base(x86_register::gs);
+                if (actual_gs_base != required_gs_base)
                 {
-                    // loading gs selector only works in 64-bit mode
-                    const auto required_gs_base = this->current_thread().gs_segment->get_base();
-                    const auto actual_gs_base = this->emu().get_segment_base(x86_register::gs);
-                    if (actual_gs_base != required_gs_base)
-                    {
-                        this->emu().set_segment_base(x86_register::gs, required_gs_base);
-                        return memory_violation_continuation::restart;
-                    }
+                    this->emu().set_segment_base(x86_register::gs, required_gs_base);
+                    return memory_violation_continuation::restart;
                 }
+            }
 
-                auto region = this->memory.get_region_info(address);
-                if (region.permissions.is_guarded())
+            auto region = this->memory.get_region_info(address);
+            if (region.permissions.is_guarded())
+            {
+                // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION
+                this->memory.protect_memory(region.allocation_base, region.length, region.permissions & ~memory_permission_ext::guard);
                 {
-                    // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION
-                    this->memory.protect_memory(region.allocation_base, region.length, region.permissions & ~memory_permission_ext::guard);
+                    const auto rip = this->emu().read_instruction_pointer();
+                    const auto* rip_mod = this->mod_manager.find_by_address(rip);
+                    this->log.print(color::dark_gray, "Guard page at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
+                                    static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
+                                    rip_mod ? rip_mod->name.c_str() : "?",
+                                    rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
+                }
+                dispatch_guard_page_violation(*this, address, operation);
+            }
+            else
+            {
+                // A fault on a null/near-null address is almost always a call through a null function
+                // pointer (e.g. a Vulkan entry point the shim doesn't implement). Log the caller's
+                // return address so the missing function's call site can be identified.
+                {
+                    const auto rip = this->emu().read_instruction_pointer();
+                    const auto* rip_mod = this->mod_manager.find_by_address(rip);
+                    if (address < 0x1000)
                     {
-                        const auto rip = this->emu().read_instruction_pointer();
-                        const auto* rip_mod = this->mod_manager.find_by_address(rip);
-                        this->log.print(color::dark_gray, "Guard page at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
+                        this->log.error("Null-pointer access at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
                                         static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
                                         rip_mod ? rip_mod->name.c_str() : "?",
                                         rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
                     }
-                    dispatch_guard_page_violation(*this, address, operation);
-                }
-                else
-                {
-                    // A fault on a null/near-null address is almost always a call through a null function
-                    // pointer (e.g. a Vulkan entry point the shim doesn't implement). Log the caller's
-                    // return address so the missing function's call site can be identified.
+                    else
                     {
-                        const auto rip = this->emu().read_instruction_pointer();
-                        const auto* rip_mod = this->mod_manager.find_by_address(rip);
-                        if (address < 0x1000)
-                        {
-                            this->log.error("Null-pointer access at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
-                                            static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
-                                            rip_mod ? rip_mod->name.c_str() : "?",
-                                            rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
-                        }
-                        else
-                        {
-                            this->log.print(color::dark_gray, "Access violation at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
-                                            static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
-                                            rip_mod ? rip_mod->name.c_str() : "?",
-                                            rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
+                        this->log.print(color::dark_gray, "Access violation at 0x%llx from RIP=0x%llx (%s+0x%llx)\n",
+                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip),
+                                        rip_mod ? rip_mod->name.c_str() : "?",
+                                        rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : rip);
 
-                            // BEGIN AV-STACKWALK DEBUG (removable)
-                            const auto esp = this->emu().reg<uint32_t>(x86_register::esp);
-                            {
-                                const auto eax = this->emu().reg<uint32_t>(x86_register::eax);
-                                const auto ebx = this->emu().reg<uint32_t>(x86_register::ebx);
-                                const auto ecx = this->emu().reg<uint32_t>(x86_register::ecx);
-                                const auto edx = this->emu().reg<uint32_t>(x86_register::edx);
-                                const auto esi = this->emu().reg<uint32_t>(x86_register::esi);
-                                const auto edi = this->emu().reg<uint32_t>(x86_register::edi);
-                                const auto ebp = this->emu().reg<uint32_t>(x86_register::ebp);
-                                this->log.print(color::dark_gray,
-                                                "AV-REGS eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x\n", eax,
-                                                ebx, ecx, edx, esi, edi, ebp);
-                                const auto dump_at = [&](const char* tag, uint32_t base) {
-                                    uint8_t buf[64] = {};
-                                    if (this->emu().try_read_memory(base, buf, sizeof(buf)))
-                                    {
-                                        std::string hex;
-                                        char t[4];
-                                        for (auto b : buf)
-                                        {
-                                            (void)snprintf(t, sizeof(t), "%02x ", b);
-                                            hex += t;
-                                        }
-                                        this->log.print(color::dark_gray, "AV-MEM %s @%08x: %s\n", tag, base, hex.c_str());
-                                    }
-                                    else
-                                    {
-                                        this->log.print(color::dark_gray, "AV-MEM %s @%08x: <unreadable>\n", tag, base);
-                                    }
-                                };
-                                // The faulting Miles call is `mov 0x1900(esi),eax; mov (eax),ecx; mov 0x8(ecx),edx; call edx`.
-                                // esi=object base; ecx=vtable; eax=object. Dump them to see if pointer/vtable are sane.
-                                dump_at("esi+18f0", esi + 0x18f0);
-                                dump_at("esi+1900", esi + 0x1900);
-                                dump_at("esi+1960", esi + 0x1960);
-                                dump_at("obj(eax)", eax);
-                                dump_at("vtbl(ecx)", ecx);
-                            }
-                            this->log.print(color::dark_gray, "AV-STACKWALK esp=0x%llx\n",
-                                            static_cast<unsigned long long>(esp));
-                            for (uint32_t i = 0; i < 64; ++i)
-                            {
-                                uint32_t ra = 0;
-                                if (!this->emu().try_read_memory(esp + i * 4u, &ra, sizeof(ra)))
+                        // BEGIN AV-STACKWALK DEBUG (removable)
+                        const auto esp = this->emu().reg<uint32_t>(x86_register::esp);
+                        {
+                            const auto eax = this->emu().reg<uint32_t>(x86_register::eax);
+                            const auto ebx = this->emu().reg<uint32_t>(x86_register::ebx);
+                            const auto ecx = this->emu().reg<uint32_t>(x86_register::ecx);
+                            const auto edx = this->emu().reg<uint32_t>(x86_register::edx);
+                            const auto esi = this->emu().reg<uint32_t>(x86_register::esi);
+                            const auto edi = this->emu().reg<uint32_t>(x86_register::edi);
+                            const auto ebp = this->emu().reg<uint32_t>(x86_register::ebp);
+                            this->log.print(color::dark_gray, "AV-REGS eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x\n",
+                                            eax, ebx, ecx, edx, esi, edi, ebp);
+                            const auto dump_at = [&](const char* tag, uint32_t base) {
+                                uint8_t buf[64] = {};
+                                if (this->emu().try_read_memory(base, buf, sizeof(buf)))
                                 {
-                                    break;
+                                    std::string hex;
+                                    char t[4];
+                                    for (auto b : buf)
+                                    {
+                                        (void)snprintf(t, sizeof(t), "%02x ", b);
+                                        hex += t;
+                                    }
+                                    this->log.print(color::dark_gray, "AV-MEM %s @%08x: %s\n", tag, base, hex.c_str());
                                 }
-                                const auto* m = this->mod_manager.find_by_address(ra);
-                                if (m && ra >= m->image_base)
+                                else
                                 {
-                                    this->log.print(color::dark_gray, "AV-FRAME [%u] 0x%llx (%s+0x%llx)\n", i,
-                                                    static_cast<unsigned long long>(ra), m->name.c_str(),
-                                                    static_cast<unsigned long long>(ra - m->image_base));
+                                    this->log.print(color::dark_gray, "AV-MEM %s @%08x: <unreadable>\n", tag, base);
                                 }
-                            }
-                            // END AV-STACKWALK DEBUG
+                            };
+                            // The faulting Miles call is `mov 0x1900(esi),eax; mov (eax),ecx; mov 0x8(ecx),edx; call edx`.
+                            // esi=object base; ecx=vtable; eax=object. Dump them to see if pointer/vtable are sane.
+                            dump_at("esi+18f0", esi + 0x18f0);
+                            dump_at("esi+1900", esi + 0x1900);
+                            dump_at("esi+1960", esi + 0x1960);
+                            dump_at("obj(eax)", eax);
+                            dump_at("vtbl(ecx)", ecx);
                         }
+                        this->log.print(color::dark_gray, "AV-STACKWALK esp=0x%llx\n", static_cast<unsigned long long>(esp));
+                        for (uint32_t i = 0; i < 64; ++i)
+                        {
+                            uint32_t ra = 0;
+                            if (!this->emu().try_read_memory(esp + i * 4u, &ra, sizeof(ra)))
+                            {
+                                break;
+                            }
+                            const auto* m = this->mod_manager.find_by_address(ra);
+                            if (m && ra >= m->image_base)
+                            {
+                                this->log.print(color::dark_gray, "AV-FRAME [%u] 0x%llx (%s+0x%llx)\n", i,
+                                                static_cast<unsigned long long>(ra), m->name.c_str(),
+                                                static_cast<unsigned long long>(ra - m->image_base));
+                            }
+                        }
+                        // END AV-STACKWALK DEBUG
                     }
-
-                    this->callbacks.on_memory_violate(address, size, operation, type);
-                    dispatch_access_violation(*this, address, operation);
                 }
 
-                return memory_violation_continuation::resume;
-            });
+                this->callbacks.on_memory_violate(address, size, operation, type);
+                dispatch_access_violation(*this, address, operation);
+            }
+
+            return memory_violation_continuation::resume;
+        });
 
         if (this->uses_instruction_precision())
         {

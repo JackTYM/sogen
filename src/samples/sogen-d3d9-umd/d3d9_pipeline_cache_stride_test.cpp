@@ -138,21 +138,26 @@ float4 main() : COLOR0
     constexpr DWORD kStrideB = sizeof(PaddedVertex);
     static_assert(kStrideB == 32, "strideB must be a distinctively different, larger stride than strideA");
 
-    float to_ndc_x(const int screen_x) { return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f; }
-    float to_ndc_y(const int screen_y) { return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f; }
+    float to_ndc_x(const int screen_x)
+    {
+        return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f;
+    }
+    float to_ndc_y(const int screen_y)
+    {
+        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+    }
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)
     {
         return std::abs(static_cast<int>(actual) - expected) <= tolerance;
     }
 
-    int check_pixel(IDirect3DSurface9* surf, const char* pass_name, const char* point_name, const int col,
-                     const int row, const int expected_b, const int expected_g, const int expected_r)
+    int check_pixel(IDirect3DSurface9* surf, const char* pass_name, const char* point_name, const int col, const int row,
+                    const int expected_b, const int expected_g, const int expected_r)
     {
         D3DLOCKED_RECT lr{};
         HRESULT hlr = surf->LockRect(&lr, nullptr, D3DLOCK_READONLY);
-        printf("[d3d9-pipeline-cache-stride-test] %s LockRect hr=0x%08lx pBits=%p\n", pass_name,
-               static_cast<unsigned long>(hlr), lr.pBits);
+        printf("[d3d9-pipeline-cache-stride-test] %s LockRect hr=0x%08lx pBits=%p\n", pass_name, static_cast<unsigned long>(hlr), lr.pBits);
         if (FAILED(hlr) || !lr.pBits)
         {
             printf("[d3d9-pipeline-cache-stride-test] FAIL: %s LockRect failed\n", pass_name);
@@ -162,21 +167,18 @@ float4 main() : COLOR0
         const auto* base = static_cast<const unsigned char*>(lr.pBits);
         constexpr LONG kStride = kCanvasWidth * 4;
         const unsigned char* p = base + row * kStride + col * 4;
-        printf("[d3d9-pipeline-cache-stride-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name,
-               point_name, col, row, p[0], p[1], p[2], p[3]);
+        printf("[d3d9-pipeline-cache-stride-test] %s %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X\n", pass_name, point_name, col, row, p[0],
+               p[1], p[2], p[3]);
 
         int failures = 0;
-        if (!channel_close(p[0], expected_b, 2) || !channel_close(p[1], expected_g, 2) ||
-            !channel_close(p[2], expected_r, 2))
+        if (!channel_close(p[0], expected_b, 2) || !channel_close(p[1], expected_g, 2) || !channel_close(p[2], expected_r, 2))
         {
-            printf("[d3d9-pipeline-cache-stride-test] FAIL: %s %s does not match the expected color\n", pass_name,
-                   point_name);
+            printf("[d3d9-pipeline-cache-stride-test] FAIL: %s %s does not match the expected color\n", pass_name, point_name);
             ++failures;
         }
         else
         {
-            printf("[d3d9-pipeline-cache-stride-test] PASS: %s %s matches the expected color\n", pass_name,
-                   point_name);
+            printf("[d3d9-pipeline-cache-stride-test] PASS: %s %s matches the expected color\n", pass_name, point_name);
         }
 
         surf->UnlockRect();
@@ -184,8 +186,8 @@ float4 main() : COLOR0
     }
 
     void release_all(IDirect3DVertexDeclaration9* decl, IDirect3DVertexBuffer9* buf_a, IDirect3DVertexBuffer9* buf_b,
-                     IDirect3DIndexBuffer9* ib, IDirect3DSurface9* rt, IDirect3DVertexShader9* vs,
-                     IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
+                     IDirect3DIndexBuffer9* ib, IDirect3DSurface9* rt, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps,
+                     IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (decl)
         {
@@ -236,8 +238,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9pipelinecachestridetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "pipeline-cache-stride-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0,
-                                0, kCanvasWidth, kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "pipeline-cache-stride-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
+                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -258,10 +260,8 @@ int main()
     pp.hDeviceWindow = hwnd;
 
     IDirect3DDevice9* dev = nullptr;
-    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp,
-                                   &dev);
-    printf("[d3d9-pipeline-cache-stride-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr),
-           static_cast<void*>(dev));
+    HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
+    printf("[d3d9-pipeline-cache-stride-test] CreateDevice hr=0x%08lx dev=%p\n", static_cast<unsigned long>(hr), static_cast<void*>(dev));
     if (FAILED(hr) || !dev)
     {
         d3d->Release();
@@ -270,15 +270,14 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-pipeline-cache-stride-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
         if (vs_errors)
         {
-            printf("[d3d9-pipeline-cache-stride-test] VS compile errors: %s\n",
-                   static_cast<const char*>(vs_errors->GetBufferPointer()));
+            printf("[d3d9-pipeline-cache-stride-test] VS compile errors: %s\n", static_cast<const char*>(vs_errors->GetBufferPointer()));
             vs_errors->Release();
         }
         release_all(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, dev, d3d);
@@ -287,15 +286,14 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-pipeline-cache-stride-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
         if (ps_errors)
         {
-            printf("[d3d9-pipeline-cache-stride-test] PS compile errors: %s\n",
-                   static_cast<const char*>(ps_errors->GetBufferPointer()));
+            printf("[d3d9-pipeline-cache-stride-test] PS compile errors: %s\n", static_cast<const char*>(ps_errors->GetBufferPointer()));
             ps_errors->Release();
         }
         vs_blob->Release();
@@ -326,8 +324,8 @@ int main()
     };
     IDirect3DVertexDeclaration9* decl = nullptr;
     HRESULT hcd = dev->CreateVertexDeclaration(kDecl, &decl);
-    printf("[d3d9-pipeline-cache-stride-test] CreateVertexDeclaration hr=0x%08lx decl=%p\n",
-           static_cast<unsigned long>(hcd), static_cast<void*>(decl));
+    printf("[d3d9-pipeline-cache-stride-test] CreateVertexDeclaration hr=0x%08lx decl=%p\n", static_cast<unsigned long>(hcd),
+           static_cast<void*>(decl));
     if (FAILED(hcd) || !decl)
     {
         printf("[d3d9-pipeline-cache-stride-test] FAIL: CreateVertexDeclaration failed\n");
@@ -344,8 +342,8 @@ int main()
     };
     IDirect3DVertexBuffer9* buf_a = nullptr;
     HRESULT hcba = dev->CreateVertexBuffer(sizeof(kQuadA), 0, 0, D3DPOOL_DEFAULT, &buf_a, nullptr);
-    printf("[d3d9-pipeline-cache-stride-test] CreateVertexBuffer(A, stride=%lu) hr=0x%08lx vb=%p\n",
-           static_cast<unsigned long>(kStrideA), static_cast<unsigned long>(hcba), static_cast<void*>(buf_a));
+    printf("[d3d9-pipeline-cache-stride-test] CreateVertexBuffer(A, stride=%lu) hr=0x%08lx vb=%p\n", static_cast<unsigned long>(kStrideA),
+           static_cast<unsigned long>(hcba), static_cast<void*>(buf_a));
     if (FAILED(hcba) || !buf_a)
     {
         printf("[d3d9-pipeline-cache-stride-test] FAIL: buffer A creation failed\n");
@@ -376,8 +374,8 @@ int main()
     }
     IDirect3DVertexBuffer9* buf_b = nullptr;
     HRESULT hcbb = dev->CreateVertexBuffer(sizeof(kQuadB), 0, 0, D3DPOOL_DEFAULT, &buf_b, nullptr);
-    printf("[d3d9-pipeline-cache-stride-test] CreateVertexBuffer(B, stride=%lu) hr=0x%08lx vb=%p\n",
-           static_cast<unsigned long>(kStrideB), static_cast<unsigned long>(hcbb), static_cast<void*>(buf_b));
+    printf("[d3d9-pipeline-cache-stride-test] CreateVertexBuffer(B, stride=%lu) hr=0x%08lx vb=%p\n", static_cast<unsigned long>(kStrideB),
+           static_cast<unsigned long>(hcbb), static_cast<void*>(buf_b));
     if (FAILED(hcbb) || !buf_b)
     {
         printf("[d3d9-pipeline-cache-stride-test] FAIL: buffer B creation failed\n");
@@ -415,8 +413,7 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE,
-                                           &rt, nullptr);
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
     printf("[d3d9-pipeline-cache-stride-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
            static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
@@ -442,12 +439,10 @@ int main()
     dev->BeginScene();
     dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
     HRESULT hd1 = dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2);
-    printf("[d3d9-pipeline-cache-stride-test] sub-pass 1 DrawIndexedPrimitive hr=0x%08lx\n",
-           static_cast<unsigned long>(hd1));
+    printf("[d3d9-pipeline-cache-stride-test] sub-pass 1 DrawIndexedPrimitive hr=0x%08lx\n", static_cast<unsigned long>(hd1));
     dev->EndScene();
 
-    failures += check_pixel(rt, "sub-pass-1 (strideA=12)", "left-half checkpoint", kCanvasWidth / 4, kCanvasHeight / 2,
-                            0, 0, 255);
+    failures += check_pixel(rt, "sub-pass-1 (strideA=12)", "left-half checkpoint", kCanvasWidth / 4, kCanvasHeight / 2, 0, 0, 255);
 
     // Sub-pass 2 (the discriminator): SAME declaration/VS/PS (never recreated), re-clear the SAME RT, bind
     // buffer B (strideB=32, SAME stream 0) covering the RIGHT half instead. pipeline_cache_key's
@@ -456,15 +451,13 @@ int main()
     dev->BeginScene();
     dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
     HRESULT hd2 = dev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2);
-    printf("[d3d9-pipeline-cache-stride-test] sub-pass 2 DrawIndexedPrimitive hr=0x%08lx\n",
-           static_cast<unsigned long>(hd2));
+    printf("[d3d9-pipeline-cache-stride-test] sub-pass 2 DrawIndexedPrimitive hr=0x%08lx\n", static_cast<unsigned long>(hd2));
     dev->EndScene();
 
     // Expected RED under a fixed vertex_shape_key(); this is the check predicted to FAIL (read back
     // BLACK instead) against the current, unmodified host code -- see this file's header comment for the
     // exact garbage-fetch computation proving the buggy geometry can never cover this checkpoint.
-    failures += check_pixel(rt, "sub-pass-2 (strideB=32)", "right-half checkpoint", 3 * kCanvasWidth / 4,
-                            kCanvasHeight / 2, 0, 0, 255);
+    failures += check_pixel(rt, "sub-pass-2 (strideB=32)", "right-half checkpoint", 3 * kCanvasWidth / 4, kCanvasHeight / 2, 0, 0, 255);
 
     release_all(decl, buf_a, buf_b, ib, rt, vs, ps, dev, d3d);
 

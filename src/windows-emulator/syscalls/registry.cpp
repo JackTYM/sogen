@@ -211,8 +211,7 @@ namespace sogen
             {
                 if (getenv("EMULATOR_LOG_REGMISS"))
                 {
-                    c.win_emu.log.error("[regmiss] NOT_FOUND key=%s value=%s\n", u16_to_u8(key->to_string()).c_str(),
-                                        name_8.c_str());
+                    c.win_emu.log.error("[regmiss] NOT_FOUND key=%s value=%s\n", u16_to_u8(key->to_string()).c_str(), name_8.c_str());
                 }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }

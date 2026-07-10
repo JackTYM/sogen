@@ -60,8 +60,8 @@ float4 main(PSInput input) : COLOR0
     constexpr DWORD kFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
     constexpr int kCanvasWidth = 640;
     constexpr int kCanvasHeight = 480;
-    constexpr int kTexSize = 64;   // level 0 dimensions
-    constexpr int kMipLevels = 3;  // 64x64, 32x32, 16x16
+    constexpr int kTexSize = 64;  // level 0 dimensions
+    constexpr int kMipLevels = 3; // 64x64, 32x32, 16x16
 
     float to_ndc_x(const int screen_x)
     {
@@ -89,9 +89,8 @@ float4 main(PSInput input) : COLOR0
         return std::abs(static_cast<int>(actual) - expected) <= tolerance;
     }
 
-    void release_all(IDirect3DTexture9* tex, IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb,
-                     IDirect3DIndexBuffer9* ib, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps,
-                     IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DTexture9* tex, IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb, IDirect3DIndexBuffer9* ib,
+                     IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (tex)
         {
@@ -158,9 +157,8 @@ float4 main(PSInput input) : COLOR0
 
     // One sub-pass: bind sampler LOD state, clear, draw the current quad, read back its center pixel,
     // and check it matches the expected per-level color. Returns the number of failed checks (0/1).
-    int run_pass(IDirect3DDevice9* dev, IDirect3DSurface9* rt, const int center_x, const int center_y,
-                 const DWORD mip_filter, const DWORD max_mip_level, const int exp_b, const int exp_g, const int exp_r,
-                 const char* label)
+    int run_pass(IDirect3DDevice9* dev, IDirect3DSurface9* rt, const int center_x, const int center_y, const DWORD mip_filter,
+                 const DWORD max_mip_level, const int exp_b, const int exp_g, const int exp_r, const char* label)
     {
         dev->SetSamplerState(0, D3DSAMP_MIPFILTER, mip_filter);
         dev->SetSamplerState(0, D3DSAMP_MAXMIPLEVEL, max_mip_level);
@@ -181,8 +179,8 @@ float4 main(PSInput input) : COLOR0
         constexpr LONG kStride = kCanvasWidth * 4;
         const auto* base = static_cast<const unsigned char*>(lr.pBits);
         const unsigned char* p = base + center_y * kStride + center_x * 4;
-        printf("[d3d9-miptexture-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X (expected B=%02X G=%02X R=%02X)\n", label,
-               center_x, center_y, p[0], p[1], p[2], p[3], exp_b, exp_g, exp_r);
+        printf("[d3d9-miptexture-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X (expected B=%02X G=%02X R=%02X)\n", label, center_x,
+               center_y, p[0], p[1], p[2], p[3], exp_b, exp_g, exp_r);
         int failed = 0;
         if (!channel_close(p[0], exp_b, 4) || !channel_close(p[1], exp_g, 4) || !channel_close(p[2], exp_r, 4))
         {
@@ -208,8 +206,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9miptexturetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "miptexture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
-                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "miptexture-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -240,8 +238,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-miptexture-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -256,8 +254,8 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-miptexture-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -288,8 +286,7 @@ int main()
     // 64x64 texture with 3 real mip levels. Each level gets a distinct solid color written through its
     // own LockRect(level) call -- this is the per-subresource path under test.
     IDirect3DTexture9* tex = nullptr;
-    HRESULT hct =
-        dev->CreateTexture(kTexSize, kTexSize, kMipLevels, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
+    HRESULT hct = dev->CreateTexture(kTexSize, kTexSize, kMipLevels, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
     printf("[d3d9-miptexture-test] CreateTexture(%dx%d, %d levels) hr=0x%08lx tex=%p\n", kTexSize, kTexSize, kMipLevels,
            static_cast<unsigned long>(hct), static_cast<void*>(tex));
     if (FAILED(hct) || !tex)
@@ -321,10 +318,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-    printf("[d3d9-miptexture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-miptexture-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-miptexture-test] FAIL: render target creation failed\n");
@@ -389,8 +384,8 @@ int main()
     // BLUE. This exercises real screen-space-derivative mip selection, not just the LOD clamp.
     constexpr int kMinL = 40, kMinT = 40, kMinR = 56, kMinB = 56;
     set_quad(vb, kMinL, kMinT, kMinR, kMinB);
-    failures += run_pass(dev, rt, (kMinL + kMinR) / 2, (kMinT + kMinB) / 2, D3DTEXF_POINT, 0, /*B*/ 255, /*G*/ 0, /*R*/ 0,
-                         "minified(BLUE)");
+    failures +=
+        run_pass(dev, rt, (kMinL + kMinR) / 2, (kMinT + kMinB) / 2, D3DTEXF_POINT, 0, /*B*/ 255, /*G*/ 0, /*R*/ 0, "minified(BLUE)");
 
     release_all(tex, rt, vb, ib, vs, ps, dev, d3d);
 

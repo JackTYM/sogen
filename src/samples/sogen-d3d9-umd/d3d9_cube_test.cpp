@@ -75,9 +75,8 @@ float4 main(PSInput input) : COLOR0
         return std::abs(static_cast<int>(actual) - expected) <= tolerance;
     }
 
-    void release_all(IDirect3DCubeTexture9* tex, IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb,
-                     IDirect3DIndexBuffer9* ib, IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps,
-                     IDirect3DDevice9* dev, IDirect3D9* d3d)
+    void release_all(IDirect3DCubeTexture9* tex, IDirect3DSurface9* rt, IDirect3DVertexBuffer9* vb, IDirect3DIndexBuffer9* ib,
+                     IDirect3DVertexShader9* vs, IDirect3DPixelShader9* ps, IDirect3DDevice9* dev, IDirect3D9* d3d)
     {
         if (tex)
         {
@@ -133,8 +132,8 @@ float4 main(PSInput input) : COLOR0
     // One sub-pass: point texCUBE at a face-center direction (PS constant c0), clear, draw the full-screen
     // quad, read back the center pixel, and check it matches that face's expected color. Returns the
     // number of failed checks (0/1).
-    int run_pass(IDirect3DDevice9* dev, IDirect3DSurface9* rt, const float dir_x, const float dir_y, const float dir_z,
-                 const int exp_b, const int exp_g, const int exp_r, const char* label)
+    int run_pass(IDirect3DDevice9* dev, IDirect3DSurface9* rt, const float dir_x, const float dir_y, const float dir_z, const int exp_b,
+                 const int exp_g, const int exp_r, const char* label)
     {
         const float dir[4] = {dir_x, dir_y, dir_z, 0.0f};
         dev->SetPixelShaderConstantF(0, dir, 1);
@@ -157,8 +156,8 @@ float4 main(PSInput input) : COLOR0
         const int cy = kCanvasHeight / 2;
         const auto* base = static_cast<const unsigned char*>(lr.pBits);
         const unsigned char* p = base + cy * kStride + cx * 4;
-        printf("[d3d9-cube-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X (expected B=%02X G=%02X R=%02X)\n", label, cx,
-               cy, p[0], p[1], p[2], p[3], exp_b, exp_g, exp_r);
+        printf("[d3d9-cube-test] %s pixel(%d,%d)=B=%02X G=%02X R=%02X A=%02X (expected B=%02X G=%02X R=%02X)\n", label, cx, cy, p[0], p[1],
+               p[2], p[3], exp_b, exp_g, exp_r);
         int failed = 0;
         if (!channel_close(p[0], exp_b, 4) || !channel_close(p[1], exp_g, 4) || !channel_close(p[2], exp_r, 4))
         {
@@ -184,8 +183,8 @@ int main()
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "sogend3d9cubetest";
     RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "cube-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth,
-                                kCanvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "cube-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, kCanvasWidth, kCanvasHeight,
+                                nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -216,8 +215,8 @@ int main()
 
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* vs_errors = nullptr;
-    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "vs_2_0", 0, 0, &vs_blob, &vs_errors);
+    HRESULT hvsc = D3DCompile(k_vertex_shader_hlsl, strlen(k_vertex_shader_hlsl), nullptr, nullptr, nullptr, "main", "vs_2_0", 0, 0,
+                              &vs_blob, &vs_errors);
     printf("[d3d9-cube-test] D3DCompile(vs) hr=0x%08lx\n", static_cast<unsigned long>(hvsc));
     if (FAILED(hvsc))
     {
@@ -232,8 +231,8 @@ int main()
 
     ID3DBlob* ps_blob = nullptr;
     ID3DBlob* ps_errors = nullptr;
-    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main",
-                              "ps_2_0", 0, 0, &ps_blob, &ps_errors);
+    HRESULT hpsc = D3DCompile(k_pixel_shader_hlsl, strlen(k_pixel_shader_hlsl), nullptr, nullptr, nullptr, "main", "ps_2_0", 0, 0, &ps_blob,
+                              &ps_errors);
     printf("[d3d9-cube-test] D3DCompile(ps) hr=0x%08lx\n", static_cast<unsigned long>(hpsc));
     if (FAILED(hpsc))
     {
@@ -265,10 +264,9 @@ int main()
     // proven lockable-texture path d3d9_miptexture_test.cpp uses for 2D); the creation-only
     // d3d9_cube_volume_test.cpp used Usage=0 because it never locked.
     IDirect3DCubeTexture9* tex = nullptr;
-    HRESULT hct =
-        dev->CreateCubeTexture(kCubeSize, kMipLevels, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
-    printf("[d3d9-cube-test] CreateCubeTexture(%d, %d levels) hr=0x%08lx tex=%p\n", kCubeSize, kMipLevels,
-           static_cast<unsigned long>(hct), static_cast<void*>(tex));
+    HRESULT hct = dev->CreateCubeTexture(kCubeSize, kMipLevels, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
+    printf("[d3d9-cube-test] CreateCubeTexture(%d, %d levels) hr=0x%08lx tex=%p\n", kCubeSize, kMipLevels, static_cast<unsigned long>(hct),
+           static_cast<void*>(tex));
     if (FAILED(hct) || !tex)
     {
         printf("[d3d9-cube-test] FAIL: CreateCubeTexture failed\n");
@@ -305,8 +303,8 @@ int main()
             D3DLOCKED_RECT lr{};
             const D3DCUBEMAP_FACES face = static_cast<D3DCUBEMAP_FACES>(D3DCUBEMAP_FACE_POSITIVE_X + f);
             HRESULT htl = tex->LockRect(face, level, &lr, nullptr, 0);
-            printf("[d3d9-cube-test] LockRect(face=%d, level=%d) hr=0x%08lx pBits=%p\n", f, level,
-                   static_cast<unsigned long>(htl), lr.pBits);
+            printf("[d3d9-cube-test] LockRect(face=%d, level=%d) hr=0x%08lx pBits=%p\n", f, level, static_cast<unsigned long>(htl),
+                   lr.pBits);
             if (FAILED(htl) || !lr.pBits)
             {
                 printf("[d3d9-cube-test] FAIL: LockRect(face=%d, level=%d) failed\n", f, level);
@@ -319,10 +317,8 @@ int main()
     }
 
     IDirect3DSurface9* rt = nullptr;
-    HRESULT hcrt =
-        dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
-    printf("[d3d9-cube-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt),
-           static_cast<void*>(rt));
+    HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
+    printf("[d3d9-cube-test] CreateRenderTarget hr=0x%08lx surf=%p\n", static_cast<unsigned long>(hcrt), static_cast<void*>(rt));
     if (FAILED(hcrt) || !rt)
     {
         printf("[d3d9-cube-test] FAIL: render target creation failed\n");

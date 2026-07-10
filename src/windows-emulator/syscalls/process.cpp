@@ -31,10 +31,9 @@ namespace sogen
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                return handle_query<uint32_t>(c.emu, process_information, process_information_length, return_length,
-                                              [](uint32_t& flags) {
-                                                  flags = 0x1; // MEM_EXECUTE_OPTION_DISABLE (DEP enabled)
-                                              });
+                return handle_query<uint32_t>(c.emu, process_information, process_information_length, return_length, [](uint32_t& flags) {
+                    flags = 0x1; // MEM_EXECUTE_OPTION_DISABLE (DEP enabled)
+                });
             case ProcessGroupInformation:
             case ProcessMitigationPolicy: {
                 // ProcessMitigationPolicy requires special handling because the caller

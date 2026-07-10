@@ -305,7 +305,8 @@ namespace sogen
                 write_empty_success_reply(send_message, receive_message);
                 if (buffer_length && receive_message)
                 {
-                    buffer_length.write(static_cast<typename EmulatorTraits<Emu64>::SIZE_T>(lpc_port_message::read(send_message).wire_size()));
+                    buffer_length.write(
+                        static_cast<typename EmulatorTraits<Emu64>::SIZE_T>(lpc_port_message::read(send_message).wire_size()));
                 }
                 return STATUS_SUCCESS;
             }

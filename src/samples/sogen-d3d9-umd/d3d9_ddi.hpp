@@ -18,11 +18,11 @@
 #include <cstdint>
 
 // --- D3D_UMD_INTERFACE_VERSION values (WDK d3dukmdt.h) ---------------------------------------------
-#define SOGEN_D3D_UMD_INTERFACE_VERSION_VISTA 0x000C
-#define SOGEN_D3D_UMD_INTERFACE_VERSION_WIN7 0x2003
-#define SOGEN_D3D_UMD_INTERFACE_VERSION_WIN8 0x3004
-#define SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM1_3 0x4002
-#define SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM2_0 0x5002
+#define SOGEN_D3D_UMD_INTERFACE_VERSION_VISTA     0x000C
+#define SOGEN_D3D_UMD_INTERFACE_VERSION_WIN7      0x2003
+#define SOGEN_D3D_UMD_INTERFACE_VERSION_WIN8      0x3004
+#define SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM1_3   0x4002
+#define SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM2_0   0x5002
 #define SOGEN_D3D_UMD_INTERFACE_VERSION_WDDM2_1_2 0x6001
 
 // Version this UMD is built for. D3D9 is a Vista/Win7-era DDI; WIN7 is the conservative bring-up
@@ -47,10 +47,10 @@ typedef enum _SOGEN_D3DDDICAPS_TYPE
 
 typedef struct _D3DDDIARG_GETCAPS
 {
-    UINT  Type;     // SOGEN_D3DDDICAPS_TYPE (a plain enum == UINT wide)
-    VOID* pInfo;    // in
-    VOID* pData;    // out
-    UINT  DataSize; // in
+    UINT Type;     // SOGEN_D3DDDICAPS_TYPE (a plain enum == UINT wide)
+    VOID* pInfo;   // in
+    VOID* pData;   // out
+    UINT DataSize; // in
 } D3DDDIARG_GETCAPS;
 
 // --- Callback tables (opaque to us; we only store the runtime pointer) -----------------------------
@@ -228,20 +228,20 @@ typedef struct _D3DDDI_DEVICEFUNCS
 // --- CreateDevice arg -----------------------------------------------------------------------------
 typedef struct _D3DDDIARG_CREATEDEVICE
 {
-    HANDLE              hDevice;               // in: runtime handle / out: driver handle
-    UINT                Interface;             // in
-    UINT                Version;               // in
-    CONST VOID*         pCallbacks;            // in: D3DDDI_DEVICECALLBACKS*
-    VOID*               pCommandBuffer;        // in
-    UINT                CommandBufferSize;     // in
-    VOID*               pAllocationList;       // out
-    UINT                AllocationListSize;    // in
-    VOID*               pPatchLocationList;    // out
-    UINT                PatchLocationListSize; // in
-    D3DDDI_DEVICEFUNCS* pDeviceFuncs;          // out: driver function table (we fill it)
-    UINT                Flags;                 // in: D3DDDI_CREATEDEVICEFLAGS
+    HANDLE hDevice;                   // in: runtime handle / out: driver handle
+    UINT Interface;                   // in
+    UINT Version;                     // in
+    CONST VOID* pCallbacks;           // in: D3DDDI_DEVICECALLBACKS*
+    VOID* pCommandBuffer;             // in
+    UINT CommandBufferSize;           // in
+    VOID* pAllocationList;            // out
+    UINT AllocationListSize;          // in
+    VOID* pPatchLocationList;         // out
+    UINT PatchLocationListSize;       // in
+    D3DDDI_DEVICEFUNCS* pDeviceFuncs; // out: driver function table (we fill it)
+    UINT Flags;                       // in: D3DDDI_CREATEDEVICEFLAGS
 #if (SOGEN_D3D9_UMD_INTERFACE_VERSION >= SOGEN_D3D_UMD_INTERFACE_VERSION_WIN7)
-    UINT64              CommandBuffer;         // out: GPU VA of the command buffer
+    UINT64 CommandBuffer; // out: GPU VA of the command buffer
 #endif
 } D3DDDIARG_CREATEDEVICE;
 
@@ -252,7 +252,7 @@ typedef HRESULT(APIENTRY* PFND3DDDI_CLOSEADAPTER)(HANDLE hAdapter);
 
 typedef struct _D3DDDI_ADAPTERFUNCS
 {
-    PFND3DDDI_GETCAPS      pfnGetCaps;
+    PFND3DDDI_GETCAPS pfnGetCaps;
     PFND3DDDI_CREATEDEVICE pfnCreateDevice;
     PFND3DDDI_CLOSEADAPTER pfnCloseAdapter;
 } D3DDDI_ADAPTERFUNCS;
@@ -260,12 +260,12 @@ typedef struct _D3DDDI_ADAPTERFUNCS
 // --- OpenAdapter arg (the DLL's single exported entry point) --------------------------------------
 typedef struct _D3DDDIARG_OPENADAPTER
 {
-    HANDLE                         hAdapter;          // in/out: runtime handle / out: driver handle
-    UINT                           Interface;         // in: interface version the runtime speaks
-    UINT                           Version;           // in: runtime version
+    HANDLE hAdapter;                                  // in/out: runtime handle / out: driver handle
+    UINT Interface;                                   // in: interface version the runtime speaks
+    UINT Version;                                     // in: runtime version
     CONST D3DDDI_ADAPTERCALLBACKS* pAdapterCallbacks; // in
-    D3DDDI_ADAPTERFUNCS*           pAdapterFuncs;     // out: we fill GetCaps/CreateDevice/CloseAdapter
-    UINT                           DriverVersion;     // out: D3D_UMD_INTERFACE_VERSION we were built for
+    D3DDDI_ADAPTERFUNCS* pAdapterFuncs;               // out: we fill GetCaps/CreateDevice/CloseAdapter
+    UINT DriverVersion;                               // out: D3D_UMD_INTERFACE_VERSION we were built for
 } D3DDDIARG_OPENADAPTER;
 
 typedef HRESULT(APIENTRY* PFND3DDDI_OPENADAPTER)(D3DDDIARG_OPENADAPTER*);
@@ -659,13 +659,13 @@ static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll 
 #ifdef _WIN64
 typedef struct _D3DDDIARG_COLORFILL
 {
-    HANDLE hResource;    // 0
+    HANDLE hResource;      // 0
     UINT SubResourceIndex; // 8 -- read from the hResource wrapper (CD3DDDIDX10::Colorfill's a2[2]);
                            // 0 observed live (single-subresource surface).
-    D3DDDIRECT DstRect;  // 12, 16 bytes (left/top/right/bottom)
-    UINT Color;          // 28 -- D3DCOLOR (ARGB)
-    UINT Flags;          // 32 -- always 0 (the builder zeroes an 8-byte slot here; the second UINT is
-                         // struct tail padding on x64). Field name per the WDK; value never seen non-zero.
+    D3DDDIRECT DstRect;    // 12, 16 bytes (left/top/right/bottom)
+    UINT Color;            // 28 -- D3DCOLOR (ARGB)
+    UINT Flags;            // 32 -- always 0 (the builder zeroes an 8-byte slot here; the second UINT is
+                           // struct tail padding on x64). Field name per the WDK; value never seen non-zero.
 } D3DDDIARG_COLORFILL;
 static_assert(sizeof(D3DDDIARG_COLORFILL) == 40,
               "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Colorfill + LHBatchColorFill, x64) + live trace");
@@ -676,14 +676,13 @@ static_assert(sizeof(D3DDDIARG_COLORFILL) == 40,
 // matching the D3DDDIARG_TEXBLT x86 precedent); layout is an independent decompile, not an extrapolation.
 typedef struct _D3DDDIARG_COLORFILL
 {
-    HANDLE hResource;    // 0
+    HANDLE hResource;      // 0
     UINT SubResourceIndex; // 4 -- read from the hResource wrapper (a2[1] on x86)
-    D3DDDIRECT DstRect;  // 8, 16 bytes (left/top/right/bottom)
-    UINT Color;          // 24 -- D3DCOLOR (ARGB)
-    UINT Flags;          // 28 -- always 0 (builder's `v10 = 0`)
+    D3DDDIRECT DstRect;    // 8, 16 bytes (left/top/right/bottom)
+    UINT Color;            // 24 -- D3DCOLOR (ARGB)
+    UINT Flags;            // 28 -- always 0 (builder's `v10 = 0`)
 } D3DDDIARG_COLORFILL;
-static_assert(sizeof(D3DDDIARG_COLORFILL) == 32,
-              "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Colorfill + LHBatchColorFill, x86)");
+static_assert(sizeof(D3DDDIARG_COLORFILL) == 32, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Colorfill + LHBatchColorFill, x86)");
 #endif
 
 // D3DDDIARG_BLT -- pfnBlt, device-func-table slot 55 (behind IDirect3DDevice9::StretchRect). A DIFFERENT
@@ -721,8 +720,7 @@ typedef struct _D3DDDIARG_BLT
                               // arg); 0 == D3DTEXF_NONE observed live. Scaling is inferred by the driver
                               // from the Src/Dst rect-size ratio (the DDI carries no explicit scale field).
 } D3DDDIARG_BLT;
-static_assert(sizeof(D3DDDIARG_BLT) == 72,
-              "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x64) + live trace");
+static_assert(sizeof(D3DDDIARG_BLT) == 72, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x64) + live trace");
 #else
 // x86 shape decompile-RE'd independently (d3d9_x86.dll.i64 CD3DDDIDX10::Blt @ 0x10062CB0 + LHBatchBlt's
 // qmemcpy 0x38). Same field ORDER as the x64 layout above (Src-first, cross-validated by the x64 live
@@ -739,8 +737,7 @@ typedef struct _D3DDDIARG_BLT
     UINT Reserved;            // 48 -- always 0 (builder's `v20 = 0`)
     UINT Flags;               // 52 -- Filter / blt-flags (builder's a10)
 } D3DDDIARG_BLT;
-static_assert(sizeof(D3DDDIARG_BLT) == 56,
-              "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x86)");
+static_assert(sizeof(D3DDDIARG_BLT) == 56, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x86)");
 #endif
 
 // D3DDDI_SURFACEINFO and D3DDDIARG_CREATERESOURCE -- RE'd this session (2026-07-05) the same way the
@@ -766,8 +763,8 @@ typedef struct _D3DDDI_SURFACEINFO
     UINT Height;           // 4 -- live-confirmed
     UINT Depth;            // 8 -- live-confirmed (1 for 2D surfaces)
     VOID* pSysMem;         // x64:16 / x86:12 -- INFERRED (0 in every probe; see block comment above). On
-                          // x64, 4 bytes of alignment padding precede this (Depth ends at 12, an 8-byte
-                          // pointer aligns up to 16); on x86 the 4-byte pointer already sits at 12.
+                           // x64, 4 bytes of alignment padding precede this (Depth ends at 12, an 8-byte
+                           // pointer aligns up to 16); on x86 the 4-byte pointer already sits at 12.
     UINT SysMemPitch;      // x64:24 / x86:16 -- INFERRED
     UINT SysMemSlicePitch; // x64:28 / x86:20 -- INFERRED
 } D3DDDI_SURFACEINFO;
@@ -928,23 +925,23 @@ static_assert(sizeof(D3DDDIARG_CREATERESOURCE) == 60, "size confirmed via real d
 #ifdef _WIN64
 typedef struct _D3DDDIARG_LOCK
 {
-    HANDLE hResource;        // 0 -- confirmed
-    UINT SubResourceIndex;   // 8 -- RE-verified live + static 2026-07-06 (see block comment above):
-                             //      flattened subresource index (Level for mips; FaceType*MipLevels +
-                             //      Level for cube/array). 0 for buffers. Consumed by umd_Lock as of the
-                             //      real mip-mapping work (see block comment above).
-    UINT Reserved0Hi;        // 12 -- always 0 live (high half of the former UINT64 Reserved0 slot)
-    BYTE Reserved1[24];      // 16..39 -- Range/Box input region (DdLockLH's v30/v31); not modeled
-    VOID* pData;         // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
-    BYTE Reserved2[32];  // 48..79 -- unconfirmed
-    UINT OffsetToLock;   // 80 -- RE-verified live (see comment above): the app's requested byte offset,
-                         // reliably present in the "driver-routed" shape. In the "sysmem-routed" shape
-                         // this offset holds unrelated data instead, but that path's driver-returned
-                         // pData is discarded by the app regardless (confirmed live,
-                         // HANDOFF_MACBOOK.md #16.1), so umd_Lock reading this field unconditionally
-                         // for buffer resources is safe either way -- the host's own lock() already
-                         // rejects an out-of-range offset.
-    BYTE Reserved3[20];  // 84..103 -- unconfirmed
+    HANDLE hResource;      // 0 -- confirmed
+    UINT SubResourceIndex; // 8 -- RE-verified live + static 2026-07-06 (see block comment above):
+                           //      flattened subresource index (Level for mips; FaceType*MipLevels +
+                           //      Level for cube/array). 0 for buffers. Consumed by umd_Lock as of the
+                           //      real mip-mapping work (see block comment above).
+    UINT Reserved0Hi;      // 12 -- always 0 live (high half of the former UINT64 Reserved0 slot)
+    BYTE Reserved1[24];    // 16..39 -- Range/Box input region (DdLockLH's v30/v31); not modeled
+    VOID* pData;           // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
+    BYTE Reserved2[32];    // 48..79 -- unconfirmed
+    UINT OffsetToLock;     // 80 -- RE-verified live (see comment above): the app's requested byte offset,
+                           // reliably present in the "driver-routed" shape. In the "sysmem-routed" shape
+                           // this offset holds unrelated data instead, but that path's driver-returned
+                           // pData is discarded by the app regardless (confirmed live,
+                           // HANDOFF_MACBOOK.md #16.1), so umd_Lock reading this field unconditionally
+                           // for buffer resources is safe either way -- the host's own lock() already
+                           // rejects an out-of-range offset.
+    BYTE Reserved3[20];    // 84..103 -- unconfirmed
 } D3DDDIARG_LOCK;
 #else
 // x86 D3DDDIARG_LOCK is a GENUINELY DIFFERENT, smaller (48-byte) struct, not a pointer-shrunk copy of
@@ -1005,24 +1002,24 @@ typedef struct _D3DDDIARG_LOCK
 // pointer the guest app receives from `IDirect3DVertexBuffer9::Lock()` (both `0x41f46e0` in one capture).
 typedef struct _D3DDDIARG_LOCK
 {
-    HANDLE hResource;    // 0 -- RE-verified live 2026-07-04 (see comment above)
+    HANDLE hResource;      // 0 -- RE-verified live 2026-07-04 (see comment above)
     UINT SubResourceIndex; // 4 -- RE-verified live + static 2026-07-06 (see block comment above the x64
-                         //      struct): flattened subresource index (Level for mips; FaceType*MipLevels
-                         //      + Level for cube/array). 0 for buffers. Was "Reserved0"; NOT a UINT64.
-                         //      Consumed by umd_Lock as of the real mip-mapping work.
-    UINT OffsetToLock;   // 8 -- RE-verified live 2026-07-06: the app's requested byte offset, reliably
-                         // present in the "driver-routed" shape (the x86 analog of the x64 field at 80).
-                         // Two distinctive marker offsets, 0x4321 and 0x8642, both read back exactly here
-                         // as a 32-bit little-endian value, with a Lock(offset=0) baseline reading 0 --
-                         // cross-checked, not a coincidence. In the "sysmem-routed" shape this offset
-                         // holds unrelated data, but that path's driver-returned pData is discarded by
-                         // the app regardless, so umd_Lock reading this field unconditionally for buffer
-                         // resources is safe either way -- the host's own lock() rejects an out-of-range
-                         // offset. SizeToLock is not modeled (no reliable offset; size=0 "to end of
-                         // resource" is exactly the tail-append semantics this enables -- see x64 comment).
-    BYTE Reserved1[20];  // 12..31 -- unconfirmed (SizeToLock or Rect/Box input region)
-    VOID* pData;         // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
-    BYTE Reserved2[12];  // 36..47 -- unconfirmed (Pitch/SlicePitch/Flags; not read by umd_Lock)
+                           //      struct): flattened subresource index (Level for mips; FaceType*MipLevels
+                           //      + Level for cube/array). 0 for buffers. Was "Reserved0"; NOT a UINT64.
+                           //      Consumed by umd_Lock as of the real mip-mapping work.
+    UINT OffsetToLock;     // 8 -- RE-verified live 2026-07-06: the app's requested byte offset, reliably
+                           // present in the "driver-routed" shape (the x86 analog of the x64 field at 80).
+                           // Two distinctive marker offsets, 0x4321 and 0x8642, both read back exactly here
+                           // as a 32-bit little-endian value, with a Lock(offset=0) baseline reading 0 --
+                           // cross-checked, not a coincidence. In the "sysmem-routed" shape this offset
+                           // holds unrelated data, but that path's driver-returned pData is discarded by
+                           // the app regardless, so umd_Lock reading this field unconditionally for buffer
+                           // resources is safe either way -- the host's own lock() rejects an out-of-range
+                           // offset. SizeToLock is not modeled (no reliable offset; size=0 "to end of
+                           // resource" is exactly the tail-append semantics this enables -- see x64 comment).
+    BYTE Reserved1[20];    // 12..31 -- unconfirmed (SizeToLock or Rect/Box input region)
+    VOID* pData;           // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
+    BYTE Reserved2[12];    // 36..47 -- unconfirmed (Pitch/SlicePitch/Flags; not read by umd_Lock)
 } D3DDDIARG_LOCK;
 #endif
 
