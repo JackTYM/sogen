@@ -195,8 +195,10 @@ changes automatically. After editing anything under `deps/FEX`, rebuild it expli
 
 ```sh
 ninja -C build/release/deps/fex_external-prefix/src/fex_external-build FEXCore/Source/libFEXCore.dylib
-cp build/release/deps/fex_external-prefix/src/fex_external-build/FEXCore/Source/libFEXCore.dylib build/release/artifacts/
 ```
+
+No copy step is needed afterward — `fex-emulator`'s rpath points directly at that build directory
+(see "Build" above), so the freshly-rebuilt library is picked up in place.
 
 `backend-selection` links `fex-emulator`, defines `SOGEN_ENABLE_FEX`, adds `backend_type::fex`, and
 honors `EMULATOR_FEX=1`; the Python `Backend` enum gains `fex`.

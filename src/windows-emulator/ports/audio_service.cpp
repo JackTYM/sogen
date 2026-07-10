@@ -134,13 +134,14 @@ namespace sogen
                 if (getenv("EMULATOR_LOG_RPC"))
                 {
                     win_emu.log.error("[audiosrv] call iface=%02x%02x%02x%02x opnum=%u send=%u\n", iface[0], iface[1], iface[2], iface[3],
-                                      procedure_id, c.send_buffer_length);
+                                      procedure_id, static_cast<uint32_t>(c.send_buffer_length));
                 }
                 // DEBUG-AUDIO-NDR: dump full request bytes for the AudioClient streaming opnums under scrutiny.
                 if (getenv("EMULATOR_LOG_RPC") && this->is_audio_client_ &&
                     (procedure_id == 0 || procedure_id == 2 || procedure_id == 4 || procedure_id == 5 || procedure_id == 7))
                 {
-                    win_emu.log.error("[audiosrv-dbg] REQ opnum=%u send_len=%u bytes: %s\n", procedure_id, c.send_buffer_length,
+                    win_emu.log.error("[audiosrv-dbg] REQ opnum=%u send_len=%u bytes: %s\n", procedure_id,
+                                      static_cast<uint32_t>(c.send_buffer_length),
                                       dump_hex(win_emu, c.send_buffer, c.send_buffer_length, 256).c_str());
                 }
 
@@ -184,8 +185,9 @@ namespace sogen
 
             static NTSTATUS log_unhandled(windows_emulator& win_emu, const char* iface, const uint32_t opnum, const lpc_request_context& c)
             {
-                win_emu.log.error("[audiosrv] UNHANDLED %s opnum=%u send_len=%u recv_len=%u req: %s\n", iface, opnum, c.send_buffer_length,
-                                  c.recv_buffer_length, dump_hex(win_emu, c.send_buffer, c.send_buffer_length).c_str());
+                win_emu.log.error("[audiosrv] UNHANDLED %s opnum=%u send_len=%u recv_len=%u req: %s\n", iface, opnum,
+                                  static_cast<uint32_t>(c.send_buffer_length), static_cast<uint32_t>(c.recv_buffer_length),
+                                  dump_hex(win_emu, c.send_buffer, c.send_buffer_length).c_str());
                 return STATUS_NOT_SUPPORTED;
             }
 

@@ -64,7 +64,7 @@ namespace sogen
 
                 if (getenv("EMULATOR_LOG_RPC"))
                 {
-                    win_emu.log.error("[svcctl] opnum=%u send=%u\n", procedure_id, c.send_buffer_length);
+                    win_emu.log.error("[svcctl] opnum=%u send=%u\n", procedure_id, static_cast<uint32_t>(c.send_buffer_length));
                 }
 
                 switch (procedure_id)
@@ -123,7 +123,8 @@ namespace sogen
                         (void)snprintf(tmp.data(), tmp.size(), "%02x ", b);
                         hex += tmp.data();
                     }
-                    win_emu.log.error("[svcctl] UNHANDLED opnum=%u send_len=%u in: %s\n", procedure_id, c.send_buffer_length, hex.c_str());
+                    win_emu.log.error("[svcctl] UNHANDLED opnum=%u send_len=%u in: %s\n", procedure_id,
+                                      static_cast<uint32_t>(c.send_buffer_length), hex.c_str());
                     return STATUS_NOT_SUPPORTED;
                 }
                 }
