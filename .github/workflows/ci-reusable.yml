@@ -350,7 +350,7 @@ jobs:
           max_attempts: 5
           timeout_minutes: 15
           retry_wait_seconds: 60
-          command: brew install perl flex bison libtool mingw-w64 vulkan-headers spirv-headers vulkan-loader
+          command: brew install autoconf automake perl flex bison libtool mingw-w64 vulkan-headers spirv-headers vulkan-loader
 
       - name: Enable Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1.13.0
