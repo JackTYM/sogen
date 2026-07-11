@@ -9,6 +9,7 @@
 
 #include <serialization_helper.hpp>
 #include <cinttypes>
+#include <cstring>
 #include <vector>
 
 namespace sogen
@@ -16,15 +17,14 @@ namespace sogen
 
     namespace
     {
-        // kernelbase_gnls_process_local_cache_rva (below) is a hardcoded offset derived once via static
-        // analysis of a specific kernelbase.dll build - it silently drifts across different Windows
-        // servicing/OS-build combinations (confirmed: a newer kernelbase.dll build relocates
-        // gNlsProcessLocalCache out of .data into .rdata, making the same RVA land on a READ-ONLY page).
-        // Since real ntdll/kernelbase code eventually WRITES through whatever TEB.NlsCache points at,
-        // resolving to a stale RVA that now falls on a read-only page is a guaranteed guest access
-        // violation rather than a silent correctness gap - so validate against the module's own section
-        // table (parsed from the real PE headers at map time, so it's always accurate for THIS build)
-        // before trusting the hardcoded constant.
+        // gNlsProcessLocalCache's RVA silently drifts across different Windows servicing/OS-build
+        // combinations (confirmed directly: it differs between the Windows 2022 and 2025 CI-baked
+        // kernelbase.dll builds - one relocates the global entirely, out of where the other build's
+        // RVA would land). Since real ntdll/kernelbase code eventually WRITES through whatever
+        // TEB.NlsCache points at, resolving to a stale RVA that now falls on the wrong page/section is
+        // a guaranteed guest access violation rather than a silent correctness gap - so validate
+        // against the module's own section table (parsed from the real PE headers at map time, so it's
+        // always accurate for THIS build) before trusting any resolved address.
         bool address_is_in_writable_section(const mapped_module& mod, const uint64_t address)
         {
             for (const auto& section : mod.sections)
@@ -39,11 +39,71 @@ namespace sogen
             return false;
         }
 
-        // Returns 0 (unresolved) rather than a guaranteed-wrong address if the hardcoded RVA falls
-        // outside kernelbase's own writable data for THIS specific build - see
-        // address_is_in_writable_section's doc comment.
-        uint64_t resolve_kernelbase_nls_cache_address(const mapped_module& kernelbase)
+        // Locates kernelbase.dll's private (non-exported) gNlsProcessLocalCache global by scanning the
+        // module's own code for the fixed TEB.NlsCache access sequence inside BaseNlsThreadCleanup:
+        //   65 48 8B 04 25 30 00 00 00   mov rax, gs:[0x30]      (TEB self-pointer)
+        //   48 8B 98 A0 17 00 00         mov rbx, [rax+0x17A0]    (TEB.NlsCache)
+        //   48 8D 05 xx xx xx xx         lea rax, [rip+disp32]    (&gNlsProcessLocalCache)
+        // Confirmed via idasql against both the Windows 2022 and 2025 CI-baked kernelbase.dll builds:
+        // this exact 19-byte prefix is byte-identical across both (the TEB access is an ABI-level,
+        // fixed-offset structure read that the compiler always emits the same way), and only the
+        // trailing RIP-relative displacement - the actual per-build variable - differs. This is what
+        // makes the scan build-independent, unlike a hardcoded RVA (see address_is_in_writable_section's
+        // doc comment above for why a stale RVA is dangerous, not just wrong).
+        std::optional<uint64_t> scan_kernelbase_nls_cache_reference(const memory_manager& memory, const mapped_module& kernelbase)
         {
+            static constexpr std::array<uint8_t, 19> pattern{
+                0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // mov rax, gs:[0x30]
+                0x48, 0x8B, 0x98, 0xA0, 0x17, 0x00, 0x00,             // mov rbx, [rax+0x17A0]
+                0x48, 0x8D, 0x05,                                     // lea rax, [rip+disp32]
+            };
+
+            for (const auto& section : kernelbase.sections)
+            {
+                const auto& region = section.region;
+                if (!is_executable(region.permissions) || region.length < pattern.size() + sizeof(int32_t))
+                {
+                    continue;
+                }
+
+                std::vector<uint8_t> data(region.length);
+                if (!memory.try_read_memory(region.start, data.data(), data.size()))
+                {
+                    continue;
+                }
+
+                const auto search_end = data.size() - pattern.size() - sizeof(int32_t);
+                for (size_t i = 0; i <= search_end; ++i)
+                {
+                    if (std::memcmp(data.data() + i, pattern.data(), pattern.size()) != 0)
+                    {
+                        continue;
+                    }
+
+                    int32_t displacement{};
+                    std::memcpy(&displacement, data.data() + i + pattern.size(), sizeof(displacement));
+
+                    const auto instruction_end = region.start + i + pattern.size() + sizeof(displacement);
+                    return static_cast<uint64_t>(static_cast<int64_t>(instruction_end) + displacement);
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        // Returns 0 (unresolved) if neither the build-independent code scan above nor the hardcoded-RVA
+        // fallback land on writable data for THIS specific build - see address_is_in_writable_section's
+        // doc comment. The scan is the primary path; the hardcoded RVA (derived once via static analysis
+        // of the original macOS dev-build kernelbase.dll) is kept only as a last-resort fallback for the
+        // case where BaseNlsThreadCleanup's code shape changes enough that the scan no longer matches.
+        uint64_t resolve_kernelbase_nls_cache_address(const memory_manager& memory, const mapped_module& kernelbase)
+        {
+            if (const auto scanned = scan_kernelbase_nls_cache_reference(memory, kernelbase);
+                scanned.has_value() && address_is_in_writable_section(kernelbase, *scanned))
+            {
+                return *scanned;
+            }
+
             constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
             const auto address = kernelbase.image_base + kernelbase_gnls_process_local_cache_rva;
             return address_is_in_writable_section(kernelbase, address) ? address : 0;
@@ -525,13 +585,13 @@ namespace sogen
             // module_manager instance - safe, since the callback captures `context` by reference and
             // every caller of this function passes the SAME process_context the module_manager was
             // constructed for.
-            this->callbacks_->on_module_load.add([&context](mapped_module& mod) {
+            this->callbacks_->on_module_load.add([this, &context](mapped_module& mod) {
                 if (mod.name != "kernelbase.dll")
                 {
                     return;
                 }
 
-                context.kernelbase_nls_process_local_cache = resolve_kernelbase_nls_cache_address(mod);
+                context.kernelbase_nls_process_local_cache = resolve_kernelbase_nls_cache_address(*this->memory_, mod);
             });
         }
 
@@ -549,7 +609,7 @@ namespace sogen
         // pre-kernelbase.dll-load snapshot), reset to 0 so a thread created before the on_module_load
         // callback above fires again gets the placeholder instead of a stale/invalid address.
         const auto* kernelbase = this->find_by_name("kernelbase.dll");
-        context.kernelbase_nls_process_local_cache = kernelbase ? resolve_kernelbase_nls_cache_address(*kernelbase) : 0;
+        context.kernelbase_nls_process_local_cache = kernelbase ? resolve_kernelbase_nls_cache_address(*this->memory_, *kernelbase) : 0;
     }
 
     void module_manager::map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
