@@ -696,7 +696,11 @@ namespace sogen
                 {
                 case 1: {
                     const uint8_t index = (row[x / 8u] >> (7u - (x & 7u))) & 1u;
-                    return palette ? palette[index] : (index ? 0xFFFFFFFFu : 0xFF000000u);
+                    if (palette)
+                    {
+                        return palette[index];
+                    }
+                    return index ? 0xFFFFFFFFu : 0xFF000000u;
                 }
                 case 4: {
                     const uint8_t packed = row[x / 2u];
@@ -709,9 +713,9 @@ namespace sogen
                     uint16_t v = 0;
                     std::memcpy(&v, row + static_cast<size_t>(x) * 2, sizeof(v));
                     // BI_RGB 16bpp = RGB555: bits 14-10 = R, 9-5 = G, 4-0 = B
-                    const uint8_t r = static_cast<uint8_t>(((v >> 10u) & 0x1Fu) * 255u / 31u);
-                    const uint8_t g = static_cast<uint8_t>(((v >> 5u) & 0x1Fu) * 255u / 31u);
-                    const uint8_t b = static_cast<uint8_t>((v & 0x1Fu) * 255u / 31u);
+                    const auto r = static_cast<uint8_t>(((v >> 10u) & 0x1Fu) * 255u / 31u);
+                    const auto g = static_cast<uint8_t>(((v >> 5u) & 0x1Fu) * 255u / 31u);
+                    const auto b = static_cast<uint8_t>((v & 0x1Fu) * 255u / 31u);
                     return 0xFF000000u | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | b;
                 }
                 case 24: {
