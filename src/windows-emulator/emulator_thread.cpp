@@ -495,7 +495,7 @@ namespace sogen
 
         // Reserve and initialize 64-bit TEB first
         this->teb64 = this->gs_segment->reserve<TEB64>();
-        const auto nls_cache_obj = this->gs_segment->reserve<nls_cache_placeholder>();
+        const auto nls_cache_addr = resolve_nls_cache(*this->gs_segment, context);
 
         // This is the *native* 64-bit stack - setup_registers()'s "Native 64-bit process setup"
         // unconditionally uses this->stack_base/stack_size to set up RSP for the real 64-bit
@@ -522,7 +522,7 @@ namespace sogen
             reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
 
             // See nls_cache_placeholder's doc comment.
-            teb_obj.NlsCache = nls_cache_obj.value();
+            teb_obj.NlsCache = nls_cache_addr;
 
             teb_obj.ClientId.UniqueProcess = process_context::process_id;
             teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
