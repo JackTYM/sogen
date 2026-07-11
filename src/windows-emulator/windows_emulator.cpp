@@ -933,11 +933,6 @@ namespace sogen
     {
         auto& thread = vcpu.thread();
 
-        if (!thread.callback_stack.empty() && address == this->process.zw_callback_return)
-        {
-            thread.callback_return_rax = vcpu.cpu.reg<uint64_t>(x86_register::rax);
-        }
-
         ++this->executed_instructions_;
         const auto thread_insts = ++thread.executed_instructions;
         if (thread_insts % MAX_INSTRUCTIONS_PER_TIME_SLICE == 0)

@@ -610,6 +610,31 @@ namespace sogen
         this->ki_user_callback_dispatcher = ntdll.find_export("KiUserCallbackDispatcher");
         this->instrumentation_callback = 0;
         this->zw_callback_return = ntdll.find_export("ZwCallbackReturn");
+
+        // A window-proc-style callback returns its LRESULT in eax/rax and then falls straight through
+        // into ntdll's ZwCallbackReturn stub, which passes it to KiUserCallbackDispatcher's caller -
+        // but the stub itself clobbers eax with the syscall number right before the actual `syscall`
+        // instruction, so by the time handle_NtCallbackReturn (syscalls/thread.cpp) reads rax off the
+        // trapped CPU state, the real return value is already gone. Capturing it here, at the stub's
+        // entry point (before that clobber), is the only way to recover it. This must be a targeted,
+        // address-specific hook rather than a blanket per-instruction/per-basic-block one: those are
+        // only installed when the backend uses instruction-precision execution (see
+        // windows_emulator::setup_hooks) or needs cooperative preemption, neither of which holds for
+        // KVM/WHP - trading instruction precision for real hardware execution speed is the whole point
+        // of those backends, so this capture must not depend on it.
+        if (this->zw_callback_return != 0)
+        {
+            emu.hook_memory_execution(this->zw_callback_return, [&win_emu](cpu_interface& cpu, uint64_t) {
+                win_emu.dispatch_on_cpu(cpu, [&] {
+                    auto& vcpu = win_emu.vcpu(cpu.index());
+                    auto& thread = vcpu.thread();
+                    if (!thread.callback_stack.empty())
+                    {
+                        thread.callback_return_rax = vcpu.cpu.reg<uint64_t>(x86_register::rax);
+                    }
+                });
+            });
+        }
         this->gdi_default_dc_handle = 0;
         this->gdi_dc_states.clear();
         this->gdi_dc_save_states.clear();
