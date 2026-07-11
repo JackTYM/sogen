@@ -532,37 +532,6 @@ namespace sogen
 
             if (c.proc.is_current_process_handle(process_handle))
             {
-                // TEMP-DIAG: when a WOW64 process terminates itself with a non-success status (the
-                // "Smoke Test Windows x86" CI job's STATUS_HEAP_CORRUPTION case), dump the live 32-bit
-                // register state and walk its stack to find the real 32-bit caller chain that decided
-                // on this exit status - the 64-bit "via" address always resolves to wow64cpu.dll's own
-                // transition thunk (every WOW64 syscall traps through it), which is useless for finding
-                // which 32-bit ntdll code actually detected the corruption. No RVA-guessing into ntdll
-                // internals needed here, unlike the reverted diagnostic attempts.
-                if (exit_status != STATUS_SUCCESS && c.thread().wow64_cpu_reserved.has_value())
-                {
-                    c.thread().wow64_cpu_reserved->access([&](const WOW64_CPURESERVED& ctx) {
-                        c.win_emu.log.error("[WOW64-HEAP-DIAG] NtTerminateProcess(status=0x%x) 32-bit eip=0x%x esp=0x%x\n",
-                                            static_cast<uint32_t>(exit_status), ctx.Context.Eip, ctx.Context.Esp);
-
-                        for (uint32_t off = 0; off <= 0x100; off += 4)
-                        {
-                            uint32_t stack_val = 0;
-                            if (!c.win_emu.memory.try_read_memory(ctx.Context.Esp + off, &stack_val, sizeof(stack_val)))
-                            {
-                                break;
-                            }
-
-                            const auto* mod = c.win_emu.mod_manager.find_by_address(stack_val);
-                            if (mod)
-                            {
-                                c.win_emu.log.error("[WOW64-HEAP-DIAG]   [esp32+0x%x]=0x%x (%s+0x%llx)\n", off, stack_val,
-                                                    mod->name.c_str(), static_cast<unsigned long long>(stack_val - mod->image_base));
-                            }
-                        }
-                    });
-                }
-
                 c.proc.exit_status = exit_status;
                 c.emu.stop();
                 return STATUS_SUCCESS;
