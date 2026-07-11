@@ -352,14 +352,6 @@ namespace sogen
         void setup(windows_emulator& win_emu, const application_settings& app_settings, const mapped_module& executable,
                    const mapped_module& ntdll, const apiset::container& apiset_container, const mapped_module* ntdll32 = nullptr);
 
-        // Not serialized - purely in-memory bookkeeping for whether this process_context instance's
-        // C++ object has installed its callback-return-value hook (see ensure_callback_return_hook's
-        // definition). A windows_emulator deserialized/reset into (rather than freshly set up via
-        // setup() above) needs this re-installed too, since the hook lives on the emu()/CPU object,
-        // not in any serialized state.
-        bool callback_return_hook_registered_{false};
-        void ensure_callback_return_hook(windows_emulator& win_emu);
-
         handle create_thread(memory_manager& memory, uint64_t start_address, uint64_t argument, uint64_t stack_size, uint32_t create_flags,
                              bool initial_thread = false);
         void terminate_thread(emulator_thread& thread, NTSTATUS thread_exit_status);
