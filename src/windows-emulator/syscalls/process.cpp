@@ -532,6 +532,37 @@ namespace sogen
 
             if (c.proc.is_current_process_handle(process_handle))
             {
+                // TEMP-DIAG: when a WOW64 process terminates itself with a non-success status (the
+                // "Smoke Test Windows x86" CI job's STATUS_HEAP_CORRUPTION case), dump the live 32-bit
+                // register state and walk its stack to find the real 32-bit caller chain that decided
+                // on this exit status. Uses a plain read() (not access()) deliberately: access() writes
+                // the object back afterwards even for a const-only callback, and a prior version of
+                // this diagnostic that used access() caused a real hang specific to the Windows-2022
+                // Windows Test job - suspected to be that extra, unnecessary write triggering something
+                // on the WOW64_CPURESERVED region specifically (it's embedded directly in the TEB).
+                if (exit_status != STATUS_SUCCESS && c.thread().wow64_cpu_reserved.has_value())
+                {
+                    const auto ctx = c.thread().wow64_cpu_reserved->read();
+                    c.win_emu.log.error("[WOW64-HEAP-DIAG] NtTerminateProcess(status=0x%x) 32-bit eip=0x%x esp=0x%x\n",
+                                        static_cast<uint32_t>(exit_status), ctx.Context.Eip, ctx.Context.Esp);
+
+                    for (uint32_t off = 0; off <= 0x100; off += 4)
+                    {
+                        uint32_t stack_val = 0;
+                        if (!c.win_emu.memory.try_read_memory(ctx.Context.Esp + off, &stack_val, sizeof(stack_val)))
+                        {
+                            break;
+                        }
+
+                        const auto* mod = c.win_emu.mod_manager.find_by_address(stack_val);
+                        if (mod)
+                        {
+                            c.win_emu.log.error("[WOW64-HEAP-DIAG]   [esp32+0x%x]=0x%x (%s+0x%llx)\n", off, stack_val, mod->name.c_str(),
+                                                static_cast<unsigned long long>(stack_val - mod->image_base));
+                        }
+                    }
+                }
+
                 c.proc.exit_status = exit_status;
                 c.emu.stop();
                 return STATUS_SUCCESS;
