@@ -4568,8 +4568,8 @@ namespace sogen
             // wow64win marshals the two output counts (pNumPathArrayElements / pNumModeInfoArrayElements)
             // into a single packed buffer: [0] = path count, [1] = mode count. A zero mode count makes
             // callers (e.g. coloradapterclient) build an empty mode vector and dereference NULL.
-            const UINT32 counts[2] = {1, 2};
-            if (!c.win_emu.memory.try_write_memory(counts_buffer, counts, sizeof(counts)))
+            const std::array<UINT32, 2> counts{1, 2};
+            if (!c.win_emu.memory.try_write_memory(counts_buffer, counts.data(), sizeof(counts)))
             {
                 return STATUS_INVALID_PARAMETER;
             }
