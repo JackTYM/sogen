@@ -178,6 +178,18 @@ if(SOGEN_ENABLE_FEX)
 
   ExternalProject_Get_property(fex_external BINARY_DIR)
 
+  # CI builds and tests run in separate jobs/runners, exchanging only the artifacts output
+  # directory (build/<preset>/artifacts/) as an uploaded/downloaded tarball - the ExternalProject's
+  # own build tree (where fexcore's IMPORTED_LOCATION below points) never leaves the build job's
+  # runner. Copy the shared library into the artifacts directory too, alongside fex-emulator's own
+  # output, so the test job's @loader_path-relative rpath resolves it without needing that
+  # build-tree path to exist.
+  add_custom_command(
+    TARGET fex_external POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "${BINARY_DIR}/FEXCore/Source/${_FEXCORE_SHARED_LIB}" "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+    COMMENT "Copying libFEXCore shared library to the artifacts directory"
+  )
+
   # CMake validates that every directory in an IMPORTED target's INTERFACE_INCLUDE_DIRECTORIES
   # exists at generate time. ${BINARY_DIR}/include (FEXCore's build-time-generated headers, see
   # below) doesn't exist yet on a fresh checkout - it's only created once the fex_external
