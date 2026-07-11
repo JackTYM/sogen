@@ -747,6 +747,7 @@ jobs:
         run: cd build/release/artifacts && ./analyzer.exe -e root c:/test-sample.exe
         env:
           EMULATOR_WHP: "1"
+          EMULATOR_MSGDIAG: "1"
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
           EMULATOR_VERBOSE: ${{ inputs.verbose }}
 
@@ -793,6 +794,7 @@ jobs:
         run: cd build/release/artifacts && chmod +x ./analyzer && ./analyzer -e root c:/test-sample.exe
         env:
           EMULATOR_KVM: "1"
+          EMULATOR_MSGDIAG: "1"
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
           EMULATOR_VERBOSE: ${{ inputs.verbose }}
 
@@ -819,6 +821,7 @@ jobs:
       - name: CMake Test
         run: cd build/release/artifacts && ./analyzer.exe -e root c:/test-sample.exe
         env:
+          EMULATOR_MSGDIAG: "1"
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
           EMULATOR_VERBOSE: ${{ inputs.verbose }}
 

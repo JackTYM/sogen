@@ -3216,6 +3216,15 @@ namespace sogen
                 return 0;
             }
 
+            if (getenv("EMULATOR_MSGDIAG") && c.win_emu.callbacks.on_generic_activity)
+            {
+                c.win_emu.callbacks.on_generic_activity(
+                    "[MSGDIAG] NtUserMessageCall hwnd=0x" + utils::string::to_hex_number(hwnd) + " msg=0x" +
+                    utils::string::to_hex_number(msg) + " type=0x" + utils::string::to_hex_number(type) +
+                    " win->thread_id=" + std::to_string(win->thread_id) +
+                    " active_thread_id=" + (c.vcpu.active_thread ? std::to_string(c.vcpu.active_thread->id) : "<null>"));
+            }
+
             if (type == FNID_DEFWINDOW)
             {
                 const auto result = handle_default_window_proc_message(c, *win, msg, w_param, l_param, ansi);
