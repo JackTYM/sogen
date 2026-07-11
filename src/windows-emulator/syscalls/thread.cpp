@@ -1001,18 +1001,7 @@ namespace sogen
             auto frame = std::move(t.callback_stack.back());
             t.callback_stack.pop_back();
 
-            const bool msgdiag = getenv("EMULATOR_MSGDIAG") != nullptr && c.win_emu.callbacks.on_generic_activity;
-            const uint64_t rip_before_restore = msgdiag ? c.emu.read_instruction_pointer() : 0;
-
             frame.restore_registers(c.emu);
-
-            if (msgdiag)
-            {
-                c.win_emu.callbacks.on_generic_activity("[MSGDIAG] NtCallbackReturn rip_before_restore=0x" +
-                                                        utils::string::to_hex_number(rip_before_restore) + " rip_after_restore=0x" +
-                                                        utils::string::to_hex_number(c.emu.read_instruction_pointer()) +
-                                                        " callback_result=0x" + utils::string::to_hex_number(callback_result));
-            }
 
             auto dispatch_result =
                 c.win_emu.dispatcher.dispatch_completion(c.win_emu, c.vcpu, frame.handler_id, frame.state.get(), callback_result);
@@ -1029,12 +1018,6 @@ namespace sogen
                 // Move past syscall instruction
                 const auto new_ip = c.emu.read_instruction_pointer();
                 c.emu.reg(x86_register::rip, new_ip + 2);
-
-                if (msgdiag)
-                {
-                    c.win_emu.callbacks.on_generic_activity("[MSGDIAG] NtCallbackReturn final rip=0x" +
-                                                            utils::string::to_hex_number(new_ip + 2));
-                }
             }
 
             c.write_status = false;
