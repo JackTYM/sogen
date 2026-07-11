@@ -1111,14 +1111,17 @@ namespace sogen
             }
 
             // TEMP-DIAG: capture RtlpHpHeapHandleError's (a1, a2, a3) args and caller return address at
-            // the 32-bit ntdll's entry (RVA 0xEF810 in this build's syswow64/ntdll.dll) to identify the
-            // WOW64/32-bit-side STATUS_HEAP_CORRUPTION seen in the "Threads" smoke test - the existing
-            // 64-bit-only hook above never fires for it, and the corruption is only reported once, at
+            // the 32-bit ntdll's entry (RVA 0x103C20 - re-derived via idasql against the actual
+            // syswow64/ntdll.dll downloaded from the "Windows 2025 Emulation Root" CI artifact; the
+            // earlier 0xEF810 was derived from a different, older local copy and never matched, which is
+            // why the first attempt at this diagnostic produced zero hits) to identify the WOW64/32-bit-
+            // side STATUS_HEAP_CORRUPTION seen in the "Threads" smoke test - the existing 64-bit-only
+            // hook above never fires for it, and the corruption is only reported once, at
             // NtTerminateProcess, so this needs to catch it at the actual detection routine rather than
             // guess at a specific call site the way the 64-bit hook does.
             if (mod.name == "ntdll.dll" && mod.machine == 0x14c /*IMAGE_FILE_MACHINE_I386*/)
             {
-                const auto hook_addr = mod.image_base + 0xEF810;
+                const auto hook_addr = mod.image_base + 0x103C20;
                 this->emu().hook_memory_execution(hook_addr, [this](cpu_interface& cpu, uint64_t) {
                     auto& vcpu = this->vcpu(cpu.index());
                     auto& acting = vcpu.cpu;
