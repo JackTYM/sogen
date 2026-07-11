@@ -1109,48 +1109,6 @@ namespace sogen
                     }
                 });
             }
-
-            // TEMP-DIAG: capture RtlpReportHeapFailure's (a1) arg and caller return address at the
-            // 32-bit ntdll's entry (RVA 0x10583D, verified via idasql against the actual
-            // syswow64/ntdll.dll downloaded from the "Windows 2025 Emulation Root" CI artifact) to
-            // identify the WOW64/32-bit-side STATUS_HEAP_CORRUPTION seen in the "Threads" smoke test.
-            // A prior attempt hooked RtlpHpHeapHandleError's entry directly (the segment/"Hp" heap
-            // manager's error handler, which itself calls RtlpReportHeapFailure(2) on the terminal
-            // path) and got zero hits, meaning this process's corruption is detected by the OTHER
-            // (legacy, non-Hp) heap manager instead - RtlpReportHeapFailure is the common final funnel
-            // both variants call before actually exiting, so hooking it directly should catch either.
-            if (mod.name == "ntdll.dll" && mod.machine == 0x14c /*IMAGE_FILE_MACHINE_I386*/)
-            {
-                const auto hook_addr = mod.image_base + 0x10583D;
-                this->emu().hook_memory_execution(hook_addr, [this](cpu_interface& cpu, uint64_t) {
-                    auto& vcpu = this->vcpu(cpu.index());
-                    auto& acting = vcpu.cpu;
-                    const auto esp = acting.reg<uint32_t>(x86_register::esp);
-
-                    uint32_t a1 = 0;
-                    acting.try_read_memory(esp + 4, &a1, sizeof(a1));
-                    this->log.error("[WOW64-HEAP-DIAG] RtlpReportHeapFailure(a1=0x%x)\n", a1);
-
-                    // Raw stack scan (frame layout of the caller chain above this point is unknown, so
-                    // this can't be walked reliably as real return addresses) - print whatever looks
-                    // like a code address so the actual caller can be identified after the fact.
-                    for (uint32_t off = 0; off <= 0x80; off += 4)
-                    {
-                        uint32_t stack_val = 0;
-                        if (!acting.try_read_memory(esp + off, &stack_val, sizeof(stack_val)))
-                        {
-                            break;
-                        }
-
-                        const auto* mod2 = this->mod_manager.find_by_address(stack_val);
-                        if (mod2)
-                        {
-                            this->log.error("[WOW64-HEAP-DIAG]   [esp+0x%x]=0x%x (%s+0x%llx)\n", off, stack_val, mod2->name.c_str(),
-                                            static_cast<unsigned long long>(stack_val - mod2->image_base));
-                        }
-                    }
-                });
-            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
