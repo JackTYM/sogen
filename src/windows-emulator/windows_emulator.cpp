@@ -1109,6 +1109,37 @@ namespace sogen
                     }
                 });
             }
+
+            // TEMP-DIAG: capture RtlpHpHeapHandleError's (a1, a2, a3) args and caller return address at
+            // the 32-bit ntdll's entry (RVA 0xEF810 in this build's syswow64/ntdll.dll) to identify the
+            // WOW64/32-bit-side STATUS_HEAP_CORRUPTION seen in the "Threads" smoke test - the existing
+            // 64-bit-only hook above never fires for it, and the corruption is only reported once, at
+            // NtTerminateProcess, so this needs to catch it at the actual detection routine rather than
+            // guess at a specific call site the way the 64-bit hook does.
+            if (mod.name == "ntdll.dll" && mod.machine == 0x14c /*IMAGE_FILE_MACHINE_I386*/)
+            {
+                const auto hook_addr = mod.image_base + 0xEF810;
+                this->emu().hook_memory_execution(hook_addr, [this](cpu_interface& cpu, uint64_t) {
+                    auto& vcpu = this->vcpu(cpu.index());
+                    auto& acting = vcpu.cpu;
+                    const auto esp = acting.reg<uint32_t>(x86_register::esp);
+
+                    uint32_t return_address = 0;
+                    uint32_t a1 = 0;
+                    uint32_t a2 = 0;
+                    uint32_t a3 = 0;
+                    acting.try_read_memory(esp, &return_address, sizeof(return_address));
+                    acting.try_read_memory(esp + 4, &a1, sizeof(a1));
+                    acting.try_read_memory(esp + 8, &a2, sizeof(a2));
+                    acting.try_read_memory(esp + 0xC, &a3, sizeof(a3));
+
+                    const auto* caller_mod = this->mod_manager.find_by_address(return_address);
+                    this->log.error("[WOW64-HEAP-DIAG] RtlpHpHeapHandleError(a1=%u, a2=0x%x, a3=0x%x) called from %s+0x%llx\n", a1, a2, a3,
+                                    caller_mod ? caller_mod->name.c_str() : "?",
+                                    caller_mod ? static_cast<unsigned long long>(return_address - caller_mod->image_base)
+                                               : static_cast<unsigned long long>(return_address));
+                });
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
