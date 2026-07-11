@@ -1835,6 +1835,11 @@ namespace sogen
         // already registered it (the common case: deserializing into an already-running emulator).
         this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
 
+        // Same reasoning as above: the callback-return-value capture hook lives on the emu()/CPU
+        // object, not in any serialized state, so a pure deserialize() target never has it installed.
+        // Idempotent no-op when deserializing into an already-running emulator.
+        this->process.ensure_callback_return_hook(*this);
+
         this->restore_ui_backend();
     }
 
@@ -2001,6 +2006,11 @@ namespace sogen
         // resolver exists to prevent. Idempotent, so this is also a harmless no-op when map_main_modules
         // already registered it (the common case: deserializing into an already-running emulator).
         this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
+
+        // Same reasoning as above: the callback-return-value capture hook lives on the emu()/CPU
+        // object, not in any serialized state, so a pure deserialize() target never has it installed.
+        // Idempotent no-op when deserializing into an already-running emulator.
+        this->process.ensure_callback_return_hook(*this);
 
         this->restore_ui_backend();
     }
