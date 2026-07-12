@@ -1292,6 +1292,26 @@ namespace sogen
                             }
                             fprintf(stderr, "\n");
                         }
+
+                        // The decoded stub (mov eax,imm32; mov edx,imm32; call edx) bakes a fixed
+                        // address into edx - dump what's actually there to see whether it's real
+                        // code, still-zero/uncommitted memory, or something in between.
+                        constexpr uint32_t baked_wow64_transition = 0x4b335190;
+                        std::array<uint8_t, 16> transition_bytes{};
+                        if (acting.try_read_memory(baked_wow64_transition, transition_bytes.data(), transition_bytes.size()))
+                        {
+                            fprintf(stderr, "[NULLDIAG] bytes at baked Wow64Transition (0x%x): ", baked_wow64_transition);
+                            for (const auto b : transition_bytes)
+                            {
+                                fprintf(stderr, "%02x ", b);
+                            }
+                            fprintf(stderr, "\n");
+                        }
+                        else
+                        {
+                            fprintf(stderr, "[NULLDIAG] baked Wow64Transition (0x%x) is unreadable/unmapped\n", baked_wow64_transition);
+                        }
+                        fflush(stderr);
                     }
 
                     fprintf(stderr, "[NULLDIAG] eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x esi=0x%x edi=0x%x ebp=0x%x esp=0x%x eip=0x%x\n",
