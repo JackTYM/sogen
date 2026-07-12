@@ -1281,6 +1281,13 @@ namespace sogen
                                         static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
                                         mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
                     }
+
+                    fprintf(stderr, "[NULLDIAG] eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x esi=0x%x edi=0x%x ebp=0x%x esp=0x%x eip=0x%x\n",
+                            acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::ebx),
+                            acting.reg<uint32_t>(x86_register::ecx), acting.reg<uint32_t>(x86_register::edx),
+                            acting.reg<uint32_t>(x86_register::esi), acting.reg<uint32_t>(x86_register::edi),
+                            acting.reg<uint32_t>(x86_register::ebp), sp, acting.reg<uint32_t>(x86_register::eip));
+                    fflush(stderr);
                 }
 
                 this->callbacks.on_memory_violate(address, size, operation, type);
