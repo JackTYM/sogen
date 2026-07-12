@@ -544,9 +544,18 @@ namespace sogen
                 {
                     const auto ctx = c.thread().wow64_cpu_reserved->read();
                     c.win_emu.log.error("[WOW64-HEAP-DIAG] NtTerminateProcess(status=0x%x) 32-bit eip=0x%x esp=0x%x\n",
-                                        static_cast<uint32_t>(exit_status), ctx.Context.Eip, ctx.Context.Esp);
+                                        static_cast<uint32_t>(exit_status), static_cast<uint32_t>(ctx.Context.Eip),
+                                        static_cast<uint32_t>(ctx.Context.Esp));
 
-                    for (uint32_t off = 0; off <= 0x100; off += 4)
+                    // Widened from the first pass's 0x100 bytes: that scan only turned up unrelated,
+                    // stale stack garbage (e.g. Normalization/CRT function addresses with no plausible
+                    // relation to heap corruption), not the real caller chain. RtlpReportHeapFailure -
+                    // confirmed via idasql as the ntdll build's ONLY site that hardcodes the
+                    // 0xC0000374 literal (mov ecx, 0C0000374h) - is almost certainly on the real
+                    // path, so scan much further to have a chance of catching its actual return
+                    // address (or RtlpHeapHandleError/RtlpHpHeapHandleError's) somewhere in this
+                    // thread's real call history.
+                    for (uint32_t off = 0; off <= 0x4000; off += 4)
                     {
                         uint32_t stack_val = 0;
                         if (!c.win_emu.memory.try_read_memory(ctx.Context.Esp + off, &stack_val, sizeof(stack_val)))
