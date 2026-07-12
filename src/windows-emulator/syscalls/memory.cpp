@@ -497,10 +497,19 @@ namespace sogen
                 // that run guest VA == host VA (FEX on Apple), where the host process's own mappings
                 // (JIT code buffers, a framework's lazy allocation, a GCD worker stack) share the guest
                 // address space and can appear at any point during execution. Only on an actual
-                // collision - rare - pay for a full reserve_host_memory_ranges() rescan (which records
-                // every currently-foreign range so the next pick skips them) and retry, mirroring the
-                // pick/confirm/retry loop the size-only memory_manager::allocate_memory overload uses
-                // for the same reason.
+                // collision - rare - rescan and retry, mirroring the pick/confirm/retry loop
+                // memory_manager::find_free_host_allocation_base uses for the same reason.
+                //
+                // The rescan is BOTH the full reserve_host_memory_ranges() AND the windowed
+                // reserve_host_memory_ranges_in(pick, size) - see find_free_host_allocation_base for the full
+                // rationale. In short: the full scan retires every currently-visible foreign range at once so
+                // a pick at the low edge of a large host-occupied region jumps clear of the whole region,
+                // while the windowed record catches a structural blind spot the full scan has but the
+                // windowed host_window_is_free probe does not - the FEX/Apple wow64 rebase host window
+                // [0x400000000, 0x500000000), omitted from the full reserved_host_ranges() scan yet reported
+                // occupied by the windowed reserved_host_ranges_in() for a native pick landing on it. Without
+                // the windowed record a native 4GB+ reservation whose lowest free hole is that window spins to
+                // exhaustion (real busybox-w32 wow64 init: C0000145 in ~6/8 runs).
                 for (int attempt = 0;; ++attempt)
                 {
                     potential_base = c.win_emu.memory.find_free_allocation_base(
@@ -519,6 +528,7 @@ namespace sogen
                     }
 
                     c.win_emu.memory.reserve_host_memory_ranges();
+                    c.win_emu.memory.reserve_host_memory_ranges_in(potential_base, static_cast<size_t>(allocation_bytes));
                 }
             }
             else

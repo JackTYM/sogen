@@ -798,11 +798,26 @@ namespace sogen
         // Pick from sogen's current bookkeeping, then confirm just the picked window is still free at the
         // host level (host_window_is_free - a pure probe, no clamped slice recorded). Only on an actual
         // collision - a foreign host mapping having landed in the freshly-picked gap since the last scan -
-        // pay for a full reserve_host_memory_ranges() rescan, which records every current foreign range so
-        // the next find_free_allocation_base skips past it in one go, and re-pick. Bounded by
-        // max_host_reserved_retries: every non-settling iteration records at least one more foreign range,
-        // so find_free_allocation_base is guaranteed to make progress. Returns 0 (as the old
+        // rescan and re-pick. Bounded by max_host_reserved_retries: each non-settling iteration records at
+        // least one more foreign range overlapping the just-rejected pick, so find_free_allocation_base
+        // cannot return it again and is guaranteed to make progress. Returns 0 (as the old
         // unconditional-rescan path did) when a pick could not be confirmed.
+        //
+        // The rescan is BOTH the full reserve_host_memory_ranges() AND the windowed
+        // reserve_host_memory_ranges_in(pick, size), because the two cover cases the other misses:
+        //   * The full scan records every currently-visible foreign range at once, so a pick landing at the
+        //     low edge of a large contiguous host-occupied region jumps clear past the whole region in one
+        //     step. The windowed record alone would only retire its own pick-sized slice, unable to escape a
+        //     region wider than max_host_reserved_retries picks (real regression: a relocated 64-bit module -
+        //     user32.dll - failed to place at all when only the windowed slice was recorded).
+        //   * The full scan can have a structural blind spot the windowed host_window_is_free probe does not.
+        //     On the FEX/Apple backend the wow64 rebase host window [0x400000000, 0x500000000) is omitted
+        //     from the full reserved_host_ranges() scan (it is guest address space, not a foreign occupant)
+        //     yet is correctly reported occupied by the windowed reserved_host_ranges_in() for a native,
+        //     non-rebased pick that lands on it. A native 4GB+ auto-placement whose lowest free bookkeeping
+        //     hole is that window would otherwise have host_window_is_free reject the same pick every
+        //     iteration while a full rescan recorded nothing new, spinning to exhaustion. The windowed record
+        //     retires exactly the window host_window_is_free just flagged, closing that gap.
         for (int attempt = 0;; ++attempt)
         {
             const uint64_t allocation_base = this->find_free_allocation_base(size, start);
@@ -822,6 +837,7 @@ namespace sogen
             }
 
             this->reserve_host_memory_ranges();
+            this->reserve_host_memory_ranges_in(allocation_base, size);
         }
     }
 
