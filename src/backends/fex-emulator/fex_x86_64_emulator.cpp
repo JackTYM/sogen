@@ -3365,6 +3365,23 @@ namespace sogen::fex
             const auto saved_fs_cached = dst.fs_cached;
             const auto saved_gs_cached = dst.gs_cached;
 
+            // Same reasoning as the segment preservation above, applied to r12-r15: these are the
+            // wow64cpu-reserved registers the forward crossing populates on the 64-bit engine (thread_)
+            // - r12/r13 = TEB64/CpuArea block, r14 = the frozen 64-bit exception stack real Windows'
+            // Wow64PrepareForException reads via CONTEXT.R14 (see enter_wow64_32bit_from_run_simulated_code's
+            // doc comment), r15 = the turbo jump table. marshal_architectural_state copies the FULL
+            // register file including r8-r15, so crossing back into the 64-bit engine here (the
+            // heaven's-gate exception-delivery path) overwrote thread_'s carefully-set r12-r15 with
+            // whatever was in the 32-bit engine's (thread32_) same slots - meaningless SRA-spill garbage,
+            // since 32-bit code cannot address r8-r15 at all. That garbage r14 then fed
+            // Wow64PrepareForException's real stack-derivation logic, producing a wild address and a
+            // second fault inside KiUserExceptionDispatcher itself. Preserve the destination engine's
+            // own r12-r15 across the marshal exactly like the segment state above.
+            const auto saved_r12 = dst.gregs[12];
+            const auto saved_r13 = dst.gregs[13];
+            const auto saved_r14 = dst.gregs[14];
+            const auto saved_r15 = dst.gregs[15];
+
             marshal_architectural_state(src, dst);
 
             dst.es_idx = saved_es_idx;
@@ -3379,6 +3396,10 @@ namespace sogen::fex
             dst.ds_cached = saved_ds_cached;
             dst.fs_cached = saved_fs_cached;
             dst.gs_cached = saved_gs_cached;
+            dst.gregs[12] = saved_r12;
+            dst.gregs[13] = saved_r13;
+            dst.gregs[14] = saved_r14;
+            dst.gregs[15] = saved_r15;
 
             dst.rip = target_rip;
             dst.gregs[detail::greg_rsp] = target_rsp;
