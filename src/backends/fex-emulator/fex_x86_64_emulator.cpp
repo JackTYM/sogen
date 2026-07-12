@@ -3169,14 +3169,6 @@ namespace sogen::fex
             state64.gregs[14] = state64.gregs[detail::greg_rsp];                          // r14 = 64-bit frame
             state64.gregs[15] = (gate.address & ~static_cast<uint64_t>(0xFFFF)) + 0x36d0; // r15 = turbo table
 
-            fprintf(stderr,
-                    "[GATEDIAG] forward crossing 64->32: true_entry=%d entry_rsp_pre_adjust=0x%llx r14_set=0x%llx "
-                    "teb64=0x%llx block=0x%llx\n",
-                    src.rip == gate.address ? 1 : 0, static_cast<unsigned long long>(state64.gregs[detail::greg_rsp]),
-                    static_cast<unsigned long long>(state64.gregs[14]), static_cast<unsigned long long>(teb64),
-                    static_cast<unsigned long long>(block));
-            fflush(stderr);
-
             this->active_context_ = this->context32_.get();
             this->active_thread_ = this->thread32_;
             return true;
@@ -3408,18 +3400,6 @@ namespace sogen::fex
             dst.gregs[13] = saved_r13;
             dst.gregs[14] = saved_r14;
             dst.gregs[15] = saved_r15;
-
-            if (target_is_64bit)
-            {
-                fprintf(stderr,
-                        "[GATEDIAG] heaven's-gate crossing -> 64-bit: target_rip=0x%llx target_rsp=0x%llx "
-                        "r12=0x%llx r13=0x%llx r14=0x%llx r15=0x%llx (thread_==dst_thread: %d)\n",
-                        static_cast<unsigned long long>(target_rip), static_cast<unsigned long long>(target_rsp),
-                        static_cast<unsigned long long>(dst.gregs[12]), static_cast<unsigned long long>(dst.gregs[13]),
-                        static_cast<unsigned long long>(dst.gregs[14]), static_cast<unsigned long long>(dst.gregs[15]),
-                        dst_thread == this->thread_ ? 1 : 0);
-                fflush(stderr);
-            }
 
             dst.rip = target_rip;
             dst.gregs[detail::greg_rsp] = target_rsp;
