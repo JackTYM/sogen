@@ -713,26 +713,39 @@ namespace sogen
                 throw std::runtime_error("Memory range not allocatable");
             }
 
-            if (force_wow64cpu_32bit_va)
+            // 32-bit (WOW64) modules must stay below 4 GB; native modules use the 64-bit arena.
+            const uint64_t fallback_start =
+                (force_wow64cpu_32bit_va || is_32bit) ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
+            const auto image_size = static_cast<size_t>(binary.size_of_image);
+
+            // The preferred base was taken, so relocate. find_free_host_allocation_base picks a base and
+            // confirms it is actually free at the host level, not merely per sogen's own bookkeeping. That
+            // matters on backends sharing the guest address space with the host process (FEX on Apple
+            // Silicon: guest VA == host VA), where a foreign host mapping (a lazily-loaded dylib, a thread
+            // stack, ASLR-placed anything) can occupy a VA sogen still believes is free. The old code picked
+            // once via find_free_allocation_base and retried the map exactly once, so a single such collision
+            // threw "Memory range not allocatable" outright. The loop below re-picks past a racer instead:
+            // a failed try_map_module_at_current_base has already recorded the intruding host range (via the
+            // fixed-address allocate_memory's windowed rescan), so the next pick steps past it. Bounded so a
+            // genuinely exhausted address space still terminates rather than spinning.
+            constexpr int max_host_relocation_retries = 8;
+            bool mapped = false;
+            for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
             {
-                binary.image_base =
-                    memory.find_free_allocation_base(static_cast<size_t>(binary.size_of_image), DEFAULT_ALLOCATION_ADDRESS_32BIT);
-            }
-            else if (is_32bit)
-            {
-                // Use 32-bit allocation for WOW64 modules
-                binary.image_base =
-                    memory.find_free_allocation_base(static_cast<size_t>(binary.size_of_image), DEFAULT_ALLOCATION_ADDRESS_32BIT);
-            }
-            else
-            {
-                // Use 64-bit allocation for native modules
-                binary.image_base =
-                    memory.find_free_allocation_base(static_cast<size_t>(binary.size_of_image), DEFAULT_ALLOCATION_ADDRESS_64BIT);
+                binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start);
+                if (!binary.image_base)
+                {
+                    break;
+                }
+
+                if (try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header))
+                {
+                    mapped = true;
+                    break;
+                }
             }
 
-            if (!binary.image_base ||
-                !try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header))
+            if (!mapped)
             {
                 throw std::runtime_error("Memory range not allocatable");
             }

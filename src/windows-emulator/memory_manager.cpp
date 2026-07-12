@@ -767,26 +767,10 @@ namespace sogen
         // latter records a *clamped* window slice into reserved_regions_, which would then block the
         // full rescan below from recording an intruder's full extent and make re-picking crawl across
         // it in size-sized steps instead of skipping it in one go.
-        uint64_t allocation_base = 0;
-        for (int attempt = 0;; ++attempt)
+        const uint64_t allocation_base = this->find_free_host_allocation_base(size, start);
+        if (!allocation_base)
         {
-            allocation_base = this->find_free_allocation_base(size, start);
-            if (!allocation_base)
-            {
-                return 0;
-            }
-
-            if (this->host_window_is_free(allocation_base, size))
-            {
-                break;
-            }
-
-            if (attempt >= max_host_reserved_retries)
-            {
-                return 0;
-            }
-
-            this->reserve_host_memory_ranges();
+            return 0;
         }
 
         // Claim the range at the host OS level immediately, even though it may only be reserve-only
@@ -807,6 +791,38 @@ namespace sogen
         }
 
         return allocation_base;
+    }
+
+    uint64_t memory_manager::find_free_host_allocation_base(const size_t size, const uint64_t start)
+    {
+        // Pick from sogen's current bookkeeping, then confirm just the picked window is still free at the
+        // host level (host_window_is_free - a pure probe, no clamped slice recorded). Only on an actual
+        // collision - a foreign host mapping having landed in the freshly-picked gap since the last scan -
+        // pay for a full reserve_host_memory_ranges() rescan, which records every current foreign range so
+        // the next find_free_allocation_base skips past it in one go, and re-pick. Bounded by
+        // max_host_reserved_retries: every non-settling iteration records at least one more foreign range,
+        // so find_free_allocation_base is guaranteed to make progress. Returns 0 (as the old
+        // unconditional-rescan path did) when a pick could not be confirmed.
+        for (int attempt = 0;; ++attempt)
+        {
+            const uint64_t allocation_base = this->find_free_allocation_base(size, start);
+            if (!allocation_base)
+            {
+                return 0;
+            }
+
+            if (this->host_window_is_free(allocation_base, size))
+            {
+                return allocation_base;
+            }
+
+            if (attempt >= max_host_reserved_retries)
+            {
+                return 0;
+            }
+
+            this->reserve_host_memory_ranges();
+        }
     }
 
     uint64_t memory_manager::find_free_allocation_base(const size_t size, const uint64_t start) const

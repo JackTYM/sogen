@@ -147,6 +147,15 @@ namespace sogen
         uint64_t find_free_allocation_base(size_t size, uint64_t start, uint64_t alignment, uint64_t lowest_address,
                                            uint64_t highest_address) const;
 
+        // Like find_free_allocation_base, but also confirms the pick is actually free at the host level
+        // (not merely per sogen's own bookkeeping) and rescans + re-picks past any foreign host mapping
+        // that has claimed it since the last scan, bounded by an internal retry cap (returns 0 if none
+        // could be confirmed). On backends with an independent guest address space (the default) this is
+        // identical to find_free_allocation_base - host_window_is_free is always true there. Shared by the
+        // size-only allocate_memory overload and the fixed-address module-relocation fallback so both get
+        // the same host-race recovery; see the size-only allocate_memory overload for the full rationale.
+        uint64_t find_free_host_allocation_base(size_t size, uint64_t start);
+
         region_info get_region_info(uint64_t address);
         std::optional<std::u16string> get_region_mapped_filename(uint64_t address) const;
         void set_region_mapped_filename(uint64_t address, std::u16string filename);
