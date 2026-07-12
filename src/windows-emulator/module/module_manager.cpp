@@ -815,6 +815,10 @@ namespace sogen
                 constexpr uint64_t cpu_mode_probe_size = 0x10;
                 emu_ptr->register_gate_crossing(image_base + cpu_mode_probe_rva, cpu_mode_probe_size,
                                                 x86_64_emulator::gate_crossing_kind::far_jmp_bitness_switch);
+
+                fprintf(stderr, "[GATEDIAG3] registered far_jmp_bitness_switch gate at 0x%llx (image_base=0x%llx)\n",
+                        static_cast<unsigned long long>(image_base + cpu_mode_probe_rva), static_cast<unsigned long long>(image_base));
+                fflush(stderr);
             });
 
             load_wow64_modules(emu, executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",

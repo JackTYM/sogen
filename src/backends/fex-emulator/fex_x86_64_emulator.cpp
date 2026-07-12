@@ -5019,6 +5019,22 @@ namespace sogen::fex
             }
         }
 
+        bool near_far_jmp_gate = false;
+        for (const auto& gate : this->emulator_.gate_crossings_)
+        {
+            if (gate.kind == x86_64_emulator::gate_crossing_kind::far_jmp_bitness_switch && address + 0x2000 >= gate.address &&
+                address < gate.address + 0x2000)
+            {
+                near_far_jmp_gate = true;
+            }
+        }
+        if (near_far_jmp_gate)
+        {
+            fprintf(stderr, "[QDIAG] QueryGuestExecutableRange address=0x%llx (gate_count=%zu)\n", static_cast<unsigned long long>(address),
+                    this->emulator_.gate_crossings_.size());
+            fflush(stderr);
+        }
+
         // A registered WoW64 gate crossing is likewise non-executable to the JIT - reaching it must
         // raise a synthetic #PF (which perform_gate_crossing then services) rather than compile the
         // real mode-switch bytes there, which the fixed-bitness JIT can't execute anyway.
@@ -5026,6 +5042,12 @@ namespace sogen::fex
         {
             if (address >= gate.address && address < gate.address + gate.size)
             {
+                if (near_far_jmp_gate)
+                {
+                    fprintf(stderr, "[QDIAG] matched gate at 0x%llx size=0x%zx kind=%d\n", static_cast<unsigned long long>(gate.address),
+                            gate.size, static_cast<int>(gate.kind));
+                    fflush(stderr);
+                }
                 return {};
             }
         }
