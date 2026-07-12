@@ -276,6 +276,21 @@ namespace sogen
                       ? thread.current_ip
                       : vcpu.cpu.read_instruction_pointer();
 
+        fprintf(
+            stderr,
+            "[EXCDIAG2] dispatch_exception: status=0x%lx rip=0x%llx rsp=0x%llx rax=0x%llx rbx=0x%llx rcx=0x%llx "
+            "rdx=0x%llx rsi=0x%llx rdi=0x%llx rbp=0x%llx r8=0x%llx r9=0x%llx r10=0x%llx r11=0x%llx r12=0x%llx "
+            "r13=0x%llx r14=0x%llx r15=0x%llx segcs=0x%llx seggs=0x%llx segfs=0x%llx param1=0x%llx\n",
+            static_cast<unsigned long>(status), static_cast<unsigned long long>(ctx.Rip), static_cast<unsigned long long>(ctx.Rsp),
+            static_cast<unsigned long long>(ctx.Rax), static_cast<unsigned long long>(ctx.Rbx), static_cast<unsigned long long>(ctx.Rcx),
+            static_cast<unsigned long long>(ctx.Rdx), static_cast<unsigned long long>(ctx.Rsi), static_cast<unsigned long long>(ctx.Rdi),
+            static_cast<unsigned long long>(ctx.Rbp), static_cast<unsigned long long>(ctx.R8), static_cast<unsigned long long>(ctx.R9),
+            static_cast<unsigned long long>(ctx.R10), static_cast<unsigned long long>(ctx.R11), static_cast<unsigned long long>(ctx.R12),
+            static_cast<unsigned long long>(ctx.R13), static_cast<unsigned long long>(ctx.R14), static_cast<unsigned long long>(ctx.R15),
+            static_cast<unsigned long long>(ctx.SegCs), static_cast<unsigned long long>(ctx.SegGs),
+            static_cast<unsigned long long>(ctx.SegFs), static_cast<unsigned long long>(parameters.empty() ? 0 : parameters[0]));
+        fflush(stderr);
+
         // FEXCore's JIT translation of INT3 reports RIP already advanced past the trapping 0xCC
         // (see reports_breakpoint_rip_past_instruction's doc comment) - real hardware/NT
         // (KiBreakpointTrap) always reports #BP at the INT3 itself, which is what guest SEH/VEH
