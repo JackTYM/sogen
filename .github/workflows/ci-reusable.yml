@@ -866,6 +866,63 @@ jobs:
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
           EMULATOR_VERBOSE: ${{ inputs.verbose }}
 
+  smoke-test-fex-gpu:
+    name: Smoke Test FEX GPU (macOS arm64)
+    runs-on: macos-latest
+    needs: [create-emulation-root, build]
+    steps:
+      - name: Download Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: macOS arm64 Release Artifacts
+          path: build/release/artifacts
+
+      - name: Download Windows Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows x86_64 Release Artifacts
+          path: build/release/artifacts
+
+      # vulkan-shim-test.exe is a Windows PE guest; it can't be produced by the macOS build, so it's
+      # sourced from the MinGW x86_64 build's artifacts (src/samples/CMakeLists.txt builds it
+      # unconditionally for every platform, and the build job's Upload Artifacts step uploads
+      # everything under that platform's artifacts directory).
+      - name: Download GPU Test Guest
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: MinGW x86_64 Release Artifacts
+          path: build/release/artifacts/mingw
+
+      # The GPU runtime shim (DXVK + vulkan-1.dll) is already installed into this root by
+      # create-emulation-root's install-gpu-runtime.ps1 step; no per-job GPU setup is needed here.
+      - name: Download Emulation Root
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows 2025 Emulation Root
+          path: build/release/artifacts/root
+
+      - name: Stage GPU Test Guest
+        run: cp build/release/artifacts/mingw/vulkan-shim-test.exe build/release/artifacts/root/filesys/c/
+
+      # Same known-flaky FEX address-space class as smoke-test-fex (see its comment above) - a fresh
+      # process retry with its own fresh ASLR layout reliably works around it. The shim-test's own
+      # exit code plus the "[shim-test] ok" completion marker (rather than exit code alone) guard
+      # against a benign, non-fatal teardown-time module-mapping message that can otherwise still
+      # leave exit=0.
+      - name: Run GPU Paravirtualization Smoke Test
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 10
+          command: |
+            cd build/release/artifacts && chmod +x ./analyzer
+            ./analyzer -s -e root c:/vulkan-shim-test.exe | tee gpu-smoke-test.log
+            grep -q '\[shim-test\] ok' gpu-smoke-test.log
+        env:
+          EMULATOR_FEX: "1"
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
+          EMULATOR_VERBOSE: ${{ inputs.verbose }}
+
   smoke-test-mingw:
     name: Smoke Test MinGW x86_64
     runs-on: windows-latest
@@ -1261,6 +1318,7 @@ jobs:
         smoke-test-whp,
         smoke-test-kvm,
         smoke-test-fex,
+        smoke-test-fex-gpu,
         smoke-test-node,
         smoke-test-mingw,
         smoke-test-win32,
