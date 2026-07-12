@@ -627,6 +627,18 @@ namespace sogen
         // stack (ActiveFrame=0, FrameListCache as an empty circular list, cookie sequence starting at 1
         // like real ntdll) so those Rtl(De)ActivateActivationContextUnsafeFast paths operate on a real
         // structure. WoW64-only (native threads return above), so the native path is unaffected.
+        //
+        // Flags=2 (not 0) is load-bearing, not cosmetic: real ntdll's own lazy-init path
+        // (RtlpInitializeThreadActivationContextStack, called on first use of a thread's activation
+        // context stack) stores this exact struct embedded directly in the TEB - not a separate heap
+        // block - and sets this Flags bit specifically so RtlFreeActivationContextStack (invoked via
+        // RtlFreeThreadActivationContextStack on ExitThread, confirmed via disassembly of the actual
+        // ntdll shipped in this project's emulation root) skips its `RtlFreeHeap(ProcessHeap, 0, a1)`
+        // call: `if ((a1->Flags & 2) == 0) RtlFreeHeap(...)`. This project's stack similarly isn't a
+        // real heap allocation (it lives in the gs_segment), so Flags=0 made every WOW64 thread's exit
+        // free a pointer that was never allocated via RtlAllocateHeap, corrupting the heap - the
+        // STATUS_HEAP_CORRUPTION seen in the "Threads" smoke test only after several worker threads
+        // had actually exited (ExitThread, not process teardown, which skips this cleanup entirely).
         {
             const auto act_ctx_stack = this->gs_segment->reserve<ACTIVATION_CONTEXT_STACK32>();
             const auto frame_list_cache_addr =
@@ -635,7 +647,7 @@ namespace sogen
                 stack.ActiveFrame = 0;
                 stack.FrameListCache.Flink = frame_list_cache_addr;
                 stack.FrameListCache.Blink = frame_list_cache_addr;
-                stack.Flags = 0;
+                stack.Flags = 2;
                 stack.NextCookieSequenceNumber = 1;
                 stack.StackId = 0;
             });
