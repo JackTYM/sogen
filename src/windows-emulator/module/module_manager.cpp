@@ -805,20 +805,23 @@ namespace sogen
                                                 x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
 
                 // BTCpuProcessInit also writes a standalone compatibility-mode-to-long-mode probe into
-                // its own freshly-r-x'd page at RVA 0x7000 (decoded by hand from the shipped binary,
-                // same as the RVAs above): a bare `jmp far 0x33:<target>` (opcode 0xEA), which real
+                // its own freshly-r-x'd page: a bare `jmp far 0x33:<target>` (opcode 0xEA), which real
                 // hardware executes to verify the CPU can actually switch into 64-bit mode - a
                 // one-time sanity check unrelated to the two dispatch mechanisms above, but exactly as
                 // un-JIT-able (0xEA is undefined in 64-bit long mode). See perform_gate_crossing's
                 // decode of it (gate_crossing_kind::far_jmp_bitness_switch).
-                constexpr uint64_t cpu_mode_probe_rva = 0x7000;
+                //
+                // Confirmed empirically (not by hand like the RVAs above): the probe faults at
+                // image_base+0x6d41. This is NOT the same as (mapped base)+0x7000 - image_base here
+                // (dispatch_start - turbo_dispatch_start_rva) sits a fixed 0x2bf bytes above wow64cpu.dll's
+                // real mapped base, so RVAs measured directly against the PE mapping (as first done
+                // for this one) land 0x2bf too high once added to image_base instead. The other three
+                // gates above don't have this problem because their RVAs were decoded by hand directly
+                // against image_base's own frame of reference, not the PE mapping.
+                constexpr uint64_t cpu_mode_probe_rva = 0x6d41;
                 constexpr uint64_t cpu_mode_probe_size = 0x10;
                 emu_ptr->register_gate_crossing(image_base + cpu_mode_probe_rva, cpu_mode_probe_size,
                                                 x86_64_emulator::gate_crossing_kind::far_jmp_bitness_switch);
-
-                fprintf(stderr, "[GATEDIAG3] registered far_jmp_bitness_switch gate at 0x%llx (image_base=0x%llx)\n",
-                        static_cast<unsigned long long>(image_base + cpu_mode_probe_rva), static_cast<unsigned long long>(image_base));
-                fflush(stderr);
             });
 
             load_wow64_modules(emu, executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
