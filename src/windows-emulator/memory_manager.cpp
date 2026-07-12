@@ -818,9 +818,15 @@ namespace sogen
         //     hole is that window would otherwise have host_window_is_free reject the same pick every
         //     iteration while a full rescan recorded nothing new, spinning to exhaustion. The windowed record
         //     retires exactly the window host_window_is_free just flagged, closing that gap.
+        return this->find_free_host_allocation_base(size, start, MAX_ALLOCATION_END_EXCL - 1);
+    }
+
+    uint64_t memory_manager::find_free_host_allocation_base(const size_t size, const uint64_t start, const uint64_t highest_address)
+    {
         for (int attempt = 0;; ++attempt)
         {
-            const uint64_t allocation_base = this->find_free_allocation_base(size, start);
+            const uint64_t allocation_base =
+                this->find_free_allocation_base(size, start, ALLOCATION_GRANULARITY, MIN_ALLOCATION_ADDRESS, highest_address);
             if (!allocation_base)
             {
                 return 0;

@@ -49,6 +49,7 @@
 #include <dlfcn.h>
 #include <cxxabi.h>
 #include <libkern/OSCacheControl.h>
+#include <libproc.h>
 #endif
 
 #include <atomic>
@@ -1640,13 +1641,6 @@ namespace sogen::fex
             this->context_->SetNeedsWow64GuestRebase(is_wow64_process);
             if (is_wow64_process)
             {
-#ifdef __APPLE__
-                // Claim the wow64 rebase window before anything else (FEXCore init, guest code, any
-                // lazily-loaded host framework) can - see reserve_wow64_host_window's doc comment.
-                // Must happen before ensure_context32()/any guest code runs, not after: the whole
-                // point is closing the window before it can be raced.
-                this->reserve_wow64_host_window();
-#endif
                 this->ensure_context32();
             }
         }
@@ -1665,14 +1659,20 @@ namespace sogen::fex
         // nondeterministically, tracking the host's own ASLR/allocation timing (measured at roughly
         // 20-30% of runs for a real wow64 guest before this fix).
         //
-        // Called once, at the earliest point a wow64 process is known (notify_process_bitness,
-        // before ensure_context32()/any guest or guest-triggered code has run at all) - the window
-        // is expected to be genuinely empty this early on macOS/arm64 (dyld's shared cache and the
-        // main image both sit far outside it). Probes first and fails loud (falls back to the
-        // existing detect-and-retry behavior, unchanged) rather than silently clobbering something
-        // already there if that expectation is ever wrong in some environment - this can only ever
-        // improve on baseline, never regress it, since wow64_host_window_reserved_ staying false
-        // makes reserved_host_ranges()/reserved_host_ranges_in() behave exactly as before.
+        // Called once, unconditionally, from initialize_context() - this backend's own construction,
+        // before FEXCore's context/CodeBuffer exist and before any guest or guest-triggered code has
+        // run - regardless of whether this process turns out to be wow64 at all (bitness isn't known
+        // this early; see initialize_context's call site comment for why reserving it unconditionally
+        // is harmless for a plain 64-bit guest). This used to run later, from notify_process_bitness,
+        // once bitness was actually known - but that was measurably too late: this process links
+        // Cocoa/Metal (sogen's own GPU/window subsystem), whose device/heap setup can claim a large
+        // host VA range via ASLR before notify_process_bitness ever fires, occasionally landing
+        // exactly on this window. Running from initialize_context() instead gives this the earliest
+        // possible chance to win that race. Probes first and fails loud (falls back to the existing
+        // detect-and-retry behavior, unchanged) rather than silently clobbering something already
+        // there if the window isn't actually free even this early - this can only ever improve on
+        // baseline, never regress it, since wow64_host_window_reserved_ staying false makes
+        // reserved_host_ranges()/reserved_host_ranges_in() behave exactly as before.
         //
         // Deliberately NOT surfaced as a "reserved" range via reserved_host_ranges()/
         // reserved_host_ranges_in() (contrast with fex_internal_arena, which IS surfaced there) -
@@ -1690,6 +1690,11 @@ namespace sogen::fex
         // stop reporting the window as "foreign" at all, which the skip checks below do.
         void reserve_wow64_host_window()
         {
+            if (this->wow64_host_window_reserved_)
+            {
+                return;
+            }
+
             void* const target = reinterpret_cast<void*>(wow64_guest_rebase);
 
             mach_vm_address_t probe_addr = wow64_guest_rebase;
@@ -1701,12 +1706,16 @@ namespace sogen::fex
                                                               reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
             if (probe_result == KERN_SUCCESS && probe_addr < wow64_guest_rebase + wow64_guest_address_space_size)
             {
+                char path_buf[PROC_PIDPATHINFO_MAXSIZE] = {};
+                const int path_len = proc_regionfilename(getpid(), probe_addr, path_buf, sizeof(path_buf));
                 fprintf(stderr,
                         "[FEX backend] wow64 host window [0x%llx, 0x%llx) not empty at reservation time (existing "
-                        "mapping at 0x%llx) - skipping proactive reservation, falling back to detect-and-retry\n",
+                        "mapping at 0x%llx size=0x%llx prot=%d max_prot=%d shared=%d reserved=%d behavior=%d "
+                        "file=%s) - skipping proactive reservation, falling back to detect-and-retry\n",
                         static_cast<unsigned long long>(wow64_guest_rebase),
                         static_cast<unsigned long long>(wow64_guest_rebase + wow64_guest_address_space_size),
-                        static_cast<unsigned long long>(probe_addr));
+                        static_cast<unsigned long long>(probe_addr), static_cast<unsigned long long>(probe_size), info.protection,
+                        info.max_protection, info.shared, info.reserved, info.behavior, path_len > 0 ? path_buf : "<none>");
                 return;
             }
 
@@ -2723,6 +2732,21 @@ namespace sogen::fex
             // and before reserved_host_ranges() is first queried, so the whole arena is off-limits to
             // guest allocations. See fex_internal_arena's comment for the full rationale.
             fex_internal_arena::instance().install();
+
+            // Claim the wow64 rebase window here too, unconditionally - not only once bitness is known
+            // to be wow64 (notify_process_bitness, which used to be the sole call site). A real
+            // regression showed this window can already be occupied by the time notify_process_bitness
+            // runs: this process links Cocoa/Metal (sogen's own GPU/window subsystem - see the
+            // vulkan-shim work), and Metal's device/heap setup reserves a large (multi-GB) host VA
+            // range whose ASLR placement can land inside this window before any target executable
+            // (and thus its bitness) is even known - measured directly landing on the heaven's-gate
+            // trampoline's rebased target and reproducibly breaking install_wow64_heaven_gate. This is
+            // the earliest point in the process (this backend's own construction, before FEXCore's
+            // context/CodeBuffer, before any GUI/graphics initialization sogen itself triggers) this
+            // code can act, so it gives the reservation the best chance of winning that race. Harmless
+            // for a plain 64-bit-only guest: it only ever steers that guest's own allocations away from
+            // this one 4GB range, exactly like any other foreign occupant already does.
+            this->reserve_wow64_host_window();
 #endif
 
             // libc++abi's default terminate handler prints nothing useful for an uncaught exception

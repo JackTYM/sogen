@@ -94,8 +94,8 @@ namespace sogen
             uint64_t ss;
         };
 
-        void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher,
-                                         const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
+        void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher, const uint64_t heaven_gate_code_base,
+                                         const uint64_t heaven_gate_stack_top, const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
         {
             constexpr auto mach_frame_size = 0x40;
             constexpr auto context_record_size = 0x4F0;
@@ -154,8 +154,8 @@ namespace sogen
             emu.reg(x86_register::rbx, new_sp);
             emu.reg(x86_register::rcx, static_cast<uint64_t>(wow64::heaven_gate::kUserCodeSelector));
             emu.reg(x86_register::rdx, static_cast<uint64_t>(wow64::heaven_gate::kUserStackSelector));
-            emu.reg(x86_register::rsp, wow64::heaven_gate::kStackTop);
-            emu.reg(x86_register::rip, wow64::heaven_gate::kCodeBase);
+            emu.reg(x86_register::rsp, heaven_gate_stack_top);
+            emu.reg(x86_register::rip, heaven_gate_code_base);
         }
 
         WOW64_CONTEXT make_wow64_context(const CONTEXT64& ctx)
@@ -312,7 +312,9 @@ namespace sogen
         EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers{};
         pointers.ContextRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&ctx);
         pointers.ExceptionRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&record);
-        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher, pointers);
+        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher,
+                                    win_emu.mod_manager.wow64_heaven_gate_code_base(), win_emu.mod_manager.wow64_heaven_gate_stack_top(),
+                                    pointers);
     }
 
     void dispatch_access_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address, const memory_operation operation)

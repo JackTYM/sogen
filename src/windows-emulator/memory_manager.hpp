@@ -156,6 +156,11 @@ namespace sogen
         // the same host-race recovery; see the size-only allocate_memory overload for the full rationale.
         uint64_t find_free_host_allocation_base(size_t size, uint64_t start);
 
+        // Same as above, but bounds the search to [MIN_ALLOCATION_ADDRESS, highest_address] instead of the
+        // full address space - for callers with a hard architectural ceiling (e.g. a below-4GB requirement)
+        // where a pick above that ceiling would be useless regardless of whether it's free.
+        uint64_t find_free_host_allocation_base(size_t size, uint64_t start, uint64_t highest_address);
+
         region_info get_region_info(uint64_t address);
         std::optional<std::u16string> get_region_mapped_filename(uint64_t address) const;
         void set_region_mapped_filename(uint64_t address, std::u16string filename);

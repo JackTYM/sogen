@@ -939,6 +939,61 @@ jobs:
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
           EMULATOR_VERBOSE: ${{ inputs.verbose }}
 
+  smoke-test-fex-wow64:
+    name: Smoke Test FEX WoW64 (macOS arm64)
+    runs-on: macos-latest
+    needs: [create-emulation-root, build]
+    steps:
+      # wow64-test-sample.exe is a genuine 32-bit PE; it can't be produced by the macOS build, so
+      # it's sourced from the real MSVC "Windows x86" build's artifacts (src/CMakeLists.txt's
+      # `if(WIN32)` guard means src/samples/ is only built there or under MinGW, never natively on
+      # macOS/Linux).
+      - name: Download WoW64 Test Guest
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows x86 Release Artifacts
+          path: build/release/artifacts/win32
+
+      - name: Download Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: macOS arm64 Release Artifacts
+          path: build/release/artifacts
+
+      - name: Download Emulation Root
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows 2025 Emulation Root
+          path: build/release/artifacts/root
+
+      - name: Stage WoW64 Test Guest
+        run: cp build/release/artifacts/win32/wow64-test-sample.exe build/release/artifacts/root/filesys/c/
+
+      # This is the one CI job that actually exercises WoW64 translation (a genuine 32-bit guest
+      # running under a 64-bit analyzer) - every other smoke test uses a bitness-matched
+      # analyzer+guest pair, with no WoW64 machinery involved at all. Same known-flaky FEX
+      # address-space class as smoke-test-fex (see its comment above) applies here too, plus a
+      # residual, much rarer WoW64-specific race (a large host VA reservation this process's own
+      # Cocoa/Metal GPU subsystem makes at dyld-load time can - unpredictably, based on ASLR -
+      # exhaust the address space sogen's WoW64 support needs below 4GB; see the plan file's
+      # 2026-07-12 entry for the full root cause). A fresh process retry, with its own fresh ASLR
+      # layout, reliably works around both. The sample's own "wow64-test-sample: ok" completion
+      # marker (rather than exit code alone) guards against a benign non-fatal teardown-time
+      # message that can otherwise still leave exit=0.
+      - name: Run WoW64 Smoke Test
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 10
+          command: |
+            cd build/release/artifacts && chmod +x ./analyzer
+            ./analyzer -e root c:/wow64-test-sample.exe | tee wow64-smoke-test.log
+            grep -q 'wow64-test-sample: ok' wow64-smoke-test.log
+        env:
+          EMULATOR_FEX: "1"
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
+          EMULATOR_VERBOSE: ${{ inputs.verbose }}
+
   smoke-test-mingw:
     name: Smoke Test MinGW x86_64
     runs-on: windows-latest
@@ -1335,6 +1390,7 @@ jobs:
         smoke-test-kvm,
         smoke-test-fex,
         smoke-test-fex-gpu,
+        smoke-test-fex-wow64,
         smoke-test-node,
         smoke-test-mingw,
         smoke-test-win32,

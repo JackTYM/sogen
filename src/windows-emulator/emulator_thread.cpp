@@ -504,9 +504,23 @@ namespace sogen
         // wow64win.dll's win32k callback thunks can truncate the stack pointer to build the 32-bit
         // window-proc call frame. Search from a base above the 32-bit module/heap region so it does
         // not land at a structurally-wrong low address the way the raw 0x10000 default did.
-        this->stack_base =
-            memory.allocate_memory(WOW64_NATIVE_STACK_SIZE, memory_permission::read_write, false, WOW64_NATIVE_STACK_BASE_HINT);
-        if (this->stack_base == 0)
+        //
+        // Explicitly bounded below 4GB, unlike the plain hint-based allocate_memory(size, ...)
+        // overload (which searches upward from the hint with no ceiling at all - risking a pick above
+        // 4GB, silently violating the low-4GB requirement above, if the region right above the hint is
+        // ever exhausted). Deliberately does NOT fall back to searching below the hint on failure: that
+        // range is exactly the "32-bit module/heap region" the hint exists to avoid (confirmed by a
+        // real regression - a low-floor fallback landed the stack in that region and caused genuine
+        // guest-visible memory corruption, worse than the clean failure below). If the hint-and-above
+        // range is ever exhausted (e.g. a large foreign host reservation - see
+        // install_wow64_heaven_gate's doc comment for the same root cause - starting at or below the
+        // hint), failing loudly here is the correct, safe outcome.
+        constexpr uint64_t wow64_native_stack_below_4gb_ceiling = 0xFFFFFFFFULL;
+
+        this->stack_base = memory.find_free_host_allocation_base(WOW64_NATIVE_STACK_SIZE, WOW64_NATIVE_STACK_BASE_HINT,
+                                                                 wow64_native_stack_below_4gb_ceiling);
+
+        if (!this->stack_base || !memory.allocate_memory(this->stack_base, WOW64_NATIVE_STACK_SIZE, memory_permission::read_write))
         {
             throw std::runtime_error("Failed to allocate native stack + WOW64_CPURESERVED memory region");
             return;

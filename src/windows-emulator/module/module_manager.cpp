@@ -479,64 +479,159 @@ namespace sogen
         using wow64::heaven_gate::kStackSize;
         using wow64::heaven_gate::kTrampolineBytes;
 
-        auto allocate_or_validate = [&](uint64_t base, size_t size, memory_permission perms, const char* name) {
-            if (!this->memory_->allocate_memory(base, size, perms))
+        // Unlike a real module's preferred base, kCodeBase/kStackBase aren't addresses real
+        // Windows/wow64cpu.dll require - they're sogen-internal implementation details (kTrampolineBytes
+        // is itself fully position-independent code: its one "call" targets its own next instruction,
+        // not an absolute address), so there's no compatibility reason they must sit exactly there. Try
+        // the preferred address first (the common, fast path - almost always free), but fall back to
+        // searching for any free spot below 4GB if it isn't. This matters on a backend sharing the guest
+        // address space with the host process (FEX on Apple Silicon): a real regression showed the
+        // preferred kCodeBase can already be claimed by a foreign host mapping - this process's own
+        // Cocoa/Metal GPU subsystem reserves a large host VA range whose ASLR placement occasionally
+        // lands exactly there. Confirmed to be a genuine, ongoing race (not just a one-time startup
+        // ordering issue): even when the address reads as free at allocation time, Metal's own
+        // background thread can still claim it in the narrow window before the trampoline bytes are
+        // actually written, so the write itself must be retried at a new address on failure too, not
+        // just the initial allocation. With none of this handled, real wow64 runs failed outright in
+        // roughly 20-40% of runs.
+        constexpr uint64_t heaven_gate_below_4gb_ceiling = 0xFFFFFFFFULL;
+        constexpr int max_heaven_gate_retries = 8;
+
+        auto allocate_or_validate = [&](uint64_t preferred_base, size_t size, memory_permission perms,
+                                        const char* name) -> std::optional<uint64_t> {
+            if (this->memory_->allocate_memory(preferred_base, size, perms))
             {
-                const auto region = this->memory_->get_region_info(base);
-                if (!region.is_reserved || region.allocation_length < size)
-                {
-                    logger.error("Failed to allocate %s at 0x%" PRIx64 " (size 0x%zx)\n", name, base, size);
-                    return false;
-                }
+                return preferred_base;
             }
-            return true;
+
+            const auto region = this->memory_->get_region_info(preferred_base);
+            if (region.is_reserved && region.allocation_length >= size)
+            {
+                return preferred_base;
+            }
+
+            const uint64_t relocated_base =
+                this->memory_->find_free_host_allocation_base(size, preferred_base, heaven_gate_below_4gb_ceiling);
+            if (!relocated_base || !this->memory_->allocate_memory(relocated_base, size, perms))
+            {
+                logger.error("Failed to allocate %s (size 0x%zx)\n", name, size);
+                return std::nullopt;
+            }
+
+            return relocated_base;
         };
 
-        bool code_initialized = false;
-        if (allocate_or_validate(kCodeBase, kCodeSize, memory_permission::read_write, "WOW64 heaven gate code"))
+        // Allocates (or relocates) preferred_base, then runs `commit` (the actual writes/protection
+        // changes). If `commit` reports failure, releases the allocation and retries at a fresh
+        // address, up to max_heaven_gate_retries times.
+        //
+        // Deliberately does NOT just retry allocate_or_validate(preferred_base, ...) unchanged: on this
+        // backend, the fixed-address path's underlying host mmap uses MAP_FIXED, which unconditionally
+        // succeeds by silently clobbering whatever was already there - it can't detect Metal's
+        // background thread continuing to reclaim the exact same address after we do (a genuinely
+        // adversarial, repeated race, confirmed empirically: identical retries at the same preferred
+        // address kept reporting the same commit failure every time). So after the first failure this
+        // switches straight to a real search (find_free_host_allocation_base, which confirms host
+        // availability and rescans past foreign occupants).
+        //
+        // The relocation search always restarts from heaven_gate_search_floor (a low, fixed address),
+        // never from just past the last failed range: kCodeBase/kStackBase sit near the TOP of the
+        // below-4GB range, so "search upward from the failure" would only ever cover the last few MB
+        // before hitting the 4GB ceiling, silently ignoring the (likely much larger) free space below
+        // the preferred address entirely. Restarting from the floor each time lets the full below-4GB
+        // range be considered; find_free_host_allocation_base's own rescan-and-retry already keeps a
+        // repeat failure at the same spot from looping forever.
+        constexpr uint64_t heaven_gate_search_floor = 0x10000ULL;
+
+        auto commit_with_retry = [&](uint64_t preferred_base, size_t size, const char* name,
+                                     const std::function<bool(uint64_t)>& commit) -> std::optional<uint64_t> {
+            bool force_relocate = false;
+
+            for (int attempt = 0; attempt <= max_heaven_gate_retries; ++attempt)
+            {
+                std::optional<uint64_t> base;
+                if (!force_relocate)
+                {
+                    base = allocate_or_validate(preferred_base, size, memory_permission::read_write, name);
+                }
+                else
+                {
+                    const uint64_t relocated_base =
+                        this->memory_->find_free_host_allocation_base(size, heaven_gate_search_floor, heaven_gate_below_4gb_ceiling);
+                    if (relocated_base && this->memory_->allocate_memory(relocated_base, size, memory_permission::read_write))
+                    {
+                        base = relocated_base;
+                    }
+                }
+
+                if (!base)
+                {
+                    logger.error("Failed to allocate %s (size 0x%zx)\n", name, size);
+                    return std::nullopt;
+                }
+
+                if (commit(*base))
+                {
+                    return base;
+                }
+
+                logger.error("Failed to commit %s at 0x%" PRIx64 " (size 0x%zx) - retrying elsewhere\n", name, *base, size);
+                this->memory_->release_memory(*base, size);
+                force_relocate = true;
+            }
+
+            logger.error("Failed to commit %s after %d retries\n", name, max_heaven_gate_retries);
+            return std::nullopt;
+        };
+
+        const auto code_base = commit_with_retry(kCodeBase, kCodeSize, "WOW64 heaven gate code", [&](uint64_t base) {
+            if (!this->memory_->protect_memory(base, kCodeSize, nt_memory_permission(memory_permission::read_write)))
+            {
+                return false;
+            }
+
+            std::vector<uint8_t> buffer(kCodeSize, 0);
+            if (!this->memory_->try_write_memory(base, buffer.data(), buffer.size()) ||
+                !this->memory_->try_write_memory(base, kTrampolineBytes.data(), kTrampolineBytes.size()))
+            {
+                return false;
+            }
+
+            this->memory_->protect_memory(base, kCodeSize, nt_memory_permission(memory_permission::read | memory_permission::exec));
+            return true;
+        });
+        if (code_base)
         {
-            if (!this->memory_->protect_memory(kCodeBase, kCodeSize, nt_memory_permission(memory_permission::read_write)))
-            {
-                logger.error("Failed to change protection for WOW64 heaven gate code at 0x%" PRIx64 "\n", kCodeBase);
-            }
-            else
-            {
-                std::vector<uint8_t> buffer(kCodeSize, 0);
-                this->memory_->write_memory(kCodeBase, buffer.data(), buffer.size());
-                this->memory_->write_memory(kCodeBase, kTrampolineBytes.data(), kTrampolineBytes.size());
-                this->memory_->protect_memory(kCodeBase, kCodeSize,
-                                              nt_memory_permission(memory_permission::read | memory_permission::exec));
-                code_initialized = true;
+            this->wow64_heaven_gate_code_base_ = *code_base;
 
-                // KVM/Unicorn genuinely execute the trampoline's real machine code (a real CS-segment
-                // mode switch via retf/iretq) - real|exec is correct and sufficient for them, so
-                // register_gate_crossing is a no-op default there. A JIT-based backend (FEXCore)
-                // cannot execute that at all (bitness fixed per compiled Context - see
-                // notify_process_bitness's doc comment) and instead intercepts execution reaching this
-                // page before any of it is ever JIT-compiled, then synthesizes the mode switch itself
-                // (marshal register state into its other-bitness Context and flip which one runs) -
-                // see register_gate_crossing / gate_crossing_kind::heaven_gate (arch_emulator.hpp).
-                // The trampoline is driven with the confirmed convention RAX=RIP, RBX=RSP, RCX=CS,
-                // RDX=SS (see exception_dispatch.cpp), which the FEX crossing handler decodes.
-                emu.register_gate_crossing(kCodeBase, kCodeSize, x86_64_emulator::gate_crossing_kind::heaven_gate);
-            }
+            // KVM/Unicorn genuinely execute the trampoline's real machine code (a real CS-segment
+            // mode switch via retf/iretq) - real|exec is correct and sufficient for them, so
+            // register_gate_crossing is a no-op default there. A JIT-based backend (FEXCore)
+            // cannot execute that at all (bitness fixed per compiled Context - see
+            // notify_process_bitness's doc comment) and instead intercepts execution reaching this
+            // page before any of it is ever JIT-compiled, then synthesizes the mode switch itself
+            // (marshal register state into its other-bitness Context and flip which one runs) -
+            // see register_gate_crossing / gate_crossing_kind::heaven_gate (arch_emulator.hpp).
+            // The trampoline is driven with the confirmed convention RAX=RIP, RBX=RSP, RCX=CS,
+            // RDX=SS (see exception_dispatch.cpp), which the FEX crossing handler decodes.
+            emu.register_gate_crossing(*code_base, kCodeSize, x86_64_emulator::gate_crossing_kind::heaven_gate);
 
-            if (code_initialized && this->modules_.contains(kCodeBase))
+            if (this->modules_.contains(*code_base))
             {
                 mapped_module module{};
                 module.name = "wow64_heaven_gate";
                 module.path = "<wow64-heaven-gate>";
-                module.image_base = kCodeBase;
-                module.image_base_file = kCodeBase;
+                module.image_base = *code_base;
+                module.image_base_file = *code_base;
                 module.size_of_image = kCodeSize;
-                module.entry_point = kCodeBase;
+                module.entry_point = *code_base;
                 constexpr uint16_t kMachineAmd64 = 0x8664;
                 module.machine = kMachineAmd64;
                 module.is_static = true;
 
                 mapped_section section{};
                 section.name = ".gate";
-                section.region.start = kCodeBase;
+                section.region.start = *code_base;
                 section.region.length = kCodeSize;
                 section.region.permissions = memory_permission::read | memory_permission::exec;
                 module.sections.emplace_back(std::move(section));
@@ -546,10 +641,13 @@ namespace sogen
             }
         }
 
-        if (allocate_or_validate(kStackBase, kStackSize, memory_permission::read_write, "WOW64 heaven gate stack"))
-        {
+        const auto stack_base = commit_with_retry(kStackBase, kStackSize, "WOW64 heaven gate stack", [&](uint64_t base) {
             std::vector<uint8_t> buffer(kStackSize, 0);
-            this->memory_->write_memory(kStackBase, buffer.data(), buffer.size());
+            return this->memory_->try_write_memory(base, buffer.data(), buffer.size());
+        });
+        if (stack_base)
+        {
+            this->wow64_heaven_gate_stack_top_ = *stack_base + kStackSize;
         }
     }
 
