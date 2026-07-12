@@ -264,6 +264,18 @@ namespace sogen
                       ? thread.current_ip
                       : vcpu.cpu.read_instruction_pointer();
 
+        // Non-instruction-precise backends (FEX, KVM) report RIP already advanced past the
+        // trapping 0xCC (FEXCore's INT3 handling sets SetRIPToNext), unlike instruction-precise
+        // backends where current_ip is still the INT3 byte's own address. Real hardware/NT
+        // (KiBreakpointTrap) always reports #BP at the INT3 itself, which is what guest SEH/VEH
+        // handlers and ContextRecord->Rip adjustments (e.g. `Rip += 1` to step past it) expect -
+        // without this, such a handler's adjusted Rip lands one byte short, inside the next
+        // instruction rather than past the INT3.
+        if (status == STATUS_BREAKPOINT && !win_emu.uses_instruction_precision())
+        {
+            ctx.Rip -= 1;
+        }
+
         exception_record record{};
         memset(&record, 0, sizeof(record));
         record.ExceptionCode = status;

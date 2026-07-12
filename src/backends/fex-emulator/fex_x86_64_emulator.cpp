@@ -814,6 +814,15 @@ namespace sogen::fex
             ::sigaction(SIGSEGV, &action, nullptr);
             ::sigaction(SIGBUS, &action, nullptr);
             ::sigaction(SIGILL, &action, nullptr);
+
+            // FEXCore's IR "Break" op (see handle_fault_signal's FaultToTopAndGeneratedException
+            // comment) models x86 HLT/UD2/INT3/INT1/INTO/unhandled-INT-N uniformly via distinct native
+            // trap instructions chosen per Dispatcher.cpp's GuestSignal_SIG* stubs: HLT/UDF raise
+            // SIGILL, BRK raises SIGTRAP. INT3 (x86_64_dbgbreak/DebugBreak()) goes through the SIGTRAP
+            // stub - without a handler registered here, that BRK was an entirely unhandled hardware
+            // trap, terminating the process (exit 128+SIGTRAP) instead of reaching the vector-dispatch
+            // logic below, which already handles vector 3 (breakpoint) correctly once it runs.
+            ::sigaction(SIGTRAP, &action, nullptr);
         }
 
         // FEXCore::CPU::Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call
