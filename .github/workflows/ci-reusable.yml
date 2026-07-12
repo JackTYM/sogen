@@ -871,6 +871,15 @@ jobs:
     runs-on: macos-latest
     needs: [create-emulation-root, build]
     steps:
+      # vulkan_host.cpp dlopen()s the real Vulkan loader / MoltenVK at RUNTIME (libvulkan.1.dylib,
+      # libMoltenVK.dylib, etc. - see its own doc comment) - this is a plain dynamic library lookup,
+      # not something CMake/the build step provides (Vulkan-Headers is vendored for build-time types
+      # only). Runner images don't ship it, so without this the guest's vkCreateInstance call fails
+      # outright with VK_ERROR_INITIALIZATION_FAILED (-3) - confirmed via an actual CI run's log,
+      # 5/5 retry attempts, before this fix.
+      - name: Install MoltenVK Runtime
+        run: brew install molten-vk vulkan-loader
+
       - name: Download Artifacts
         uses: pyTooling/download-artifact@v8
         with:
