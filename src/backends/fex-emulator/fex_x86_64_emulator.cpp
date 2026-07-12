@@ -4481,12 +4481,17 @@ namespace sogen::fex
         // is currently executing) and whether ensure_context32() builds context32_ at all. No longer
         // selects context_'s own bitness - context_ is always the 64-bit Context now.
         bool is_wow64_process_ = false;
+#ifdef __APPLE__
         // Set by reserve_wow64_host_window() iff it actually claimed [wow64_guest_rebase,
         // wow64_guest_rebase + wow64_guest_address_space_size) up front - see its doc comment. Gates
         // the skip checks in reserved_host_ranges()/reserved_host_ranges_in() below; if the
         // reservation attempt was skipped or failed (logged loudly either way), this stays false and
         // both functions behave exactly as before - detect-and-report, not silently assume-safe.
+        // Apple-only: reserve_wow64_host_window() and its two call sites below are both
+        // __APPLE__-gated (the whole mechanism is a macOS/mach_vm_region-specific fix), so this
+        // member is unused - and -Werror,-Wunused-private-field - on other platforms without this.
         bool wow64_host_window_reserved_ = false;
+#endif
         std::unique_ptr<fex_syscall_handler> syscall_handler_{};
         // Placeholder: FEXCore::SignalDelegator has no pure virtuals, so InitCore() can be satisfied
         // with the plain base class for now. This does no actual fault handling - a real Mach-
