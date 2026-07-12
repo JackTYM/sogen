@@ -261,8 +261,26 @@ namespace sogen
     {
         auto& thread = vcpu.thread();
 
+        const auto exc_rip = vcpu.cpu.read_instruction_pointer();
         fprintf(stderr, "[EXCDIAG3] dispatch_exception: status=0x%lx rip=0x%llx\n", static_cast<unsigned long>(status),
-                static_cast<unsigned long long>(vcpu.cpu.read_instruction_pointer()));
+                static_cast<unsigned long long>(exc_rip));
+        if (status == STATUS_ILLEGAL_INSTRUCTION)
+        {
+            std::array<uint8_t, 16> bytes{};
+            if (win_emu.memory.try_read_memory(exc_rip, bytes.data(), bytes.size()))
+            {
+                fprintf(stderr, "[EXCDIAG3] bytes at rip: ");
+                for (const auto b : bytes)
+                {
+                    fprintf(stderr, "%02x ", b);
+                }
+                fprintf(stderr, "\n");
+            }
+            else
+            {
+                fprintf(stderr, "[EXCDIAG3] failed to read bytes at rip\n");
+            }
+        }
         fflush(stderr);
 
         win_emu.record_exception_trace({
