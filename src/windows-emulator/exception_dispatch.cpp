@@ -261,6 +261,10 @@ namespace sogen
     {
         auto& thread = vcpu.thread();
 
+        fprintf(stderr, "[EXCDIAG3] dispatch_exception: status=0x%lx rip=0x%llx\n", static_cast<unsigned long>(status),
+                static_cast<unsigned long long>(vcpu.cpu.read_instruction_pointer()));
+        fflush(stderr);
+
         win_emu.record_exception_trace({
             .status = static_cast<uint32_t>(status),
             .tid = thread.id,
