@@ -100,10 +100,6 @@ namespace sogen
             {
                 const uint64_t stack_end = stack_base + stack_size - sizeof(WOW64_CPURESERVED) - 0x1578;
                 emu.reg(x86_register::rsp, stack_end);
-                fprintf(stderr, "[STACKDIAG] setup_stack (wow64): stack_base=0x%llx stack_size=0x%llx initial_rsp=0x%llx\n",
-                        static_cast<unsigned long long>(stack_base), static_cast<unsigned long long>(stack_size),
-                        static_cast<unsigned long long>(stack_end));
-                fflush(stderr);
             }
         }
 
@@ -529,11 +525,6 @@ namespace sogen
             throw std::runtime_error("Failed to allocate native stack + WOW64_CPURESERVED memory region");
             return;
         }
-
-        fprintf(stderr, "[STACKDIAG] native wow64 stack_base=0x%llx stack_size=0x%llx (hint=0x%llx)\n",
-                static_cast<unsigned long long>(this->stack_base), static_cast<unsigned long long>(WOW64_NATIVE_STACK_SIZE),
-                static_cast<unsigned long long>(WOW64_NATIVE_STACK_BASE_HINT));
-        fflush(stderr);
 
         const uint64_t wow64_cpureserved_base = this->stack_base + this->stack_size - sizeof(WOW64_CPURESERVED) - 0x1030;
 

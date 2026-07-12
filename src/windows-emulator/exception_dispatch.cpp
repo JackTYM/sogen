@@ -107,13 +107,21 @@ namespace sogen
 
             const auto allocation_size = combined_size + mach_frame_size;
 
-            const auto initial_sp = emu.reg(x86_register::rsp);
-            const auto new_sp = align_down(initial_sp - allocation_size, 0x100);
+            // The stack this exception frame gets written to must NOT be read from the currently-active
+            // engine's rsp when a wow64 32-bit fault is being routed through the heaven's gate: the CPU
+            // is still running the 32-bit engine at this point, so its rsp is the guest's own (small)
+            // 32-bit ESP, not a stack large enough (or intended) to hold a CONTEXT64. Real Windows never
+            // does this either - wow64!Wow64PrepareForException derives the 64-bit exception stack from
+            // CONTEXT.R14 (the frame RunSimulatedCode's `mov r14, rsp` captured right before the 64->32
+            // switch), not from the current stack pointer. r14 is readable here regardless of which
+            // engine is active (see fex_x86_64_emulator.cpp's read_raw_register), so mirror that
+            // convention instead of reusing the live rsp for the bit32 case.
+            const auto cs_selector = emu.reg<uint16_t>(x86_register::cs);
+            const auto bitness = segment_utils::get_segment_bitness(emu, cs_selector);
+            const auto is_bit32 = bitness && *bitness == segment_utils::segment_bitness::bit32;
 
-            fprintf(stderr, "[EXCDIAG] dispatch_exception_pointers: initial_sp=0x%llx allocation_size=0x%llx new_sp=0x%llx\n",
-                    static_cast<unsigned long long>(initial_sp), static_cast<unsigned long long>(allocation_size),
-                    static_cast<unsigned long long>(new_sp));
-            fflush(stderr);
+            const auto initial_sp = is_bit32 ? emu.reg(x86_register::r14) : emu.reg(x86_register::rsp);
+            const auto new_sp = align_down(initial_sp - allocation_size, 0x100);
 
             const auto total_size = initial_sp - new_sp;
             assert(total_size >= allocation_size);
@@ -145,10 +153,7 @@ namespace sogen
                 frame.eflags = record.EFlags;
             });
 
-            const auto cs_selector = emu.reg<uint16_t>(x86_register::cs);
-            const auto bitness = segment_utils::get_segment_bitness(emu, cs_selector);
-
-            if (!bitness || *bitness != segment_utils::segment_bitness::bit32)
+            if (!is_bit32)
             {
                 emu.reg(x86_register::rsp, new_sp);
                 emu.reg(x86_register::rip, dispatcher);

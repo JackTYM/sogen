@@ -1763,7 +1763,6 @@ namespace sogen::fex
 
                 this->wow64_guest_rebase_ = candidate;
                 this->wow64_host_window_reserved_ = true;
-                fprintf(stderr, "[FEX backend] wow64 host window reserved at 0x%llx\n", static_cast<unsigned long long>(candidate));
                 return;
             }
 
