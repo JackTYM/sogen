@@ -108,6 +108,15 @@ namespace sogen
             // file into its 32-bit Context - see perform_gate_crossing. Appended last for vtable-ABI
             // safety (this enum is only passed by value, but keep additions at the end regardless).
             wow64_run_simulated_code,
+            // A standalone compatibility-mode-to-long-mode probe wow64cpu.dll's own BTCpuProcessInit
+            // writes into a dedicated, freshly-r-x'd page (observed at a fixed RVA past the turbo-bop
+            // table): a bare `jmp far 0x33:<same page + a few bytes>` (opcode 0xEA - only valid in
+            // 16/32-bit mode, undefined in 64-bit long mode, so FEXCore's fixed-bitness JIT can't
+            // execute it any more than the other two real transitions above). Unlike those two, this
+            // one isn't driven by any register convention at all - the target offset/selector are
+            // encoded directly as the instruction's immediate operand, and it doesn't touch RSP (a
+            // real far jmp, not a call/ret or iretq). See perform_gate_crossing's decode of it.
+            far_jmp_bitness_switch,
         };
 
         // Registers [address, address+size) as a WoW64 bitness gate crossing: a JIT backend

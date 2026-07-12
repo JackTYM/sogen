@@ -3297,28 +3297,18 @@ namespace sogen::fex
             return true;
         }
 
-        bool perform_gate_crossing(const gate_crossing& gate)
+        // Performs a generic bitness-switch crossing given an already-decoded target RIP/RSP/CS:
+        // marshals the architectural register file from the currently-active engine into whichever
+        // engine target_cs selects, preserving the destination's own segment state, r12-r15, and
+        // rax-rbx-rcx-rdx (all of which marshal_architectural_state would otherwise clobber with the
+        // source's - see the comments below), then flips active_context_/active_thread_ so the next
+        // ExecuteThread runs the destination engine from target_rip. Shared by the heaven's-gate
+        // exception-delivery crossing (whose target_rip/rsp/cs come from registers dispatch_exception_
+        // pointers set up) and the far-jmp CPU-mode-probe crossing (whose target_rip/cs come from
+        // decoding the `jmp far` instruction's own immediate operand instead).
+        bool perform_bitness_switch(const uint64_t target_rip, const uint64_t target_rsp, const uint16_t target_cs)
         {
-            if (gate.kind == gate_crossing_kind::wow64_run_simulated_code)
-            {
-                return this->enter_wow64_32bit_from_run_simulated_code(gate);
-            }
-
-            if (gate.kind == gate_crossing_kind::wow64cpu_dispatch)
-            {
-                return this->enter_wow64_64bit_from_wow64svc_thunk(gate);
-            }
-
             const auto& src = this->active_thread_->CurrentFrame->State;
-
-            // Confirmed heaven's-gate trampoline convention (wow64_heaven_gate.hpp, cross-checked
-            // against exception_dispatch.cpp which drives it programmatically): the trampoline's
-            // final iretq consumes RIP<-RAX, CS<-RCX, RFLAGS<-(pushfq), RSP<-RBX, SS<-RDX, leaving the
-            // GPRs otherwise intact.
-            const uint64_t target_rip = src.gregs[detail::greg_rax];
-            const uint64_t target_rsp = src.gregs[detail::greg_rbx];
-            const auto target_cs = static_cast<uint16_t>(src.gregs[detail::greg_rcx]);
-
             const bool target_is_64bit = (target_cs == wow64_user_code_selector_64bit);
 
             FEXCore::Context::Context* dst_context = nullptr;
@@ -3426,6 +3416,60 @@ namespace sogen::fex
             this->active_context_ = dst_context;
             this->active_thread_ = dst_thread;
             return true;
+        }
+
+        // Decodes wow64cpu.dll's standalone `jmp far 0x33:<target>` CPU-mode probe (opcode 0xEA,
+        // followed by a 4-byte absolute target offset and a 2-byte target CS selector, both little-
+        // endian - see gate_crossing_kind::far_jmp_bitness_switch's doc comment). The offset is encoded
+        // as a real linear address (fixed up by the loader's relocation table when wow64cpu.dll loads
+        // away from its preferred base), not an RVA, so it's used directly with no image_base add.
+        // Unlike the heaven's gate, a plain far jmp never touches RSP, so the current one carries
+        // through unchanged.
+        bool enter_bitness_switch_from_far_jmp(const gate_crossing& gate)
+        {
+            std::array<uint8_t, 7> insn{};
+            if (!this->try_read_memory(gate.address, insn.data(), insn.size()) || insn[0] != 0xEA)
+            {
+                return false;
+            }
+
+            uint32_t target_offset = 0;
+            std::memcpy(&target_offset, &insn[1], sizeof(target_offset));
+            uint16_t target_cs = 0;
+            std::memcpy(&target_cs, &insn[5], sizeof(target_cs));
+
+            fprintf(stderr, "[GATEDIAG2] far_jmp_bitness_switch: gate.address=0x%llx target_offset=0x%x target_cs=0x%x\n",
+                    static_cast<unsigned long long>(gate.address), target_offset, target_cs);
+            fflush(stderr);
+
+            const auto& src = this->active_thread_->CurrentFrame->State;
+            return this->perform_bitness_switch(target_offset, src.gregs[detail::greg_rsp], target_cs);
+        }
+
+        bool perform_gate_crossing(const gate_crossing& gate)
+        {
+            if (gate.kind == gate_crossing_kind::wow64_run_simulated_code)
+            {
+                return this->enter_wow64_32bit_from_run_simulated_code(gate);
+            }
+
+            if (gate.kind == gate_crossing_kind::wow64cpu_dispatch)
+            {
+                return this->enter_wow64_64bit_from_wow64svc_thunk(gate);
+            }
+
+            if (gate.kind == gate_crossing_kind::far_jmp_bitness_switch)
+            {
+                return this->enter_bitness_switch_from_far_jmp(gate);
+            }
+
+            // gate_crossing_kind::heaven_gate: confirmed trampoline convention (wow64_heaven_gate.hpp,
+            // cross-checked against exception_dispatch.cpp which drives it programmatically) - the
+            // trampoline's final iretq consumes RIP<-RAX, CS<-RCX, RFLAGS<-(pushfq), RSP<-RBX, SS<-RDX,
+            // leaving the GPRs otherwise intact.
+            const auto& src = this->active_thread_->CurrentFrame->State;
+            return this->perform_bitness_switch(src.gregs[detail::greg_rax], src.gregs[detail::greg_rbx],
+                                                static_cast<uint16_t>(src.gregs[detail::greg_rcx]));
         }
 
         // Returns the host address offset to add to `address` if it needs the wow64 rebase applied -

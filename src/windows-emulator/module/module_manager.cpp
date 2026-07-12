@@ -803,6 +803,18 @@ namespace sogen
                 constexpr uint64_t w64svc_turbo_bop_size = 0x10;
                 emu_ptr->register_gate_crossing(image_base + w64svc_turbo_bop_rva, w64svc_turbo_bop_size,
                                                 x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
+
+                // BTCpuProcessInit also writes a standalone compatibility-mode-to-long-mode probe into
+                // its own freshly-r-x'd page at RVA 0x7000 (decoded by hand from the shipped binary,
+                // same as the RVAs above): a bare `jmp far 0x33:<target>` (opcode 0xEA), which real
+                // hardware executes to verify the CPU can actually switch into 64-bit mode - a
+                // one-time sanity check unrelated to the two dispatch mechanisms above, but exactly as
+                // un-JIT-able (0xEA is undefined in 64-bit long mode). See perform_gate_crossing's
+                // decode of it (gate_crossing_kind::far_jmp_bitness_switch).
+                constexpr uint64_t cpu_mode_probe_rva = 0x7000;
+                constexpr uint64_t cpu_mode_probe_size = 0x10;
+                emu_ptr->register_gate_crossing(image_base + cpu_mode_probe_rva, cpu_mode_probe_size,
+                                                x86_64_emulator::gate_crossing_kind::far_jmp_bitness_switch);
             });
 
             load_wow64_modules(emu, executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
