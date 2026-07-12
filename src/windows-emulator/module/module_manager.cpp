@@ -819,7 +819,14 @@ namespace sogen
                 // gates above don't have this problem because their RVAs were decoded by hand directly
                 // against image_base's own frame of reference, not the PE mapping.
                 constexpr uint64_t cpu_mode_probe_rva = 0x6d41;
-                constexpr uint64_t cpu_mode_probe_size = 0x10;
+                // Exactly the far jmp's own encoding length (1-byte opcode + 4-byte offset + 2-byte
+                // selector) - NOT rounded up like the other gates above. The probe's target sits just
+                // 9 bytes past its own start (jmp far 0x33:<9 bytes ahead>), so a padded size (0x10, as
+                // first tried here) would cover the landing address too: execution would re-enter this
+                // same "non-executable" gate immediately after the crossing, decode the identical bytes,
+                // and cross again forever - an infinite loop rather than the crash this gate exists to
+                // fix. Confirmed via a hung CI run before narrowing this to the true instruction length.
+                constexpr uint64_t cpu_mode_probe_size = 0x7;
                 emu_ptr->register_gate_crossing(image_base + cpu_mode_probe_rva, cpu_mode_probe_size,
                                                 x86_64_emulator::gate_crossing_kind::far_jmp_bitness_switch);
             });
