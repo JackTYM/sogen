@@ -1280,6 +1280,18 @@ namespace sogen
                         this->log.error("Null-pointer call to 0x%llx; caller return address 0x%x (%s+0x%llx)\n",
                                         static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
                                         mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
+
+                        std::array<uint8_t, 12> call_bytes{};
+                        if (return_address >= call_bytes.size() &&
+                            acting.try_read_memory(return_address - call_bytes.size(), call_bytes.data(), call_bytes.size()))
+                        {
+                            fprintf(stderr, "[NULLDIAG] bytes before return_address (0x%x): ", return_address);
+                            for (const auto b : call_bytes)
+                            {
+                                fprintf(stderr, "%02x ", b);
+                            }
+                            fprintf(stderr, "\n");
+                        }
                     }
 
                     fprintf(stderr, "[NULLDIAG] eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x esi=0x%x edi=0x%x ebp=0x%x esp=0x%x eip=0x%x\n",
