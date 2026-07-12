@@ -3382,6 +3382,21 @@ namespace sogen::fex
             const auto saved_r14 = dst.gregs[14];
             const auto saved_r15 = dst.gregs[15];
 
+            // rax/rbx/rcx/rdx are the trampoline's OWN scratch registers here (see the convention
+            // comment above: dispatch_exception_pointers stuffs rax=target RIP, rbx=target RSP,
+            // rcx=target CS selector, rdx=target SS selector into the SOURCE (pre-crossing) engine
+            // purely so the trampoline's iretq can consume them). They were never meant to be live
+            // architectural state - target_rip/target_rsp are already captured above from src, and
+            // target_cs was only needed to pick the destination engine. marshal_architectural_state
+            // copies the whole GPR file though, so without this the destination engine's genuine
+            // rax/rbx/rcx/rdx (whatever the guest was last doing with them) get clobbered by these
+            // selector/address scratch values instead - the same class of leak the segment and
+            // r12-r15 preservation above already guards against. Preserve them the same way.
+            const auto saved_rax = dst.gregs[detail::greg_rax];
+            const auto saved_rbx = dst.gregs[detail::greg_rbx];
+            const auto saved_rcx = dst.gregs[detail::greg_rcx];
+            const auto saved_rdx = dst.gregs[detail::greg_rdx];
+
             marshal_architectural_state(src, dst);
 
             dst.es_idx = saved_es_idx;
@@ -3400,6 +3415,10 @@ namespace sogen::fex
             dst.gregs[13] = saved_r13;
             dst.gregs[14] = saved_r14;
             dst.gregs[15] = saved_r15;
+            dst.gregs[detail::greg_rax] = saved_rax;
+            dst.gregs[detail::greg_rbx] = saved_rbx;
+            dst.gregs[detail::greg_rcx] = saved_rcx;
+            dst.gregs[detail::greg_rdx] = saved_rdx;
 
             dst.rip = target_rip;
             dst.gregs[detail::greg_rsp] = target_rsp;
