@@ -1741,13 +1741,13 @@ namespace sogen::fex
                             path_len > 0 ? path_buf : "<none>");
 
                     const uint64_t occupant_end = probe_addr + probe_size;
-                    candidate =
-                        (occupant_end + wow64_guest_address_space_size - 1) & ~(wow64_guest_address_space_size - 1);
+                    candidate = (occupant_end + wow64_guest_address_space_size - 1) & ~(wow64_guest_address_space_size - 1);
                     continue;
                 }
 
                 void* const target = reinterpret_cast<void*>(candidate);
-                void* const result = ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                void* const result =
+                    ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                 if (result != target)
                 {
                     // A racer claimed this exact candidate between our probe and our mmap - move on.
@@ -3388,6 +3388,35 @@ namespace sogen::fex
             return true;
         }
 
+        // Returns the host address offset to add to `address` if it needs the wow64 rebase applied -
+        // see wow64_guest_rebase_default's doc comment for why this is a per-instance member
+        // (wow64_guest_rebase_) rather than a fixed constant. See wow64_guest_address_space_size's
+        // doc comment for why is_32bit_mode alone isn't the gate - the address itself must also be
+        // below that boundary. Unconditional (not Apple-only): this backend is shared with Linux
+        // ARM64, which also needs it (wow64_guest_rebase_ just stays at its default there, since
+        // reserve_wow64_host_window - the only thing that ever changes it - is Apple-only).
+        uint64_t rebase_for(bool is_32bit_mode, uint64_t address) const
+        {
+            return (is_32bit_mode && address < wow64_guest_address_space_size) ? this->wow64_guest_rebase_ : 0ULL;
+        }
+
+        // Un-rebases a real hardware fault address (info->si_addr) back to the guest address space
+        // when it falls in the wow64-rebased range a 32-bit context's guest memory actually lives in
+        // (see rebase_for's doc comment) - a no-op in 64-bit mode. Needed anywhere a fault address is
+        // compared against or dispatched to guest-address-keyed structures (mmio_regions_,
+        // page_shadow_apple_, memory_violation_hooks_), as opposed to used directly as a real host
+        // pointer (e.g. handle_misaligned_atomic_fault's memcpy), which must keep the original,
+        // rebased address.
+        uint64_t unrebase_fault_addr(uint64_t fault_addr) const
+        {
+            if (this->is_wow64_process_ && fault_addr >= this->wow64_guest_rebase_ &&
+                fault_addr < this->wow64_guest_rebase_ + wow64_guest_address_space_size)
+            {
+                return fault_addr - this->wow64_guest_rebase_;
+            }
+            return fault_addr;
+        }
+
 #ifdef __APPLE__
       public:
         // TEMP diagnostic accessor for the mystery memory-corruption investigation - lets the
@@ -3707,40 +3736,6 @@ namespace sogen::fex
         // fault from a stricter neighbor sharing the host page) - decode-and-emulate it exactly like
         // handle_misaligned_atomic_fault already does for a different fault kind (same technique,
         // reused directly).
-        // Un-rebases a real hardware fault address (info->si_addr) back to the guest address space
-        // when it falls in the WOW64_GUEST_REBASE-shifted range a 32-bit context's guest memory
-        // actually lives in (see wow64_guest_rebase's doc comment) - a no-op in 64-bit mode. Needed
-        // anywhere a fault address is compared against or dispatched to guest-address-keyed
-        // structures (mmio_regions_, page_shadow_apple_, memory_violation_hooks_), as opposed to
-        // used directly as a real host pointer (e.g. handle_misaligned_atomic_fault's memcpy), which
-        // must keep the original, rebased address.
-        // Un-rebases a real hardware fault address (info->si_addr) back to the guest address space
-        // when it falls in the WOW64_GUEST_REBASE-shifted range a 32-bit context's guest memory
-        // actually lives in (see wow64_guest_rebase's doc comment) - a no-op in 64-bit mode. Needed
-        // anywhere a fault address is compared against or dispatched to guest-address-keyed
-        // structures (mmio_regions_, page_shadow_apple_, memory_violation_hooks_), as opposed to
-        // used directly as a real host pointer (e.g. handle_misaligned_atomic_fault's memcpy), which
-        // must keep the original, rebased address.
-        // Returns the host address offset to add to `address` if it needs the wow64 rebase applied -
-        // see wow64_guest_rebase_default's doc comment for why this is a per-instance member
-        // (wow64_guest_rebase_) rather than a fixed constant. See wow64_guest_address_space_size's
-        // doc comment for why is_32bit_mode alone isn't the gate - the address itself must also be
-        // below that boundary.
-        uint64_t rebase_for(bool is_32bit_mode, uint64_t address) const
-        {
-            return (is_32bit_mode && address < wow64_guest_address_space_size) ? this->wow64_guest_rebase_ : 0ULL;
-        }
-
-        uint64_t unrebase_fault_addr(uint64_t fault_addr) const
-        {
-            if (this->is_wow64_process_ && fault_addr >= this->wow64_guest_rebase_ &&
-                fault_addr < this->wow64_guest_rebase_ + wow64_guest_address_space_size)
-            {
-                return fault_addr - this->wow64_guest_rebase_;
-            }
-            return fault_addr;
-        }
-
         // True if a host PC lies inside either FEXCore Context's dispatcher trampoline. The dispatcher
         // is host MAP_JIT code (like a CodeBuffer) but IsAddressInCodeBuffer does not recognize it, so
         // the CodeBuffer-gated W^X retries in handle_fault_signal never fire for a dispatcher fault.
