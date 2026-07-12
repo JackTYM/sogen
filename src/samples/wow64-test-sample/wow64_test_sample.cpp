@@ -16,11 +16,16 @@
 // A full WoW64-under-FEX run (process init through wow64.dll, the 32-bit rebase window, the
 // heaven's-gate trampoline) already exercises the other fixed bug (the wow64-rebase-window blind
 // spot in handle_NtAllocateVirtualMemoryEx) just by getting this far at all.
+#include <array>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <windows.h>
 
+// Only ever called from main()'s #else (32-bit) branch below - guard the definitions themselves the
+// same way so a 64-bit build of this same source (e.g. the MinGW x86_64 CI target, which builds
+// everything under src/samples/ regardless of bitness) doesn't leave them unused under -Werror.
+#if !defined(_WIN64)
 namespace
 {
     constexpr int module_cycle_count = 50;
@@ -28,7 +33,7 @@ namespace
 
     // Ordinary system DLLs present in any standard Windows emulation root, chosen only for being
     // real, non-trivial, relocatable modules - not for their functionality.
-    constexpr const char* modules_to_cycle[] = {
+    constexpr std::array<const char*, 5> modules_to_cycle{
         "advapi32.dll", "shell32.dll", "ole32.dll", "gdi32.dll", "user32.dll",
     };
 
@@ -83,10 +88,10 @@ namespace
 
     bool basic_file_roundtrip()
     {
-        const char path[] = "c:\\wow64_test_sample_out.txt";
-        const char message[] = "wow64-test-sample file roundtrip ok";
+        constexpr auto path = std::to_array("c:\\wow64_test_sample_out.txt");
+        constexpr auto message = std::to_array("wow64-test-sample file roundtrip ok");
 
-        const HANDLE write_handle = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const HANDLE write_handle = CreateFileA(path.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (write_handle == INVALID_HANDLE_VALUE)
         {
             std::printf("wow64-test: CreateFileA(write) failed: %lu\n", GetLastError());
@@ -94,26 +99,26 @@ namespace
         }
 
         DWORD written = 0;
-        const BOOL write_ok = WriteFile(write_handle, message, sizeof(message) - 1, &written, nullptr);
+        const BOOL write_ok = WriteFile(write_handle, message.data(), message.size() - 1, &written, nullptr);
         CloseHandle(write_handle);
-        if (!write_ok || written != sizeof(message) - 1)
+        if (!write_ok || written != message.size() - 1)
         {
             std::printf("wow64-test: WriteFile failed: %lu\n", GetLastError());
             return false;
         }
 
-        const HANDLE read_handle = CreateFileA(path, GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const HANDLE read_handle = CreateFileA(path.data(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (read_handle == INVALID_HANDLE_VALUE)
         {
             std::printf("wow64-test: CreateFileA(read) failed: %lu\n", GetLastError());
             return false;
         }
 
-        char buffer[64] = {};
+        std::array<char, 64> buffer{};
         DWORD read = 0;
-        const BOOL read_ok = ReadFile(read_handle, buffer, sizeof(buffer) - 1, &read, nullptr);
+        const BOOL read_ok = ReadFile(read_handle, buffer.data(), buffer.size() - 1, &read, nullptr);
         CloseHandle(read_handle);
-        if (!read_ok || read != sizeof(message) - 1 || std::memcmp(buffer, message, read) != 0)
+        if (!read_ok || read != message.size() - 1 || std::memcmp(buffer.data(), message.data(), read) != 0)
         {
             std::printf("wow64-test: ReadFile mismatch\n");
             return false;
@@ -122,6 +127,7 @@ namespace
         return true;
     }
 } // namespace
+#endif
 
 int main()
 {
@@ -141,8 +147,8 @@ int main()
     {
         return 1;
     }
-    std::printf("wow64-test-sample: module load/unload churn ok (%d modules x %d cycles)\n",
-                static_cast<int>(sizeof(modules_to_cycle) / sizeof(modules_to_cycle[0])), module_cycle_count);
+    std::printf("wow64-test-sample: module load/unload churn ok (%d modules x %d cycles)\n", static_cast<int>(modules_to_cycle.size()),
+                module_cycle_count);
 
     if (!cycle_virtual_alloc())
     {
