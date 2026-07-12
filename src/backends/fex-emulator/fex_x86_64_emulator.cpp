@@ -889,6 +889,20 @@ namespace sogen::fex
             // Reserve the arena and install the FEXCore allocator hooks. Must run before the first
             // FEXCore-internal allocation (context/CodeBuffer creation) and before the memory
             // manager first queries reserved_host_ranges(). Idempotent.
+            //
+            // This runs before notify_process_bitness (bitness isn't known yet at CPU-backend
+            // construction time), so if the kernel's ASLR happens to place this arena's own
+            // mmap(nullptr, ...) inside [wow64_guest_rebase, wow64_guest_rebase +
+            // wow64_guest_address_space_size), that later reservation (see
+            // reserve_wow64_host_window's doc comment) finds the window already occupied - by us -
+            // and skips itself, silently losing the fix it exists to provide. Bitness isn't known
+            // here, so just always avoid that range for the arena's own placement (harmless for a
+            // non-wow64 process too - the arena has no reason to prefer any particular address).
+            // Bounded retry: an ordinary mmap(nullptr, ...) with no hint gets a fresh ASLR pick each
+            // call, so a handful of retries converges quickly; give up and accept the collision
+            // rather than spin forever on a determined adversary (in which case
+            // reserve_wow64_host_window's own probe-and-skip still keeps this safe, just without
+            // the improvement).
             void install()
             {
                 if (this->base_ != 0)
@@ -896,7 +910,29 @@ namespace sogen::fex
                     return;
                 }
 
-                void* base = ::mmap(nullptr, arena_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                void* base = MAP_FAILED;
+                constexpr int max_attempts = 8;
+                for (int attempt = 0; attempt < max_attempts; ++attempt)
+                {
+                    void* candidate = ::mmap(nullptr, arena_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                    if (candidate == MAP_FAILED)
+                    {
+                        break;
+                    }
+
+                    const auto candidate_addr = reinterpret_cast<uint64_t>(candidate);
+                    const auto candidate_end = candidate_addr + arena_size;
+                    const bool overlaps_wow64_window =
+                        candidate_addr < wow64_guest_rebase + wow64_guest_address_space_size && candidate_end > wow64_guest_rebase;
+                    if (!overlaps_wow64_window)
+                    {
+                        base = candidate;
+                        break;
+                    }
+
+                    ::munmap(candidate, arena_size);
+                }
+
                 if (base == MAP_FAILED)
                 {
                     throw std::runtime_error("Failed to reserve FEXCore-internal host arena");
@@ -1604,9 +1640,90 @@ namespace sogen::fex
             this->context_->SetNeedsWow64GuestRebase(is_wow64_process);
             if (is_wow64_process)
             {
+#ifdef __APPLE__
+                // Claim the wow64 rebase window before anything else (FEXCore init, guest code, any
+                // lazily-loaded host framework) can - see reserve_wow64_host_window's doc comment.
+                // Must happen before ensure_context32()/any guest code runs, not after: the whole
+                // point is closing the window before it can be raced.
+                this->reserve_wow64_host_window();
+#endif
                 this->ensure_context32();
             }
         }
+
+#ifdef __APPLE__
+        // Reserves the ENTIRE host window a wow64 guest's sub-4GB addresses rebase into -
+        // [wow64_guest_rebase, wow64_guest_rebase + wow64_guest_address_space_size) - up front, as
+        // PROT_NONE, before FEXCore or anything else in this process can lazily claim any part of
+        // it. This closes a real, previously-unaddressed race: that window was only ever implicitly
+        // covered by reserved_host_ranges()'s one-shot startup snapshot (see its own doc comment),
+        // so any host allocation made AFTER that snapshot but not going through FEXCore's own hooked
+        // allocator (see fex_internal_arena) - a lazily-loaded host framework/dylib, a new pthread's
+        // stack, libc heap growth - could land on a fixed guest address this window needs (the
+        // wow64 heaven's-gate trampoline at kCodeBase, a non-relocatable module's preferred base)
+        // and fail with "Memory range not allocatable" or "Failed to write FEX guest memory" -
+        // nondeterministically, tracking the host's own ASLR/allocation timing (measured at roughly
+        // 20-30% of runs for a real wow64 guest before this fix).
+        //
+        // Called once, at the earliest point a wow64 process is known (notify_process_bitness,
+        // before ensure_context32()/any guest or guest-triggered code has run at all) - the window
+        // is expected to be genuinely empty this early on macOS/arm64 (dyld's shared cache and the
+        // main image both sit far outside it). Probes first and fails loud (falls back to the
+        // existing detect-and-retry behavior, unchanged) rather than silently clobbering something
+        // already there if that expectation is ever wrong in some environment - this can only ever
+        // improve on baseline, never regress it, since wow64_host_window_reserved_ staying false
+        // makes reserved_host_ranges()/reserved_host_ranges_in() behave exactly as before.
+        //
+        // Deliberately NOT surfaced as a "reserved" range via reserved_host_ranges()/
+        // reserved_host_ranges_in() (contrast with fex_internal_arena, which IS surfaced there) -
+        // unlike the arena, this window IS guest address space; guest memory is meant to live here.
+        // A guest's own fixed-address mmap(MAP_FIXED) call silently overwrites this PROT_NONE
+        // placeholder at the kernel level with no help needed. The only failure mode to avoid is
+        // sogen's OWN collision detection mistaking this placeholder for a foreign occupant and
+        // refusing the legitimate guest allocation that's supposed to land there - exactly the
+        // regression reserved_host_ranges()'s doc comment documents for a different range (an
+        // earlier fix reserved [0, first_hit) unconditionally and broke install_wow64_heaven_gate's
+        // fixed allocate_memory(kCodeBase, ...) call outright, which has no fallback search to skip
+        // past a conflicting reservation). Reuse/re-allocation correctness for addresses actually
+        // inside this window is already handled independently by memory_manager's own
+        // reserved_regions_/overlaps_reserved_region bookkeeping - these two functions only need to
+        // stop reporting the window as "foreign" at all, which the skip checks below do.
+        void reserve_wow64_host_window()
+        {
+            void* const target = reinterpret_cast<void*>(wow64_guest_rebase);
+
+            mach_vm_address_t probe_addr = wow64_guest_rebase;
+            mach_vm_size_t probe_size = 0;
+            vm_region_basic_info_data_64_t info{};
+            mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object_name = MACH_PORT_NULL;
+            const kern_return_t probe_result = mach_vm_region(mach_task_self(), &probe_addr, &probe_size, VM_REGION_BASIC_INFO_64,
+                                                              reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+            if (probe_result == KERN_SUCCESS && probe_addr < wow64_guest_rebase + wow64_guest_address_space_size)
+            {
+                fprintf(stderr,
+                        "[FEX backend] wow64 host window [0x%llx, 0x%llx) not empty at reservation time (existing "
+                        "mapping at 0x%llx) - skipping proactive reservation, falling back to detect-and-retry\n",
+                        static_cast<unsigned long long>(wow64_guest_rebase),
+                        static_cast<unsigned long long>(wow64_guest_rebase + wow64_guest_address_space_size),
+                        static_cast<unsigned long long>(probe_addr));
+                return;
+            }
+
+            void* const result = ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (result != target)
+            {
+                fprintf(stderr, "[FEX backend] failed to reserve wow64 host window - falling back to detect-and-retry\n");
+                if (result != MAP_FAILED)
+                {
+                    ::munmap(result, wow64_guest_address_space_size);
+                }
+                return;
+            }
+
+            this->wow64_host_window_reserved_ = true;
+        }
+#endif
 
         void mark_guest_range_permanently_non_executable(pointer_type address, size_t size) override
         {
@@ -1921,6 +2038,19 @@ namespace sogen::fex
                     continue;
                 }
 
+                // See reserve_wow64_host_window's doc comment: unlike the arena above, this window
+                // is deliberately NOT added as a reserved range at all - it's guest address space,
+                // and memory_manager's own reserved_regions_ already tracks whatever sogen has
+                // legitimately placed inside it. Just don't let this one-shot scan report it as a
+                // foreign occupant (whether it's still our own PROT_NONE placeholder or already-
+                // committed guest content, neither is foreign).
+                if (this->wow64_host_window_reserved_ && address >= wow64_guest_rebase &&
+                    address < wow64_guest_rebase + wow64_guest_address_space_size)
+                {
+                    address += size;
+                    continue;
+                }
+
                 if (first_region)
                 {
                     const uint64_t gap_start = this->is_wow64_process_ ? wow64_guest_address_space_size : 0;
@@ -1973,6 +2103,19 @@ namespace sogen::fex
             std::vector<host_reserved_range> ranges;
 
             const auto rebase = rebase_for(this->is_wow64_process_, address);
+
+            // See reserve_wow64_host_window's doc comment. A non-zero rebase means this query
+            // targets the wow64 rebase window, which - if the up-front reservation succeeded - is
+            // never a foreign occupant: it's either still our own PROT_NONE placeholder, or guest
+            // content memory_manager's own reserved_regions_ already tracks. Reporting nothing here
+            // is exactly the fix; without it, this live probe would find our own placeholder mapped
+            // at the target address and register it as host_reserved before the actual fixed
+            // allocation gets a chance to proceed, incorrectly rejecting it.
+            if (this->wow64_host_window_reserved_ && rebase != 0)
+            {
+                return ranges;
+            }
+
             const mach_vm_address_t window_start = address + rebase;
             const mach_vm_address_t window_end = window_start + size;
 
@@ -4338,6 +4481,12 @@ namespace sogen::fex
         // is currently executing) and whether ensure_context32() builds context32_ at all. No longer
         // selects context_'s own bitness - context_ is always the 64-bit Context now.
         bool is_wow64_process_ = false;
+        // Set by reserve_wow64_host_window() iff it actually claimed [wow64_guest_rebase,
+        // wow64_guest_rebase + wow64_guest_address_space_size) up front - see its doc comment. Gates
+        // the skip checks in reserved_host_ranges()/reserved_host_ranges_in() below; if the
+        // reservation attempt was skipped or failed (logged loudly either way), this stays false and
+        // both functions behave exactly as before - detect-and-report, not silently assume-safe.
+        bool wow64_host_window_reserved_ = false;
         std::unique_ptr<fex_syscall_handler> syscall_handler_{};
         // Placeholder: FEXCore::SignalDelegator has no pure virtuals, so InitCore() can be satisfied
         // with the plain base class for now. This does no actual fault handling - a real Mach-
