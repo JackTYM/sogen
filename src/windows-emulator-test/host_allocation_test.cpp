@@ -48,7 +48,7 @@ namespace sogen::test
                         const auto end = std::min(window_end, range_end);
                         if (start < end)
                         {
-                            result.push_back({start, static_cast<size_t>(end - start)});
+                            result.push_back({.address = start, .size = static_cast<size_t>(end - start)});
                         }
                     }
                 };
@@ -110,7 +110,7 @@ namespace sogen::test
         ASSERT_NE(naive_base, 0u);
 
         // A foreign host mapping now occupies exactly that address, invisible to sogen's bookkeeping.
-        host.foreign_ranges.push_back({naive_base, size});
+        host.foreign_ranges.push_back({.address = naive_base, .size = size});
 
         // The plain pick still returns the now-occupied address (it cannot see the foreign mapping)...
         ASSERT_EQ(mm.find_free_allocation_base(size, start), naive_base);
@@ -160,7 +160,7 @@ namespace sogen::test
         // Occupy the naive pick with a range the full reserved_host_ranges() scan never reports (only the
         // windowed reserved_host_ranges_in() sees it) - the wow64-window asymmetry. A full-only rescan would
         // spin on naive_base forever; the windowed record in the rescan is what lets the pick advance.
-        host.hidden_from_full_scan.push_back({naive_base, size});
+        host.hidden_from_full_scan.push_back({.address = naive_base, .size = size});
 
         const uint64_t host_base = mm.find_free_host_allocation_base(size, start);
         ASSERT_NE(host_base, 0u);
@@ -189,7 +189,7 @@ namespace sogen::test
         // A single contiguous foreign region far larger than (retry budget * size) sitting on the naive pick.
         // Only a full-scan rescan (which records the whole region in one step) can clear it within the bound.
         constexpr size_t large_region = size * 4096;
-        host.foreign_ranges.push_back({naive_base, large_region});
+        host.foreign_ranges.push_back({.address = naive_base, .size = large_region});
 
         const uint64_t host_base = mm.find_free_host_allocation_base(size, start);
         ASSERT_NE(host_base, 0u);
