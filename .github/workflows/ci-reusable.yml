@@ -909,6 +909,13 @@ jobs:
       # exit code plus the "[shim-test] ok" completion marker (rather than exit code alone) guard
       # against a benign, non-fatal teardown-time module-mapping message that can otherwise still
       # leave exit=0.
+      #
+      # vulkan-shim-test.exe defaults to loading "vulkan-shim.dll" (a bare name, resolved via the
+      # guest's normal DLL search path) if no argument is given - but install-gpu-runtime.ps1
+      # installs the shim as the system vulkan-1.dll (system32/syswow64), the real name a Vulkan
+      # application/DXVK would look for, not the raw "vulkan-shim.dll" name. Pass it explicitly so
+      # this test exercises the actual installed runtime configuration rather than requiring a
+      # separately-staged, non-representative copy of the raw shim under a different name.
       - name: Run GPU Paravirtualization Smoke Test
         uses: nick-fields/retry@v4.0.0
         with:
@@ -916,7 +923,7 @@ jobs:
           timeout_minutes: 10
           command: |
             cd build/release/artifacts && chmod +x ./analyzer
-            ./analyzer -s -e root c:/vulkan-shim-test.exe | tee gpu-smoke-test.log
+            ./analyzer -s -e root c:/vulkan-shim-test.exe vulkan-1.dll | tee gpu-smoke-test.log
             grep -q '\[shim-test\] ok' gpu-smoke-test.log
         env:
           EMULATOR_FEX: "1"
