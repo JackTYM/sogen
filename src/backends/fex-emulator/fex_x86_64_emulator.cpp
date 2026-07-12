@@ -92,45 +92,46 @@ namespace sogen::fex
     {
         constexpr size_t page_size = 0x1000;
 
-        // Must match FEXCore::IR::WOW64_GUEST_REBASE (deps/FEX/FEXCore/Source/Interface/Core/
-        // Addressing.h). On Apple Silicon macOS, every process has a mandatory, unshrinkable 4GB
-        // __PAGEZERO segment - the entire address range a real 32-bit x86 (WoW64) guest process
-        // needs (image base, stack, heap, both 32-bit ntdll/kernel32) is permanently unmappable
-        // there (see docs/fex-mac-wow64-pagezero-blocker.md). FEXCore's JIT already adds this to
-        // every 32-bit-mode guest memory dereference/instruction fetch (the patch in deps/FEX); this
-        // backend must apply the exact same rebase to the *actual* host mmap/mprotect/memcpy for
-        // every guest memory operation while a 32-bit context is active, so real host memory backs
-        // 32-bit guest addresses at guest_addr + WOW64_GUEST_REBASE. Everything above this backend
-        // (sogen's PE loader, syscall handlers) continues to deal exclusively in ordinary guest
-        // addresses, unaware this translation exists.
-        constexpr uint64_t wow64_guest_rebase = 0x400000000ULL;
+        // On Apple Silicon macOS, every process has a mandatory, unshrinkable 4GB __PAGEZERO
+        // segment - the entire address range a real 32-bit x86 (WoW64) guest process needs (image
+        // base, stack, heap, both 32-bit ntdll/kernel32) is permanently unmappable there. FEXCore's
+        // JIT rebases every 32-bit-mode guest memory dereference/instruction fetch by a
+        // per-Context, runtime-configurable offset (FEXCore::Context::Config.Wow64GuestRebaseValue,
+        // set via SetWow64GuestRebaseValue - see its doc comment, public Context.h) so real host
+        // memory can back 32-bit guest addresses at guest_addr + that offset instead. Everything
+        // above this backend (sogen's PE loader, syscall handlers) continues to deal exclusively in
+        // ordinary guest addresses, unaware this translation exists.
+        //
+        // wow64_guest_rebase_default is only the FIRST candidate this backend's own
+        // reserve_wow64_host_window() tries (see its doc comment for the full rationale - in short,
+        // no single fixed compile-time offset is safe: what host VA is actually free depends on
+        // what else this specific process/machine has already mapped, which a hardcoded guess
+        // cannot account for). It's also the value used unconditionally on any platform where that
+        // dynamic search doesn't run (e.g. Linux ARM64 - this backend is shared, not Apple-
+        // exclusive), preserving this backend's original, pre-dynamic-rebase behavior there exactly.
+        constexpr uint64_t wow64_guest_rebase_default = 0x400000000ULL;
 
         // A 32-bit x86 guest's entire architectural address space is bounded by its 32-bit
-        // pointers: [0, 4GB). This is the ONLY range that ever needs wow64_guest_rebase applied -
-        // see rebase_for's doc comment for why this must be a separate constant from
-        // wow64_guest_rebase itself (the two used to be conflated, which was a real bug: real
-        // 64-bit ntdll/win32u modules are placed starting at memory_manager's
+        // pointers: [0, 4GB). This is the ONLY range that ever needs the wow64 rebase applied - kept
+        // separate from the rebase offset itself (this backend used to conflate the two, which was
+        // a real bug: real 64-bit ntdll/win32u modules are placed starting at memory_manager's
         // DEFAULT_ALLOCATION_ADDRESS_64BIT, which is exactly 4GB - i.e. *below* the old 16GB
-        // threshold - so a wow64 process's real 64-bit ntdll could land in [4GB, 16GB) and get
-        // incorrectly rebased right along with genuine 32-bit addresses, corrupting where its real
-        // host memory actually lives relative to where context_'s 64-bit JIT - which applies no
-        // internal rebase of its own, see GuestMemoryRebase()'s Config.Is64BitMode() gate in
-        // deps/FEX - expects to find it).
+        // rebase-offset default - so a wow64 process's real 64-bit ntdll could land in [4GB, 16GB)
+        // and get incorrectly rebased right along with genuine 32-bit addresses, corrupting where
+        // its real host memory actually lives relative to where context_'s 64-bit JIT - which
+        // applies no internal rebase of its own, see GuestMemoryRebase()'s Config.Is64BitMode()
+        // gate in deps/FEX - expects to find it).
         constexpr uint64_t wow64_guest_address_space_size = 0x100000000ULL;
 
         // A real wow64 process maps BOTH a 32-bit executable/ntdll32 (living in [0, 4GB), needing
-        // the rebase above) AND the real 64-bit ntdll/win32u/wow64*.dll support modules (living
-        // anywhere from 4GB up, needing NO rebase at all) - module_manager::load_wow64_modules maps
-        // both kinds while this backend's is_wow64_process_ is already true. Blanket-applying the
-        // rebase whenever is_wow64_process_ is set - rather than per-address - would incorrectly
-        // shift the 64-bit modules' own addresses too. Gate on the address itself: anything at or
-        // past the true 32-bit address-space boundary (wow64_guest_address_space_size) is left
-        // alone, regardless of how far below wow64_guest_rebase (the unrelated offset actually
-        // added) it happens to sit.
-        constexpr uint64_t rebase_for(const bool is_32bit_mode, const uint64_t address)
-        {
-            return (is_32bit_mode && address < wow64_guest_address_space_size) ? wow64_guest_rebase : 0ULL;
-        }
+        // the rebase) AND the real 64-bit ntdll/win32u/wow64*.dll support modules (living anywhere
+        // from 4GB up, needing NO rebase at all) - module_manager::load_wow64_modules maps both
+        // kinds while this backend's is_wow64_process_ is already true. Blanket-applying the rebase
+        // whenever is_wow64_process_ is set - rather than per-address - would incorrectly shift the
+        // 64-bit modules' own addresses too. Gate on the address itself: anything at or past the
+        // true 32-bit address-space boundary (wow64_guest_address_space_size) is left alone,
+        // regardless of how far below the rebase offset (the unrelated value actually added) it
+        // happens to sit.
 
         // The 64-bit user code-segment selector (matches sogen::wow64::heaven_gate::kUserCodeSelector
         // in src/windows-emulator/wow64_heaven_gate.hpp - kept as a local constant to avoid pulling
@@ -923,8 +924,8 @@ namespace sogen::fex
 
                     const auto candidate_addr = reinterpret_cast<uint64_t>(candidate);
                     const auto candidate_end = candidate_addr + arena_size;
-                    const bool overlaps_wow64_window =
-                        candidate_addr < wow64_guest_rebase + wow64_guest_address_space_size && candidate_end > wow64_guest_rebase;
+                    const bool overlaps_wow64_window = candidate_addr < wow64_guest_rebase_default + wow64_guest_address_space_size &&
+                                                       candidate_end > wow64_guest_rebase_default;
                     if (!overlaps_wow64_window)
                     {
                         base = candidate;
@@ -1646,33 +1647,50 @@ namespace sogen::fex
         }
 
 #ifdef __APPLE__
-        // Reserves the ENTIRE host window a wow64 guest's sub-4GB addresses rebase into -
-        // [wow64_guest_rebase, wow64_guest_rebase + wow64_guest_address_space_size) - up front, as
-        // PROT_NONE, before FEXCore or anything else in this process can lazily claim any part of
-        // it. This closes a real, previously-unaddressed race: that window was only ever implicitly
-        // covered by reserved_host_ranges()'s one-shot startup snapshot (see its own doc comment),
-        // so any host allocation made AFTER that snapshot but not going through FEXCore's own hooked
-        // allocator (see fex_internal_arena) - a lazily-loaded host framework/dylib, a new pthread's
-        // stack, libc heap growth - could land on a fixed guest address this window needs (the
-        // wow64 heaven's-gate trampoline at kCodeBase, a non-relocatable module's preferred base)
-        // and fail with "Memory range not allocatable" or "Failed to write FEX guest memory" -
-        // nondeterministically, tracking the host's own ASLR/allocation timing (measured at roughly
-        // 20-30% of runs for a real wow64 guest before this fix).
+        // Picks a genuinely free 4GB host window for sub-4GB guest addresses to rebase into, and
+        // reserves it up front as PROT_NONE before FEXCore or anything else in this process can
+        // lazily claim any part of it - storing the choice in wow64_guest_rebase_. Deliberately does
+        // NOT tell context_ about it here: context_ doesn't exist yet at this call site (this must
+        // run before CreateNewContext() to have any chance of winning the race against FEXCore's own
+        // internal allocations - see below), so initialize_context() calls
+        // context_->SetWow64GuestRebaseValue(wow64_guest_rebase_) itself once context_ exists,
+        // right after constructing it.
+        //
+        // A SINGLE FIXED candidate (the original design, always [0x400000000, 0x500000000)) is not
+        // safe here: what host VA is actually free depends on what else this specific process/
+        // machine has already mapped, and that varies with the host in ways no compile-time constant
+        // can anticipate. Two real, independently-measured collisions with a fixed candidate:
+        //   - This process links Cocoa/Metal (sogen's own GPU/window subsystem). Its dyld-load-time
+        //     host VA reservation (up to ~12GB) is unbeatable from application code (confirmed: moving
+        //     this reservation as early as initialize_context() made no measurable difference), and
+        //     was observed clustering tightly within [0x418000000, 0x4fa000000] across 100+ runs on
+        //     one machine - entirely inside the original [16GB, 20GB) candidate, causing "Failed to
+        //     write FEX guest memory" at kCodeBase (the heaven's-gate trampoline) in ~20-40% of runs.
+        //   - Simply moving the candidate higher (128GB) traded one fixed collision for another: this
+        //     machine (64GB RAM) also has an always-present, non-ASLR'd ~384GB reservation starting at
+        //     exactly its own physical RAM size (0x1000000000) - some RAM-proportional heuristic
+        //     (malloc/VM compressor/similar), NOT a Metal/GPU artifact. A larger-RAM machine would push
+        //     this reservation's start (and thus what it covers) even higher, so no single fixed
+        //     candidate is safe across different host RAM sizes either.
+        // So this tries a sequence of candidates, live-probed via mach_vm_region, jumping past
+        // whatever occupies each rejected one (using the occupant's own reported extent, so a huge
+        // reservation is skipped in one step rather than walked past 4GB at a time) until one is
+        // found genuinely empty - bounded by both a candidate-count cap and an address ceiling chosen
+        // to stay comfortably below AddressSanitizer's shadow-memory floor (~0x7e00000000 on macOS/
+        // arm64 - see reserved_host_ranges()'s ASan-skip comment) for instrumented builds.
         //
         // Called once, unconditionally, from initialize_context() - this backend's own construction,
         // before FEXCore's context/CodeBuffer exist and before any guest or guest-triggered code has
         // run - regardless of whether this process turns out to be wow64 at all (bitness isn't known
-        // this early; see initialize_context's call site comment for why reserving it unconditionally
-        // is harmless for a plain 64-bit guest). This used to run later, from notify_process_bitness,
-        // once bitness was actually known - but that was measurably too late: this process links
-        // Cocoa/Metal (sogen's own GPU/window subsystem), whose device/heap setup can claim a large
-        // host VA range via ASLR before notify_process_bitness ever fires, occasionally landing
-        // exactly on this window. Running from initialize_context() instead gives this the earliest
-        // possible chance to win that race. Probes first and fails loud (falls back to the existing
-        // detect-and-retry behavior, unchanged) rather than silently clobbering something already
-        // there if the window isn't actually free even this early - this can only ever improve on
-        // baseline, never regress it, since wow64_host_window_reserved_ staying false makes
-        // reserved_host_ranges()/reserved_host_ranges_in() behave exactly as before.
+        // this early; harmless for a plain 64-bit guest, which never rebases anything - see
+        // rebase_for). This is also as early as this backend's own code can possibly run: moving it
+        // even earlier isn't possible from here, since Cocoa/Metal's own reservation happens via dyld
+        // loading the frameworks before main() - before ANY of this process's own C++ constructors,
+        // sogen's included - even runs at all.
+        //
+        // Falls back to leaving wow64_guest_rebase_/wow64_host_window_reserved_ at their defaults
+        // (unchanged, existing detect-and-retry behavior) if every candidate is exhausted - this can
+        // only ever improve on that baseline, never regress it.
         //
         // Deliberately NOT surfaced as a "reserved" range via reserved_host_ranges()/
         // reserved_host_ranges_in() (contrast with fex_internal_arena, which IS surfaced there) -
@@ -1695,42 +1713,64 @@ namespace sogen::fex
                 return;
             }
 
-            void* const target = reinterpret_cast<void*>(wow64_guest_rebase);
+            constexpr uint64_t search_ceiling = 0x8000000000ULL; // 512 GiB
+            constexpr int max_candidates = 32;
 
-            mach_vm_address_t probe_addr = wow64_guest_rebase;
-            mach_vm_size_t probe_size = 0;
-            vm_region_basic_info_data_64_t info{};
-            mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
-            mach_port_t object_name = MACH_PORT_NULL;
-            const kern_return_t probe_result = mach_vm_region(mach_task_self(), &probe_addr, &probe_size, VM_REGION_BASIC_INFO_64,
-                                                              reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
-            if (probe_result == KERN_SUCCESS && probe_addr < wow64_guest_rebase + wow64_guest_address_space_size)
+            uint64_t candidate = wow64_guest_rebase_default;
+            for (int attempt = 0; attempt < max_candidates && candidate + wow64_guest_address_space_size <= search_ceiling; ++attempt)
             {
-                char path_buf[PROC_PIDPATHINFO_MAXSIZE] = {};
-                const int path_len = proc_regionfilename(getpid(), probe_addr, path_buf, sizeof(path_buf));
-                fprintf(stderr,
-                        "[FEX backend] wow64 host window [0x%llx, 0x%llx) not empty at reservation time (existing "
-                        "mapping at 0x%llx size=0x%llx prot=%d max_prot=%d shared=%d reserved=%d behavior=%d "
-                        "file=%s) - skipping proactive reservation, falling back to detect-and-retry\n",
-                        static_cast<unsigned long long>(wow64_guest_rebase),
-                        static_cast<unsigned long long>(wow64_guest_rebase + wow64_guest_address_space_size),
-                        static_cast<unsigned long long>(probe_addr), static_cast<unsigned long long>(probe_size), info.protection,
-                        info.max_protection, info.shared, info.reserved, info.behavior, path_len > 0 ? path_buf : "<none>");
-                return;
-            }
+                mach_vm_address_t probe_addr = candidate;
+                mach_vm_size_t probe_size = 0;
+                vm_region_basic_info_data_64_t info{};
+                mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+                mach_port_t object_name = MACH_PORT_NULL;
+                const kern_return_t probe_result = mach_vm_region(mach_task_self(), &probe_addr, &probe_size, VM_REGION_BASIC_INFO_64,
+                                                                  reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
 
-            void* const result = ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (result != target)
-            {
-                fprintf(stderr, "[FEX backend] failed to reserve wow64 host window - falling back to detect-and-retry\n");
-                if (result != MAP_FAILED)
+                const bool candidate_is_free = probe_result != KERN_SUCCESS || probe_addr >= candidate + wow64_guest_address_space_size;
+                if (!candidate_is_free)
                 {
-                    ::munmap(result, wow64_guest_address_space_size);
+                    char path_buf[PROC_PIDPATHINFO_MAXSIZE] = {};
+                    const int path_len = proc_regionfilename(getpid(), probe_addr, path_buf, sizeof(path_buf));
+                    fprintf(stderr,
+                            "[FEX backend] wow64 host window candidate [0x%llx, 0x%llx) occupied (mapping at 0x%llx "
+                            "size=0x%llx prot=%d file=%s) - trying the next candidate\n",
+                            static_cast<unsigned long long>(candidate),
+                            static_cast<unsigned long long>(candidate + wow64_guest_address_space_size),
+                            static_cast<unsigned long long>(probe_addr), static_cast<unsigned long long>(probe_size), info.protection,
+                            path_len > 0 ? path_buf : "<none>");
+
+                    const uint64_t occupant_end = probe_addr + probe_size;
+                    candidate =
+                        (occupant_end + wow64_guest_address_space_size - 1) & ~(wow64_guest_address_space_size - 1);
+                    continue;
                 }
+
+                void* const target = reinterpret_cast<void*>(candidate);
+                void* const result = ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (result != target)
+                {
+                    // A racer claimed this exact candidate between our probe and our mmap - move on.
+                    fprintf(stderr, "[FEX backend] failed to reserve wow64 host window at 0x%llx - trying the next candidate\n",
+                            static_cast<unsigned long long>(candidate));
+                    if (result != MAP_FAILED)
+                    {
+                        ::munmap(result, wow64_guest_address_space_size);
+                    }
+                    candidate += wow64_guest_address_space_size;
+                    continue;
+                }
+
+                this->wow64_guest_rebase_ = candidate;
+                this->wow64_host_window_reserved_ = true;
                 return;
             }
 
-            this->wow64_host_window_reserved_ = true;
+            fprintf(stderr,
+                    "[FEX backend] exhausted %d candidates below 0x%llx searching for a free wow64 host window - "
+                    "falling back to the default at 0x%llx with detect-and-retry\n",
+                    max_candidates, static_cast<unsigned long long>(search_ceiling),
+                    static_cast<unsigned long long>(wow64_guest_rebase_default));
         }
 #endif
 
@@ -2053,8 +2093,8 @@ namespace sogen::fex
                 // legitimately placed inside it. Just don't let this one-shot scan report it as a
                 // foreign occupant (whether it's still our own PROT_NONE placeholder or already-
                 // committed guest content, neither is foreign).
-                if (this->wow64_host_window_reserved_ && address >= wow64_guest_rebase &&
-                    address < wow64_guest_rebase + wow64_guest_address_space_size)
+                if (this->wow64_host_window_reserved_ && address >= this->wow64_guest_rebase_ &&
+                    address < this->wow64_guest_rebase_ + wow64_guest_address_space_size)
                 {
                     address += size;
                     continue;
@@ -2823,6 +2863,14 @@ namespace sogen::fex
             const FEXCore::HostFeatures features{}; // TODO(fex): FEXCore::FetchHostFeatures() on real HW.
 #endif
             this->context_ = FEXCore::Context::Context::CreateNewContext(features);
+
+            // Tell context_'s JIT the actual host address offset to use for the wow64 rebase -
+            // whatever reserve_wow64_host_window() (called above, before context_ existed) already
+            // chose, or the unchanged default if that never ran (e.g. non-Apple platforms). Must
+            // happen before the first block compiles (InitCore(), below) - see
+            // SetWow64GuestRebaseValue's doc comment (public Context.h).
+            this->context_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
+
             // active_context_/active_thread_ track whichever context/thread is currently executing -
             // see their doc comment. Nothing but context_/thread_ ever runs until Phase B's gate-
             // crossing starts flipping this, so initialize it to context_ here, once, right after
@@ -2871,6 +2919,13 @@ namespace sogen::fex
             const FEXCore::HostFeatures features{};
 #endif
             this->context32_ = FEXCore::Context::Context::CreateNewContext(features);
+
+            // context32_ is a genuinely 32-bit-mode Context (GuestMemoryRebase() applies the rebase
+            // unconditionally there, not just when NeedsWow64GuestRebase is set - see its doc
+            // comment), so it must agree with context_/wow64_guest_rebase_ on the actual host address
+            // offset - whatever reserve_wow64_host_window() already chose for this process by the
+            // time a wow64 process's first gate crossing lazily creates this Context.
+            this->context32_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
 
             this->syscall_handler32_ = std::make_unique<fex_syscall_handler>(*this);
             this->context32_->SetSyscallHandler(this->syscall_handler32_.get());
@@ -3666,11 +3721,22 @@ namespace sogen::fex
         // structures (mmio_regions_, page_shadow_apple_, memory_violation_hooks_), as opposed to
         // used directly as a real host pointer (e.g. handle_misaligned_atomic_fault's memcpy), which
         // must keep the original, rebased address.
+        // Returns the host address offset to add to `address` if it needs the wow64 rebase applied -
+        // see wow64_guest_rebase_default's doc comment for why this is a per-instance member
+        // (wow64_guest_rebase_) rather than a fixed constant. See wow64_guest_address_space_size's
+        // doc comment for why is_32bit_mode alone isn't the gate - the address itself must also be
+        // below that boundary.
+        uint64_t rebase_for(bool is_32bit_mode, uint64_t address) const
+        {
+            return (is_32bit_mode && address < wow64_guest_address_space_size) ? this->wow64_guest_rebase_ : 0ULL;
+        }
+
         uint64_t unrebase_fault_addr(uint64_t fault_addr) const
         {
-            if (this->is_wow64_process_ && fault_addr >= wow64_guest_rebase && fault_addr < wow64_guest_rebase + 0x100000000ULL)
+            if (this->is_wow64_process_ && fault_addr >= this->wow64_guest_rebase_ &&
+                fault_addr < this->wow64_guest_rebase_ + wow64_guest_address_space_size)
             {
-                return fault_addr - wow64_guest_rebase;
+                return fault_addr - this->wow64_guest_rebase_;
             }
             return fault_addr;
         }
@@ -4505,9 +4571,16 @@ namespace sogen::fex
         // is currently executing) and whether ensure_context32() builds context32_ at all. No longer
         // selects context_'s own bitness - context_ is always the 64-bit Context now.
         bool is_wow64_process_ = false;
+        // The actual host address offset added to sub-4GB guest addresses (see rebase_for). Starts
+        // at wow64_guest_rebase_default and, on Apple, is overwritten by reserve_wow64_host_window()
+        // once it finds a genuinely free candidate window - see that method's doc comment. Stays at
+        // the default on every other platform (this backend is shared, not Apple-exclusive), which
+        // is also FEXCore::Context::Config.Wow64GuestRebaseValue's own default, so both sides agree
+        // without sogen ever needing to call SetWow64GuestRebaseValue there at all.
+        uint64_t wow64_guest_rebase_ = wow64_guest_rebase_default;
 #ifdef __APPLE__
-        // Set by reserve_wow64_host_window() iff it actually claimed [wow64_guest_rebase,
-        // wow64_guest_rebase + wow64_guest_address_space_size) up front - see its doc comment. Gates
+        // Set by reserve_wow64_host_window() iff it actually claimed [wow64_guest_rebase_,
+        // wow64_guest_rebase_ + wow64_guest_address_space_size) up front - see its doc comment. Gates
         // the skip checks in reserved_host_ranges()/reserved_host_ranges_in() below; if the
         // reservation attempt was skipped or failed (logged loudly either way), this stays false and
         // both functions behave exactly as before - detect-and-report, not silently assume-safe.
