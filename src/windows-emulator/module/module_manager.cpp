@@ -457,6 +457,31 @@ namespace sogen
         init_block.MitigationAuditOptionsMap.Map[1] = 0;
         init_block.MitigationAuditOptionsMap.Map[2] = 0;
 
+        fprintf(
+            stderr,
+            "[INITBLOCKDIAG] LdrInitializeThunk=0x%llx KiUserExceptionDispatcher=0x%llx KiUserApcDispatcher=0x%llx "
+            "KiUserCallbackDispatcher=0x%llx RtlUserThreadStart=0x%llx RtlpQueryProcessDebugInformationRemote=0x%llx "
+            "BaseAddress=0x%llx LdrSystemDllInitBlock32=0x%llx RtlpFreezeTimeBias=0x%llx\n",
+            static_cast<unsigned long long>(
+                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32LdrInitializeThunk)]),
+            static_cast<unsigned long long>(init_block.Wow64SharedInformation[static_cast<uint64_t>(
+                WOW64_SHARED_INFORMATION_V5::SharedNtdll32KiUserExceptionDispatcher)]),
+            static_cast<unsigned long long>(
+                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32KiUserApcDispatcher)]),
+            static_cast<unsigned long long>(init_block.Wow64SharedInformation[static_cast<uint64_t>(
+                WOW64_SHARED_INFORMATION_V5::SharedNtdll32KiUserCallbackDispatcher)]),
+            static_cast<unsigned long long>(
+                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32RtlUserThreadStart)]),
+            static_cast<unsigned long long>(init_block.Wow64SharedInformation[static_cast<uint64_t>(
+                WOW64_SHARED_INFORMATION_V5::SharedNtdll32pQueryProcessDebugInformationRemote)]),
+            static_cast<unsigned long long>(
+                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32BaseAddress)]),
+            static_cast<unsigned long long>(
+                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32LdrSystemDllInitBlock)]),
+            static_cast<unsigned long long>(
+                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32RtlpFreezeTimeBias)]));
+        fflush(stderr);
+
         // Find LdrSystemDllInitBlock export address in 64-bit ntdll and write the structure
         const auto ldr_init_block_addr = this->ntdll->find_export("LdrSystemDllInitBlock");
         if (ldr_init_block_addr == 0)
