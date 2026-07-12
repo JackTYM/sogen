@@ -110,6 +110,11 @@ namespace sogen
             const auto initial_sp = emu.reg(x86_register::rsp);
             const auto new_sp = align_down(initial_sp - allocation_size, 0x100);
 
+            fprintf(stderr, "[EXCDIAG] dispatch_exception_pointers: initial_sp=0x%llx allocation_size=0x%llx new_sp=0x%llx\n",
+                    static_cast<unsigned long long>(initial_sp), static_cast<unsigned long long>(allocation_size),
+                    static_cast<unsigned long long>(new_sp));
+            fflush(stderr);
+
             const auto total_size = initial_sp - new_sp;
             assert(total_size >= allocation_size);
 
