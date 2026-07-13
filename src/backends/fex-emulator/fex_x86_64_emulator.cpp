@@ -4314,9 +4314,10 @@ namespace sogen::fex
                 if (const auto* gate = this->find_gate_crossing(frame->State.rip))
                 {
                     static uint64_t gate_seq = 0;
-                    fprintf(stderr, "[GATEDIAG7] #%llu kind=%d gate.address=0x%llx src_rip=0x%llx engine=%s\n",
+                    fprintf(stderr, "[GATEDIAG7] #%llu kind=%d gate.address=0x%llx src_rip=0x%llx src_rsp=0x%llx engine=%s\n",
                             static_cast<unsigned long long>(++gate_seq), static_cast<int>(gate->kind),
                             static_cast<unsigned long long>(gate->address), static_cast<unsigned long long>(frame->State.rip),
+                            static_cast<unsigned long long>(frame->State.gregs[detail::greg_rsp]),
                             this->active_context_ == this->context32_.get() ? "32bit" : "64bit");
                     fflush(stderr);
 
