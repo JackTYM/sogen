@@ -4313,6 +4313,13 @@ namespace sogen::fex
                 // rather than dispatching a memory violation.
                 if (const auto* gate = this->find_gate_crossing(frame->State.rip))
                 {
+                    static uint64_t gate_seq = 0;
+                    fprintf(stderr, "[GATEDIAG7] #%llu kind=%d gate.address=0x%llx src_rip=0x%llx engine=%s\n",
+                            static_cast<unsigned long long>(++gate_seq), static_cast<int>(gate->kind),
+                            static_cast<unsigned long long>(gate->address), static_cast<unsigned long long>(frame->State.rip),
+                            this->active_context_ == this->context32_.get() ? "32bit" : "64bit");
+                    fflush(stderr);
+
                     // Capture the source (currently-active, pre-crossing) engine's dispatcher stop
                     // handler *before* perform_gate_crossing flips active_context_: the in-flight
                     // ExecuteThread that must unwind belongs to the source Context, so it has to
