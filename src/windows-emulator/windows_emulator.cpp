@@ -1574,7 +1574,7 @@ namespace sogen
                                 // destination pointer passed into this memcpy-style routine can be
                                 // disassembled directly rather than inferred.
                                 constexpr uint64_t k_call_lead_in = 0x60;
-                                constexpr uint64_t k_call_trail = 0x10;
+                                constexpr uint64_t k_call_trail = 0x80;
                                 std::array<uint8_t, k_call_lead_in + k_call_trail> call_window{};
                                 const auto call_window_start = candidate - k_call_lead_in;
                                 if (acting.try_read_memory(call_window_start, call_window.data(), call_window.size()))
