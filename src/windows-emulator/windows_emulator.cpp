@@ -1272,6 +1272,28 @@ namespace sogen
                 // return address so the missing function's call site can be identified.
                 if (address < 0x1000)
                 {
+                    const auto eip_now = acting.reg<uint32_t>(x86_register::eip);
+                    const auto fs_base = acting.get_segment_base(x86_register::fs);
+                    const auto gs_base = acting.get_segment_base(x86_register::gs);
+                    std::array<uint8_t, 12> eip_bytes{};
+                    const bool eip_ok = acting.try_read_memory(eip_now, eip_bytes.data(), eip_bytes.size());
+                    fprintf(stderr, "[NULLDIAG2] address=0x%llx eip=0x%x fs_base=0x%llx gs_base=0x%llx op=%d type=%d bytes_at_eip: ",
+                            static_cast<unsigned long long>(address), eip_now, static_cast<unsigned long long>(fs_base),
+                            static_cast<unsigned long long>(gs_base), static_cast<int>(operation), static_cast<int>(type));
+                    if (eip_ok)
+                    {
+                        for (const auto b : eip_bytes)
+                        {
+                            fprintf(stderr, "%02x ", b);
+                        }
+                    }
+                    else
+                    {
+                        fprintf(stderr, "<unreadable>");
+                    }
+                    fprintf(stderr, "\n");
+                    fflush(stderr);
+
                     const auto sp = acting.reg<uint32_t>(x86_register::esp);
                     uint32_t return_address = 0;
                     if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
