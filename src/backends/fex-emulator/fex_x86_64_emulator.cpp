@@ -3211,7 +3211,13 @@ namespace sogen::fex
             // and ignores the high-word turbo index, so no masking of eax is needed. table[0] is 0x17af
             // anyway, so non-turbo syscalls are unaffected; turbo syscalls just take the slower (but
             // correct) generic thunk. This is the plan's documented robust fix at a small perf cost.
-            const uint64_t generic_dispatch = image_base + 0x17af;
+            //
+            // The +0x17af offset is only a fallback: confirmed empirically to be WRONG on at least
+            // one real wow64cpu.dll build (the bytes there decode as nonsense, not the documented
+            // `mov ecx,eax; ...` sequence, and executing them corrupts guest memory beyond repair).
+            // module_manager resolves the real TurboDispatchJumpAddressEnd export address and hands
+            // it over via set_wow64_turbo_dispatch_end - always prefer that when it's been set.
+            const uint64_t generic_dispatch = this->wow64_turbo_dispatch_end_ != 0 ? this->wow64_turbo_dispatch_end_ : image_base + 0x17af;
             const uint64_t jump_table = image_base + 0x36d0;
 
             // Source: the 32-bit engine that reached the thunk (SRA already spilled - this is a
@@ -4686,6 +4692,18 @@ namespace sogen::fex
         // member is unused - and -Werror,-Wunused-private-field - on other platforms without this.
         bool wow64_host_window_reserved_ = false;
 #endif
+        // wow64cpu.dll's real TurboDispatchJumpAddressEnd export address, set via
+        // set_wow64_turbo_dispatch_end once module_manager resolves it - see that method's doc
+        // comment for why this can't just be a fixed offset from the image base. Stays 0 until
+        // then; enter_wow64_64bit_from_wow64svc_thunk falls back to the old (best-effort) fixed-
+        // offset computation if it's never been set, rather than crashing outright.
+        uint64_t wow64_turbo_dispatch_end_ = 0;
+
+        void set_wow64_turbo_dispatch_end(pointer_type address) override
+        {
+            this->wow64_turbo_dispatch_end_ = address;
+        }
+
         std::unique_ptr<fex_syscall_handler> syscall_handler_{};
         // Placeholder: FEXCore::SignalDelegator has no pure virtuals, so InitCore() can be satisfied
         // with the plain base class for now. This does no actual fault handling - a real Mach-

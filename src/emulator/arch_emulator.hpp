@@ -131,6 +131,19 @@ namespace sogen
         virtual void register_gate_crossing(pointer_type /*address*/, size_t /*size*/, gate_crossing_kind /*kind*/)
         {
         }
+
+        // Tells a JIT backend wow64cpu.dll's real TurboDispatchJumpAddressEnd export address - the
+        // generic 64-bit dispatch continuation a reverse (32->64) wow64cpu_dispatch gate crossing
+        // resumes execution at (see gate_crossing_kind::wow64cpu_dispatch's doc comment). This
+        // can't be reliably derived from a fixed RVA offset relative to the image base or to
+        // TurboDispatchJumpAddressStart - confirmed empirically to differ across wow64cpu.dll
+        // builds/OS versions - so the caller resolves it from the real export table (the same way
+        // TurboDispatchJumpAddressStart itself already is) and hands the address over directly. A
+        // no-op on native-execution backends (KVM/Unicorn/WHP): they execute the real 64-bit
+        // dispatch code directly and never need to resume it synthetically.
+        virtual void set_wow64_turbo_dispatch_end(pointer_type /*address*/)
+        {
+        }
     };
 
     template <typename Traits>

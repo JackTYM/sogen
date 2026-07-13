@@ -823,6 +823,17 @@ namespace sogen
                 constexpr uint64_t turbo_dispatch_start_rva = 0x17a6;
                 const auto image_base = dispatch_start - turbo_dispatch_start_rva;
 
+                // TurboDispatchJumpAddressEnd's RVA relative to Start is NOT reliably 0x17af - 0x17a6
+                // == 9 bytes across every wow64cpu.dll build (confirmed empirically: a real CI build's
+                // bytes at image_base+0x17af decode as nonsense, not the documented dispatcher code,
+                // and executing them corrupts guest memory). Resolve the real export address directly
+                // instead of assuming a fixed offset, exactly like TurboDispatchJumpAddressStart above.
+                const auto dispatch_end = mod.find_export("TurboDispatchJumpAddressEnd");
+                if (dispatch_end != 0)
+                {
+                    emu_ptr->set_wow64_turbo_dispatch_end(dispatch_end);
+                }
+
                 // Register the forward (64->32) transition, RunSimulatedCode. Its body contains the
                 // un-JIT-able `mov gs, cx`; registering the span makes a JIT backend intercept it at
                 // its entry and marshal the 32-bit register block itself instead of compiling those
