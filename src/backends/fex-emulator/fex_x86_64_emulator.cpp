@@ -3468,6 +3468,21 @@ namespace sogen::fex
                 this->thread_->CurrentFrame->State.gregs[15] = r15_value;
                 fprintf(stderr, "[GATEDIAG4] far_jmp_bitness_switch: set r15=0x%llx for landing at target_offset=0x%x\n",
                         static_cast<unsigned long long>(r15_value), target_offset);
+
+                // The landing code's first instruction is `jmp qword ptr [r15+0xf8]` - dump that
+                // slot (and the table broadly) to see whether real BTCpuProcessInit code has
+                // actually populated it by this point, or whether it's still zero/uninitialized.
+                uint64_t slot_value = 0;
+                if (this->try_read_memory(r15_value + 0xf8, &slot_value, sizeof(slot_value)))
+                {
+                    fprintf(stderr, "[GATEDIAG4] table slot [r15+0xf8] (0x%llx) = 0x%llx\n",
+                            static_cast<unsigned long long>(r15_value + 0xf8), static_cast<unsigned long long>(slot_value));
+                }
+                else
+                {
+                    fprintf(stderr, "[GATEDIAG4] table slot [r15+0xf8] (0x%llx) is unreadable/unmapped\n",
+                            static_cast<unsigned long long>(r15_value + 0xf8));
+                }
                 fflush(stderr);
             }
 
