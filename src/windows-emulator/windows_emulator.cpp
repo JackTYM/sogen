@@ -1396,16 +1396,18 @@ namespace sogen
                 if (address >= 0x1000)
                 {
                     const auto eip_full = acting.reg<uint64_t>(x86_register::rip);
+                    const auto cs_val = acting.reg<uint16_t>(x86_register::cs);
+                    const auto rbx_val = acting.reg<uint64_t>(x86_register::rbx);
                     fprintf(stderr,
                             "[NULLDIAG3] non-null violation: address=0x%llx size=0x%zx op=%d type=%d cs=0x%x rip=0x%llx "
                             "fs_base=0x%llx gs_base=0x%llx rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx rsi=0x%llx rdi=0x%llx "
                             "rbp=0x%llx rsp=0x%llx r11=0x%llx r13=0x%llx r15=0x%llx\n",
-                            static_cast<unsigned long long>(address), size, static_cast<int>(operation), static_cast<int>(type),
-                            acting.reg<uint16_t>(x86_register::cs), static_cast<unsigned long long>(eip_full),
+                            static_cast<unsigned long long>(address), size, static_cast<int>(operation), static_cast<int>(type), cs_val,
+                            static_cast<unsigned long long>(eip_full),
                             static_cast<unsigned long long>(acting.get_segment_base(x86_register::fs)),
                             static_cast<unsigned long long>(acting.get_segment_base(x86_register::gs)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rax)),
-                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rbx)),
+                            static_cast<unsigned long long>(rbx_val),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rcx)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rdx)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rsi)),
@@ -1425,6 +1427,41 @@ namespace sogen
                             fprintf(stderr, "%02x ", b);
                         }
                         fprintf(stderr, "\n");
+                    }
+
+                    // Zero-fill fix (8c21c350) had no effect on this failure - byte-identical crash -
+                    // so the "cmp ecx, [edx+ebx]" lookup isn't reading NtTraceControl's output buffer
+                    // after all. Dump the table ebx actually points at (its real, mapped contents) and
+                    // scan the stack for a plausible return address (a value landing inside a known
+                    // module) to identify the real calling function without symbols.
+                    if (cs_val == 0x23)
+                    {
+                        std::array<uint8_t, 32> table_bytes{};
+                        if (acting.try_read_memory(rbx_val, table_bytes.data(), table_bytes.size()))
+                        {
+                            fprintf(stderr, "[NULLDIAG3] bytes at ebx (0x%llx): ", static_cast<unsigned long long>(rbx_val));
+                            for (const auto b : table_bytes)
+                            {
+                                fprintf(stderr, "%02x ", b);
+                            }
+                            fprintf(stderr, "\n");
+                        }
+
+                        const auto esp_val = acting.reg<uint32_t>(x86_register::esp);
+                        for (uint32_t off = 0; off < 0x60; off += 4)
+                        {
+                            uint32_t candidate = 0;
+                            if (!acting.try_read_memory(esp_val + off, &candidate, sizeof(candidate)))
+                            {
+                                continue;
+                            }
+                            const auto* mod = this->mod_manager.find_by_address(candidate);
+                            if (mod)
+                            {
+                                fprintf(stderr, "[NULLDIAG3] stack[esp+0x%x]=0x%x -> %s+0x%llx\n", off, candidate, mod->name.c_str(),
+                                        static_cast<unsigned long long>(candidate - mod->image_base));
+                            }
+                        }
                     }
                     fflush(stderr);
                 }
