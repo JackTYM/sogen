@@ -3425,67 +3425,31 @@ namespace sogen::fex
         // away from its preferred base), not an RVA, so it's used directly with no image_base add.
         // Unlike the heaven's gate, a plain far jmp never touches RSP, so the current one carries
         // through unchanged.
+        // This gate is wow64cpu.dll's one-time "can the CPU actually switch into 64-bit mode"
+        // hardware sanity check (see gate_crossing_kind::far_jmp_bitness_switch's doc comment) -
+        // not a real WoW64 syscall transition with a meaningful continuation. A real crossing
+        // (via perform_bitness_switch) lands 64-bit execution on `jmp qword ptr [r15+0xf8]`,
+        // wow64cpu!TurboThunkDispatch's own jump table (image_base + 0x36d0) - but that table's
+        // contents are never populated by anything sogen executes (confirmed empirically: the
+        // slot reads 0 on every run), so the landing always faults with a null target. Nothing
+        // else in this backend's already-working wow64 syscall dispatch (enter_wow64_64bit_from_
+        // wow64svc_thunk) ever reads that table's contents either - it only sets the r15 pointer
+        // itself and jumps straight to the generic dispatcher - so the table's population was
+        // never actually load-bearing for anything sogen implements. Since this backend always
+        // runs on genuinely 64-bit-capable hardware, the probe's real-world answer is trivially
+        // "yes" regardless - so just prove the instruction decodes as expected (confirming this
+        // really is the probe) and resume the SAME (source) engine past it, without ever
+        // switching engines at all. This sidesteps the unpopulated-table fault entirely instead
+        // of trying to reproduce wow64cpu.dll's internal continuation logic exactly.
         bool enter_bitness_switch_from_far_jmp(const gate_crossing& gate)
         {
-            const auto* engine_before =
-                this->active_thread_ == this->thread32_ ? "32bit" : (this->active_thread_ == this->thread_ ? "64bit" : "unknown");
-
             std::array<uint8_t, 7> insn{};
-            const bool read_ok = this->try_read_memory(gate.address, insn.data(), insn.size());
-            if (!read_ok || insn[0] != 0xEA)
-            {
-                fprintf(stderr, "[GATEDIAG3] far_jmp_bitness_switch MISS: gate.address=0x%llx engine=%s read_ok=%d insn[0]=0x%x\n",
-                        static_cast<unsigned long long>(gate.address), engine_before, read_ok ? 1 : 0, insn[0]);
-                fflush(stderr);
-                return false;
-            }
-
-            uint32_t target_offset = 0;
-            std::memcpy(&target_offset, &insn[1], sizeof(target_offset));
-            uint16_t target_cs = 0;
-            std::memcpy(&target_cs, &insn[5], sizeof(target_cs));
-
-            const auto& src = this->active_thread_->CurrentFrame->State;
-            if (!this->perform_bitness_switch(target_offset, src.gregs[detail::greg_rsp], target_cs))
+            if (!this->try_read_memory(gate.address, insn.data(), insn.size()) || insn[0] != 0xEA)
             {
                 return false;
             }
 
-            // The landing code past this probe (wow64cpu.dll's BTCpuProcessInit, dynamically
-            // JIT-written at runtime so it's absent from the static PE image) dispatches through
-            // `jmp qword ptr [r15+0xf8]` - the SAME wow64cpu!TurboThunkDispatch jump table
-            // (image_base + 0x36d0) that enter_wow64_32bit_from_run_simulated_code and
-            // enter_wow64_64bit_from_wow64svc_thunk already populate for their own 64-bit landings.
-            // perform_bitness_switch only PRESERVES the destination engine's existing r15 (correct
-            // for the heaven's-gate exception path, where a real syscall dispatch has already run
-            // and set it) - but this CPU-probe is the very first 32->64 crossing of the process, so
-            // the 64-bit engine's r15 is still its uninitialized default (0), making that indexed
-            // jump read near-null memory and fault with a target of 0. Set it explicitly here,
-            // exactly like the other two handlers, whenever this crossing lands in 64-bit mode.
-            if (target_cs == wow64_user_code_selector_64bit)
-            {
-                const auto r15_value = (gate.address & ~static_cast<uint64_t>(0xFFFF)) + 0x36d0;
-                this->thread_->CurrentFrame->State.gregs[15] = r15_value;
-                fprintf(stderr, "[GATEDIAG4] far_jmp_bitness_switch: set r15=0x%llx for landing at target_offset=0x%x\n",
-                        static_cast<unsigned long long>(r15_value), target_offset);
-
-                // The landing code's first instruction is `jmp qword ptr [r15+0xf8]` - dump that
-                // slot (and the table broadly) to see whether real BTCpuProcessInit code has
-                // actually populated it by this point, or whether it's still zero/uninitialized.
-                uint64_t slot_value = 0;
-                if (this->try_read_memory(r15_value + 0xf8, &slot_value, sizeof(slot_value)))
-                {
-                    fprintf(stderr, "[GATEDIAG4] table slot [r15+0xf8] (0x%llx) = 0x%llx\n",
-                            static_cast<unsigned long long>(r15_value + 0xf8), static_cast<unsigned long long>(slot_value));
-                }
-                else
-                {
-                    fprintf(stderr, "[GATEDIAG4] table slot [r15+0xf8] (0x%llx) is unreadable/unmapped\n",
-                            static_cast<unsigned long long>(r15_value + 0xf8));
-                }
-                fflush(stderr);
-            }
-
+            this->active_thread_->CurrentFrame->State.rip = gate.address + insn.size();
             return true;
         }
 
