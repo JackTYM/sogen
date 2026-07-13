@@ -1395,15 +1395,37 @@ namespace sogen
 
                 if (address >= 0x1000)
                 {
+                    const auto eip_full = acting.reg<uint64_t>(x86_register::rip);
                     fprintf(stderr,
-                            "[NULLDIAG3] non-null violation: address=0x%llx size=0x%zx op=%d type=%d cs=0x%x eip=0x%x "
-                            "fs_base=0x%llx gs_base=0x%llx eax=0x%x ecx=0x%x edx=0x%x\n",
+                            "[NULLDIAG3] non-null violation: address=0x%llx size=0x%zx op=%d type=%d cs=0x%x rip=0x%llx "
+                            "fs_base=0x%llx gs_base=0x%llx rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx rsi=0x%llx rdi=0x%llx "
+                            "rbp=0x%llx rsp=0x%llx r11=0x%llx r13=0x%llx r15=0x%llx\n",
                             static_cast<unsigned long long>(address), size, static_cast<int>(operation), static_cast<int>(type),
-                            acting.reg<uint16_t>(x86_register::cs), acting.reg<uint32_t>(x86_register::eip),
+                            acting.reg<uint16_t>(x86_register::cs), static_cast<unsigned long long>(eip_full),
                             static_cast<unsigned long long>(acting.get_segment_base(x86_register::fs)),
                             static_cast<unsigned long long>(acting.get_segment_base(x86_register::gs)),
-                            acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::ecx),
-                            acting.reg<uint32_t>(x86_register::edx));
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rax)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rbx)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rcx)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rdx)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rsi)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rdi)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rbp)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rsp)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r11)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r13)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r15)));
+
+                    std::array<uint8_t, 16> eip_bytes{};
+                    if (acting.try_read_memory(eip_full, eip_bytes.data(), eip_bytes.size()))
+                    {
+                        fprintf(stderr, "[NULLDIAG3] bytes at rip: ");
+                        for (const auto b : eip_bytes)
+                        {
+                            fprintf(stderr, "%02x ", b);
+                        }
+                        fprintf(stderr, "\n");
+                    }
                     fflush(stderr);
                 }
 
