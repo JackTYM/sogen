@@ -3464,7 +3464,11 @@ namespace sogen::fex
             // exactly like the other two handlers, whenever this crossing lands in 64-bit mode.
             if (target_cs == wow64_user_code_selector_64bit)
             {
-                this->thread_->CurrentFrame->State.gregs[15] = (gate.address & ~static_cast<uint64_t>(0xFFFF)) + 0x36d0;
+                const auto r15_value = (gate.address & ~static_cast<uint64_t>(0xFFFF)) + 0x36d0;
+                this->thread_->CurrentFrame->State.gregs[15] = r15_value;
+                fprintf(stderr, "[GATEDIAG4] far_jmp_bitness_switch: set r15=0x%llx for landing at target_offset=0x%x\n",
+                        static_cast<unsigned long long>(r15_value), target_offset);
+                fflush(stderr);
             }
 
             return true;

@@ -1350,7 +1350,9 @@ namespace sogen
                                                 cache_address);
                                     }
 
-                                    fprintf(stderr, "[NULLDIAG] cs=0x%x active engine cs check\n", acting.reg<uint16_t>(x86_register::cs));
+                                    fprintf(stderr, "[NULLDIAG] cs=0x%x r15=0x%llx active engine check\n",
+                                            acting.reg<uint16_t>(x86_register::cs),
+                                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r15)));
                                 }
                             }
                             else
