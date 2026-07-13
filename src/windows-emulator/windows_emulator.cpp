@@ -1401,7 +1401,8 @@ namespace sogen
                     fprintf(stderr,
                             "[NULLDIAG3] non-null violation: address=0x%llx size=0x%zx op=%d type=%d cs=0x%x rip=0x%llx "
                             "fs_base=0x%llx gs_base=0x%llx rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx rsi=0x%llx rdi=0x%llx "
-                            "rbp=0x%llx rsp=0x%llx r11=0x%llx r13=0x%llx r15=0x%llx\n",
+                            "rbp=0x%llx rsp=0x%llx r8=0x%llx r9=0x%llx r10=0x%llx r11=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx "
+                            "r15=0x%llx\n",
                             static_cast<unsigned long long>(address), size, static_cast<int>(operation), static_cast<int>(type), cs_val,
                             static_cast<unsigned long long>(eip_full),
                             static_cast<unsigned long long>(acting.get_segment_base(x86_register::fs)),
@@ -1414,8 +1415,13 @@ namespace sogen
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rdi)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rbp)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rsp)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r8)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r9)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r10)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r11)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r12)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r13)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r14)),
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::r15)));
 
                     std::array<uint8_t, 16> eip_bytes{};
@@ -1528,6 +1534,27 @@ namespace sogen
                         }
 
                         const auto rsp_val = acting.reg<uint64_t>(x86_register::rsp);
+
+                        // Raw stack dump: the module-pointer-shaped scan below only catches return
+                        // addresses that happen to look like one, and one such match already proved to
+                        // be stale/unrelated data (its call site's predicted register values didn't
+                        // match this fault). Dump the bytes themselves so the real caller's home-space
+                        // spills (rax/rcx/rdx as originally passed in, before the callee's own locals
+                        // overwrite them) can be found by direct inspection instead of a pattern match.
+                        constexpr uint64_t k_stack_dump_size = 0x400;
+                        std::array<uint8_t, k_stack_dump_size> stack_bytes{};
+                        if (acting.try_read_memory(rsp_val, stack_bytes.data(), stack_bytes.size()))
+                        {
+                            fprintf(stderr,
+                                    "[NULLDIAG3] raw stack at rsp=0x%llx (0x%llx bytes): ", static_cast<unsigned long long>(rsp_val),
+                                    static_cast<unsigned long long>(k_stack_dump_size));
+                            for (const auto b : stack_bytes)
+                            {
+                                fprintf(stderr, "%02x ", b);
+                            }
+                            fprintf(stderr, "\n");
+                        }
+
                         for (uint64_t off = 0; off < 0x100; off += 8)
                         {
                             uint64_t candidate = 0;
