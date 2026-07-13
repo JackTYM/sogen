@@ -1513,6 +1513,27 @@ namespace sogen
                                 fprintf(stderr, "[NULLDIAG3] stack64[rsp+0x%llx]=0x%llx -> %s+0x%llx\n",
                                         static_cast<unsigned long long>(off), static_cast<unsigned long long>(candidate), mod->name.c_str(),
                                         static_cast<unsigned long long>(candidate - mod->image_base));
+
+                                // Found a likely caller return address inside a known module - pull the
+                                // code around it too, so the exact instruction that computed the bad
+                                // destination pointer passed into this memcpy-style routine can be
+                                // disassembled directly rather than inferred.
+                                constexpr uint64_t k_call_lead_in = 0x60;
+                                constexpr uint64_t k_call_trail = 0x10;
+                                std::array<uint8_t, k_call_lead_in + k_call_trail> call_window{};
+                                const auto call_window_start = candidate - k_call_lead_in;
+                                if (acting.try_read_memory(call_window_start, call_window.data(), call_window.size()))
+                                {
+                                    fprintf(stderr, "[NULLDIAG3] caller code window at 0x%llx (%s+0x%llx-0x%llx..+0x%llx): ",
+                                            static_cast<unsigned long long>(call_window_start), mod->name.c_str(),
+                                            static_cast<unsigned long long>(candidate - mod->image_base),
+                                            static_cast<unsigned long long>(k_call_lead_in), static_cast<unsigned long long>(k_call_trail));
+                                    for (const auto b : call_window)
+                                    {
+                                        fprintf(stderr, "%02x ", b);
+                                    }
+                                    fprintf(stderr, "\n");
+                                }
                             }
                         }
                     }
