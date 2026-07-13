@@ -1511,8 +1511,8 @@ namespace sogen
                             if (mod)
                             {
                                 fprintf(stderr, "[NULLDIAG3] stack64[rsp+0x%llx]=0x%llx -> %s+0x%llx\n",
-                                        static_cast<unsigned long long>(off), static_cast<unsigned long long>(candidate),
-                                        mod->name.c_str(), static_cast<unsigned long long>(candidate - mod->image_base));
+                                        static_cast<unsigned long long>(off), static_cast<unsigned long long>(candidate), mod->name.c_str(),
+                                        static_cast<unsigned long long>(candidate - mod->image_base));
                             }
                         }
                     }
