@@ -3432,6 +3432,10 @@ namespace sogen::fex
         // the generic dispatcher, using the already-proven-correct logic verbatim.
         bool enter_bitness_switch_from_far_jmp(const gate_crossing& gate)
         {
+            const auto& state64 = this->thread_->CurrentFrame->State;
+            fprintf(stderr, "[GATEDIAG5] far_jmp_bitness_switch: thread_ rsp=0x%llx gs_cached=0x%llx\n",
+                    static_cast<unsigned long long>(state64.gregs[detail::greg_rsp]), static_cast<unsigned long long>(state64.gs_cached));
+            fflush(stderr);
             return this->enter_wow64_64bit_from_wow64svc_thunk(gate);
         }
 
