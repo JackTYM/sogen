@@ -1070,19 +1070,28 @@ namespace sogen
 
     void windows_emulator::setup_hooks()
     {
-        // CALLTRACE-DIAG: a lightweight ring buffer of recently-executed basic-block addresses,
-        // shared across backends (FEX and Unicorn both fire hook_basic_block), so the real call
+        // CALLTRACE-DIAG: a lightweight ring buffer of recently-executed addresses, so the real call
         // chain into a fault can be read back directly instead of inferred from a stack-scanning
         // heuristic - which already proved unreliable for the KiUserExceptionDispatcher wild-write
         // investigation (a stack-resident "return address" turned out to belong to an unrelated,
-        // already-returned function).
+        // already-returned function). Unicorn fires hook_basic_block (confirmed: a full 1024-entry
+        // trace was captured under it), but FEX does not (confirmed: zero entries recorded) - FEX
+        // apparently only drives its own time-slicing via per-instruction execution hooks (see the
+        // existing uses_instruction_precision() branch below), so register hook_memory_execution too,
+        // sharing the same ring buffer, to get equivalent coverage under FEX.
         static std::mutex call_trace_mutex{};
-        static std::array<uint64_t, 1024> call_trace_ring{};
+        static std::array<uint64_t, 4096> call_trace_ring{};
         static size_t call_trace_index{0};
 
         this->emu().hook_basic_block([](cpu_interface&, const basic_block& block) {
             const std::scoped_lock call_trace_lock(call_trace_mutex);
             call_trace_ring[call_trace_index % call_trace_ring.size()] = block.address;
+            ++call_trace_index;
+        });
+
+        this->emu().hook_memory_execution([](cpu_interface&, const uint64_t address) {
+            const std::scoped_lock call_trace_lock(call_trace_mutex);
+            call_trace_ring[call_trace_index % call_trace_ring.size()] = address;
             ++call_trace_index;
         });
 
