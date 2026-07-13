@@ -821,7 +821,9 @@ namespace sogen
                 {
                     if (t.teb32.has_value())
                     {
-                        t.teb32->access([&](TEB32& teb32_obj) { teb32_obj.WOW32Reserved = image_base + w64svc_turbo_bop_rva; });
+                        t.teb32->access([&](TEB32& teb32_obj) {
+                            teb32_obj.WOW32Reserved = static_cast<std::uint32_t>(image_base + w64svc_turbo_bop_rva);
+                        });
                     }
                 }
 
