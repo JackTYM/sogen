@@ -10,6 +10,7 @@
 
 #if defined(__clang__) || defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#pragma GCC diagnostic ignored "-Wunused-template"
 #endif
 
 namespace sogen
