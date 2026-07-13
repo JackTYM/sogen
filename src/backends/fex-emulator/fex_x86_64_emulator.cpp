@@ -3427,9 +3427,16 @@ namespace sogen::fex
         // through unchanged.
         bool enter_bitness_switch_from_far_jmp(const gate_crossing& gate)
         {
+            const auto* engine_before =
+                this->active_thread_ == this->thread32_ ? "32bit" : (this->active_thread_ == this->thread_ ? "64bit" : "unknown");
+
             std::array<uint8_t, 7> insn{};
-            if (!this->try_read_memory(gate.address, insn.data(), insn.size()) || insn[0] != 0xEA)
+            const bool read_ok = this->try_read_memory(gate.address, insn.data(), insn.size());
+            if (!read_ok || insn[0] != 0xEA)
             {
+                fprintf(stderr, "[GATEDIAG3] far_jmp_bitness_switch MISS: gate.address=0x%llx engine=%s read_ok=%d insn[0]=0x%x\n",
+                        static_cast<unsigned long long>(gate.address), engine_before, read_ok ? 1 : 0, insn[0]);
+                fflush(stderr);
                 return false;
             }
 
@@ -3438,8 +3445,8 @@ namespace sogen::fex
             uint16_t target_cs = 0;
             std::memcpy(&target_cs, &insn[5], sizeof(target_cs));
 
-            fprintf(stderr, "[GATEDIAG3] far_jmp_bitness_switch fired: gate.address=0x%llx target_offset=0x%x target_cs=0x%x\n",
-                    static_cast<unsigned long long>(gate.address), target_offset, target_cs);
+            fprintf(stderr, "[GATEDIAG3] far_jmp_bitness_switch fired: gate.address=0x%llx engine=%s target_offset=0x%x target_cs=0x%x\n",
+                    static_cast<unsigned long long>(gate.address), engine_before, target_offset, target_cs);
             fflush(stderr);
 
             const auto& src = this->active_thread_->CurrentFrame->State;

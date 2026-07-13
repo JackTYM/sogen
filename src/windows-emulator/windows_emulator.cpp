@@ -1322,13 +1322,35 @@ namespace sogen
                                     uint32_t cache_value = 0;
                                     if (acting.try_read_memory(cache_address, &cache_value, sizeof(cache_value)))
                                     {
-                                        fprintf(stderr, "[NULLDIAG] Wow64Transition cache (0x%x) value: 0x%x\n", cache_address,
+                                        fprintf(stderr, "[NULLDIAG] Wow64Transition cache (0x%x) value via acting: 0x%x\n", cache_address,
                                                 cache_value);
                                     }
                                     else
                                     {
-                                        fprintf(stderr, "[NULLDIAG] Wow64Transition cache (0x%x) is unreadable/unmapped\n", cache_address);
+                                        fprintf(stderr, "[NULLDIAG] Wow64Transition cache (0x%x) is unreadable/unmapped via acting\n",
+                                                cache_address);
                                     }
+
+                                    // Compare against the memory_manager's own view (used by
+                                    // module_manager's scan+write) - if these disagree, the CPU
+                                    // interface and memory_manager see different backing memory for
+                                    // this address, which would explain a write that never reaches
+                                    // what the guest actually executes against.
+                                    uint32_t cache_value_via_memory = 0;
+                                    if (this->memory.try_read_memory(cache_address, &cache_value_via_memory,
+                                                                     sizeof(cache_value_via_memory)))
+                                    {
+                                        fprintf(stderr, "[NULLDIAG] Wow64Transition cache (0x%x) value via memory_manager: 0x%x\n",
+                                                cache_address, cache_value_via_memory);
+                                    }
+                                    else
+                                    {
+                                        fprintf(stderr,
+                                                "[NULLDIAG] Wow64Transition cache (0x%x) is unreadable/unmapped via memory_manager\n",
+                                                cache_address);
+                                    }
+
+                                    fprintf(stderr, "[NULLDIAG] cs=0x%x active engine cs check\n", acting.reg<uint16_t>(x86_register::cs));
                                 }
                             }
                             else
