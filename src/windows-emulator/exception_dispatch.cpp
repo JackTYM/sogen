@@ -285,10 +285,14 @@ namespace sogen
                       ? thread.current_ip
                       : vcpu.cpu.read_instruction_pointer();
 
-        fprintf(stderr, "[EXCDIAG5] status=0x%x ctx.Rsp=0x%llx ctx.Rbp=0x%llx ctx.SegCs=0x%llx ctx.SegSs=0x%llx cs_reg=0x%x rip=0x%llx\n",
+        fprintf(stderr,
+                "[EXCDIAG5] status=0x%x ctx.Rsp=0x%llx ctx.Rbp=0x%llx ctx.SegCs=0x%llx ctx.SegSs=0x%llx cs_reg=0x%x rip=0x%llx "
+                "ctx.R12=0x%llx ctx.R13=0x%llx ctx.R14=0x%llx ctx.R15=0x%llx\n",
                 static_cast<unsigned int>(status), static_cast<unsigned long long>(ctx.Rsp), static_cast<unsigned long long>(ctx.Rbp),
                 static_cast<unsigned long long>(ctx.SegCs), static_cast<unsigned long long>(ctx.SegSs),
-                vcpu.cpu.reg<uint16_t>(x86_register::cs), static_cast<unsigned long long>(ctx.Rip));
+                vcpu.cpu.reg<uint16_t>(x86_register::cs), static_cast<unsigned long long>(ctx.Rip),
+                static_cast<unsigned long long>(ctx.R12), static_cast<unsigned long long>(ctx.R13),
+                static_cast<unsigned long long>(ctx.R14), static_cast<unsigned long long>(ctx.R15));
         fflush(stderr);
 
         // FEXCore's JIT translation of INT3 reports RIP already advanced past the trapping 0xCC
