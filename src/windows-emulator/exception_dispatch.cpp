@@ -128,6 +128,15 @@ namespace sogen
             const auto total_size = initial_sp - new_sp;
             assert(total_size >= allocation_size);
 
+            fprintf(stderr,
+                    "[EXCDIAG4] is_bit32=%d native_stack_top=0x%llx initial_sp=0x%llx allocation_size=0x%llx new_sp=0x%llx "
+                    "dispatcher=0x%llx heaven_gate_code_base=0x%llx heaven_gate_stack_top=0x%llx\n",
+                    is_bit32 ? 1 : 0, static_cast<unsigned long long>(native_stack_top), static_cast<unsigned long long>(initial_sp),
+                    static_cast<unsigned long long>(allocation_size), static_cast<unsigned long long>(new_sp),
+                    static_cast<unsigned long long>(dispatcher), static_cast<unsigned long long>(heaven_gate_code_base),
+                    static_cast<unsigned long long>(heaven_gate_stack_top));
+            fflush(stderr);
+
             std::vector<uint8_t> zero_memory{};
             zero_memory.resize(static_cast<size_t>(total_size), 0);
 
