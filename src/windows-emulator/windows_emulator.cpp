@@ -1293,23 +1293,48 @@ namespace sogen
                             fprintf(stderr, "\n");
                         }
 
-                        // The decoded stub (mov eax,imm32; mov edx,imm32; call edx) bakes a fixed
-                        // address into edx - dump what's actually there to see whether it's real
-                        // code, still-zero/uncommitted memory, or something in between.
-                        constexpr uint32_t baked_wow64_transition = 0x4b335190;
-                        std::array<uint8_t, 16> transition_bytes{};
-                        if (acting.try_read_memory(baked_wow64_transition, transition_bytes.data(), transition_bytes.size()))
+                        // The decoded stub (mov eax,imm32; mov edx,<thunk>; call edx) bakes the
+                        // thunk's address into edx (call_bytes[6..9]); the thunk itself is
+                        // `jmp dword ptr [<cache_address>]` (call_bytes[10]==0xFF,[11]==0x25 is
+                        // just the opcode, the disp32 operand lives at thunk+2..5) - decode both
+                        // hops live rather than assuming a fixed address, since that's exactly
+                        // what's under test here (whether the cache scan wrote the right place).
+                        if (call_bytes.size() >= 12)
                         {
-                            fprintf(stderr, "[NULLDIAG] bytes at baked Wow64Transition (0x%x): ", baked_wow64_transition);
-                            for (const auto b : transition_bytes)
+                            uint32_t thunk_address = 0;
+                            std::memcpy(&thunk_address, &call_bytes[6], sizeof(thunk_address));
+
+                            std::array<uint8_t, 6> thunk_bytes{};
+                            if (acting.try_read_memory(thunk_address, thunk_bytes.data(), thunk_bytes.size()))
                             {
-                                fprintf(stderr, "%02x ", b);
+                                fprintf(stderr, "[NULLDIAG] thunk (0x%x) bytes: ", thunk_address);
+                                for (const auto b : thunk_bytes)
+                                {
+                                    fprintf(stderr, "%02x ", b);
+                                }
+                                fprintf(stderr, "\n");
+
+                                if (thunk_bytes[0] == 0xFF && thunk_bytes[1] == 0x25)
+                                {
+                                    uint32_t cache_address = 0;
+                                    std::memcpy(&cache_address, &thunk_bytes[2], sizeof(cache_address));
+
+                                    uint32_t cache_value = 0;
+                                    if (acting.try_read_memory(cache_address, &cache_value, sizeof(cache_value)))
+                                    {
+                                        fprintf(stderr, "[NULLDIAG] Wow64Transition cache (0x%x) value: 0x%x\n", cache_address,
+                                                cache_value);
+                                    }
+                                    else
+                                    {
+                                        fprintf(stderr, "[NULLDIAG] Wow64Transition cache (0x%x) is unreadable/unmapped\n", cache_address);
+                                    }
+                                }
                             }
-                            fprintf(stderr, "\n");
-                        }
-                        else
-                        {
-                            fprintf(stderr, "[NULLDIAG] baked Wow64Transition (0x%x) is unreadable/unmapped\n", baked_wow64_transition);
+                            else
+                            {
+                                fprintf(stderr, "[NULLDIAG] thunk (0x%x) is unreadable/unmapped\n", thunk_address);
+                            }
                         }
                         fflush(stderr);
                     }

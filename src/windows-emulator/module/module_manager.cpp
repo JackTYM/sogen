@@ -883,6 +883,14 @@ namespace sogen
                     cache_address.has_value())
                 {
                     this->memory_->write_memory(*cache_address, &turbo_bop_address, sizeof(turbo_bop_address));
+                    fprintf(stderr, "[MMDIAG] wrote Wow64Transition cache at 0x%llx = 0x%x\n",
+                            static_cast<unsigned long long>(*cache_address), turbo_bop_address);
+                    fflush(stderr);
+                }
+                else
+                {
+                    fprintf(stderr, "[MMDIAG] scan_wow64_transition_cache_address found nothing in ntdll32\n");
+                    fflush(stderr);
                 }
 
                 for (auto& t : context.threads | std::views::values)
