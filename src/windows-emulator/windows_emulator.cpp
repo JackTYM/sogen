@@ -1393,6 +1393,20 @@ namespace sogen
                     fflush(stderr);
                 }
 
+                if (address >= 0x1000)
+                {
+                    fprintf(stderr,
+                            "[NULLDIAG3] non-null violation: address=0x%llx size=0x%zx op=%d type=%d cs=0x%x eip=0x%x "
+                            "fs_base=0x%llx gs_base=0x%llx eax=0x%x ecx=0x%x edx=0x%x\n",
+                            static_cast<unsigned long long>(address), size, static_cast<int>(operation), static_cast<int>(type),
+                            acting.reg<uint16_t>(x86_register::cs), acting.reg<uint32_t>(x86_register::eip),
+                            static_cast<unsigned long long>(acting.get_segment_base(x86_register::fs)),
+                            static_cast<unsigned long long>(acting.get_segment_base(x86_register::gs)),
+                            acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::ecx),
+                            acting.reg<uint32_t>(x86_register::edx));
+                    fflush(stderr);
+                }
+
                 this->callbacks.on_memory_violate(address, size, operation, type);
                 dispatch_access_violation(*this, vcpu, address, operation);
             }
