@@ -3438,6 +3438,10 @@ namespace sogen::fex
             uint16_t target_cs = 0;
             std::memcpy(&target_cs, &insn[5], sizeof(target_cs));
 
+            fprintf(stderr, "[GATEDIAG3] far_jmp_bitness_switch fired: gate.address=0x%llx target_offset=0x%x target_cs=0x%x\n",
+                    static_cast<unsigned long long>(gate.address), target_offset, target_cs);
+            fflush(stderr);
+
             const auto& src = this->active_thread_->CurrentFrame->State;
             return this->perform_bitness_switch(target_offset, src.gregs[detail::greg_rsp], target_cs);
         }

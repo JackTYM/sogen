@@ -885,6 +885,17 @@ namespace sogen
                     this->memory_->write_memory(*cache_address, &turbo_bop_address, sizeof(turbo_bop_address));
                     fprintf(stderr, "[MMDIAG] wrote Wow64Transition cache at 0x%llx = 0x%x\n",
                             static_cast<unsigned long long>(*cache_address), turbo_bop_address);
+
+                    std::uint32_t readback = 0;
+                    if (this->memory_->try_read_memory(*cache_address, &readback, sizeof(readback)))
+                    {
+                        fprintf(stderr, "[MMDIAG] immediate readback at 0x%llx = 0x%x\n", static_cast<unsigned long long>(*cache_address),
+                                readback);
+                    }
+                    else
+                    {
+                        fprintf(stderr, "[MMDIAG] immediate readback at 0x%llx failed\n", static_cast<unsigned long long>(*cache_address));
+                    }
                     fflush(stderr);
                 }
                 else
