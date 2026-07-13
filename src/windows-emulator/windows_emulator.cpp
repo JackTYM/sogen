@@ -1478,6 +1478,34 @@ namespace sogen
                                     static_cast<unsigned long long>(rip_mod->image_base));
                         }
 
+                        // rax+rdx recovers the memcpy's original source pointer (rax holds the
+                        // preserved dest throughout, rdx has been reduced to src-dest by the time of
+                        // the fault) - confirmed to land at a sane address right next to rsp on the
+                        // prior round. That address is the CONTEXT record itself; dump it raw so every
+                        // field can be checked against the real CONTEXT64 layout (winnt.h) directly,
+                        // since the call-site trace via the stack-scanned return address produced
+                        // numbers inconsistent with that call actually being the one that faulted here
+                        // (rdx there should have been src-dest=-0x4f0, not the observed 0x91902510).
+                        const auto rax_val = acting.reg<uint64_t>(x86_register::rax);
+                        const auto rdx_val = acting.reg<uint64_t>(x86_register::rdx);
+                        const auto recovered_src = rax_val + rdx_val;
+                        std::array<uint8_t, 0x4d0> ctx_bytes{};
+                        if (acting.try_read_memory(recovered_src, ctx_bytes.data(), ctx_bytes.size()))
+                        {
+                            fprintf(stderr, "[NULLDIAG3] recovered CONTEXT bytes at 0x%llx (rax+rdx): ",
+                                    static_cast<unsigned long long>(recovered_src));
+                            for (const auto b : ctx_bytes)
+                            {
+                                fprintf(stderr, "%02x ", b);
+                            }
+                            fprintf(stderr, "\n");
+                        }
+                        else
+                        {
+                            fprintf(stderr, "[NULLDIAG3] recovered CONTEXT address 0x%llx is unreadable/unmapped\n",
+                                    static_cast<unsigned long long>(recovered_src));
+                        }
+
                         constexpr uint64_t k_lead_in = 0x160;
                         constexpr uint64_t k_trail = 0x20;
                         std::array<uint8_t, k_lead_in + k_trail> code_window{};
