@@ -48,12 +48,25 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            NTSTATUS handle_trace_control_passthrough(const uint64_t output_buffer, const ULONG output_buffer_length,
-                                                      const emulator_object<ULONG> return_length)
+            NTSTATUS handle_trace_control_passthrough(const syscall_context& c, const uint64_t output_buffer,
+                                                      const ULONG output_buffer_length, const emulator_object<ULONG> return_length)
             {
                 if (output_buffer_length != 0 && output_buffer == 0)
                 {
                     return STATUS_INVALID_PARAMETER;
+                }
+
+                // Real Windows populates output_buffer with a genuine registration structure (e.g.
+                // register_guids' TRACE_GUID_REGISTRATION array or set_provider_traits' output) that
+                // callers then read as authoritative - trusting the STATUS_SUCCESS below. Leaving it
+                // untouched hands back whatever garbage was already there, which real wow64/ntdll code
+                // can misinterpret as real counts/offsets and crash on (confirmed: a subsequent binary-
+                // search-style lookup computed a wild address from exactly this kind of leftover value).
+                // Zero-filling is the safe default - every real registration structure here treats an
+                // all-zero result as "nothing registered" rather than a valid entry.
+                if (output_buffer_length != 0)
+                {
+                    c.emu.set_memory(output_buffer, 0, output_buffer_length);
                 }
 
                 if (return_length)
@@ -77,7 +90,7 @@ namespace sogen
                 return handle_trace_control_add_notification_event(c, input_buffer, input_buffer_length, return_length);
             case k_trace_control_register_guids:
             case k_trace_control_set_provider_traits:
-                return handle_trace_control_passthrough(output_buffer, output_buffer_length, return_length);
+                return handle_trace_control_passthrough(c, output_buffer, output_buffer_length, return_length);
             default:
                 return STATUS_NOT_SUPPORTED;
             }
