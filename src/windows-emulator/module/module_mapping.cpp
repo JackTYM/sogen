@@ -10,6 +10,9 @@
 
 #if defined(__clang__) || defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+
+#if defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-template"
 #endif
 
