@@ -3418,39 +3418,21 @@ namespace sogen::fex
             return true;
         }
 
-        // Decodes wow64cpu.dll's standalone `jmp far 0x33:<target>` CPU-mode probe (opcode 0xEA,
-        // followed by a 4-byte absolute target offset and a 2-byte target CS selector, both little-
-        // endian - see gate_crossing_kind::far_jmp_bitness_switch's doc comment). The offset is encoded
-        // as a real linear address (fixed up by the loader's relocation table when wow64cpu.dll loads
-        // away from its preferred base), not an RVA, so it's used directly with no image_base add.
-        // Unlike the heaven's gate, a plain far jmp never touches RSP, so the current one carries
-        // through unchanged.
-        // This gate is wow64cpu.dll's one-time "can the CPU actually switch into 64-bit mode"
-        // hardware sanity check (see gate_crossing_kind::far_jmp_bitness_switch's doc comment) -
-        // not a real WoW64 syscall transition with a meaningful continuation. A real crossing
-        // (via perform_bitness_switch) lands 64-bit execution on `jmp qword ptr [r15+0xf8]`,
-        // wow64cpu!TurboThunkDispatch's own jump table (image_base + 0x36d0) - but that table's
-        // contents are never populated by anything sogen executes (confirmed empirically: the
-        // slot reads 0 on every run), so the landing always faults with a null target. Nothing
-        // else in this backend's already-working wow64 syscall dispatch (enter_wow64_64bit_from_
-        // wow64svc_thunk) ever reads that table's contents either - it only sets the r15 pointer
-        // itself and jumps straight to the generic dispatcher - so the table's population was
-        // never actually load-bearing for anything sogen implements. Since this backend always
-        // runs on genuinely 64-bit-capable hardware, the probe's real-world answer is trivially
-        // "yes" regardless - so just prove the instruction decodes as expected (confirming this
-        // really is the probe) and resume the SAME (source) engine past it, without ever
-        // switching engines at all. This sidesteps the unpopulated-table fault entirely instead
-        // of trying to reproduce wow64cpu.dll's internal continuation logic exactly.
+        // gate.address here is a `jmp far 0x33:<target>` (opcode 0xEA - see gate_crossing_kind::
+        // far_jmp_bitness_switch's doc comment). It was originally taken for a standalone, one-time
+        // "can the CPU switch to 64-bit mode" hardware check, unrelated to the real syscall
+        // dispatch path - but live traces prove otherwise: it's reached via the EXACT SAME route as
+        // wow64cpu_dispatch's WOW64SVC thunk (the 32-bit syscall stub's `call fs:[0xC0]` /
+        // Wow64Transition indirection lands here directly, with eax/edx already holding the
+        // syscall number and the stub's own return address still on the stack, un-pushed-to by
+        // anything in between). This IS wow64cpu.dll's real Wow64Transition entry point for this
+        // build - a `jmp far` into 64-bit mode is simply how it happens to be implemented here,
+        // rather than the turbo-bop mechanism wow64cpu_dispatch's gates model. Treat it exactly
+        // like reaching the WOW64SVC thunk: reverse-marshal the 32-bit register file and resume at
+        // the generic dispatcher, using the already-proven-correct logic verbatim.
         bool enter_bitness_switch_from_far_jmp(const gate_crossing& gate)
         {
-            std::array<uint8_t, 7> insn{};
-            if (!this->try_read_memory(gate.address, insn.data(), insn.size()) || insn[0] != 0xEA)
-            {
-                return false;
-            }
-
-            this->active_thread_->CurrentFrame->State.rip = gate.address + insn.size();
-            return true;
+            return this->enter_wow64_64bit_from_wow64svc_thunk(gate);
         }
 
         bool perform_gate_crossing(const gate_crossing& gate)

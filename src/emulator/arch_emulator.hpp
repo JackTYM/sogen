@@ -108,14 +108,17 @@ namespace sogen
             // file into its 32-bit Context - see perform_gate_crossing. Appended last for vtable-ABI
             // safety (this enum is only passed by value, but keep additions at the end regardless).
             wow64_run_simulated_code,
-            // A standalone compatibility-mode-to-long-mode probe wow64cpu.dll's own BTCpuProcessInit
-            // writes into a dedicated, freshly-r-x'd page (observed at a fixed RVA past the turbo-bop
-            // table): a bare `jmp far 0x33:<same page + a few bytes>` (opcode 0xEA - only valid in
-            // 16/32-bit mode, undefined in 64-bit long mode, so FEXCore's fixed-bitness JIT can't
-            // execute it any more than the other two real transitions above). Unlike those two, this
-            // one isn't driven by any register convention at all - the target offset/selector are
-            // encoded directly as the instruction's immediate operand, and it doesn't touch RSP (a
-            // real far jmp, not a call/ret or iretq). See perform_gate_crossing's decode of it.
+            // wow64cpu.dll's own BTCpuProcessInit writes this into a dedicated, freshly-r-x'd page
+            // (observed at a fixed RVA past the turbo-bop table): a bare `jmp far 0x33:<same page +
+            // a few bytes>` (opcode 0xEA - only valid in 16/32-bit mode, undefined in 64-bit long
+            // mode, so FEXCore's fixed-bitness JIT can't execute it any more than the other two real
+            // transitions above). This is the real Wow64Transition entry point for this ntdll32/
+            // wow64cpu.dll build combination - the 32-bit syscall stub's `call fs:[0xC0]` lands
+            // directly here, with the syscall number/args already live and its own return address
+            // still on the stack - so despite the different encoding (immediate target offset/
+            // selector rather than any register convention, and no RSP touch, unlike a call/ret or
+            // iretq), reaching it is handled identically to wow64cpu_dispatch's WOW64SVC thunk. See
+            // perform_gate_crossing's decode of it.
             far_jmp_bitness_switch,
         };
 
