@@ -3294,6 +3294,31 @@ namespace sogen::fex
 
             this->active_context_ = this->context_.get();
             this->active_thread_ = this->thread_;
+
+            std::array<uint8_t, 16> dispatch_bytes{};
+            const bool dispatch_ok = this->try_read_memory(generic_dispatch, dispatch_bytes.data(), dispatch_bytes.size());
+            fprintf(stderr,
+                    "[GATEDIAG6] enter_wow64_64bit_from_wow64svc_thunk: gate.address=0x%llx image_base=0x%llx "
+                    "generic_dispatch=0x%llx teb64=0x%llx cpu_area=0x%llx block=0x%llx eax=0x%x\n",
+                    static_cast<unsigned long long>(gate.address), static_cast<unsigned long long>(image_base),
+                    static_cast<unsigned long long>(generic_dispatch), static_cast<unsigned long long>(teb64),
+                    static_cast<unsigned long long>(cpu_area), static_cast<unsigned long long>(block), eax);
+            if (dispatch_ok)
+            {
+                fprintf(stderr, "[GATEDIAG6] bytes at generic_dispatch: ");
+                for (const auto b : dispatch_bytes)
+                {
+                    fprintf(stderr, "%02x ", b);
+                }
+                fprintf(stderr, "\n");
+            }
+            else
+            {
+                fprintf(stderr, "[GATEDIAG6] generic_dispatch (0x%llx) is unreadable/unmapped\n",
+                        static_cast<unsigned long long>(generic_dispatch));
+            }
+            fflush(stderr);
+
             return true;
         }
 
