@@ -285,6 +285,12 @@ namespace sogen
                       ? thread.current_ip
                       : vcpu.cpu.read_instruction_pointer();
 
+        fprintf(stderr, "[EXCDIAG5] status=0x%x ctx.Rsp=0x%llx ctx.Rbp=0x%llx ctx.SegCs=0x%llx ctx.SegSs=0x%llx cs_reg=0x%x rip=0x%llx\n",
+                static_cast<unsigned int>(status), static_cast<unsigned long long>(ctx.Rsp), static_cast<unsigned long long>(ctx.Rbp),
+                static_cast<unsigned long long>(ctx.SegCs), static_cast<unsigned long long>(ctx.SegSs),
+                vcpu.cpu.reg<uint16_t>(x86_register::cs), static_cast<unsigned long long>(ctx.Rip));
+        fflush(stderr);
+
         // FEXCore's JIT translation of INT3 reports RIP already advanced past the trapping 0xCC
         // (see reports_breakpoint_rip_past_instruction's doc comment) - real hardware/NT
         // (KiBreakpointTrap) always reports #BP at the INT3 itself, which is what guest SEH/VEH
