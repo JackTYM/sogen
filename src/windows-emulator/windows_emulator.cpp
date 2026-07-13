@@ -1,6 +1,9 @@
 #include "std_include.hpp"
 #include "windows_emulator.hpp"
 
+#include <algorithm>
+#include <vector>
+
 #include "cpu_context.hpp"
 
 #include <utils/io.hpp>
@@ -1523,6 +1526,43 @@ namespace sogen
                                 else
                                 {
                                     fprintf(stderr, "[NULLDIAG3]   [%zu] 0x%llx\n", i, static_cast<unsigned long long>(block_addr));
+                                }
+                            }
+
+                            // The trace revealed the real chain: an "optional fast path" function
+                            // pointer at ntdll+0x166910 actually points INTO wow64.dll (this is WoW64's
+                            // own context-translation callback, not a memcpy dispatch), and the
+                            // faulting routine's TRUE entry is ntdll+0x168000 - 0x80 bytes before the
+                            // address previously (wrongly) assumed to be its entry, so its real
+                            // prologue (establishing rax) was never actually captured. Dump code
+                            // windows around the last 20 distinct blocks so the wow64.dll logic and the
+                            // real ntdll+0x168000 prologue can be disassembled directly.
+                            std::vector<uint64_t> seen_addresses{};
+                            for (size_t i = count > 20 ? count - 20 : 0; i < count; ++i)
+                            {
+                                const auto entry_index = (start_index + i) % call_trace_ring.size();
+                                const auto block_addr = call_trace_ring[entry_index];
+                                if (std::find(seen_addresses.begin(), seen_addresses.end(), block_addr) != seen_addresses.end())
+                                {
+                                    continue;
+                                }
+                                seen_addresses.push_back(block_addr);
+
+                                constexpr uint64_t k_block_lead_in = 0x10;
+                                constexpr uint64_t k_block_trail = 0x30;
+                                std::array<uint8_t, k_block_lead_in + k_block_trail> block_window{};
+                                const auto block_window_start = block_addr - k_block_lead_in;
+                                if (acting.try_read_memory(block_window_start, block_window.data(), block_window.size()))
+                                {
+                                    fprintf(stderr, "[NULLDIAG3] block code window at 0x%llx (0x%llx-0x%llx..+0x%llx): ",
+                                            static_cast<unsigned long long>(block_window_start),
+                                            static_cast<unsigned long long>(block_addr), static_cast<unsigned long long>(k_block_lead_in),
+                                            static_cast<unsigned long long>(k_block_trail));
+                                    for (const auto b : block_window)
+                                    {
+                                        fprintf(stderr, "%02x ", b);
+                                    }
+                                    fprintf(stderr, "\n");
                                 }
                             }
                         }
