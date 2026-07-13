@@ -457,31 +457,6 @@ namespace sogen
         init_block.MitigationAuditOptionsMap.Map[1] = 0;
         init_block.MitigationAuditOptionsMap.Map[2] = 0;
 
-        fprintf(
-            stderr,
-            "[INITBLOCKDIAG] LdrInitializeThunk=0x%llx KiUserExceptionDispatcher=0x%llx KiUserApcDispatcher=0x%llx "
-            "KiUserCallbackDispatcher=0x%llx RtlUserThreadStart=0x%llx RtlpQueryProcessDebugInformationRemote=0x%llx "
-            "BaseAddress=0x%llx LdrSystemDllInitBlock32=0x%llx RtlpFreezeTimeBias=0x%llx\n",
-            static_cast<unsigned long long>(
-                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32LdrInitializeThunk)]),
-            static_cast<unsigned long long>(init_block.Wow64SharedInformation[static_cast<uint64_t>(
-                WOW64_SHARED_INFORMATION_V5::SharedNtdll32KiUserExceptionDispatcher)]),
-            static_cast<unsigned long long>(
-                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32KiUserApcDispatcher)]),
-            static_cast<unsigned long long>(init_block.Wow64SharedInformation[static_cast<uint64_t>(
-                WOW64_SHARED_INFORMATION_V5::SharedNtdll32KiUserCallbackDispatcher)]),
-            static_cast<unsigned long long>(
-                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32RtlUserThreadStart)]),
-            static_cast<unsigned long long>(init_block.Wow64SharedInformation[static_cast<uint64_t>(
-                WOW64_SHARED_INFORMATION_V5::SharedNtdll32pQueryProcessDebugInformationRemote)]),
-            static_cast<unsigned long long>(
-                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32BaseAddress)]),
-            static_cast<unsigned long long>(
-                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32LdrSystemDllInitBlock)]),
-            static_cast<unsigned long long>(
-                init_block.Wow64SharedInformation[static_cast<uint64_t>(WOW64_SHARED_INFORMATION_V5::SharedNtdll32RtlpFreezeTimeBias)]));
-        fflush(stderr);
-
         // Find LdrSystemDllInitBlock export address in 64-bit ntdll and write the structure
         const auto ldr_init_block_addr = this->ntdll->find_export("LdrSystemDllInitBlock");
         if (ldr_init_block_addr == 0)
@@ -772,7 +747,7 @@ namespace sogen
             // 32<->64 mode switch there instead of mis-compiling that 64-bit dispatch code. A no-op on
             // native-execution backends (register_gate_crossing's default). See fex_x86_64_emulator's
             // perform_gate_crossing for the (not-yet-decodable) wow64cpu_dispatch convention.
-            this->callbacks_->on_module_load.add([emu_ptr = &emu](mapped_module& mod) {
+            this->callbacks_->on_module_load.add([emu_ptr = &emu, &context](mapped_module& mod) {
                 if (mod.name != "wow64cpu.dll")
                 {
                     return;
@@ -828,6 +803,27 @@ namespace sogen
                 constexpr uint64_t w64svc_turbo_bop_size = 0x10;
                 emu_ptr->register_gate_crossing(image_base + w64svc_turbo_bop_rva, w64svc_turbo_bop_size,
                                                 x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
+
+                // Real wow64.dll process init writes this same address into TEB32.WOW32Reserved (the
+                // Wow64Transition field at fs:[0xC0], undocumented name but a well-established
+                // reverse-engineered fact) - every 32-bit syscall stub's shared trampoline does
+                // `jmp dword ptr [<ntdll32's cached copy of fs:[0xC0]>]` to reach it. sogen never runs
+                // whatever real guest code would normally populate fs:[0xC0] (this backend synthesizes
+                // the gate crossings above instead of executing wow64cpu.dll's real dispatch code), so
+                // the field - and ntdll32's own cached copy of it, which every stub actually reads -
+                // stays null, and the very first syscall after wow64cpu.dll finishes loading jumps to
+                // 0. Write it directly here, the same way LdrSystemDllInitBlock below is written
+                // directly rather than left for guest code to populate. Every existing thread's TEB32
+                // needs it, not just the one that triggered this module load - wow64cpu.dll (and this
+                // callback) only ever loads once per process, but by the time it does, worker-factory
+                // threads may already exist with their own not-yet-populated TEB32.
+                for (auto& t : context.threads | std::views::values)
+                {
+                    if (t.teb32.has_value())
+                    {
+                        t.teb32->access([&](TEB32& teb32_obj) { teb32_obj.WOW32Reserved = image_base + w64svc_turbo_bop_rva; });
+                    }
+                }
 
                 // BTCpuProcessInit also writes a standalone compatibility-mode-to-long-mode probe into
                 // its own freshly-r-x'd page: a bare `jmp far 0x33:<target>` (opcode 0xEA), which real
