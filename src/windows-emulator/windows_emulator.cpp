@@ -1067,6 +1067,22 @@ namespace sogen
 
     void windows_emulator::setup_hooks()
     {
+        // CALLTRACE-DIAG: a lightweight ring buffer of recently-executed basic-block addresses,
+        // shared across backends (FEX and Unicorn both fire hook_basic_block), so the real call
+        // chain into a fault can be read back directly instead of inferred from a stack-scanning
+        // heuristic - which already proved unreliable for the KiUserExceptionDispatcher wild-write
+        // investigation (a stack-resident "return address" turned out to belong to an unrelated,
+        // already-returned function).
+        static std::mutex call_trace_mutex{};
+        static std::array<uint64_t, 1024> call_trace_ring{};
+        static size_t call_trace_index{0};
+
+        this->emu().hook_basic_block([](cpu_interface&, const basic_block& block) {
+            const std::scoped_lock lock(call_trace_mutex);
+            call_trace_ring[call_trace_index % call_trace_ring.size()] = block.address;
+            ++call_trace_index;
+        });
+
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
             for (size_t i = 0; i < mod.sections.size(); ++i)
             {
@@ -1482,6 +1498,33 @@ namespace sogen
                             fprintf(stderr, "[NULLDIAG3] rip -> %s+0x%llx (image_base=0x%llx)\n", rip_mod->name.c_str(),
                                     static_cast<unsigned long long>(eip_full - rip_mod->image_base),
                                     static_cast<unsigned long long>(rip_mod->image_base));
+                        }
+
+                        // CALLTRACE-DIAG: dump the real, recently-executed basic-block trace (oldest
+                        // first) instead of inferring the call chain from a stack scan - the only
+                        // stack-resident candidate found so far turned out to belong to an unrelated,
+                        // already-returned function, not the true caller.
+                        {
+                            const std::scoped_lock lock(call_trace_mutex);
+                            const auto count = std::min<size_t>(call_trace_index, call_trace_ring.size());
+                            const auto start_index = call_trace_index >= call_trace_ring.size() ? call_trace_index : 0;
+                            fprintf(stderr, "[NULLDIAG3] call trace (last %zu blocks, oldest first):\n", count);
+                            for (size_t i = 0; i < count; ++i)
+                            {
+                                const auto entry_index = (start_index + i) % call_trace_ring.size();
+                                const auto block_addr = call_trace_ring[entry_index];
+                                const auto* block_mod = this->mod_manager.find_by_address(block_addr);
+                                if (block_mod)
+                                {
+                                    fprintf(stderr, "[NULLDIAG3]   [%zu] 0x%llx -> %s+0x%llx\n", i,
+                                            static_cast<unsigned long long>(block_addr), block_mod->name.c_str(),
+                                            static_cast<unsigned long long>(block_addr - block_mod->image_base));
+                                }
+                                else
+                                {
+                                    fprintf(stderr, "[NULLDIAG3]   [%zu] 0x%llx\n", i, static_cast<unsigned long long>(block_addr));
+                                }
+                            }
                         }
 
                         // rax+rdx recovers the memcpy's original source pointer (rax holds the
