@@ -91,6 +91,62 @@ namespace sogen
             return std::nullopt;
         }
 
+        // Locates ntdll32's own cached copy of TEB32.WOW32Reserved (fs:[0xC0], the undocumented but
+        // well-established "Wow64Transition" field). Every 32-bit syscall stub reaches the wow64
+        // dispatcher via a shared two-instruction indirection: the stub does
+        // `mov eax,<syscall#>; mov edx,<thunk>; call edx` where <thunk> is a small, module-internal
+        // trampoline that itself does `jmp dword ptr [<cache>]` - <cache> being ntdll32's OWN cached
+        // copy of fs:[0xC0], read once during LdrpInitializeProcess rather than re-read from the TEB
+        // on every syscall. Writing fs:[0xC0] itself (e.g. once wow64cpu.dll loads and its real thunk
+        // address becomes known) is therefore too late: that caching already happened, with whatever
+        // (null, since this backend never runs whatever real code would set fs:[0xC0]) fs:[0xC0] held
+        // at process start. Scan for the syscall stub's own bytes instead, extract <thunk> from the
+        // stub's second `mov` immediate, then dereference <thunk>'s own `jmp dword ptr [<cache>]` to
+        // get <cache>'s real address - this needs no hardcoded RVA and survives ntdll32 build changes,
+        // matching scan_kernelbase_nls_cache_reference's approach above for the same class of problem.
+        std::optional<uint64_t> scan_wow64_transition_cache_address(const memory_manager& memory, const mapped_module& ntdll32)
+        {
+            for (const auto& section : ntdll32.sections)
+            {
+                const auto& region = section.region;
+                constexpr size_t stub_size = 12; // B8 imm32 BA imm32 FF D2
+                if (!is_executable(region.permissions) || region.length < stub_size)
+                {
+                    continue;
+                }
+
+                std::vector<uint8_t> data(region.length);
+                if (!memory.try_read_memory(region.start, data.data(), data.size()))
+                {
+                    continue;
+                }
+
+                for (size_t i = 0; i + stub_size <= data.size(); ++i)
+                {
+                    if (data[i] != 0xB8 || data[i + 5] != 0xBA || data[i + 10] != 0xFF || data[i + 11] != 0xD2)
+                    {
+                        continue;
+                    }
+
+                    uint32_t thunk_address{};
+                    std::memcpy(&thunk_address, &data[i + 6], sizeof(thunk_address));
+
+                    std::array<uint8_t, 6> thunk_bytes{};
+                    if (!memory.try_read_memory(thunk_address, thunk_bytes.data(), thunk_bytes.size()) || thunk_bytes[0] != 0xFF ||
+                        thunk_bytes[1] != 0x25)
+                    {
+                        continue;
+                    }
+
+                    uint32_t cache_address{};
+                    std::memcpy(&cache_address, &thunk_bytes[2], sizeof(cache_address));
+                    return cache_address;
+                }
+            }
+
+            return std::nullopt;
+        }
+
         // Returns 0 (unresolved) if neither the build-independent code scan above nor the hardcoded-RVA
         // fallback land on writable data for THIS specific build - see address_is_in_writable_section's
         // doc comment. The scan is the primary path; the hardcoded RVA (derived once via static analysis
@@ -747,7 +803,7 @@ namespace sogen
             // 32<->64 mode switch there instead of mis-compiling that 64-bit dispatch code. A no-op on
             // native-execution backends (register_gate_crossing's default). See fex_x86_64_emulator's
             // perform_gate_crossing for the (not-yet-decodable) wow64cpu_dispatch convention.
-            this->callbacks_->on_module_load.add([emu_ptr = &emu, &context](mapped_module& mod) {
+            this->callbacks_->on_module_load.add([this, emu_ptr = &emu, &context](mapped_module& mod) {
                 if (mod.name != "wow64cpu.dll")
                 {
                     return;
@@ -806,24 +862,34 @@ namespace sogen
 
                 // Real wow64.dll process init writes this same address into TEB32.WOW32Reserved (the
                 // Wow64Transition field at fs:[0xC0], undocumented name but a well-established
-                // reverse-engineered fact) - every 32-bit syscall stub's shared trampoline does
-                // `jmp dword ptr [<ntdll32's cached copy of fs:[0xC0]>]` to reach it. sogen never runs
-                // whatever real guest code would normally populate fs:[0xC0] (this backend synthesizes
-                // the gate crossings above instead of executing wow64cpu.dll's real dispatch code), so
-                // the field - and ntdll32's own cached copy of it, which every stub actually reads -
-                // stays null, and the very first syscall after wow64cpu.dll finishes loading jumps to
-                // 0. Write it directly here, the same way LdrSystemDllInitBlock below is written
-                // directly rather than left for guest code to populate. Every existing thread's TEB32
-                // needs it, not just the one that triggered this module load - wow64cpu.dll (and this
-                // callback) only ever loads once per process, but by the time it does, worker-factory
-                // threads may already exist with their own not-yet-populated TEB32.
+                // reverse-engineered fact). sogen never runs whatever real guest code would normally
+                // populate fs:[0xC0] (this backend synthesizes the gate crossings above instead of
+                // executing wow64cpu.dll's real dispatch code), so the field stays null. Setting
+                // TEB32.WOW32Reserved alone is not enough though - confirmed empirically (the syscall
+                // stub's own baked-in behavior was unchanged by it): every 32-bit syscall stub reaches
+                // the dispatcher via a shared indirection stub that itself does
+                // `jmp dword ptr [<ntdll32's OWN cached copy of fs:[0xC0]>]`, and that copy is read
+                // once during LdrpInitializeProcess, long before wow64cpu.dll loads and this callback
+                // ever runs - so by the time TEB32.WOW32Reserved gets set here, the (null) value is
+                // already cached and nothing re-reads the TEB. Find and write ntdll32's actual cache
+                // address directly instead (see scan_wow64_transition_cache_address's doc comment) -
+                // the same "write it directly rather than rely on guest code" approach
+                // LdrSystemDllInitBlock below already uses. Still set TEB32.WOW32Reserved on every
+                // existing thread too, in case anything else reads it directly rather than through the
+                // cache - wow64cpu.dll (and this callback) only ever loads once per process, but by the
+                // time it does, worker-factory threads may already exist with their own TEB32.
+                const auto turbo_bop_address = static_cast<std::uint32_t>(image_base + w64svc_turbo_bop_rva);
+                if (const auto cache_address = scan_wow64_transition_cache_address(*this->memory_, *this->wow64_modules_.ntdll32);
+                    cache_address.has_value())
+                {
+                    this->memory_->write_memory(*cache_address, &turbo_bop_address, sizeof(turbo_bop_address));
+                }
+
                 for (auto& t : context.threads | std::views::values)
                 {
                     if (t.teb32.has_value())
                     {
-                        t.teb32->access([&](TEB32& teb32_obj) {
-                            teb32_obj.WOW32Reserved = static_cast<std::uint32_t>(image_base + w64svc_turbo_bop_rva);
-                        });
+                        t.teb32->access([&](TEB32& teb32_obj) { teb32_obj.WOW32Reserved = turbo_bop_address; });
                     }
                 }
 
