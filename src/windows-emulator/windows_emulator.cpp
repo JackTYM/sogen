@@ -1463,6 +1463,59 @@ namespace sogen
                             }
                         }
                     }
+
+                    // 64-bit fault (Windows x86/Unicorn KiUserExceptionDispatcher wild-write): pin down
+                    // which module/offset rip belongs to, and pull a wide window of code preceding rip so
+                    // the setup of the bad rcx/rax pointer can be disassembled offline instead of guessed
+                    // at one register field per CI round.
+                    if (cs_val == 0x33)
+                    {
+                        const auto* rip_mod = this->mod_manager.find_by_address(eip_full);
+                        if (rip_mod)
+                        {
+                            fprintf(stderr, "[NULLDIAG3] rip -> %s+0x%llx (image_base=0x%llx)\n", rip_mod->name.c_str(),
+                                    static_cast<unsigned long long>(eip_full - rip_mod->image_base),
+                                    static_cast<unsigned long long>(rip_mod->image_base));
+                        }
+
+                        constexpr uint64_t k_lead_in = 0x160;
+                        constexpr uint64_t k_trail = 0x20;
+                        std::array<uint8_t, k_lead_in + k_trail> code_window{};
+                        const auto window_start = eip_full - k_lead_in;
+                        if (acting.try_read_memory(window_start, code_window.data(), code_window.size()))
+                        {
+                            fprintf(stderr, "[NULLDIAG3] code window at 0x%llx (rip-0x%llx..rip+0x%llx): ",
+                                    static_cast<unsigned long long>(window_start), static_cast<unsigned long long>(k_lead_in),
+                                    static_cast<unsigned long long>(k_trail));
+                            for (const auto b : code_window)
+                            {
+                                fprintf(stderr, "%02x ", b);
+                            }
+                            fprintf(stderr, "\n");
+                        }
+                        else
+                        {
+                            fprintf(stderr, "[NULLDIAG3] code window at rip-0x%llx is unreadable/unmapped\n",
+                                    static_cast<unsigned long long>(k_lead_in));
+                        }
+
+                        const auto rsp_val = acting.reg<uint64_t>(x86_register::rsp);
+                        for (uint64_t off = 0; off < 0x100; off += 8)
+                        {
+                            uint64_t candidate = 0;
+                            if (!acting.try_read_memory(rsp_val + off, &candidate, sizeof(candidate)))
+                            {
+                                continue;
+                            }
+                            const auto* mod = this->mod_manager.find_by_address(candidate);
+                            if (mod)
+                            {
+                                fprintf(stderr, "[NULLDIAG3] stack64[rsp+0x%llx]=0x%llx -> %s+0x%llx\n",
+                                        static_cast<unsigned long long>(off), static_cast<unsigned long long>(candidate),
+                                        mod->name.c_str(), static_cast<unsigned long long>(candidate - mod->image_base));
+                            }
+                        }
+                    }
                     fflush(stderr);
                 }
 
