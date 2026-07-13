@@ -3447,6 +3447,25 @@ namespace sogen::fex
 
             fprintf(stderr, "[GATEDIAG3] far_jmp_bitness_switch fired: gate.address=0x%llx engine=%s target_offset=0x%x target_cs=0x%x\n",
                     static_cast<unsigned long long>(gate.address), engine_before, target_offset, target_cs);
+
+            // Dump what's actually AT the landing point - this is real, dynamically-JIT-written
+            // guest code (BTCpuProcessInit writes it at runtime into a freshly-allocated page, so
+            // it's never present in the static PE image), and we've never confirmed what it
+            // actually does after the probe succeeds (e.g. whether/how it returns to 32-bit mode).
+            std::array<uint8_t, 32> landing_bytes{};
+            if (this->try_read_memory(target_offset, landing_bytes.data(), landing_bytes.size()))
+            {
+                fprintf(stderr, "[GATEDIAG3] bytes at target_offset (0x%x): ", target_offset);
+                for (const auto b : landing_bytes)
+                {
+                    fprintf(stderr, "%02x ", b);
+                }
+                fprintf(stderr, "\n");
+            }
+            else
+            {
+                fprintf(stderr, "[GATEDIAG3] target_offset (0x%x) is unreadable/unmapped\n", target_offset);
+            }
             fflush(stderr);
 
             const auto& src = this->active_thread_->CurrentFrame->State;
