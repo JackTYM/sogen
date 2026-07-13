@@ -1078,7 +1078,7 @@ namespace sogen
         static size_t call_trace_index{0};
 
         this->emu().hook_basic_block([](cpu_interface&, const basic_block& block) {
-            const std::scoped_lock lock(call_trace_mutex);
+            const std::scoped_lock call_trace_lock(call_trace_mutex);
             call_trace_ring[call_trace_index % call_trace_ring.size()] = block.address;
             ++call_trace_index;
         });
@@ -1505,7 +1505,7 @@ namespace sogen
                         // stack-resident candidate found so far turned out to belong to an unrelated,
                         // already-returned function, not the true caller.
                         {
-                            const std::scoped_lock lock(call_trace_mutex);
+                            const std::scoped_lock call_trace_lock(call_trace_mutex);
                             const auto count = std::min<size_t>(call_trace_index, call_trace_ring.size());
                             const auto start_index = call_trace_index >= call_trace_ring.size() ? call_trace_index : 0;
                             fprintf(stderr, "[NULLDIAG3] call trace (last %zu blocks, oldest first):\n", count);
