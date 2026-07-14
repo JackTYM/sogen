@@ -1484,6 +1484,78 @@ namespace sogen
                         fflush(stderr);
                     });
                 }
+
+                // APISETDIAG: ApiSetpSearchForApiSet (real ntdll's ApiSet-namespace binary-search
+                // helper) is not exported, and its non-exported callers are 2-3 levels deep from any
+                // exported entry point, so it can't be resolved via find_export or a short byte-scan
+                // from a known anchor. Four independent, well-reasoned allocation/sizing fixes
+                // (apiset::clone's ValueCount==0 skip, NtTraceControl's uninitialized output buffer,
+                // the module-relocation 4GB ceiling, the PEB-segment-allocator 4GB ceiling) have all
+                // had zero effect on a deterministic access violation inside this exact function during
+                // LoadLibraryA("advapi32.dll") - a live disassembly confirmed the crash-matching compare
+                // (`cmp ecx,[edx+ebx]`) should have ebx hold structPtr (the ApiSetNamespace pointer,
+                // stable across the whole call, restored from a spill slot right before the search
+                // loop), yet the fault shows ebx holding an unrelated ntdll-static string address
+                // instead. Rather than keep guessing further upstream, byte-scan ntdll32's own code for
+                // the exact instruction sequence already captured at the fault site in every CI
+                // reproduction so far, and hook it LIVE (non-crashing) to log ecx/edx/ebx on every
+                // invocation - not just the fatal one - so the first several (successful) lookups for
+                // shell32.dll/ole32.dll/gdi32.dll/user32.dll can be compared directly against the
+                // failing advapi32.dll one, revealing whether structPtr is already wrong on every call
+                // (a one-time setup bug) or only breaks for this specific one (a per-call marshaling
+                // bug).
+                constexpr std::array<uint8_t, 7> k_apiset_cmp_pattern = {0x3B, 0x0C, 0x1A, 0x72, 0x13, 0x76, 0x16};
+                for (const auto& section : mod.sections)
+                {
+                    if (!is_executable(section.region.permissions))
+                    {
+                        continue;
+                    }
+
+                    std::vector<uint8_t> code(section.region.length);
+                    if (!this->memory.try_read_memory(section.region.start, code.data(), code.size()))
+                    {
+                        continue;
+                    }
+
+                    for (size_t i = 0; i + k_apiset_cmp_pattern.size() <= code.size(); ++i)
+                    {
+                        if (!std::equal(k_apiset_cmp_pattern.begin(), k_apiset_cmp_pattern.end(), code.begin() + static_cast<ptrdiff_t>(i)))
+                        {
+                            continue;
+                        }
+
+                        const auto apiset_cmp_addr = section.region.start + i;
+                        this->emu().hook_memory_execution(apiset_cmp_addr, [this, apiset_cmp_addr](cpu_interface& cpu, uint64_t) {
+                            static std::atomic<int> counter{0};
+                            if (counter.fetch_add(1) >= 300)
+                            {
+                                return;
+                            }
+
+                            auto& vcpu = this->vcpu(cpu.index());
+                            auto& acting = vcpu.cpu;
+                            const auto ecx = acting.reg<uint32_t>(x86_register::ecx);
+                            const auto edx = acting.reg<uint32_t>(x86_register::edx);
+                            const auto ebx = acting.reg<uint32_t>(x86_register::ebx);
+                            const auto esp = acting.reg<uint32_t>(x86_register::esp);
+                            const auto ebp = acting.reg<uint32_t>(x86_register::ebp);
+
+                            char name_buffer[32] = {};
+                            acting.try_read_memory(ebx, name_buffer, sizeof(name_buffer) - 2);
+
+                            fprintf(stderr,
+                                    "[APISETDIAG] #%d cmp@0x%llx: ecx=0x%x edx=0x%x ebx=0x%x esp=0x%x ebp=0x%x "
+                                    "bytes_at_ebx=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                                    counter.load(), static_cast<unsigned long long>(apiset_cmp_addr), ecx, edx, ebx, esp, ebp,
+                                    static_cast<uint8_t>(name_buffer[0]), static_cast<uint8_t>(name_buffer[1]),
+                                    static_cast<uint8_t>(name_buffer[2]), static_cast<uint8_t>(name_buffer[3]),
+                                    static_cast<uint8_t>(name_buffer[4]), static_cast<uint8_t>(name_buffer[5]),
+                                    static_cast<uint8_t>(name_buffer[6]), static_cast<uint8_t>(name_buffer[7]));
+                            fflush(stderr);
+                        });
+                    }
+                }
             }
 
             if (mod.name == "kernelbase.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
