@@ -1334,6 +1334,36 @@ namespace sogen
                     });
                 }
             }
+
+            // WOW64RECURSDIAG2: UnhandledExceptionFilter is confirmed genuinely re-entered many times
+            // with a monotonically decreasing esp (real recursion, ~1500 bytes/call, matching the
+            // earlier-observed ThreadWow64Context stack growth) - but RtlDispatchException's hook never
+            // fired (likely not exported, so find_export silently returned 0) despite it being the only
+            // thing that's supposed to invoke UnhandledExceptionFilter's caller. Hook
+            // _except_handler4_common directly (confirmed exported from vcruntime140.dll) to see whether
+            // it's reprocessing the SAME EstablisherFrame/scope-table walk over and over (its own
+            // internal EnclosingLevel loop never reaching the -2 sentinel) or genuinely being called
+            // fresh each time by something above it.
+            if (mod.name == "vcruntime140.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
+            {
+                const auto eh4_addr = mod.find_export("_except_handler4_common");
+                if (eh4_addr)
+                {
+                    this->emu().hook_memory_execution(eh4_addr, [this](cpu_interface& cpu, uint64_t) {
+                        auto& vcpu = this->vcpu(cpu.index());
+                        auto& acting = vcpu.cpu;
+                        const auto esp = acting.reg<uint32_t>(x86_register::esp);
+
+                        std::array<uint32_t, 6> stack_words{};
+                        acting.try_read_memory(esp, stack_words.data(), sizeof(stack_words));
+
+                        fprintf(stderr,
+                                "[WOW64RECURSDIAG2] _except_handler4_common entry: esp=0x%x stack=[0x%x 0x%x 0x%x 0x%x 0x%x 0x%x]\n", esp,
+                                stack_words[0], stack_words[1], stack_words[2], stack_words[3], stack_words[4], stack_words[5]);
+                        fflush(stderr);
+                    });
+                }
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
