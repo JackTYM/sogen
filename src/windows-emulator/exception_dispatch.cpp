@@ -242,6 +242,48 @@ namespace sogen
             const std::array<uint32_t, 2> args_frame = {static_cast<uint32_t>(record_addr), static_cast<uint32_t>(wow64_context_addr)};
             emu.write_memory(args_frame_addr, args_frame.data(), sizeof(args_frame));
 
+            // SEHCHAINDIAG: a Smoke Test Windows x86 run confirmed the crash from the stale-context bug
+            // is gone, but the run then hung indefinitely - _seh_filter_exe/anti-debug-check/
+            // NtSetInformationThread repeating thousands of times with no new dispatch_exception call
+            // in between, meaning real ntdll's own FS:[0] walk (or _seh_filter_exe's own logic) is
+            // looping entirely in already-dispatched guest code. Dump the chain right before handing
+            // off to the real dispatcher, with cycle detection, to see whether it's already circular/
+            // malformed at this exact point (before real ntdll ever touches it) or looks fine here.
+            {
+                const auto fs_base = emu.get_segment_base(x86_register::fs);
+                uint32_t chain_addr = 0;
+                emu.try_read_memory(fs_base, &chain_addr, sizeof(chain_addr));
+                fprintf(stderr, "[SEHCHAINDIAG] dispatch fs_base=0x%llx head=0x%x wow64_context_addr=0x%llx record_addr=0x%llx\n",
+                        static_cast<unsigned long long>(fs_base), chain_addr, static_cast<unsigned long long>(wow64_context_addr),
+                        static_cast<unsigned long long>(record_addr));
+
+                std::unordered_set<uint32_t> seen{};
+                for (int i = 0; i < 32 && chain_addr != 0xFFFFFFFFu && chain_addr != 0; ++i)
+                {
+                    if (!seen.insert(chain_addr).second)
+                    {
+                        fprintf(stderr, "[SEHCHAINDIAG] CYCLE detected re-visiting 0x%x after %d entries\n", chain_addr, i);
+                        break;
+                    }
+
+                    struct
+                    {
+                        uint32_t next;
+                        uint32_t handler;
+                    } rec{};
+
+                    if (!emu.try_read_memory(chain_addr, &rec, sizeof(rec)))
+                    {
+                        fprintf(stderr, "[SEHCHAINDIAG] chain[%d] @0x%x unreadable\n", i, chain_addr);
+                        break;
+                    }
+
+                    fprintf(stderr, "[SEHCHAINDIAG] chain[%d] @0x%x next=0x%x handler=0x%x\n", i, chain_addr, rec.next, rec.handler);
+                    chain_addr = rec.next;
+                }
+                fflush(stderr);
+            }
+
             emu.reg(x86_register::esp, args_frame_addr);
             emu.reg(x86_register::eip, dispatcher32);
         }
