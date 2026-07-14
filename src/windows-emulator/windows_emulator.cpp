@@ -1299,6 +1299,7 @@ namespace sogen
                 // whatever bytes this specific build actually has - this is accurate regardless of how
                 // the two builds differ, since it reads the real, live, loaded code.
                 uint64_t rtl_dispatch_addr = 0;
+                uint64_t zw_continue_return_addr = 0;
                 const auto ki_user_exception_dispatcher_addr = mod.find_export("KiUserExceptionDispatcher");
                 if (ki_user_exception_dispatcher_addr)
                 {
@@ -1335,20 +1336,92 @@ namespace sogen
                                 break;
                             }
                         }
+
+                        // KIUSERDIAG: manual disassembly of the dump above shows the handled-breakpoint
+                        // success path is "pop ebx; pop ecx; push 0; push ecx; call ZwContinue" (only 2
+                        // args, unlike the 3-arg ZwRaiseException call on the failure path) followed
+                        // immediately by an unconditional jmp into the same second-chance/ZwRaiseException
+                        // block if the call ever returns - which it should never do on success. Locate that
+                        // call's real target the same way (byte-scan + decode) and inspect ITS code
+                        // directly, since neither NtContinue nor NtRaiseException are ever observed as
+                        // syscalls, meaning whatever fails must happen before ZwContinue's own syscall
+                        // instruction executes.
+                        uint64_t zw_continue_addr = 0;
+                        constexpr std::array<uint8_t, 6> k_zw_continue_pattern = {0x5B, 0x59, 0x6A, 0x00, 0x51, 0xE8};
+                        for (size_t i = 0; i + k_zw_continue_pattern.size() + 4 <= scan_buffer.size(); ++i)
+                        {
+                            if (std::equal(k_zw_continue_pattern.begin(), k_zw_continue_pattern.end(),
+                                           scan_buffer.begin() + static_cast<ptrdiff_t>(i)))
+                            {
+                                const auto call_opcode_addr = ki_user_exception_dispatcher_addr + i + (k_zw_continue_pattern.size() - 1);
+                                int32_t displacement = 0;
+                                memcpy(&displacement, scan_buffer.data() + i + k_zw_continue_pattern.size(), sizeof(displacement));
+                                zw_continue_addr = call_opcode_addr + 5 + static_cast<uint64_t>(displacement);
+                                zw_continue_return_addr = call_opcode_addr + 5;
+                                break;
+                            }
+                        }
+
+                        if (zw_continue_addr)
+                        {
+                            std::array<uint8_t, 0x40> zw_scan_buffer{};
+                            if (this->memory.try_read_memory(zw_continue_addr, zw_scan_buffer.data(), zw_scan_buffer.size()))
+                            {
+                                fprintf(stderr, "[KIUSERDIAG] code window at ZwContinue (0x%llx, 0x%zx bytes): ",
+                                        static_cast<unsigned long long>(zw_continue_addr), zw_scan_buffer.size());
+                                for (const auto b : zw_scan_buffer)
+                                {
+                                    fprintf(stderr, "%02x ", b);
+                                }
+                                fprintf(stderr, "\n");
+                                fflush(stderr);
+                            }
+
+                            this->emu().hook_memory_execution(zw_continue_addr, [this, zw_continue_addr](cpu_interface& cpu, uint64_t) {
+                                auto& vcpu = this->vcpu(cpu.index());
+                                auto& acting = vcpu.cpu;
+                                const auto esp = acting.reg<uint32_t>(x86_register::esp);
+                                uint32_t return_addr = 0;
+                                uint32_t arg_context = 0;
+                                uint32_t arg_test_alert = 0;
+                                acting.try_read_memory(esp, &return_addr, sizeof(return_addr));
+                                acting.try_read_memory(esp + 4, &arg_context, sizeof(arg_context));
+                                acting.try_read_memory(esp + 8, &arg_test_alert, sizeof(arg_test_alert));
+                                fprintf(stderr,
+                                        "[KIUSERDIAG] entered ZwContinue (0x%llx): esp=0x%x return_addr=0x%x "
+                                        "ContextRecord=0x%x TestAlert=0x%x eax=0x%x edx=0x%x\n",
+                                        static_cast<unsigned long long>(zw_continue_addr), esp, return_addr, arg_context, arg_test_alert,
+                                        acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::edx));
+                                fflush(stderr);
+                            });
+                        }
                     }
 
-                    this->emu().hook_memory_execution(ki_user_exception_dispatcher_addr + 0x4A, [this](cpu_interface& cpu, uint64_t) {
-                        auto& vcpu = this->vcpu(cpu.index());
-                        auto& acting = vcpu.cpu;
-                        fprintf(stderr,
-                                "[KIUSERDIAG] hit KiUserExceptionDispatcher+0x4A: eax=0x%x "
-                                "ecx=0x%x edx=0x%x ebx=0x%x esp=0x%x ebp=0x%x esi=0x%x edi=0x%x\n",
-                                acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::ecx),
-                                acting.reg<uint32_t>(x86_register::edx), acting.reg<uint32_t>(x86_register::ebx),
-                                acting.reg<uint32_t>(x86_register::esp), acting.reg<uint32_t>(x86_register::ebp),
-                                acting.reg<uint32_t>(x86_register::esi), acting.reg<uint32_t>(x86_register::edi));
-                        fflush(stderr);
-                    });
+                    // KIUSERDIAG: the earlier "+0x4A" hook (a hardcoded, per-build-fragile offset) never
+                    // fired across any CI run - reaching it required Context.Eip to land exactly there,
+                    // which manual disassembly now shows is only KiUserExceptionDispatcher's OWN tail
+                    // "ret 8", not a meaningful fault site. The real diagnostic question is whether the
+                    // "call ZwContinue" instruction (found dynamically above) ever ABNORMALLY RETURNS -
+                    // on success it never should, since the kernel resumes execution directly. Hook the
+                    // instruction immediately after that call instead: reaching it at all is itself the
+                    // signal that ZwContinue failed to take effect.
+                    if (zw_continue_return_addr)
+                    {
+                        this->emu().hook_memory_execution(
+                            zw_continue_return_addr, [this, zw_continue_return_addr](cpu_interface& cpu, uint64_t) {
+                                auto& vcpu = this->vcpu(cpu.index());
+                                auto& acting = vcpu.cpu;
+                                fprintf(stderr,
+                                        "[KIUSERDIAG] ZwContinue call at 0x%llx ABNORMALLY RETURNED: eax=0x%x "
+                                        "ecx=0x%x edx=0x%x ebx=0x%x esp=0x%x ebp=0x%x esi=0x%x edi=0x%x\n",
+                                        static_cast<unsigned long long>(zw_continue_return_addr), acting.reg<uint32_t>(x86_register::eax),
+                                        acting.reg<uint32_t>(x86_register::ecx), acting.reg<uint32_t>(x86_register::edx),
+                                        acting.reg<uint32_t>(x86_register::ebx), acting.reg<uint32_t>(x86_register::esp),
+                                        acting.reg<uint32_t>(x86_register::ebp), acting.reg<uint32_t>(x86_register::esi),
+                                        acting.reg<uint32_t>(x86_register::edi));
+                                fflush(stderr);
+                            });
+                    }
                 }
 
                 if (rtl_dispatch_addr)

@@ -480,6 +480,7 @@ namespace sogen
         std::optional<emulator_object<RTL_USER_PROCESS_PARAMETERS32>> process_params32;
         std::optional<uint64_t> rtl_user_thread_start32{};
         std::optional<uint64_t> ki_user_exception_dispatcher32{};
+        std::optional<uint64_t> wow64_syscall_reentry_addr{};
 
         user_handle_table user_handles;
         handle default_monitor_handle{};

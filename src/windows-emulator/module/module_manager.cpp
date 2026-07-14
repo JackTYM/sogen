@@ -837,6 +837,28 @@ namespace sogen
                 emu_ptr->register_gate_crossing(image_base + run_simulated_code_rva, turbo_dispatch_start_rva - run_simulated_code_rva,
                                                 x86_64_emulator::gate_crossing_kind::wow64_run_simulated_code);
 
+                // NtContinue never returns through the normal syscall path - the real kernel restores
+                // the guest's context directly, including a mode switch back to 32-bit compatibility
+                // mode, without wow64.dll's usual "jmp RunSimulatedCode" return sequence ever running.
+                // handle_NtContinueEx (syscalls/thread.cpp) needs a reverse-gate address to redirect a
+                // WoW64 thread's 64-bit engine to when NtContinue fires mid-gate-crossing, so the
+                // existing reverse-gate machinery performs the real engine flip instead of the syscall
+                // handler corrupting the active (64-bit) engine's own control-flow state. Deliberately
+                // NOT run_simulated_code_rva (0x1650) itself - enter_wow64_32bit_from_run_simulated_code
+                // only spills the 8 nonvolatile registers and adjusts rsp by -0xA8 when src.rip equals
+                // that exact address (its "true, freshly-called-from-BTCpuSimulate entry" case); a
+                // NtContinue-triggered crossing is never that - it fires mid-execution of wow64.dll's
+                // own real code, so re-running that one-time prologue spill scribbles over the frozen
+                // 64-bit stack with whatever's currently in r12-r15/rbx/rsi/rdi/rbp and double-adjusts
+                // rsp, corrupting state for every syscall dispatched afterward (confirmed locally: this
+                // broke reproducibly 3/3 runs when 0x1650 was used, while the equivalent syscall-return
+                // re-entry point stayed clean 3/3). 0x167f is that clean re-entry point - it falls
+                // within this same registered gate range (0x1650 already extends the whole way to
+                // turbo_dispatch_start_rva) but is documented as "already runs with rsp prologue-
+                // adjusted and must not be double-counted", exactly matching a mid-syscall return.
+                constexpr uint64_t syscall_reentry_rva = 0x167f;
+                context.wow64_syscall_reentry_addr = image_base + syscall_reentry_rva;
+
                 // Register the reverse (32->64) transition. The 32-bit ntdll syscall stub reaches the
                 // WOW64SVC thunk @ 0x2010 via `call fs:[0xC0]` (Wow64Transition); the thunk does a far
                 // `ljmp 0x33:...` into 64-bit mode, which the fixed-bitness 32-bit Context cannot do.

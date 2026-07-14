@@ -714,6 +714,7 @@ namespace sogen
         buffer.write(this->ki_user_apc_dispatcher);
         buffer.write(this->ki_user_exception_dispatcher);
         buffer.write_optional(this->ki_user_exception_dispatcher32);
+        buffer.write_optional(this->wow64_syscall_reentry_addr);
         buffer.write(this->ki_user_callback_dispatcher);
         buffer.write(this->instrumentation_callback);
         buffer.write(this->zw_callback_return);
@@ -806,6 +807,7 @@ namespace sogen
         buffer.read(this->ki_user_apc_dispatcher);
         buffer.read(this->ki_user_exception_dispatcher);
         buffer.read_optional(this->ki_user_exception_dispatcher32);
+        buffer.read_optional(this->wow64_syscall_reentry_addr);
         buffer.read(this->ki_user_callback_dispatcher);
         buffer.read(this->instrumentation_callback);
         buffer.read(this->zw_callback_return);
