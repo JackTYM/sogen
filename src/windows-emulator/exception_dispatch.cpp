@@ -311,6 +311,11 @@ namespace sogen
 
     }
 
+    // WOW64LOOPDIAG: set once the breakpoint dispatch preceding the observed post-breakpoint hang
+    // happens, so thread.cpp/memory.cpp's gated diagnostics capture calls from inside the actual loop
+    // instead of being exhausted by unrelated startup-time calls to the same syscalls.
+    std::atomic<bool> g_wow64_post_breakpoint_diag{false};
+
     bool dispatch_debug_exception(windows_emulator& win_emu, CONTEXT64& ctx, EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>& record)
     {
         std::array<uint8_t, 2> ins = {0};
@@ -418,6 +423,15 @@ namespace sogen
 
         if (is_bit32 && win_emu.process.ki_user_exception_dispatcher32 && thread.wow64_cpu_reserved)
         {
+            if (status == STATUS_BREAKPOINT)
+            {
+                // WOW64LOOPDIAG: flips on once the breakpoint dispatch that precedes the observed
+                // post-breakpoint hang happens, so thread.cpp/memory.cpp's diagnostics (gated on this
+                // flag) capture calls from inside the actual loop instead of being exhausted by
+                // unrelated startup-time calls to the same syscalls long before this point.
+                g_wow64_post_breakpoint_diag.store(true);
+            }
+
             const auto wow64_context_addr = thread.wow64_cpu_reserved->value() + offsetof(WOW64_CPURESERVED, Context);
             dispatch_exception_pointers_wow64(vcpu.cpu, *win_emu.process.ki_user_exception_dispatcher32, wow64_context_addr, pointers);
             return;

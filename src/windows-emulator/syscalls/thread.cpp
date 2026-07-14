@@ -8,6 +8,9 @@
 
 namespace sogen
 {
+    // WOW64LOOPDIAG: defined in exception_dispatch.cpp, set once the breakpoint dispatch preceding
+    // the observed post-breakpoint hang happens.
+    extern std::atomic<bool> g_wow64_post_breakpoint_diag;
 
     namespace syscalls
     {
@@ -17,11 +20,13 @@ namespace sogen
             // WOW64LOOPDIAG: a wow64 CI run hung in an apparent infinite loop of
             // _seh_filter_exe/anti-debug-check/NtSetInformationThread after a handled STATUS_BREAKPOINT,
             // with no new dispatch_exception call - print the real info_class (this syscall's own
-            // logging only shows its syscall index, not this parameter) for the first few calls to see
-            // what's actually being requested in that loop.
+            // logging only shows its syscall index, not this parameter) for the first calls seen once
+            // the loop-triggering breakpoint has actually been dispatched, to see what's actually being
+            // requested in that loop rather than unrelated earlier startup-time calls.
+            if (g_wow64_post_breakpoint_diag.load())
             {
                 static std::atomic<int> counter{0};
-                if (counter.fetch_add(1) < 20)
+                if (counter.fetch_add(1) < 30)
                 {
                     fprintf(stderr, "[WOW64LOOPDIAG] NtSetInformationThread info_class=%u thread_information=0x%llx length=%u\n",
                             static_cast<unsigned>(info_class), static_cast<unsigned long long>(thread_information),

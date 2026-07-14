@@ -8,6 +8,9 @@
 
 namespace sogen
 {
+    // WOW64LOOPDIAG: defined in exception_dispatch.cpp, set once the breakpoint dispatch preceding
+    // the observed post-breakpoint hang happens.
+    extern std::atomic<bool> g_wow64_post_breakpoint_diag;
 
     namespace syscalls
     {
@@ -162,9 +165,10 @@ namespace sogen
         {
             // WOW64LOOPDIAG: see thread.cpp's NtSetInformationThread hook - part of the same
             // investigation into a wow64 CI hang right after a handled STATUS_BREAKPOINT.
+            if (g_wow64_post_breakpoint_diag.load())
             {
                 static std::atomic<int> counter{0};
-                if (counter.fetch_add(1) < 20)
+                if (counter.fetch_add(1) < 30)
                 {
                     fprintf(stderr, "[WOW64LOOPDIAG] NtQueryVirtualMemory base_address=0x%llx info_class=%u\n",
                             static_cast<unsigned long long>(base_address), info_class);
