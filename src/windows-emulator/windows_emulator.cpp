@@ -1306,6 +1306,23 @@ namespace sogen
                     std::array<uint8_t, k_scan_size> scan_buffer{};
                     if (this->memory.try_read_memory(ki_user_exception_dispatcher_addr, scan_buffer.data(), scan_buffer.size()))
                     {
+                        // KIUSERDIAG: a live hook confirmed a *new* exception (Context.Eip landing
+                        // inside KiUserExceptionDispatcher's own body, at +0x4A in one CI run) fires
+                        // immediately after RtlDispatchException reports the original, correctly-
+                        // flagged (ExceptionFlags=0) breakpoint as handled - right where ZwContinue
+                        // would be called - yet NtContinue never appears as a syscall, meaning whatever
+                        // fails does so before the syscall instruction itself executes. Dump the raw
+                        // bytes once so the real call-to-ZwContinue site (and whatever precedes it) can
+                        // be read directly instead of guessed at.
+                        fprintf(stderr, "[KIUSERDIAG] code window at KiUserExceptionDispatcher (0x%llx, 0x%zx bytes): ",
+                                static_cast<unsigned long long>(ki_user_exception_dispatcher_addr), scan_buffer.size());
+                        for (const auto b : scan_buffer)
+                        {
+                            fprintf(stderr, "%02x ", b);
+                        }
+                        fprintf(stderr, "\n");
+                        fflush(stderr);
+
                         constexpr std::array<uint8_t, 10> k_pattern = {0x8B, 0x4C, 0x24, 0x04, 0x8B, 0x1C, 0x24, 0x51, 0x53, 0xE8};
                         for (size_t i = 0; i + k_pattern.size() + 4 <= scan_buffer.size(); ++i)
                         {
@@ -1319,6 +1336,19 @@ namespace sogen
                             }
                         }
                     }
+
+                    this->emu().hook_memory_execution(ki_user_exception_dispatcher_addr + 0x4A, [this](cpu_interface& cpu, uint64_t) {
+                        auto& vcpu = this->vcpu(cpu.index());
+                        auto& acting = vcpu.cpu;
+                        fprintf(stderr,
+                                "[KIUSERDIAG] hit KiUserExceptionDispatcher+0x4A: eax=0x%x "
+                                "ecx=0x%x edx=0x%x ebx=0x%x esp=0x%x ebp=0x%x esi=0x%x edi=0x%x\n",
+                                acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::ecx),
+                                acting.reg<uint32_t>(x86_register::edx), acting.reg<uint32_t>(x86_register::ebx),
+                                acting.reg<uint32_t>(x86_register::esp), acting.reg<uint32_t>(x86_register::ebp),
+                                acting.reg<uint32_t>(x86_register::esi), acting.reg<uint32_t>(x86_register::edi));
+                        fflush(stderr);
+                    });
                 }
 
                 if (rtl_dispatch_addr)
