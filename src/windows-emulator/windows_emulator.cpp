@@ -1547,15 +1547,18 @@ namespace sogen
                             // own context-translation callback, not a memcpy dispatch), and the
                             // faulting routine's TRUE entry is ntdll+0x168000 - 0x80 bytes before the
                             // address previously (wrongly) assumed to be its entry, so its real
-                            // prologue (establishing rax) was never actually captured. Dump code
-                            // windows around the last 20 distinct blocks so the wow64.dll logic and the
-                            // real ntdll+0x168000 prologue can be disassembled directly.
+                            // prologue (establishing rax) was never actually captured. Scanning only the
+                            // last 20 RAW entries turned out to be too narrow - on Unicorn this hook
+                            // fires at near-instruction granularity, so the last 20 raw slots cover only
+                            // the final ~20 instructions before the fault, never reaching back past the
+                            // faulting function's own body to wow64.dll/ntdll+0x168000. Scan the entire
+                            // ring buffer instead; deduplication keeps the printed output bounded.
                             std::vector<uint64_t> seen_addresses{};
-                            for (size_t i = count > 20 ? count - 20 : 0; i < count; ++i)
+                            for (size_t i = 0; i < count; ++i)
                             {
                                 const auto entry_index = (start_index + i) % call_trace_ring.size();
                                 const auto block_addr = call_trace_ring[entry_index];
-                                if (std::find(seen_addresses.begin(), seen_addresses.end(), block_addr) != seen_addresses.end())
+                                if (std::ranges::find(seen_addresses, block_addr) != seen_addresses.end())
                                 {
                                     continue;
                                 }
