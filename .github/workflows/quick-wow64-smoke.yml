@@ -26,13 +26,18 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Enable Developer Command Prompt (x86)
         uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
           arch: x86
 
       - name: Build 32-bit Vulkan Shim
-        run: cmake --preset=release && cmake --build --preset=release -t vulkan-shim
+        run: cmake --preset=release -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache && cmake --build --preset=release -t vulkan-shim
+        env:
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Stash 32-bit Vulkan Shim
         shell: pwsh
@@ -47,7 +52,9 @@ jobs:
           arch: x64
 
       - name: Build API Set Dumper and 64-bit Vulkan Shim
-        run: cmake --preset=release && cmake --build --preset=release -t dump-apiset vulkan-shim
+        run: cmake --preset=release -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache && cmake --build --preset=release -t dump-apiset vulkan-shim
+        env:
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Stage Vulkan Shims
         shell: pwsh
@@ -123,13 +130,25 @@ jobs:
           - platform: Windows x86
             runner: windows-latest
             devcmd_arch: x86
+            cmake-options: "-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
           - platform: macOS arm64
             runner: macos-latest
+            cmake-options: "-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
     steps:
       - name: Checkout Source
         uses: actions/checkout@v7
         with:
           submodules: recursive
+
+      - name: Run sccache-cache
+        if: ${{ matrix.platform == 'Windows x86' }}
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Run ccache
+        if: ${{ matrix.platform == 'macOS arm64' }}
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: ${{ matrix.platform }}
 
       - name: Enable Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1.13.0
@@ -139,6 +158,8 @@ jobs:
 
       - name: CMake Build
         run: cmake --preset=${{matrix.preset}} ${{matrix.cmake-options}} && cmake --build --preset=${{matrix.preset}}
+        env:
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Upload Artifacts
         uses: pyTooling/upload-artifact@v7
