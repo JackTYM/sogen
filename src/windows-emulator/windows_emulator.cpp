@@ -1175,6 +1175,44 @@ namespace sogen
                     fflush(stderr);
                 });
             }
+
+            // SEHDISPATCHDIAG: with the CONTEXT.Rsp bug fixed, KiUserExceptionDispatcher now runs
+            // successfully but still reaches NtRaiseException for a guest exception that has a
+            // completely valid, intact SEH chain with a matching __except handler present - real
+            // Windows should have invoked that handler instead. Disassembly of
+            // KiUserExceptionDispatcher (RVA 0x1668cc-0x16696b in this build) shows it calls
+            // ntdll+0x11ef0 (RCX=local-context-pointer, RDX=rsp) and branches on its boolean (AL)
+            // return value - if AL==0, it falls straight through to preparing the NtRaiseException
+            // call. This is almost certainly RtlDispatchException (or a thin wrapper around it) - the
+            // actual decision point. Capture its own code so it can be disassembled directly, same
+            // technique that found the CONTEXT.Rsp bug.
+            if (mod.name == "ntdll.dll" && mod.machine == 0x8664 /*IMAGE_FILE_MACHINE_AMD64*/)
+            {
+                const auto hook_addr = mod.image_base + 0x11ef0;
+                this->emu().hook_memory_execution(hook_addr, [this, hook_addr](cpu_interface& cpu, uint64_t) {
+                    auto& vcpu = this->vcpu(cpu.index());
+                    auto& acting = vcpu.cpu;
+
+                    constexpr uint64_t k_window_size = 0x200;
+                    std::array<uint8_t, k_window_size> window{};
+                    if (acting.try_read_memory(hook_addr, window.data(), window.size()))
+                    {
+                        fprintf(stderr, "[SEHDISPATCHDIAG] code window at ntdll+0x11ef0 (0x%llx, 0x%llx bytes): ",
+                                static_cast<unsigned long long>(hook_addr), static_cast<unsigned long long>(k_window_size));
+                        for (const auto b : window)
+                        {
+                            fprintf(stderr, "%02x ", b);
+                        }
+                        fprintf(stderr, "\n");
+                    }
+
+                    fprintf(stderr, "[SEHDISPATCHDIAG] rcx=0x%llx rdx=0x%llx rsp=0x%llx\n",
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rcx)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rdx)),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rsp)));
+                    fflush(stderr);
+                });
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
