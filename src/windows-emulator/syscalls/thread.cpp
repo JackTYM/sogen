@@ -14,6 +14,22 @@ namespace sogen
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, const handle thread_handle, const THREADINFOCLASS info_class,
                                                const uint64_t thread_information, const uint32_t thread_information_length)
         {
+            // WOW64LOOPDIAG: a wow64 CI run hung in an apparent infinite loop of
+            // _seh_filter_exe/anti-debug-check/NtSetInformationThread after a handled STATUS_BREAKPOINT,
+            // with no new dispatch_exception call - print the real info_class (this syscall's own
+            // logging only shows its syscall index, not this parameter) for the first few calls to see
+            // what's actually being requested in that loop.
+            {
+                static std::atomic<int> counter{0};
+                if (counter.fetch_add(1) < 20)
+                {
+                    fprintf(stderr, "[WOW64LOOPDIAG] NtSetInformationThread info_class=%u thread_information=0x%llx length=%u\n",
+                            static_cast<unsigned>(info_class), static_cast<unsigned long long>(thread_information),
+                            thread_information_length);
+                    fflush(stderr);
+                }
+            }
+
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)

@@ -160,6 +160,18 @@ namespace sogen
                                              const uint32_t info_class, const uint64_t memory_information,
                                              const uint64_t memory_information_length, const emulator_object<uint64_t> return_length)
         {
+            // WOW64LOOPDIAG: see thread.cpp's NtSetInformationThread hook - part of the same
+            // investigation into a wow64 CI hang right after a handled STATUS_BREAKPOINT.
+            {
+                static std::atomic<int> counter{0};
+                if (counter.fetch_add(1) < 20)
+                {
+                    fprintf(stderr, "[WOW64LOOPDIAG] NtQueryVirtualMemory base_address=0x%llx info_class=%u\n",
+                            static_cast<unsigned long long>(base_address), info_class);
+                    fflush(stderr);
+                }
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
