@@ -1243,6 +1243,38 @@ namespace sogen
                             (val_8 & 7) != 0 ? 1 : 0, val_8 < val_40 ? 1 : 0, val_8 >= val_48 ? 1 : 0);
                     fflush(stderr);
                 });
+
+                // SEHDISPATCHDIAG3: SEHDISPATCHDIAG2 never fired - meaning execution never reached
+                // +0x122a0 at all. Re-examining the disassembly: there's an EARLIER exit at +0x12152
+                // ("test al,al; je +0x12381", right after "call 0x1800e18d0" at +0x1214d, a "get stack
+                // limits"-looking call taking rcx=&[rbp+0x40], rdx=&[rbp+0x48], edi=(context[4] & 0x81))
+                // that goes straight to the same "return false" landing pad if THAT call itself
+                // returns false - meaning the stack-limit lookup itself may be failing before the
+                // bounds comparison is ever reached. Hook right after this call returns to check AL and
+                // the context flags byte that feeds it.
+                const auto sehdiag3_hook_addr = mod.image_base + 0x12152;
+                this->emu().hook_memory_execution(sehdiag3_hook_addr, [this](cpu_interface& cpu, uint64_t) {
+                    auto& vcpu = this->vcpu(cpu.index());
+                    auto& acting = vcpu.cpu;
+                    const auto al = acting.reg<uint8_t>(x86_register::al);
+                    const auto rbx = acting.reg<uint64_t>(x86_register::rbx);
+                    const auto rbp = acting.reg<uint64_t>(x86_register::rbp);
+
+                    uint32_t ctx_flags4 = 0;
+                    const bool ctx_flags4_ok = acting.try_read_memory(rbx + 4, &ctx_flags4, sizeof(ctx_flags4));
+                    uint64_t val_40 = 0;
+                    uint64_t val_48 = 0;
+                    const bool ok_40 = acting.try_read_memory(rbp + 0x40, &val_40, sizeof(val_40));
+                    const bool ok_48 = acting.try_read_memory(rbp + 0x48, &val_48, sizeof(val_48));
+
+                    fprintf(stderr,
+                            "[SEHDISPATCHDIAG3] al=%d rbx=0x%llx [rbx+4]=0x%x(ok=%d) rbp=0x%llx [rbp+0x40]=0x%llx(ok=%d) "
+                            "[rbp+0x48]=0x%llx(ok=%d)\n",
+                            static_cast<int>(al), static_cast<unsigned long long>(rbx), ctx_flags4, ctx_flags4_ok ? 1 : 0,
+                            static_cast<unsigned long long>(rbp), static_cast<unsigned long long>(val_40), ok_40 ? 1 : 0,
+                            static_cast<unsigned long long>(val_48), ok_48 ? 1 : 0);
+                    fflush(stderr);
+                });
             }
         });
 
