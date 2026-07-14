@@ -77,6 +77,28 @@ namespace sogen
                     fprintf(stderr, "[SEHDIAG] chain[%d] @0x%x next=0x%x handler=0x%x\n", i, chain_addr, record.next, record.handler);
                     chain_addr = record.next;
                 }
+
+                // The SEH chain itself looks intact - dump the native (64-bit) stack too, so real
+                // ntdll's own internal call chain (RtlDispatchException, RtlpExecuteHandlerForException,
+                // etc.) leading to this "no handler found" decision can be identified without symbols.
+                const auto native_rsp = c.emu.reg<uint64_t>(x86_register::rsp);
+                fprintf(stderr, "[SEHDIAG] native rsp=0x%llx rip=0x%llx\n", static_cast<unsigned long long>(native_rsp),
+                        static_cast<unsigned long long>(c.emu.reg<uint64_t>(x86_register::rip)));
+                for (uint64_t off = 0; off < 0x200; off += 8)
+                {
+                    uint64_t candidate = 0;
+                    if (!c.emu.try_read_memory(native_rsp + off, &candidate, sizeof(candidate)))
+                    {
+                        continue;
+                    }
+                    const auto* mod = c.win_emu.mod_manager.find_by_address(candidate);
+                    if (mod)
+                    {
+                        fprintf(stderr, "[SEHDIAG] stack[rsp+0x%llx]=0x%llx -> %s+0x%llx\n", static_cast<unsigned long long>(off),
+                                static_cast<unsigned long long>(candidate), mod->name.c_str(),
+                                static_cast<unsigned long long>(candidate - mod->image_base));
+                    }
+                }
                 fflush(stderr);
             }
 
