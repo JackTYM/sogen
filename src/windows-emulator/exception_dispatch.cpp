@@ -211,31 +211,35 @@ namespace sogen
         // for genuinely 64-bit-mode faults) - this matches how the real kernel picks the dispatch entry
         // point from the trap frame's Cs at fault time (Wow64SharedInformation, populated in
         // module_manager.cpp, exists precisely so the kernel/wow64 layer knows this 32-bit address).
-        void dispatch_exception_pointers_wow64(x86_64_cpu& emu, const uint64_t dispatcher32,
+        //
+        // The PCONTEXT passed to the dispatcher must be thread.wow64_cpu_reserved's Context field, not
+        // some arbitrary scratch copy: real wow64's own machinery (e.g. the translation NtContinue's
+        // wow64 syscall thunk performs when the guest's SEH filter resumes execution) reads/writes the
+        // 32-bit context from that well-known, TEB-referenced location - confirmed by sync_wow64_cpu_-
+        // reserved_context's own doc comment below ("Wow64PassExceptionToGuest rebuilds the 32-bit
+        // context from WOW64_CPURESERVED"). Handing it a disconnected copy left later stages (observed:
+        // a wow64cpu.dll-internal single-step immediately after a handled STATUS_BREAKPOINT) restoring
+        // CPU state from stale/uninitialized data instead of this dispatch's actual context.
+        void dispatch_exception_pointers_wow64(x86_64_cpu& emu, const uint64_t dispatcher32, const uint64_t wow64_context_addr,
                                                const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
         {
             const auto& ctx = *reinterpret_cast<CONTEXT64*>(pointers.ContextRecord);
             const auto& record = *reinterpret_cast<exception_record*>(pointers.ExceptionRecord);
 
-            const auto wow64_ctx = make_wow64_context(ctx);
             const auto wow64_record = make_wow64_exception_record(record);
 
             constexpr uint64_t args_frame_size = 8;
-            const uint64_t total_size = align_up(sizeof(wow64_ctx) + sizeof(wow64_record) + args_frame_size, 0x10);
+            const uint64_t total_size = align_up(sizeof(wow64_record) + args_frame_size, 0x10);
             const auto current_esp = ctx.Rsp & 0xFFFFFFFFu;
             const auto new_esp = align_down(current_esp - total_size, 0x10);
 
-            const auto context_addr = new_esp;
-            const auto record_addr = context_addr + sizeof(wow64_ctx);
+            const auto record_addr = new_esp;
             const auto args_frame_addr = record_addr + sizeof(wow64_record);
-
-            const emulator_object<WOW64_CONTEXT> context_obj{emu, context_addr};
-            context_obj.write(wow64_ctx);
 
             const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>>> record_obj{emu, record_addr};
             record_obj.write(wow64_record);
 
-            const std::array<uint32_t, 2> args_frame = {static_cast<uint32_t>(record_addr), static_cast<uint32_t>(context_addr)};
+            const std::array<uint32_t, 2> args_frame = {static_cast<uint32_t>(record_addr), static_cast<uint32_t>(wow64_context_addr)};
             emu.write_memory(args_frame_addr, args_frame.data(), sizeof(args_frame));
 
             emu.reg(x86_register::esp, args_frame_addr);
@@ -370,9 +374,10 @@ namespace sogen
         const auto bitness = segment_utils::get_segment_bitness(vcpu.cpu, cs_selector);
         const auto is_bit32 = bitness && *bitness == segment_utils::segment_bitness::bit32;
 
-        if (is_bit32 && win_emu.process.ki_user_exception_dispatcher32)
+        if (is_bit32 && win_emu.process.ki_user_exception_dispatcher32 && thread.wow64_cpu_reserved)
         {
-            dispatch_exception_pointers_wow64(vcpu.cpu, *win_emu.process.ki_user_exception_dispatcher32, pointers);
+            const auto wow64_context_addr = thread.wow64_cpu_reserved->value() + offsetof(WOW64_CPURESERVED, Context);
+            dispatch_exception_pointers_wow64(vcpu.cpu, *win_emu.process.ki_user_exception_dispatcher32, wow64_context_addr, pointers);
             return;
         }
 
