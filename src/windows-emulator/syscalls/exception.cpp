@@ -97,6 +97,31 @@ namespace sogen
                         fprintf(stderr, "[SEHDIAG] stack[rsp+0x%llx]=0x%llx -> %s+0x%llx\n", static_cast<unsigned long long>(off),
                                 static_cast<unsigned long long>(candidate), mod->name.c_str(),
                                 static_cast<unsigned long long>(candidate - mod->image_base));
+
+                        // wow64cpu.dll mediates 32/64-bit mode switches - a return address landing
+                        // there is the strongest lead for "real ntdll tried to call back into 32-bit
+                        // guest code (the SEH handler) and something about that transition failed."
+                        // Dump a code window there (and any other candidate) so it can be disassembled
+                        // directly, same approach that found the CONTEXT.Rsp bug.
+                        if (mod->name == "wow64cpu.dll" || mod->name == "wow64.dll")
+                        {
+                            constexpr uint64_t k_lead_in = 0x30;
+                            constexpr uint64_t k_trail = 0x30;
+                            std::array<uint8_t, k_lead_in + k_trail> window{};
+                            const auto window_start = candidate - k_lead_in;
+                            if (c.emu.try_read_memory(window_start, window.data(), window.size()))
+                            {
+                                fprintf(stderr, "[SEHDIAG] code window at 0x%llx (%s+0x%llx-0x%llx..+0x%llx): ",
+                                        static_cast<unsigned long long>(window_start), mod->name.c_str(),
+                                        static_cast<unsigned long long>(candidate - mod->image_base),
+                                        static_cast<unsigned long long>(k_lead_in), static_cast<unsigned long long>(k_trail));
+                                for (const auto b : window)
+                                {
+                                    fprintf(stderr, "%02x ", b);
+                                }
+                                fprintf(stderr, "\n");
+                            }
+                        }
                     }
                 }
                 fflush(stderr);
