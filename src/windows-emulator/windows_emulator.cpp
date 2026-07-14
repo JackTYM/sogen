@@ -1276,6 +1276,64 @@ namespace sogen
                     fflush(stderr);
                 });
             }
+
+            // WOW64RECURSDIAG: two independent, thorough disassembly passes confirmed 32-bit
+            // RtlDispatchException, _except_handler4_common, and kernelbase's UnhandledExceptionFilter/
+            // BasepFillUEFInfo are ALL linear/bounded/non-recursive on real Windows - none of them loop
+            // or retry. Yet the observed post-breakpoint hang shows the same syscall pattern
+            // (_seh_filter_exe, anti-debug check, NtSetInformationThread) repeating with zero new
+            // dispatch_exception calls and zero NtContinue calls. Hook both functions' entries directly
+            // (resolved via find_export, robust across ntdll/kernelbase builds) to get ground truth on
+            // whether RtlDispatchException/UnhandledExceptionFilter are actually being re-entered
+            // multiple times for the same breakpoint, and with what arguments each time.
+            if (mod.name == "ntdll.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
+            {
+                const auto rtl_dispatch_addr = mod.find_export("RtlDispatchException");
+                if (rtl_dispatch_addr)
+                {
+                    this->emu().hook_memory_execution(rtl_dispatch_addr, [this](cpu_interface& cpu, uint64_t) {
+                        auto& vcpu = this->vcpu(cpu.index());
+                        auto& acting = vcpu.cpu;
+                        const auto esp = acting.reg<uint32_t>(x86_register::esp);
+
+                        uint32_t exception_record_ptr = 0;
+                        uint32_t context_record_ptr = 0;
+                        acting.try_read_memory(esp + 4, &exception_record_ptr, sizeof(exception_record_ptr));
+                        acting.try_read_memory(esp + 8, &context_record_ptr, sizeof(context_record_ptr));
+
+                        uint32_t exception_code = 0;
+                        uint32_t context_eip = 0;
+                        acting.try_read_memory(exception_record_ptr, &exception_code, sizeof(exception_code));
+                        acting.try_read_memory(context_record_ptr + 0xB8, &context_eip, sizeof(context_eip));
+
+                        fprintf(stderr,
+                                "[WOW64RECURSDIAG] RtlDispatchException entry: esp=0x%x ExceptionRecord=0x%x ContextRecord=0x%x "
+                                "ExceptionCode=0x%x Context.Eip=0x%x\n",
+                                esp, exception_record_ptr, context_record_ptr, exception_code, context_eip);
+                        fflush(stderr);
+                    });
+                }
+            }
+
+            if (mod.name == "kernelbase.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
+            {
+                const auto uef_addr = mod.find_export("UnhandledExceptionFilter");
+                if (uef_addr)
+                {
+                    this->emu().hook_memory_execution(uef_addr, [this](cpu_interface& cpu, uint64_t) {
+                        auto& vcpu = this->vcpu(cpu.index());
+                        auto& acting = vcpu.cpu;
+                        const auto esp = acting.reg<uint32_t>(x86_register::esp);
+
+                        uint32_t exception_pointers_ptr = 0;
+                        acting.try_read_memory(esp + 4, &exception_pointers_ptr, sizeof(exception_pointers_ptr));
+
+                        fprintf(stderr, "[WOW64RECURSDIAG] UnhandledExceptionFilter entry: esp=0x%x ExceptionInfo=0x%x\n", esp,
+                                exception_pointers_ptr);
+                        fflush(stderr);
+                    });
+                }
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
