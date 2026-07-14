@@ -1137,6 +1137,44 @@ namespace sogen
                     }
                 });
             }
+
+            // WOW64DIAG: the call-trace investigation traced the KiUserExceptionDispatcher
+            // wild-write to wow64.dll's own context-translation callback, at RVA 0x363fe-0x3640d in
+            // this build: it computes a destination pointer as
+            // `rbx = CONTEXT.R14 - (CONTEXT.Rsp_low32 - current_esp)`, then `rcx = rbx` right before
+            // calling into the real ntdll memcpy (confirmed via disassembly of the captured call
+            // trace - that memcpy's own prologue is provably correct, "mov rax,rcx" at its true
+            // entry). Hook the call site itself to capture live register/CONTEXT-field values, since
+            // the earlier arithmetic-only analysis couldn't rule in/out a 32-bit truncation bug
+            // without the actual esp value at this exact point.
+            if (mod.name == "wow64.dll" && mod.machine == 0x8664 /*IMAGE_FILE_MACHINE_AMD64*/)
+            {
+                const auto hook_addr = mod.image_base + 0x3640d;
+                this->emu().hook_memory_execution(hook_addr, [this](cpu_interface& cpu, uint64_t) {
+                    auto& vcpu = this->vcpu(cpu.index());
+                    auto& acting = vcpu.cpu;
+                    const auto rsp = acting.reg<uint64_t>(x86_register::rsp);
+                    const auto rcx = acting.reg<uint64_t>(x86_register::rcx);
+                    const auto rdx = acting.reg<uint64_t>(x86_register::rdx);
+                    const auto r8 = acting.reg<uint64_t>(x86_register::r8);
+                    const auto rdi = acting.reg<uint64_t>(x86_register::rdi);
+                    const auto rbx = acting.reg<uint64_t>(x86_register::rbx);
+
+                    uint64_t ctx_rsp = 0;
+                    uint64_t ctx_r14 = 0;
+                    const bool ctx_rsp_ok = acting.try_read_memory(rdi + 0x98, &ctx_rsp, sizeof(ctx_rsp));
+                    const bool ctx_r14_ok = acting.try_read_memory(rdi + 0xe8, &ctx_r14, sizeof(ctx_r14));
+
+                    fprintf(stderr,
+                            "[WOW64DIAG] at wow64.dll+0x363fe call site: rsp=0x%llx rcx(dest)=0x%llx rdx=0x%llx "
+                            "r8=0x%llx rdi(ContextRecord)=0x%llx rbx=0x%llx ctx.Rsp=0x%llx(ok=%d) ctx.R14=0x%llx(ok=%d)\n",
+                            static_cast<unsigned long long>(rsp), static_cast<unsigned long long>(rcx),
+                            static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8), static_cast<unsigned long long>(rdi),
+                            static_cast<unsigned long long>(rbx), static_cast<unsigned long long>(ctx_rsp), ctx_rsp_ok ? 1 : 0,
+                            static_cast<unsigned long long>(ctx_r14), ctx_r14_ok ? 1 : 0);
+                    fflush(stderr);
+                });
+            }
         });
 
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
