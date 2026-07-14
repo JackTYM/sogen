@@ -1213,6 +1213,36 @@ namespace sogen
                             static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rsp)));
                     fflush(stderr);
                 });
+
+                // SEHDISPATCHDIAG2: disassembly of the captured ntdll+0x11ef0 window found the exact
+                // "give up" path - three bounds checks at +0x122a0..+0x122bb comparing a local value
+                // ([rbp+8]) against limits at [rbp+0x40]/[rbp+0x48] (populated earlier by what looks
+                // like a "get stack limits" call), all three failure branches converging on
+                // "or edi,8; dil=0; return false" at +0x12381 - i.e. the exact source of the observed
+                // AL=0 ("no handler") result. Hook the comparison site directly to see the live values
+                // and which specific check (misalignment, below-lower-bound, at/above-upper-bound)
+                // actually fires.
+                const auto sehdiag2_hook_addr = mod.image_base + 0x122a0;
+                this->emu().hook_memory_execution(sehdiag2_hook_addr, [this](cpu_interface& cpu, uint64_t) {
+                    auto& vcpu = this->vcpu(cpu.index());
+                    auto& acting = vcpu.cpu;
+                    const auto rbp = acting.reg<uint64_t>(x86_register::rbp);
+
+                    uint64_t val_8 = 0;
+                    uint64_t val_40 = 0;
+                    uint64_t val_48 = 0;
+                    const bool ok_8 = acting.try_read_memory(rbp + 8, &val_8, sizeof(val_8));
+                    const bool ok_40 = acting.try_read_memory(rbp + 0x40, &val_40, sizeof(val_40));
+                    const bool ok_48 = acting.try_read_memory(rbp + 0x48, &val_48, sizeof(val_48));
+
+                    fprintf(stderr,
+                            "[SEHDISPATCHDIAG2] rbp=0x%llx [rbp+8]=0x%llx(ok=%d) [rbp+0x40]=0x%llx(ok=%d) "
+                            "[rbp+0x48]=0x%llx(ok=%d) misaligned=%d below_lower=%d at_or_above_upper=%d\n",
+                            static_cast<unsigned long long>(rbp), static_cast<unsigned long long>(val_8), ok_8 ? 1 : 0,
+                            static_cast<unsigned long long>(val_40), ok_40 ? 1 : 0, static_cast<unsigned long long>(val_48), ok_48 ? 1 : 0,
+                            (val_8 & 7) != 0 ? 1 : 0, val_8 < val_40 ? 1 : 0, val_8 >= val_48 ? 1 : 0);
+                    fflush(stderr);
+                });
             }
         });
 
