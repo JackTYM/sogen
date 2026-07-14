@@ -1288,7 +1288,23 @@ namespace sogen
             // multiple times for the same breakpoint, and with what arguments each time.
             if (mod.name == "ntdll.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
             {
-                const auto rtl_dispatch_addr = mod.find_export("RtlDispatchException");
+                // RtlDispatchException isn't exported in this build (find_export returns 0 for it,
+                // confirmed - the hook below never fired in several CI runs). Two independent
+                // disassembly passes of this emulation root's own ntdll.dll agree its entry sits
+                // exactly 0xDAFE bytes before KiUserExceptionDispatcher's within the same build -
+                // compute its address relative to that (exported) symbol instead of a hardcoded
+                // absolute RVA, since ntdll builds differ enough between local and CI environments
+                // that KiUserExceptionDispatcher's own RVA alone has already been observed to shift.
+                auto rtl_dispatch_addr = mod.find_export("RtlDispatchException");
+                if (!rtl_dispatch_addr)
+                {
+                    const auto ki_user_exception_dispatcher_addr = mod.find_export("KiUserExceptionDispatcher");
+                    if (ki_user_exception_dispatcher_addr > 0xDAFE)
+                    {
+                        rtl_dispatch_addr = ki_user_exception_dispatcher_addr - 0xDAFE;
+                    }
+                }
+
                 if (rtl_dispatch_addr)
                 {
                     this->emu().hook_memory_execution(rtl_dispatch_addr, [this](cpu_interface& cpu, uint64_t) {
@@ -1302,14 +1318,16 @@ namespace sogen
                         acting.try_read_memory(esp + 8, &context_record_ptr, sizeof(context_record_ptr));
 
                         uint32_t exception_code = 0;
+                        uint32_t exception_flags = 0;
                         uint32_t context_eip = 0;
                         acting.try_read_memory(exception_record_ptr, &exception_code, sizeof(exception_code));
+                        acting.try_read_memory(exception_record_ptr + 4, &exception_flags, sizeof(exception_flags));
                         acting.try_read_memory(context_record_ptr + 0xB8, &context_eip, sizeof(context_eip));
 
                         fprintf(stderr,
                                 "[WOW64RECURSDIAG] RtlDispatchException entry: esp=0x%x ExceptionRecord=0x%x ContextRecord=0x%x "
-                                "ExceptionCode=0x%x Context.Eip=0x%x\n",
-                                esp, exception_record_ptr, context_record_ptr, exception_code, context_eip);
+                                "ExceptionCode=0x%x ExceptionFlags=0x%x Context.Eip=0x%x\n",
+                                esp, exception_record_ptr, context_record_ptr, exception_code, exception_flags, context_eip);
                         fflush(stderr);
                     });
                 }
