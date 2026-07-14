@@ -102,8 +102,13 @@ namespace sogen
                         // there is the strongest lead for "real ntdll tried to call back into 32-bit
                         // guest code (the SEH handler) and something about that transition failed."
                         // Dump a code window there (and any other candidate) so it can be disassembled
-                        // directly, same approach that found the CONTEXT.Rsp bug.
-                        if (mod->name == "wow64cpu.dll" || mod->name == "wow64.dll")
+                        // directly, same approach that found the CONTEXT.Rsp bug. The wow64cpu.dll/
+                        // wow64.dll hits found so far turned out ambiguous on disassembly (one reads
+                        // like a stale, already-returned frame; another like an unrelated data table) -
+                        // prioritize ntdll.dll hits too, especially ones close to rsp (less likely to
+                        // be stale, more likely to be RtlDispatchException/RtlpExecuteHandlerForException
+                        // itself, given KiUserExceptionDispatcher's own return address sits at rsp+0).
+                        if (mod->name == "wow64cpu.dll" || mod->name == "wow64.dll" || (mod->name == "ntdll.dll" && off <= 0x20))
                         {
                             constexpr uint64_t k_lead_in = 0x30;
                             constexpr uint64_t k_trail = 0x30;
