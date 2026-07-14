@@ -239,6 +239,24 @@ namespace sogen
             const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>>> record_obj{emu, record_addr};
             record_obj.write(wow64_record);
 
+            // NONCONTINUABLEDIAG: RtlDispatchException is confirmed (via disassembly) to refuse
+            // continuation and raise STATUS_NONCONTINUABLE_EXCEPTION whenever the original
+            // EXCEPTION_RECORD's ExceptionFlags bit 0 (EXCEPTION_NONCONTINUABLE) is set - this exactly
+            // matches the observed infinite loop (UnhandledExceptionFilter's callback returns -1, but
+            // resumption is refused, so a fresh STATUS_NONCONTINUABLE_EXCEPTION gets raised and
+            // re-dispatched forever). record.ExceptionFlags is set to 0 in dispatch_exception, but
+            // verify the actual value written here and read back from guest memory to rule out any
+            // corruption/miscomputation before assuming the C++ source is what's actually landing.
+            {
+                const auto readback = record_obj.try_read();
+                fprintf(stderr,
+                        "[NONCONTINUABLEDIAG] wow64_record.ExceptionFlags=0x%x wow64_record.ExceptionCode=0x%x record_addr=0x%llx "
+                        "readback_ok=%d readback.ExceptionFlags=0x%x readback.ExceptionCode=0x%x\n",
+                        wow64_record.ExceptionFlags, wow64_record.ExceptionCode, static_cast<unsigned long long>(record_addr),
+                        readback.has_value() ? 1 : 0, readback ? readback->ExceptionFlags : 0, readback ? readback->ExceptionCode : 0);
+                fflush(stderr);
+            }
+
             const std::array<uint32_t, 2> args_frame = {static_cast<uint32_t>(record_addr), static_cast<uint32_t>(wow64_context_addr)};
             emu.write_memory(args_frame_addr, args_frame.data(), sizeof(args_frame));
 
