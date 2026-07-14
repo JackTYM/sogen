@@ -128,6 +128,23 @@ namespace sogen
             const auto total_size = initial_sp - new_sp;
             assert(total_size >= allocation_size);
 
+            // For a wow64 32-bit thread, ctx.Rsp still holds whatever cpu_context::save() captured
+            // from the currently-active (32-bit) engine - the guest's own small ESP, correctly reused
+            // by sync_wow64_cpu_reserved_context's make_wow64_context() for WOW64_CPURESERVED, but
+            // wrong for the CONTEXT64 record being written here: real wow64.dll's own context-
+            // translation code (reached from KiUserExceptionDispatcher via ntdll's internal function-
+            // pointer callback) reads CONTEXT.Rsp expecting the NATIVE 64-bit stack pointer, then
+            // computes a destination as `R14 - (CONTEXT.Rsp_low32 - current_esp)` before an internal
+            // memcpy - leaving the 32-bit ESP there makes that subtraction underflow (0x193fecc-ish
+            // vs. a ~0x7003fxxx native esp), producing a wild, sign-extended destination and a wild
+            // memory write deep inside real ntdll/wow64.dll code, confirmed via CI-side instruction
+            // tracing and disassembly. Correct it to the native stack location this frame is actually
+            // being written to.
+            if (is_bit32)
+            {
+                reinterpret_cast<CONTEXT64*>(pointers.ContextRecord)->Rsp = new_sp;
+            }
+
             fprintf(stderr,
                     "[EXCDIAG4] is_bit32=%d native_stack_top=0x%llx initial_sp=0x%llx allocation_size=0x%llx new_sp=0x%llx "
                     "dispatcher=0x%llx heaven_gate_code_base=0x%llx heaven_gate_stack_top=0x%llx\n",
