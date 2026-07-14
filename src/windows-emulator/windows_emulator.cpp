@@ -1300,7 +1300,7 @@ namespace sogen
                 // return address so the missing function's call site can be identified.
                 if (address < 0x1000)
                 {
-                    const auto eip_now = acting.reg<uint32_t>(x86_register::eip);
+                    const auto eip_now = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rip));
                     const auto fs_base = acting.get_segment_base(x86_register::fs);
                     const auto gs_base = acting.get_segment_base(x86_register::gs);
                     std::array<uint8_t, 12> eip_bytes{};
@@ -1322,7 +1322,7 @@ namespace sogen
                     fprintf(stderr, "\n");
                     fflush(stderr);
 
-                    const auto sp = acting.reg<uint32_t>(x86_register::esp);
+                    const auto sp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsp));
                     uint32_t return_address = 0;
                     if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
                     {
@@ -1414,10 +1414,14 @@ namespace sogen
                     }
 
                     fprintf(stderr, "[NULLDIAG] eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x esi=0x%x edi=0x%x ebp=0x%x esp=0x%x eip=0x%x\n",
-                            acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::ebx),
-                            acting.reg<uint32_t>(x86_register::ecx), acting.reg<uint32_t>(x86_register::edx),
-                            acting.reg<uint32_t>(x86_register::esi), acting.reg<uint32_t>(x86_register::edi),
-                            acting.reg<uint32_t>(x86_register::ebp), sp, acting.reg<uint32_t>(x86_register::eip));
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rax)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rbx)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rcx)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rdx)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsi)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rdi)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rbp)), sp,
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rip)));
                     fflush(stderr);
                 }
 
@@ -1481,7 +1485,7 @@ namespace sogen
                             fprintf(stderr, "\n");
                         }
 
-                        const auto esp_val = acting.reg<uint32_t>(x86_register::esp);
+                        const auto esp_val = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsp));
                         for (uint32_t off = 0; off < 0x60; off += 4)
                         {
                             uint32_t candidate = 0;
