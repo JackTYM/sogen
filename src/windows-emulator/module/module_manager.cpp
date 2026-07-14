@@ -658,8 +658,6 @@ namespace sogen
         });
         if (code_base)
         {
-            this->wow64_heaven_gate_code_base_ = *code_base;
-
             // KVM/Unicorn genuinely execute the trampoline's real machine code (a real CS-segment
             // mode switch via retf/iretq) - real|exec is correct and sufficient for them, so
             // register_gate_crossing is a no-op default there. A JIT-based backend (FEXCore)
@@ -697,14 +695,10 @@ namespace sogen
             }
         }
 
-        const auto stack_base = commit_with_retry(kStackBase, kStackSize, "WOW64 heaven gate stack", [&](uint64_t base) {
+        commit_with_retry(kStackBase, kStackSize, "WOW64 heaven gate stack", [&](uint64_t base) {
             std::vector<uint8_t> buffer(kStackSize, 0);
             return this->memory_->try_write_memory(base, buffer.data(), buffer.size());
         });
-        if (stack_base)
-        {
-            this->wow64_heaven_gate_stack_top_ = *stack_base + kStackSize;
-        }
     }
 
     void module_manager::ensure_kernelbase_nls_cache_hook(process_context& context)

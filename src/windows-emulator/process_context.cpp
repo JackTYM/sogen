@@ -594,6 +594,7 @@ namespace sogen
             if (ntdll32 != nullptr)
             {
                 this->rtl_user_thread_start32 = ntdll32->find_export("RtlUserThreadStart");
+                this->ki_user_exception_dispatcher32 = ntdll32->find_export("KiUserExceptionDispatcher");
             }
         }
 
@@ -712,6 +713,7 @@ namespace sogen
         buffer.write_optional(this->rtl_user_thread_start32);
         buffer.write(this->ki_user_apc_dispatcher);
         buffer.write(this->ki_user_exception_dispatcher);
+        buffer.write_optional(this->ki_user_exception_dispatcher32);
         buffer.write(this->ki_user_callback_dispatcher);
         buffer.write(this->instrumentation_callback);
         buffer.write(this->zw_callback_return);
@@ -803,6 +805,7 @@ namespace sogen
         buffer.read_optional(this->rtl_user_thread_start32);
         buffer.read(this->ki_user_apc_dispatcher);
         buffer.read(this->ki_user_exception_dispatcher);
+        buffer.read_optional(this->ki_user_exception_dispatcher32);
         buffer.read(this->ki_user_callback_dispatcher);
         buffer.read(this->instrumentation_callback);
         buffer.read(this->zw_callback_return);

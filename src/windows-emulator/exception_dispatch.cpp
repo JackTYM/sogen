@@ -5,7 +5,6 @@
 #include "windows_emulator.hpp"
 
 #include "segment_utils.hpp"
-#include "wow64_heaven_gate.hpp"
 
 namespace sogen
 {
@@ -94,8 +93,7 @@ namespace sogen
             uint64_t ss;
         };
 
-        void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher, const uint64_t heaven_gate_code_base,
-                                         const uint64_t heaven_gate_stack_top, const uint64_t native_stack_top,
+        void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher,
                                          const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
         {
             constexpr auto mach_frame_size = 0x40;
@@ -108,51 +106,11 @@ namespace sogen
 
             const auto allocation_size = combined_size + mach_frame_size;
 
-            // The stack this exception frame gets written to must NOT be read from the currently-active
-            // engine's rsp when a wow64 32-bit fault is being routed through the heaven's gate: the CPU
-            // is still running the 32-bit engine at this point, so its rsp is the guest's own (small)
-            // 32-bit ESP, not a stack large enough (or intended) to hold a CONTEXT64. Use the thread's
-            // own dedicated native (64-bit) stack instead - a region sogen itself allocates and always
-            // keeps valid, unlike a hardware register that a backend's own fault-delivery path could
-            // still leave stale (R14 holds the equivalent address on real Windows, per
-            // wow64!Wow64PrepareForException's own, separate CONTEXT.R14-based stack derivation - see
-            // fex_x86_64_emulator.cpp's perform_gate_crossing for why that register must independently
-            // stay valid across the crossing regardless of what basis is used here).
-            const auto cs_selector = emu.reg<uint16_t>(x86_register::cs);
-            const auto bitness = segment_utils::get_segment_bitness(emu, cs_selector);
-            const auto is_bit32 = bitness && *bitness == segment_utils::segment_bitness::bit32;
-
-            const auto initial_sp = is_bit32 ? native_stack_top : emu.reg(x86_register::rsp);
+            const auto initial_sp = emu.reg(x86_register::rsp);
             const auto new_sp = align_down(initial_sp - allocation_size, 0x100);
 
             const auto total_size = initial_sp - new_sp;
             assert(total_size >= allocation_size);
-
-            // For a wow64 32-bit thread, ctx.Rsp still holds whatever cpu_context::save() captured
-            // from the currently-active (32-bit) engine - the guest's own small ESP, correctly reused
-            // by sync_wow64_cpu_reserved_context's make_wow64_context() for WOW64_CPURESERVED, but
-            // wrong for the CONTEXT64 record being written here: real wow64.dll's own context-
-            // translation code (reached from KiUserExceptionDispatcher via ntdll's internal function-
-            // pointer callback) reads CONTEXT.Rsp expecting the NATIVE 64-bit stack pointer, then
-            // computes a destination as `R14 - (CONTEXT.Rsp_low32 - current_esp)` before an internal
-            // memcpy - leaving the 32-bit ESP there makes that subtraction underflow (0x193fecc-ish
-            // vs. a ~0x7003fxxx native esp), producing a wild, sign-extended destination and a wild
-            // memory write deep inside real ntdll/wow64.dll code, confirmed via CI-side instruction
-            // tracing and disassembly. Correct it to the native stack location this frame is actually
-            // being written to.
-            if (is_bit32)
-            {
-                reinterpret_cast<CONTEXT64*>(pointers.ContextRecord)->Rsp = new_sp;
-            }
-
-            fprintf(stderr,
-                    "[EXCDIAG4] is_bit32=%d native_stack_top=0x%llx initial_sp=0x%llx allocation_size=0x%llx new_sp=0x%llx "
-                    "dispatcher=0x%llx heaven_gate_code_base=0x%llx heaven_gate_stack_top=0x%llx\n",
-                    is_bit32 ? 1 : 0, static_cast<unsigned long long>(native_stack_top), static_cast<unsigned long long>(initial_sp),
-                    static_cast<unsigned long long>(allocation_size), static_cast<unsigned long long>(new_sp),
-                    static_cast<unsigned long long>(dispatcher), static_cast<unsigned long long>(heaven_gate_code_base),
-                    static_cast<unsigned long long>(heaven_gate_stack_top));
-            fflush(stderr);
 
             std::vector<uint8_t> zero_memory{};
             zero_memory.resize(static_cast<size_t>(total_size), 0);
@@ -181,19 +139,8 @@ namespace sogen
                 frame.eflags = record.EFlags;
             });
 
-            if (!is_bit32)
-            {
-                emu.reg(x86_register::rsp, new_sp);
-                emu.reg(x86_register::rip, dispatcher);
-                return;
-            }
-
-            emu.reg(x86_register::rax, dispatcher);
-            emu.reg(x86_register::rbx, new_sp);
-            emu.reg(x86_register::rcx, static_cast<uint64_t>(wow64::heaven_gate::kUserCodeSelector));
-            emu.reg(x86_register::rdx, static_cast<uint64_t>(wow64::heaven_gate::kUserStackSelector));
-            emu.reg(x86_register::rsp, heaven_gate_stack_top);
-            emu.reg(x86_register::rip, heaven_gate_code_base);
+            emu.reg(x86_register::rsp, new_sp);
+            emu.reg(x86_register::rip, dispatcher);
         }
 
         WOW64_CONTEXT make_wow64_context(const CONTEXT64& ctx)
@@ -235,6 +182,64 @@ namespace sogen
             static_assert(sizeof(xmm_state) <= sizeof(result.ExtendedRegisters));
             memcpy(result.ExtendedRegisters, &xmm_state, sizeof(xmm_state));
             return result;
+        }
+
+        EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>> make_wow64_exception_record(const exception_record& record)
+        {
+            EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>> result{};
+            result.ExceptionCode = record.ExceptionCode;
+            result.ExceptionFlags = record.ExceptionFlags;
+            result.ExceptionRecord = 0;
+            result.ExceptionAddress = static_cast<uint32_t>(record.ExceptionAddress);
+            result.NumberParameters = record.NumberParameters;
+            for (size_t i = 0; i < std::size(result.ExceptionInformation); ++i)
+            {
+                result.ExceptionInformation[i] = static_cast<uint32_t>(record.ExceptionInformation[i]);
+            }
+            return result;
+        }
+
+        // Real x86 ntdll.dll!KiUserExceptionDispatcher(PEXCEPTION_RECORD, PCONTEXT) is entered directly
+        // by the kernel (no `call`, no return address on the stack): confirmed via disassembly of the
+        // real 32-bit ntdll.dll that it reads `[esp+0]` as PEXCEPTION_RECORD and `[esp+4]` as PCONTEXT,
+        // then tail-calls the real RtlDispatchException with them. Since a wow64 thread's 32-bit
+        // ntdll.dll is genuine Windows code already mapped in guest memory, dispatch only has to hand
+        // control to it correctly - RtlDispatchException performs the real FS:[0] SEH chain walk and
+        // invokes the guest's actual handler(s) itself, with no need for sogen to reimplement any of
+        // that. A wow64 thread that faults while running 32-bit code never has to leave 32-bit mode for
+        // exception delivery at all (unlike the heaven's-gate-crossing dispatch_exception_pointers uses
+        // for genuinely 64-bit-mode faults) - this matches how the real kernel picks the dispatch entry
+        // point from the trap frame's Cs at fault time (Wow64SharedInformation, populated in
+        // module_manager.cpp, exists precisely so the kernel/wow64 layer knows this 32-bit address).
+        void dispatch_exception_pointers_wow64(x86_64_cpu& emu, const uint64_t dispatcher32,
+                                               const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
+        {
+            const auto& ctx = *reinterpret_cast<CONTEXT64*>(pointers.ContextRecord);
+            const auto& record = *reinterpret_cast<exception_record*>(pointers.ExceptionRecord);
+
+            const auto wow64_ctx = make_wow64_context(ctx);
+            const auto wow64_record = make_wow64_exception_record(record);
+
+            constexpr uint64_t args_frame_size = 8;
+            const uint64_t total_size = align_up(sizeof(wow64_ctx) + sizeof(wow64_record) + args_frame_size, 0x10);
+            const auto current_esp = ctx.Rsp & 0xFFFFFFFFu;
+            const auto new_esp = align_down(current_esp - total_size, 0x10);
+
+            const auto context_addr = new_esp;
+            const auto record_addr = context_addr + sizeof(wow64_ctx);
+            const auto args_frame_addr = record_addr + sizeof(wow64_record);
+
+            const emulator_object<WOW64_CONTEXT> context_obj{emu, context_addr};
+            context_obj.write(wow64_ctx);
+
+            const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>>> record_obj{emu, record_addr};
+            record_obj.write(wow64_record);
+
+            const std::array<uint32_t, 2> args_frame = {static_cast<uint32_t>(record_addr), static_cast<uint32_t>(context_addr)};
+            emu.write_memory(args_frame_addr, args_frame.data(), sizeof(args_frame));
+
+            emu.reg(x86_register::esp, args_frame_addr);
+            emu.reg(x86_register::eip, dispatcher32);
         }
 
         void sync_wow64_cpu_reserved_context(windows_emulator& win_emu, x86_64_cpu& emu, emulator_thread& thread, const CONTEXT64& ctx)
@@ -360,9 +365,18 @@ namespace sogen
         EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers{};
         pointers.ContextRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&ctx);
         pointers.ExceptionRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&record);
-        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher,
-                                    win_emu.mod_manager.wow64_heaven_gate_code_base(), win_emu.mod_manager.wow64_heaven_gate_stack_top(),
-                                    thread.stack_base + thread.stack_size, pointers);
+
+        const auto cs_selector = vcpu.cpu.reg<uint16_t>(x86_register::cs);
+        const auto bitness = segment_utils::get_segment_bitness(vcpu.cpu, cs_selector);
+        const auto is_bit32 = bitness && *bitness == segment_utils::segment_bitness::bit32;
+
+        if (is_bit32 && win_emu.process.ki_user_exception_dispatcher32)
+        {
+            dispatch_exception_pointers_wow64(vcpu.cpu, *win_emu.process.ki_user_exception_dispatcher32, pointers);
+            return;
+        }
+
+        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher, pointers);
     }
 
     void dispatch_access_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address, const memory_operation operation)
