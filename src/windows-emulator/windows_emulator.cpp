@@ -1184,8 +1184,9 @@ namespace sogen
             // ntdll+0x11ef0 (RCX=local-context-pointer, RDX=rsp) and branches on its boolean (AL)
             // return value - if AL==0, it falls straight through to preparing the NtRaiseException
             // call. This is almost certainly RtlDispatchException (or a thin wrapper around it) - the
-            // actual decision point. Capture its own code so it can be disassembled directly, same
-            // technique that found the CONTEXT.Rsp bug.
+            // actual decision point. A first, 0x200-byte capture only covered the function's prologue
+            // (stack-cookie setup and a conditional ETW trace-event block, gated on a PEB flag) - the
+            // real SEH-walking logic is further in; widened to 0x1000 bytes to reach it.
             if (mod.name == "ntdll.dll" && mod.machine == 0x8664 /*IMAGE_FILE_MACHINE_AMD64*/)
             {
                 const auto hook_addr = mod.image_base + 0x11ef0;
@@ -1193,7 +1194,7 @@ namespace sogen
                     auto& vcpu = this->vcpu(cpu.index());
                     auto& acting = vcpu.cpu;
 
-                    constexpr uint64_t k_window_size = 0x200;
+                    constexpr uint64_t k_window_size = 0x1000;
                     std::array<uint8_t, k_window_size> window{};
                     if (acting.try_read_memory(hook_addr, window.data(), window.size()))
                     {
