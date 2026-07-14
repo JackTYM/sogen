@@ -253,19 +253,15 @@ namespace sogen
         // causing it to retry its endpoint-activation loop until DSERR_PRIOLEVELNEEDED.
         // The registration must exist in both the native and WOW6432Node subtrees so 32-bit WoW64
         // dsound (which reads Wow6432Node) and any 64-bit callers both find it.
+        const auto to_reg_sz_bytes = [](const std::u16string_view str) {
+            const auto* ptr = reinterpret_cast<const std::byte*>(str.data());
+            return std::vector<std::byte>(ptr, ptr + (str.size() + 1) * sizeof(char16_t));
+        };
         const auto register_mmdevice_enumerator = [&](const std::filesystem::path& classes_root) {
             const std::string guid = "{BCDE0395-E52F-467C-8E3D-C4579291692E}";
             const auto clsid_key = this->create_key(utils::path_key{classes_root / "CLSID" / guid});
-            const auto dll_name_bytes = []() {
-                const std::u16string dll_u16 = u"mmdevapi.dll";
-                const auto* ptr = reinterpret_cast<const std::byte*>(dll_u16.data());
-                return std::vector<std::byte>(ptr, ptr + (dll_u16.size() + 1) * sizeof(char16_t));
-            }();
-            const auto threading_bytes = []() {
-                const std::u16string tm = u"Both";
-                const auto* ptr = reinterpret_cast<const std::byte*>(tm.data());
-                return std::vector<std::byte>(ptr, ptr + (tm.size() + 1) * sizeof(char16_t));
-            }();
+            const auto dll_name_bytes = to_reg_sz_bytes(u"mmdevapi.dll");
+            const auto threading_bytes = to_reg_sz_bytes(u"Both");
             const auto inproc_key = this->create_key(utils::path_key{classes_root / "CLSID" / guid / "InprocServer32"});
             this->set_value(inproc_key, "", 1 /* REG_SZ */, std::span<const std::byte>(dll_name_bytes));
             this->set_value(inproc_key, "ThreadingModel", 1 /* REG_SZ */, std::span<const std::byte>(threading_bytes));
