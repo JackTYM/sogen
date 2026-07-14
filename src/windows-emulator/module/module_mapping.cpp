@@ -718,8 +718,20 @@ namespace sogen
             }
 
             // 32-bit (WOW64) modules must stay below 4 GB; native modules use the 64-bit arena.
-            const uint64_t fallback_start =
-                (force_wow64cpu_32bit_va || is_32bit) ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
+            const bool needs_below_4gb = force_wow64cpu_32bit_va || is_32bit;
+            const uint64_t fallback_start = needs_below_4gb ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
+            // find_free_host_allocation_base's 2-arg overload has no ceiling at all (MAX_ALLOCATION_ADDRESS,
+            // effectively the top of the host-addressable range) - for a 32-bit module this can silently
+            // return an address above 4GB once the low arena fragments/fills (e.g. after enough
+            // load/unload churn forces repeated relocation), which then gets truncated to 32 bits by
+            // guest/WOW64 pointer marshaling and aliases onto whatever unrelated low allocation happens to
+            // sit at the truncated address - confirmed via CI as the root cause of a deterministic access
+            // violation inside ntdll during wow64-test-sample.exe's LoadLibraryA/FreeLibrary churn (a
+            // stable ntdll stack slot got silently overwritten). The heaven's-gate and native-wow64-stack
+            // call sites already learned this and pass an explicit below-4GB ceiling; this relocation
+            // fallback for 32-bit modules needed the same fix.
+            constexpr uint64_t below_4gb_ceiling = 0xFFFFFFFFULL;
+            const uint64_t highest_address = needs_below_4gb ? below_4gb_ceiling : MAX_ALLOCATION_ADDRESS;
             const auto image_size = static_cast<size_t>(binary.size_of_image);
 
             // The preferred base was taken, so relocate. find_free_host_allocation_base picks a base and
@@ -736,7 +748,7 @@ namespace sogen
             bool mapped = false;
             for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
             {
-                binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start);
+                binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start, highest_address);
                 if (!binary.image_base)
                 {
                     break;
