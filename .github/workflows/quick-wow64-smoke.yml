@@ -1,0 +1,213 @@
+# TEMPORARY dev-speed workflow: runs only the minimal job chain needed to validate the
+# wow64/FEX exception-dispatch fix (build-root-tools -> create-emulation-root -> build
+# [Windows x86 + macOS arm64] -> Smoke Test Windows x86 + Smoke Test FEX WoW64), skipping
+# the rest of the full matrix (Linux/Android/Emscripten/Python-wheel/etc.) so iteration
+# doesn't queue behind unrelated macOS-runner contention. Delete this file once the fix is
+# confirmed and the full ci-reusable.yml run is green.
+name: Quick WoW64 Smoke (temp)
+
+on:
+  push:
+    branches:
+      - fex-backend
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build-root-tools:
+    name: Build Root Tools
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Enable Developer Command Prompt (x86)
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x86
+
+      - name: Build 32-bit Vulkan Shim
+        run: cmake --preset=release && cmake --build --preset=release -t vulkan-shim
+
+      - name: Stash 32-bit Vulkan Shim
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path shims -Force | Out-Null
+          Copy-Item build/release/artifacts/vulkan-shim.dll shims/vulkan-shim-x86.dll -Force
+          Remove-Item build/release -Recurse -Force
+
+      - name: Enable Developer Command Prompt (x64)
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: Build API Set Dumper and 64-bit Vulkan Shim
+        run: cmake --preset=release && cmake --build --preset=release -t dump-apiset vulkan-shim
+
+      - name: Stage Vulkan Shims
+        shell: pwsh
+        run: |
+          Move-Item build/release/artifacts/vulkan-shim.dll build/release/artifacts/vulkan-shim-x64.dll -Force
+          Copy-Item shims/vulkan-shim-x86.dll build/release/artifacts/vulkan-shim-x86.dll -Force
+
+      - name: Upload Artifacts
+        uses: pyTooling/upload-artifact@v7
+        with:
+          name: Temp Root Build Tools
+          working-directory: build/release/artifacts/
+          path: "*"
+          retention-days: 1
+
+  create-emulation-root:
+    name: Create Emulation Root
+    runs-on: windows-2025
+    needs: [build-root-tools]
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v7
+
+      - name: Download DirectX Runtime
+        run: curl --connect-timeout 20 --max-time 200 --retry 5 --retry-delay 2 --retry-max-time 200 -L -o directx_Jun2010_redist.exe https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe
+
+      - name: Extract DirectX Runtime
+        run: 'cmd /c "start /wait directx_Jun2010_redist.exe /Q /T:${{github.workspace}}/dxrt"'
+
+      - name: Install DirectX Runtime
+        run: "cmd /c \"start /wait .\\dxrt\\dxsetup.exe /silent\""
+
+      - name: Download Root Build Tools
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Temp Root Build Tools
+          path: build/release/artifacts
+
+      - name: Create Emulation Root
+        run: src/tools/create-root.bat
+
+      - name: Dump API Set
+        run: cd root && ../build/release/artifacts/dump-apiset.exe
+
+      - name: Install DXVK and Vulkan Shim
+        shell: pwsh
+        run: ./src/tools/install-gpu-runtime.ps1 -WindowsDir root/filesys/c/windows -Shim64 build/release/artifacts/vulkan-shim-x64.dll -Shim32 build/release/artifacts/vulkan-shim-x86.dll
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Upload Artifacts
+        uses: pyTooling/upload-artifact@v7
+        with:
+          name: Windows 2025 Emulation Root
+          path: "*"
+          working-directory: root
+          retention-days: 1
+
+  build:
+    name: Build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - Windows x86
+          - macOS arm64
+        configuration:
+          - Release
+        include:
+          - configuration: Release
+            preset: release
+          - platform: Windows x86
+            runner: windows-latest
+            devcmd_arch: x86
+          - platform: macOS arm64
+            runner: macos-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Enable Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        if: ${{ startsWith(matrix.platform, 'Windows') }}
+        with:
+          arch: ${{ matrix.devcmd_arch }}
+
+      - name: CMake Build
+        run: cmake --preset=${{matrix.preset}} ${{matrix.cmake-options}} && cmake --build --preset=${{matrix.preset}}
+
+      - name: Upload Artifacts
+        uses: pyTooling/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }} ${{matrix.configuration}} Artifacts
+          working-directory: build/${{matrix.preset}}/artifacts/
+          path: "*"
+          retention-days: 1
+
+  smoke-test-win32:
+    name: Smoke Test Windows x86
+    runs-on: windows-latest
+    needs: [create-emulation-root, build]
+    steps:
+      - name: Download Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows x86 Release Artifacts
+          path: build/release/artifacts
+
+      - name: Download Emulation Root
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows 2025 Emulation Root
+          path: build/release/artifacts/root
+
+      - name: Copy Test Sample
+        run: cp build/release/artifacts/test-sample.exe build/release/artifacts/root/filesys/c/
+
+      - name: CMake Test
+        run: cd build/release/artifacts && ./analyzer.exe -e root c:/test-sample.exe
+        env:
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
+
+  smoke-test-fex-wow64:
+    name: Smoke Test FEX WoW64 (macOS arm64)
+    runs-on: macos-latest
+    needs: [create-emulation-root, build]
+    steps:
+      - name: Download WoW64 Test Guest
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows x86 Release Artifacts
+          path: build/release/artifacts/win32
+
+      - name: Download Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: macOS arm64 Release Artifacts
+          path: build/release/artifacts
+
+      - name: Download Emulation Root
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows 2025 Emulation Root
+          path: build/release/artifacts/root
+
+      - name: Stage WoW64 Test Guest
+        run: cp build/release/artifacts/win32/wow64-test-sample.exe build/release/artifacts/root/filesys/c/
+
+      - name: Run WoW64 Smoke Test
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 10
+          command: |
+            cd build/release/artifacts && chmod +x ./analyzer
+            ./analyzer -e root c:/wow64-test-sample.exe | tee wow64-smoke-test.log
+            grep -q 'wow64-test-sample: ok' wow64-smoke-test.log
+        env:
+          EMULATOR_FEX: "1"
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
