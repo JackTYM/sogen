@@ -1313,6 +1313,40 @@ namespace sogen
                         fflush(stderr);
                     });
                 }
+
+                // WOW64RECURSDIAG3: RtlDispatchException's own hook never fired (find_export returned
+                // 0 for it - likely not exported in this build), yet _except_handler4_common/
+                // UnhandledExceptionFilter are confirmed genuinely re-entered many times with a growing
+                // stack and no new dispatch_exception/NtContinue calls in between. RtlRaiseException
+                // (the implementation behind the RaiseException WinAPI) IS reliably exported and can
+                // call RtlDispatchException as an ordinary library function, entirely bypassing sogen's
+                // hardware-fault-detection hook - if something in the guest is calling it repeatedly,
+                // that would explain the whole observed pattern without any new hardware exception ever
+                // being redelivered.
+                const auto rtl_raise_addr = mod.find_export("RtlRaiseException");
+                if (rtl_raise_addr)
+                {
+                    this->emu().hook_memory_execution(rtl_raise_addr, [this](cpu_interface& cpu, uint64_t) {
+                        auto& vcpu = this->vcpu(cpu.index());
+                        auto& acting = vcpu.cpu;
+                        const auto esp = acting.reg<uint32_t>(x86_register::esp);
+
+                        uint32_t exception_record_ptr = 0;
+                        acting.try_read_memory(esp + 4, &exception_record_ptr, sizeof(exception_record_ptr));
+
+                        uint32_t exception_code = 0;
+                        acting.try_read_memory(exception_record_ptr, &exception_code, sizeof(exception_code));
+
+                        uint32_t return_addr = 0;
+                        acting.try_read_memory(esp, &return_addr, sizeof(return_addr));
+
+                        fprintf(stderr,
+                                "[WOW64RECURSDIAG3] RtlRaiseException entry: esp=0x%x ExceptionRecord=0x%x ExceptionCode=0x%x "
+                                "return_addr=0x%x\n",
+                                esp, exception_record_ptr, exception_code, return_addr);
+                        fflush(stderr);
+                    });
+                }
             }
 
             if (mod.name == "kernelbase.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
