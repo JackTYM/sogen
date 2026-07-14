@@ -1289,19 +1289,35 @@ namespace sogen
             if (mod.name == "ntdll.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
             {
                 // RtlDispatchException isn't exported in this build (find_export returns 0 for it,
-                // confirmed - the hook below never fired in several CI runs). Two independent
-                // disassembly passes of this emulation root's own ntdll.dll agree its entry sits
-                // exactly 0xDAFE bytes before KiUserExceptionDispatcher's within the same build -
-                // compute its address relative to that (exported) symbol instead of a hardcoded
-                // absolute RVA, since ntdll builds differ enough between local and CI environments
-                // that KiUserExceptionDispatcher's own RVA alone has already been observed to shift.
-                auto rtl_dispatch_addr = mod.find_export("RtlDispatchException");
-                if (!rtl_dispatch_addr)
+                // confirmed - the hook below never fired in several CI runs), and a hardcoded offset
+                // from KiUserExceptionDispatcher (confirmed via two local disassembly passes) ALSO
+                // never fired against this specific CI build's ntdll.dll, meaning the two builds don't
+                // share a stable relative layout either. Instead, disassemble KiUserExceptionDispatcher
+                // (whose own address IS reliably resolved via find_export) live, scanning for the exact
+                // byte sequence confirmed earlier for its "mov ecx,[esp+4]; mov ebx,[esp+0]; push ecx;
+                // push ebx; call RtlDispatchException" sequence, and decode the real call target from
+                // whatever bytes this specific build actually has - this is accurate regardless of how
+                // the two builds differ, since it reads the real, live, loaded code.
+                uint64_t rtl_dispatch_addr = 0;
+                const auto ki_user_exception_dispatcher_addr = mod.find_export("KiUserExceptionDispatcher");
+                if (ki_user_exception_dispatcher_addr)
                 {
-                    const auto ki_user_exception_dispatcher_addr = mod.find_export("KiUserExceptionDispatcher");
-                    if (ki_user_exception_dispatcher_addr > 0xDAFE)
+                    constexpr size_t k_scan_size = 0x100;
+                    std::array<uint8_t, k_scan_size> scan_buffer{};
+                    if (this->memory.try_read_memory(ki_user_exception_dispatcher_addr, scan_buffer.data(), scan_buffer.size()))
                     {
-                        rtl_dispatch_addr = ki_user_exception_dispatcher_addr - 0xDAFE;
+                        constexpr std::array<uint8_t, 10> k_pattern = {0x8B, 0x4C, 0x24, 0x04, 0x8B, 0x1C, 0x24, 0x51, 0x53, 0xE8};
+                        for (size_t i = 0; i + k_pattern.size() + 4 <= scan_buffer.size(); ++i)
+                        {
+                            if (std::equal(k_pattern.begin(), k_pattern.end(), scan_buffer.begin() + static_cast<ptrdiff_t>(i)))
+                            {
+                                const auto call_opcode_addr = ki_user_exception_dispatcher_addr + i + (k_pattern.size() - 1);
+                                int32_t displacement = 0;
+                                memcpy(&displacement, scan_buffer.data() + i + k_pattern.size(), sizeof(displacement));
+                                rtl_dispatch_addr = call_opcode_addr + 5 + static_cast<uint64_t>(displacement);
+                                break;
+                            }
+                        }
                     }
                 }
 
