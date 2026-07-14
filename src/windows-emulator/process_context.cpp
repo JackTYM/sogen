@@ -74,7 +74,24 @@ namespace sogen
         {
             uint64_t default_allocation_base =
                 (is_wow64_process == true) ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
-            uint64_t base = memory.find_free_allocation_base(size, default_allocation_base);
+
+            // For a WoW64 process, everything sub-allocated out of this allocator (PEB32, the cloned
+            // ApiSetMap, RTL_USER_PROCESS_PARAMETERS32, etc.) must be 32-bit addressable - process_context
+            // truncates this allocator's own base into 32-bit fields (e.g. p32.ApiSetMap =
+            // static_cast<uint32_t>(...)). The 2-arg find_free_allocation_base has no ceiling at all
+            // (defaults to MAX_ALLOCATION_END_EXCL - 1), so once the low ~4GB arena is tight enough (a
+            // WoW64 process maps ntdll32/kernel32/syswow64 modules, the GS segment, native/32-bit stacks,
+            // etc. before this runs), it can silently pick a base above 4GB - the subsequent uint32_t
+            // truncation then produces a garbage guest pointer. Confirmed via CI as the root cause of a
+            // deterministic access violation inside real ntdll's ApiSet-namespace binary search during
+            // wow64-test-sample.exe's LoadLibraryA("advapi32.dll") (a stable, real-ntdll comparison
+            // register held a wild, truncation-shaped table offset). Cap explicitly for the wow64 case,
+            // mirroring the same fix already applied to the module-relocation fallback
+            // (module_mapping.cpp) and the heaven's-gate/native-wow64-stack allocations.
+            constexpr uint64_t below_4gb_ceiling = 0xFFFFFFFFULL;
+            const uint64_t highest_address = is_wow64_process ? below_4gb_ceiling : MAX_ALLOCATION_ADDRESS;
+            uint64_t base = memory.find_free_allocation_base(size, default_allocation_base, ALLOCATION_GRANULARITY, MIN_ALLOCATION_ADDRESS,
+                                                             highest_address);
             bool allocated = memory.allocate_memory(base, size, memory_permission::read_write);
 
             if (!allocated)
