@@ -252,8 +252,10 @@ namespace sogen
                 fprintf(stderr,
                         "[NONCONTINUABLEDIAG] wow64_record.ExceptionFlags=0x%x wow64_record.ExceptionCode=0x%x record_addr=0x%llx "
                         "readback_ok=%d readback.ExceptionFlags=0x%x readback.ExceptionCode=0x%x\n",
-                        wow64_record.ExceptionFlags, wow64_record.ExceptionCode, static_cast<unsigned long long>(record_addr),
-                        readback.has_value() ? 1 : 0, readback ? readback->ExceptionFlags : 0, readback ? readback->ExceptionCode : 0);
+                        static_cast<unsigned int>(wow64_record.ExceptionFlags), static_cast<unsigned int>(wow64_record.ExceptionCode),
+                        static_cast<unsigned long long>(record_addr), readback.has_value() ? 1 : 0,
+                        static_cast<unsigned int>(readback ? readback->ExceptionFlags : 0),
+                        static_cast<unsigned int>(readback ? readback->ExceptionCode : 0));
                 fflush(stderr);
             }
 
