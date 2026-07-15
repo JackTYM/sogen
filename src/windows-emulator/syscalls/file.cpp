@@ -1694,6 +1694,22 @@ namespace sogen
             const auto attributes = object_attributes.read();
             auto filename = read_unicode_string(c.emu, attributes.ObjectName);
 
+            // APISETDIAG: sogen writes a sane, low PEB32.ApiSetMap value at process setup, but a live
+            // guest-side read at the advapi32.dll ApiSet crash shows it holding an unrelated ntdll-
+            // static-string address instead - something overwrites it between setup and the crash.
+            // NtCreateFile/NtOpenFile fires on every LoadLibrary's own file-open step (unlike guest-code
+            // execution hooks, which have proven unreliable for this investigation across 4 attempts),
+            // so poll the live value here on every file open to pin down exactly which DLL's load
+            // corrupts it.
+            if (c.proc.is_wow64_process && c.proc.peb32.has_value())
+            {
+                uint32_t live_apiset_map = 0;
+                const bool ok = c.emu.try_read_memory(c.proc.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
+                fprintf(stderr, "[APISETDIAG] NtCreateFile peb32.ApiSetMap=0x%x(ok=%d) opening=%s\n", live_apiset_map, ok ? 1 : 0,
+                        u16_to_u8(filename).c_str());
+                fflush(stderr);
+            }
+
             // Check for console device paths
             // Convert to uppercase for case-insensitive comparison
             std::u16string filename_upper = filename;
