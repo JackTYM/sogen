@@ -1536,29 +1536,41 @@ namespace sogen
                         const auto apiset_cmp_addr = section.region.start + i;
 
                         // APISETDIAG follow-up #2: hooking apiset_cmp_addr directly (a mid-function
-                        // instruction, not a function entry or branch target) found the pattern but the
-                        // hook NEVER fired across 5 CI retries - a live, still-unexplained precedent for
-                        // this exact failure mode already exists this session (an earlier
-                        // KiUserExceptionDispatcher+0x4A mid-function hook also never fired, while every
-                        // hook placed at a real function entry via find_export has fired reliably).
-                        // hook_memory_execution most likely only reliably triggers at genuine basic-block
-                        // boundaries under this backend, not arbitrary mid-block addresses. Scan backward
-                        // from the confirmed compare instruction for the nearest "push ebp; mov ebp,esp"
-                        // (55 8B EC) - an extremely common, low-risk-of-false-match function prologue
-                        // sequence - and hook THAT instead, reading ecx (the fastcall first argument,
-                        // structPtr, per the confirmed calling convention) directly at entry, before any
-                        // internal register reuse could touch it.
-                        constexpr std::array<uint8_t, 3> k_prologue_pattern = {0x55, 0x8B, 0xEC};
-                        constexpr size_t k_prologue_search_window = 0x100;
+                        // instruction found only by byte-pattern matching, not by decoding a real
+                        // control-flow instruction) found the pattern but the hook NEVER fired across 5
+                        // CI retries. A "search backward for a generic push-ebp/mov-ebp,esp prologue"
+                        // follow-up ALSO never fired - a 3-byte pattern is too weak a signal; it likely
+                        // matched an unrelated, coincidental byte sequence rather than the true entry.
+                        // The one address family that HAS fired reliably all session is either a
+                        // find_export result, or - critically - RtlDispatchException's address, which
+                        // was found not by matching bytes AT that location, but by DECODING A REAL "call
+                        // rel32" INSTRUCTION's own displacement elsewhere. That target is, by
+                        // construction, a genuine control-flow destination the JIT necessarily treats as
+                        // a real block boundary (something actually calls it). Apply the same technique
+                        // here: scan for "E8 <rel32>" (call) instructions anywhere in this section, decode
+                        // each one's target, and keep the one whose target falls just before
+                        // apiset_cmp_addr (within a function-sized window) - that's a real caller's "call
+                        // ApiSetpSearchForApiSet" instruction, and its decoded target is a genuine call
+                        // destination, not a guessed byte-pattern location.
+                        constexpr size_t k_entry_search_window = 0x300;
                         uint64_t apiset_entry_addr = 0;
-                        const size_t search_start = i >= k_prologue_search_window ? i - k_prologue_search_window : 0;
-                        for (size_t j = i; j-- > search_start;)
+                        const size_t search_start = i >= k_entry_search_window ? i - k_entry_search_window : 0;
+                        for (size_t j = search_start; j + 5 <= code.size() && j < i; ++j)
                         {
-                            if (j + k_prologue_pattern.size() <= code.size() &&
-                                std::equal(k_prologue_pattern.begin(), k_prologue_pattern.end(), code.begin() + static_cast<ptrdiff_t>(j)))
+                            if (code[j] != 0xE8)
                             {
-                                apiset_entry_addr = section.region.start + j;
-                                break;
+                                continue;
+                            }
+
+                            int32_t displacement = 0;
+                            memcpy(&displacement, code.data() + j + 1, sizeof(displacement));
+                            const auto call_target =
+                                section.region.start + j + 5 + static_cast<uint64_t>(static_cast<int64_t>(displacement));
+
+                            if (call_target > apiset_entry_addr && call_target <= apiset_cmp_addr &&
+                                call_target >= apiset_cmp_addr - k_entry_search_window)
+                            {
+                                apiset_entry_addr = call_target;
                             }
                         }
 
