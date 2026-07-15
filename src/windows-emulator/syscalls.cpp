@@ -990,8 +990,30 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtQueryInformationJobObject()
+        NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle /*job_handle*/,
+                                                    const uint32_t /*job_object_information_class*/, const uint64_t job_object_information,
+                                                    const uint32_t job_object_information_length,
+                                                    const emulator_object<uint32_t> return_length)
         {
+            // This stub previously took no parameters at all, meaning the guest's own output buffer
+            // was never touched - the exact same class of bug already found and fixed for
+            // NtTraceControl (trace.cpp's handle_trace_control_passthrough): the caller trusts
+            // JobObjectInformation as populated once STATUS_SUCCESS/an expected status is seen, but
+            // real Windows code can also read from it on OTHER return paths (e.g. IsProcessInJob-style
+            // wrappers built on this syscall), misinterpreting leftover garbage as real counts/offsets.
+            // Zero-fill it regardless of what status is returned, mirroring the already-proven-safe
+            // pattern - real job-object query structures all treat an all-zero result as "not in a job/
+            // nothing to report" rather than a valid entry.
+            if (job_object_information != 0 && job_object_information_length != 0)
+            {
+                c.emu.set_memory(job_object_information, 0, job_object_information_length);
+            }
+
+            if (return_length)
+            {
+                return_length.write(0);
+            }
+
             return STATUS_NOT_SUPPORTED;
         }
 
