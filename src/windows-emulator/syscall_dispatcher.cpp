@@ -11,6 +11,41 @@ namespace sogen
 
     namespace
     {
+        // APISETDIAG: printing on every syscall unconditionally flooded the log without ever reaching
+        // the crash (the gap between VCRUNTIME140.dll's file open and the actual fault turned out to
+        // be well over a million log lines / thousands of syscalls, not the few hundred assumed
+        // earlier). Keep only a small ring of the most recent {syscall, ApiSetMap value} pairs instead,
+        // and dump it on demand from the fault handler - this bounds the log size regardless of how
+        // long the run is, while still capturing exactly what led up to the crash.
+        struct apiset_diag_entry
+        {
+            const char* syscall_name;
+            uint32_t apiset_map;
+            bool ok;
+        };
+
+        std::mutex g_apiset_diag_mutex;
+        std::array<apiset_diag_entry, 64> g_apiset_diag_ring{};
+        size_t g_apiset_diag_index = 0;
+    } // namespace
+
+    void dump_apiset_diag_ring()
+    {
+        const std::scoped_lock lock(g_apiset_diag_mutex);
+        const auto count = std::min<size_t>(g_apiset_diag_index, g_apiset_diag_ring.size());
+        const auto start_index = g_apiset_diag_index >= g_apiset_diag_ring.size() ? g_apiset_diag_index : 0;
+        fprintf(stderr, "[APISETDIAG] ring dump (last %zu syscalls, oldest first):\n", count);
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto& entry = g_apiset_diag_ring[(start_index + i) % g_apiset_diag_ring.size()];
+            fprintf(stderr, "[APISETDIAG]   [%zu] %s peb32.ApiSetMap=0x%x(ok=%d)\n", i, entry.syscall_name, entry.apiset_map,
+                    entry.ok ? 1 : 0);
+        }
+        fflush(stderr);
+    }
+
+    namespace
+    {
         // Real ntdll's RtlpInitCodePageTables (called once, early, from LdrpInitializeNlsInfo) is
         // supposed to always leave this internal global (real ntdll's own "GlobalRtlNlsState +
         // 0x90"-offset field, consumed directly by RtlConsoleMultiByteToUnicodeN/
@@ -155,19 +190,17 @@ namespace sogen
         // NtProtectVirtualMemory call polled during the wow64-test-sample.exe advapi32.dll ApiSet
         // crash investigation, including the last one (VCRUNTIME140.dll's own file open) - the
         // corruption happens purely in guest-code execution between syscalls, not during any syscall
-        // itself. Poll on EVERY syscall once g_apiset_diag_active flips (right after that file open)
-        // to bracket the exact syscall boundary the corrupting guest code falls between.
+        // itself. Printing unconditionally on every syscall flooded the log without ever reaching the
+        // crash (the gap between that file open and the fault turned out to be well over a million log
+        // lines / thousands of syscalls). Push into a small ring buffer instead, dumped on demand from
+        // the fault handler - this bounds the log size regardless of run length.
         if (context.is_wow64_process && context.peb32.has_value() && g_apiset_diag_active.load())
         {
-            static std::atomic<int> counter{0};
-            if (counter.fetch_add(1) < 400)
-            {
-                uint32_t live_apiset_map = 0;
-                const bool ok = emu.try_read_memory(context.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
-                fprintf(stderr, "[APISETDIAG] dispatch %s (0x%x) peb32.ApiSetMap=0x%x(ok=%d)\n", syscall_name, syscall_id, live_apiset_map,
-                        ok ? 1 : 0);
-                fflush(stderr);
-            }
+            uint32_t live_apiset_map = 0;
+            const bool ok = emu.try_read_memory(context.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
+            const std::scoped_lock lock(g_apiset_diag_mutex);
+            g_apiset_diag_ring[g_apiset_diag_index % g_apiset_diag_ring.size()] = {syscall_name, live_apiset_map, ok};
+            ++g_apiset_diag_index;
         }
 
         try

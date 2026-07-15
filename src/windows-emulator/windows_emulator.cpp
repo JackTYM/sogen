@@ -20,6 +20,10 @@
 
 namespace sogen
 {
+    // APISETDIAG: defined in syscall_dispatcher.cpp, dumps the ring buffer of recent
+    // {syscall, PEB32.ApiSetMap} pairs accumulated since VCRUNTIME140.dll's file open.
+    void dump_apiset_diag_ring();
+
     constexpr auto MAX_INSTRUCTIONS_PER_TIME_SLICE = 0x20000;
     constexpr auto MAX_BASIC_BLOCKS_PER_TIME_SLICE = 0x8000;
 
@@ -2026,6 +2030,12 @@ namespace sogen
                     // module) to identify the real calling function without symbols.
                     if (cs_val == 0x23)
                     {
+                        // APISETDIAG: dump the ring buffer of recent {syscall, PEB32.ApiSetMap} values
+                        // accumulated since VCRUNTIME140.dll's file open - the transition point (last
+                        // correct value, first wrong one) pinpoints which specific syscall the
+                        // corrupting guest code runs right after.
+                        dump_apiset_diag_ring();
+
                         // APISETDIAG: compare what sogen wrote into PEB32.ApiSetMap at process setup
                         // (printed separately in process_context.cpp) against what the guest's own
                         // TEB32->PEB32 chain actually reads for it right now, at the fault - a mismatch
