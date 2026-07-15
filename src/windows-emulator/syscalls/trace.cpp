@@ -91,8 +91,9 @@ namespace sogen
                 fprintf(stderr,
                         "[APISETWATCH] NtTraceControl function_code=0x%x base=0x%x input_buffer=0x%llx "
                         "input_buffer_length=%u output_buffer=0x%llx output_buffer_length=%u\n",
-                        function_code, base_function_code, static_cast<unsigned long long>(input_buffer), input_buffer_length,
-                        static_cast<unsigned long long>(output_buffer), output_buffer_length);
+                        static_cast<unsigned int>(function_code), static_cast<unsigned int>(base_function_code),
+                        static_cast<unsigned long long>(input_buffer), static_cast<unsigned int>(input_buffer_length),
+                        static_cast<unsigned long long>(output_buffer), static_cast<unsigned int>(output_buffer_length));
                 fflush(stderr);
             }
 

@@ -1497,159 +1497,12 @@ namespace sogen
                     });
                 }
 
-                // APISETDIAG: ApiSetpSearchForApiSet (real ntdll's ApiSet-namespace binary-search
-                // helper) is not exported, and its non-exported callers are 2-3 levels deep from any
-                // exported entry point, so it can't be resolved via find_export or a short byte-scan
-                // from a known anchor. Four independent, well-reasoned allocation/sizing fixes
-                // (apiset::clone's ValueCount==0 skip, NtTraceControl's uninitialized output buffer,
-                // the module-relocation 4GB ceiling, the PEB-segment-allocator 4GB ceiling) have all
-                // had zero effect on a deterministic access violation inside this exact function during
-                // LoadLibraryA("advapi32.dll") - a live disassembly confirmed the crash-matching compare
-                // (`cmp ecx,[edx+ebx]`) should have ebx hold structPtr (the ApiSetNamespace pointer,
-                // stable across the whole call, restored from a spill slot right before the search
-                // loop), yet the fault shows ebx holding an unrelated ntdll-static string address
-                // instead. Rather than keep guessing further upstream, byte-scan ntdll32's own code for
-                // the exact instruction sequence already captured at the fault site in every CI
-                // reproduction so far, and hook it LIVE (non-crashing) to log ecx/edx/ebx on every
-                // invocation - not just the fatal one - so the first several (successful) lookups for
-                // shell32.dll/ole32.dll/gdi32.dll/user32.dll can be compared directly against the
-                // failing advapi32.dll one, revealing whether structPtr is already wrong on every call
-                // (a one-time setup bug) or only breaks for this specific one (a per-call marshaling
-                // bug).
-                // APISETDIAG follow-up: an earlier version of this scan filtered sections by
-                // is_executable(section.region.permissions) and found nothing, even though the fault
-                // site (captured via NULLDIAG3) proves this exact byte pattern both exists and executes
-                // - meaning on_module_load's own section-permission snapshot for ntdll.dll is stale
-                // relative to whatever final protections get applied afterward (a common PE-loading
-                // pattern: broad initial mapping permissions, hardened later). Read every section
-                // unconditionally instead - this only reads bytes to find a pattern, it never executes
-                // anything at scan time, so the permission filter was an optimization, not a
-                // correctness requirement.
-                constexpr std::array<uint8_t, 7> k_apiset_cmp_pattern = {0x3B, 0x0C, 0x1A, 0x72, 0x13, 0x76, 0x16};
-                size_t apiset_scanned_bytes = 0;
-                size_t apiset_matches_found = 0;
-                for (const auto& section : mod.sections)
-                {
-                    std::vector<uint8_t> code(section.region.length);
-                    if (!this->memory.try_read_memory(section.region.start, code.data(), code.size()))
-                    {
-                        continue;
-                    }
-                    apiset_scanned_bytes += code.size();
-
-                    for (size_t i = 0; i + k_apiset_cmp_pattern.size() <= code.size(); ++i)
-                    {
-                        if (!std::equal(k_apiset_cmp_pattern.begin(), k_apiset_cmp_pattern.end(), code.begin() + static_cast<ptrdiff_t>(i)))
-                        {
-                            continue;
-                        }
-
-                        ++apiset_matches_found;
-                        const auto apiset_cmp_addr = section.region.start + i;
-
-                        // APISETDIAG follow-up #2: hooking apiset_cmp_addr directly (a mid-function
-                        // instruction found only by byte-pattern matching, not by decoding a real
-                        // control-flow instruction) found the pattern but the hook NEVER fired across 5
-                        // CI retries. A "search backward for a generic push-ebp/mov-ebp,esp prologue"
-                        // follow-up ALSO never fired - a 3-byte pattern is too weak a signal; it likely
-                        // matched an unrelated, coincidental byte sequence rather than the true entry.
-                        // The one address family that HAS fired reliably all session is either a
-                        // find_export result, or - critically - RtlDispatchException's address, which
-                        // was found not by matching bytes AT that location, but by DECODING A REAL "call
-                        // rel32" INSTRUCTION's own displacement elsewhere. That target is, by
-                        // construction, a genuine control-flow destination the JIT necessarily treats as
-                        // a real block boundary (something actually calls it). Apply the same technique
-                        // here: scan for "E8 <rel32>" (call) instructions anywhere in this section, decode
-                        // each one's target, and keep the one whose target falls just before
-                        // apiset_cmp_addr (within a function-sized window) - that's a real caller's "call
-                        // ApiSetpSearchForApiSet" instruction, and its decoded target is a genuine call
-                        // destination, not a guessed byte-pattern location.
-                        constexpr size_t k_entry_search_window = 0x300;
-                        uint64_t apiset_entry_addr = 0;
-                        const size_t search_start = i >= k_entry_search_window ? i - k_entry_search_window : 0;
-                        for (size_t j = search_start; j + 5 <= code.size() && j < i; ++j)
-                        {
-                            if (code[j] != 0xE8)
-                            {
-                                continue;
-                            }
-
-                            int32_t displacement = 0;
-                            memcpy(&displacement, code.data() + j + 1, sizeof(displacement));
-                            const auto call_target =
-                                section.region.start + j + 5 + static_cast<uint64_t>(static_cast<int64_t>(displacement));
-
-                            if (call_target > apiset_entry_addr && call_target <= apiset_cmp_addr &&
-                                call_target >= apiset_cmp_addr - k_entry_search_window)
-                            {
-                                apiset_entry_addr = call_target;
-                            }
-                        }
-
-                        if (apiset_entry_addr)
-                        {
-                            this->emu().hook_memory_execution(apiset_entry_addr, [this, apiset_entry_addr](cpu_interface& cpu, uint64_t) {
-                                static std::atomic<int> counter{0};
-                                if (counter.fetch_add(1) >= 300)
-                                {
-                                    return;
-                                }
-
-                                auto& vcpu = this->vcpu(cpu.index());
-                                auto& acting = vcpu.cpu;
-                                const auto ecx = acting.reg<uint32_t>(x86_register::ecx);
-                                const auto edx = acting.reg<uint32_t>(x86_register::edx);
-                                const auto esp = acting.reg<uint32_t>(x86_register::esp);
-
-                                char name_buffer[32] = {};
-                                acting.try_read_memory(edx, name_buffer, sizeof(name_buffer) - 2);
-
-                                fprintf(stderr,
-                                        "[APISETDIAG] #%d entry@0x%llx: ecx(structPtr)=0x%x edx(pName)=0x%x esp=0x%x "
-                                        "name_at_edx=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                                        counter.load(), static_cast<unsigned long long>(apiset_entry_addr), ecx, edx, esp,
-                                        static_cast<uint8_t>(name_buffer[0]), static_cast<uint8_t>(name_buffer[1]),
-                                        static_cast<uint8_t>(name_buffer[2]), static_cast<uint8_t>(name_buffer[3]),
-                                        static_cast<uint8_t>(name_buffer[4]), static_cast<uint8_t>(name_buffer[5]),
-                                        static_cast<uint8_t>(name_buffer[6]), static_cast<uint8_t>(name_buffer[7]));
-                                fflush(stderr);
-                            });
-                        }
-
-                        this->emu().hook_memory_execution(apiset_cmp_addr, [this, apiset_cmp_addr](cpu_interface& cpu, uint64_t) {
-                            static std::atomic<int> counter{0};
-                            if (counter.fetch_add(1) >= 300)
-                            {
-                                return;
-                            }
-
-                            auto& vcpu = this->vcpu(cpu.index());
-                            auto& acting = vcpu.cpu;
-                            const auto ecx = acting.reg<uint32_t>(x86_register::ecx);
-                            const auto edx = acting.reg<uint32_t>(x86_register::edx);
-                            const auto ebx = acting.reg<uint32_t>(x86_register::ebx);
-                            const auto esp = acting.reg<uint32_t>(x86_register::esp);
-                            const auto ebp = acting.reg<uint32_t>(x86_register::ebp);
-
-                            char name_buffer[32] = {};
-                            acting.try_read_memory(ebx, name_buffer, sizeof(name_buffer) - 2);
-
-                            fprintf(stderr,
-                                    "[APISETDIAG] #%d cmp@0x%llx: ecx=0x%x edx=0x%x ebx=0x%x esp=0x%x ebp=0x%x "
-                                    "bytes_at_ebx=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                                    counter.load(), static_cast<unsigned long long>(apiset_cmp_addr), ecx, edx, ebx, esp, ebp,
-                                    static_cast<uint8_t>(name_buffer[0]), static_cast<uint8_t>(name_buffer[1]),
-                                    static_cast<uint8_t>(name_buffer[2]), static_cast<uint8_t>(name_buffer[3]),
-                                    static_cast<uint8_t>(name_buffer[4]), static_cast<uint8_t>(name_buffer[5]),
-                                    static_cast<uint8_t>(name_buffer[6]), static_cast<uint8_t>(name_buffer[7]));
-                            fflush(stderr);
-                        });
-                    }
-                }
-
-                fprintf(stderr, "[APISETDIAG] scan complete: sections=%zu scanned_bytes=%zu pattern_matches=%zu\n", mod.sections.size(),
-                        apiset_scanned_bytes, apiset_matches_found);
-                fflush(stderr);
+                // APISETDIAG byte-scan (ApiSetpSearchForApiSet execution hooks): removed - confirmed
+                // across 4 independent placement attempts to never fire under the FEX backend, which
+                // only accepts execution hooks for API compatibility and never actually calls them
+                // (fex_x86_64_emulator.cpp's hook_interface comment). Root-cause investigation for the
+                // advapi32.dll ApiSet crash continues via syscall-boundary and stack-layout analysis
+                // instead (see syscall_dispatcher.cpp's ring buffer and file.cpp's diagnostics).
             }
 
             if (mod.name == "kernelbase.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
@@ -2180,7 +2033,7 @@ namespace sogen
                         // Walk the real EBP frame-pointer chain (a direct, verified technique, not a
                         // stack-scan heuristic that could land on stale/unrelated data) to find the
                         // actual caller and its own arguments/frame.
-                        uint32_t walk_ebp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rbp));
+                        auto walk_ebp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rbp));
                         for (int frame = 0; frame < 4 && walk_ebp; ++frame)
                         {
                             uint32_t saved_ebp = 0;
