@@ -9,6 +9,7 @@
 
 #include <utils/io.hpp>
 #include <utils/buffer_accessor.hpp>
+#include <random>
 #include <regex>
 #include <sstream>
 
@@ -357,6 +358,20 @@ namespace sogen
         this->console_handle = this->devices.store(std::move(console));
 
         this->sid = get_sid(win_emu.registry);
+
+        // Real Windows assigns a genuine random per-process cookie here, used by ntdll's
+        // RtlEncodePointer/RtlDecodePointer-style rotate+xor pointer obfuscation (e.g.
+        // RtlUserThreadStart's own top-level SEH filter decodes _RtlpUnhandledExceptionFilter's
+        // stored pointer with it). A fixed/predictable value here breaks that round-trip for any
+        // code path relying on it. Zero is deliberately excluded: RtlEncodePointer/DecodePointer
+        // special-case a NULL pointer to pass through unencoded, and several ntdll internals rely
+        // on that - a zero cookie would make every encoded-zero value decode to zero too by
+        // coincidence, masking the same bug for a NULL-pointer case specifically.
+        {
+            std::random_device rd;
+            std::uniform_int_distribution<uint32_t> cookie_dist(1, 0xFFFFFFFFu);
+            this->process_cookie = cookie_dist(rd);
+        }
 
         // notify_process_bitness() already ran from module_manager::map_main_modules(), before any
         // module (including this process's own executable) was mapped - see its doc comment.

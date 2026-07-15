@@ -386,6 +386,14 @@ namespace sogen
         // WOW64 support flag - set during process setup based on executable architecture
         bool is_wow64_process{false};
 
+        // Per-process random cookie for NtQueryInformationProcess's ProcessCookie class - real
+        // Windows assigns this once, at process creation, and every subsequent query returns the
+        // same value (ntdll's own RtlpGetCookieValue caches it after the first query). Guest code
+        // uses this to obfuscate function pointers via RtlEncodePointer/RtlDecodePointer-style
+        // rotate+xor schemes; a real random value here is required for those to round-trip
+        // correctly. Generated once during process setup.
+        uint32_t process_cookie{};
+
         callbacks* callbacks_{};
 
         std::vector<uint8_t> sid{};
