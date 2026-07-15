@@ -414,25 +414,28 @@ namespace sogen
             is_debug_exception = dispatch_debug_exception(win_emu, ctx, record);
         }
 
-        // x86 INT3 is a trap, not a fault: real hardware's own trap frame naturally contains the
-        // address AFTER the 1-byte 0xCC as the resume point - confirmed via disassembly of the real
-        // 32-bit ntdll's KiUserExceptionDispatcher (ZwContinue resumes at ContextRecord->Eip
-        // completely unadjusted) and kernelbase's UnhandledExceptionFilter (its registered-callback-
-        // invocation path never touches Eip either). Real NT sets ExceptionRecord->ExceptionAddress to
-        // the int3's own address (record.ExceptionAddress, captured below, deliberately keeps the
-        // value above unadjusted for that) but leaves ContextRecord->Eip already one past it. Without
-        // this, a wow64 guest's EXCEPTION_CONTINUE_EXECUTION resume via NtContinue lands back on the
-        // same int3 and re-faults forever - observed as an unbounded wow64 KiUserExceptionDispatcher/
-        // UnhandledExceptionFilter recursion after a handled STATUS_BREAKPOINT. Scoped to the wow64
-        // 32-bit dispatch path only (confirmed by disassembly of the 32-bit dispatcher specifically) -
-        // applying it to the native 64-bit path as well regressed test-sample.exe's own exception
-        // tests, so whatever the native 64-bit KiUserExceptionDispatcher/UnhandledExceptionFilter does
-        // instead must already account for this itself. Excludes the dispatch_debug_exception (int
-        // 2dh) case above, which already advances ctx.Rip past its own, differently-sized instruction.
+        // ContextRecord->Eip must reach the guest's first-chance handler UNADJUSTED (the int3's own
+        // address), matching the general real-hardware/NT contract documented on
+        // reports_breakpoint_rip_past_instruction() above and on every other backend (KVM/WHP/
+        // Unicorn already report the unadjusted address; only FEX needed the -1 correction just
+        // above). A previous version of this code added a wow64-32-bit-only +1 pre-advance here,
+        // reasoning that ContextRecord->Eip arrives "already one past" the int3 for wow64 - this
+        // directly contradicted the general contract two paragraphs up and was disproven live: with
+        // it in place, test-sample.exe's own test_unhandled_exception() (its top-level filter does
+        // `ContextRecord->Eip += 1` itself, exactly the self-adjustment the general contract expects
+        // callers to make) ends up double-advanced by 2 bytes total, landing execution mid-instruction
+        // one byte into whatever follows the int3 - confirmed via a live GDB-stub session (breakpoints
+        // on RtlDispatchException/RtlpExecuteHandlerForException/__except_handler4 in the real syswow64
+        // ntdll.dll) that this is exactly what produces the observed STATUS_NONCONTINUABLE_EXCEPTION
+        // (0xc0000025) infinite recursion: the corrupted resume raises a new exception whose handler
+        // (ntdll's own __except_handler4) returns ExceptionContinueExecution for it, which
+        // RtlDispatchException correctly refuses (since EXCEPTION_NONCONTINUABLE is set) by raising a
+        // fresh STATUS_NONCONTINUABLE_EXCEPTION - recursing until the stack is exhausted. Excludes the
+        // dispatch_debug_exception (int 2dh) case above, which already advances ctx.Rip past its own,
+        // differently-sized instruction.
         const auto cs_selector = vcpu.cpu.reg<uint16_t>(x86_register::cs);
         const auto bitness = segment_utils::get_segment_bitness(vcpu.cpu, cs_selector);
         const auto is_bit32 = bitness && *bitness == segment_utils::segment_bitness::bit32;
-        const auto breakpoint_resume_rip = (status == STATUS_BREAKPOINT && !is_debug_exception && is_bit32) ? ctx.Rip + 1 : ctx.Rip;
 
         if (!is_debug_exception)
         {
@@ -450,7 +453,6 @@ namespace sogen
         }
 
         record.ExceptionAddress = ctx.Rip;
-        ctx.Rip = breakpoint_resume_rip;
 
         sync_wow64_cpu_reserved_context(win_emu, vcpu.cpu, thread, ctx);
 
