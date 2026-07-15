@@ -15,6 +15,10 @@
 
 namespace sogen
 {
+    // APISETDIAG: set once VCRUNTIME140.dll's file open is seen, so syscall_dispatcher::dispatch can
+    // poll PEB32.ApiSetMap on every subsequent syscall to bracket the exact syscall boundary a
+    // deterministic guest-code corruption falls between.
+    std::atomic<bool> g_apiset_diag_active{false};
 
     namespace syscalls
     {
@@ -1700,14 +1704,26 @@ namespace sogen
             // NtCreateFile/NtOpenFile fires on every LoadLibrary's own file-open step (unlike guest-code
             // execution hooks, which have proven unreliable for this investigation across 4 attempts),
             // so poll the live value here on every file open to pin down exactly which DLL's load
-            // corrupts it.
+            // corrupts it. Confirmed via CI: stays correct through every file open, including the last
+            // one (VCRUNTIME140.dll) before the crash - the corruption happens purely in guest-code
+            // execution, without any of NtCreateFile/NtMapViewOfSection/NtProtectVirtualMemory/
+            // NtContinue's own reverse-gate (all separately ruled out). Flip a global flag once
+            // VCRUNTIME140.dll's file open is seen so syscall_dispatcher::dispatch can poll on EVERY
+            // subsequent syscall (not just these three), to bracket the exact syscall boundary the
+            // corrupting guest code falls between.
             if (c.proc.is_wow64_process && c.proc.peb32.has_value())
             {
                 uint32_t live_apiset_map = 0;
                 const bool ok = c.emu.try_read_memory(c.proc.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
+                const auto filename_u8 = u16_to_u8(filename);
                 fprintf(stderr, "[APISETDIAG] NtCreateFile peb32.ApiSetMap=0x%x(ok=%d) opening=%s\n", live_apiset_map, ok ? 1 : 0,
-                        u16_to_u8(filename).c_str());
+                        filename_u8.c_str());
                 fflush(stderr);
+
+                if (filename_u8.find("VCRUNTIME140") != std::string::npos)
+                {
+                    g_apiset_diag_active.store(true);
+                }
             }
 
             // Check for console device paths

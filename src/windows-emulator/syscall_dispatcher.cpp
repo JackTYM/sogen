@@ -6,6 +6,8 @@
 
 namespace sogen
 {
+    // APISETDIAG: defined in syscalls/file.cpp, set once VCRUNTIME140.dll's file open is seen.
+    extern std::atomic<bool> g_apiset_diag_active;
 
     namespace
     {
@@ -148,6 +150,25 @@ namespace sogen
             .proc = context,
             .write_status = true,
         };
+
+        // APISETDIAG: PEB32.ApiSetMap stays correct through every NtCreateFile/NtMapViewOfSection/
+        // NtProtectVirtualMemory call polled during the wow64-test-sample.exe advapi32.dll ApiSet
+        // crash investigation, including the last one (VCRUNTIME140.dll's own file open) - the
+        // corruption happens purely in guest-code execution between syscalls, not during any syscall
+        // itself. Poll on EVERY syscall once g_apiset_diag_active flips (right after that file open)
+        // to bracket the exact syscall boundary the corrupting guest code falls between.
+        if (context.is_wow64_process && context.peb32.has_value() && g_apiset_diag_active.load())
+        {
+            static std::atomic<int> counter{0};
+            if (counter.fetch_add(1) < 400)
+            {
+                uint32_t live_apiset_map = 0;
+                const bool ok = emu.try_read_memory(context.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
+                fprintf(stderr, "[APISETDIAG] dispatch %s (0x%x) peb32.ApiSetMap=0x%x(ok=%d)\n", syscall_name, syscall_id, live_apiset_map,
+                        ok ? 1 : 0);
+                fflush(stderr);
+            }
+        }
 
         try
         {
