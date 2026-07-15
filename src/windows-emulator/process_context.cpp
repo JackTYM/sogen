@@ -6,6 +6,7 @@
 #include "syscall_utils.hpp"
 #include "windows_emulator.hpp"
 #include "version/windows_version_manager.hpp"
+#include "wow64_heaven_gate.hpp"
 
 #include <utils/io.hpp>
 #include <utils/buffer_accessor.hpp>
@@ -638,6 +639,17 @@ namespace sogen
             {
                 this->rtl_user_thread_start32 = ntdll32->find_export("RtlUserThreadStart");
                 this->ki_user_exception_dispatcher32 = ntdll32->find_export("KiUserExceptionDispatcher");
+
+                // See wow64_heaven_gate.hpp's kFilterTrampolineBase doc comment: prefer starting the
+                // wow64 main thread at the trampoline module_manager::install_wow64_heaven_gate wrote
+                // there (which calls real ntdll32's RtlSetUnhandledExceptionFilter(NULL) before
+                // falling through to RtlUserThreadStart32) rather than jumping straight to
+                // RtlUserThreadStart32. Only used if RtlUserThreadStart itself resolved -
+                // install_wow64_heaven_gate only wrote the trampoline in that case too.
+                if (this->rtl_user_thread_start32.has_value())
+                {
+                    this->wow64_thread_start_trampoline = wow64::heaven_gate::kFilterTrampolineBase;
+                }
             }
         }
 
@@ -754,6 +766,7 @@ namespace sogen
         buffer.write(this->ldr_initialize_thunk);
         buffer.write(this->rtl_user_thread_start);
         buffer.write_optional(this->rtl_user_thread_start32);
+        buffer.write_optional(this->wow64_thread_start_trampoline);
         buffer.write(this->ki_user_apc_dispatcher);
         buffer.write(this->ki_user_exception_dispatcher);
         buffer.write_optional(this->ki_user_exception_dispatcher32);
@@ -847,6 +860,7 @@ namespace sogen
         buffer.read(this->ldr_initialize_thunk);
         buffer.read(this->rtl_user_thread_start);
         buffer.read_optional(this->rtl_user_thread_start32);
+        buffer.read_optional(this->wow64_thread_start_trampoline);
         buffer.read(this->ki_user_apc_dispatcher);
         buffer.read(this->ki_user_exception_dispatcher);
         buffer.read_optional(this->ki_user_exception_dispatcher32);

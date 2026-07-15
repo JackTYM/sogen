@@ -487,6 +487,13 @@ namespace sogen
         std::optional<emulator_object<PEB32>> peb32;
         std::optional<emulator_object<RTL_USER_PROCESS_PARAMETERS32>> process_params32;
         std::optional<uint64_t> rtl_user_thread_start32{};
+        // When set, points at the wow64-heaven-gate page's small "call
+        // RtlSetUnhandledExceptionFilter(NULL), then jmp RtlUserThreadStart32" trampoline
+        // (module_manager::install_wow64_heaven_gate) - the wow64 main thread's initial EIP should
+        // use this instead of rtl_user_thread_start32 directly so real ntdll32 code performs that
+        // one call itself before falling through to the real entry point. See
+        // wow64_heaven_gate.hpp's kFilterTrampolineBase doc comment for why.
+        std::optional<uint64_t> wow64_thread_start_trampoline{};
         std::optional<uint64_t> ki_user_exception_dispatcher32{};
         std::optional<uint64_t> wow64_syscall_reentry_addr{};
 

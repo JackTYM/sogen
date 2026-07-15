@@ -139,6 +139,7 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
+            c.proc.exit_status = exception_record.read().ExceptionCode;
             c.win_emu.callbacks.on_exception();
             c.emu.stop();
 
