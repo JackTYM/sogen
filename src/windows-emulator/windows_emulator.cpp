@@ -1534,6 +1534,64 @@ namespace sogen
 
                         ++apiset_matches_found;
                         const auto apiset_cmp_addr = section.region.start + i;
+
+                        // APISETDIAG follow-up #2: hooking apiset_cmp_addr directly (a mid-function
+                        // instruction, not a function entry or branch target) found the pattern but the
+                        // hook NEVER fired across 5 CI retries - a live, still-unexplained precedent for
+                        // this exact failure mode already exists this session (an earlier
+                        // KiUserExceptionDispatcher+0x4A mid-function hook also never fired, while every
+                        // hook placed at a real function entry via find_export has fired reliably).
+                        // hook_memory_execution most likely only reliably triggers at genuine basic-block
+                        // boundaries under this backend, not arbitrary mid-block addresses. Scan backward
+                        // from the confirmed compare instruction for the nearest "push ebp; mov ebp,esp"
+                        // (55 8B EC) - an extremely common, low-risk-of-false-match function prologue
+                        // sequence - and hook THAT instead, reading ecx (the fastcall first argument,
+                        // structPtr, per the confirmed calling convention) directly at entry, before any
+                        // internal register reuse could touch it.
+                        constexpr std::array<uint8_t, 3> k_prologue_pattern = {0x55, 0x8B, 0xEC};
+                        constexpr size_t k_prologue_search_window = 0x100;
+                        uint64_t apiset_entry_addr = 0;
+                        const size_t search_start = i >= k_prologue_search_window ? i - k_prologue_search_window : 0;
+                        for (size_t j = i; j-- > search_start;)
+                        {
+                            if (j + k_prologue_pattern.size() <= code.size() &&
+                                std::equal(k_prologue_pattern.begin(), k_prologue_pattern.end(), code.begin() + static_cast<ptrdiff_t>(j)))
+                            {
+                                apiset_entry_addr = section.region.start + j;
+                                break;
+                            }
+                        }
+
+                        if (apiset_entry_addr)
+                        {
+                            this->emu().hook_memory_execution(apiset_entry_addr, [this, apiset_entry_addr](cpu_interface& cpu, uint64_t) {
+                                static std::atomic<int> counter{0};
+                                if (counter.fetch_add(1) >= 300)
+                                {
+                                    return;
+                                }
+
+                                auto& vcpu = this->vcpu(cpu.index());
+                                auto& acting = vcpu.cpu;
+                                const auto ecx = acting.reg<uint32_t>(x86_register::ecx);
+                                const auto edx = acting.reg<uint32_t>(x86_register::edx);
+                                const auto esp = acting.reg<uint32_t>(x86_register::esp);
+
+                                char name_buffer[32] = {};
+                                acting.try_read_memory(edx, name_buffer, sizeof(name_buffer) - 2);
+
+                                fprintf(stderr,
+                                        "[APISETDIAG] #%d entry@0x%llx: ecx(structPtr)=0x%x edx(pName)=0x%x esp=0x%x "
+                                        "name_at_edx=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                                        counter.load(), static_cast<unsigned long long>(apiset_entry_addr), ecx, edx, esp,
+                                        static_cast<uint8_t>(name_buffer[0]), static_cast<uint8_t>(name_buffer[1]),
+                                        static_cast<uint8_t>(name_buffer[2]), static_cast<uint8_t>(name_buffer[3]),
+                                        static_cast<uint8_t>(name_buffer[4]), static_cast<uint8_t>(name_buffer[5]),
+                                        static_cast<uint8_t>(name_buffer[6]), static_cast<uint8_t>(name_buffer[7]));
+                                fflush(stderr);
+                            });
+                        }
+
                         this->emu().hook_memory_execution(apiset_cmp_addr, [this, apiset_cmp_addr](cpu_interface& cpu, uint64_t) {
                             static std::atomic<int> counter{0};
                             if (counter.fetch_add(1) >= 300)
