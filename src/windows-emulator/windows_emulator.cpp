@@ -2052,6 +2052,74 @@ namespace sogen
                                         static_cast<unsigned long long>(candidate - mod->image_base));
                             }
                         }
+
+                        // APISETDIAG follow-up #4: 4 consecutive attempts to hook ApiSetpSearchForApiSet
+                        // directly (a mid-function compare, a guessed prologue, a call-target-decoded
+                        // entry, all via hook_memory_execution) never fired, and even the previously-
+                        // assumed-reliable RtlRaiseException/UnhandledExceptionFilter hooks show zero
+                        // hits in this exact run - hook_memory_execution's specific-address overload
+                        // appears fundamentally unreliable here, regardless of address quality. The
+                        // call_trace_ring buffer (populated by the UNCONDITIONAL, no-address
+                        // hook_memory_execution overload registered once in setup_hooks - confirmed
+                        // working, since it's what the cs_val==0x33 branch below already dumps
+                        // successfully) is NOT gated on bitness - it should hold real, executed
+                        // instruction addresses here too. Dump it for the 32-bit case as well, resolved
+                        // to module+offset, to get the actual executed call chain leading into this
+                        // fault without needing any new address-specific hook.
+                        {
+                            const std::scoped_lock call_trace_lock(call_trace_mutex);
+                            const auto count = std::min<size_t>(call_trace_index, call_trace_ring.size());
+                            const auto start_index = call_trace_index >= call_trace_ring.size() ? call_trace_index : 0;
+                            fprintf(stderr, "[APISETDIAG] call trace (last %zu blocks, oldest first):\n", count);
+                            for (size_t k = 0; k < count; ++k)
+                            {
+                                const auto entry_index = (start_index + k) % call_trace_ring.size();
+                                const auto block_addr = call_trace_ring[entry_index];
+                                const auto* block_mod = this->mod_manager.find_by_address(block_addr);
+                                if (block_mod)
+                                {
+                                    fprintf(stderr, "[APISETDIAG]   [%zu] 0x%llx -> %s+0x%llx\n", k,
+                                            static_cast<unsigned long long>(block_addr), block_mod->name.c_str(),
+                                            static_cast<unsigned long long>(block_addr - block_mod->image_base));
+                                }
+                                else
+                                {
+                                    fprintf(stderr, "[APISETDIAG]   [%zu] 0x%llx\n", k, static_cast<unsigned long long>(block_addr));
+                                }
+                            }
+                        }
+
+                        // Walk the real EBP frame-pointer chain (a direct, verified technique, not a
+                        // stack-scan heuristic that could land on stale/unrelated data) to find the
+                        // actual caller and its own arguments/frame.
+                        uint32_t walk_ebp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rbp));
+                        for (int frame = 0; frame < 4 && walk_ebp; ++frame)
+                        {
+                            uint32_t saved_ebp = 0;
+                            uint32_t return_addr = 0;
+                            const bool ok_ebp = acting.try_read_memory(walk_ebp, &saved_ebp, sizeof(saved_ebp));
+                            const bool ok_ret = acting.try_read_memory(walk_ebp + 4, &return_addr, sizeof(return_addr));
+                            const auto* ret_mod = ok_ret ? this->mod_manager.find_by_address(return_addr) : nullptr;
+
+                            std::array<uint32_t, 4> args{};
+                            for (size_t a = 0; a < args.size(); ++a)
+                            {
+                                acting.try_read_memory(walk_ebp + 8 + static_cast<uint32_t>(a * 4), &args[a], sizeof(args[a]));
+                            }
+
+                            fprintf(stderr,
+                                    "[APISETDIAG] frame[%d] ebp=0x%x saved_ebp=0x%x(ok=%d) return_addr=0x%x(ok=%d)%s%s "
+                                    "args={0x%x,0x%x,0x%x,0x%x}\n",
+                                    frame, walk_ebp, saved_ebp, ok_ebp ? 1 : 0, return_addr, ok_ret ? 1 : 0, ret_mod ? " -> " : "",
+                                    ret_mod ? ret_mod->name.c_str() : "", args[0], args[1], args[2], args[3]);
+
+                            if (!ok_ebp || saved_ebp <= walk_ebp)
+                            {
+                                break;
+                            }
+                            walk_ebp = saved_ebp;
+                        }
+                        fflush(stderr);
                     }
 
                     // 64-bit fault (Windows x86/Unicorn KiUserExceptionDispatcher wild-write): pin down
