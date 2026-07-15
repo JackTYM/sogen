@@ -1504,19 +1504,26 @@ namespace sogen
                 // failing advapi32.dll one, revealing whether structPtr is already wrong on every call
                 // (a one-time setup bug) or only breaks for this specific one (a per-call marshaling
                 // bug).
+                // APISETDIAG follow-up: an earlier version of this scan filtered sections by
+                // is_executable(section.region.permissions) and found nothing, even though the fault
+                // site (captured via NULLDIAG3) proves this exact byte pattern both exists and executes
+                // - meaning on_module_load's own section-permission snapshot for ntdll.dll is stale
+                // relative to whatever final protections get applied afterward (a common PE-loading
+                // pattern: broad initial mapping permissions, hardened later). Read every section
+                // unconditionally instead - this only reads bytes to find a pattern, it never executes
+                // anything at scan time, so the permission filter was an optimization, not a
+                // correctness requirement.
                 constexpr std::array<uint8_t, 7> k_apiset_cmp_pattern = {0x3B, 0x0C, 0x1A, 0x72, 0x13, 0x76, 0x16};
+                size_t apiset_scanned_bytes = 0;
+                size_t apiset_matches_found = 0;
                 for (const auto& section : mod.sections)
                 {
-                    if (!is_executable(section.region.permissions))
-                    {
-                        continue;
-                    }
-
                     std::vector<uint8_t> code(section.region.length);
                     if (!this->memory.try_read_memory(section.region.start, code.data(), code.size()))
                     {
                         continue;
                     }
+                    apiset_scanned_bytes += code.size();
 
                     for (size_t i = 0; i + k_apiset_cmp_pattern.size() <= code.size(); ++i)
                     {
@@ -1525,6 +1532,7 @@ namespace sogen
                             continue;
                         }
 
+                        ++apiset_matches_found;
                         const auto apiset_cmp_addr = section.region.start + i;
                         this->emu().hook_memory_execution(apiset_cmp_addr, [this, apiset_cmp_addr](cpu_interface& cpu, uint64_t) {
                             static std::atomic<int> counter{0};
@@ -1556,6 +1564,10 @@ namespace sogen
                         });
                     }
                 }
+
+                fprintf(stderr, "[APISETDIAG] scan complete: sections=%zu scanned_bytes=%zu pattern_matches=%zu\n", mod.sections.size(),
+                        apiset_scanned_bytes, apiset_matches_found);
+                fflush(stderr);
             }
 
             if (mod.name == "kernelbase.dll" && mod.machine == IMAGE_FILE_MACHINE_I386)
