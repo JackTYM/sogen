@@ -564,6 +564,17 @@ namespace sogen
                 // Use the dedicated 32-bit ApiSetMap for PEB32
                 p32.ApiSetMap = static_cast<uint32_t>(apiset_map_address_32);
 
+                // APISETDIAG: struct layout confirmed correct (ApiSetMap sits at the real, documented
+                // offset 0x38 within PEB32) and the below-4GB truncation fix (this file, create_allocator)
+                // had zero effect on the deterministic advapi32.dll ApiSet crash - print what's actually
+                // written here so it can be directly compared against what the guest reads at crash time
+                // (via a PEB32.ApiSetMap read added at the fault site), to confirm whether the WRITE
+                // itself is already wrong, or something overwrites/misreads it afterward.
+                fprintf(stderr, "[APISETDIAG] PEB32.ApiSetMap set: apiset_map_address_32=0x%llx (truncated=0x%x) peb32_addr=0x%llx\n",
+                        static_cast<unsigned long long>(apiset_map_address_32), p32.ApiSetMap,
+                        static_cast<unsigned long long>(this->peb32->value()));
+                fflush(stderr);
+
                 // Copy similar settings from PEB64
                 p32.ProcessHeap = 0;
                 p32.ProcessHeaps = 0;

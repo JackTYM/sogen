@@ -2026,6 +2026,28 @@ namespace sogen
                     // module) to identify the real calling function without symbols.
                     if (cs_val == 0x23)
                     {
+                        // APISETDIAG: compare what sogen wrote into PEB32.ApiSetMap at process setup
+                        // (printed separately in process_context.cpp) against what the guest's own
+                        // TEB32->PEB32 chain actually reads for it right now, at the fault - a mismatch
+                        // here would mean something overwrites/redirects it after setup rather than the
+                        // initial value being wrong. fs:[0x30] = TEB32's own self-relative PEB pointer
+                        // field (standard, documented offset); PEB32+0x38 = ApiSetMap (confirmed correct
+                        // via struct layout inspection).
+                        {
+                            const auto fs_base = acting.get_segment_base(x86_register::fs);
+                            uint32_t peb32_addr = 0;
+                            const bool ok_peb = acting.try_read_memory(fs_base + 0x30, &peb32_addr, sizeof(peb32_addr));
+                            uint32_t live_apiset_map = 0;
+                            const bool ok_apiset =
+                                ok_peb && acting.try_read_memory(peb32_addr + 0x38, &live_apiset_map, sizeof(live_apiset_map));
+                            fprintf(stderr,
+                                    "[APISETDIAG] live read: fs_base=0x%llx peb32_addr=0x%x(ok=%d) "
+                                    "PEB32.ApiSetMap=0x%x(ok=%d)\n",
+                                    static_cast<unsigned long long>(fs_base), peb32_addr, ok_peb ? 1 : 0, live_apiset_map,
+                                    ok_apiset ? 1 : 0);
+                            fflush(stderr);
+                        }
+
                         std::array<uint8_t, 32> table_bytes{};
                         if (acting.try_read_memory(rbx_val, table_bytes.data(), table_bytes.size()))
                         {
