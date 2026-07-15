@@ -20,6 +20,17 @@ namespace sogen
     // deterministic guest-code corruption falls between.
     std::atomic<bool> g_apiset_diag_active{false};
 
+    // APISETDIAG: the syscall-boundary ring buffer only bracketed the corruption between two
+    // syscalls, without ever pointing at the actual writing instruction (guest-code execution hooks
+    // proved unreliable for this investigation - see windows_emulator.cpp). Instead of hooking
+    // execution, mark ApiSetMap's own guest page read-only the moment the diagnostic window opens:
+    // the wild write then surfaces as a real protection fault through the already-working
+    // memory-violation hook, with live registers captured at the exact instant of the write.
+    std::atomic<bool> g_apiset_watch_armed{false};
+    std::atomic<bool> g_apiset_watch_fired{false};
+    std::atomic<uint64_t> g_apiset_watch_page{0};
+    std::atomic<uint8_t> g_apiset_watch_old_permission{0};
+
     namespace syscalls
     {
         namespace
@@ -1723,6 +1734,22 @@ namespace sogen
                 if (filename_u8.find("VCRUNTIME140") != std::string::npos)
                 {
                     g_apiset_diag_active.store(true);
+
+                    if (!g_apiset_watch_armed.load())
+                    {
+                        constexpr uint64_t page_size = 0x1000;
+                        const uint64_t watch_page = (c.proc.peb32->value() + 0x38) & ~(page_size - 1);
+                        nt_memory_permission old_permission{};
+                        if (c.win_emu.memory.protect_memory(watch_page, page_size, memory_permission::read, &old_permission))
+                        {
+                            g_apiset_watch_page.store(watch_page);
+                            g_apiset_watch_old_permission.store(static_cast<uint8_t>(static_cast<memory_permission>(old_permission)));
+                            g_apiset_watch_armed.store(true);
+                            fprintf(stderr, "[APISETWATCH] armed write-guard on page 0x%llx (old_permission=0x%x)\n",
+                                    static_cast<unsigned long long>(watch_page), static_cast<unsigned int>(old_permission.common));
+                            fflush(stderr);
+                        }
+                    }
                 }
             }
 

@@ -24,6 +24,14 @@ namespace sogen
     // {syscall, PEB32.ApiSetMap} pairs accumulated since VCRUNTIME140.dll's file open.
     void dump_apiset_diag_ring();
 
+    // APISETWATCH: defined in syscalls/file.cpp - a one-shot write-guard armed on ApiSetMap's own
+    // guest page once the diagnostic window opens, so the actual wild-write instruction (not just
+    // the syscall boundary it falls between) surfaces through the memory-violation hook below.
+    extern std::atomic<bool> g_apiset_watch_armed;
+    extern std::atomic<bool> g_apiset_watch_fired;
+    extern std::atomic<uint64_t> g_apiset_watch_page;
+    extern std::atomic<uint8_t> g_apiset_watch_old_permission;
+
     constexpr auto MAX_INSTRUCTIONS_PER_TIME_SLICE = 0x20000;
     constexpr auto MAX_BASIC_BLOCKS_PER_TIME_SLICE = 0x8000;
 
@@ -1830,6 +1838,54 @@ namespace sogen
             auto& vcpu = this->vcpu(cpu.index());
             const scoped_dispatch dispatch(*this, vcpu);
             auto& acting = vcpu.cpu;
+
+            if (g_apiset_watch_armed.load() && !g_apiset_watch_fired.load())
+            {
+                const auto watch_page = g_apiset_watch_page.load();
+                if (address >= watch_page && address < watch_page + 0x1000 && operation == memory_operation::write)
+                {
+                    g_apiset_watch_fired.store(true);
+
+                    fprintf(stderr,
+                            "[APISETWATCH] wild write caught: address=0x%llx size=0x%zx cs=0x%x rip=0x%llx eax=0x%x "
+                            "ebx=0x%x ecx=0x%x edx=0x%x esi=0x%x edi=0x%x ebp=0x%x esp=0x%x\n",
+                            static_cast<unsigned long long>(address), size, acting.reg<uint16_t>(x86_register::cs),
+                            static_cast<unsigned long long>(acting.reg<uint64_t>(x86_register::rip)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rax)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rbx)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rcx)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rdx)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsi)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rdi)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rbp)),
+                            static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsp)));
+
+                    const auto eip_now = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rip));
+                    std::array<uint8_t, 16> eip_bytes{};
+                    if (acting.try_read_memory(eip_now, eip_bytes.data(), eip_bytes.size()))
+                    {
+                        fprintf(stderr, "[APISETWATCH] bytes at rip (0x%x): ", eip_now);
+                        for (const auto b : eip_bytes)
+                        {
+                            fprintf(stderr, "%02x ", b);
+                        }
+                        fprintf(stderr, "\n");
+                    }
+
+                    const auto* rip_mod = this->mod_manager.find_by_address(eip_now);
+                    if (rip_mod != nullptr)
+                    {
+                        fprintf(stderr, "[APISETWATCH] rip -> %s+0x%llx\n", rip_mod->name.c_str(),
+                                static_cast<unsigned long long>(eip_now - rip_mod->image_base));
+                    }
+                    fflush(stderr);
+
+                    const auto old_permission = static_cast<memory_permission>(g_apiset_watch_old_permission.load());
+                    this->memory.protect_memory(watch_page, 0x1000, old_permission);
+                    return memory_violation_continuation::restart;
+                }
+            }
+
             if (acting.reg<uint16_t>(x86_register::cs) == 0x33)
             {
                 // loading gs selector only works in 64-bit mode
