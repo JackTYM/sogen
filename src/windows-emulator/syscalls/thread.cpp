@@ -739,6 +739,20 @@ namespace sogen
             const auto cpu_area = c.emu.read_memory<uint64_t>(teb64 + 0x1488);
             const auto block = cpu_area + 0x80;
 
+            // APISETDIAG: a deterministic advapi32.dll ApiSet crash traced PEB32.ApiSetMap being
+            // silently overwritten with a guest register value sometime during guest execution, not
+            // during any syscall - checking whether this reverse-gate write (added earlier this
+            // session) could be the source, in case `block` is ever miscomputed to land near
+            // c.proc.peb32's own address instead of the real CPU-area block (normally ~0x7003xxxx, a
+            // native 64-bit stack region, nowhere near a 32-bit process's own low PEB address).
+            if (c.proc.is_wow64_process && c.proc.peb32.has_value())
+            {
+                fprintf(stderr, "[APISETDIAG] wow64 continue reverse-gate: teb64=0x%llx cpu_area=0x%llx block=0x%llx peb32_addr=0x%llx\n",
+                        static_cast<unsigned long long>(teb64), static_cast<unsigned long long>(cpu_area),
+                        static_cast<unsigned long long>(block), static_cast<unsigned long long>(c.proc.peb32->value()));
+                fflush(stderr);
+            }
+
             const auto write32 = [&](const uint64_t offset, const uint32_t value) { c.emu.write_memory(block + offset, value); };
             write32(0x20, static_cast<uint32_t>(context.Rdi));
             write32(0x24, static_cast<uint32_t>(context.Rsi));
