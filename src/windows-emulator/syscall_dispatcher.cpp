@@ -199,7 +199,8 @@ namespace sogen
             uint32_t live_apiset_map = 0;
             const bool ok = emu.try_read_memory(context.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
             const std::scoped_lock lock(g_apiset_diag_mutex);
-            g_apiset_diag_ring[g_apiset_diag_index % g_apiset_diag_ring.size()] = {syscall_name, live_apiset_map, ok};
+            g_apiset_diag_ring[g_apiset_diag_index % g_apiset_diag_ring.size()] = {
+                .syscall_name = syscall_name, .apiset_map = live_apiset_map, .ok = ok};
             ++g_apiset_diag_index;
         }
 
