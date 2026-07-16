@@ -147,6 +147,72 @@ namespace sogen
             return std::nullopt;
         }
 
+        // wow64cpu.dll's real RunSimulatedCode entry has no export, so its caller previously used a
+        // single hand-decoded RVA relative to TurboDispatchJumpAddressStart. That fixed offset drifts
+        // across wow64cpu.dll builds - confirmed via idasql against a genuine Windows Server 2025
+        // system DLL (the one CI's create-emulation-root job bakes): the hardcoded RVA landed 0x11
+        // (17) bytes before the real prologue, inside the tail (a bare `retn`) of the unrelated,
+        // preceding function. The registered gate crossing (built from that RVA up to
+        // TurboDispatchJumpAddressStart) then accidentally swallowed that ret too, and FEXCore's JIT
+        // refused to execute it (a genuine NoExec fault) every time real control flow legitimately
+        // returned through it - surfacing as a deterministic, CI-only STATUS_FATAL_USER_CALLBACK_
+        // EXCEPTION during the one-time win32k client-thread-setup callback. RunSimulatedCode's
+        // prologue is a highly distinctive, fixed instruction sequence (9 specific register pushes in
+        // a specific order, then a specific stack adjustment) any compiler emits identically
+        // regardless of build - scan for it directly, matching scan_kernelbase_nls_cache_reference/
+        // scan_wow64_transition_cache_address's approach for the same class of problem, instead of
+        // trusting a single hand-decoded RVA. Returns the closest match preceding dispatch_start
+        // (TurboDispatchJumpAddressStart), matching the known layout invariant that RunSimulatedCode
+        // precedes it in the same dispatch code block.
+        std::optional<uint64_t> scan_run_simulated_code_entry(const memory_manager& memory, const mapped_module& wow64cpu,
+                                                              uint64_t dispatch_start)
+        {
+            static constexpr std::array<uint8_t, 16> pattern{
+                0x41, 0x57,             // push r15
+                0x41, 0x56,             // push r14
+                0x41, 0x55,             // push r13
+                0x41, 0x54,             // push r12
+                0x53,                   // push rbx
+                0x56,                   // push rsi
+                0x57,                   // push rdi
+                0x55,                   // push rbp
+                0x48, 0x83, 0xEC, 0x68, // sub rsp, 0x68
+            };
+
+            std::optional<uint64_t> best;
+
+            for (const auto& section : wow64cpu.sections)
+            {
+                const auto& region = section.region;
+                if (!is_executable(region.permissions) || region.length < pattern.size())
+                {
+                    continue;
+                }
+
+                std::vector<uint8_t> data(region.length);
+                if (!memory.try_read_memory(region.start, data.data(), data.size()))
+                {
+                    continue;
+                }
+
+                for (size_t i = 0; i + pattern.size() <= data.size(); ++i)
+                {
+                    if (std::memcmp(data.data() + i, pattern.data(), pattern.size()) != 0)
+                    {
+                        continue;
+                    }
+
+                    const auto candidate = region.start + i;
+                    if (candidate < dispatch_start && (!best.has_value() || candidate > *best))
+                    {
+                        best = candidate;
+                    }
+                }
+            }
+
+            return best;
+        }
+
         // Returns 0 (unresolved) if neither the build-independent code scan above nor the hardcoded-RVA
         // fallback land on writable data for THIS specific build - see address_is_in_writable_section's
         // doc comment. The scan is the primary path; the hardcoded RVA (derived once via static analysis
@@ -840,8 +906,22 @@ namespace sogen
                 // its entry and marshal the 32-bit register block itself instead of compiling those
                 // bytes. See the FEX backend's enter_wow64_32bit_from_run_simulated_code
                 // (gate_crossing_kind::wow64_run_simulated_code).
+                //
+                // Prefer the build-independent prologue scan (see scan_run_simulated_code_entry's doc
+                // comment for why the fixed RVA below drifts across wow64cpu.dll builds); fall back to
+                // the hand-decoded RVA only if the scan finds no match, so an unrecognized future
+                // build shape degrades to the previous behavior instead of failing outright.
                 constexpr uint64_t run_simulated_code_rva = 0x1650;
-                emu_ptr->register_gate_crossing(image_base + run_simulated_code_rva, turbo_dispatch_start_rva - run_simulated_code_rva,
+                uint64_t run_simulated_code_address = image_base + run_simulated_code_rva;
+                uint64_t run_simulated_code_size = turbo_dispatch_start_rva - run_simulated_code_rva;
+
+                if (const auto scanned = scan_run_simulated_code_entry(*this->memory_, mod, dispatch_start); scanned.has_value())
+                {
+                    run_simulated_code_address = *scanned;
+                    run_simulated_code_size = dispatch_start - *scanned;
+                }
+
+                emu_ptr->register_gate_crossing(run_simulated_code_address, run_simulated_code_size,
                                                 x86_64_emulator::gate_crossing_kind::wow64_run_simulated_code);
 
                 // NtContinue never returns through the normal syscall path - the real kernel restores
