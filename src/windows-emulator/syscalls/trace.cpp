@@ -4,9 +4,6 @@
 
 namespace sogen
 {
-    // APISETDIAG: defined in syscalls/file.cpp, set once VCRUNTIME140.dll's file open is seen.
-    extern std::atomic<bool> g_apiset_diag_active;
-
     namespace syscalls
     {
         namespace
@@ -85,17 +82,6 @@ namespace sogen
                                        const emulator_object<ULONG> return_length)
         {
             const auto base_function_code = function_code & ~k_trace_control_wow64_bit;
-
-            if (g_apiset_diag_active.load())
-            {
-                fprintf(stderr,
-                        "[APISETWATCH] NtTraceControl function_code=0x%x base=0x%x input_buffer=0x%llx "
-                        "input_buffer_length=%u output_buffer=0x%llx output_buffer_length=%u\n",
-                        static_cast<unsigned int>(function_code), static_cast<unsigned int>(base_function_code),
-                        static_cast<unsigned long long>(input_buffer), static_cast<unsigned int>(input_buffer_length),
-                        static_cast<unsigned long long>(output_buffer), static_cast<unsigned int>(output_buffer_length));
-                fflush(stderr);
-            }
 
             switch (base_function_code)
             {

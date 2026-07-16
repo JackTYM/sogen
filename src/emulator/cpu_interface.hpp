@@ -70,18 +70,6 @@ namespace sogen
         // Hypervisor-backed backends can cancel execution from any thread; the JIT/interpreter
         // backends cannot, so they must be preempted cooperatively from the CPU thread instead.
         virtual bool is_stop_thread_safe() const = 0;
-
-        // Whether hook_basic_block's callback actually fires for every executed block on this
-        // backend. Hypervisor/interpreter backends (KVM/Unicorn/WHP/icicle) drive it directly and
-        // reliably; FEXCore's JIT only calls back through its own per-instruction execution hooks,
-        // so callers needing full coverage under FEX must register hook_memory_execution instead
-        // (which forces single-stepping - do not register it unconditionally on every backend, as
-        // WHP cannot nest that single-step state with its own). Defaults to true (matches every
-        // backend except FEX).
-        virtual bool fires_basic_block_hook() const
-        {
-            return true;
-        }
     };
 
 } // namespace sogen

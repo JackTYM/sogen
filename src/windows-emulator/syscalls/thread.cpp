@@ -8,33 +8,11 @@
 
 namespace sogen
 {
-    // WOW64LOOPDIAG: defined in exception_dispatch.cpp, set once the breakpoint dispatch preceding
-    // the observed post-breakpoint hang happens.
-    extern std::atomic<bool> g_wow64_post_breakpoint_diag;
-
     namespace syscalls
     {
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, const handle thread_handle, const THREADINFOCLASS info_class,
                                                const uint64_t thread_information, const uint32_t thread_information_length)
         {
-            // WOW64LOOPDIAG: a wow64 CI run hung in an apparent infinite loop of
-            // _seh_filter_exe/anti-debug-check/NtSetInformationThread after a handled STATUS_BREAKPOINT,
-            // with no new dispatch_exception call - print the real info_class (this syscall's own
-            // logging only shows its syscall index, not this parameter) for the first calls seen once
-            // the loop-triggering breakpoint has actually been dispatched, to see what's actually being
-            // requested in that loop rather than unrelated earlier startup-time calls.
-            if (g_wow64_post_breakpoint_diag.load())
-            {
-                static std::atomic<int> counter{0};
-                if (counter.fetch_add(1) < 30)
-                {
-                    fprintf(stderr, "[WOW64LOOPDIAG] NtSetInformationThread info_class=%u thread_information=0x%llx length=%u\n",
-                            static_cast<unsigned>(info_class), static_cast<unsigned long long>(thread_information),
-                            thread_information_length);
-                    fflush(stderr);
-                }
-            }
-
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
@@ -750,20 +728,6 @@ namespace sogen
             const auto teb64 = c.vcpu.thread().teb64->value();
             const auto cpu_area = c.emu.read_memory<uint64_t>(teb64 + 0x1488);
             const auto block = cpu_area + 0x80;
-
-            // APISETDIAG: a deterministic advapi32.dll ApiSet crash traced PEB32.ApiSetMap being
-            // silently overwritten with a guest register value sometime during guest execution, not
-            // during any syscall - checking whether this reverse-gate write (added earlier this
-            // session) could be the source, in case `block` is ever miscomputed to land near
-            // c.proc.peb32's own address instead of the real CPU-area block (normally ~0x7003xxxx, a
-            // native 64-bit stack region, nowhere near a 32-bit process's own low PEB address).
-            if (c.proc.is_wow64_process && c.proc.peb32.has_value())
-            {
-                fprintf(stderr, "[APISETDIAG] wow64 continue reverse-gate: teb64=0x%llx cpu_area=0x%llx block=0x%llx peb32_addr=0x%llx\n",
-                        static_cast<unsigned long long>(teb64), static_cast<unsigned long long>(cpu_area),
-                        static_cast<unsigned long long>(block), static_cast<unsigned long long>(c.proc.peb32->value()));
-                fflush(stderr);
-            }
 
             const auto write32 = [&](const uint64_t offset, const uint32_t value) { c.emu.write_memory(block + offset, value); };
             write32(0x20, static_cast<uint32_t>(context.Rdi));

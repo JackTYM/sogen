@@ -15,22 +15,6 @@
 
 namespace sogen
 {
-    // APISETDIAG: set once VCRUNTIME140.dll's file open is seen, so syscall_dispatcher::dispatch can
-    // poll PEB32.ApiSetMap on every subsequent syscall to bracket the exact syscall boundary a
-    // deterministic guest-code corruption falls between.
-    std::atomic<bool> g_apiset_diag_active{false};
-
-    // APISETDIAG: the syscall-boundary ring buffer only bracketed the corruption between two
-    // syscalls, without ever pointing at the actual writing instruction (guest-code execution hooks
-    // proved unreliable for this investigation - see windows_emulator.cpp). Instead of hooking
-    // execution, mark ApiSetMap's own guest page read-only the moment the diagnostic window opens:
-    // the wild write then surfaces as a real protection fault through the already-working
-    // memory-violation hook, with live registers captured at the exact instant of the write.
-    std::atomic<bool> g_apiset_watch_armed{false};
-    std::atomic<bool> g_apiset_watch_fired{false};
-    std::atomic<uint64_t> g_apiset_watch_page{0};
-    std::atomic<uint8_t> g_apiset_watch_old_permission{0};
-
     namespace syscalls
     {
         namespace
@@ -1708,50 +1692,6 @@ namespace sogen
 
             const auto attributes = object_attributes.read();
             auto filename = read_unicode_string(c.emu, attributes.ObjectName);
-
-            // APISETDIAG: sogen writes a sane, low PEB32.ApiSetMap value at process setup, but a live
-            // guest-side read at the advapi32.dll ApiSet crash shows it holding an unrelated ntdll-
-            // static-string address instead - something overwrites it between setup and the crash.
-            // NtCreateFile/NtOpenFile fires on every LoadLibrary's own file-open step (unlike guest-code
-            // execution hooks, which have proven unreliable for this investigation across 4 attempts),
-            // so poll the live value here on every file open to pin down exactly which DLL's load
-            // corrupts it. Confirmed via CI: stays correct through every file open, including the last
-            // one (VCRUNTIME140.dll) before the crash - the corruption happens purely in guest-code
-            // execution, without any of NtCreateFile/NtMapViewOfSection/NtProtectVirtualMemory/
-            // NtContinue's own reverse-gate (all separately ruled out). Flip a global flag once
-            // VCRUNTIME140.dll's file open is seen so syscall_dispatcher::dispatch can poll on EVERY
-            // subsequent syscall (not just these three), to bracket the exact syscall boundary the
-            // corrupting guest code falls between.
-            if (c.proc.is_wow64_process && c.proc.peb32.has_value())
-            {
-                uint32_t live_apiset_map = 0;
-                const bool ok = c.emu.try_read_memory(c.proc.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
-                const auto filename_u8 = u16_to_u8(filename);
-                fprintf(stderr, "[APISETDIAG] NtCreateFile peb32.ApiSetMap=0x%x(ok=%d) opening=%s\n", live_apiset_map, ok ? 1 : 0,
-                        filename_u8.c_str());
-                fflush(stderr);
-
-                if (filename_u8.find("VCRUNTIME140") != std::string::npos)
-                {
-                    g_apiset_diag_active.store(true);
-
-                    if (!g_apiset_watch_armed.load())
-                    {
-                        constexpr uint64_t page_size = 0x1000;
-                        const uint64_t watch_page = (c.proc.peb32->value() + 0x38) & ~(page_size - 1);
-                        nt_memory_permission old_permission{};
-                        if (c.win_emu.memory.protect_memory(watch_page, page_size, memory_permission::read, &old_permission))
-                        {
-                            g_apiset_watch_page.store(watch_page);
-                            g_apiset_watch_old_permission.store(static_cast<uint8_t>(static_cast<memory_permission>(old_permission)));
-                            g_apiset_watch_armed.store(true);
-                            fprintf(stderr, "[APISETWATCH] armed write-guard on page 0x%llx (old_permission=0x%x)\n",
-                                    static_cast<unsigned long long>(watch_page), static_cast<unsigned int>(old_permission.common));
-                            fflush(stderr);
-                        }
-                    }
-                }
-            }
 
             // Check for console device paths
             // Convert to uppercase for case-insensitive comparison

@@ -8,10 +8,6 @@
 
 namespace sogen
 {
-    // WOW64LOOPDIAG: defined in exception_dispatch.cpp, set once the breakpoint dispatch preceding
-    // the observed post-breakpoint hang happens.
-    extern std::atomic<bool> g_wow64_post_breakpoint_diag;
-
     namespace syscalls
     {
         namespace
@@ -163,19 +159,6 @@ namespace sogen
                                              const uint32_t info_class, const uint64_t memory_information,
                                              const uint64_t memory_information_length, const emulator_object<uint64_t> return_length)
         {
-            // WOW64LOOPDIAG: see thread.cpp's NtSetInformationThread hook - part of the same
-            // investigation into a wow64 CI hang right after a handled STATUS_BREAKPOINT.
-            if (g_wow64_post_breakpoint_diag.load())
-            {
-                static std::atomic<int> counter{0};
-                if (counter.fetch_add(1) < 30)
-                {
-                    fprintf(stderr, "[WOW64LOOPDIAG] NtQueryVirtualMemory base_address=0x%llx info_class=%u\n",
-                            static_cast<unsigned long long>(base_address), info_class);
-                    fflush(stderr);
-                }
-            }
-
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
@@ -360,22 +343,6 @@ namespace sogen
                                                const emulator_object<uint32_t> bytes_to_protect, const uint32_t protection,
                                                const emulator_object<uint32_t> old_protection)
         {
-            // APISETDIAG: PEB32.ApiSetMap stays correct through every NtCreateFile call captured during
-            // the wow64-test-sample.exe LoadLibrary churn, including the last one (opening
-            // VCRUNTIME140.dll) - meaning the corruption happens afterward, during that module's own
-            // mapping/relocation/TLS-init, not during any subsequent file open. NtProtectVirtualMemory
-            // fires repeatedly per module (relocation fixups, page locking), so poll here too to narrow
-            // down which specific protection change is responsible.
-            if (c.proc.is_wow64_process && c.proc.peb32.has_value())
-            {
-                uint32_t live_apiset_map = 0;
-                const bool ok = c.emu.try_read_memory(c.proc.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
-                const auto requested_base = base_address.read();
-                fprintf(stderr, "[APISETDIAG] NtProtectVirtualMemory entry peb32.ApiSetMap=0x%x(ok=%d) base=0x%llx protection=0x%x\n",
-                        live_apiset_map, ok ? 1 : 0, static_cast<unsigned long long>(requested_base), protection);
-                fflush(stderr);
-            }
-
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;

@@ -285,20 +285,6 @@ namespace sogen
                                            const SECTION_INHERIT /*inherit_disposition*/, const ULONG /*allocation_type*/,
                                            const ULONG /*win32_protect*/)
         {
-            // APISETDIAG: PEB32.ApiSetMap stays correct through every NtCreateFile call captured during
-            // the wow64-test-sample.exe LoadLibrary churn (confirmed via CI), including the last one
-            // (opening VCRUNTIME140.dll) - meaning the corruption happens afterward, during that
-            // module's OWN mapping/relocation/TLS-init, not during any subsequent file open. Poll here
-            // too, on every section-mapping call, to narrow down which specific map operation is
-            // responsible.
-            if (c.proc.is_wow64_process && c.proc.peb32.has_value())
-            {
-                uint32_t live_apiset_map = 0;
-                const bool ok = c.emu.try_read_memory(c.proc.peb32->value() + 0x38, &live_apiset_map, sizeof(live_apiset_map));
-                fprintf(stderr, "[APISETDIAG] NtMapViewOfSection entry peb32.ApiSetMap=0x%x(ok=%d)\n", live_apiset_map, ok ? 1 : 0);
-                fflush(stderr);
-            }
-
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_INVALID_HANDLE;

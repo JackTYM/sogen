@@ -222,11 +222,6 @@ namespace sogen
 
     }
 
-    // WOW64LOOPDIAG: set once the breakpoint dispatch preceding the observed post-breakpoint hang
-    // happens, so thread.cpp/memory.cpp's gated diagnostics capture calls from inside the actual loop
-    // instead of being exhausted by unrelated startup-time calls to the same syscalls.
-    std::atomic<bool> g_wow64_post_breakpoint_diag{false};
-
     bool dispatch_debug_exception(windows_emulator& win_emu, CONTEXT64& ctx, EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>& record)
     {
         std::array<uint8_t, 2> ins = {0};
@@ -336,14 +331,6 @@ namespace sogen
         EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers{};
         pointers.ContextRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&ctx);
         pointers.ExceptionRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&record);
-
-        if (status == STATUS_BREAKPOINT)
-        {
-            // WOW64LOOPDIAG: flips on once a breakpoint gets dispatched, so thread.cpp/memory.cpp's
-            // diagnostics (gated on this flag) capture calls from that point on instead of being
-            // exhausted by unrelated startup-time calls to the same syscalls.
-            g_wow64_post_breakpoint_diag.store(true);
-        }
 
         dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher,
                                     win_emu.mod_manager.wow64_heaven_gate_code_base(), win_emu.mod_manager.wow64_heaven_gate_stack_top(),

@@ -1559,13 +1559,6 @@ namespace sogen::fex
             return true;
         }
 
-        // See fires_basic_block_hook's doc comment - FEXCore's JIT doesn't drive hook_basic_block's
-        // callback for normal execution, only its own per-instruction execution hooks.
-        bool fires_basic_block_hook() const override
-        {
-            return false;
-        }
-
         // request_thread_stop() mprotects InterruptFaultPage to PROT_NONE, which is safe to call from
         // any host thread - the software-quantum watchdog thread in windows_emulator::start() relies on
         // exactly this (supports_instruction_counting() is false, so that path is the only time-slicing
@@ -3317,30 +3310,6 @@ namespace sogen::fex
             this->active_context_ = this->context_.get();
             this->active_thread_ = this->thread_;
 
-            std::array<uint8_t, 16> dispatch_bytes{};
-            const bool dispatch_ok = this->try_read_memory(generic_dispatch, dispatch_bytes.data(), dispatch_bytes.size());
-            fprintf(stderr,
-                    "[GATEDIAG6] enter_wow64_64bit_from_wow64svc_thunk: gate.address=0x%llx image_base=0x%llx "
-                    "generic_dispatch=0x%llx teb64=0x%llx cpu_area=0x%llx block=0x%llx eax=0x%x\n",
-                    static_cast<unsigned long long>(gate.address), static_cast<unsigned long long>(image_base),
-                    static_cast<unsigned long long>(generic_dispatch), static_cast<unsigned long long>(teb64),
-                    static_cast<unsigned long long>(cpu_area), static_cast<unsigned long long>(block), eax);
-            if (dispatch_ok)
-            {
-                fprintf(stderr, "[GATEDIAG6] bytes at generic_dispatch: ");
-                for (const auto b : dispatch_bytes)
-                {
-                    fprintf(stderr, "%02x ", b);
-                }
-                fprintf(stderr, "\n");
-            }
-            else
-            {
-                fprintf(stderr, "[GATEDIAG6] generic_dispatch (0x%llx) is unreadable/unmapped\n",
-                        static_cast<unsigned long long>(generic_dispatch));
-            }
-            fflush(stderr);
-
             return true;
         }
 
@@ -3479,10 +3448,6 @@ namespace sogen::fex
         // the generic dispatcher, using the already-proven-correct logic verbatim.
         bool enter_bitness_switch_from_far_jmp(const gate_crossing& gate)
         {
-            const auto& state64 = this->thread_->CurrentFrame->State;
-            fprintf(stderr, "[GATEDIAG5] far_jmp_bitness_switch: thread_ rsp=0x%llx gs_cached=0x%llx\n",
-                    static_cast<unsigned long long>(state64.gregs[detail::greg_rsp]), static_cast<unsigned long long>(state64.gs_cached));
-            fflush(stderr);
             return this->enter_wow64_64bit_from_wow64svc_thunk(gate);
         }
 
@@ -4329,14 +4294,6 @@ namespace sogen::fex
                 // rather than dispatching a memory violation.
                 if (const auto* gate = this->find_gate_crossing(frame->State.rip))
                 {
-                    static uint64_t gate_seq = 0;
-                    fprintf(stderr, "[GATEDIAG7] #%llu kind=%d gate.address=0x%llx src_rip=0x%llx src_rsp=0x%llx engine=%s\n",
-                            static_cast<unsigned long long>(++gate_seq), static_cast<int>(gate->kind),
-                            static_cast<unsigned long long>(gate->address), static_cast<unsigned long long>(frame->State.rip),
-                            static_cast<unsigned long long>(frame->State.gregs[detail::greg_rsp]),
-                            this->active_context_ == this->context32_.get() ? "32bit" : "64bit");
-                    fflush(stderr);
-
                     // Capture the source (currently-active, pre-crossing) engine's dispatcher stop
                     // handler *before* perform_gate_crossing flips active_context_: the in-flight
                     // ExecuteThread that must unwind belongs to the source Context, so it has to
