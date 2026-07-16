@@ -1559,6 +1559,13 @@ namespace sogen::fex
             return true;
         }
 
+        // See fires_basic_block_hook's doc comment - FEXCore's JIT doesn't drive hook_basic_block's
+        // callback for normal execution, only its own per-instruction execution hooks.
+        bool fires_basic_block_hook() const override
+        {
+            return false;
+        }
+
         // request_thread_stop() mprotects InterruptFaultPage to PROT_NONE, which is safe to call from
         // any host thread - the software-quantum watchdog thread in windows_emulator::start() relies on
         // exactly this (supports_instruction_counting() is false, so that path is the only time-slicing

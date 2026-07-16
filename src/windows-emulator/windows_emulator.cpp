@@ -1089,8 +1089,13 @@ namespace sogen
         // already-returned function). Unicorn fires hook_basic_block (confirmed: a full 1024-entry
         // trace was captured under it), but FEX does not (confirmed: zero entries recorded) - FEX
         // apparently only drives its own time-slicing via per-instruction execution hooks (see the
-        // existing uses_instruction_precision() branch below), so register hook_memory_execution too,
-        // sharing the same ring buffer, to get equivalent coverage under FEX.
+        // existing uses_instruction_precision() branch below), so register hook_memory_execution too
+        // on backends where fires_basic_block_hook() says it's needed, sharing the same ring buffer,
+        // to get equivalent coverage under FEX. This must stay backend-gated: registering the
+        // no-address hook_memory_execution overload forces single-stepping for the whole run, which
+        // WHP cannot nest with its own single-step state (confirmed regression: unconditionally
+        // registering this broke "Smoke Test WHP x86_64" with "Nested WHP execution single-step
+        // state is not supported").
         static std::mutex call_trace_mutex{};
         static std::array<uint64_t, 4096> call_trace_ring{};
         static size_t call_trace_index{0};
@@ -1101,11 +1106,14 @@ namespace sogen
             ++call_trace_index;
         });
 
-        this->emu().hook_memory_execution([](cpu_interface&, const uint64_t address) {
-            const std::scoped_lock call_trace_lock(call_trace_mutex);
-            call_trace_ring[call_trace_index % call_trace_ring.size()] = address;
-            ++call_trace_index;
-        });
+        if (!this->emu().fires_basic_block_hook())
+        {
+            this->emu().hook_memory_execution([](cpu_interface&, const uint64_t address) {
+                const std::scoped_lock call_trace_lock(call_trace_mutex);
+                call_trace_ring[call_trace_index % call_trace_ring.size()] = address;
+                ++call_trace_index;
+            });
+        }
 
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
             for (size_t i = 0; i < mod.sections.size(); ++i)
