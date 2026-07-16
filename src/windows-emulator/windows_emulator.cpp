@@ -1140,15 +1140,6 @@ namespace sogen
             const std::scoped_lock lock(this->kernel_lock_);
             auto& vcpu = this->vcpu(cpu.index());
             const scoped_dispatch dispatch(*this, vcpu);
-
-            {
-                static std::atomic<uint64_t> espdiag5_seq{0};
-                const auto seq = espdiag5_seq.fetch_add(1);
-                const auto eax = vcpu.cpu.reg<uint32_t>(x86_register::eax);
-                fprintf(stderr, "[ESPDIAG5] #%llu real-syscall-trap eax=0x%x\n", static_cast<unsigned long long>(seq), eax);
-                fflush(stderr);
-            }
-
             this->dispatcher.dispatch(*this, vcpu);
             return instruction_hook_continuation::skip_instruction;
         });
