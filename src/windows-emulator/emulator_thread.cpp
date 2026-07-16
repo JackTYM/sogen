@@ -1281,30 +1281,10 @@ namespace sogen
         // Handle WOW64 process setup
         if (context.is_wow64_process && this->wow64_cpu_reserved.has_value())
         {
-            // RtlSetUnhandledExceptionFilter(NULL) is process-wide, one-time process-init state
-            // (real Windows only ever calls it from LdrpInitializeProcess, on the process's
-            // original thread) - not something every CreateThread-spawned thread should redo. Redoing
-            // it on later threads clobbers whatever the process legitimately registered via its own
-            // SetUnhandledExceptionFilter calls in between. TEB32.InitialThread is the same bit real
-            // ntdll itself checks to tell process-init and thread-init apart.
-            bool is_initial_thread = false;
-            if (this->teb32.has_value())
-            {
-                this->teb32->access([&](const TEB32& teb32) { is_initial_thread = teb32.InitialThread != 0; });
-            }
-
             // Set up WOW64 context with proper EIP
             this->wow64_cpu_reserved->access([&](WOW64_CPURESERVED& ctx) {
-                // Prefer the wow64-heaven-gate trampoline (calls real ntdll32's
-                // RtlSetUnhandledExceptionFilter(NULL), then falls through to RtlUserThreadStart32)
-                // over jumping straight to RtlUserThreadStart32 - see
-                // process_context::wow64_thread_start_trampoline's doc comment.
-                if (is_initial_thread && context.wow64_thread_start_trampoline.has_value())
-                {
-                    ctx.Context.Eip = static_cast<uint32_t>(context.wow64_thread_start_trampoline.value());
-                    ctx.Context.Ebx = static_cast<uint32_t>(this->argument);
-                }
-                else if (context.rtl_user_thread_start32.has_value())
+                // Set EIP to RtlUserThreadStart in 32-bit ntdll if available
+                if (context.rtl_user_thread_start32.has_value())
                 {
                     ctx.Context.Eip = static_cast<uint32_t>(context.rtl_user_thread_start32.value());
                     ctx.Context.Ebx = static_cast<uint32_t>(this->argument);

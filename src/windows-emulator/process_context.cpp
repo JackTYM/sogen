@@ -6,11 +6,9 @@
 #include "syscall_utils.hpp"
 #include "windows_emulator.hpp"
 #include "version/windows_version_manager.hpp"
-#include "wow64_heaven_gate.hpp"
 
 #include <utils/io.hpp>
 #include <utils/buffer_accessor.hpp>
-#include <random>
 #include <regex>
 #include <sstream>
 
@@ -360,20 +358,6 @@ namespace sogen
 
         this->sid = get_sid(win_emu.registry);
 
-        // Real Windows assigns a genuine random per-process cookie here, used by ntdll's
-        // RtlEncodePointer/RtlDecodePointer-style rotate+xor pointer obfuscation (e.g.
-        // RtlUserThreadStart's own top-level SEH filter decodes _RtlpUnhandledExceptionFilter's
-        // stored pointer with it). A fixed/predictable value here breaks that round-trip for any
-        // code path relying on it. Zero is deliberately excluded: RtlEncodePointer/DecodePointer
-        // special-case a NULL pointer to pass through unencoded, and several ntdll internals rely
-        // on that - a zero cookie would make every encoded-zero value decode to zero too by
-        // coincidence, masking the same bug for a NULL-pointer case specifically.
-        {
-            std::random_device rd;
-            std::uniform_int_distribution<uint32_t> cookie_dist(1, 0xFFFFFFFFu);
-            this->process_cookie = cookie_dist(rd);
-        }
-
         // notify_process_bitness() already ran from module_manager::map_main_modules(), before any
         // module (including this process's own executable) was mapped - see its doc comment.
         setup_gdt(emu, win_emu.memory);
@@ -638,18 +622,6 @@ namespace sogen
             if (ntdll32 != nullptr)
             {
                 this->rtl_user_thread_start32 = ntdll32->find_export("RtlUserThreadStart");
-                this->ki_user_exception_dispatcher32 = ntdll32->find_export("KiUserExceptionDispatcher");
-
-                // See wow64_heaven_gate.hpp's kFilterTrampolineBase doc comment: prefer starting the
-                // wow64 main thread at the trampoline module_manager::install_wow64_heaven_gate wrote
-                // there (which calls real ntdll32's RtlSetUnhandledExceptionFilter(NULL) before
-                // falling through to RtlUserThreadStart32) rather than jumping straight to
-                // RtlUserThreadStart32. Only used if RtlUserThreadStart itself resolved -
-                // install_wow64_heaven_gate only wrote the trampoline in that case too.
-                if (this->rtl_user_thread_start32.has_value())
-                {
-                    this->wow64_thread_start_trampoline = wow64::heaven_gate::kFilterTrampolineBase;
-                }
             }
         }
 
@@ -766,10 +738,8 @@ namespace sogen
         buffer.write(this->ldr_initialize_thunk);
         buffer.write(this->rtl_user_thread_start);
         buffer.write_optional(this->rtl_user_thread_start32);
-        buffer.write_optional(this->wow64_thread_start_trampoline);
         buffer.write(this->ki_user_apc_dispatcher);
         buffer.write(this->ki_user_exception_dispatcher);
-        buffer.write_optional(this->ki_user_exception_dispatcher32);
         buffer.write_optional(this->wow64_syscall_reentry_addr);
         buffer.write(this->ki_user_callback_dispatcher);
         buffer.write(this->instrumentation_callback);
@@ -860,10 +830,8 @@ namespace sogen
         buffer.read(this->ldr_initialize_thunk);
         buffer.read(this->rtl_user_thread_start);
         buffer.read_optional(this->rtl_user_thread_start32);
-        buffer.read_optional(this->wow64_thread_start_trampoline);
         buffer.read(this->ki_user_apc_dispatcher);
         buffer.read(this->ki_user_exception_dispatcher);
-        buffer.read_optional(this->ki_user_exception_dispatcher32);
         buffer.read_optional(this->wow64_syscall_reentry_addr);
         buffer.read(this->ki_user_callback_dispatcher);
         buffer.read(this->instrumentation_callback);

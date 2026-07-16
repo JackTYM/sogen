@@ -68,8 +68,9 @@ namespace sogen
                                                        });
 
             case ProcessCookie:
-                return handle_query<uint32_t>(c.emu, process_information, process_information_length, return_length,
-                                              [&](uint32_t& cookie) { cookie = c.proc.process_cookie; });
+                return handle_query<uint32_t>(c.emu, process_information, process_information_length, return_length, [](uint32_t& cookie) {
+                    cookie = 0x01234567; //
+                });
 
             case ProcessDebugObjectHandle:
 

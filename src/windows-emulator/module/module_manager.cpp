@@ -39,14 +39,6 @@ namespace sogen
             return false;
         }
 
-        void append_le32(std::vector<uint8_t>& bytes, const uint32_t value)
-        {
-            bytes.push_back(static_cast<uint8_t>(value));
-            bytes.push_back(static_cast<uint8_t>(value >> 8));
-            bytes.push_back(static_cast<uint8_t>(value >> 16));
-            bytes.push_back(static_cast<uint8_t>(value >> 24));
-        }
-
         // Locates kernelbase.dll's private (non-exported) gNlsProcessLocalCache global by scanning the
         // module's own code for the fixed TEB.NlsCache access sequence inside BaseNlsThreadCleanup:
         //   65 48 8B 04 25 30 00 00 00   mov rax, gs:[0x30]      (TEB self-pointer)
@@ -539,8 +531,6 @@ namespace sogen
     {
         using wow64::heaven_gate::kCodeBase;
         using wow64::heaven_gate::kCodeSize;
-        using wow64::heaven_gate::kFilterTrampolineBase;
-        using wow64::heaven_gate::kFilterTrampolineSize;
         using wow64::heaven_gate::kStackBase;
         using wow64::heaven_gate::kStackSize;
         using wow64::heaven_gate::kTrampolineBytes;
@@ -667,71 +657,10 @@ namespace sogen
             return true;
         });
 
-        if (this->wow64_modules_.ntdll32 != nullptr)
-        {
-            const auto rtl_user_thread_start32 = this->wow64_modules_.ntdll32->find_export("RtlUserThreadStart");
-            const auto rtl_set_unhandled_exception_filter32 = this->wow64_modules_.ntdll32->find_export("RtlSetUnhandledExceptionFilter");
-
-            if (rtl_user_thread_start32 != 0)
-            {
-                commit_with_retry(kFilterTrampolineBase, kFilterTrampolineSize, "WOW64 unhandled-filter trampoline", [&](uint64_t site) {
-                    if (!this->memory_->protect_memory(site, kFilterTrampolineSize, nt_memory_permission(memory_permission::read_write)))
-                    {
-                        return false;
-                    }
-
-                    std::vector<uint8_t> filter_trampoline{};
-
-                    if (rtl_set_unhandled_exception_filter32 != 0)
-                    {
-                        // push eax/ecx/edx ; push 0 ; call RtlSetUnhandledExceptionFilter ;
-                        // pop edx/ecx/eax ; jmp RtlUserThreadStart32
-                        //
-                        // eax/ecx/edx are caller-saved (stdcall callees are free to clobber
-                        // them), and RtlSetUnhandledExceptionFilter genuinely does clobber
-                        // eax (it returns the previous filter's encoded value there). eax
-                        // specifically must survive the call: it holds the thread's real
-                        // start address, which BaseThreadInitThunk/RtlUserThreadStart32
-                        // read straight out of eax per the thread-init ABI sogen seeds at
-                        // emulator_thread.cpp - clobbering it here sent execution jumping
-                        // through that leftover filter-encoding value instead of the real
-                        // start routine.
-                        const auto call_rel32 = static_cast<int32_t>(static_cast<int64_t>(rtl_set_unhandled_exception_filter32) -
-                                                                     static_cast<int64_t>(site + 10));
-                        const auto jmp_rel32 =
-                            static_cast<int32_t>(static_cast<int64_t>(rtl_user_thread_start32) - static_cast<int64_t>(site + 18));
-
-                        filter_trampoline = {0x50, 0x51, 0x52, 0x6A, 0x00, 0xE8};
-                        append_le32(filter_trampoline, static_cast<uint32_t>(call_rel32));
-                        filter_trampoline.insert(filter_trampoline.end(), {0x5A, 0x59, 0x58, 0xE9});
-                        append_le32(filter_trampoline, static_cast<uint32_t>(jmp_rel32));
-                    }
-                    else
-                    {
-                        // RtlSetUnhandledExceptionFilter isn't exported - fall back to a
-                        // plain jump straight to RtlUserThreadStart32, matching the
-                        // pre-existing behaviour.
-                        logger.error("Failed to find RtlSetUnhandledExceptionFilter export in 32-bit ntdll\n");
-
-                        const auto jmp_rel32 =
-                            static_cast<int32_t>(static_cast<int64_t>(rtl_user_thread_start32) - static_cast<int64_t>(site + 5));
-                        filter_trampoline = {0xE9};
-                        append_le32(filter_trampoline, static_cast<uint32_t>(jmp_rel32));
-                    }
-
-                    if (!this->memory_->try_write_memory(site, filter_trampoline.data(), filter_trampoline.size()))
-                    {
-                        return false;
-                    }
-
-                    this->memory_->protect_memory(site, kFilterTrampolineSize,
-                                                  nt_memory_permission(memory_permission::read | memory_permission::exec));
-                    return true;
-                });
-            }
-        }
         if (code_base)
         {
+            this->wow64_heaven_gate_code_base_ = *code_base;
+
             // KVM/Unicorn genuinely execute the trampoline's real machine code (a real CS-segment
             // mode switch via retf/iretq) - real|exec is correct and sufficient for them, so
             // register_gate_crossing is a no-op default there. A JIT-based backend (FEXCore)
@@ -769,10 +698,14 @@ namespace sogen
             }
         }
 
-        commit_with_retry(kStackBase, kStackSize, "WOW64 heaven gate stack", [&](uint64_t base) {
+        const auto stack_base = commit_with_retry(kStackBase, kStackSize, "WOW64 heaven gate stack", [&](uint64_t base) {
             std::vector<uint8_t> buffer(kStackSize, 0);
             return this->memory_->try_write_memory(base, buffer.data(), buffer.size());
         });
+        if (stack_base)
+        {
+            this->wow64_heaven_gate_stack_top_ = *stack_base + kStackSize;
+        }
     }
 
     void module_manager::ensure_kernelbase_nls_cache_hook(process_context& context)

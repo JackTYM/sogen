@@ -5,6 +5,7 @@
 #include "windows_emulator.hpp"
 
 #include "segment_utils.hpp"
+#include "wow64_heaven_gate.hpp"
 
 namespace sogen
 {
@@ -93,8 +94,8 @@ namespace sogen
             uint64_t ss;
         };
 
-        void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher,
-                                         const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
+        void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher, const uint64_t heaven_gate_code_base,
+                                         const uint64_t heaven_gate_stack_top, const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
         {
             constexpr auto mach_frame_size = 0x40;
             constexpr auto context_record_size = 0x4F0;
@@ -139,8 +140,22 @@ namespace sogen
                 frame.eflags = record.EFlags;
             });
 
-            emu.reg(x86_register::rsp, new_sp);
-            emu.reg(x86_register::rip, dispatcher);
+            const auto cs_selector = emu.reg<uint16_t>(x86_register::cs);
+            const auto bitness = segment_utils::get_segment_bitness(emu, cs_selector);
+
+            if (!bitness || *bitness != segment_utils::segment_bitness::bit32)
+            {
+                emu.reg(x86_register::rsp, new_sp);
+                emu.reg(x86_register::rip, dispatcher);
+                return;
+            }
+
+            emu.reg(x86_register::rax, dispatcher);
+            emu.reg(x86_register::rbx, new_sp);
+            emu.reg(x86_register::rcx, static_cast<uint64_t>(wow64::heaven_gate::kUserCodeSelector));
+            emu.reg(x86_register::rdx, static_cast<uint64_t>(wow64::heaven_gate::kUserStackSelector));
+            emu.reg(x86_register::rsp, heaven_gate_stack_top);
+            emu.reg(x86_register::rip, heaven_gate_code_base);
         }
 
         WOW64_CONTEXT make_wow64_context(const CONTEXT64& ctx)
@@ -182,130 +197,6 @@ namespace sogen
             static_assert(sizeof(xmm_state) <= sizeof(result.ExtendedRegisters));
             memcpy(result.ExtendedRegisters, &xmm_state, sizeof(xmm_state));
             return result;
-        }
-
-        EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>> make_wow64_exception_record(const exception_record& record)
-        {
-            EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>> result{};
-            result.ExceptionCode = record.ExceptionCode;
-            result.ExceptionFlags = record.ExceptionFlags;
-            result.ExceptionRecord = 0;
-            result.ExceptionAddress = static_cast<uint32_t>(record.ExceptionAddress);
-            result.NumberParameters = record.NumberParameters;
-            for (size_t i = 0; i < std::size(result.ExceptionInformation); ++i)
-            {
-                result.ExceptionInformation[i] = static_cast<uint32_t>(record.ExceptionInformation[i]);
-            }
-            return result;
-        }
-
-        // Real x86 ntdll.dll!KiUserExceptionDispatcher(PEXCEPTION_RECORD, PCONTEXT) is entered directly
-        // by the kernel (no `call`, no return address on the stack): confirmed via disassembly of the
-        // real 32-bit ntdll.dll that it reads `[esp+0]` as PEXCEPTION_RECORD and `[esp+4]` as PCONTEXT,
-        // then tail-calls the real RtlDispatchException with them. Since a wow64 thread's 32-bit
-        // ntdll.dll is genuine Windows code already mapped in guest memory, dispatch only has to hand
-        // control to it correctly - RtlDispatchException performs the real FS:[0] SEH chain walk and
-        // invokes the guest's actual handler(s) itself, with no need for sogen to reimplement any of
-        // that. A wow64 thread that faults while running 32-bit code never has to leave 32-bit mode for
-        // exception delivery at all (unlike the heaven's-gate-crossing dispatch_exception_pointers uses
-        // for genuinely 64-bit-mode faults) - this matches how the real kernel picks the dispatch entry
-        // point from the trap frame's Cs at fault time (Wow64SharedInformation, populated in
-        // module_manager.cpp, exists precisely so the kernel/wow64 layer knows this 32-bit address).
-        //
-        // The PCONTEXT passed to the dispatcher must be thread.wow64_cpu_reserved's Context field, not
-        // some arbitrary scratch copy: real wow64's own machinery (e.g. the translation NtContinue's
-        // wow64 syscall thunk performs when the guest's SEH filter resumes execution) reads/writes the
-        // 32-bit context from that well-known, TEB-referenced location - confirmed by sync_wow64_cpu_-
-        // reserved_context's own doc comment below ("Wow64PassExceptionToGuest rebuilds the 32-bit
-        // context from WOW64_CPURESERVED"). Handing it a disconnected copy left later stages (observed:
-        // a wow64cpu.dll-internal single-step immediately after a handled STATUS_BREAKPOINT) restoring
-        // CPU state from stale/uninitialized data instead of this dispatch's actual context.
-        void dispatch_exception_pointers_wow64(x86_64_cpu& emu, const uint64_t dispatcher32, const uint64_t wow64_context_addr,
-                                               const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
-        {
-            const auto& ctx = *reinterpret_cast<CONTEXT64*>(pointers.ContextRecord);
-            const auto& record = *reinterpret_cast<exception_record*>(pointers.ExceptionRecord);
-
-            const auto wow64_record = make_wow64_exception_record(record);
-
-            constexpr uint64_t args_frame_size = 8;
-            const uint64_t total_size = align_up(sizeof(wow64_record) + args_frame_size, 0x10);
-            const auto current_esp = ctx.Rsp & 0xFFFFFFFFu;
-            const auto new_esp = align_down(current_esp - total_size, 0x10);
-
-            const auto record_addr = new_esp;
-            const auto args_frame_addr = record_addr + sizeof(wow64_record);
-
-            const emulator_object<EMU_EXCEPTION_RECORD<EmulatorTraits<Emu32>>> record_obj{emu, record_addr};
-            record_obj.write(wow64_record);
-
-            // NONCONTINUABLEDIAG: RtlDispatchException is confirmed (via disassembly) to refuse
-            // continuation and raise STATUS_NONCONTINUABLE_EXCEPTION whenever the original
-            // EXCEPTION_RECORD's ExceptionFlags bit 0 (EXCEPTION_NONCONTINUABLE) is set - this exactly
-            // matches the observed infinite loop (UnhandledExceptionFilter's callback returns -1, but
-            // resumption is refused, so a fresh STATUS_NONCONTINUABLE_EXCEPTION gets raised and
-            // re-dispatched forever). record.ExceptionFlags is set to 0 in dispatch_exception, but
-            // verify the actual value written here and read back from guest memory to rule out any
-            // corruption/miscomputation before assuming the C++ source is what's actually landing.
-            {
-                const auto readback = record_obj.try_read();
-                fprintf(stderr,
-                        "[NONCONTINUABLEDIAG] wow64_record.ExceptionFlags=0x%x wow64_record.ExceptionCode=0x%x record_addr=0x%llx "
-                        "readback_ok=%d readback.ExceptionFlags=0x%x readback.ExceptionCode=0x%x\n",
-                        static_cast<unsigned int>(wow64_record.ExceptionFlags), static_cast<unsigned int>(wow64_record.ExceptionCode),
-                        static_cast<unsigned long long>(record_addr), readback.has_value() ? 1 : 0,
-                        static_cast<unsigned int>(readback ? readback->ExceptionFlags : 0),
-                        static_cast<unsigned int>(readback ? readback->ExceptionCode : 0));
-                fflush(stderr);
-            }
-
-            const std::array<uint32_t, 2> args_frame = {static_cast<uint32_t>(record_addr), static_cast<uint32_t>(wow64_context_addr)};
-            emu.write_memory(args_frame_addr, args_frame.data(), sizeof(args_frame));
-
-            // SEHCHAINDIAG: a Smoke Test Windows x86 run confirmed the crash from the stale-context bug
-            // is gone, but the run then hung indefinitely - _seh_filter_exe/anti-debug-check/
-            // NtSetInformationThread repeating thousands of times with no new dispatch_exception call
-            // in between, meaning real ntdll's own FS:[0] walk (or _seh_filter_exe's own logic) is
-            // looping entirely in already-dispatched guest code. Dump the chain right before handing
-            // off to the real dispatcher, with cycle detection, to see whether it's already circular/
-            // malformed at this exact point (before real ntdll ever touches it) or looks fine here.
-            {
-                const auto fs_base = emu.get_segment_base(x86_register::fs);
-                uint32_t chain_addr = 0;
-                emu.try_read_memory(fs_base, &chain_addr, sizeof(chain_addr));
-                fprintf(stderr, "[SEHCHAINDIAG] dispatch fs_base=0x%llx head=0x%x wow64_context_addr=0x%llx record_addr=0x%llx\n",
-                        static_cast<unsigned long long>(fs_base), chain_addr, static_cast<unsigned long long>(wow64_context_addr),
-                        static_cast<unsigned long long>(record_addr));
-
-                std::unordered_set<uint32_t> seen{};
-                for (int i = 0; i < 32 && chain_addr != 0xFFFFFFFFu && chain_addr != 0; ++i)
-                {
-                    if (!seen.insert(chain_addr).second)
-                    {
-                        fprintf(stderr, "[SEHCHAINDIAG] CYCLE detected re-visiting 0x%x after %d entries\n", chain_addr, i);
-                        break;
-                    }
-
-                    struct
-                    {
-                        uint32_t next;
-                        uint32_t handler;
-                    } rec{};
-
-                    if (!emu.try_read_memory(chain_addr, &rec, sizeof(rec)))
-                    {
-                        fprintf(stderr, "[SEHCHAINDIAG] chain[%d] @0x%x unreadable\n", i, chain_addr);
-                        break;
-                    }
-
-                    fprintf(stderr, "[SEHCHAINDIAG] chain[%d] @0x%x next=0x%x handler=0x%x\n", i, chain_addr, rec.next, rec.handler);
-                    chain_addr = rec.next;
-                }
-                fflush(stderr);
-            }
-
-            emu.reg(x86_register::esp, args_frame_addr);
-            emu.reg(x86_register::eip, dispatcher32);
         }
 
         void sync_wow64_cpu_reserved_context(windows_emulator& win_emu, x86_64_cpu& emu, emulator_thread& thread, const CONTEXT64& ctx)
@@ -378,16 +269,6 @@ namespace sogen
                       ? thread.current_ip
                       : vcpu.cpu.read_instruction_pointer();
 
-        fprintf(stderr,
-                "[EXCDIAG5] status=0x%x ctx.Rsp=0x%llx ctx.Rbp=0x%llx ctx.SegCs=0x%llx ctx.SegSs=0x%llx cs_reg=0x%x rip=0x%llx "
-                "ctx.R12=0x%llx ctx.R13=0x%llx ctx.R14=0x%llx ctx.R15=0x%llx\n",
-                static_cast<unsigned int>(status), static_cast<unsigned long long>(ctx.Rsp), static_cast<unsigned long long>(ctx.Rbp),
-                static_cast<unsigned long long>(ctx.SegCs), static_cast<unsigned long long>(ctx.SegSs),
-                vcpu.cpu.reg<uint16_t>(x86_register::cs), static_cast<unsigned long long>(ctx.Rip),
-                static_cast<unsigned long long>(ctx.R12), static_cast<unsigned long long>(ctx.R13),
-                static_cast<unsigned long long>(ctx.R14), static_cast<unsigned long long>(ctx.R15));
-        fflush(stderr);
-
         // FEXCore's JIT translation of INT3 reports RIP already advanced past the trapping 0xCC
         // (see reports_breakpoint_rip_past_instruction's doc comment) - real hardware/NT
         // (KiBreakpointTrap) always reports #BP at the INT3 itself, which is what guest SEH/VEH
@@ -433,10 +314,6 @@ namespace sogen
         // fresh STATUS_NONCONTINUABLE_EXCEPTION - recursing until the stack is exhausted. Excludes the
         // dispatch_debug_exception (int 2dh) case above, which already advances ctx.Rip past its own,
         // differently-sized instruction.
-        const auto cs_selector = vcpu.cpu.reg<uint16_t>(x86_register::cs);
-        const auto bitness = segment_utils::get_segment_bitness(vcpu.cpu, cs_selector);
-        const auto is_bit32 = bitness && *bitness == segment_utils::segment_bitness::bit32;
-
         if (!is_debug_exception)
         {
             record.NumberParameters = static_cast<DWORD>(parameters.size());
@@ -460,23 +337,17 @@ namespace sogen
         pointers.ContextRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&ctx);
         pointers.ExceptionRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&record);
 
-        if (is_bit32 && win_emu.process.ki_user_exception_dispatcher32 && thread.wow64_cpu_reserved)
+        if (status == STATUS_BREAKPOINT)
         {
-            if (status == STATUS_BREAKPOINT)
-            {
-                // WOW64LOOPDIAG: flips on once the breakpoint dispatch that precedes the observed
-                // post-breakpoint hang happens, so thread.cpp/memory.cpp's diagnostics (gated on this
-                // flag) capture calls from inside the actual loop instead of being exhausted by
-                // unrelated startup-time calls to the same syscalls long before this point.
-                g_wow64_post_breakpoint_diag.store(true);
-            }
-
-            const auto wow64_context_addr = thread.wow64_cpu_reserved->value() + offsetof(WOW64_CPURESERVED, Context);
-            dispatch_exception_pointers_wow64(vcpu.cpu, *win_emu.process.ki_user_exception_dispatcher32, wow64_context_addr, pointers);
-            return;
+            // WOW64LOOPDIAG: flips on once a breakpoint gets dispatched, so thread.cpp/memory.cpp's
+            // diagnostics (gated on this flag) capture calls from that point on instead of being
+            // exhausted by unrelated startup-time calls to the same syscalls.
+            g_wow64_post_breakpoint_diag.store(true);
         }
 
-        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher, pointers);
+        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher,
+                                    win_emu.mod_manager.wow64_heaven_gate_code_base(), win_emu.mod_manager.wow64_heaven_gate_stack_top(),
+                                    pointers);
     }
 
     void dispatch_access_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address, const memory_operation operation)

@@ -386,14 +386,6 @@ namespace sogen
         // WOW64 support flag - set during process setup based on executable architecture
         bool is_wow64_process{false};
 
-        // Per-process random cookie for NtQueryInformationProcess's ProcessCookie class - real
-        // Windows assigns this once, at process creation, and every subsequent query returns the
-        // same value (ntdll's own RtlpGetCookieValue caches it after the first query). Guest code
-        // uses this to obfuscate function pointers via RtlEncodePointer/RtlDecodePointer-style
-        // rotate+xor schemes; a real random value here is required for those to round-trip
-        // correctly. Generated once during process setup.
-        uint32_t process_cookie{};
-
         callbacks* callbacks_{};
 
         std::vector<uint8_t> sid{};
@@ -487,14 +479,6 @@ namespace sogen
         std::optional<emulator_object<PEB32>> peb32;
         std::optional<emulator_object<RTL_USER_PROCESS_PARAMETERS32>> process_params32;
         std::optional<uint64_t> rtl_user_thread_start32{};
-        // When set, points at the wow64-heaven-gate page's small "call
-        // RtlSetUnhandledExceptionFilter(NULL), then jmp RtlUserThreadStart32" trampoline
-        // (module_manager::install_wow64_heaven_gate) - the wow64 main thread's initial EIP should
-        // use this instead of rtl_user_thread_start32 directly so real ntdll32 code performs that
-        // one call itself before falling through to the real entry point. See
-        // wow64_heaven_gate.hpp's kFilterTrampolineBase doc comment for why.
-        std::optional<uint64_t> wow64_thread_start_trampoline{};
-        std::optional<uint64_t> ki_user_exception_dispatcher32{};
         std::optional<uint64_t> wow64_syscall_reentry_addr{};
 
         user_handle_table user_handles;
