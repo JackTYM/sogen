@@ -921,7 +921,7 @@ namespace sogen
                     run_simulated_code_size = dispatch_start - *scanned;
                 }
 
-                emu_ptr->register_gate_crossing(run_simulated_code_address, run_simulated_code_size,
+                emu_ptr->register_gate_crossing(run_simulated_code_address, static_cast<size_t>(run_simulated_code_size),
                                                 x86_64_emulator::gate_crossing_kind::wow64_run_simulated_code);
 
                 // NtContinue never returns through the normal syscall path - the real kernel restores
