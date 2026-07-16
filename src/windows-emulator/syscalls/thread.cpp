@@ -711,6 +711,18 @@ namespace sogen
         // machinery instead of duplicating its register-marshaling logic here.
         bool try_restore_wow64_continue_via_reverse_gate(const syscall_context& c, const CONTEXT64& context)
         {
+            // Only a dual-engine backend (FEX) can have its 64-bit engine transiently active mid
+            // gate-crossing in the first place - see has_separate_bitness_engines' doc comment. On
+            // every other backend, cpu_context::restore already resumes a WoW64 thread correctly;
+            // taking the reverse-gate path anyway hijacks an ordinary NtContinue call (confirmed:
+            // this misfired on non-FEX backends for perfectly normal WoW64 resumes during
+            // SEH-heavy LoadLibrary churn, corrupting the resume into a deterministic access
+            // violation).
+            if (!c.vcpu.cpu.has_separate_bitness_engines())
+            {
+                return false;
+            }
+
             // The calling engine's CURRENT CS (0x33 at the moment this syscall fires) and even
             // wow64_cpu_reserved being set are both unreliable signals for "this needs the reverse
             // gate": a WoW64 *process* can host genuinely native 64-bit worker/loader threads (their

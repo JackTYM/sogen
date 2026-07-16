@@ -1550,6 +1550,15 @@ namespace sogen::fex
             return true;
         }
 
+        // FEXCore maintains separate context_/thread_ (64-bit) and context32_/thread32_ (32-bit)
+        // engines for a WoW64 process, only one of which is active at a time (see
+        // perform_bitness_switch) - see has_separate_bitness_engines' doc comment for why this
+        // matters for the WoW64 NtContinue reverse-gate.
+        bool has_separate_bitness_engines() const override
+        {
+            return true;
+        }
+
         // request_thread_stop() mprotects InterruptFaultPage to PROT_NONE, which is safe to call from
         // any host thread - the software-quantum watchdog thread in windows_emulator::start() relies on
         // exactly this (supports_instruction_counting() is false, so that path is the only time-slicing
