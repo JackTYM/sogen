@@ -977,9 +977,12 @@ jobs:
       # Cocoa/Metal GPU subsystem makes at dyld-load time can - unpredictably, based on ASLR -
       # exhaust the address space sogen's WoW64 support needs below 4GB; see the plan file's
       # 2026-07-12 entry for the full root cause). A fresh process retry, with its own fresh ASLR
-      # layout, reliably works around both. The sample's own "wow64-test-sample: ok" completion
-      # marker (rather than exit code alone) guards against a benign non-fatal teardown-time
-      # message that can otherwise still leave exit=0.
+      # layout, reliably works around both. Checking for genuine completion (rather than exit code
+      # alone, which guards against a benign non-fatal teardown-time message that can otherwise
+      # still leave exit=0) is done via the sample's own status file, not its stdout - a WoW64
+      # 32-bit guest's buffered CRT stdio has been observed to never actually flush to a real
+      # WriteFile syscall (see wow64_test_sample.cpp's write_completion_marker), so a host-side
+      # stdout capture can't reliably observe it even when the test genuinely passes.
       - name: Run WoW64 Smoke Test
         uses: nick-fields/retry@v4.0.0
         with:
@@ -987,8 +990,9 @@ jobs:
           timeout_minutes: 10
           command: |
             cd build/release/artifacts && chmod +x ./analyzer
+            rm -f root/filesys/c/wow64_test_sample_status.txt
             ./analyzer -e root c:/wow64-test-sample.exe | tee wow64-smoke-test.log
-            grep -q 'wow64-test-sample: ok' wow64-smoke-test.log
+            grep -q 'wow64-test-sample: ok' root/filesys/c/wow64_test_sample_status.txt
         env:
           EMULATOR_FEX: "1"
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root

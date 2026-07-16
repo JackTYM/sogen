@@ -199,6 +199,10 @@ jobs:
       - name: Stage WoW64 Test Guest
         run: cp build/release/artifacts/win32/wow64-test-sample.exe build/release/artifacts/root/filesys/c/
 
+      # Checking for genuine completion is done via the sample's own status file, not its stdout -
+      # a WoW64 32-bit guest's buffered CRT stdio has been observed to never actually flush to a
+      # real WriteFile syscall (see wow64_test_sample.cpp's write_completion_marker), so a
+      # host-side stdout capture can't reliably observe it even when the test genuinely passes.
       - name: Run WoW64 Smoke Test
         uses: nick-fields/retry@v4.0.0
         with:
@@ -206,8 +210,9 @@ jobs:
           timeout_minutes: 10
           command: |
             cd build/release/artifacts && chmod +x ./analyzer
+            rm -f root/filesys/c/wow64_test_sample_status.txt
             ./analyzer -e root c:/wow64-test-sample.exe | tee wow64-smoke-test.log
-            grep -q 'wow64-test-sample: ok' wow64-smoke-test.log
+            grep -q 'wow64-test-sample: ok' root/filesys/c/wow64_test_sample_status.txt
         env:
           EMULATOR_FEX: "1"
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root

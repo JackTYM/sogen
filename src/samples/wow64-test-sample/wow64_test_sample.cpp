@@ -126,6 +126,37 @@ namespace
 
         return true;
     }
+
+    // Guest stdout here isn't a real console, and buffered CRT stdio (even with setvbuf's _IOLBF
+    // below) has been observed to never actually flush for a WoW64 32-bit process - printf's own
+    // "ok" markers reliably reach the guest's internal buffer but never reach a real WriteFile
+    // syscall, so a host-side observer (e.g. CI capturing stdout) never sees them even though the
+    // test genuinely passed. WriteFile is a direct syscall with no such buffering ambiguity - write
+    // the final completion marker to a dedicated file instead, exactly like basic_file_roundtrip's
+    // own known-reliable write above, so CI can check for genuine completion via the file's content.
+    bool write_completion_marker()
+    {
+        constexpr auto path = std::to_array("c:\\wow64_test_sample_status.txt");
+        constexpr auto message = std::to_array("wow64-test-sample: ok");
+
+        const HANDLE handle = CreateFileA(path.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            std::printf("wow64-test: CreateFileA(status) failed: %lu\n", GetLastError());
+            return false;
+        }
+
+        DWORD written = 0;
+        const BOOL write_ok = WriteFile(handle, message.data(), message.size() - 1, &written, nullptr);
+        CloseHandle(handle);
+        if (!write_ok || written != message.size() - 1)
+        {
+            std::printf("wow64-test: WriteFile(status) failed: %lu\n", GetLastError());
+            return false;
+        }
+
+        return true;
+    }
 } // namespace
 #endif
 
@@ -163,6 +194,11 @@ int main()
     std::printf("wow64-test-sample: file roundtrip ok\n");
 
     std::printf("wow64-test-sample: ok\n");
+
+    if (!write_completion_marker())
+    {
+        return 1;
+    }
     return 0;
 #endif
 }
