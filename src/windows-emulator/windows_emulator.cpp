@@ -793,6 +793,29 @@ namespace sogen
                                                           this->mod_manager.executable->size_of_stack_reserve, 0, true);
 
         switch_to_thread(*this, this->vcpu(0), main_thread_id);
+
+        // The desktop window is created in setup() before any thread exists, so its owning thread id
+        // stays 0. Real Windows reports a valid thread for GetWindowThreadProcessId(GetDesktopWindow()),
+        // and code relies on it: DirectSound's SetCooperativeLevel stores
+        // GetWindowThreadProcessId(GetRootParentWindow(hwnd)) and IDirectSoundBuffer::Play rejects every
+        // call with DSERR_PRIOLEVELNEEDED ("Cooperative level must be set") when that id is 0. user32's
+        // client-side GetWindowThreadProcessId reads the owning thread from the shared USER handle
+        // table entry (USER_HANDLEENTRY::pOwner) and returns 0 immediately when it is null, only falling
+        // back to the NtUserQueryWindow syscall (which reads window::thread_id) otherwise. Populate both
+        // now that the main thread exists.
+        if (auto* desktop = context.windows.get(context.default_desktop_window_handle))
+        {
+            const auto desktop_thread_id = this->current_thread().id;
+            desktop->thread_id = desktop_thread_id;
+            desktop->guest.access([&](USER_WINDOW& window) { window.threadId = desktop_thread_id; });
+            // Unlike set_user_handle_owner(), which stores a win32-thread-info guest pointer, this stores
+            // a raw thread id: the desktop window exists before any guest thread does, so there is no
+            // thread-info pointer to store yet. user32 null-checks pOwner and falls back to the
+            // NtUserQueryWindow syscall for cross-process/early windows, so a raw tid here is enough to
+            // satisfy the client-side fast path without breaking that fallback.
+            context.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = desktop_thread_id; },
+                                                           static_cast<uint32_t>(context.default_desktop_window_handle.value.id));
+        }
     }
 
     void windows_emulator::yield_thread(vcpu_context& vcpu, const bool alertable)
