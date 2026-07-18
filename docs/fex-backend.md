@@ -9,17 +9,21 @@ Silicon** — [FEX](https://fex-emu.com) only JITs x86/x86-64 to ARM64.
 **Working on macOS/Apple Silicon — the only functional target.** On Darwin the backend builds,
 links, and runs: it passes the full regression suite (`test-sample.exe`, `hello.exe`,
 `busybox.exe`) matching the Unicorn backend's behavior byte-for-byte, and has been validated
-against ~40 pre-existing native 64-bit sample executables (process/thread introspection,
-synchronization primitives, sections, security tokens, the registry, pipes, sockets, timers,
-file/directory I/O, GUI dialogs, DXGK harnesses) with every remaining discrepancy traced to a
-backend-agnostic gap (an unimplemented syscall, or a missing staged system-DLL export) rather than
-a difference between this backend and the existing one.
+against ~40 pre-existing sample executables (process/thread introspection, synchronization
+primitives, sections, security tokens, the registry, pipes, sockets, timers, file/directory I/O,
+GUI dialogs, DXGK harnesses, and 32-bit WoW64 binaries) with every remaining discrepancy traced
+to a backend-agnostic gap (an unimplemented syscall, or a missing staged system-DLL export) rather
+than a difference between this backend and the existing one.
 
 **ARM64 Linux is build-tested only.** The Linux path compiles in CI but has never been run and is
 not expected to work: it installs no fault signal handlers, has no MMIO emulation (the
 KUSER_SHARED_DATA decode-and-emulate path is `__APPLE__`-gated), and passes FEXCore an empty
 default-constructed `HostFeatures` instead of real hardware detection (a `TODO` in
 `fex_x86_64_emulator.cpp`). Android is excluded outright by the CMake gate.
+
+**32-bit WoW64 processes are supported** (see "WoW64 support" below): a real 32-bit guest process
+runs against a second, lazily-created 32-bit FEXCore Context, with state marshaled across the
+bitness-switch trampoline on every crossing.
 
 ### Performance
 
@@ -37,9 +41,6 @@ significant fraction of runtime.
   backend and Unicorn due to a staged `comctl32.dll` build that doesn't export the ordinals the
   sample binaries were linked against. This is a staged-asset version mismatch, not a code bug, and
   is not fixable without staging a different `comctl32.dll`.
-- **32-bit (WoW64) processes are not supported.** FEXCore is fixed-bitness per `Context` and this
-  backend only stands up the single 64-bit one; `notify_process_bitness` rejects a WoW64 process
-  with a clear error instead of mis-decoding its 32-bit code. Native 64-bit processes only.
 - **A plain guest store to read-only memory aborts the emulator instead of raising an exception.**
   The fault-classification decoder (`decode_arm64_store`) only recognizes the STLR family, so a
   plain (non-atomic) STR to memory that *is* mapped read-only gets misclassified as a read and
@@ -50,6 +51,10 @@ significant fraction of runtime.
   reach the guest as an exception, but with the read/write flag (`ExceptionInformation[0]`)
   wrongly reporting a read. See `decode_arm64_store`'s comment for why the decode table cannot
   simply be broadened.
+- **Real `wow64cpu.dll` dispatch is not yet exercised.** This backend intercepts and marshals state
+  directly at the x86 bitness-switch ("heaven's gate") trampoline rather than executing real
+  `wow64cpu.dll` code through it; the real dispatch-table-driven convention is decoded (see
+  "WoW64 support" below) but not yet wired up as an alternate/fallback path.
 
 ## What is in place
 
@@ -75,8 +80,57 @@ significant fraction of runtime.
   access. This applies to both the main JIT code buffer and the per-compile temporary staging buffer.
 - GPU-bridge host-memory coherency (`mach_vm_remap` aliasing on macOS, `sys_dcache_flush`/`dc civac`
   cache maintenance) for the paravirtualized-GPU memory-sharing path.
+- 32-bit WoW64 process support (a second, lazily-created 32-bit FEXCore Context/Thread per process,
+  gate-crossing state marshaling, a WoW64 guest-memory rebase — see below).
 - Build, backend-selection, and Python-binding wiring (auto-enabled on ARM64 Linux/macOS + Clang);
   FEXCore built via ExternalProject and linked.
+
+## WoW64 support
+
+FEXCore is fixed-bitness per `Context` — a single `Context` cannot execute both 64-bit and 32-bit
+code. A WoW64 process genuinely starts execution in real 64-bit ntdll code (the thread-init thunk),
+crosses into 32-bit code at the x86 "heaven's gate" bitness switch, and crosses back on every syscall
+return and kernel callback. This backend models that with **two FEXCore Contexts per WoW64 process**
+— a 64-bit one (handling the real 64-bit ntdll/wow64*.dll code) and a 32-bit one (handling the
+guest's own 32-bit image and its 32-bit ntdll) — switching which one is "active" at each gate
+crossing.
+
+### Gate-crossing interception
+
+The bitness-switch trampoline is intercepted via the same generic non-executable-range mechanism
+FEXCore already uses for synthetic page faults: the trampoline's guest address range is marked
+non-executable, so reaching it raises a controlled synthetic `#PF` before any of its bytes are ever
+JIT-compiled, which the backend catches and handles by marshaling state between the two Contexts
+directly (rather than letting either Context attempt to decode/execute the other bitness's code).
+
+State marshaling across a crossing needs to be careful about more than a naive whole-`CPUState` copy:
+each Context's `CPUState` also carries FEXCore-internal JIT bookkeeping (SRA-mapped GPRs, the call-ret
+shadow-stack pointer, the JIT lookup-cache pointer) interleaved with genuinely-architectural x86 state
+(GPRs, XMM, x87, EFLAGS, segment selectors). A correct crossing copies the architectural state and
+leaves each Context's own JIT bookkeeping alone.
+
+### 32-bit guest memory rebase
+
+Apple Silicon enforces a mandatory, unshrinkable 4GB `__PAGEZERO` for every 64-bit process, making
+the entire low 4GB of host address space permanently unmappable. This conflicts directly with this
+project's guest-VA-equals-host-VA memory model for a 32-bit guest, whose whole architectural address
+space lives in that exact range. The fix is a FEXCore-side, per-Context, runtime-conditional address
+rebase (a `CONFIG_WOW64GUESTREBASE` option and `Context::SetNeedsWow64GuestRebase` API in the
+`deps/FEX` submodule): when enabled on a Context, every real memory access — data or instruction
+fetch — computed at an address below 4GB is transparently rebased to a fixed offset above it, via a
+runtime IR `Select` rather than a compile-time-constant add (since a 64-bit-mode Context's addresses
+aren't confined to a fixed range the way a 32-bit-mode Context's are). This is a strict no-op for any
+Context that doesn't opt in, so it does not affect the existing 64-bit-only Linux/macOS path.
+
+### `wow64cpu.dll`'s real dispatch convention (decoded, not yet used)
+
+The real `TurboDispatchJumpAddressStart` mechanism inside `wow64cpu.dll` — the genuine syscall-return
+dispatch table a real WoW64 process uses — has a documented calling convention (an index derived
+from the high word of `EAX`, dispatched through a jump table `wow64cpu.dll` builds at init, against a
+CPU-area `CONTEXT` block holding the 32-bit register file), but this backend does not yet execute
+real `wow64cpu.dll` code through it — it intercepts and marshals state directly at the bitness-switch
+trampoline instead, which is sufficient for everything validated so far but means the real dispatch
+table is presently unused.
 
 ## Architecture
 
@@ -84,20 +138,26 @@ significant fraction of runtime.
 - `fex_x86_64_common.hpp` — header-only `x86_register` → `CPUState` field mapping (GPRs and their
   sub-registers, rip, flags, xmm, mm, fs/gs base, segment selectors, mxcsr/fcw). No FEX includes, so
   it can be reasoned about without the FEX toolchain.
-- `fex_x86_64_emulator.cpp` — the backend and the syscall bridge.
+- `fex_x86_64_marshal.hpp` — the architectural-state marshaling helper used at WoW64 gate crossings
+  (deliberately factored out so a standalone test can exercise it without linking the whole backend).
+- `fex_x86_64_emulator.cpp` — the backend, the syscall bridge, and the WoW64 gate-crossing/rebase
+  integration.
 
 ### Guest model — the key difference from the other backends
 
 FEX is an **in-process** binary translator. It does not sandbox a separate guest address space:
 translated guest code runs inside the host process and **guest virtual addresses are host virtual
-addresses** (a 1:1 mapping). This drives the whole design:
+addresses** (a 1:1 mapping, subject to the WoW64 rebase described above for 32-bit processes). This
+drives the whole design:
 
 - `map_memory()` is a real `mmap(MAP_FIXED)` at the guest address; `unmap_memory()`/
   `apply_memory_protection()` are `munmap`/`mprotect`. A sorted region map tracks what is mapped, and
   (on macOS) a per-4KB-page permission shadow table reconciles the 16KB host page granularity against
   the guest's 4KB pages.
 - `read_memory()`/`write_memory()` are direct host `memcpy`s once the range is confirmed mapped (the
-  guest pointer is directly dereferenceable). Writes invalidate FEX's translation cache for the range.
+  guest pointer is directly dereferenceable). Writes invalidate FEX's translation cache for the range
+  — for a WoW64 process, both Contexts' caches, since the Context active at unmap time does not
+  necessarily match the Context whose cached translations cover the unmapped range.
 - `map_host_memory()` aliases caller-owned memory into the guest with `mremap(MREMAP_FIXED)` on Linux
   or `mach_vm_remap` on macOS (e.g. for the GPU bridge), and is *not* munmap'd on teardown.
 
