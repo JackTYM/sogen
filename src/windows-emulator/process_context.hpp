@@ -548,6 +548,11 @@ namespace sogen
         uint32_t spawned_thread_count{0};
         handle_store<handle_types::thread, emulator_thread> threads{};
 
+        // Handles delivered with the most recent ALPC reply message (NtAlpcSendWaitReceivePort). rpcrt4's
+        // system-handle import retrieves them via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation)
+        // rather than reading the handle attribute directly. Transient (valid only until the next reply).
+        std::vector<alpc_reply_handle> pending_alpc_message_handles{};
+
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx
         uint64_t last_extended_params_numa_node{0};
