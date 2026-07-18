@@ -9,6 +9,7 @@ add_subdirectory(vulkan-shim)
 add_subdirectory(vulkan-shim-test)
 add_subdirectory(steam-shim)
 add_subdirectory(cpu-bench-sample)
+add_subdirectory(wow64-test-sample)
 
 ##########################################
 
