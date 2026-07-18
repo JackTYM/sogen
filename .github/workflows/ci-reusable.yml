@@ -910,6 +910,69 @@ jobs:
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
           EMULATOR_VERBOSE: ${{ inputs.verbose }}
 
+  smoke-test-fex-wow64:
+    name: Smoke Test FEX WoW64 (macOS arm64)
+    runs-on: macos-latest
+    needs: [create-emulation-root, build]
+    steps:
+      - name: Download Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: macOS arm64 Release Artifacts
+          path: build/release/artifacts
+
+      - name: Download Windows Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows x86_64 Release Artifacts
+          path: build/release/artifacts
+
+      - name: Download Windows x86 Artifacts
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows x86 Release Artifacts
+          path: build/release/artifacts-x86
+
+      - name: Download Emulation Root
+        uses: pyTooling/download-artifact@v8
+        with:
+          name: Windows 2025 Emulation Root
+          path: build/release/artifacts/root
+
+      - name: Copy Test Samples
+        run: |
+          cp build/release/artifacts-x86/test-sample.exe build/release/artifacts/root/filesys/c/
+          cp build/release/artifacts-x86/wow64-test-sample.exe build/release/artifacts/root/filesys/c/
+
+      # See smoke-test-fex's own comment on this retry: FEX shares the guest address space directly
+      # with the host process, so its free-region search competes with the host's own ASLR layout.
+      - name: CMake Test (real test-sample.exe as a genuine WoW64 guest)
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 10
+          command: cd build/release/artifacts && chmod +x ./analyzer && ./analyzer -e root c:/test-sample.exe
+        env:
+          EMULATOR_FEX: "1"
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
+          EMULATOR_VERBOSE: ${{ inputs.verbose }}
+
+      # wow64-test-sample.exe's own stdout is unreliable under WoW64 (see its own doc comment), so its
+      # pass/fail signal is the completion-marker file it writes, not the process exit code alone.
+      - name: CMake Test (wow64-test-sample.exe)
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 10
+          command: |
+            cd build/release/artifacts && chmod +x ./analyzer
+            ./analyzer -e root c:/wow64-test-sample.exe
+            grep -q 'wow64-test-sample: ok' root/filesys/c/wow64_test_sample_status.txt
+        env:
+          EMULATOR_FEX: "1"
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
+          EMULATOR_VERBOSE: ${{ inputs.verbose }}
+
   smoke-test-mingw:
     name: Smoke Test MinGW x86_64
     runs-on: windows-latest
@@ -1305,6 +1368,7 @@ jobs:
         smoke-test-whp,
         smoke-test-kvm,
         smoke-test-fex,
+        smoke-test-fex-wow64,
         smoke-test-node,
         smoke-test-mingw,
         smoke-test-win32,
