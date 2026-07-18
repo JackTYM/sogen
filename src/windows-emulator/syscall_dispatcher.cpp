@@ -7,6 +7,58 @@
 namespace sogen
 {
 
+    namespace
+    {
+        // Real ntdll's RtlpInitCodePageTables always leaves this internal lead-byte-info-table pointer
+        // (at a fixed offset from ntdll's image base) populated - either a real DBCS table, or ntdll's
+        // own empty/all-zero NlsEmptyLeadByteInfoTable for single-byte codepages. For a wow64 process
+        // specifically, this field is observed to stay null even though the sibling codepage-table
+        // fields are populated correctly, and any guest read of a null table computes a near-null
+        // address and crashes. Populating it with an empty/all-zero lead-byte table is semantically
+        // identical to ntdll's own single-byte-codepage behavior, so it's a safe fix regardless of the
+        // exact root cause.
+        constexpr uint64_t nls_lead_byte_info_table_offset = 0x172760;
+
+        void ensure_nls_lead_byte_info_table(windows_emulator& win_emu)
+        {
+            if (!win_emu.process.is_wow64_process)
+            {
+                return;
+            }
+
+            const auto* ntdll_mod = win_emu.mod_manager.ntdll;
+            if (ntdll_mod == nullptr)
+            {
+                return;
+            }
+
+            const auto field_address = ntdll_mod->image_base + nls_lead_byte_info_table_offset;
+
+            uint64_t current_value = 0;
+            if (!win_emu.emu().try_read_memory(field_address, &current_value, sizeof(current_value)) || current_value != 0)
+            {
+                return;
+            }
+
+            uint16_t global_rtl_nls_state = 0;
+            // 0xFDE9 is ntdll's own not-yet-initialized marker for this state; skip until ntdll's own
+            // codepage init has actually run.
+            if (!win_emu.emu().try_read_memory(ntdll_mod->image_base + 0x1726d0, &global_rtl_nls_state, sizeof(global_rtl_nls_state)) ||
+                global_rtl_nls_state == 0xFDE9)
+            {
+                return;
+            }
+
+            constexpr size_t lead_byte_table_size = 0x200; // 256 WORD entries, one per possible byte value
+            const auto aligned_size = static_cast<size_t>(page_align_up(lead_byte_table_size));
+            const auto table_address = win_emu.memory.allocate_memory(aligned_size, memory_permission::read);
+            const std::vector<std::byte> zeroed_table(lead_byte_table_size, std::byte{0});
+            win_emu.emu().write_memory(table_address, zeroed_table.data(), zeroed_table.size());
+            win_emu.emu().write_memory(field_address, &table_address, sizeof(table_address));
+        }
+
+    } // namespace
+
     static void serialize(utils::buffer_serializer& buffer, const syscall_handler_entry& obj)
     {
         buffer.write(obj.name);
@@ -70,6 +122,8 @@ namespace sogen
     {
         auto& emu = vcpu.cpu;
         auto& context = win_emu.process;
+
+        ensure_nls_lead_byte_info_table(win_emu);
 
         const auto address = emu.read_instruction_pointer();
         const auto raw_syscall_id = emu.reg<uint32_t>(x86_register::eax);
