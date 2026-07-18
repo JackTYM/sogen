@@ -460,9 +460,21 @@ namespace sogen
         // Reserve and initialize 64-bit TEB first
         this->teb64 = this->gs_segment->reserve<TEB64>();
 
-        // Allocate memory for native stack + WOW64_CPURESERVED structure
-        this->stack_base = memory.allocate_memory(WOW64_NATIVE_STACK_SIZE, memory_permission::read_write);
-        if (this->stack_base == 0)
+        // This is the *native* 64-bit stack - setup_registers()'s "Native 64-bit process setup"
+        // unconditionally uses this->stack_base/stack_size to set up RSP for the real 64-bit
+        // RtlUserThreadStart every wow64 thread genuinely starts executing. It must live in the low
+        // 4GB (WOW64_NATIVE_STACK_BASE_HINT): real WoW64 keeps the native stack 32-bit-addressable so
+        // wow64win.dll's win32k callback thunks can truncate the stack pointer to build the 32-bit
+        // window-proc call frame. Deliberately bounded, unlike the plain hint-based allocate_memory
+        // overload (which searches upward from the hint with no ceiling, risking a pick above 4GB) -
+        // and deliberately does NOT fall back to searching below the hint on failure, since that range
+        // is exactly the 32-bit module/heap region the hint exists to avoid.
+        constexpr uint64_t wow64_native_stack_below_4gb_ceiling = 0xFFFFFFFFULL;
+
+        this->stack_base = memory.find_free_host_allocation_base(WOW64_NATIVE_STACK_SIZE, WOW64_NATIVE_STACK_BASE_HINT,
+                                                                 wow64_native_stack_below_4gb_ceiling);
+
+        if (!this->stack_base || !memory.allocate_memory(this->stack_base, WOW64_NATIVE_STACK_SIZE, memory_permission::read_write))
         {
             throw std::runtime_error("Failed to allocate native stack + WOW64_CPURESERVED memory region");
             return;
@@ -654,6 +666,39 @@ namespace sogen
             static_assert(sizeof(xmm_state) <= sizeof(ctx.Context.ExtendedRegisters));
             memcpy(ctx.Context.ExtendedRegisters, &xmm_state, sizeof(xmm_state));
         });
+
+        // Real ntdll allocates a per-thread activation-context stack during thread init and stores it
+        // in TEB->ActivationContextStackPointer. Once real 32-bit loader code runs
+        // (LdrpLoadForwardedDll -> RtlActivateActivationContextUnsafeFast), it dereferences
+        // ActivationContextStackPointer (writing ->ActiveFrame) for any module that has a non-null
+        // activation context, crashing on a null pointer. Provide a minimal, valid, empty stack
+        // (ActiveFrame=0, FrameListCache as an empty circular list, cookie sequence starting at 1 like
+        // real ntdll) so those Rtl(De)ActivateActivationContextUnsafeFast paths operate on a real
+        // structure.
+        //
+        // Flags=2 (not 0) is load-bearing: real ntdll's own lazy-init path
+        // (RtlpInitializeThreadActivationContextStack) stores this exact struct embedded directly in
+        // the TEB - not a separate heap block - and sets this flag specifically so
+        // RtlFreeActivationContextStack (invoked via RtlFreeThreadActivationContextStack on
+        // ExitThread) skips its RtlFreeHeap call: `if ((a1->Flags & 2) == 0) RtlFreeHeap(...)`. This
+        // stack similarly isn't a real heap allocation (it lives in the gs_segment), so Flags=0 would
+        // make every WOW64 thread's exit free a pointer that was never allocated via RtlAllocateHeap,
+        // corrupting the heap.
+        {
+            const auto act_ctx_stack = this->gs_segment->reserve<ACTIVATION_CONTEXT_STACK32>();
+            const auto frame_list_cache_addr =
+                static_cast<uint32_t>(act_ctx_stack.value() + offsetof(ACTIVATION_CONTEXT_STACK32, FrameListCache));
+            act_ctx_stack.access([&](ACTIVATION_CONTEXT_STACK32& stack) {
+                stack.ActiveFrame = 0;
+                stack.FrameListCache.Flink = frame_list_cache_addr;
+                stack.FrameListCache.Blink = frame_list_cache_addr;
+                stack.Flags = 2;
+                stack.NextCookieSequenceNumber = 1;
+                stack.StackId = 0;
+            });
+            this->teb32->access(
+                [&](TEB32& teb32_obj) { teb32_obj.ActivationContextStackPointer = static_cast<uint32_t>(act_ctx_stack.value()); });
+        }
     }
 
     void emulator_thread::mark_as_ready(const NTSTATUS status)
