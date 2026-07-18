@@ -197,6 +197,8 @@ namespace sogen
         uint64_t get_generation(const utils::path_key& full_path) const;
         bool is_deleted_hive_key(const utils::path_key& full_path) const;
         void add_path_mapping(const utils::path_key& key, const utils::path_key& value);
+        void alias_remote_audio_endpoints(const std::filesystem::path& machine);
+        void alias_remote_audio_folder(const std::filesystem::path& audio);
 
         hive_map::iterator find_hive(const utils::path_key& key);
         hive_map::const_iterator find_hive(const utils::path_key& key) const;
