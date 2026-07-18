@@ -53,8 +53,15 @@ namespace sogen
     }
 
 // TODO: Get rid of that
-#define WOW64_NATIVE_STACK_SIZE 0x40000ULL
-#define WOW64_32BIT_STACK_SIZE  (1 << 20)
+#define WOW64_NATIVE_STACK_SIZE      0x40000ULL
+#define WOW64_32BIT_STACK_SIZE       (1 << 20)
+
+// A WoW64 thread's *native* 64-bit stack must live in the low 4GB: wow64win.dll's win32k
+// callback-marshaling thunks (e.g. fnINLPCREATESTRUCT for WM_NCCREATE) build the 32-bit call
+// frame on the native stack and truncate the 64-bit stack pointer to 32 bits before handing it
+// to the 32-bit window proc. Search from a base above the 32-bit module/heap region to avoid
+// low-address collisions.
+#define WOW64_NATIVE_STACK_BASE_HINT 0x70000000ULL
 
     struct emulator_settings;
     struct application_settings;
@@ -519,6 +526,7 @@ namespace sogen
         std::optional<emulator_object<PEB32>> peb32;
         std::optional<emulator_object<RTL_USER_PROCESS_PARAMETERS32>> process_params32;
         std::optional<uint64_t> rtl_user_thread_start32{};
+        std::optional<uint64_t> wow64_syscall_reentry_addr{};
 
         user_handle_table user_handles;
         handle default_monitor_handle{};
