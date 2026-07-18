@@ -1216,7 +1216,7 @@ namespace sogen
                 // return address so the missing function's call site can be identified.
                 if (address < 0x1000)
                 {
-                    const auto sp = acting.reg<uint32_t>(x86_register::esp);
+                    const auto sp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsp));
                     uint32_t return_address = 0;
                     if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
                     {
