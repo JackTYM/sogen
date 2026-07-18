@@ -3,6 +3,7 @@
 #include "logger.hpp"
 #include "windows_emulator.hpp"
 #include "ports/api_port.hpp"
+#include "ports/audio_service.hpp"
 #include "ports/core_messaging_registrar.hpp"
 #include "ports/dns_resolver.hpp"
 #include "ports/lsa_policy_lookup.hpp"
@@ -59,6 +60,11 @@ namespace sogen
             return create_lsa_policy_lookup_port();
         }
 
+        if (port == u"\\RPC Control\\Audiosrv" || port == u"\\RPC Control\\AudioClientRpc" || port == u"\\RPC Control\\AudioSrvServiceRpc")
+        {
+            return create_audio_service_port(port);
+        }
+
         if (port == u"\\WindowsErrorReportingServicePort")
         {
             return std::make_unique<noop_port>();
@@ -75,6 +81,14 @@ namespace sogen
             // service through svcctl while creating a render audio client, so the open/close calls must return
             // a real context handle; other interfaces on this port fall back to a zero-payload success.
             return create_service_control_port();
+        }
+
+        if (port == u"\\RPC Control\\umpo")
+        {
+            // User Mode Power Object RPC port. The audio stack queries this to manage power policy
+            // for the audio endpoint (e.g. before activating a render stream). An empty success
+            // reply for all procedures is sufficient to let mmdevapi proceed to OpenStream.
+            return std::make_unique<noop_port>();
         }
 
         return std::make_unique<dummy_port>(std::u16string(port));
