@@ -672,6 +672,76 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // On real Windows, NtContinue never "returns" through the normal syscall path: the kernel
+        // restores the caller's context directly onto the trap frame, including switching CS/SS back
+        // to 32-bit compatibility mode for a WoW64 thread, entirely bypassing wow64.dll's usual
+        // "marshal outputs, jmp RunSimulatedCode" return sequence. When a WoW64 thread's own
+        // KiUserExceptionDispatcher calls ZwContinue, that call reaches sogen's syscall dispatch while
+        // the thread's 64-bit engine is transiently active (mid gate-crossing, running wow64.dll's
+        // real CONTEXT32->CONTEXT64 marshaling code) - restoring the given CONTEXT64 directly onto
+        // that engine (as cpu_context::restore does) clobbers its own control-flow state instead of
+        // properly handing control back to the 32-bit engine. Detect this case and replicate the real
+        // kernel's direct mode switch by writing the resume state into the same guest CPU-area block
+        // the reverse-gate mechanism (enter_wow64_32bit_from_run_simulated_code) already reads on
+        // every ordinary wow64 syscall return, then redirecting the 64-bit engine's RIP to that same
+        // reverse-gate entry point so the existing engine-flip logic performs the switch.
+        bool try_restore_wow64_continue_via_reverse_gate(const syscall_context& c, const CONTEXT64& context)
+        {
+            // Only a dual-engine backend (FEX) can have its 64-bit engine transiently active mid
+            // gate-crossing in the first place - see has_separate_bitness_engines' doc comment. On
+            // every other backend, cpu_context::restore already resumes a WoW64 thread correctly;
+            // taking the reverse-gate path anyway would hijack an ordinary NtContinue call.
+            if (!c.vcpu.cpu.has_separate_bitness_engines())
+            {
+                return false;
+            }
+
+            // The calling engine's CURRENT CS and even wow64_cpu_reserved being set are both
+            // unreliable signals for "this needs the reverse gate": a WoW64 process can host
+            // genuinely native 64-bit worker/loader threads that still get a wow64_cpu_reserved
+            // block populated as part of standard process-wide thread init, and still run at
+            // CS==0x33 permanently - such a thread's own, perfectly ordinary NtContinue call would
+            // otherwise be misidentified as a wow64 crossing and redirected into wow64cpu.dll
+            // nonsensically. The one signal that actually reflects intent rather than incidental
+            // engine state is the CONTEXT64 argument's own SegCs: only a continuation built by
+            // wow64.dll's real CONTEXT32->CONTEXT64 marshaling (i.e. genuinely resuming 32-bit guest
+            // code) ever carries SegCs==0x23 - a native thread's own NtContinue never does.
+            constexpr uint16_t wow64_code_selector = 0x23;
+            if (!c.proc.is_wow64_process || (context.SegCs & 0xFFFF) != wow64_code_selector)
+            {
+                return false;
+            }
+
+            if (!c.proc.wow64_syscall_reentry_addr || !c.vcpu.thread().teb64.has_value())
+            {
+                return false;
+            }
+
+            const auto teb64 = c.vcpu.thread().teb64->value();
+            const auto cpu_area = c.emu.read_memory<uint64_t>(teb64 + 0x1488);
+            const auto block = cpu_area + 0x80;
+
+            const auto write32 = [&](const uint64_t offset, const uint32_t value) { c.emu.write_memory(block + offset, value); };
+            write32(0x20, static_cast<uint32_t>(context.Rdi));
+            write32(0x24, static_cast<uint32_t>(context.Rsi));
+            write32(0x28, static_cast<uint32_t>(context.Rbx));
+            write32(0x2C, static_cast<uint32_t>(context.Rdx));
+            write32(0x30, static_cast<uint32_t>(context.Rcx));
+            write32(0x34, static_cast<uint32_t>(context.Rax));
+            write32(0x38, static_cast<uint32_t>(context.Rbp));
+            write32(0x3C, static_cast<uint32_t>(context.Rip));
+            write32(0x44, static_cast<uint32_t>(context.EFlags));
+            write32(0x48, static_cast<uint32_t>(context.Rsp));
+
+            for (size_t i = 0; i < 6; ++i)
+            {
+                c.emu.write_memory(block + 0xF0 + (i * 0x10), &context.FltSave.XmmRegisters[i], sizeof(M128A));
+            }
+
+            c.emu.reg(x86_register::rip, *c.proc.wow64_syscall_reentry_addr);
+            return true;
+        }
+
         NTSTATUS handle_NtContinueEx(const syscall_context& c, const emulator_object<CONTEXT64> thread_context,
                                      const uint64_t continue_argument)
         {
@@ -688,7 +758,10 @@ namespace sogen
             }
 
             const auto context = thread_context.read();
-            cpu_context::restore(c.emu, context);
+            if (!try_restore_wow64_continue_via_reverse_gate(c, context))
+            {
+                cpu_context::restore(c.emu, context);
+            }
 
             if (argument.ContinueFlags & KCONTINUE_FLAG_TEST_ALERT)
             {
