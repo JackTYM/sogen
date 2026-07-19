@@ -1,19 +1,25 @@
 # FEX backend — development notes
 
 The FEX-Emu emulator backend (`sogen::fex`). A standalone backend that mirrors the structure of the
-other backends, selected at runtime via `EMULATOR_FEX=1`. It targets **AArch64 Linux and macOS hosts**
-— [FEX](https://fex-emu.com) only JITs x86/x86-64 to ARM64.
+other backends, selected at runtime via `EMULATOR_FEX=1`. Its functional target is **macOS on Apple
+Silicon** — [FEX](https://fex-emu.com) only JITs x86/x86-64 to ARM64.
 
 ## Status
 
-**Working.** The backend builds, links, and runs on both ARM64 Linux and macOS/Apple Silicon. It
-passes the full regression suite (`test-sample.exe`, `hello.exe`, `busybox.exe`) matching the
-Unicorn backend's behavior byte-for-byte, and has been validated against ~40 pre-existing native
-64-bit sample executables (process/thread introspection, synchronization primitives, sections,
-security tokens, the registry, pipes, sockets, timers, file/directory I/O, GUI dialogs, DXGK
-harnesses) with every remaining discrepancy traced to a backend-agnostic gap (an unimplemented
-syscall, or a missing staged system-DLL export) rather than a difference between this backend and
-the existing one.
+**Working on macOS/Apple Silicon — the only functional target.** On Darwin the backend builds,
+links, and runs: it passes the full regression suite (`test-sample.exe`, `hello.exe`,
+`busybox.exe`) matching the Unicorn backend's behavior byte-for-byte, and has been validated
+against ~40 pre-existing native 64-bit sample executables (process/thread introspection,
+synchronization primitives, sections, security tokens, the registry, pipes, sockets, timers,
+file/directory I/O, GUI dialogs, DXGK harnesses) with every remaining discrepancy traced to a
+backend-agnostic gap (an unimplemented syscall, or a missing staged system-DLL export) rather than
+a difference between this backend and the existing one.
+
+**ARM64 Linux is build-tested only.** The Linux path compiles in CI but has never been run and is
+not expected to work: it installs no fault signal handlers, has no MMIO emulation (the
+KUSER_SHARED_DATA decode-and-emulate path is `__APPLE__`-gated), and passes FEXCore an empty
+default-constructed `HostFeatures` instead of real hardware detection (a `TODO` in
+`fex_x86_64_emulator.cpp`). Android is excluded outright by the CMake gate.
 
 ### Performance
 
@@ -34,6 +40,16 @@ significant fraction of runtime.
 - **32-bit (WoW64) processes are not supported.** FEXCore is fixed-bitness per `Context` and this
   backend only stands up the single 64-bit one; `notify_process_bitness` rejects a WoW64 process
   with a clear error instead of mis-decoding its 32-bit code. Native 64-bit processes only.
+- **A plain guest store to read-only memory aborts the emulator instead of raising an exception.**
+  The fault-classification decoder (`decode_arm64_store`) only recognizes the STLR family, so a
+  plain (non-atomic) STR to memory that *is* mapped read-only gets misclassified as a read and
+  routed through fault-recovery paths that both fail — the result is an unhandled host signal that
+  aborts the whole emulator process, not a `STATUS_ACCESS_VIOLATION` delivered to the guest. This
+  affects any guest that deliberately writes to read-only memory and catches the resulting
+  exception (packers/DRM protections do this routinely). A plain store to *unmapped* memory does
+  reach the guest as an exception, but with the read/write flag (`ExceptionInformation[0]`)
+  wrongly reporting a read. See `decode_arm64_store`'s comment for why the decode table cannot
+  simply be broadened.
 
 ## What is in place
 
@@ -41,7 +57,8 @@ significant fraction of runtime.
 - `x86_register` ↔ `FEXCore::Core::CPUState` mapping (`fex_x86_64_common.hpp`).
 - A `FEXCore::HLE::SyscallHandler` that routes guest `syscall` instructions to the registered
   syscall instruction-hook (the path the Windows emulation layer uses to service NT syscalls).
-- Real `FEXCore::HostFeatures` detection (`sysctlbyname` on macOS, MIDR-register reads on Linux).
+- Real `FEXCore::HostFeatures` detection via `sysctlbyname` on macOS (the Linux path currently
+  passes an empty default-constructed `HostFeatures` — a known `TODO`).
 - Fault delivery via plain POSIX `sigaction` on macOS (no Mach exception port needed): a per-guest-
   page permission shadow table reconciling Apple Silicon's 16KB host page size against the guest's
   4KB architectural page size, JIT guard-page write-protect race handling, MMIO decode-and-emulate,
