@@ -36,10 +36,11 @@ namespace sogen
         //   65 48 8B 04 25 30 00 00 00   mov rax, gs:[0x30]      (TEB self-pointer)
         //   48 8B 98 A0 17 00 00         mov rbx, [rax+0x17A0]   (TEB.NlsCache)
         //   48 8D 05 xx xx xx xx         lea rax, [rip+disp32]   (&gNlsProcessLocalCache)
-        // The TEB access is a fixed-offset ABI read the compiler always emits identically; only the
-        // trailing RIP-relative displacement differs across kernelbase.dll builds, which is what makes
-        // this scan more robust than a hardcoded RVA (gNlsProcessLocalCache's RVA is known to drift
-        // across Windows servicing builds).
+        // The TEB access is a fixed-offset ABI read that current compiler/SDK builds emit identically;
+        // only the trailing RIP-relative displacement differs across kernelbase.dll builds, which is
+        // what makes this scan more robust than a hardcoded RVA (gNlsProcessLocalCache's RVA is known to
+        // drift across Windows servicing builds). Should a future codegen change alter this sequence,
+        // the writable-section-validated hardcoded-RVA fallback below still covers it.
         std::optional<uint64_t> scan_kernelbase_nls_cache_reference(const memory_manager& memory, const mapped_module& kernelbase)
         {
             static constexpr std::array<uint8_t, 19> pattern{

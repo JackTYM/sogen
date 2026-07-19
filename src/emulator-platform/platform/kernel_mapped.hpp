@@ -501,6 +501,8 @@ namespace sogen
         EMULATOR_CAST(uint32_t, USHORT*) DBCSOffsets;
     } CPTABLEINFO32, *PCPTABLEINFO32;
 
+    static_assert(sizeof(CPTABLEINFO32) == 0x2C);
+
     typedef struct _NLSTABLEINFO32
     {
         CPTABLEINFO32 OemTableInfo;
@@ -508,6 +510,8 @@ namespace sogen
         EMULATOR_CAST(uint32_t, USHORT*) UpperCaseTable;
         EMULATOR_CAST(uint32_t, USHORT*) LowerCaseTable;
     } NLSTABLEINFO32, *PNLSTABLEINFO32;
+
+    static_assert(sizeof(NLSTABLEINFO32) == 0x60);
 
     typedef struct _CURDIR32
     {

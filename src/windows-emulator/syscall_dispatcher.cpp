@@ -18,11 +18,33 @@ namespace sogen
         // identical to ntdll's own single-byte-codepage behavior, so it's a safe fix regardless of the
         // exact root cause.
         constexpr uint64_t nls_lead_byte_info_table_offset = 0x172760;
+        constexpr uint64_t nls_global_rtl_state_offset = 0x1726d0;
+
+        bool address_is_in_writable_section(const mapped_module& mod, const uint64_t address)
+        {
+            for (const auto& section : mod.sections)
+            {
+                const auto& region = section.region;
+                if (address >= region.start && address - region.start < region.length)
+                {
+                    return (region.permissions & memory_permission::write) != memory_permission::none;
+                }
+            }
+
+            return false;
+        }
 
         void ensure_nls_lead_byte_info_table(windows_emulator& win_emu)
         {
+            auto& resolved = win_emu.process.nls_lead_byte_info_table_resolved;
+            if (resolved.has_value())
+            {
+                return;
+            }
+
             if (!win_emu.process.is_wow64_process)
             {
+                resolved = false;
                 return;
             }
 
@@ -33,17 +55,31 @@ namespace sogen
             }
 
             const auto field_address = ntdll_mod->image_base + nls_lead_byte_info_table_offset;
+            const auto global_rtl_state_address = ntdll_mod->image_base + nls_global_rtl_state_offset;
+
+            if (!address_is_in_writable_section(*ntdll_mod, field_address) ||
+                !address_is_in_writable_section(*ntdll_mod, global_rtl_state_address))
+            {
+                resolved = false;
+                return;
+            }
 
             uint64_t current_value = 0;
-            if (!win_emu.emu().try_read_memory(field_address, &current_value, sizeof(current_value)) || current_value != 0)
+            if (!win_emu.emu().try_read_memory(field_address, &current_value, sizeof(current_value)))
             {
+                resolved = false;
+                return;
+            }
+            if (current_value != 0)
+            {
+                resolved = true;
                 return;
             }
 
             uint16_t global_rtl_nls_state = 0;
             // 0xFDE9 is ntdll's own not-yet-initialized marker for this state; skip until ntdll's own
             // codepage init has actually run.
-            if (!win_emu.emu().try_read_memory(ntdll_mod->image_base + 0x1726d0, &global_rtl_nls_state, sizeof(global_rtl_nls_state)) ||
+            if (!win_emu.emu().try_read_memory(global_rtl_state_address, &global_rtl_nls_state, sizeof(global_rtl_nls_state)) ||
                 global_rtl_nls_state == 0xFDE9)
             {
                 return;
@@ -55,6 +91,7 @@ namespace sogen
             const std::vector<std::byte> zeroed_table(lead_byte_table_size, std::byte{0});
             win_emu.emu().write_memory(table_address, zeroed_table.data(), zeroed_table.size());
             win_emu.emu().write_memory(field_address, &table_address, sizeof(table_address));
+            resolved = true;
         }
 
     } // namespace

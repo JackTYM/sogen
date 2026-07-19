@@ -444,6 +444,11 @@ namespace sogen
         // (DLL_THREAD_DETACH) skips freeing TEB.NlsCache whenever it still points here. 0 if
         // kernelbase.dll hasn't been mapped yet.
         uint64_t kernelbase_nls_process_local_cache{};
+        // Caches the outcome of ensure_nls_lead_byte_info_table (syscall_dispatcher.cpp) so it only
+        // scans/validates once instead of on every syscall. nullopt = not yet resolved (still waiting on
+        // ntdll's own codepage init); host-side bookkeeping, not serialized, so a snapshot restore just
+        // resolves it again.
+        std::optional<bool> nls_lead_byte_info_table_resolved{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};

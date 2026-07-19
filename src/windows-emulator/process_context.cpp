@@ -85,9 +85,11 @@ namespace sogen
             return emulator_allocator{memory, base, size};
         }
 
-        // NLSTABLEINFO.UpperCaseTable/LowerCaseTable are flat, 0x10000-entry (one per UTF-16 code unit)
-        // USHORT tables that RtlUpcaseUnicodeChar/RtlDowncaseUnicodeChar index directly. This is a plain
-        // ASCII-only case mapping (identity elsewhere), not a byte-accurate Unicode case-folding table.
+        // RtlUpcaseUnicodeChar/RtlDowncaseUnicodeChar handle a-z inline and, for chars >= 0xC0, walk an
+        // internal table built from l_intl.nls (served via the type-14 NtGetNlsSectionPtr section
+        // handled in syscalls/locale.cpp), not these PEB-referenced NLSTABLEINFO tables. The guest only
+        // depends on ActiveCodePage=1252/OemCodePage=437 (GetACP()/GetOEMCP()) and non-null pointers
+        // here; this identity table is otherwise an inert placeholder.
         std::vector<uint16_t> make_ascii_case_table(const bool uppercase)
         {
             std::vector<uint16_t> table(0x10000);
