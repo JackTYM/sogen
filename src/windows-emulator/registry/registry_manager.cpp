@@ -77,6 +77,7 @@ namespace sogen
     {
         this->path_mapping_.clear();
         this->overlay_values_.clear();
+        this->overlay_keys_.clear();
         this->hives_.clear();
 
         const std::filesystem::path root = R"(\registry)";
@@ -246,6 +247,33 @@ namespace sogen
                                machine / "SOFTWARE" / "RegisteredApplications");
 
         this->alias_remote_audio_endpoints(machine);
+
+        // Register MMDeviceEnumerator ({BCDE0395-E52F-467C-8E3D-C4579291692E}) as an in-process COM server
+        // backed by mmdevapi.dll. This CLSID is absent from the extracted hive; without it, dsound's
+        // CoCreateInstance call fails and it never gets an IMMDeviceEnumerator to activate an IAudioClient,
+        // causing it to retry its endpoint-activation loop until DSERR_PRIOLEVELNEEDED.
+        // The registration must exist in both the native and WOW6432Node subtrees so 32-bit WoW64
+        // dsound (which reads Wow6432Node) and any 64-bit callers both find it.
+        const auto register_mmdevice_enumerator = [&](const std::filesystem::path& classes_root) {
+            const std::string guid = "{BCDE0395-E52F-467C-8E3D-C4579291692E}";
+            const auto clsid_key = this->create_key(utils::path_key{classes_root / "CLSID" / guid});
+            const auto dll_name_bytes = []() {
+                const std::u16string dll_u16 = u"mmdevapi.dll";
+                const auto* ptr = reinterpret_cast<const std::byte*>(dll_u16.data());
+                return std::vector<std::byte>(ptr, ptr + (dll_u16.size() + 1) * sizeof(char16_t));
+            }();
+            const auto threading_bytes = []() {
+                const std::u16string tm = u"Both";
+                const auto* ptr = reinterpret_cast<const std::byte*>(tm.data());
+                return std::vector<std::byte>(ptr, ptr + (tm.size() + 1) * sizeof(char16_t));
+            }();
+            const auto inproc_key = this->create_key(utils::path_key{classes_root / "CLSID" / guid / "InprocServer32"});
+            this->set_value(inproc_key, "", 1 /* REG_SZ */, std::span<const std::byte>(dll_name_bytes));
+            this->set_value(inproc_key, "ThreadingModel", 1 /* REG_SZ */, std::span<const std::byte>(threading_bytes));
+            (void)clsid_key;
+        };
+        register_mmdevice_enumerator(machine / "SOFTWARE" / "Classes" / "Wow6432Node");
+        register_mmdevice_enumerator(machine / "SOFTWARE" / "Classes");
     }
 
     // On a headless/server host the local Render/Capture endpoint folders are empty, while an RDP session
@@ -452,6 +480,12 @@ namespace sogen
 
         if (!entry)
         {
+            if (this->overlay_keys_.contains(normal_key))
+            {
+                registry_key overlay_key{};
+                overlay_key.hive = normal_key;
+                return {std::move(overlay_key)};
+            }
             return std::nullopt;
         }
 
@@ -524,14 +558,28 @@ namespace sogen
         value.data.assign(data.begin(), data.end());
     }
 
+    registry_key registry_manager::create_key(const utils::path_key& key)
+    {
+        const auto normal_key = this->normalize_path(key);
+        this->overlay_keys_.insert(normal_key);
+
+        registry_key reg_key{};
+        reg_key.hive = normal_key;
+        return reg_key;
+    }
+
     void registry_manager::serialize_runtime_state(utils::buffer_serializer& buffer) const
     {
         buffer.write_map(this->overlay_values_);
+        const std::vector<utils::path_key> keys_vec(this->overlay_keys_.begin(), this->overlay_keys_.end());
+        buffer.write_vector(keys_vec);
     }
 
     void registry_manager::deserialize_runtime_state(utils::buffer_deserializer& buffer)
     {
         buffer.read_map(this->overlay_values_);
+        const auto keys_vec = buffer.read_vector<utils::path_key>();
+        this->overlay_keys_.insert(keys_vec.begin(), keys_vec.end());
     }
 
     registry_manager::hive_map::iterator registry_manager::find_hive(const utils::path_key& key)
