@@ -496,6 +496,35 @@ namespace sogen
             throw std::runtime_error("WHP memory execution hook mode must be auto or int3");
         }
 
+        uint32_t parse_dialog_control_id(const std::string_view token)
+        {
+            if (token.empty())
+            {
+                throw std::runtime_error("Control id must not be empty");
+            }
+
+            for (const auto c : token)
+            {
+                if (c < '0' || c > '9')
+                {
+                    throw std::runtime_error("Control id must be a non-negative integer");
+                }
+            }
+
+            if (token.size() > 5)
+            {
+                throw std::runtime_error("Control id should be in range 0-65535");
+            }
+
+            const auto control_id = std::stoul(std::string(token));
+            if (control_id > 0xFFFF)
+            {
+                throw std::runtime_error("Control id should be in range 0-65535");
+            }
+
+            return static_cast<uint32_t>(control_id);
+        }
+
         std::unique_ptr<x86_64_emulator> create_configured_backend(const analysis_options& options)
         {
             auto emu = options.backend ? create_x86_64_emulator(*options.backend, options.vcpu_count)
@@ -902,7 +931,7 @@ namespace sogen
             std::vector<std::string> click_dialog_button_args{};
             app.add_option("--click-dialog-button", click_dialog_button_args,
                            "Auto-dismiss modal dialogs by clicking whichever listed control is present "
-                           "(comma-separated, e.g. 6,1 = IDYES or IDOK)")
+                           "(comma-separated, e.g. 6,1 = IDYES or IDOK). Requires --vcpus 1")
                 ->allow_extra_args(false);
 
             CLI11_PARSE(app, argc, argv);
@@ -938,13 +967,8 @@ namespace sogen
                     {
                         const auto comma = arg.find(',', pos);
                         const auto token = arg.substr(pos, comma - pos);
-                        const auto control_id = std::stoul(token);
-                        if (control_id > 0xFFFF)
-                        {
-                            throw std::runtime_error("Control id should be in range 0-65535");
-                        }
+                        options.click_dialog_buttons.push_back(parse_dialog_control_id(token));
 
-                        options.click_dialog_buttons.push_back(static_cast<uint32_t>(control_id));
                         if (comma == std::string::npos)
                         {
                             break;
