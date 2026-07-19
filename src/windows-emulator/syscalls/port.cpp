@@ -155,7 +155,7 @@ namespace sogen
             // 64-bit layout. A 64-bit-shaped attribute makes the 32-bit rpcrt4 read the handle COUNT from the
             // wrong offset (0/garbage), fail its import gate, and never import the delivered section handle.
             const bool wow64 = c.proc.is_wow64_process;
-            const uint64_t security_stride = wow64 ? 0x0c : 0x20;
+            const uint64_t security_stride = wow64 ? 0x0c : 0x18;
             const uint64_t view_stride = wow64 ? 0x10 : 0x20;
             const uint64_t context_stride = wow64 ? 0x14 : 0x20;
 
@@ -175,9 +175,10 @@ namespace sogen
 
             // On a real ALPC receive the kernel (not the caller) fills the whole handle attribute: a non-zero
             // Flags value that marks the slot as carrying a duplicated handle, then the Handle/Count/Access.
-            // The COUNT field (not the Handle) is what rpcrt4 reads to gate the import, then it fetches each
-            // handle via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation).
-            constexpr ULONG alpc_received_handle_flags = 0x001243fb & ~0x00040000u; // clear ALPC_HANDLEFLG_INDIRECT
+            // A live capture of the audio CreateRemoteStream reply showed Flags=0x001243fb; replicate it as
+            // observed. The COUNT field (not the Handle) is what rpcrt4 reads to gate the import, then it
+            // fetches each handle via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation).
+            constexpr ULONG alpc_received_handle_flags = 0x001243fb;
             const auto& h = handles.front();
             const auto attr_base = attributes.value() + offset;
             emulator_object<ULONG>{c.emu, attr_base + 0}.write(alpc_received_handle_flags);

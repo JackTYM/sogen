@@ -9,12 +9,14 @@ namespace sogen
 
     namespace
     {
-        // The \RPC Control\ntsvcs ALPC port hosts several RPC interfaces. The one implemented here is svcctl
+        // The \RPC Control\ntsvcs ALPC port hosts several RPC interfaces. The one that matters here is svcctl
         // (the Service Control Manager), {367ABB81-9844-35F1-AD32-98F038001003}: while creating a render audio
         // client, mmdevapi opens the "AudioSrv" service through it (OpenSCManagerW -> OpenServiceW ->
-        // SubscribeServiceChangeNotifications) so it can react to the audio service restarting. Opnums this
-        // file does not recognize (e.g. calls belonging to the PnP CM_* config-manager interface, which shares
-        // the same port) fall back to an empty success reply.
+        // SubscribeServiceChangeNotifications) so it can react to the audio service restarting. The same port
+        // also carries the PnP / Plug-and-Play interface (CM_* config-manager notifications); those callers
+        // tolerate an empty success reply, which is the fallback below.
+        constexpr std::array<uint8_t, 16> k_iface_svcctl = {0x81, 0xbb, 0x7a, 0x36, 0x44, 0x98, 0xf1, 0x35,
+                                                            0xad, 0x32, 0x98, 0xf0, 0x38, 0x00, 0x10, 0x03};
 
         // svcctl opnums. NOTE: this Windows build's svcctl client uses opnum numbers shifted from the classic
         // MS-SCMR table - observed on the wire: ROpenSCManagerW arrives as opnum 64 (its [in] is the
@@ -53,6 +55,18 @@ namespace sogen
             NTSTATUS handle_rpc(windows_emulator& win_emu, const uint32_t procedure_id, const lpc_request_context& c,
                                 utils::aligned_binary_writer& writer, std::vector<alpc_reply_handle>& /*reply_handles*/) override
             {
+                if (this->bound_interface() != k_iface_svcctl)
+                {
+                    // PnP / other ntsvcs interfaces (e.g. CM_Register_Notification): an empty success reply is
+                    // enough for the current callers to continue.
+                    return STATUS_SUCCESS;
+                }
+
+                if (getenv("EMULATOR_LOG_RPC"))
+                {
+                    win_emu.log.error("[svcctl] opnum=%u send=%u\n", procedure_id, c.send_buffer_length);
+                }
+
                 switch (procedure_id)
                 {
                 case k_svcctl_open_sc_manager_w:
@@ -109,9 +123,9 @@ namespace sogen
                         (void)snprintf(tmp.data(), tmp.size(), "%02x ", b);
                         hex += tmp.data();
                     }
-                    win_emu.log.error("[svcctl] unrecognized opnum=%u send_len=%u in: %s\n", procedure_id,
+                    win_emu.log.error("[svcctl] UNHANDLED opnum=%u send_len=%u in: %s\n", procedure_id,
                                       static_cast<uint32_t>(c.send_buffer_length), hex.c_str());
-                    return STATUS_SUCCESS;
+                    return STATUS_NOT_SUPPORTED;
                 }
                 }
             }

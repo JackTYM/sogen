@@ -295,19 +295,6 @@ namespace sogen
         std::vector<alpc_reply_handle> reply_handles;
         const auto status = this->handle_rpc(win_emu, procedure_id, rpc_context, writer, reply_handles);
 
-        if (getenv("EMULATOR_LOG_RPC") && procedure_id == 0 && !payload.empty())
-        {
-            std::string hex;
-            hex.reserve(payload.size() * 3);
-            for (const auto b : payload)
-            {
-                std::array<char, 4> buf{};
-                snprintf(buf.data(), buf.size(), "%02x ", static_cast<unsigned char>(b));
-                hex += buf.data();
-            }
-            win_emu.log.error("[audiosrv-resp] opnum=0 reply (%zu bytes): %s\n", payload.size(), hex.c_str());
-        }
-
         lpc_request_result result{status, std::move(payload)};
         result.handles = std::move(reply_handles);
         return result;
