@@ -1155,7 +1155,18 @@ namespace sogen::fex
             // munmap also requires host-page alignment, which regions_ entries don't guarantee.
             for (const auto host_page : this->mapped_host_pages_apple_)
             {
-                ::munmap(reinterpret_cast<void*>(host_page), host_page_size_apple);
+                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
+                if (rebase != 0 && this->wow64_host_window_reserved_)
+                {
+                    // Covered by the whole-window munmap below.
+                    continue;
+                }
+                ::munmap(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple);
+            }
+
+            if (this->wow64_host_window_reserved_)
+            {
+                ::munmap(reinterpret_cast<void*>(this->wow64_guest_rebase_), wow64_guest_address_space_size);
             }
 
             if (g_active_emulator == this)
@@ -2336,7 +2347,21 @@ namespace sogen::fex
             auto it = this->mapped_host_pages_apple_.lower_bound(start);
             while (it != this->mapped_host_pages_apple_.end() && *it + host_page_size_apple <= end)
             {
-                ::munmap(reinterpret_cast<void*>(*it), host_page_size_apple);
+                const auto rebase = rebase_for(this->is_wow64_process_, *it);
+                void* const host_ptr = reinterpret_cast<void*>(*it + rebase);
+                if (rebase != 0 && this->wow64_host_window_reserved_)
+                {
+                    // Pages inside the up-front-reserved wow64 host window must never be munmap'd:
+                    // reserved_host_ranges_in() reports nothing for the whole window on the strength
+                    // of "everything in it is ours", so a hole punched here could be claimed by a
+                    // foreign host allocation that a later fixed guest allocation's MAP_FIXED would
+                    // silently clobber. Restore the window's PROT_NONE placeholder in place instead.
+                    ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                }
+                else
+                {
+                    ::munmap(host_ptr, host_page_size_apple);
+                }
                 it = this->mapped_host_pages_apple_.erase(it);
             }
         }
