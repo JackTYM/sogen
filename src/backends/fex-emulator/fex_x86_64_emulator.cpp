@@ -1790,18 +1790,13 @@ namespace sogen::fex
         }
 #endif
 
-        void mark_guest_range_permanently_non_executable(pointer_type address, size_t size) override
-        {
-            this->permanently_non_executable_ranges_.emplace_back(address, size);
-        }
-
         void register_gate_crossing(pointer_type address, size_t size, gate_crossing_kind kind) override
         {
             // A gate is inherently non-executable to the JIT (QueryGuestExecutableRange consults
             // gate_crossings_ directly, so reaching it raises FEXCore's synthetic #PF before any
-            // byte there is compiled) - no separate mark_guest_range_permanently_non_executable call
-            // is needed. handle_fault_signal's vector-14 path then recognizes the faulting RIP as a
-            // gate and performs the actual crossing instead of dispatching a memory violation.
+            // byte there is compiled). handle_fault_signal's vector-14 path then recognizes the
+            // faulting RIP as a gate and performs the actual crossing instead of dispatching a
+            // memory violation.
             this->gate_crossings_.push_back(gate_crossing{address, size, kind});
         }
 
@@ -3104,7 +3099,8 @@ namespace sogen::fex
         // RunSimulatedCode's body entirely is what avoids ever handing its `mov gs, cx` (unimplemented
         // in FEX's 64-bit JIT) to the compiler. All field offsets are relative to the r13 pointer
         // RunSimulatedCode computes as *(TEB64+0x1488)+0x80; they were decoded from the shipped
-        // wow64cpu.dll (an i386 CONTEXT sits at r13-0x60). Returns true on success.
+        // wow64cpu.dll (an i386 CONTEXT sits at r13-0x7C, i.e. cpu_area+4; r13-0x60 is where its
+        // FloatSave member begins). Returns true on success.
         bool enter_wow64_32bit_from_run_simulated_code(const gate_crossing& gate)
         {
             // Source is always the 64-bit engine: RunSimulatedCode only ever runs under context_.
@@ -4748,11 +4744,6 @@ namespace sogen::fex
         // guest address space) and outlive any individual CPUState snapshot they were allocated for.
         std::vector<std::pair<void*, size_t>> callret_buffers_;
 
-        // See x86_emulator::mark_guest_range_permanently_non_executable's doc comment - consulted by
-        // fex_syscall_handler::QueryGuestExecutableRange, which is what actually makes FEXCore treat
-        // these ranges as non-executable regardless of their real page permissions.
-        std::vector<std::pair<uint64_t, size_t>> permanently_non_executable_ranges_;
-
         // See x86_emulator::register_gate_crossing / the gate_crossing struct (declared above, near
         // find_gate_crossing). Each entry is a WoW64 mode-switch point; reaching one (recognized in
         // handle_fault_signal by matching the faulting RIP) marshals CPU state between context_/
@@ -4866,21 +4857,12 @@ namespace sogen::fex
         // address isn't reported as executable here - so returning the default-constructed {} for
         // every address (as this stub previously did unconditionally) made every guest instruction
         // fetch look like a DEP violation to FEXCore.
-        // See x86_emulator::mark_guest_range_permanently_non_executable's doc comment - checked
-        // first, ahead of the region's own real permissions, so this always wins regardless of how
-        // the range is actually mapped (sogen's own WoW64 heaven's-gate trampoline is deliberately
+        // A registered WoW64 gate crossing is non-executable to the JIT - reaching it must raise a
+        // synthetic #PF (which perform_gate_crossing then services) rather than compile the real
+        // mode-switch bytes there, which the fixed-bitness JIT can't execute anyway. Checked first,
+        // ahead of the region's own real permissions, so this always wins regardless of how the
+        // range is actually mapped (sogen's own WoW64 heaven's-gate trampoline is deliberately
         // mapped read|exec for KVM/Unicorn's benefit, but must never look executable here).
-        for (const auto& [non_exec_address, non_exec_size] : this->emulator_.permanently_non_executable_ranges_)
-        {
-            if (address >= non_exec_address && address < non_exec_address + non_exec_size)
-            {
-                return {};
-            }
-        }
-
-        // A registered WoW64 gate crossing is likewise non-executable to the JIT - reaching it must
-        // raise a synthetic #PF (which perform_gate_crossing then services) rather than compile the
-        // real mode-switch bytes there, which the fixed-bitness JIT can't execute anyway.
         for (const auto& gate : this->emulator_.gate_crossings_)
         {
             if (address >= gate.address && address < gate.address + gate.size)

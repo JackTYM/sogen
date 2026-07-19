@@ -51,10 +51,13 @@ significant fraction of runtime.
   reach the guest as an exception, but with the read/write flag (`ExceptionInformation[0]`)
   wrongly reporting a read. See `decode_arm64_store`'s comment for why the decode table cannot
   simply be broadened.
-- **Real `wow64cpu.dll` dispatch is not yet exercised.** This backend intercepts and marshals state
-  directly at the x86 bitness-switch ("heaven's gate") trampoline rather than executing real
-  `wow64cpu.dll` code through it; the real dispatch-table-driven convention is decoded (see
-  "WoW64 support" below) but not yet wired up as an alternate/fallback path.
+- **`wow64cpu.dll`'s turbo-table fast-path is bypassed.** The reverse (32→64) gate crossing does
+  execute real `wow64cpu.dll` 64-bit dispatch code: after marshaling state, it resumes at the real
+  `TurboDispatchJumpAddressEnd`, whose genuine code path (through `Wow64SystemServiceEx` in
+  `wow64.dll`) services every 32-bit syscall. What is *not* executed is only the turbo-thunk
+  fast-path at `TurboDispatchJumpAddressStart` (`jmp [r15+rcx*8]` through the per-service jump
+  table) — the crossing always forces the generic dispatch continuation instead of selecting a
+  specialized turbo thunk.
 
 ## What is in place
 
@@ -122,15 +125,17 @@ runtime IR `Select` rather than a compile-time-constant add (since a 64-bit-mode
 aren't confined to a fixed range the way a 32-bit-mode Context's are). This is a strict no-op for any
 Context that doesn't opt in, so it does not affect the existing 64-bit-only Linux/macOS path.
 
-### `wow64cpu.dll`'s real dispatch convention (decoded, not yet used)
+### `wow64cpu.dll`'s real dispatch convention
 
 The real `TurboDispatchJumpAddressStart` mechanism inside `wow64cpu.dll` — the genuine syscall-return
 dispatch table a real WoW64 process uses — has a documented calling convention (an index derived
 from the high word of `EAX`, dispatched through a jump table `wow64cpu.dll` builds at init, against a
-CPU-area `CONTEXT` block holding the 32-bit register file), but this backend does not yet execute
-real `wow64cpu.dll` code through it — it intercepts and marshals state directly at the bitness-switch
-trampoline instead, which is sufficient for everything validated so far but means the real dispatch
-table is presently unused.
+CPU-area `CONTEXT` block holding the 32-bit register file). The reverse (32→64) gate crossing decodes
+this convention, marshals state, and resumes real 64-bit execution at `TurboDispatchJumpAddressEnd` —
+the generic dispatch continuation, whose genuine `wow64cpu.dll`/`wow64.dll` code
+(`Wow64SystemServiceEx`) then services the syscall. Only the turbo-thunk fast-path itself (the
+`jmp [r15+rcx*8]` jump-table dispatch into per-service turbo thunks) is never taken; the crossing
+always forces the generic path.
 
 ## Architecture
 
@@ -139,7 +144,8 @@ table is presently unused.
   sub-registers, rip, flags, xmm, mm, fs/gs base, segment selectors, mxcsr/fcw). No FEX includes, so
   it can be reasoned about without the FEX toolchain.
 - `fex_x86_64_marshal.hpp` — the architectural-state marshaling helper used at WoW64 gate crossings
-  (deliberately factored out so a standalone test can exercise it without linking the whole backend).
+  (factored out because it is shared by the two call sites that need it,
+  `enter_wow64_32bit_from_run_simulated_code` and `perform_bitness_switch`).
 - `fex_x86_64_emulator.cpp` — the backend, the syscall bridge, and the WoW64 gate-crossing/rebase
   integration.
 
@@ -156,8 +162,14 @@ drives the whole design:
   the guest's 4KB pages.
 - `read_memory()`/`write_memory()` are direct host `memcpy`s once the range is confirmed mapped (the
   guest pointer is directly dereferenceable). Writes invalidate FEX's translation cache for the range
-  — for a WoW64 process, both Contexts' caches, since the Context active at unmap time does not
-  necessarily match the Context whose cached translations cover the unmapped range.
+  in the **currently-active** Context only. Unmaps additionally invalidate the inactive Context
+  (`invalidate_code_range(..., include_inactive_contexts=true)`, called only from `unmap_memory`),
+  since the Context active at unmap time does not necessarily match the Context whose cached
+  translations cover the unmapped range. Known limitation: 32-bit guest code that self-patches via a
+  syscall-serviced `write_memory` (e.g. `NtWriteVirtualMemory`) — which runs while the 64-bit engine
+  is active — can leave stale 32-bit JIT translations cached. This gap is deliberate: extending
+  inactive-Context invalidation to every write would repeatedly delink the live 32-bit Context's
+  blocks and risks livelocking it, given how frequent ordinary syscall-time writes are.
 - `map_host_memory()` aliases caller-owned memory into the guest with `mremap(MREMAP_FIXED)` on Linux
   or `mach_vm_remap` on macOS (e.g. for the GPU bridge), and is *not* munmap'd on teardown.
 

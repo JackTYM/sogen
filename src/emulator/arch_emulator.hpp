@@ -62,26 +62,6 @@ namespace sogen
         {
         }
 
-        // Marks [address, address+size) as permanently non-executable for guest *instruction fetch*
-        // purposes, regardless of whatever real page permissions it's mapped with (ordinary reads/
-        // writes to it are unaffected). Used for sogen's own WoW64 heaven's-gate trampoline
-        // (wow64_heaven_gate.hpp): backends that execute guest code natively on real x86-64 hardware
-        // (KVM/Unicorn/WHP) genuinely run the trampoline's real machine code (a `retf`/`iretq`
-        // sequence performing an actual CS-segment mode switch), so the default no-op is correct for
-        // them. A JIT-based backend (FEXCore) cannot execute that sequence at all - its bitness is
-        // fixed per compiled Context, so a real mode-switching far return is meaningless to it - and
-        // instead needs to intercept guest execution reaching this range *before* any of its bytes
-        // are ever JIT-compiled, so it can synthesize the transition's observable effect itself
-        // (marshal register state to/from its other-bitness Context and switch which one is active).
-        // The natural interception point already exists on every native-execution backend precisely
-        // for this shape of problem: reporting an address as not executable via the backend's
-        // syscall-handler-facing executable-range query makes FEXCore raise its own synthetic #PF
-        // (the same mechanism used for an ordinary DEP violation) before ever attempting to decode
-        // guest instructions there.
-        virtual void mark_guest_range_permanently_non_executable(pointer_type /*address*/, size_t /*size*/)
-        {
-        }
-
         // Identifies which real WoW64 CPU-mode-switch mechanism lives at a registered gate-crossing
         // range, so a JIT backend knows which calling convention to decode when guest execution
         // reaches it (see register_gate_crossing).
@@ -122,8 +102,8 @@ namespace sogen
         };
 
         // Registers [address, address+size) as a WoW64 bitness gate crossing: a JIT backend
-        // intercepts guest execution reaching it (like mark_guest_range_permanently_non_executable,
-        // which this implies) and, instead of raising a memory-violation exception, marshals the CPU
+        // intercepts guest execution reaching it (its range is inherently non-executable to the
+        // JIT) and, instead of raising a memory-violation exception, marshals the CPU
         // register file into its other-bitness Context and switches which one is executing - the
         // observable effect of the real hardware CS-segment mode switch that native backends
         // (KVM/Unicorn/WHP) perform transparently, hence the no-op default here.
