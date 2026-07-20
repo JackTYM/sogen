@@ -737,10 +737,8 @@ namespace sogen
                     continue;
                 }
 
-                // Each rule is (title substring, control id): only a dialog whose title matches a
-                // known, expected substring gets auto-clicked, and only with that rule's own button -
-                // an unrecognized dialog (a real error, for instance) is left alone rather than
-                // guessing from a single global button list.
+                // A dialog whose title matches none of the rules is left alone: it might be a
+                // real, unexpected error rather than one of the known dialogs to auto-dismiss.
                 const auto title = u16_to_u8(win.name);
                 const auto rule = std::ranges::find_if(c.click_dialog_rules,
                                                        [&](const auto& entry) { return title.find(entry.first) != std::string::npos; });
@@ -751,18 +749,15 @@ namespace sogen
 
                 const auto wanted = rule->second;
 
-                // Requiring the owning thread to already be blocked in a message wait
-                // (await_msg/await_msg_mask) misses dialogs whose thread pumps via a plain
-                // PeekMessage loop rather than NtUserWaitMessage - the WM_COMMAND below is posted
-                // (queued), not delivered synchronously, so it's picked up whenever that thread's
-                // loop next runs regardless of which wait style it uses.
+                // The WM_COMMAND below is posted (queued), so the owning thread need not already
+                // be blocked in a message wait - a plain PeekMessage pump will still pick it up;
+                // do not gate this on await_msg/await_msg_mask.
                 const emulator_thread* owner = proc.find_thread_by_id(win.thread_id);
                 if (!owner)
                 {
                     continue;
                 }
 
-                uint32_t target_id = 0;
                 hwnd child_handle = 0;
                 for (auto& child : proc.windows | std::views::values)
                 {
@@ -775,7 +770,6 @@ namespace sogen
                     child.guest.access([&](const USER_WINDOW& gw) { control_id = static_cast<uint32_t>(gw.wID); });
                     if (control_id == wanted)
                     {
-                        target_id = wanted;
                         child_handle = child.handle;
                         break;
                     }
@@ -789,8 +783,8 @@ namespace sogen
                 ui_event event{};
                 event.window = win.handle;
                 event.message = WM_COMMAND;
-                event.wParam = target_id & 0xFFFF;
-                event.lParam = static_cast<uint32_t>(child_handle);
+                event.wParam = wanted & 0xFFFF;
+                event.lParam = child_handle;
 
                 c.win_emu->handle_ui_event(event);
                 c.clicked_dialogs.insert(win.handle);

@@ -951,6 +951,11 @@ namespace sogen
                     throw std::runtime_error("GDB debugging requires --vcpus 1");
                 }
 
+                if (!click_dialog_button_args.empty() && options.vcpu_count > 1)
+                {
+                    throw std::runtime_error("--click-dialog-button requires --vcpus 1");
+                }
+
                 if (!backend_name.empty())
                 {
                     static const std::map<std::string, backend_type> backends{
