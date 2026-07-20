@@ -18,14 +18,14 @@ namespace sogen
         constexpr std::array<uint8_t, 16> k_iface_svcctl = {0x81, 0xbb, 0x7a, 0x36, 0x44, 0x98, 0xf1, 0x35,
                                                             0xad, 0x32, 0x98, 0xf0, 0x38, 0x00, 0x10, 0x03};
 
-        // svcctl opnums. NOTE: this Windows build's svcctl client uses opnum numbers shifted from the classic
-        // MS-SCMR table - observed on the wire: ROpenSCManagerW arrives as opnum 64 (its [in] is the
-        // "ServicesActive" database string + access, with no input handle). Follow-on opnums are discovered the
-        // same way; the classic numbers are kept as fallbacks.
+        // svcctl opnums observed on the wire. Opnum 64 is ROpenSCManager2 (MS-SCMR, added in Windows 10 1703+), a
+        // distinct method from the classic ROpenSCManagerW: its [in] is just the "ServicesActive" database name
+        // string + desired access, with no machine name or input handle. The other opnums here are the classic
+        // MS-SCMR numbers.
         constexpr uint32_t k_svcctl_close_handle = 0;       // RCloseServiceHandle ([in,out] handle)
         constexpr uint32_t k_svcctl_open_service_w = 16;    // ROpenServiceW (SCM handle + name + access)
         constexpr uint32_t k_svcctl_subscribe = 55;         // SubscribeServiceChangeNotifications (handle + mask)
-        constexpr uint32_t k_svcctl_open_sc_manager_w = 64; // ROpenSCManagerW (database string + access)
+        constexpr uint32_t k_svcctl_open_sc_manager_w = 64; // ROpenSCManager2 (database string + access)
 
         constexpr uint32_t k_error_success = 0;
 

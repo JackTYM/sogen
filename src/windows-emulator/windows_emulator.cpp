@@ -394,7 +394,7 @@ namespace sogen
             constexpr uint64_t clock_position_offset = 0x98;
 
             const auto now_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                std::chrono::duration_cast<std::chrono::nanoseconds>(win_emu.clock().steady_now().time_since_epoch()).count());
 
             // The guest maps and later unmaps each render section (dsound churns stream setup until playback
             // stabilizes), so a tracked section's backing can become unmapped. Probe with try_read and prune
