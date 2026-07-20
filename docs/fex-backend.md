@@ -153,6 +153,21 @@ No copy step is needed afterward — `fex-emulator`'s rpath points directly at t
 `backend-selection` links `fex-emulator`, defines `SOGEN_ENABLE_FEX`, adds `backend_type::fex`, and
 honors `EMULATOR_FEX=1`; the Python `Backend` enum gains `fex`.
 
+### Submodule fork
+
+`deps/FEX` is pinned to [github.com/JackTYM/FEX](https://github.com/JackTYM/FEX), a personal fork of
+upstream FEX-Emu (`github.com/FEX-Emu/FEX`), not upstream directly. The fork carries the
+Darwin/Apple Silicon portability and correctness patches this backend depends on: JIT/temp-buffer
+guard pages sized for Apple Silicon's 16KB host page granularity, `MAP_JIT` write-protect and
+build/link fixes, a per-`Context`/runtime-configurable WoW64 guest-rebase host offset, and an
+opdispatch fix (`InvalidOp` raising `#UD` instead of `#DE`) — see the fork's commit history for the
+full list.
+
+Pinning to a personal fork means these patches do not automatically track upstream FEX-Emu,
+including upstream security fixes. Picking up an upstream FEX-Emu update requires manually
+rebasing/merging this fork onto the corresponding upstream release and re-verifying the Darwin
+patches still apply.
+
 ## Selecting the backend
 
 ```sh
