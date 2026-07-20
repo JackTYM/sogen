@@ -113,15 +113,14 @@ namespace sogen::fex
         constexpr uint64_t wow64_guest_rebase_default = 0x400000000ULL;
 
         // A 32-bit x86 guest's entire architectural address space is bounded by its 32-bit
-        // pointers: [0, 4GB). This is the ONLY range that ever needs the wow64 rebase applied - kept
-        // separate from the rebase offset itself (this backend used to conflate the two, which was
-        // a real bug: real 64-bit ntdll/win32u modules are placed starting at memory_manager's
-        // DEFAULT_ALLOCATION_ADDRESS_64BIT, which is exactly 4GB - i.e. *below* the old 16GB
-        // rebase-offset default - so a wow64 process's real 64-bit ntdll could land in [4GB, 16GB)
-        // and get incorrectly rebased right along with genuine 32-bit addresses, corrupting where
-        // its real host memory actually lives relative to where context_'s 64-bit JIT - which
-        // applies no internal rebase of its own, see GuestMemoryRebase()'s Config.Is64BitMode()
-        // gate in deps/FEX - expects to find it).
+        // pointers: [0, 4GB). This is the ONLY range that ever needs the wow64 rebase applied, and
+        // it must stay separate from the rebase offset itself: real 64-bit ntdll/win32u modules are
+        // placed starting at memory_manager's DEFAULT_ALLOCATION_ADDRESS_64BIT, which is exactly
+        // 4GB - i.e. below a 16GB rebase offset - so using the rebase offset as the bound would
+        // rebase a wow64 process's real 64-bit ntdll in [4GB, 16GB) right along with genuine 32-bit
+        // addresses, corrupting where its real host memory lives relative to where context_'s
+        // 64-bit JIT - which applies no internal rebase of its own, see GuestMemoryRebase()'s
+        // Config.Is64BitMode() gate in deps/FEX - expects to find it.
         constexpr uint64_t wow64_guest_address_space_size = 0x100000000ULL;
 
         // A real wow64 process maps BOTH a 32-bit executable/ntdll32 (living in [0, 4GB), needing
@@ -1672,22 +1671,10 @@ namespace sogen::fex
         // context_->SetWow64GuestRebaseValue(wow64_guest_rebase_) itself once context_ exists,
         // right after constructing it.
         //
-        // A SINGLE FIXED candidate (the original design, always [0x400000000, 0x500000000)) is not
-        // safe here: what host VA is actually free depends on what else this specific process/
-        // machine has already mapped, and that varies with the host in ways no compile-time constant
-        // can anticipate. Two real, independently-measured collisions with a fixed candidate:
-        //   - This process links Cocoa/Metal (sogen's own GPU/window subsystem). Its dyld-load-time
-        //     host VA reservation (up to ~12GB) is unbeatable from application code (confirmed: moving
-        //     this reservation as early as initialize_context() made no measurable difference), and
-        //     was observed clustering tightly within [0x418000000, 0x4fa000000] across 100+ runs on
-        //     one machine - entirely inside the original [16GB, 20GB) candidate, causing "Failed to
-        //     write FEX guest memory" at kCodeBase (the heaven's-gate trampoline) in ~20-40% of runs.
-        //   - Simply moving the candidate higher (128GB) traded one fixed collision for another: this
-        //     machine (64GB RAM) also has an always-present, non-ASLR'd ~384GB reservation starting at
-        //     exactly its own physical RAM size (0x1000000000) - some RAM-proportional heuristic
-        //     (malloc/VM compressor/similar), NOT a Metal/GPU artifact. A larger-RAM machine would push
-        //     this reservation's start (and thus what it covers) even higher, so no single fixed
-        //     candidate is safe across different host RAM sizes either.
+        // No single fixed candidate is safe here: Cocoa/Metal's dyld-load-time host VA reservations
+        // (multi-GB, ASLR'd, placed before main() runs) and a RAM-proportional system reservation
+        // starting at the machine's physical RAM size both land at host-dependent addresses no
+        // compile-time constant can avoid.
         // So this tries a sequence of candidates, live-probed via mach_vm_region, jumping past
         // whatever occupies each rejected one (using the occupant's own reported extent, so a huge
         // reservation is skipped in one step rather than walked past 4GB at a time) until one is
@@ -2058,10 +2045,10 @@ namespace sogen::fex
             // own fixed-address heaven's-gate trampoline at kCodeBase/0xFF300000,
             // wow64_heaven_gate.hpp) - all of it gets a real, valid, rebased host address up at
             // [wow64_guest_rebase, wow64_guest_rebase + 4GB) regardless, so none of it ever actually
-            // touches this gap at the host level. (Confirmed by a second regression: reserving all
-            // of [0, first_hit) unconditionally, as an earlier version of this fix did, blocked
-            // install_wow64_heaven_gate's fixed allocate_memory(kCodeBase, ...) call outright, since
-            // that call has no fallback search to skip past a conflicting reservation.)
+            // touches this gap at the host level. (Reserving all of [0, first_hit) unconditionally
+            // would block install_wow64_heaven_gate's fixed allocate_memory(kCodeBase, ...) call
+            // outright, since that call has no fallback search to skip past a conflicting
+            // reservation.)
             // The FEXCore-internal arena (see fex_internal_arena) is a live mapping the Mach scan
             // below would otherwise report as many separate sub-regions (PROT_NONE reservation, the
             // committed BlockLinks buffers, the MAP_JIT CodeBuffer, freed holes...). Skip all of them
@@ -3120,9 +3107,13 @@ namespace sogen::fex
             }
             const uint64_t block = cpu_area + 0x80; // == r13
 
+            bool reads_ok = true;
             const auto read32 = [&](uint64_t offset) -> uint32_t {
                 uint32_t value = 0;
-                this->try_read_memory(block + offset, &value, sizeof(value));
+                if (!this->try_read_memory(block + offset, &value, sizeof(value)))
+                {
+                    reads_ok = false;
+                }
                 return value;
             };
 
@@ -3136,6 +3127,11 @@ namespace sogen::fex
             const uint32_t eip = read32(0x3c);
             const uint32_t eflags = read32(0x44);
             const uint32_t esp = read32(0x48);
+
+            if (!reads_ok)
+            {
+                return false;
+            }
 
             // thread32_ is built eagerly in create_thread() (ordinary call context), never lazily
             // from here - this runs inside handle_fault_signal's synthetic-#PF path, where
@@ -3200,8 +3196,8 @@ namespace sogen::fex
             // (the reverse gate resumes it at 0x17af to run Wow64SystemServiceEx), where the on-image
             // UNWIND_INFO assumes the prologue ran. If we leave the frozen rsp at the raw entry level, a
             // later callback-return longjmp (RtlUnwindEx) virtual-unwinds this frame by rsp+0xA8 and reads
-            // uninitialized stack (observed as the garbage return address 0x10003) instead of the real
-            // caller return address -> RtlpxVirtualUnwind's no-progress leaf guard returns 0xC00000FF ->
+            // uninitialized stack instead of the real caller return address ->
+            // RtlpxVirtualUnwind's no-progress leaf guard returns 0xC00000FF ->
             // noncontinuable exception -> STATUS_FATAL_USER_CALLBACK_EXCEPTION. Native (Unicorn) executes
             // the real prologue and unwinds correctly. So emulate the prologue's stack effect now: spill the
             // 8 nonvolatiles into their canonical slots and drop rsp by 0xA8, making the frozen 64-bit frame
@@ -3260,7 +3256,7 @@ namespace sogen::fex
         // execute. Instead of the thunk's bitness switch + wow64cpu.dll's own reverse-marshal (0x1779),
         // we marshal the current 32-bit register file into the WoW64 CPU-area CONTEXT block ourselves
         // and resume the 64-bit engine (context_, frozen at RunSimulatedCode's entry by the forward
-        // crossing) at TurboDispatchJumpAddressStart (0x17a6). The real 64-bit TurboDispatch +
+        // crossing) at TurboDispatchJumpAddressEnd (0x17af). The real 64-bit TurboDispatch +
         // wow64.dll!Wow64SystemServiceEx then run, translating the 32-bit service number to its 64-bit
         // equivalent and issuing a genuine 64-bit `syscall` that sogen's own syscall hook catches (the
         // same path the native backends use, so sogen dispatches by the translated 64-bit number).
@@ -4622,13 +4618,11 @@ namespace sogen::fex
             // (32-bit) - each with its own translation cache and code buffers. An unmap of 32-bit guest
             // code is serviced while active_context_ is the 64-bit context (a 32-bit guest syscall
             // crosses through the heaven's gate to 64-bit mode before reaching sogen's syscall handler),
-            // so invalidating only active_context_ leaves stale *32-bit* translations behind. That is
-            // exactly what let a block compiled from clbcatq.dll (mapped at guest base 0xa220000, image
-            // 0x86000) survive after clbcatq was unmapped and mmdevapi.dll (a smaller 0x75000 image) was
-            // mapped at the SAME base: the guest later reached that guest RIP, FEX ran the phantom
-            // clbcatq translation instead of recompiling mmdevapi's current bytes, and it stored to a
-            // clbcatq global past mmdevapi's image end (0xa29ae80) - now unmapped - faulting with
-            // C0000005. Only unmaps request this - doing it on every protection change would repeatedly
+            // so invalidating only active_context_ leaves stale *32-bit* translations behind. If a new
+            // module is later mapped at the same base, FEX runs the phantom translation of the old
+            // module's bytes instead of recompiling the new ones - so an unmap must invalidate the
+            // inactive context's cache for the range too.
+            // Only unmaps request this - doing it on every protection change would repeatedly
             // delink the live 32-bit context's blocks from the inactive side and livelock it.
             if (include_inactive_contexts && this->context32_.get() != nullptr && this->context32_.get() != this->active_context_ &&
                 this->thread32_ != nullptr)

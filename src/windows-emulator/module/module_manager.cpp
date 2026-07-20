@@ -519,15 +519,13 @@ namespace sogen
         // not an absolute address), so there's no compatibility reason they must sit exactly there. Try
         // the preferred address first (the common, fast path - almost always free), but fall back to
         // searching for any free spot below 4GB if it isn't. This matters on a backend sharing the guest
-        // address space with the host process (FEX on Apple Silicon): a real regression showed the
-        // preferred kCodeBase can already be claimed by a foreign host mapping - this process's own
-        // Cocoa/Metal GPU subsystem reserves a large host VA range whose ASLR placement occasionally
-        // lands exactly there. Confirmed to be a genuine, ongoing race (not just a one-time startup
-        // ordering issue): even when the address reads as free at allocation time, Metal's own
-        // background thread can still claim it in the narrow window before the trampoline bytes are
-        // actually written, so the write itself must be retried at a new address on failure too, not
-        // just the initial allocation. With none of this handled, real wow64 runs failed outright in
-        // roughly 20-40% of runs.
+        // address space with the host process (FEX on Apple Silicon): the preferred kCodeBase can
+        // already be claimed by a foreign host mapping - this process's own Cocoa/Metal GPU subsystem
+        // reserves a large host VA range whose ASLR placement can land exactly there. This is an
+        // ongoing race, not just a one-time startup ordering issue: even when the address reads as free
+        // at allocation time, Metal's own background thread can still claim it in the narrow window
+        // before the trampoline bytes are actually written, so the write itself must be retried at a
+        // new address on failure too, not just the initial allocation.
         constexpr uint64_t heaven_gate_below_4gb_ceiling = 0xFFFFFFFFULL;
         constexpr int max_heaven_gate_retries = 8;
 
@@ -562,9 +560,8 @@ namespace sogen
         // Deliberately does NOT just retry allocate_or_validate(preferred_base, ...) unchanged: on this
         // backend, the fixed-address path's underlying host mmap uses MAP_FIXED, which unconditionally
         // succeeds by silently clobbering whatever was already there - it can't detect Metal's
-        // background thread continuing to reclaim the exact same address after we do (a genuinely
-        // adversarial, repeated race, confirmed empirically: identical retries at the same preferred
-        // address kept reporting the same commit failure every time). So after the first failure this
+        // background thread continuing to reclaim the exact same address after we do, so identical
+        // retries at the same preferred address keep failing. So after the first failure this
         // switches straight to a real search (find_free_host_allocation_base, which confirms host
         // availability and rescans past foreign occupants).
         //
@@ -742,9 +739,9 @@ namespace sogen
                 const auto image_base = dispatch_start - turbo_dispatch_start_rva;
 
                 // TurboDispatchJumpAddressEnd's RVA relative to Start is NOT reliably 0x17af - 0x17a6
-                // == 9 bytes across every wow64cpu.dll build (confirmed empirically: a real CI build's
-                // bytes at image_base+0x17af decode as nonsense, not the documented dispatcher code,
-                // and executing them corrupts guest memory). Resolve the real export address directly
+                // == 9 bytes across every wow64cpu.dll build (on some builds the bytes at
+                // image_base+0x17af decode as nonsense, not the documented dispatcher code, and
+                // executing them corrupts guest memory). Resolve the real export address directly
                 // instead of assuming a fixed offset, exactly like TurboDispatchJumpAddressStart above.
                 const auto dispatch_end = mod.find_export("TurboDispatchJumpAddressEnd");
                 if (dispatch_end != 0)
@@ -788,9 +785,8 @@ namespace sogen
                 // NtContinue-triggered crossing is never that - it fires mid-execution of wow64.dll's
                 // own real code, so re-running that one-time prologue spill scribbles over the frozen
                 // 64-bit stack with whatever's currently in r12-r15/rbx/rsi/rdi/rbp and double-adjusts
-                // rsp, corrupting state for every syscall dispatched afterward (confirmed locally: this
-                // broke reproducibly 3/3 runs when 0x1650 was used, while the equivalent syscall-return
-                // re-entry point stayed clean 3/3). 0x167f is that clean re-entry point - it falls
+                // rsp, corrupting state for every syscall dispatched afterward. 0x167f is the
+                // syscall-return re-entry point instead - it falls
                 // within this same registered gate range (0x1650 already extends the whole way to
                 // turbo_dispatch_start_rva) but is documented as "already runs with rsp prologue-
                 // adjusted and must not be double-counted", exactly matching a mid-syscall return.
@@ -830,8 +826,7 @@ namespace sogen
                 // reverse-engineered fact). sogen never runs whatever real guest code would normally
                 // populate fs:[0xC0] (this backend synthesizes the gate crossings above instead of
                 // executing wow64cpu.dll's real dispatch code), so the field stays null. Setting
-                // TEB32.WOW32Reserved alone is not enough though - confirmed empirically (the syscall
-                // stub's own baked-in behavior was unchanged by it): every 32-bit syscall stub reaches
+                // TEB32.WOW32Reserved alone is not enough though: every 32-bit syscall stub reaches
                 // the dispatcher via a shared indirection stub that itself does
                 // `jmp dword ptr [<ntdll32's OWN cached copy of fs:[0xC0]>]`, and that copy is read
                 // once during LdrpInitializeProcess, long before wow64cpu.dll loads and this callback
@@ -868,15 +863,15 @@ namespace sogen
                 // Unlike the RVAs above, the probe faults at image_base+0x6d41. This is NOT the same
                 // as (mapped base)+0x7000 - image_base here
                 // (dispatch_start - turbo_dispatch_start_rva) sits a fixed 0x2bf bytes above wow64cpu.dll's
-                // real mapped base, so RVAs measured directly against the PE mapping (as first done
-                // for this one) land 0x2bf too high once added to image_base instead. The other three
+                // real mapped base, so RVAs measured directly against the PE mapping land 0x2bf too
+                // high once added to image_base instead. The other three
                 // gates above don't have this problem because their RVAs were decoded by hand directly
                 // against image_base's own frame of reference, not the PE mapping.
                 constexpr uint64_t cpu_mode_probe_rva = 0x6d41;
                 // Exactly the far jmp's own encoding length (1-byte opcode + 4-byte offset + 2-byte
                 // selector) - NOT rounded up like the other gates above. The probe's target sits just
-                // 9 bytes past its own start (jmp far 0x33:<9 bytes ahead>), so a padded size (0x10, as
-                // first tried here) would cover the landing address too: execution would re-enter this
+                // 9 bytes past its own start (jmp far 0x33:<9 bytes ahead>), so a padded size (e.g.
+                // 0x10) would cover the landing address too: execution would re-enter this
                 // same "non-executable" gate immediately after the crossing, decode the identical bytes,
                 // and cross again forever - an infinite loop rather than the crash this gate exists to
                 // fix.
@@ -1000,6 +995,9 @@ namespace sogen
         buffer.write(this->wow64_modules_.ntdll32 ? this->wow64_modules_.ntdll32->image_base : 0);
         buffer.write(this->wow64_modules_.wow64_dll ? this->wow64_modules_.wow64_dll->image_base : 0);
         buffer.write(this->wow64_modules_.wow64win_dll ? this->wow64_modules_.wow64win_dll->image_base : 0);
+
+        buffer.write(this->wow64_heaven_gate_code_base_);
+        buffer.write(this->wow64_heaven_gate_stack_top_);
     }
 
     void module_manager::deserialize(utils::buffer_deserializer& buffer)
@@ -1027,6 +1025,9 @@ namespace sogen
         this->wow64_modules_.ntdll32 = ntdll32_base ? this->find_by_address(ntdll32_base) : nullptr;
         this->wow64_modules_.wow64_dll = wow64_dll_base ? this->find_by_address(wow64_dll_base) : nullptr;
         this->wow64_modules_.wow64win_dll = wow64win_dll_base ? this->find_by_address(wow64win_dll_base) : nullptr;
+
+        this->wow64_heaven_gate_code_base_ = buffer.read<uint64_t>();
+        this->wow64_heaven_gate_stack_top_ = buffer.read<uint64_t>();
     }
 
     bool module_manager::unmap(const uint64_t address)
