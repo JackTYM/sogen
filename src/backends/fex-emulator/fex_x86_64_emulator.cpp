@@ -355,13 +355,13 @@ namespace sogen::fex
         // only MMIO consumer is read-only). Same fixed-Rm, no-addressing-mode shape as LDAR/LDAPR.
         //
         // Deliberately does NOT also decode plain STR/STUR (unlike decode_arm64_load, which does
-        // cover the equivalent plain-load forms): a broadened version covering those was tried for
-        // handle_general_memory_violation's Category-3 "false fault" case and caused a real,
-        // reproducible hang (confirmed via bisection - isolated to this table specifically, not
-        // decode_arm64_load's equivalent broadening, which the KUSD/MMIO path already exercises
-        // safely) whose exact root cause wasn't pinned down before time ran out on the investigation.
-        // Category-3 false-fault emulation is therefore currently limited to loads and STLR-family
-        // stores; a plain-store false fault falls through to a crash instead of being emulated.
+        // cover the equivalent plain-load forms): broadening this table to cover them for
+        // handle_general_memory_violation's Category-3 "false fault" case causes a real,
+        // reproducible hang isolated to this table specifically (decode_arm64_load's equivalent
+        // plain-load coverage is safe - the KUSD/MMIO path already exercises it) with a root cause
+        // that is not yet understood, so this table must stay narrow. Category-3 false-fault
+        // emulation is therefore currently limited to loads and STLR-family stores; a plain-store
+        // false fault falls through to a crash instead of being emulated.
         //
         // This has a real, understood downstream consequence beyond just that crash, tracked
         // separately: handle_general_memory_violation also uses this same decoder to classify a
@@ -2538,7 +2538,7 @@ namespace sogen::fex
         // real stop - but without touching stop_requested_), which then dispatches the hook in normal
         // context and resumes guest execution by simply re-entering ExecuteThread: it always starts
         // fresh from CurrentFrame->State.rip, which is exactly what AbsoluteLoopTopAddressFillSRA
-        // already re-derived SRA from, so this is behaviorally identical to the old in-handler resume.
+        // already re-derived SRA from, so this is behaviorally identical to resuming in-handler.
         enum class pending_fault_kind
         {
             none,
@@ -2602,7 +2602,7 @@ namespace sogen::fex
         // callers interrupting arbitrary, uncontrolled points in live guest-translated JIT code (a
         // real hardware fault directly on translated code, see handle_general_memory_violation) must
         // pass false, since SRA is still live only in host registers there and skipping the spill
-        // left stale/inconsistent state for the next ExecuteThread entry to read.
+        // leaves stale/inconsistent state for the next ExecuteThread entry to read.
         void defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled)
         {
             this->pending_fault_dispatch_ = dispatch;
@@ -2744,7 +2744,7 @@ namespace sogen::fex
                 // like the CodeBuffer race (see the BUS_ADRALN branch's own comment), Darwin can
                 // report this exact same PROT_NONE violation as BUS_ADRALN instead of the expected
                 // SEGV_ACCERR/SEGV_MAPERR. Since InterruptFaultPage's address is never inside the
-                // CodeBuffer, a misclassified BUS_ADRALN fault here used to fall past that check
+                // CodeBuffer, a misclassified BUS_ADRALN fault here would fall past that check
                 // straight into handle_general_memory_violation, which unconditionally treats
                 // fault_addr as a *guest* address (page_shadow_apple_ lookup) and
                 // dispatches a synthetic guest memory-violation exception with that bogus "guest
@@ -2961,7 +2961,7 @@ namespace sogen::fex
                     return true;
                 }
 
-                // See g_jit_write_protect_retry_counts' doc comment: FEXCore's own code-patching paths
+                // See jit_write_protect_retry_count_for's doc comment: FEXCore's own code-patching paths
                 // (ExitFunctionLink, block delinkers) don't reliably leave this thread's JIT write-
                 // protect state correct for the duration of their self-modifying writes into a
                 // CodeBuffer. Set it to whatever the faulting access actually needs and retry the
