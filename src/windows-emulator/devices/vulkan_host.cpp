@@ -254,13 +254,9 @@ namespace sogen
             });
         }
 
-        // Apple's registered Vulkan/PCI vendor ID. Reported directly by the ICD via
-        // vkGetPhysicalDeviceProperties regardless of which Vulkan library the host resolved (the real
-        // Khronos loader vs. libMoltenVK.dylib directly) - unlike VK_KHR_portability_subset, whose
-        // enumeration depends on loader-level machinery (VK_KHR_portability_enumeration) that only runs
-        // when the real loader is present. Falling back to libMoltenVK.dylib is a real, observed
-        // environment on this host, and under it MoltenVK can legitimately omit portability_subset from
-        // its own device-extension list, so checking the extension alone is not reliable here.
+        // Apple's registered Vulkan/PCI vendor ID. The ICD reports it unconditionally via
+        // vkGetPhysicalDeviceProperties, making it a robust fallback signal independent of any
+        // extension-enumeration edge cases.
         static constexpr uint32_t APPLE_VENDOR_ID = 0x106B;
 
         // A device advertising VK_KHR_portability_subset, or reporting Apple's vendor ID, is a
@@ -1799,10 +1795,13 @@ namespace sogen
         const bool portability = impl::is_portability_device(instance->second, pd->second);
 
         // Vulkan requires VK_KHR_portability_subset to be enabled whenever the physical device advertises
-        // it (MoltenVK always does). The guest never asks for it, so add it here when present.
+        // it (MoltenVK always does). The guest never asks for it, so add it here when present. `portability`
+        // can also be true purely from the vendorID fallback, so re-check the extension itself here rather
+        // than pushing an extension the device never actually advertised.
         const bool requests_portability_subset =
             std::ranges::any_of(extensions, [](const char* name) { return std::strcmp(name, "VK_KHR_portability_subset") == 0; });
-        if (portability && !requests_portability_subset)
+        if (portability && !requests_portability_subset &&
+            impl::has_device_extension(instance->second, pd->second.handle, "VK_KHR_portability_subset"))
         {
             extensions.push_back("VK_KHR_portability_subset");
         }

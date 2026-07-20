@@ -314,8 +314,10 @@ plus the surrounding calls needed to actually use them:
     device is ever enumerated. The extension is implemented by the loader, not the driver, so it can
     appear on Linux loaders too — but enabling it is harmless everywhere: it only un-hides
     non-conformant devices from enumeration, it never misreports a device's capabilities.
-  - `create_device` now appends `VK_KHR_portability_subset` when the physical device advertises it
-    (Vulkan requires enabling it in that case); the guest never asks for it.
+  - `create_device` now appends `VK_KHR_portability_subset` when the physical device is recognized as
+    a portability device (advertises the extension, or — as a fallback — reports Apple's vendor ID;
+    Vulkan requires enabling it whenever the device actually advertises it); the guest never asks for
+    it.
   Verified end-to-end on macOS against a real GPU: the guest `vulkan-shim-test` enumerates the host
   **Apple M5 Pro** through MoltenVK and its `fill+readback` (`0xDEADBEEF`) and `clear+readback`
   (`0xFF0000FF`) checks both pass — the GPU produces the pixels and the guest reads them back exactly.
@@ -350,9 +352,10 @@ plus the surrounding calls needed to actually use them:
   binds for unbound resources rely on MoltenVK/Metal tolerating null descriptors in practice without
   the formal `nullDescriptor` feature — empirical behavior, not a guaranteed contract.
 
-  All of this is strictly gated to **portability devices** — those advertising
-  `VK_KHR_portability_subset`, which conformant native drivers never do (the check is cached per
-  physical device). A native Linux/Windows driver that really lacks one of these features (e.g. a
+  All of this is gated to **portability devices** — those advertising `VK_KHR_portability_subset`,
+  or (as a fallback conformant native drivers can't hit) reporting Apple's vendor ID; conformant
+  native drivers advertise neither (the check is cached per physical device). A native Linux/Windows
+  driver that really lacks one of these features (e.g. a
   software rasterizer without `geometryShader`) sees its real capabilities, and whatever the guest
   requests reaches it unmodified — `vkCreateDevice` fails there exactly as it would without the shim.
 
