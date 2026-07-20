@@ -61,7 +61,7 @@ namespace sogen
             bool pause_before_start{false};
 #endif
             std::optional<uint64_t> break_call{};
-            std::vector<uint32_t> click_dialog_buttons{};
+            std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
@@ -610,7 +610,7 @@ namespace sogen
             analysis_context context{
                 .settings = &options,
                 .auto_break_before_call = options.break_call,
-                .click_dialog_buttons = options.click_dialog_buttons,
+                .click_dialog_rules = options.click_dialog_rules,
             };
 
             const auto concise_logging = options.concise_logging;
@@ -928,10 +928,12 @@ namespace sogen
             std::vector<std::pair<std::string, std::string>> environment{};
             app.add_option("--env", environment, "Set an environment variable")->type_name("NAME VALUE")->allow_extra_args(false);
 
-            std::vector<std::string> click_dialog_button_args{};
+            std::vector<std::pair<std::string, std::string>> click_dialog_button_args{};
             app.add_option("--click-dialog-button", click_dialog_button_args,
-                           "Auto-dismiss modal dialogs by clicking whichever listed control is present "
-                           "(comma-separated, e.g. 6,1 = IDYES or IDOK). Requires --vcpus 1")
+                           "Auto-dismiss a modal dialog whose title contains TITLE by clicking control ID "
+                           "(repeatable, e.g. --click-dialog-button \"Safe Mode\" 7). A dialog whose title "
+                           "matches no rule is left alone rather than guessed at. Requires --vcpus 1")
+                ->type_name("TITLE ID")
                 ->allow_extra_args(false);
 
             CLI11_PARSE(app, argc, argv);
@@ -960,21 +962,9 @@ namespace sogen
                     options.backend = backends.at(backend_name);
                 }
 
-                for (const auto& arg : click_dialog_button_args)
+                for (const auto& [title, id] : click_dialog_button_args)
                 {
-                    size_t pos = 0;
-                    while (pos <= arg.size())
-                    {
-                        const auto comma = arg.find(',', pos);
-                        const auto token = arg.substr(pos, comma - pos);
-                        options.click_dialog_buttons.push_back(parse_dialog_control_id(token));
-
-                        if (comma == std::string::npos)
-                        {
-                            break;
-                        }
-                        pos = comma + 1;
-                    }
+                    options.click_dialog_rules.emplace_back(title, parse_dialog_control_id(id));
                 }
 
                 for (auto& module_name : tracked_modules)

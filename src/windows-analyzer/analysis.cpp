@@ -718,7 +718,7 @@ namespace sogen
 
         void handle_event_pump(analysis_context& c)
         {
-            if (c.click_dialog_buttons.empty())
+            if (c.click_dialog_rules.empty())
             {
                 return;
             }
@@ -737,37 +737,46 @@ namespace sogen
                     continue;
                 }
 
-                const emulator_thread* owner = proc.find_thread_by_id(win.thread_id);
-                if (!owner || !(owner->await_msg.has_value() || owner->await_msg_mask.has_value()))
+                // Each rule is (title substring, control id): only a dialog whose title matches a
+                // known, expected substring gets auto-clicked, and only with that rule's own button -
+                // an unrecognized dialog (a real error, for instance) is left alone rather than
+                // guessing from a single global button list.
+                const auto title = u16_to_u8(win.name);
+                const auto rule = std::ranges::find_if(c.click_dialog_rules,
+                                                       [&](const auto& entry) { return title.find(entry.first) != std::string::npos; });
+                if (rule == c.click_dialog_rules.end())
                 {
                     continue;
                 }
 
-                // Different dialogs in the same run can carry different buttons, so click
-                // whichever of the requested control ids is present, honoring caller priority.
+                const auto wanted = rule->second;
+
+                // Requiring the owning thread to already be blocked in a message wait
+                // (await_msg/await_msg_mask) misses dialogs whose thread pumps via a plain
+                // PeekMessage loop rather than NtUserWaitMessage - the WM_COMMAND below is posted
+                // (queued), not delivered synchronously, so it's picked up whenever that thread's
+                // loop next runs regardless of which wait style it uses.
+                const emulator_thread* owner = proc.find_thread_by_id(win.thread_id);
+                if (!owner)
+                {
+                    continue;
+                }
+
                 uint32_t target_id = 0;
                 hwnd child_handle = 0;
-                for (const auto wanted : c.click_dialog_buttons)
+                for (auto& child : proc.windows | std::views::values)
                 {
-                    for (auto& child : proc.windows | std::views::values)
+                    if (child.parent_handle != win.handle)
                     {
-                        if (child.parent_handle != win.handle)
-                        {
-                            continue;
-                        }
-
-                        uint32_t control_id = 0;
-                        child.guest.access([&](const USER_WINDOW& gw) { control_id = static_cast<uint32_t>(gw.wID); });
-                        if (control_id == wanted)
-                        {
-                            target_id = wanted;
-                            child_handle = child.handle;
-                            break;
-                        }
+                        continue;
                     }
 
-                    if (child_handle != 0)
+                    uint32_t control_id = 0;
+                    child.guest.access([&](const USER_WINDOW& gw) { control_id = static_cast<uint32_t>(gw.wID); });
+                    if (control_id == wanted)
                     {
+                        target_id = wanted;
+                        child_handle = child.handle;
                         break;
                     }
                 }
