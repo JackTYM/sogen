@@ -123,9 +123,9 @@ namespace sogen
             const auto object_handle = make_handle(index, type, false);
 
             // user32's client-side handle validation (HMValidateHandle and friends) indexes the shared
-            // aheList by the HANDLE's low 16 bits, not by our internal handle id. Since handles are now
-            // 4-aligned (low 2 bits reserved for the NtClose ABI), the id lives at bit 2, so the aheList
-            // slot the guest reads is id << 2. Write the entry there so the client-side lookup resolves.
+            // aheList by the HANDLE's low 16 bits, not by our internal handle id. Handles are 4-aligned
+            // (low 2 bits reserved for the NtClose ABI), so the id lives at bit 2 and the aheList slot
+            // the guest reads is id << 2. Write the entry there so the client-side lookup resolves.
             const auto ahe_slot = handle_index_to_ahe_slot(index);
 
             const auto alloc_size = static_cast<size_t>(page_align_up(sizeof(T)));
