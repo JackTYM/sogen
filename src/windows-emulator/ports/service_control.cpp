@@ -66,17 +66,17 @@ namespace sogen
                     return STATUS_SUCCESS;
 
                 case k_svcctl_subscribe:
-                    // I_ScQueryServiceConfig, the worker behind SubscribeServiceChangeNotifications. Its [out]
-                    // (classic NDR) is a non-encapsulated union discriminated by the change-mask; for the masks
-                    // used here the arm is a unique pointer to an 8-byte WNF_STATE_NAME the client would
-                    // subscribe to. NDR order is: the pointer referent, then the return value, then the deferred
-                    // pointee.
+                    // SubscribeServiceChangeNotifications's [out] (classic NDR) is a non-encapsulated union
+                    // discriminated by the change-mask; for the masks used here the arm is a unique pointer to
+                    // an 8-byte WNF_STATE_NAME the client would subscribe to. NDR order is: the pointer referent,
+                    // then the return value, then the deferred pointee.
                     {
                         // The change-mask is an [in] parameter so it is NOT echoed in the output NDR.
-                        // Output layout: referent (non-null), return value, deferred WNF_STATE_NAME.
                         writer.write<uint32_t>(0x00020000);      // unique pointer referent (non-null)
                         writer.write<uint32_t>(k_error_success); // return value
                         constexpr uint64_t k_wnf_audiosrv_running = 0x41C200A1700AC3C5ULL;
+                        // Written as two uint32_t so binary_writer does not insert 8-byte alignment padding
+                        // before them, which a single write<uint64_t> call would.
                         writer.write<uint32_t>(static_cast<uint32_t>(k_wnf_audiosrv_running));
                         writer.write<uint32_t>(static_cast<uint32_t>(k_wnf_audiosrv_running >> 32));
                     }
@@ -102,8 +102,8 @@ namespace sogen
                         (void)snprintf(tmp.data(), tmp.size(), "%02x ", b);
                         hex += tmp.data();
                     }
-                    win_emu.log.error("[svcctl] unrecognized opnum=%u send_len=%u in: %s\n", procedure_id,
-                                      static_cast<uint32_t>(c.send_buffer_length), hex.c_str());
+                    win_emu.log.info("[ntsvcs] unrecognized opnum=%u send_len=%u in: %s\n", procedure_id,
+                                     static_cast<uint32_t>(c.send_buffer_length), hex.c_str());
                     return STATUS_SUCCESS;
                 }
                 }
