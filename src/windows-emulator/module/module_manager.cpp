@@ -9,7 +9,6 @@
 
 #include <serialization_helper.hpp>
 #include <cinttypes>
-#include <cstring>
 #include <vector>
 
 namespace sogen
@@ -17,88 +16,6 @@ namespace sogen
 
     namespace
     {
-        bool address_is_in_writable_section(const mapped_module& mod, const uint64_t address)
-        {
-            for (const auto& section : mod.sections)
-            {
-                const auto& region = section.region;
-                if (address >= region.start && address - region.start < region.length)
-                {
-                    return (region.permissions & memory_permission::write) != memory_permission::none;
-                }
-            }
-
-            return false;
-        }
-
-        // Locates kernelbase.dll's private (non-exported) gNlsProcessLocalCache global by scanning for
-        // the fixed TEB.NlsCache access sequence inside BaseNlsThreadCleanup:
-        //   65 48 8B 04 25 30 00 00 00   mov rax, gs:[0x30]      (TEB self-pointer)
-        //   48 8B 98 A0 17 00 00         mov rbx, [rax+0x17A0]   (TEB.NlsCache)
-        //   48 8D 05 xx xx xx xx         lea rax, [rip+disp32]   (&gNlsProcessLocalCache)
-        // The TEB access is a fixed-offset ABI read that current compiler/SDK builds emit identically;
-        // only the trailing RIP-relative displacement differs across kernelbase.dll builds, which is
-        // what makes this scan more robust than a hardcoded RVA (gNlsProcessLocalCache's RVA is known to
-        // drift across Windows servicing builds). Should a future codegen change alter this sequence,
-        // the writable-section-validated hardcoded-RVA fallback below still covers it.
-        std::optional<uint64_t> scan_kernelbase_nls_cache_reference(const memory_manager& memory, const mapped_module& kernelbase)
-        {
-            static constexpr std::array<uint8_t, 19> pattern{
-                0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // mov rax, gs:[0x30]
-                0x48, 0x8B, 0x98, 0xA0, 0x17, 0x00, 0x00,             // mov rbx, [rax+0x17A0]
-                0x48, 0x8D, 0x05,                                     // lea rax, [rip+disp32]
-            };
-
-            for (const auto& section : kernelbase.sections)
-            {
-                const auto& region = section.region;
-                if (!is_executable(region.permissions) || region.length < pattern.size() + sizeof(int32_t))
-                {
-                    continue;
-                }
-
-                std::vector<uint8_t> data(region.length);
-                if (!memory.try_read_memory(region.start, data.data(), data.size()))
-                {
-                    continue;
-                }
-
-                const auto search_end = data.size() - pattern.size() - sizeof(int32_t);
-                for (size_t i = 0; i <= search_end; ++i)
-                {
-                    if (std::memcmp(data.data() + i, pattern.data(), pattern.size()) != 0)
-                    {
-                        continue;
-                    }
-
-                    int32_t displacement{};
-                    std::memcpy(&displacement, data.data() + i + pattern.size(), sizeof(displacement));
-
-                    const auto instruction_end = region.start + i + pattern.size() + sizeof(displacement);
-                    return static_cast<uint64_t>(static_cast<int64_t>(instruction_end) + displacement);
-                }
-            }
-
-            return std::nullopt;
-        }
-
-        // Falls back to a hardcoded RVA (derived once via static analysis of a specific kernelbase.dll
-        // build) when the pattern scan above finds no match. Either result is only trusted once it's
-        // confirmed to land on writable data in the module's own section table, since a stale RVA would
-        // otherwise fault when written through.
-        uint64_t resolve_kernelbase_nls_cache_address(const memory_manager& memory, const mapped_module& kernelbase)
-        {
-            if (const auto scanned = scan_kernelbase_nls_cache_reference(memory, kernelbase);
-                scanned.has_value() && address_is_in_writable_section(kernelbase, *scanned))
-            {
-                return *scanned;
-            }
-
-            constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
-            const auto address = kernelbase.image_base + kernelbase_gnls_process_local_cache_rva;
-            return address_is_in_writable_section(kernelbase, address) ? address : 0;
-        }
-
         uint64_t get_system_dll_init_block_size(const windows_version_manager& version)
         {
             if (version.is_build_after_or_equal(WINDOWS_VERSION::WINDOWS_11_24H2))
@@ -536,32 +453,6 @@ namespace sogen
         }
     }
 
-    void module_manager::ensure_kernelbase_nls_cache_hook(process_context& context)
-    {
-        if (!this->kernelbase_nls_cache_hook_registered_)
-        {
-            this->kernelbase_nls_cache_hook_registered_ = true;
-
-            // kernelbase.dll is not among the modules process_context::setup() maps eagerly; it loads
-            // later via the guest loader's own import resolution, so gNlsProcessLocalCache can only be
-            // resolved once it actually appears.
-            this->callbacks_->on_module_load.add([this, &context](mapped_module& mod) {
-                if (mod.name != "kernelbase.dll")
-                {
-                    return;
-                }
-
-                context.kernelbase_nls_process_local_cache = resolve_kernelbase_nls_cache_address(*this->memory_, mod);
-            });
-        }
-
-        // kernelbase_nls_process_local_cache is host-side bookkeeping, not part of process_context's
-        // serialized state, so restoring a snapshot taken before kernelbase.dll loaded must re-derive it
-        // from the current module list instead of leaving a stale address behind.
-        const auto* kernelbase = this->find_by_name("kernelbase.dll");
-        context.kernelbase_nls_process_local_cache = kernelbase ? resolve_kernelbase_nls_cache_address(*this->memory_, *kernelbase) : 0;
-    }
-
     void module_manager::map_main_modules(const windows_path& executable_path, windows_version_manager& version, process_context& context,
                                           const logger& logger)
     {
@@ -571,8 +462,6 @@ namespace sogen
 
         current_execution_mode_ = detect_execution_mode(executable_path, logger);
         context.is_wow64_process = (current_execution_mode_ == execution_mode::wow64_32bit);
-
-        this->ensure_kernelbase_nls_cache_hook(context);
 
         switch (current_execution_mode_)
         {

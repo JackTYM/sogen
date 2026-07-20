@@ -11,12 +11,10 @@ namespace sogen
     {
         // Real ntdll's RtlpInitCodePageTables always leaves this internal lead-byte-info-table pointer
         // (at a fixed offset from ntdll's image base) populated - either a real DBCS table, or ntdll's
-        // own empty/all-zero NlsEmptyLeadByteInfoTable for single-byte codepages. For a wow64 process
-        // specifically, this field is observed to stay null even though the sibling codepage-table
-        // fields are populated correctly, and any guest read of a null table computes a near-null
-        // address and crashes. Populating it with an empty/all-zero lead-byte table is semantically
-        // identical to ntdll's own single-byte-codepage behavior, so it's a safe fix regardless of the
-        // exact root cause.
+        // own empty/all-zero NlsEmptyLeadByteInfoTable for single-byte codepages. In a wow64 process
+        // under this emulator the field stays null even though the sibling codepage-table fields are
+        // populated, and any guest read of a null table computes a near-null address and crashes.
+        // An empty/all-zero lead-byte table matches ntdll's own single-byte-codepage behavior.
         constexpr uint64_t nls_lead_byte_info_table_offset = 0x172760;
         constexpr uint64_t nls_global_rtl_state_offset = 0x1726d0;
 

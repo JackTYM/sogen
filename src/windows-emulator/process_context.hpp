@@ -437,17 +437,9 @@ namespace sogen
         kusd_mmio kusd;
 
         uint64_t ntdll_image_base{};
-        // Guest address of kernelbase.dll's private gNlsProcessLocalCache global, resolved once
-        // kernelbase.dll is mapped (see module_manager::ensure_kernelbase_nls_cache_hook). Real Windows
-        // points every thread's TEB.NlsCache at this shared, process-wide fallback structure until that
-        // thread does its own locale/NLS API work; kernelbase.dll's BaseNlsThreadCleanup
-        // (DLL_THREAD_DETACH) skips freeing TEB.NlsCache whenever it still points here. 0 if
-        // kernelbase.dll hasn't been mapped yet.
-        uint64_t kernelbase_nls_process_local_cache{};
-        // Caches the outcome of ensure_nls_lead_byte_info_table (syscall_dispatcher.cpp) so it only
-        // scans/validates once instead of on every syscall. nullopt = not yet resolved (still waiting on
-        // ntdll's own codepage init); host-side bookkeeping, not serialized, so a snapshot restore just
-        // resolves it again.
+        // nullopt = ensure_nls_lead_byte_info_table (syscall_dispatcher.cpp) hasn't run to completion
+        // yet, e.g. because ntdll's own codepage init hasn't happened. Not serialized; reset on
+        // deserialize because the patch it gates lives in guest memory and reverts with it.
         std::optional<bool> nls_lead_byte_info_table_resolved{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};

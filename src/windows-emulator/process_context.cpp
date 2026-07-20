@@ -119,8 +119,7 @@ namespace sogen
         // PEB.AnsiCodePageData/OemCodePageData point at a CPTABLEINFO describing the process's
         // ANSI/OEM codepage. This builds a minimal, single-byte-codepage-1252-shaped identity table:
         // WideCharTable[byte] treats every byte 0-255 as its own Unicode code point (correct for the
-        // printable ASCII range, imprecise for cp1252's 0x80-0x9F). Also reused to fill NLSTABLEINFO's
-        // own embedded OemTableInfo/AnsiTableInfo sub-structs.
+        // printable ASCII range, imprecise for cp1252's 0x80-0x9F).
         void fill_identity_codepage_table(emulator_allocator& allocator, CPTABLEINFO& t)
         {
             std::vector<uint16_t> wide_char_table(0x100);
@@ -156,10 +155,9 @@ namespace sogen
             return table.value();
         }
 
-        // CPTABLEINFO32/NLSTABLEINFO32 (kernel_mapped.hpp) are the 32-bit-pointer-shaped layout real
-        // 32-bit ntdll parses under WoW64 - a distinct struct from CPTABLEINFO/NLSTABLEINFO, not just
-        // the same layout with narrower fields, since CPTABLEINFO32's pointer fields sit at different
-        // byte offsets once the preceding 8-byte fields shrink to 4.
+        // CPTABLEINFO32/NLSTABLEINFO32 (kernel_mapped.hpp) are the layouts real 32-bit ntdll parses
+        // under WoW64: they differ from CPTABLEINFO/NLSTABLEINFO only in pointer width and the
+        // resulting field offsets and struct size.
         void fill_identity_codepage_table32(emulator_allocator& allocator, CPTABLEINFO32& t)
         {
             std::vector<uint16_t> wide_char_table(0x100);
@@ -853,6 +851,10 @@ namespace sogen
 
     void process_context::deserialize(utils::buffer_deserializer& buffer, emulator_thread*& active_thread)
     {
+        // The lead-byte-table patch lives in guest memory and reverts with it, so it must be re-resolved
+        // after any restore.
+        this->nls_lead_byte_info_table_resolved.reset();
+
         buffer.read_vector(this->sid);
         buffer.read(this->shared_section_address);
         buffer.read(this->shared_section_size);

@@ -1774,12 +1774,6 @@ namespace sogen
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
-
-        // A windows_emulator constructed as a pure deserialize() target never ran map_main_modules, so
-        // the kernelbase.dll NLS-cache resolver was never registered; idempotent, so also a no-op when
-        // it was already registered.
-        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
-
         this->restore_ui_backend();
     }
 
@@ -1938,12 +1932,6 @@ namespace sogen
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
-
-        // A windows_emulator constructed as a pure deserialize() target never ran map_main_modules, so
-        // the kernelbase.dll NLS-cache resolver was never registered; idempotent, so also a no-op when
-        // it was already registered.
-        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
-
         this->restore_ui_backend();
     }
 
