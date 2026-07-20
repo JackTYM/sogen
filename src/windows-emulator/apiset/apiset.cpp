@@ -170,8 +170,10 @@ namespace sogen
                         values_obj.write(value, j);
                     }
                 }
-                // else: ValueOffset keeps the host map's original value, unpatched into the clone —
-                // harmless, since every consumer must check ValueCount before touching it.
+                else
+                {
+                    ns_entry.ValueOffset = 0;
+                }
 
                 ns_entries_obj.write(ns_entry, i);
                 hash_entries_obj.write(hash_entry, i);
