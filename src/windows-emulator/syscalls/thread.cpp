@@ -993,8 +993,7 @@ namespace sogen
                 // user32's SFI-table-driven dispatch stubs (the __guard_xfg_dispatch_icall_fptr family
                 // used for e.g. NtUserMessageCall completions) always pass a real result pointer with
                 // ResultLength=0x18 - a 24-byte structure whose first 8 bytes are the actual LRESULT the
-                // callback computed. Only read as many bytes as callback_result fits, not the whole
-                // declared length.
+                // callback computed.
                 const auto read_length = std::min<ULONG>(callback_result_length, sizeof(callback_result));
                 std::array<std::byte, sizeof(callback_result)> result_bytes{};
                 if (c.win_emu.memory.try_read_memory(callback_result_ptr, result_bytes.data(), read_length))

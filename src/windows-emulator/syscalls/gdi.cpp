@@ -700,7 +700,6 @@ namespace sogen
             }
 
             // Decode a single pixel from a BI_RGB DIB scanline (any standard bit depth) into 0xFFRRGGBB BGRA.
-            // For palettised depths (<=8bpp) the caller supplies the DIB colour table; higher depths are direct.
             uint32_t dib_pixel_to_bgra32(const uint8_t* row, const uint32_t x, const uint16_t bpp, const uint32_t* palette)
             {
                 switch (bpp)
@@ -4844,16 +4843,14 @@ namespace sogen
 
         // WDDM command-buffer submission. The paravirtualized GPU path used by real rendering (DXVK)
         // runs over the separate \\.\SogenGpu ioctl bridge, not this D3DKMT kernel escape, so there is
-        // no command buffer to translate here. Accept the submission so the guest's render loop
-        // proceeds, matching the no-op behavior of the other DXGK stubs.
+        // no command buffer to translate here.
         NTSTATUS handle_NtGdiDdDDISubmitCommand(const syscall_context& /*c*/, const emulator_pointer /*submit_command*/)
         {
             return STATUS_SUCCESS;
         }
 
         // WDDM present. Real on-screen presentation for paravirtualized rendering happens over the
-        // \\.\SogenGpu bridge, not this D3DKMT kernel path, so accept the present and let the guest's
-        // frame loop advance, matching the no-op behavior of the other DXGK stubs.
+        // \\.\SogenGpu bridge, not this D3DKMT kernel path.
         NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& /*c*/, const emulator_pointer /*present*/)
         {
             return STATUS_SUCCESS;
