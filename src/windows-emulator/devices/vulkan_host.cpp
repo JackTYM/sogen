@@ -238,11 +238,15 @@ namespace sogen
             }
 
             uint32_t count = 0;
-            instance.enumerate_device_extension_properties(device, nullptr, &count, nullptr);
-            std::vector<VkExtensionProperties> extensions(count);
-            if (count > 0)
+            if (instance.enumerate_device_extension_properties(device, nullptr, &count, nullptr) != VK_SUCCESS)
             {
-                instance.enumerate_device_extension_properties(device, nullptr, &count, extensions.data());
+                return false;
+            }
+
+            std::vector<VkExtensionProperties> extensions(count);
+            if (count > 0 && instance.enumerate_device_extension_properties(device, nullptr, &count, extensions.data()) != VK_SUCCESS)
+            {
+                return false;
             }
 
             return std::ranges::any_of(extensions, [&](const VkExtensionProperties& extension) {
@@ -250,13 +254,31 @@ namespace sogen
             });
         }
 
-        // A device advertising VK_KHR_portability_subset is a non-conformant translation layer (MoltenVK
-        // on macOS); conformant native drivers never expose it.
+        // Apple's registered Vulkan/PCI vendor ID. Reported directly by the ICD via
+        // vkGetPhysicalDeviceProperties regardless of which Vulkan library the host resolved (the real
+        // Khronos loader vs. libMoltenVK.dylib directly) - unlike VK_KHR_portability_subset, whose
+        // enumeration depends on loader-level machinery (VK_KHR_portability_enumeration) that only runs
+        // when the real loader is present. Falling back to libMoltenVK.dylib is a real, observed
+        // environment on this host, and under it MoltenVK can legitimately omit portability_subset from
+        // its own device-extension list, so checking the extension alone is not reliable here.
+        static constexpr uint32_t APPLE_VENDOR_ID = 0x106B;
+
+        // A device advertising VK_KHR_portability_subset, or reporting Apple's vendor ID, is a
+        // non-conformant translation layer (MoltenVK on macOS); conformant native drivers are neither.
         static bool is_portability_device(const instance_data& instance, physical_device_data& device)
         {
             if (!device.portability)
             {
-                device.portability = has_device_extension(instance, device.handle, "VK_KHR_portability_subset");
+                bool portability = has_device_extension(instance, device.handle, "VK_KHR_portability_subset");
+
+                if (!portability && instance.get_physical_device_properties)
+                {
+                    VkPhysicalDeviceProperties properties{};
+                    instance.get_physical_device_properties(device.handle, &properties);
+                    portability = properties.vendorID == APPLE_VENDOR_ID;
+                }
+
+                device.portability = portability;
             }
 
             return *device.portability;
