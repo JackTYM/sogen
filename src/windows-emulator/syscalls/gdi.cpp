@@ -2134,6 +2134,44 @@ namespace sogen
             return static_cast<int>(copied);
         }
 
+        // GetBitmapBits is a DDB API: scanlines are returned top-down, unlike GetDIBits' bottom-up DIB above.
+        LONG handle_NtGdiGetBitmapBits(const syscall_context& c, const handle bitmap, const LONG cb_buffer, const emulator_pointer bits)
+        {
+            if (bits == 0 || cb_buffer <= 0)
+            {
+                return 0;
+            }
+
+            const auto it = c.proc.gdi_bitmap_surfaces.find(static_cast<uint32_t>(bitmap.bits));
+            if (it == c.proc.gdi_bitmap_surfaces.end())
+            {
+                return 0;
+            }
+
+            const auto& surface = it->second;
+            if (surface.pixels.empty())
+            {
+                return 0;
+            }
+
+            const size_t stride = static_cast<size_t>(surface.width) * sizeof(uint32_t);
+            const size_t total = stride * surface.height;
+            const size_t to_copy = std::min(static_cast<size_t>(cb_buffer), total);
+
+            for (size_t row = 0; row < surface.height; ++row)
+            {
+                const size_t dst_offset = row * stride;
+                if (dst_offset >= to_copy)
+                {
+                    break;
+                }
+                const size_t row_bytes = std::min(stride, to_copy - dst_offset);
+                c.emu.write_memory(bits + dst_offset, surface.pixels.data() + row * surface.width, row_bytes);
+            }
+
+            return static_cast<LONG>(to_copy);
+        }
+
         int handle_NtGdiSetDIBitsToDeviceInternal(const syscall_context& c, const hdc dc, const int x_dest, const int y_dest,
                                                   const uint32_t width, const uint32_t height, const int x_src, const int y_src,
                                                   const uint32_t /*start_scan*/, const uint32_t scan_lines, const emulator_pointer bits,

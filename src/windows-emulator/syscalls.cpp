@@ -735,6 +735,7 @@ namespace sogen
         int handle_NtGdiGetDIBitsInternal(const syscall_context& c, hdc dc, handle bitmap, uint32_t start_scan, uint32_t scan_lines,
                                           emulator_pointer bits, emulator_pointer info, uint32_t usage, uint32_t max_bits,
                                           uint32_t max_info);
+        LONG handle_NtGdiGetBitmapBits(const syscall_context& c, handle bitmap, LONG cb_buffer, emulator_pointer bits);
         int handle_NtGdiStretchDIBitsInternal(const syscall_context& c, hdc dc, int x_dst, int y_dst, int dst_width, int dst_height,
                                               int x_src, int y_src, int src_width, int src_height, emulator_pointer bits,
                                               emulator_pointer info, uint32_t usage, uint32_t rop, uint32_t max_info, uint32_t max_bits,
@@ -1299,6 +1300,7 @@ namespace sogen
         add_handler(NtGdiCreateDIBitmapInternal);
         add_handler(NtGdiSetDIBitsToDeviceInternal);
         add_handler(NtGdiGetDIBitsInternal);
+        add_handler(NtGdiGetBitmapBits);
         add_handler(NtGdiStretchDIBitsInternal);
         add_handler(NtGdiDeleteObjectApp);
         add_handler(NtGdiSelectBitmap);
