@@ -589,8 +589,9 @@ namespace sogen
 
         if (force_wow64cpu_32bit_va)
         {
-            binary.image_base =
-                memory.find_free_allocation_base(static_cast<size_t>(binary.size_of_image), DEFAULT_ALLOCATION_ADDRESS_32BIT);
+            binary.image_base = memory.find_free_allocation_base(static_cast<size_t>(binary.size_of_image),
+                                                                 DEFAULT_ALLOCATION_ADDRESS_32BIT, ALLOCATION_GRANULARITY,
+                                                                 DEFAULT_ALLOCATION_ADDRESS_32BIT, DEFAULT_ALLOCATION_ADDRESS_64BIT - 1);
         }
 
         // Store PE header fields
