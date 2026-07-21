@@ -256,6 +256,9 @@ namespace sogen
                                                   /*receive_message_attributes*/,
                                                   emulator_object<LARGE_INTEGER> /*timeout*/);
         NTSTATUS handle_NtAlpcQueryInformation();
+        NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& c, handle port_handle, uint64_t message,
+                                                      uint32_t message_info_class, uint64_t message_info, ULONG length,
+                                                      emulator_object<ULONG> return_length);
         NTSTATUS handle_NtAlpcSetInformation();
         NTSTATUS handle_NtAlpcCreateSecurityContext();
         NTSTATUS handle_NtAlpcDeleteSecurityContext();
@@ -1286,6 +1289,7 @@ namespace sogen
         add_handler(NtQueryInformationThread);
         add_handler(NtQueryWnfStateNameInformation);
         add_handler(NtAlpcSendWaitReceivePort);
+        add_handler(NtAlpcQueryInformationMessage);
         add_handler(NtGdiInit);
         add_handler(NtGdiGetDeviceCaps);
         add_handler(NtGdiGetDeviceCapsAll);
