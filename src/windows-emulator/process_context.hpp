@@ -55,6 +55,7 @@ namespace sogen
 // TODO: Get rid of that
 #define WOW64_NATIVE_STACK_SIZE 0x40000ULL
 #define WOW64_32BIT_STACK_SIZE  (1 << 20)
+#define WOW64_NATIVE_STACK_BASE_HINT 0x70000000ULL
 
     struct emulator_settings;
     struct application_settings;

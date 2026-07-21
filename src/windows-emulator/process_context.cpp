@@ -74,7 +74,10 @@ namespace sogen
         {
             uint64_t default_allocation_base =
                 (is_wow64_process == true) ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
-            uint64_t base = memory.find_free_allocation_base(size, default_allocation_base);
+            constexpr uint64_t below_4gb_ceiling = 0xFFFFFFFFULL;
+            const uint64_t highest_address = is_wow64_process ? below_4gb_ceiling : MAX_ALLOCATION_ADDRESS;
+            uint64_t base = memory.find_free_allocation_base(size, default_allocation_base, ALLOCATION_GRANULARITY, MIN_ALLOCATION_ADDRESS,
+                                                             highest_address);
             bool allocated = memory.allocate_memory(base, size, memory_permission::read_write);
 
             if (!allocated)
