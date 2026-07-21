@@ -49,8 +49,11 @@ jobs:
           run-id: ${{ inputs.root_run_id }}
           github-token: ${{ github.token }}
 
+      - name: Debug - List Emulation Root Contents
+        run: find build/release/artifacts/root -maxdepth 3
+
       - name: Copy Test Sample
-        run: cp build/release/artifacts/test-sample.exe build/release/artifacts/root/filesys/c/
+        run: mkdir -p build/release/artifacts/root/filesys/c && cp build/release/artifacts/test-sample.exe build/release/artifacts/root/filesys/c/
 
       - name: CMake Test
         uses: nick-fields/retry@v4.0.0
