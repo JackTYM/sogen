@@ -243,7 +243,8 @@ namespace sogen
             {
                 const auto relocation = read_mapped_object<IMAGE_BASE_RELOCATION>(memory, binary.image_base + relocation_offset);
 
-                if (relocation.VirtualAddress <= 0 || relocation.SizeOfBlock <= sizeof(IMAGE_BASE_RELOCATION))
+                if (relocation.VirtualAddress <= 0 || relocation.SizeOfBlock <= sizeof(IMAGE_BASE_RELOCATION) ||
+                    relocation.SizeOfBlock > relocation_end - relocation_offset)
                 {
                     break;
                 }
