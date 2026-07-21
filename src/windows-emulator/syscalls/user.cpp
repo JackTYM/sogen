@@ -1319,6 +1319,11 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtUserCitSetInfo()
+        {
+            return STATUS_SUCCESS;
+        }
+
         uint32_t handle_NtUserRegisterWindowMessage(const syscall_context& c,
                                                     const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> message_name)
         {
@@ -1350,6 +1355,14 @@ namespace sogen
             }
 
             return message;
+        }
+
+        // Modal message loops (dialogs, menus, scrollbars) call this to let installed WH_MSGFILTER/
+        // WH_SYSMSGFILTER hooks inspect the message. With no hook-chain infrastructure, and thus no
+        // filter hooks installed, the correct result is FALSE ("no hook handled it, keep processing").
+        BOOL handle_NtUserCallMsgFilter(const syscall_context& /*c*/, const emulator_pointer /*msg*/, const int32_t /*code*/)
+        {
+            return FALSE;
         }
 
         uint64_t handle_NtUserGetThreadState(const syscall_context& c, const ULONG routine)
@@ -4633,6 +4646,26 @@ namespace sogen
                                                           const emulator_object<UINT32> num_path_array_elements,
                                                           const emulator_object<UINT32> num_mode_info_array_elements)
         {
+            // wow64win marshals the two output counts (pNumPathArrayElements / pNumModeInfoArrayElements) into a
+            // single packed buffer (arg2 = &pathCount, arg2+4 = &modeCount); the second, native-shaped argument
+            // slot doesn't hold a valid pointer for a wow64 caller. A zero mode count makes callers (e.g.
+            // coloradapterclient) build an empty mode vector and dereference NULL.
+            if (c.proc.is_wow64_process)
+            {
+                if (!num_path_array_elements)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const std::array<UINT32, 2> counts{1, 2};
+                if (!c.win_emu.memory.try_write_memory(num_path_array_elements.value(), counts.data(), sizeof(counts)))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                return STATUS_SUCCESS;
+            }
+
             if (!num_path_array_elements || !num_mode_info_array_elements)
             {
                 return STATUS_INVALID_PARAMETER;
@@ -4659,6 +4692,23 @@ namespace sogen
             if (!num_path_array_elements)
             {
                 return STATUS_INVALID_PARAMETER;
+            }
+
+            // arg3 (path_array here) is an opaque, user32-owned modality buffer for a wow64 caller, not the
+            // caller's real DISPLAYCONFIG_PATH_INFO array - see handle_NtUserGetDisplayConfigBufferSizes. Writing
+            // our synthesized path struct through it smashes whatever wow64win actually put there (observed as
+            // dcfg32.exe's 0x4016a7 crash), so report zero active paths instead and let user32 skip its unpacking
+            // pass.
+            if (c.proc.is_wow64_process)
+            {
+                num_path_array_elements.write(0);
+
+                if (current_topology_id)
+                {
+                    current_topology_id.write(0x1); // DISPLAYCONFIG_TOPOLOGY_INTERNAL
+                }
+
+                return STATUS_SUCCESS;
             }
 
             const auto num_paths = num_path_array_elements.read();
