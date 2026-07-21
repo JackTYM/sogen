@@ -34,7 +34,7 @@ jobs:
         run: cmake --preset=release && cmake --build --preset=release
 
       - name: Download Windows x86_64 Release Artifacts (from known-good run)
-        uses: actions/download-artifact@v4
+        uses: pyTooling/download-artifact@v8
         with:
           name: "Windows x86_64 Release Artifacts"
           path: build/release/artifacts
@@ -42,7 +42,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Download Windows 2025 Emulation Root (from known-good run)
-        uses: actions/download-artifact@v4
+        uses: pyTooling/download-artifact@v8
         with:
           name: "Windows 2025 Emulation Root"
           path: build/release/artifacts/root
@@ -50,7 +50,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Copy Test Sample
-        run: cp build/release/artifacts/test-sample.exe build/release/artifacts/root/filesys/c/
+        run: mkdir -p build/release/artifacts/root/filesys/c && cp build/release/artifacts/test-sample.exe build/release/artifacts/root/filesys/c/
 
       - name: CMake Test
         uses: nick-fields/retry@v4.0.0
