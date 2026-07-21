@@ -1774,14 +1774,6 @@ namespace sogen
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
-
-        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never
-        // ran map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered - without
-        // this, any thread created after deserialize (in this object) would fall back to the
-        // non-heap-allocated NlsCache placeholder and hit the STATUS_HEAP_CORRUPTION class of bug this
-        // resolver exists to prevent. Idempotent, so this is also a harmless no-op when map_main_modules
-        // already registered it (the common case: deserializing into an already-running emulator).
-        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
         this->restore_ui_backend();
     }
 
@@ -1940,14 +1932,6 @@ namespace sogen
         this->install_section_first_execution_hooks();
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
-
-        // A windows_emulator constructed as a pure deserialize() target (create_empty_emulator) never
-        // ran map_main_modules, so the kernelbase.dll NLS-cache resolver was never registered - without
-        // this, any thread created after deserialize (in this object) would fall back to the
-        // non-heap-allocated NlsCache placeholder and hit the STATUS_HEAP_CORRUPTION class of bug this
-        // resolver exists to prevent. Idempotent, so this is also a harmless no-op when map_main_modules
-        // already registered it (the common case: deserializing into an already-running emulator).
-        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
         this->restore_ui_backend();
     }
 

@@ -988,23 +988,13 @@ namespace sogen
             uint64_t callback_result = t.callback_return_rax.value_or(c.emu.reg<uint64_t>(x86_register::rax));
             t.callback_return_rax.reset();
 
-            if (callback_result_ptr != 0 && callback_result_length != 0)
+            if (callback_result_ptr != 0 && callback_result_length != 0 && callback_result_length <= sizeof(callback_result))
             {
-                // user32's SFI-table-driven dispatch stubs (the __guard_xfg_dispatch_icall_fptr family
-                // used for e.g. NtUserMessageCall completions) always pass a real result pointer with
-                // ResultLength=0x18 - a 24-byte structure whose first 8 bytes are the actual LRESULT the
-                // callback computed, confirmed via disassembly of user32.dll's ZwCallbackReturn call
-                // sites (`lea rcx, [rsp+Result]; mov [rsp+Result], rax; lea edx, [r8+18h]`). A
-                // `callback_result_length <= sizeof(callback_result)` check rejects every one of these
-                // (24 > 8) and silently falls through to the rax-based fallback above, which is wrong for
-                // this call convention - only read as many bytes as callback_result fits, not the whole
-                // declared length.
-                const auto read_length = std::min<ULONG>(callback_result_length, sizeof(callback_result));
                 std::array<std::byte, sizeof(callback_result)> result_bytes{};
-                if (c.win_emu.memory.try_read_memory(callback_result_ptr, result_bytes.data(), read_length))
+                if (c.win_emu.memory.try_read_memory(callback_result_ptr, result_bytes.data(), callback_result_length))
                 {
                     callback_result = 0;
-                    memcpy(&callback_result, result_bytes.data(), read_length);
+                    memcpy(&callback_result, result_bytes.data(), callback_result_length);
                 }
             }
 

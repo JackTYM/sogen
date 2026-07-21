@@ -99,8 +99,6 @@ namespace sogen
         void map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
                               process_context& context, const logger& logger);
 
-        void ensure_kernelbase_nls_cache_hook(process_context& context);
-
         std::optional<uint64_t> get_module_load_count_by_path(const windows_path& path);
         mapped_module* map_module(windows_path file, const logger& logger, bool is_static = false, bool allow_duplicate = false,
                                   uint64_t relocation_base = 0);
@@ -192,7 +190,6 @@ namespace sogen
 
         mapping_strategy_factory strategy_factory_;
         execution_mode current_execution_mode_ = execution_mode::unknown;
-        bool kernelbase_nls_cache_hook_registered_{false};
 
         mapped_module* map_module_core(const pe_detection_result& detection_result, const std::function<mapped_module()>& mapper,
                                        const logger& logger, bool is_static);
