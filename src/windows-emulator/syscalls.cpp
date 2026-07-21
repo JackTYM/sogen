@@ -1010,8 +1010,22 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtQueryInformationJobObject()
+        NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle /*job_handle*/,
+                                                    const uint32_t /*job_object_information_class*/, const uint64_t job_object_information,
+                                                    const uint32_t job_object_information_length,
+                                                    const emulator_object<uint32_t> return_length)
         {
+            // Defensive zero-fill stub: doesn't model per-info-class output sizes yet.
+            if (job_object_information != 0 && job_object_information_length != 0)
+            {
+                c.emu.set_memory(job_object_information, 0, job_object_information_length);
+            }
+
+            if (return_length)
+            {
+                return_length.write(0);
+            }
+
             return STATUS_NOT_SUPPORTED;
         }
 
