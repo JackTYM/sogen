@@ -1,0 +1,63 @@
+name: Quick FEX Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      root_run_id:
+        description: "Workflow run ID to pull the Windows emulation root + Windows x86_64 artifacts from (reuses a known-good build instead of rebuilding on Windows runners)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  quick-smoke:
+    name: Quick Build + Smoke Test FEX (macOS arm64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install libclang (Steam bridge codegen)
+        run: python -m pip install --disable-pip-version-check libclang
+
+      - name: CMake Build (macOS arm64 Release)
+        run: cmake --preset=release && cmake --build --preset=release
+
+      - name: Download Windows x86_64 Release Artifacts (from known-good run)
+        uses: actions/download-artifact@v4
+        with:
+          name: "Windows x86_64 Release Artifacts"
+          path: build/release/artifacts
+          run-id: ${{ inputs.root_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download Windows 2025 Emulation Root (from known-good run)
+        uses: actions/download-artifact@v4
+        with:
+          name: "Windows 2025 Emulation Root"
+          path: build/release/artifacts/root
+          run-id: ${{ inputs.root_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Copy Test Sample
+        run: cp build/release/artifacts/test-sample.exe build/release/artifacts/root/filesys/c/
+
+      - name: CMake Test
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 5
+          timeout_minutes: 10
+          command: cd build/release/artifacts && chmod +x ./analyzer && ./analyzer -e root c:/test-sample.exe
+        env:
+          EMULATOR_FEX: "1"
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
