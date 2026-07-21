@@ -1211,6 +1211,13 @@ namespace sogen
         setup_stack(emu, context, this->stack_base, static_cast<size_t>(this->stack_size));
         emu.set_segment_base(x86_register::gs, this->gs_segment->get_base());
 
+        // x86's power-on/reset FPU control word masks every floating-point exception (round-to-nearest);
+        // a zero-initialized control word instead leaves inexact/precision (PM) unmasked, and guest code
+        // that reads it via fnstcw (e.g. the CRT's pow/_except1 path) then raises
+        // STATUS_FLOAT_INEXACT_RESULT on the first inexact result - a crash real Windows never produces.
+        emu.reg<uint16_t>(x86_register::fpcw, 0x037F);
+        emu.reg<uint32_t>(x86_register::mxcsr, 0x1F80);
+
         CONTEXT64 ctx{};
         ctx.ContextFlags = CONTEXT64_ALL;
 
