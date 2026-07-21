@@ -648,7 +648,7 @@ namespace sogen
             // RDX=SS (see exception_dispatch.cpp), which the FEX crossing handler decodes.
             emu.register_gate_crossing(*code_base, kCodeSize, x86_64_emulator::gate_crossing_kind::heaven_gate);
 
-            if (this->modules_.contains(*code_base))
+            if (!this->modules_.contains(*code_base))
             {
                 mapped_module module{};
                 module.name = "wow64_heaven_gate";
