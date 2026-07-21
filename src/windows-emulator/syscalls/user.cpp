@@ -917,11 +917,15 @@ namespace sogen
             auto* thread = c.vcpu.active_thread;
             if (!thread || !thread->teb64)
             {
+                c.win_emu.log.warn("DIAG ensure_win32_thread_info: thread=%p has_teb64=%d -> 0\n", static_cast<void*>(thread),
+                                   thread ? (thread->teb64.has_value() ? 1 : 0) : -1);
                 return 0;
             }
 
             if (thread->win32k_thread_info != 0)
             {
+                c.win_emu.log.warn("DIAG ensure_win32_thread_info: cached=0x%llx\n",
+                                   static_cast<unsigned long long>(thread->win32k_thread_info));
                 return thread->win32k_thread_info;
             }
 
@@ -931,6 +935,7 @@ namespace sogen
             if (thread_info != 0)
             {
                 thread->win32k_thread_info = thread_info;
+                c.win_emu.log.warn("DIAG ensure_win32_thread_info: from teb=0x%llx\n", static_cast<unsigned long long>(thread_info));
                 return thread_info;
             }
 
@@ -938,6 +943,8 @@ namespace sogen
             std::vector<std::byte> zero_slab(k_win32_thread_info_slab_size);
             c.emu.write_memory(slab_base, zero_slab.data(), zero_slab.size());
             thread->win32k_thread_info = slab_base + k_win32_thread_info_bias;
+            c.win_emu.log.warn("DIAG ensure_win32_thread_info: allocated slab_base=0x%llx bias_result=0x%llx\n",
+                               static_cast<unsigned long long>(slab_base), static_cast<unsigned long long>(thread->win32k_thread_info));
             return thread->win32k_thread_info;
         }
 
@@ -1348,6 +1355,8 @@ namespace sogen
 
         uint64_t handle_NtUserGetThreadState(const syscall_context& c, const ULONG routine)
         {
+            c.win_emu.log.warn("DIAG handle_NtUserGetThreadState: routine=%u\n", static_cast<unsigned>(routine));
+
             if (routine == k_thread_state_message_time)
             {
                 return c.vcpu.active_thread ? c.vcpu.active_thread->current_message_time : 0;
@@ -1366,10 +1375,18 @@ namespace sogen
             const auto thread_info = ensure_win32_thread_info(c);
             if (thread_info == 0)
             {
+                c.win_emu.log.warn("DIAG handle_NtUserGetThreadState: thread_info==0, returning 0\n");
                 return 0;
             }
 
             publish_win32_thread_info(c, thread_info);
+
+            c.win_emu.log.warn("DIAG handle_NtUserGetThreadState: is_wow64=%d has_thread=%d setup_done=%d setup_pending=%d "
+                               "thread_info=0x%llx\n",
+                               c.proc.is_wow64_process ? 1 : 0, c.vcpu.active_thread ? 1 : 0,
+                               c.vcpu.active_thread ? (c.vcpu.active_thread->win32k_thread_setup_done ? 1 : 0) : -1,
+                               c.vcpu.active_thread ? (c.vcpu.active_thread->win32k_thread_setup_pending ? 1 : 0) : -1,
+                               static_cast<unsigned long long>(thread_info));
 
             if (c.proc.is_wow64_process && c.vcpu.active_thread && !c.vcpu.active_thread->win32k_thread_setup_done &&
                 !c.vcpu.active_thread->win32k_thread_setup_pending)
