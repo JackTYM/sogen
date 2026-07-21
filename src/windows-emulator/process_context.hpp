@@ -449,6 +449,13 @@ namespace sogen
         kusd_mmio kusd;
 
         uint64_t ntdll_image_base{};
+        // Guest address of kernelbase.dll's private gNlsProcessLocalCache global, resolved once
+        // kernelbase.dll is mapped (see setup()). Real Windows points every thread's TEB.NlsCache at
+        // this shared, process-wide fallback structure until that thread does its own locale/NLS API
+        // work; BaseNlsThreadCleanup (kernelbase.dll, DLL_THREAD_DETACH) skips freeing TEB.NlsCache
+        // whenever it still points here. 0 if kernelbase.dll wasn't found (emulator_thread falls back
+        // to a zeroed placeholder in that case - see nls_cache_placeholder's doc comment).
+        uint64_t kernelbase_nls_process_local_cache{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};
