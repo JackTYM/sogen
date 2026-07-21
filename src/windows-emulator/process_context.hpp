@@ -456,6 +456,10 @@ namespace sogen
         kusd_mmio kusd;
 
         uint64_t ntdll_image_base{};
+        // nullopt = ensure_nls_lead_byte_info_table (syscall_dispatcher.cpp) hasn't run to completion
+        // yet, e.g. because ntdll's own codepage init hasn't happened. Not serialized; reset on
+        // deserialize because the patch it gates lives in guest memory and reverts with it.
+        std::optional<bool> nls_lead_byte_info_table_resolved{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};
