@@ -798,23 +798,20 @@ namespace sogen
         // stays 0 there. Real Windows reports a valid thread for GetWindowThreadProcessId(GetDesktopWindow()),
         // and DirectSound depends on it: SetCooperativeLevel stores
         // GetWindowThreadProcessId(GetRootParentWindow(hwnd)), and IDirectSoundBuffer::Play rejects every
-        // call with DSERR_PRIOLEVELNEEDED while that id is 0. user32's client-side GetWindowThreadProcessId
-        // reads the owning thread straight from USER_HANDLEENTRY::pOwner when it is set, falling back to the
-        // NtUserQueryWindow syscall (which reads window::thread_id, set below) only when pOwner is null.
-        // Populate both now that the main thread exists.
+        // call with DSERR_PRIOLEVELNEEDED while that id is 0. user32 resolves the id via the
+        // NtUserQueryWindow syscall (which reads window::thread_id) whenever the shared aheList entry's
+        // pOwner is null, so setting thread_id is sufficient here.
+        //
+        // Deliberately does NOT publish anything into the aheList entry's pOwner: every other window
+        // stores a win32-thread-info guest POINTER there (set_user_handle_owner), and no such structure
+        // exists yet for the main thread at this point. Publishing the raw thread id in its place sends
+        // user32's pOwner-consuming client paths dereferencing a non-pointer, which derails dsound's
+        // device bring-up and stalls a WoW64 game boot (MW2) before its audio init completes.
         if (auto* desktop = context.windows.get(context.default_desktop_window_handle))
         {
             const auto desktop_thread_id = this->current_thread().id;
             desktop->thread_id = desktop_thread_id;
             desktop->guest.access([&](USER_WINDOW& window) { window.threadId = desktop_thread_id; });
-
-            // user32 indexes the shared aheList by the HANDLE's low 16 bits, not by this emulator's
-            // internal handle id, so the slot must be reconstructed via make_handle() rather than read
-            // from .value.id directly.
-            const auto ahe_slot = static_cast<uint32_t>(
-                make_handle(static_cast<uint32_t>(context.default_desktop_window_handle.value.id), handle_types::window, false).bits &
-                0xFFFFu);
-            context.user_handles.get_handle_table().access([&](USER_HANDLEENTRY& entry) { entry.pOwner = desktop_thread_id; }, ahe_slot);
         }
     }
 
