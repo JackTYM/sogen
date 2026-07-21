@@ -61,6 +61,7 @@ namespace sogen
             bool pause_before_start{false};
 #endif
             std::optional<uint64_t> break_call{};
+            std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
@@ -495,6 +496,35 @@ namespace sogen
             throw std::runtime_error("WHP memory execution hook mode must be auto or int3");
         }
 
+        uint32_t parse_dialog_control_id(const std::string_view token)
+        {
+            if (token.empty())
+            {
+                throw std::runtime_error("Control id must not be empty");
+            }
+
+            for (const auto c : token)
+            {
+                if (c < '0' || c > '9')
+                {
+                    throw std::runtime_error("Control id must be a non-negative integer");
+                }
+            }
+
+            if (token.size() > 5)
+            {
+                throw std::runtime_error("Control id should be in range 0-65535");
+            }
+
+            const auto control_id = std::stoul(std::string(token));
+            if (control_id > 0xFFFF)
+            {
+                throw std::runtime_error("Control id should be in range 0-65535");
+            }
+
+            return static_cast<uint32_t>(control_id);
+        }
+
         std::unique_ptr<x86_64_emulator> create_configured_backend(const analysis_options& options)
         {
             auto emu = options.backend ? create_x86_64_emulator(*options.backend, options.vcpu_count)
@@ -580,6 +610,7 @@ namespace sogen
             analysis_context context{
                 .settings = &options,
                 .auto_break_before_call = options.break_call,
+                .click_dialog_rules = options.click_dialog_rules,
             };
 
             const auto concise_logging = options.concise_logging;
@@ -897,6 +928,14 @@ namespace sogen
             std::vector<std::pair<std::string, std::string>> environment{};
             app.add_option("--env", environment, "Set an environment variable")->type_name("NAME VALUE")->allow_extra_args(false);
 
+            std::vector<std::pair<std::string, std::string>> click_dialog_button_args{};
+            app.add_option("--click-dialog-button", click_dialog_button_args,
+                           "Auto-dismiss a modal dialog whose title contains TITLE by clicking control ID "
+                           "(repeatable, e.g. --click-dialog-button \"Safe Mode\" 7). A dialog whose title "
+                           "matches no rule is left alone rather than guessed at. Requires --vcpus 1")
+                ->type_name("TITLE ID")
+                ->allow_extra_args(false);
+
             CLI11_PARSE(app, argc, argv);
 
             if (argc <= 1)
@@ -912,6 +951,11 @@ namespace sogen
                     throw std::runtime_error("GDB debugging requires --vcpus 1");
                 }
 
+                if (!click_dialog_button_args.empty() && options.vcpu_count > 1)
+                {
+                    throw std::runtime_error("--click-dialog-button requires --vcpus 1");
+                }
+
                 if (!backend_name.empty())
                 {
                     static const std::map<std::string, backend_type> backends{
@@ -919,6 +963,11 @@ namespace sogen
                         {"kvm", backend_type::kvm},         {"fex", backend_type::fex},
                     };
                     options.backend = backends.at(backend_name);
+                }
+
+                for (const auto& [title, id] : click_dialog_button_args)
+                {
+                    options.click_dialog_rules.emplace_back(title, parse_dialog_control_id(id));
                 }
 
                 for (auto& module_name : tracked_modules)

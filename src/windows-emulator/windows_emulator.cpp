@@ -928,6 +928,7 @@ namespace sogen
             {
                 // With workers, the thread calling start() pumps UI events instead.
                 this->ui_backend_->pump_events();
+                this->callbacks.on_event_pump();
             }
 
             if (this->use_relative_time_)
@@ -1476,6 +1477,7 @@ namespace sogen
         {
             lock.unlock();
             this->ui_backend_->pump_events();
+            this->callbacks.on_event_pump();
             lock.lock();
 
             if (vcpu.switch_thread || !vcpu.thread().is_thread_ready(*this))
