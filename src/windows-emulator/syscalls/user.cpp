@@ -943,8 +943,15 @@ namespace sogen
             std::vector<std::byte> zero_slab(k_win32_thread_info_slab_size);
             c.emu.write_memory(slab_base, zero_slab.data(), zero_slab.size());
             thread->win32k_thread_info = slab_base + k_win32_thread_info_bias;
-            c.win_emu.log.warn("DIAG ensure_win32_thread_info: allocated slab_base=0x%llx bias_result=0x%llx\n",
-                               static_cast<unsigned long long>(slab_base), static_cast<unsigned long long>(thread->win32k_thread_info));
+
+            std::array<uint64_t, 4> readback{0xdeadbeefULL, 0xdeadbeefULL, 0xdeadbeefULL, 0xdeadbeefULL};
+            const bool read_ok = c.emu.try_read_memory(slab_base, readback.data(), sizeof(readback));
+            c.win_emu.log.warn(
+                "DIAG ensure_win32_thread_info: allocated slab_base=0x%llx bias_result=0x%llx read_ok=%d readback=%016llx %016llx "
+                "%016llx %016llx\n",
+                static_cast<unsigned long long>(slab_base), static_cast<unsigned long long>(thread->win32k_thread_info), read_ok ? 1 : 0,
+                static_cast<unsigned long long>(readback[0]), static_cast<unsigned long long>(readback[1]),
+                static_cast<unsigned long long>(readback[2]), static_cast<unsigned long long>(readback[3]));
             return thread->win32k_thread_info;
         }
 
@@ -964,6 +971,17 @@ namespace sogen
                 teb64.User32Reserved.arr[13] = low;
                 teb64.User32Reserved.arr[14] = high;
             });
+
+            uint64_t readback_teb_val = 0xdeadbeefULL;
+            std::array<uint64_t, 2> readback_teb_mem = {0xdeadbeefULL, 0xdeadbeefULL};
+            thread->teb64->access([&](const TEB64& teb64) { readback_teb_val = teb64.Win32ThreadInfo; });
+            const bool teb_read_ok = c.emu.try_read_memory(thread->teb64->value() + offsetof(TEB64, Win32ThreadInfo),
+                                                           readback_teb_mem.data(), sizeof(readback_teb_mem));
+            c.win_emu.log.warn("DIAG publish_win32_thread_info: wrote=0x%llx teb_addr=0x%llx access_readback=0x%llx "
+                               "raw_read_ok=%d raw_readback=%016llx %016llx\n",
+                               static_cast<unsigned long long>(thread_info), static_cast<unsigned long long>(thread->teb64->value()),
+                               static_cast<unsigned long long>(readback_teb_val), teb_read_ok ? 1 : 0,
+                               static_cast<unsigned long long>(readback_teb_mem[0]), static_cast<unsigned long long>(readback_teb_mem[1]));
 
             if (c.proc.is_wow64_process && thread->teb32)
             {
