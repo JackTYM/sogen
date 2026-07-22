@@ -56,23 +56,48 @@ namespace sogen
             const auto export_directory = buffer.as<IMAGE_EXPORT_DIRECTORY>(export_directory_entry.VirtualAddress).get();
 
             const auto names_count = export_directory.NumberOfNames;
-            // const auto function_count = export_directory.NumberOfFunctions;
+            const auto function_count = export_directory.NumberOfFunctions;
 
             const auto names = buffer.as<DWORD>(export_directory.AddressOfNames);
             const auto ordinals = buffer.as<WORD>(export_directory.AddressOfNameOrdinals);
             const auto functions = buffer.as<DWORD>(export_directory.AddressOfFunctions);
 
-            binary.exports.reserve(names_count);
+            binary.exports.reserve(function_count);
 
+            std::unordered_map<WORD, DWORD> name_index_by_ordinal{};
+            name_index_by_ordinal.reserve(names_count);
             for (DWORD i = 0; i < names_count; i++)
             {
-                const auto ordinal = ordinals.get(i);
+                name_index_by_ordinal[ordinals.get(i)] = i;
+            }
+
+            // Walk every ordinal slot (AddressOfFunctions), not just the named ones
+            // (AddressOfNames/AddressOfNameOrdinals) - many DLLs export functions by ordinal only, with no
+            // name-table entry at all. Without an address_names entry for those, the analyzer's
+            // nearest-preceding-symbol attribution (analysis.cpp's address_names upper_bound lookup)
+            // misattributed execution inside them to whichever named export happened to precede them.
+            for (DWORD ordinal = 0; ordinal < function_count; ordinal++)
+            {
+                const auto rva = functions.get(ordinal);
+                if (rva == 0)
+                {
+                    continue; // Empty slot in a sparse ordinal range - not a real export.
+                }
 
                 exported_symbol symbol{};
                 symbol.ordinal = export_directory.Base + ordinal;
-                symbol.rva = functions.get(ordinal);
+                symbol.rva = rva;
                 symbol.address = binary.image_base + symbol.rva;
-                symbol.name = buffer.as_string(names.get(i));
+
+                const auto name_index = name_index_by_ordinal.find(static_cast<WORD>(ordinal));
+                if (name_index != name_index_by_ordinal.end())
+                {
+                    symbol.name = buffer.as_string(names.get(name_index->second));
+                }
+                else
+                {
+                    symbol.name = "#" + std::to_string(symbol.ordinal);
+                }
 
                 binary.exports.push_back(std::move(symbol));
             }
@@ -197,22 +222,45 @@ namespace sogen
                 read_mapped_object<IMAGE_EXPORT_DIRECTORY>(memory, binary.image_base + export_directory_entry.VirtualAddress);
 
             const auto names_count = export_directory.NumberOfNames;
-            binary.exports.reserve(names_count);
+            const auto function_count = export_directory.NumberOfFunctions;
+            binary.exports.reserve(function_count);
 
+            std::unordered_map<WORD, DWORD> name_index_by_ordinal{};
+            name_index_by_ordinal.reserve(names_count);
             for (DWORD i = 0; i < names_count; i++)
             {
                 const auto ordinal =
                     read_mapped_object<WORD>(memory, binary.image_base + export_directory.AddressOfNameOrdinals + i * sizeof(WORD));
+                name_index_by_ordinal[ordinal] = i;
+            }
+
+            // Walk every ordinal slot, not just the named ones - see the buffer-based collect_exports
+            // above for why (ordinal-only exports still need an address_names entry).
+            for (DWORD ordinal = 0; ordinal < function_count; ordinal++)
+            {
                 const auto function_rva =
                     read_mapped_object<DWORD>(memory, binary.image_base + export_directory.AddressOfFunctions + ordinal * sizeof(DWORD));
-                const auto name_rva =
-                    read_mapped_object<DWORD>(memory, binary.image_base + export_directory.AddressOfNames + i * sizeof(DWORD));
+                if (function_rva == 0)
+                {
+                    continue; // Empty slot in a sparse ordinal range - not a real export.
+                }
 
                 exported_symbol symbol{};
                 symbol.ordinal = export_directory.Base + ordinal;
                 symbol.rva = function_rva;
                 symbol.address = binary.image_base + symbol.rva;
-                symbol.name = read_mapped_string(memory, binary.image_base + name_rva);
+
+                const auto name_index = name_index_by_ordinal.find(static_cast<WORD>(ordinal));
+                if (name_index != name_index_by_ordinal.end())
+                {
+                    const auto name_rva = read_mapped_object<DWORD>(memory, binary.image_base + export_directory.AddressOfNames +
+                                                                                name_index->second * sizeof(DWORD));
+                    symbol.name = read_mapped_string(memory, binary.image_base + name_rva);
+                }
+                else
+                {
+                    symbol.name = "#" + std::to_string(symbol.ordinal);
+                }
 
                 binary.exports.push_back(std::move(symbol));
             }
