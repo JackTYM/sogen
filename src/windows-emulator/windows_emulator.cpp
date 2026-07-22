@@ -793,6 +793,26 @@ namespace sogen
                                                           this->mod_manager.executable->size_of_stack_reserve, 0, true);
 
         switch_to_thread(*this, this->vcpu(0), main_thread_id);
+
+        // The desktop window is created in setup() before any thread exists, so its owning thread id
+        // stays 0 there. Real Windows reports a valid thread for GetWindowThreadProcessId(GetDesktopWindow()),
+        // and DirectSound depends on it: SetCooperativeLevel stores
+        // GetWindowThreadProcessId(GetRootParentWindow(hwnd)), and IDirectSoundBuffer::Play rejects every
+        // call with DSERR_PRIOLEVELNEEDED while that id is 0. user32 resolves the id via the
+        // NtUserQueryWindow syscall (which reads window::thread_id) whenever the shared aheList entry's
+        // pOwner is null, so setting thread_id is sufficient here.
+        //
+        // Deliberately does NOT publish anything into the aheList entry's pOwner: every other window
+        // stores a win32-thread-info guest POINTER there (set_user_handle_owner), and no such structure
+        // exists yet for the main thread at this point. Publishing the raw thread id in its place sends
+        // user32's pOwner-consuming client paths dereferencing a non-pointer, which derails dsound's
+        // device bring-up and stalls a WoW64 game boot (MW2) before its audio init completes.
+        if (auto* desktop = context.windows.get(context.default_desktop_window_handle))
+        {
+            const auto desktop_thread_id = this->current_thread().id;
+            desktop->thread_id = desktop_thread_id;
+            desktop->guest.access([&](USER_WINDOW& window) { window.threadId = desktop_thread_id; });
+        }
     }
 
     void windows_emulator::yield_thread(vcpu_context& vcpu, const bool alertable)
