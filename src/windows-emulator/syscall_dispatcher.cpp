@@ -7,6 +7,93 @@
 namespace sogen
 {
 
+    namespace
+    {
+        // Real ntdll's RtlpInitCodePageTables always leaves this internal lead-byte-info-table pointer
+        // (at a fixed offset from ntdll's image base) populated - either a real DBCS table, or ntdll's
+        // own empty/all-zero NlsEmptyLeadByteInfoTable for single-byte codepages. In a wow64 process
+        // under this emulator the field stays null even though the sibling codepage-table fields are
+        // populated, and any guest read of a null table computes a near-null address and crashes.
+        // An empty/all-zero lead-byte table matches ntdll's own single-byte-codepage behavior.
+        constexpr uint64_t nls_lead_byte_info_table_offset = 0x172760;
+        constexpr uint64_t nls_global_rtl_state_offset = 0x1726d0;
+
+        bool address_is_in_writable_section(const mapped_module& mod, const uint64_t address)
+        {
+            for (const auto& section : mod.sections)
+            {
+                const auto& region = section.region;
+                if (address >= region.start && address - region.start < region.length)
+                {
+                    return (region.permissions & memory_permission::write) != memory_permission::none;
+                }
+            }
+
+            return false;
+        }
+
+        void ensure_nls_lead_byte_info_table(windows_emulator& win_emu)
+        {
+            auto& resolved = win_emu.process.nls_lead_byte_info_table_resolved;
+            if (resolved.has_value())
+            {
+                return;
+            }
+
+            if (!win_emu.process.is_wow64_process)
+            {
+                resolved = false;
+                return;
+            }
+
+            const auto* ntdll_mod = win_emu.mod_manager.ntdll;
+            if (ntdll_mod == nullptr)
+            {
+                return;
+            }
+
+            const auto field_address = ntdll_mod->image_base + nls_lead_byte_info_table_offset;
+            const auto global_rtl_state_address = ntdll_mod->image_base + nls_global_rtl_state_offset;
+
+            if (!address_is_in_writable_section(*ntdll_mod, field_address) ||
+                !address_is_in_writable_section(*ntdll_mod, global_rtl_state_address))
+            {
+                resolved = false;
+                return;
+            }
+
+            uint64_t current_value = 0;
+            if (!win_emu.emu().try_read_memory(field_address, &current_value, sizeof(current_value)))
+            {
+                resolved = false;
+                return;
+            }
+            if (current_value != 0)
+            {
+                resolved = true;
+                return;
+            }
+
+            uint16_t global_rtl_nls_state = 0;
+            // 0xFDE9 is ntdll's own not-yet-initialized marker for this state; skip until ntdll's own
+            // codepage init has actually run.
+            if (!win_emu.emu().try_read_memory(global_rtl_state_address, &global_rtl_nls_state, sizeof(global_rtl_nls_state)) ||
+                global_rtl_nls_state == 0xFDE9)
+            {
+                return;
+            }
+
+            constexpr size_t lead_byte_table_size = 0x200; // 256 WORD entries, one per possible byte value
+            const auto aligned_size = static_cast<size_t>(page_align_up(lead_byte_table_size));
+            const auto table_address = win_emu.memory.allocate_memory(aligned_size, memory_permission::read);
+            const std::vector<std::byte> zeroed_table(lead_byte_table_size, std::byte{0});
+            win_emu.emu().write_memory(table_address, zeroed_table.data(), zeroed_table.size());
+            win_emu.emu().write_memory(field_address, &table_address, sizeof(table_address));
+            resolved = true;
+        }
+
+    } // namespace
+
     static void serialize(utils::buffer_serializer& buffer, const syscall_handler_entry& obj)
     {
         buffer.write(obj.name);
@@ -70,6 +157,8 @@ namespace sogen
     {
         auto& emu = vcpu.cpu;
         auto& context = win_emu.process;
+
+        ensure_nls_lead_byte_info_table(win_emu);
 
         const auto address = emu.read_instruction_pointer();
         const auto raw_syscall_id = emu.reg<uint32_t>(x86_register::eax);
