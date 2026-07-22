@@ -1313,6 +1313,11 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtUserCitSetInfo()
+        {
+            return STATUS_SUCCESS;
+        }
+
         uint32_t handle_NtUserRegisterWindowMessage(const syscall_context& c,
                                                     const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> message_name)
         {
@@ -1344,6 +1349,14 @@ namespace sogen
             }
 
             return message;
+        }
+
+        // Modal message loops (dialogs, menus, scrollbars) call this to let installed WH_MSGFILTER/
+        // WH_SYSMSGFILTER hooks inspect the message. With no hook-chain infrastructure, and thus no
+        // filter hooks installed, the correct result is FALSE ("no hook handled it, keep processing").
+        BOOL handle_NtUserCallMsgFilter(const syscall_context& /*c*/, const emulator_pointer /*msg*/, const int32_t /*code*/)
+        {
+            return FALSE;
         }
 
         uint64_t handle_NtUserGetThreadState(const syscall_context& c, const ULONG routine)

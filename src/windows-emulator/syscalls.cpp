@@ -452,8 +452,10 @@ namespace sogen
 
         // syscalls/user.cpp:
         NTSTATUS handle_NtUserTraceLoggingSendMixedModeTelemetry();
+        NTSTATUS handle_NtUserCitSetInfo();
         uint32_t handle_NtUserRegisterWindowMessage(const syscall_context& c,
                                                     emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> message_name);
+        BOOL handle_NtUserCallMsgFilter(const syscall_context& c, emulator_pointer msg, int32_t code);
         uint64_t handle_NtUserGetThreadState(const syscall_context& c, ULONG routine);
         uint64_t handle_NtUserSetThreadState(const syscall_context& c, uint64_t value, uint64_t mask);
         uint64_t completion_NtUserGetThreadState(const syscall_context& c, ULONG routine);
@@ -735,6 +737,7 @@ namespace sogen
         int handle_NtGdiGetDIBitsInternal(const syscall_context& c, hdc dc, handle bitmap, uint32_t start_scan, uint32_t scan_lines,
                                           emulator_pointer bits, emulator_pointer info, uint32_t usage, uint32_t max_bits,
                                           uint32_t max_info);
+        LONG handle_NtGdiGetBitmapBits(const syscall_context& c, handle bitmap, LONG cb_buffer, emulator_pointer bits);
         int handle_NtGdiStretchDIBitsInternal(const syscall_context& c, hdc dc, int x_dst, int y_dst, int dst_width, int dst_height,
                                               int x_src, int y_src, int src_width, int src_height, emulator_pointer bits,
                                               emulator_pointer info, uint32_t usage, uint32_t rop, uint32_t max_info, uint32_t max_bits,
@@ -814,6 +817,8 @@ namespace sogen
         NTSTATUS handle_NtGdiDdDDIOpenResource(const syscall_context& c, emulator_object<EMU_D3DKMT_OPENRESOURCE> open_resource);
         NTSTATUS handle_NtGdiDdDDILock(const syscall_context& c, emulator_object<EMU_D3DKMT_LOCK> lock_desc);
         NTSTATUS handle_NtGdiDdDDIUnlock();
+        NTSTATUS handle_NtGdiDdDDISubmitCommand(const syscall_context& c, emulator_pointer submit_command);
+        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, emulator_pointer present);
         NTSTATUS handle_NtGdiDdDDIGetDisplayModeList(const syscall_context& c,
                                                      emulator_object<EMU_D3DKMT_GETDISPLAYMODELIST> display_mode_list);
         NTSTATUS handle_NtGdiDdDDIGetSharedPrimaryHandle(const syscall_context& c,
@@ -1299,6 +1304,7 @@ namespace sogen
         add_handler(NtGdiCreateDIBitmapInternal);
         add_handler(NtGdiSetDIBitsToDeviceInternal);
         add_handler(NtGdiGetDIBitsInternal);
+        add_handler(NtGdiGetBitmapBits);
         add_handler(NtGdiStretchDIBitsInternal);
         add_handler(NtGdiDeleteObjectApp);
         add_handler(NtGdiSelectBitmap);
@@ -1350,6 +1356,7 @@ namespace sogen
         add_handler(NtUserGetThreadDesktop);
         add_handler(NtOpenKeyEx);
         add_handler(NtUserTraceLoggingSendMixedModeTelemetry);
+        add_handler(NtUserCitSetInfo);
         add_handler(NtUserDisplayConfigGetDeviceInfo);
         add_handler(NtOpenEvent);
         add_handler(NtGetMUIRegistryInfo);
@@ -1373,6 +1380,7 @@ namespace sogen
         add_handler(NtReadFile);
         add_handler(NtSetInformationFile);
         add_handler(NtUserRegisterWindowMessage);
+        add_handler(NtUserCallMsgFilter);
         add_handler(NtQueryValueKey);
         add_handler(NtQueryMultipleValueKey);
         add_handler(NtQueryKey);
@@ -1594,6 +1602,8 @@ namespace sogen
         add_handler(NtGdiDdDDICacheHybridQueryValue);
         add_handler(NtGdiDdDDINetDispQueryMiracastDisplayDeviceSupport);
         add_handler(NtGdiDdDDIUnlock);
+        add_handler(NtGdiDdDDISubmitCommand);
+        add_handler(NtGdiDdDDIPresent);
         add_handler(NtGdiDdDDIDestroyAllocation2);
         add_handler(NtGdiDdDDIDestroyAllocation);
         add_handler(NtGdiDdDDIDestroyContext);
