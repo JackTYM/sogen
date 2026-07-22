@@ -1792,6 +1792,11 @@ namespace sogen
             const auto io_device_name = get_io_device_name(filename);
             if (io_device_name.has_value())
             {
+                if (*io_device_name == u"DeviceApi\\Dev\\Query")
+                {
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+
                 const io_device_creation_data data{
                     .buffer = ea_buffer,
                     .length = ea_length,
