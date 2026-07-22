@@ -85,6 +85,114 @@ namespace sogen
             return emulator_allocator{memory, base, size};
         }
 
+        // RtlUpcaseUnicodeChar/RtlDowncaseUnicodeChar handle a-z inline and, for chars >= 0xC0, walk an
+        // internal table built from l_intl.nls (served via the type-14 NtGetNlsSectionPtr section
+        // handled in syscalls/locale.cpp), not these PEB-referenced NLSTABLEINFO tables. The guest only
+        // depends on ActiveCodePage=1252/OemCodePage=437 (GetACP()/GetOEMCP()) and non-null pointers
+        // here; this identity table is otherwise an inert placeholder.
+        std::vector<uint16_t> make_ascii_case_table(const bool uppercase)
+        {
+            std::vector<uint16_t> table(0x10000);
+            for (uint32_t i = 0; i < table.size(); ++i)
+            {
+                table[i] = static_cast<uint16_t>(i);
+            }
+
+            if (uppercase)
+            {
+                for (uint32_t c = u'a'; c <= u'z'; ++c)
+                {
+                    table[c] = static_cast<uint16_t>(c - u'a' + u'A');
+                }
+            }
+            else
+            {
+                for (uint32_t c = u'A'; c <= u'Z'; ++c)
+                {
+                    table[c] = static_cast<uint16_t>(c - u'A' + u'a');
+                }
+            }
+
+            return table;
+        }
+
+        // PEB.AnsiCodePageData/OemCodePageData point at a CPTABLEINFO describing the process's
+        // ANSI/OEM codepage. This builds a minimal, single-byte-codepage-1252-shaped identity table:
+        // WideCharTable[byte] treats every byte 0-255 as its own Unicode code point (correct for the
+        // printable ASCII range, imprecise for cp1252's 0x80-0x9F).
+        void fill_identity_codepage_table(emulator_allocator& allocator, CPTABLEINFO& t)
+        {
+            std::vector<uint16_t> wide_char_table(0x100);
+            std::vector<uint16_t> multi_byte_table(0x100);
+            for (uint32_t i = 0; i < 0x100; ++i)
+            {
+                wide_char_table[i] = static_cast<uint16_t>(i);
+                multi_byte_table[i] = static_cast<uint16_t>(i);
+            }
+
+            const auto wide_char_table_addr = allocator.reserve(wide_char_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            const auto multi_byte_table_addr = allocator.reserve(multi_byte_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            allocator.get_memory().write_memory(wide_char_table_addr, wide_char_table.data(), wide_char_table.size() * sizeof(uint16_t));
+            allocator.get_memory().write_memory(multi_byte_table_addr, multi_byte_table.data(), multi_byte_table.size() * sizeof(uint16_t));
+
+            t.CodePage = 1252;
+            t.MaximumCharacterSize = 1;
+            t.DefaultChar = '?';
+            t.UniDefaultChar = u'?';
+            t.TransDefaultChar = '?';
+            t.TransUniDefaultChar = u'?';
+            t.DBCSCodePage = 0;
+            t.MultiByteTable = multi_byte_table_addr;
+            t.WideCharTable = wide_char_table_addr;
+            t.DBCSRanges = 0;
+            t.DBCSOffsets = 0;
+        }
+
+        uint64_t make_identity_codepage_table(emulator_allocator& allocator)
+        {
+            const auto table = allocator.reserve<CPTABLEINFO>();
+            table.access([&](CPTABLEINFO& t) { fill_identity_codepage_table(allocator, t); });
+            return table.value();
+        }
+
+        // CPTABLEINFO32/NLSTABLEINFO32 (kernel_mapped.hpp) are the layouts real 32-bit ntdll parses
+        // under WoW64: they differ from CPTABLEINFO/NLSTABLEINFO only in pointer width and the
+        // resulting field offsets and struct size.
+        void fill_identity_codepage_table32(emulator_allocator& allocator, CPTABLEINFO32& t)
+        {
+            std::vector<uint16_t> wide_char_table(0x100);
+            std::vector<uint16_t> multi_byte_table(0x100);
+            for (uint32_t i = 0; i < 0x100; ++i)
+            {
+                wide_char_table[i] = static_cast<uint16_t>(i);
+                multi_byte_table[i] = static_cast<uint16_t>(i);
+            }
+
+            const auto wide_char_table_addr = allocator.reserve(wide_char_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            const auto multi_byte_table_addr = allocator.reserve(multi_byte_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            allocator.get_memory().write_memory(wide_char_table_addr, wide_char_table.data(), wide_char_table.size() * sizeof(uint16_t));
+            allocator.get_memory().write_memory(multi_byte_table_addr, multi_byte_table.data(), multi_byte_table.size() * sizeof(uint16_t));
+
+            t.CodePage = 1252;
+            t.MaximumCharacterSize = 1;
+            t.DefaultChar = '?';
+            t.UniDefaultChar = u'?';
+            t.TransDefaultChar = '?';
+            t.TransUniDefaultChar = u'?';
+            t.DBCSCodePage = 0;
+            t.MultiByteTable = static_cast<uint32_t>(multi_byte_table_addr);
+            t.WideCharTable = static_cast<uint32_t>(wide_char_table_addr);
+            t.DBCSRanges = 0;
+            t.DBCSOffsets = 0;
+        }
+
+        uint32_t make_identity_codepage_table32(emulator_allocator& allocator)
+        {
+            const auto table = allocator.reserve<CPTABLEINFO32>();
+            table.access([&](CPTABLEINFO32& t) { fill_identity_codepage_table32(allocator, t); });
+            return static_cast<uint32_t>(table.value());
+        }
+
         void setup_gdt(x86_64_emulator& emu, memory_manager& memory)
         {
             const auto vcpu_count = emu.vcpu_count();
@@ -366,9 +474,27 @@ namespace sogen
             p.OSMinorVersion = version.get_minor_version();
             p.OSBuildNumber = static_cast<USHORT>(version.get_windows_build_number());
 
-            // p.AnsiCodePageData = allocator.reserve<CPTABLEINFO>().value();
-            // p.OemCodePageData = allocator.reserve<CPTABLEINFO>().value();
-            p.UnicodeCaseTableData = allocator.reserve<NLSTABLEINFO>().value();
+            p.AnsiCodePageData = make_identity_codepage_table(allocator);
+            p.OemCodePageData = make_identity_codepage_table(allocator);
+            const auto upper_table = make_ascii_case_table(true);
+            const auto lower_table = make_ascii_case_table(false);
+            const auto upper_table_addr = allocator.reserve(upper_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            const auto lower_table_addr = allocator.reserve(lower_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            allocator.get_memory().write_memory(upper_table_addr, upper_table.data(), upper_table.size() * sizeof(uint16_t));
+            allocator.get_memory().write_memory(lower_table_addr, lower_table.data(), lower_table.size() * sizeof(uint16_t));
+
+            const auto case_table = allocator.reserve<NLSTABLEINFO>();
+            case_table.access([&](NLSTABLEINFO& t) {
+                fill_identity_codepage_table(allocator, t.OemTableInfo);
+                fill_identity_codepage_table(allocator, t.AnsiTableInfo);
+                t.UpperCaseTable = upper_table_addr;
+                t.LowerCaseTable = lower_table_addr;
+            });
+            p.UnicodeCaseTableData = case_table.value();
+
+            p.ActiveCodePage = 1252;
+            p.OemCodePage = 437;
+            p.UseCaseMapping = 1;
         });
 
         if (this->is_wow64_process)
@@ -459,11 +585,28 @@ namespace sogen
                 p32.OSMinorVersion = version.get_minor_version();
                 p32.OSBuildNumber = static_cast<USHORT>(version.get_windows_build_number());
 
-                // Initialize NLS tables for 32-bit processes
-                // These need to be in 32-bit addressable space
-                p32.UnicodeCaseTableData = static_cast<uint32_t>(allocator.reserve<NLSTABLEINFO>().value());
+                p32.ActiveCodePage = 1252;
+                p32.OemCodePage = 437;
+                p32.UseCaseMapping = 1;
 
-                // TODO: Initialize other PEB32 fields as needed
+                p32.AnsiCodePageData = make_identity_codepage_table32(allocator);
+                p32.OemCodePageData = make_identity_codepage_table32(allocator);
+
+                const auto upper_table32 = make_ascii_case_table(true);
+                const auto lower_table32 = make_ascii_case_table(false);
+                const auto upper_table32_addr = allocator.reserve(upper_table32.size() * sizeof(uint16_t), alignof(uint16_t));
+                const auto lower_table32_addr = allocator.reserve(lower_table32.size() * sizeof(uint16_t), alignof(uint16_t));
+                allocator.get_memory().write_memory(upper_table32_addr, upper_table32.data(), upper_table32.size() * sizeof(uint16_t));
+                allocator.get_memory().write_memory(lower_table32_addr, lower_table32.data(), lower_table32.size() * sizeof(uint16_t));
+
+                const auto case_table32 = allocator.reserve<NLSTABLEINFO32>();
+                case_table32.access([&](NLSTABLEINFO32& t) {
+                    fill_identity_codepage_table32(allocator, t.OemTableInfo);
+                    fill_identity_codepage_table32(allocator, t.AnsiTableInfo);
+                    t.UpperCaseTable = static_cast<uint32_t>(upper_table32_addr);
+                    t.LowerCaseTable = static_cast<uint32_t>(lower_table32_addr);
+                });
+                p32.UnicodeCaseTableData = static_cast<uint32_t>(case_table32.value());
             });
 
             if (ntdll32 != nullptr)
@@ -708,6 +851,10 @@ namespace sogen
 
     void process_context::deserialize(utils::buffer_deserializer& buffer, emulator_thread*& active_thread)
     {
+        // The lead-byte-table patch lives in guest memory and reverts with it, so it must be re-resolved
+        // after any restore.
+        this->nls_lead_byte_info_table_resolved.reset();
+
         buffer.read_vector(this->sid);
         buffer.read(this->shared_section_address);
         buffer.read(this->shared_section_size);
