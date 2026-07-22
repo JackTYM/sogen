@@ -231,8 +231,6 @@ namespace sogen
             return address_is_in_writable_section(kernelbase, address) ? address : 0;
         }
 
-        }
-
         uint64_t get_system_dll_init_block_size(const windows_version_manager& version)
         {
             if (version.is_build_after_or_equal(WINDOWS_VERSION::WINDOWS_11_24H2))
