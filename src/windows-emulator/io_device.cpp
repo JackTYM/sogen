@@ -75,6 +75,7 @@ namespace sogen
             {u"DeviceApi\\CMApi"sv, create_dummy_device},
             {u"DeviceApi\\CMNotify"sv, create_dummy_device},
             {u"ConDrv\\Server"sv, create_dummy_device},
+            {u"MMCSS\\MmThread"sv, create_dummy_device},
             // Generic
             {u"Console"sv, create_console_device},
             {u"Nsi"sv, create_network_store_interface},
