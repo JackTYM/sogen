@@ -3903,7 +3903,12 @@ extern "C"
             {
                 lock.unlock();
                 std::vector<gb::object_id> fetched;
-                if (!fetch_descriptor_sets(device_id, pool_id, layout_id, descriptor_set_readahead, fetched))
+                // A batch of `descriptor_set_readahead` is an over-request relative to what DXVK's
+                // pool was actually sized for; vkAllocateDescriptorSets is all-or-nothing, so a pool
+                // with room for exactly 1 more set of this layout still fails the whole batch. Fall
+                // back to the exact count DXVK asked for before giving up.
+                if (!fetch_descriptor_sets(device_id, pool_id, layout_id, descriptor_set_readahead, fetched) &&
+                    !fetch_descriptor_sets(device_id, pool_id, layout_id, count, fetched))
                 {
                     return VK_ERROR_INITIALIZATION_FAILED;
                 }
