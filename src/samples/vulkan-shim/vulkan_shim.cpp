@@ -253,6 +253,84 @@ namespace
         bridge_call(gb::ioctl_update_descriptor_sets_batch, batch.data(), static_cast<DWORD>(batch.size()), &response, sizeof(response));
     }
 
+    // Client-side pool for vkAllocateDescriptorSets: measured at 2000+ calls/sec during normal DXVK
+    // rendering (each unique binding-set change), a rate a real Vulkan driver services trivially but
+    // which is costly here - every call is a full WOW64 gate-crossing + syscall + IOCTL round trip,
+    // and this was found to be the single largest source of scheduler contention for the render
+    // thread. Pre-fetch a surplus batch per (descriptor_pool, layout) in one IOCTL using the
+    // protocol's existing multi-set support, then serve DXVK's typical count=1 single-layout
+    // requests locally with zero IOCTLs until the surplus is exhausted. Only that common case is
+    // cached; count>1 or multi-layout requests fall back to the direct passthrough path unchanged.
+    // Resetting or destroying the owning pool invalidates every descriptor set ever allocated from
+    // it host-side, including any surplus never handed to DXVK, so both invalidate this cache for
+    // that pool. Touched by every DXVK thread (same reasoning as g_pending_descriptor_updates_mutex),
+    // so it needs the same lock.
+    constexpr uint32_t descriptor_set_readahead = 32;
+
+    struct descriptor_set_cache_key
+    {
+        gb::object_id pool;
+        gb::object_id layout;
+
+        bool operator==(const descriptor_set_cache_key&) const = default;
+    };
+
+    struct descriptor_set_cache_key_hash
+    {
+        size_t operator()(const descriptor_set_cache_key& key) const
+        {
+            return std::hash<uint64_t>{}(key.pool) ^ (std::hash<uint64_t>{}(key.layout) << 1);
+        }
+    };
+
+    std::unordered_map<descriptor_set_cache_key, std::vector<gb::object_id>, descriptor_set_cache_key_hash> g_descriptor_set_cache;
+    std::mutex g_descriptor_set_cache_mutex;
+
+    void invalidate_descriptor_set_cache(gb::object_id pool)
+    {
+        std::lock_guard<std::mutex> lock(g_descriptor_set_cache_mutex);
+        for (auto it = g_descriptor_set_cache.begin(); it != g_descriptor_set_cache.end();)
+        {
+            it = (it->first.pool == pool) ? g_descriptor_set_cache.erase(it) : std::next(it);
+        }
+    }
+
+    // Requests `count` more sets of `layout` from `pool` in one IOCTL, appending whatever the host
+    // actually allocated (which may be less than requested, e.g. if the pool is near its capacity) to `out`.
+    bool fetch_descriptor_sets(gb::object_id device, gb::object_id pool, gb::object_id layout, uint32_t count,
+                               std::vector<gb::object_id>& out)
+    {
+        gb::allocate_descriptor_sets_request header{};
+        header.device = device;
+        header.descriptor_pool = pool;
+        header.set_count = count;
+
+        std::vector<uint8_t> message(sizeof(header) + static_cast<size_t>(count) * sizeof(gb::object_id));
+        std::memcpy(message.data(), &header, sizeof(header));
+        auto* layouts = reinterpret_cast<gb::object_id*>(message.data() + sizeof(header));
+        std::fill(layouts, layouts + count, layout);
+
+        std::vector<uint8_t> response_bytes(sizeof(gb::allocate_descriptor_sets_response) +
+                                            static_cast<size_t>(count) * sizeof(gb::object_id));
+        if (!bridge_call(gb::ioctl_allocate_descriptor_sets, message.data(), static_cast<DWORD>(message.size()), response_bytes.data(),
+                         static_cast<DWORD>(response_bytes.size())))
+        {
+            return false;
+        }
+
+        gb::allocate_descriptor_sets_response resp_header{};
+        std::memcpy(&resp_header, response_bytes.data(), sizeof(resp_header));
+        if (resp_header.vk_result != VK_SUCCESS)
+        {
+            return false;
+        }
+
+        const auto* ids = reinterpret_cast<const gb::object_id*>(response_bytes.data() + sizeof(resp_header));
+        const uint32_t written = (resp_header.count < count) ? resp_header.count : count;
+        out.insert(out.end(), ids, ids + written);
+        return written > 0;
+    }
+
     void record_command(gb::object_id command_buffer, gb::command command, const void* payload, size_t size)
     {
         auto& stream = g_command_streams[command_buffer];
@@ -3781,12 +3859,15 @@ extern "C"
     __declspec(dllexport) VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool,
                                                                              const VkAllocationCallbacks*)
     {
+        invalidate_descriptor_set_cache(to_object_id(descriptorPool));
         destroy_device_child(gb::ioctl_destroy_descriptor_pool, device, descriptorPool);
     }
 
     __declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL vkResetDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool,
                                                                                VkDescriptorPoolResetFlags flags)
     {
+        invalidate_descriptor_set_cache(to_object_id(descriptorPool));
+
         gb::reset_descriptor_pool_request request{};
         request.device = to_object_id(device);
         request.descriptor_pool = to_object_id(descriptorPool);
@@ -3806,6 +3887,46 @@ extern "C"
                                                                                   VkDescriptorSet* pDescriptorSets)
     {
         const uint32_t count = pAllocateInfo->descriptorSetCount;
+
+        // The hot path: DXVK's normal per-binding-change pattern is exactly one set of one layout.
+        // Serve it from the local surplus cache; only touch the bridge when it's empty.
+        if (count == 1)
+        {
+            const gb::object_id device_id = to_object_id(device);
+            const gb::object_id pool_id = to_object_id(pAllocateInfo->descriptorPool);
+            const gb::object_id layout_id = to_object_id(pAllocateInfo->pSetLayouts[0]);
+            const descriptor_set_cache_key key{.pool = pool_id, .layout = layout_id};
+
+            std::unique_lock<std::mutex> lock(g_descriptor_set_cache_mutex);
+            auto& cached = g_descriptor_set_cache[key];
+            if (cached.empty())
+            {
+                lock.unlock();
+                std::vector<gb::object_id> fetched;
+                // A batch of `descriptor_set_readahead` is an over-request relative to what DXVK's
+                // pool was actually sized for; vkAllocateDescriptorSets is all-or-nothing, so a pool
+                // with room for exactly 1 more set of this layout still fails the whole batch. Fall
+                // back to the exact count DXVK asked for before giving up.
+                if (!fetch_descriptor_sets(device_id, pool_id, layout_id, descriptor_set_readahead, fetched) &&
+                    !fetch_descriptor_sets(device_id, pool_id, layout_id, count, fetched))
+                {
+                    return VK_ERROR_INITIALIZATION_FAILED;
+                }
+                lock.lock();
+                cached.insert(cached.end(), fetched.begin(), fetched.end());
+            }
+
+            if (cached.empty())
+            {
+                return VK_ERROR_OUT_OF_POOL_MEMORY;
+            }
+
+            pDescriptorSets[0] = to_handle<VkDescriptorSet>(cached.back());
+            cached.pop_back();
+            return VK_SUCCESS;
+        }
+
+        // count == 0 or multi-layout requests: uncommon (not observed as a hot path), passthrough unchanged.
         gb::allocate_descriptor_sets_request header{};
         header.device = to_object_id(device);
         header.descriptor_pool = to_object_id(pAllocateInfo->descriptorPool);
