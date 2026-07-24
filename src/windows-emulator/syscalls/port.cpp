@@ -292,6 +292,12 @@ namespace sogen
             reply.write(receive_message);
         }
 
+        NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, const handle port_handle, const ULONG /*flags*/)
+        {
+            c.proc.ports.erase(port_handle);
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtAlpcSendWaitReceivePort(const syscall_context& c, const handle port_handle, const ULONG /*flags*/,
                                                   const emulator_object<PORT_MESSAGE64> send_message,
                                                   const emulator_object<ALPC_MESSAGE_ATTRIBUTES> send_message_attributes,

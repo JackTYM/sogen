@@ -1240,7 +1240,7 @@ namespace sogen::fex
                 this->active_context_->ExecuteThread(this->active_thread_);
 
                 const bool hook_dispatched = this->dispatch_pending_hook_if_any();
-                const bool interrupt_page_unwind = std::exchange(this->interrupt_page_unwind_, false);
+                const bool interrupt_page_unwind = this->interrupt_page_unwind_.exchange(false);
 
                 // An InterruptFaultPage unwind with no stop pending is the quantum timer racing this
                 // quantum's own entry: stop() sets stop_requested_ then protects the page, but a
@@ -4733,9 +4733,11 @@ namespace sogen::fex
         // defer_hook_dispatch/dispatch_pending_hook_if_any).
         pending_fault_dispatch pending_fault_dispatch_{};
         // Set by handle_fault_signal when it unwinds ExecuteThread through an InterruptFaultPage hit;
-        // consumed by start()'s loop to tell that unwind apart from any other clean return. No atomics:
-        // the signal handler runs on the same host thread whose start() consumes the flag.
-        bool interrupt_page_unwind_ = false;
+        // consumed by start()'s loop to tell that unwind apart from any other clean return. Same-thread
+        // signal-handler-to-mainline communication still needs atomic (not just same-thread ordering):
+        // the C++ abstract machine has no signal-delivery control-flow edge, so an optimizer is free to
+        // treat this field as unmodified across the opaque ExecuteThread() call and cache a stale read.
+        std::atomic<bool> interrupt_page_unwind_{false};
 #endif
 
         std::map<uint64_t, mapped_region> regions_;

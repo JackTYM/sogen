@@ -255,6 +255,7 @@ namespace sogen
                                                   emulator_object<ALPC_MESSAGE_ATTRIBUTES>
                                                   /*receive_message_attributes*/,
                                                   emulator_object<LARGE_INTEGER> /*timeout*/);
+        NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, handle port_handle, ULONG flags);
         NTSTATUS handle_NtAlpcQueryInformation();
         NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& c, handle port_handle, uint64_t message,
                                                       uint32_t message_info_class, uint64_t message_info, ULONG length,
@@ -1466,6 +1467,7 @@ namespace sogen
         add_handler(NtAlpcCreatePort);
         add_handler(NtAlpcConnectPortEx);
         add_handler(NtAlpcConnectPort);
+        add_handler(NtAlpcDisconnectPort);
         add_handler(NtAlpcQueryInformation);
         add_handler(NtGetNextThread);
         add_handler(NtSetInformationObject);
