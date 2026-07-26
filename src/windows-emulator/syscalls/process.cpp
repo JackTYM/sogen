@@ -202,6 +202,11 @@ namespace sogen
                                                                        constexpr UCHAR drive_fixed = 3;
                                                                        for (const auto drive : c.win_emu.file_sys.list_drives())
                                                                        {
+                                                                           if (drive < 'a' || drive > 'z')
+                                                                           {
+                                                                               continue;
+                                                                           }
+
                                                                            const auto drive_index = static_cast<size_t>(drive - 'a');
                                                                            info.DriveMap |= (1u << drive_index);
                                                                            info.DriveType[drive_index] = drive_fixed;
