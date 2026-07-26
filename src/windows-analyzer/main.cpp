@@ -617,6 +617,34 @@ namespace sogen
             const auto win_emu = setup_emulator(options, args);
             context.win_emu = win_emu.get();
 
+            size_t child_emulator_count = 0;
+            std::vector<std::unique_ptr<analysis_context>> child_contexts{};
+            std::vector<std::unique_ptr<analysis_reporter>> child_reporters{};
+
+            win_emu->callbacks.create_child_emulator = [&options, &child_emulator_count, &child_contexts,
+                                                        &child_reporters](application_settings settings) {
+                auto child = std::make_unique<windows_emulator>(create_configured_backend(options), std::move(settings),
+                                                                create_emulator_settings(options));
+                child->log.set_prefix("[child " + std::to_string(++child_emulator_count) + "] ");
+
+                auto& child_context = *child_contexts.emplace_back(std::make_unique<analysis_context>());
+                child_context.settings = &options;
+                child_context.win_emu = child.get();
+                child_context.click_dialog_rules = options.click_dialog_rules;
+
+                child_context.reporters.push_back(child_reporters
+                                                      .emplace_back(create_console_reporter(child->log,
+                                                                                            console_reporter_settings{
+                                                                                                .silent = options.silent,
+                                                                                                .buffer_stdout = options.buffer_stdout,
+                                                                                            }))
+                                                      .get());
+
+                register_analysis_callbacks(child_context);
+
+                return child;
+            };
+
             std::vector<std::unique_ptr<analysis_reporter>> reporters{};
             reporters.emplace_back(create_console_reporter(win_emu->log, console_reporter_settings{
                                                                              .silent = options.silent,
