@@ -1308,6 +1308,12 @@ namespace sogen
         UCHAR PriorityClass;
     };
 
+    struct PROCESS_DEVICEMAP_INFORMATION
+    {
+        ULONG DriveMap;
+        UCHAR DriveType[32];
+    };
+
     struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION
     {
         ULONG Version;

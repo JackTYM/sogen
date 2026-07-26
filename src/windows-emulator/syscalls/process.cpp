@@ -146,10 +146,16 @@ namespace sogen
                                                                   });
 
             case ProcessDeviceMap:
-                return handle_query<EmulatorTraits<Emu64>::PVOID>(c.emu, process_information, process_information_length, return_length,
-                                                                  [](EmulatorTraits<Emu64>::PVOID& ptr) {
-                                                                      ptr = 0; //
-                                                                  });
+                return handle_query<PROCESS_DEVICEMAP_INFORMATION>(c.emu, process_information, process_information_length, return_length,
+                                                                   [&](PROCESS_DEVICEMAP_INFORMATION& info) {
+                                                                       constexpr UCHAR drive_fixed = 3;
+                                                                       for (const auto drive : c.win_emu.file_sys.list_drives())
+                                                                       {
+                                                                           const auto drive_index = static_cast<size_t>(drive - 'a');
+                                                                           info.DriveMap |= (1u << drive_index);
+                                                                           info.DriveType[drive_index] = drive_fixed;
+                                                                       }
+                                                                   });
 
             case ProcessEnableAlignmentFaultFixup:
                 return handle_query<BOOLEAN>(c.emu, process_information, process_information_length, return_length, [](BOOLEAN& b) {
