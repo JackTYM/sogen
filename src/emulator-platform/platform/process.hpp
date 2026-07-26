@@ -550,6 +550,48 @@ namespace sogen
         PsAttributeMax
     };
 
+    using PS_CREATE_STATE = enum _PS_CREATE_STATE
+    {
+        PsCreateInitialState,
+        PsCreateFailOnFileOpen,
+        PsCreateFailOnSectionCreate,
+        PsCreateFailExeFormat,
+        PsCreateFailMachineMismatch,
+        PsCreateFailExeName,
+        PsCreateSuccess,
+        PsCreateMaximumStates
+    };
+
+    template <typename Traits>
+    struct PS_CREATE_INFO
+    {
+        Traits::SIZE_T Size;
+        PS_CREATE_STATE State;
+
+        union
+        {
+            struct
+            {
+                ULONG InitFlags;
+                ULONG AdditionalFileAccess;
+            } InitState;
+
+            struct
+            {
+                ULONG OutputFlags;
+                Traits::HANDLE FileHandle;
+                Traits::HANDLE SectionHandle;
+                ULONGLONG UserProcessParametersNative;
+                ULONG UserProcessParametersWow64;
+                ULONG CurrentParameterFlags;
+                ULONGLONG PebAddressNative;
+                ULONG PebAddressWow64;
+                ULONGLONG ManifestAddress;
+                ULONG ManifestSize;
+            } SuccessState;
+        };
+    };
+
     struct SYSTEM_PROCESSOR_INFORMATION64
     {
         USHORT ProcessorArchitecture;
@@ -1306,6 +1348,12 @@ namespace sogen
     {
         BOOLEAN Foreground;
         UCHAR PriorityClass;
+    };
+
+    struct PROCESS_DEVICEMAP_INFORMATION
+    {
+        ULONG DriveMap;
+        UCHAR DriveType[32];
     };
 
     struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION

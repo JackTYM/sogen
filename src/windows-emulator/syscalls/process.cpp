@@ -9,6 +9,57 @@ namespace sogen
 
     namespace syscalls
     {
+        namespace
+        {
+            // The environment block real ntdll builds (see process_context::setup's construction of
+            // RTL_USER_PROCESS_PARAMETERS64.Environment): a sequence of NUL-terminated "name=value"
+            // UTF-16 strings, terminated by an empty string (double NUL). Entries starting with '=' are
+            // drive-current-directory markers (e.g. "=C:=C:\Users\...", or the leading "=::=::\"), not
+            // real variables - skipped, matching real Windows semantics.
+            utils::unordered_insensitive_u16string_map<std::u16string> parse_environment_block(memory_interface& emu, uint64_t address)
+            {
+                utils::unordered_insensitive_u16string_map<std::u16string> result{};
+
+                if (!address)
+                {
+                    return result;
+                }
+
+                std::u16string current{};
+                constexpr size_t max_total_chars = 1 << 20;
+
+                for (size_t chars_read = 0; chars_read < max_total_chars; ++chars_read, address += sizeof(char16_t))
+                {
+                    char16_t ch{};
+                    emu.read_memory(address, &ch, sizeof(ch));
+
+                    if (ch != u'\0')
+                    {
+                        current.push_back(ch);
+                        continue;
+                    }
+
+                    if (current.empty())
+                    {
+                        break;
+                    }
+
+                    if (!current.starts_with(u'='))
+                    {
+                        const auto separator = current.find(u'=');
+                        if (separator != std::u16string::npos)
+                        {
+                            result[current.substr(0, separator)] = current.substr(separator + 1);
+                        }
+                    }
+
+                    current.clear();
+                }
+
+                return result;
+            }
+        }
+
         NTSTATUS handle_NtQueryInformationProcess(const syscall_context& c, const handle process_handle, const uint32_t info_class,
                                                   const uint64_t process_information, const uint32_t process_information_length,
                                                   const emulator_object<uint32_t> return_length)
@@ -146,10 +197,16 @@ namespace sogen
                                                                   });
 
             case ProcessDeviceMap:
-                return handle_query<EmulatorTraits<Emu64>::PVOID>(c.emu, process_information, process_information_length, return_length,
-                                                                  [](EmulatorTraits<Emu64>::PVOID& ptr) {
-                                                                      ptr = 0; //
-                                                                  });
+                return handle_query<PROCESS_DEVICEMAP_INFORMATION>(c.emu, process_information, process_information_length, return_length,
+                                                                   [&](PROCESS_DEVICEMAP_INFORMATION& info) {
+                                                                       constexpr UCHAR drive_fixed = 3;
+                                                                       for (const auto drive : c.win_emu.file_sys.list_drives())
+                                                                       {
+                                                                           const auto drive_index = static_cast<size_t>(drive - 'a');
+                                                                           info.DriveMap |= (1u << drive_index);
+                                                                           info.DriveType[drive_index] = drive_fixed;
+                                                                       }
+                                                                   });
 
             case ProcessEnableAlignmentFaultFixup:
                 return handle_query<BOOLEAN>(c.emu, process_information, process_information_length, return_length, [](BOOLEAN& b) {
@@ -598,6 +655,196 @@ namespace sogen
             }
 
             return STATUS_NOT_SUPPORTED;
+        }
+
+        NTSTATUS handle_NtCreateUserProcess(const syscall_context& c, const emulator_object<handle> process_handle,
+                                            const emulator_object<handle> thread_handle, ACCESS_MASK /*process_desired_access*/,
+                                            ACCESS_MASK /*thread_desired_access*/,
+                                            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*process_object_attributes*/,
+                                            const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*thread_object_attributes*/,
+                                            ULONG /*process_flags*/, ULONG /*thread_flags*/,
+                                            const emulator_object<RTL_USER_PROCESS_PARAMETERS64> process_parameters,
+                                            const emulator_object<PS_CREATE_INFO<EmulatorTraits<Emu64>>> create_info,
+                                            const emulator_object<PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>> attribute_list)
+        {
+            if (!process_parameters)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            if (!create_info || create_info.read().Size != sizeof(PS_CREATE_INFO<EmulatorTraits<Emu64>>))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto params = process_parameters.read();
+
+            auto command_line = read_unicode_string(c.emu, params.CommandLine);
+            const auto working_directory = read_unicode_string(c.emu, params.CurrentDirectory.DosPath);
+            std::u16string image_path = read_unicode_string(c.emu, params.ImagePathName);
+
+            constexpr auto entry_size = sizeof(PS_ATTRIBUTE<EmulatorTraits<Emu64>>);
+            constexpr auto header_size = sizeof(PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>) - entry_size;
+
+            size_t attribute_count = 0;
+            if (attribute_list)
+            {
+                const auto total_length = attribute_list.read().TotalLength;
+                if (total_length < header_size || (total_length - header_size) % entry_size != 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                attribute_count = static_cast<size_t>((total_length - header_size) / entry_size);
+            }
+
+            std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> client_id_attribute{};
+
+            if (attribute_list)
+            {
+                const emulator_object<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> attributes{
+                    c.emu, attribute_list.value() + offsetof(PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>, Attributes)};
+
+                for (size_t i = 0; i < attribute_count; ++i)
+                {
+                    attributes.access(
+                        [&](const PS_ATTRIBUTE<EmulatorTraits<Emu64>>& attribute) {
+                            const auto type = attribute.Attribute & PS_ATTRIBUTE_NUMBER_MASK;
+
+                            if (type == PsAttributeImageName)
+                            {
+                                std::u16string name{};
+                                name.resize(attribute.Size / 2);
+                                c.emu.read_memory(attribute.Value, name.data(), attribute.Size);
+                                image_path = std::move(name);
+                            }
+                            else if (type == PsAttributeClientId)
+                            {
+                                client_id_attribute = attribute;
+                            }
+                            else
+                            {
+                                c.win_emu.log.log("NtCreateUserProcess: ignoring unsupported attribute type: %" PRIx64 "\n",
+                                                  static_cast<uint64_t>(type));
+                            }
+                        },
+                        i);
+                }
+            }
+
+            const windows_path image_windows_path{image_path};
+            if (!image_windows_path.is_absolute())
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            std::error_code ec{};
+            if (!std::filesystem::exists(c.win_emu.file_sys.translate(image_windows_path), ec))
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            if (!c.win_emu.callbacks.create_child_emulator)
+            {
+                c.win_emu.log.log("NtCreateUserProcess: no create_child_emulator callback registered\n");
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            application_settings child_settings{
+                .application = image_windows_path,
+                .working_directory = windows_path{working_directory},
+                .environment = parse_environment_block(c.emu, params.Environment),
+                .command_line = std::move(command_line),
+                .image_path = image_path,
+            };
+
+            const auto record_id = c.proc.next_child_record_id++;
+
+            c.win_emu.log.log("NtCreateUserProcess: launching child %u: %s\n", record_id, u16_to_u8(image_path).c_str());
+
+            std::unique_ptr<windows_emulator> child{};
+            try
+            {
+                child = c.win_emu.callbacks.create_child_emulator(std::move(child_settings));
+            }
+            catch (const std::exception& e)
+            {
+                c.win_emu.log.error("NtCreateUserProcess: failed to construct child %u: %s\n", record_id, e.what());
+                return STATUS_UNSUCCESSFUL;
+            }
+
+            if (!child)
+            {
+                c.win_emu.log.error("NtCreateUserProcess: child %u construction returned null\n", record_id);
+                return STATUS_UNSUCCESSFUL;
+            }
+
+            child->start();
+
+            // The windows_emulator side never calls record_stop for a clean exit or a fail-fast crash
+            // (both just set process.exit_status and stop() directly - see handle_NtTerminateProcess and
+            // the STATUS_FAIL_FAST_EXCEPTION case in windows_emulator.cpp) - only the three syscall-
+            // dispatch fatal cases (unknown/unimplemented syscall, syscall exception) call record_stop,
+            // which is what leaves last_stop_reason() at its default `none` for everything else. So a
+            // fail-fast crash has to be excluded explicitly instead of being caught by last_stop_reason().
+            const auto succeeded = child->last_stop_reason() == stop_reason::none && child->process.exit_status.has_value() &&
+                                   *child->process.exit_status != STATUS_FAIL_FAST_EXCEPTION;
+            if (!succeeded)
+            {
+                if (child->process.exit_status == STATUS_FAIL_FAST_EXCEPTION)
+                {
+                    c.win_emu.log.error("NtCreateUserProcess: child %u crashed (fail-fast exception)\n", record_id);
+                }
+                else
+                {
+                    c.win_emu.log.error("NtCreateUserProcess: child %u failed: %s\n", record_id, child->last_stop_detail().c_str());
+                }
+                return STATUS_UNSUCCESSFUL;
+            }
+
+            process_context::child_process_record record{};
+            record.image_path = image_windows_path;
+            record.pid = 0x1000 + 4 * record_id;
+            record.exit_status = *child->process.exit_status;
+
+            c.win_emu.log.log("NtCreateUserProcess: child %u exited with status 0x%08X\n", record_id,
+                              static_cast<uint32_t>(record.exit_status));
+
+            if (process_handle)
+            {
+                process_handle.write(make_pseudo_handle(record_id, handle_types::process));
+            }
+
+            if (thread_handle)
+            {
+                thread_handle.write(make_pseudo_handle(record_id, handle_types::thread));
+            }
+
+            if (client_id_attribute)
+            {
+                CLIENT_ID64 client_id{};
+                client_id.UniqueProcess = record.pid;
+                client_id.UniqueThread = record.pid + 1;
+                write_attribute(c.emu, *client_id_attribute, client_id);
+            }
+
+            create_info.access([&](PS_CREATE_INFO<EmulatorTraits<Emu64>>& info) {
+                info.State = PsCreateSuccess;
+                info.SuccessState.OutputFlags = 0;
+                info.SuccessState.FileHandle = 0;
+                info.SuccessState.SectionHandle = 0;
+                info.SuccessState.UserProcessParametersNative = child->process.process_params64.value();
+                info.SuccessState.UserProcessParametersWow64 = 0;
+                info.SuccessState.CurrentParameterFlags = 0x6001;
+                info.SuccessState.PebAddressNative = child->process.peb64.value();
+                info.SuccessState.PebAddressWow64 = 0;
+                info.SuccessState.ManifestAddress = 0;
+                info.SuccessState.ManifestSize = 0;
+            });
+
+            c.proc.child_processes[record_id] = record;
+
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtFlushProcessWriteBuffers(const syscall_context& /*c*/)

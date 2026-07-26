@@ -190,6 +190,12 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (name == u"\\KernelObjects\\MaximumCommitCondition")
+            {
+                event_handle.write(MAXIMUM_COMMIT_CONDITION.bits);
+                return STATUS_SUCCESS;
+            }
+
             if (name == u"DBWIN_DATA_READY")
             {
                 event_handle.write(DBWIN_DATA_READY.bits);
