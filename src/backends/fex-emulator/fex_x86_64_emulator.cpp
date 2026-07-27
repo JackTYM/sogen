@@ -4527,8 +4527,23 @@ namespace sogen::fex
                 return true;
             }
 
-            const memory_operation operation = ((esr >> 6) & 1) != 0 ? memory_operation::write : memory_operation::read;
-            return this->hvf_handle_general_memory_violation(vcpu, fault_addr, elr, operation);
+            // FEXCore's GuestSignal_SIGSEGV dispatcher stub does not trap - unlike its SIGILL/SIGTRAP
+            // siblings (hlt(0)/brk(0)) it raises a real SIGSEGV by deliberately dereferencing null:
+            // `LoadConstant(r1, 0); ldr x1, [x1]` (Dispatcher.cpp, the !ExitOnHLTEnabled branch). Inside
+            // the VM that is an ordinary stage-1 data abort at EL1 with FAR=0, syndrome-identical to a
+            // genuine guest null dereference, so it must be told apart by the faulting pc instead - the
+            // same discrimination handle_fault_signal already performs by only reaching
+            // handle_general_memory_violation when the faulting pc is NOT in a dispatcher. Every Break
+            // op with Signal=FAULT_SIGSEGV arrives this way, which includes every WoW64 gate crossing
+            // (NoExecOp on a registered gate range emits exactly that Break), so misreading it as a
+            // guest memory violation at address 0 loses the crossing and re-faults forever.
+            const bool is_dispatcher_generated_break =
+                this->host_pc_in_any_dispatcher(elr) && active_thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException;
+            if (!is_dispatcher_generated_break)
+            {
+                const memory_operation operation = ((esr >> 6) & 1) != 0 ? memory_operation::write : memory_operation::read;
+                return this->hvf_handle_general_memory_violation(vcpu, fault_addr, elr, operation);
+            }
         }
 
         if (ec == 0x21) // instruction abort taken at EL1
