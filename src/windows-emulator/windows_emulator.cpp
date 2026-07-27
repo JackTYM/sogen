@@ -394,6 +394,21 @@ namespace sogen
                 return;
             }
 
+            const auto now_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(win_emu.clock().steady_now().time_since_epoch()).count());
+
+            // Matches the 10 ms default device period advertised to dsound by audio_service.cpp's
+            // AudioServerGetDevicePeriod reply. Without this gate, the render thread got re-signaled on
+            // every reschedule attempt of every thread in the process (perform_context_switch_work runs on
+            // every yield), waking it orders of magnitude faster than a real engine's period and burning
+            // scheduler throughput the rest of the game needs.
+            constexpr uint64_t render_period_ns = 10'000'000ULL;
+            const bool should_signal = now_ns >= process.next_audio_tick_ns;
+            if (should_signal)
+            {
+                process.next_audio_tick_ns = now_ns + render_period_ns;
+            }
+
             // Wake dsound's render thread(s): the buffer-ready event is auto-reset, so a set that no thread is
             // waiting on is simply consumed by the next wait. Drop handles that no longer resolve to an event.
             std::erase_if(process.audio_render_events, [&](const handle e) {
@@ -402,7 +417,10 @@ namespace sogen
                 {
                     return true;
                 }
-                event->signaled = true;
+                if (should_signal)
+                {
+                    event->signaled = true;
+                }
                 return false;
             });
 
@@ -411,9 +429,6 @@ namespace sogen
             constexpr uint64_t write_cursor_offset = 0x10;
             constexpr uint64_t read_cursor_offset = 0x18;
             constexpr uint64_t clock_position_offset = 0x98;
-
-            const auto now_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(win_emu.clock().steady_now().time_since_epoch()).count());
 
             // The guest maps and later unmaps each render section (dsound churns stream setup until playback
             // stabilizes), so a tracked section's backing can become unmapped. Probe with try_read and prune
