@@ -4413,6 +4413,7 @@ namespace sogen::fex
             {FEXCore::Core::OPINDEX_F80MUL, hvf::hvf_x87_fastpath::op::f80_mul},
             {FEXCore::Core::OPINDEX_F80ADD, hvf::hvf_x87_fastpath::op::f80_add},
             {FEXCore::Core::OPINDEX_F80SUB, hvf::hvf_x87_fastpath::op::f80_sub},
+            {FEXCore::Core::OPINDEX_F80DIV, hvf::hvf_x87_fastpath::op::f80_div},
         };
 
         for (const auto& [index, which] : fastpath_ops)

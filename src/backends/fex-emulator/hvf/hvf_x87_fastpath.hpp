@@ -34,6 +34,7 @@ namespace sogen::fex::hvf
             f80_mul,
             f80_add,
             f80_sub,
+            f80_div,
             count,
         };
 

@@ -523,6 +523,172 @@ namespace sogen::fex::hvf
             emit_f80_addsub(em, slow, true);
         }
 
+        // extF80_div. Same operand gate as extF80_mul - two normalized finite operands with the
+        // quotient exponent inside softfloat_roundPackToExtF80's plain rounding window - which also
+        // removes the divide-by-zero and 0/0 arms, the only two that raise a flag.
+        //
+        // The quotient itself is softfloat's own algorithm transcribed instruction for instruction
+        // rather than an exact division, because softfloat's last quotient digit is an estimate that
+        // is only corrected when it lands within one of the two boundary windows; an exact quotient
+        // would disagree with it on the sticky bit outside those windows.
+        //
+        // SOFTFLOAT_FAST_DIV64TO32 is defined for this build, so softfloat_approxRecip32_1 is the
+        // plain 0x7FFFFFFFFFFFFFFF / (uint32_t)a form rather than the table-driven one.
+        void emit_f80_div(arm64_emitter& em, const arm64_emitter::label slow)
+        {
+            constexpr uint32_t sig_b = 2;
+            constexpr uint32_t recip = 3;
+            constexpr uint32_t rem_hi = 4;
+            constexpr uint32_t rem_lo = 5;
+            constexpr uint32_t sig_z = 6;
+            constexpr uint32_t q = 7;
+            constexpr uint32_t t0 = 8;
+            constexpr uint32_t t1 = 16;
+            constexpr uint32_t t2 = 17;
+
+            const auto no_correct = em.new_label();
+            const auto try_up = em.new_label();
+            const auto sticky = em.new_label();
+
+            em.umov_d(2, 0, 0); // sigA
+            em.umov_h(3, 0, 4); // signExpA
+            em.umov_d(4, 1, 0); // sigB
+            em.umov_h(5, 1, 4); // signExpB
+
+            em.and_low_mask(6, 3, 15); // expA
+            em.and_low_mask(7, 5, 15); // expB
+            em.movz(false, 17, 0x7FFD);
+            em.sub_imm(false, 16, 6, 1);
+            em.cmp_shifted(false, 16, 17);
+            em.b_cond(cond_hi, slow);
+            em.sub_imm(false, 16, 7, 1);
+            em.cmp_shifted(false, 16, 17);
+            em.b_cond(cond_hi, slow);
+
+            em.and_shifted(true, 16, 2, 4);
+            em.cmp_imm(true, 16, 0);
+            em.b_cond(cond_pl, slow); // an operand is unnormal, subnormal or zero
+
+            em.eor_shifted(false, 16, 3, 5);
+            em.lsr_imm(false, 16, 16, 15); // signZ
+
+            em.sub_shifted(false, 6, 6, 7);
+            em.add_imm(false, 6, 6, 3, true);
+            em.add_imm(false, 6, 6, 0xFFF);
+            em.cmp_shifted(true, 2, 4);
+            em.cset(false, 17, cond_lo);
+            em.sub_shifted(false, 6, 6, 17); // expZ = expA - expB + 0x3FFF - (sigA < sigB)
+
+            // expZ and signZ outlive every register the division loop needs.
+            em.fmov_d_x(2, 6);
+            em.ins_d(2, 1, 16);
+
+            em.movz(false, 6, 31);
+            em.add_shifted(false, 6, 6, 17);
+            em.movz(false, 7, 64);
+            em.sub_shifted(false, 7, 7, 6);
+            em.lsrv(true, 8, 2, 7);  // softfloat_shortShiftLeft128(0, sigA, 31 or 32).v64
+            em.lslv(true, 16, 2, 6); // .v0
+
+            em.orr_shifted(true, sig_b, wzr, 4);
+            em.orr_shifted(true, rem_hi, wzr, 8);
+            em.orr_shifted(true, rem_lo, wzr, 16);
+
+            em.lsr_imm(true, recip, sig_b, 32);
+            em.movz(true, t0, 1);
+            em.lsl_imm(true, t0, t0, 63);
+            em.sub_imm(true, t0, t0, 1);
+            em.udiv(true, recip, t0, recip);
+
+            em.movz(true, sig_z, 0);
+
+            const auto emit_estimate_q = [&] {
+                em.lsr_imm(true, t0, rem_hi, 2);
+                em.umull(t0, t0, recip);
+                em.movz(true, t1, 0x8000, 16);
+                em.add_shifted(true, t0, t0, t1);
+                em.lsr_imm(true, q, t0, 32);
+            };
+
+            // rem = sub128(rem << 29, mul64ByShifted32To128(sigB, q)), with softfloat's downward
+            // correction when the subtraction borrowed.
+            const auto emit_reduce = [&] {
+                em.lsl_imm(true, rem_hi, rem_hi, 29);
+                em.lsr_imm(true, t0, rem_lo, 35);
+                em.orr_shifted(true, rem_hi, rem_hi, t0);
+                em.lsl_imm(true, rem_lo, rem_lo, 29);
+
+                em.umull(t0, sig_b, q);
+                em.lsr_imm(true, t1, sig_b, 32);
+                em.umull(t1, t1, q);
+                em.lsr_imm(true, t2, t0, 32);
+                em.add_shifted(true, t1, t1, t2);
+                em.lsl_imm(true, t2, t0, 32);
+
+                em.subs_shifted(true, rem_lo, rem_lo, t2);
+                em.sbcs(true, rem_hi, rem_hi, t1);
+            };
+
+            emit_estimate_q();
+            for (int i = 0; i < 2; ++i)
+            {
+                const auto no_fix = em.new_label();
+
+                emit_reduce();
+                em.b_cond(cond_pl, no_fix);
+                em.sub_imm(false, q, q, 1);
+                em.lsr_imm(true, t1, sig_b, 32);
+                em.lsl_imm(true, t2, sig_b, 32);
+                em.adds_shifted(true, rem_lo, rem_lo, t2);
+                em.adc(true, rem_hi, rem_hi, t1);
+                em.bind(no_fix);
+
+                em.lsl_imm(true, sig_z, sig_z, 29);
+                em.add_shifted(true, sig_z, sig_z, q);
+
+                emit_estimate_q();
+            }
+
+            em.add_imm(false, t0, q, 1);
+            em.and_low_mask(t0, t0, 22);
+            em.cmp_imm(false, t0, 2);
+            em.b_cond(cond_hs, no_correct);
+
+            emit_reduce();
+            em.lsr_imm(true, t1, sig_b, 32);
+            em.lsl_imm(true, t2, sig_b, 32);
+            em.b_cond(cond_pl, try_up);
+            em.sub_imm(false, q, q, 1);
+            em.adds_shifted(true, rem_lo, rem_lo, t2);
+            em.adc(true, rem_hi, rem_hi, t1);
+            em.b_cond(cond_al, sticky);
+
+            em.bind(try_up);
+            em.cmp_shifted(true, rem_lo, t2);
+            em.sbcs(true, wzr, rem_hi, t1);
+            em.b_cond(cond_lo, sticky);
+            em.add_imm(false, q, q, 1);
+            em.subs_shifted(true, rem_lo, rem_lo, t2);
+            em.sbc(true, rem_hi, rem_hi, t1);
+
+            em.bind(sticky);
+            em.orr_shifted(true, t0, rem_hi, rem_lo);
+            em.cmp_imm(true, t0, 0);
+            em.cset(false, t0, cond_ne);
+            em.orr_shifted(false, q, q, t0);
+
+            em.bind(no_correct);
+            em.lsl_imm(true, 16, sig_z, 6);
+            em.lsr_imm(true, t0, q, 23);
+            em.add_shifted(true, 16, 16, t0);
+            em.lsl_imm(true, 17, q, 41);
+
+            em.umov_d(6, 2, 0);
+            em.umov_d(7, 2, 1);
+
+            emit_round_pack_ext_f80(em, slow);
+        }
+
         // extF80_cmp, the eq/lt/le triple X80SoftFloat::FCMP composes into the LT/UNORDERED/EQ flag
         // word. Every operand shape is handled except a NaN on either side, which is the only case
         // any of the three comparisons raises the invalid flag for. The comparisons themselves are
@@ -730,6 +896,8 @@ namespace sogen::fex::hvf
                 return emit_f80_add;
             case hvf_x87_fastpath::op::f80_sub:
                 return emit_f80_sub;
+            case hvf_x87_fastpath::op::f80_div:
+                return emit_f80_div;
             default:
                 return nullptr;
             }

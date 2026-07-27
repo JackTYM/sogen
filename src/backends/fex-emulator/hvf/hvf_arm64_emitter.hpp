@@ -163,6 +163,26 @@ namespace sogen::fex::hvf
             this->emit(0x4B000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (shift << 10) | (rn << 5) | rd);
         }
 
+        void adds_shifted(const bool is64, const uint32_t rd, const uint32_t rn, const uint32_t rm, const uint32_t shift = 0)
+        {
+            this->emit(0x2B000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (shift << 10) | (rn << 5) | rd);
+        }
+
+        void subs_shifted(const bool is64, const uint32_t rd, const uint32_t rn, const uint32_t rm, const uint32_t shift = 0)
+        {
+            this->emit(0x6B000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (shift << 10) | (rn << 5) | rd);
+        }
+
+        void adc(const bool is64, const uint32_t rd, const uint32_t rn, const uint32_t rm)
+        {
+            this->emit(0x1A000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (rn << 5) | rd);
+        }
+
+        void sbc(const bool is64, const uint32_t rd, const uint32_t rn, const uint32_t rm)
+        {
+            this->emit(0x5A000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (rn << 5) | rd);
+        }
+
         void sbcs(const bool is64, const uint32_t rd, const uint32_t rn, const uint32_t rm)
         {
             this->emit(0x7A000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (rn << 5) | rd);
@@ -222,6 +242,17 @@ namespace sogen::fex::hvf
         void umulh(const uint32_t rd, const uint32_t rn, const uint32_t rm)
         {
             this->emit(0x9BC07C00u | (rm << 16) | (rn << 5) | rd);
+        }
+
+        // umull <Xd>, <Wn>, <Wm>  (UMADDL with Ra = XZR)
+        void umull(const uint32_t rd, const uint32_t rn, const uint32_t rm)
+        {
+            this->emit(0x9BA07C00u | (rm << 16) | (rn << 5) | rd);
+        }
+
+        void udiv(const bool is64, const uint32_t rd, const uint32_t rn, const uint32_t rm)
+        {
+            this->emit(0x1AC00800u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (rn << 5) | rd);
         }
 
         void clz(const bool is64, const uint32_t rd, const uint32_t rn)
