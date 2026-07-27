@@ -83,26 +83,26 @@ namespace
         }
     }
 
-#define CHECK_HV(expr)                                                                                            \
-    do                                                                                                            \
-    {                                                                                                             \
-        const hv_return_t check_hv_r = (expr);                                                                    \
-        if (check_hv_r != HV_SUCCESS)                                                                             \
-        {                                                                                                         \
-            fprintf(stderr, "FATAL: %s -> 0x%x (%s) at %s:%d\n", #expr, static_cast<uint32_t>(check_hv_r),        \
-                    hv_err_str(check_hv_r), __FILE__, __LINE__);                                                  \
-            exit(1);                                                                                              \
-        }                                                                                                         \
+#define CHECK_HV(expr)                                                                                                             \
+    do                                                                                                                             \
+    {                                                                                                                              \
+        const hv_return_t check_hv_r = (expr);                                                                                     \
+        if (check_hv_r != HV_SUCCESS)                                                                                              \
+        {                                                                                                                          \
+            fprintf(stderr, "FATAL: %s -> 0x%x (%s) at %s:%d\n", #expr, static_cast<uint32_t>(check_hv_r), hv_err_str(check_hv_r), \
+                    __FILE__, __LINE__);                                                                                           \
+            exit(1);                                                                                                               \
+        }                                                                                                                          \
     } while (0)
 
-#define CHECK_TRUE(expr)                                                                  \
-    do                                                                                    \
-    {                                                                                     \
-        if (!(expr))                                                                      \
-        {                                                                                 \
-            fprintf(stderr, "FATAL: %s failed at %s:%d\n", #expr, __FILE__, __LINE__);    \
-            exit(1);                                                                      \
-        }                                                                                 \
+#define CHECK_TRUE(expr)                                                               \
+    do                                                                                 \
+    {                                                                                  \
+        if (!(expr))                                                                   \
+        {                                                                              \
+            fprintf(stderr, "FATAL: %s failed at %s:%d\n", #expr, __FILE__, __LINE__); \
+            exit(1);                                                                   \
+        }                                                                              \
     } while (0)
 
     // =============================================================================================
@@ -430,8 +430,7 @@ namespace
 
         void build()
         {
-            this->page =
-                static_cast<uint8_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+            this->page = static_cast<uint8_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
             CHECK_TRUE(this->page != MAP_FAILED);
 
             auto* insns = reinterpret_cast<uint32_t*>(this->page);
@@ -472,33 +471,32 @@ namespace
     // other guest register, so this reproduces the exact ABI the JIT-emitted call site expects.
     // =============================================================================================
     extern "C" void hvf_spike_call_trampoline(uint64_t* gprs, uint8_t* vecs, uint64_t target);
-    __asm__(
-        ".text\n"
-        ".p2align 2\n"
-        ".globl _hvf_spike_call_trampoline\n"
-        "_hvf_spike_call_trampoline:\n"
-        "  sub sp, sp, #0x20\n"
-        "  stp x19, x20, [sp]\n"
-        "  stp x21, lr, [sp, #16]\n"
-        "  mov x19, x0\n"
-        "  mov x20, x1\n"
-        "  mov x21, x2\n"
-        "  ldp q0, q1, [x20]\n"
-        "  ldp q2, q3, [x20, #32]\n"
-        "  ldp q4, q5, [x20, #64]\n"
-        "  ldp q6, q7, [x20, #96]\n"
-        "  ldp x0, x1, [x19]\n"
-        "  ldp x2, x3, [x19, #16]\n"
-        "  ldp x4, x5, [x19, #32]\n"
-        "  ldp x6, x7, [x19, #48]\n"
-        "  ldr x8, [x19, #64]\n"
-        "  blr x21\n"
-        "  stp x0, x1, [x19]\n"
-        "  stp q0, q1, [x20]\n"
-        "  ldp x21, lr, [sp, #16]\n"
-        "  ldp x19, x20, [sp]\n"
-        "  add sp, sp, #0x20\n"
-        "  ret\n");
+    __asm__(".text\n"
+            ".p2align 2\n"
+            ".globl _hvf_spike_call_trampoline\n"
+            "_hvf_spike_call_trampoline:\n"
+            "  sub sp, sp, #0x20\n"
+            "  stp x19, x20, [sp]\n"
+            "  stp x21, lr, [sp, #16]\n"
+            "  mov x19, x0\n"
+            "  mov x20, x1\n"
+            "  mov x21, x2\n"
+            "  ldp q0, q1, [x20]\n"
+            "  ldp q2, q3, [x20, #32]\n"
+            "  ldp q4, q5, [x20, #64]\n"
+            "  ldp q6, q7, [x20, #96]\n"
+            "  ldp x0, x1, [x19]\n"
+            "  ldp x2, x3, [x19, #16]\n"
+            "  ldp x4, x5, [x19, #32]\n"
+            "  ldp x6, x7, [x19, #48]\n"
+            "  ldr x8, [x19, #64]\n"
+            "  blr x21\n"
+            "  stp x0, x1, [x19]\n"
+            "  stp q0, q1, [x20]\n"
+            "  ldp x21, lr, [sp, #16]\n"
+            "  ldp x19, x20, [sp]\n"
+            "  add sp, sp, #0x20\n"
+            "  ret\n");
 
     struct callback_slot
     {
@@ -520,6 +518,7 @@ namespace
         static constexpr uint32_t ping_iters = 1000;
         static constexpr uint32_t tight_iters = 10'000'000;
         static constexpr uint32_t rtt_iters = 100'000;
+        static constexpr uint32_t x87_iters = 20'000;
 
         void emit(std::initializer_list<uint8_t> code)
         {
@@ -585,10 +584,10 @@ namespace
             this->emit_mov_ecx(tight_iters);
             this->emit({0x31, 0xDB}); // xor ebx, ebx
             const size_t tight = this->here();
-            this->emit({0x48, 0x83, 0xC3, 0x02});                                  // add rbx, 2
-            this->emit({0xFF, 0xC9});                                              // dec ecx
+            this->emit({0x48, 0x83, 0xC3, 0x02});                                    // add rbx, 2
+            this->emit({0xFF, 0xC9});                                                // dec ecx
             this->emit({0x75, static_cast<uint8_t>(rel8(tight, this->here() + 2))}); // jnz tight
-            this->emit_mov_rax(3); // marker 3: tight loop done
+            this->emit_mov_rax(3);                                                   // marker 3: tight loop done
             this->emit_syscall();
 
             // Syscall round-trip measurement loop. Counter lives in esi: the x86-64 syscall
@@ -600,18 +599,24 @@ namespace
             this->emit_syscall();
             this->emit({0xFF, 0xCE});                                              // dec esi
             this->emit({0x75, static_cast<uint8_t>(rel8(rtt, this->here() + 2))}); // jnz rtt
-            this->emit_mov_rax(5); // marker 5: rtt loop done
+            this->emit_mov_rax(5);                                                 // marker 5: rtt loop done
             this->emit_syscall();
 
-            // x87: fld/fsin/fstp all reach FallbackHandlerPointers hypercalls.
+            // x87 fallback phase: fld/fsin/fstp reach FallbackHandlerPointers hypercalls; looped
+            // to measure the FP-class (SIMD register transfer) hypercall round-trip cost.
+            this->emit({0xBE}); // mov esi, imm32
+            this->emit_u32(x87_iters);
+            const size_t x87_loop = this->here();
             this->emit({0xDD, 0x05});
             const size_t fld_disp_at = this->here();
-            this->emit_u32(0); // patched below
+            this->emit_u32(0);        // patched below
             this->emit({0xD9, 0xFE}); // fsin
             this->emit({0xDD, 0x1D});
             const size_t fstp_disp_at = this->here();
-            this->emit_u32(0); // patched below
-            this->emit_mov_rax(6); // marker 6: fsin done, request stop
+            this->emit_u32(0);                                                          // patched below
+            this->emit({0xFF, 0xCE});                                                   // dec esi
+            this->emit({0x75, static_cast<uint8_t>(rel8(x87_loop, this->here() + 2))}); // jnz x87_loop
+            this->emit_mov_rax(6);                                                      // marker 6: x87 phase done, request stop
             this->emit_syscall();
             const size_t spin = this->here();
             this->emit({0xEB, static_cast<uint8_t>(rel8(spin, this->here() + 2))}); // jmp spin
@@ -630,9 +635,7 @@ namespace
                 this->bytes.push_back(0);
             }
 
-            const auto patch32 = [this](size_t at, uint32_t value) {
-                memcpy(this->bytes.data() + at, &value, sizeof(value));
-            };
+            const auto patch32 = [this](size_t at, uint32_t value) { memcpy(this->bytes.data() + at, &value, sizeof(value)); };
             patch32(fld_disp_at, static_cast<uint32_t>(this->val_offset - (fld_disp_at + 4)));
             patch32(fstp_disp_at, static_cast<uint32_t>(this->res_offset - (fstp_disp_at + 4)));
         }
@@ -659,8 +662,7 @@ namespace
     {
         const double expected = std::sin(0.5);
         const double got = *g_run.fsin_result;
-        printf("[%s] tight loop rbx = %" PRIu64 " (expected %u) -> %s\n", tag, g_run.tight_rbx,
-               2 * x86_program::tight_iters,
+        printf("[%s] tight loop rbx = %" PRIu64 " (expected %u) -> %s\n", tag, g_run.tight_rbx, 2 * x86_program::tight_iters,
                g_run.tight_rbx == 2ull * x86_program::tight_iters ? "OK" : "MISMATCH");
         printf("[%s] fsin(0.5) = %.17g (libm %.17g, delta %.3g) -> %s\n", tag, got, expected, std::fabs(got - expected),
                std::fabs(got - expected) < 1e-12 ? "OK" : "MISMATCH");
@@ -693,8 +695,8 @@ namespace
                 g_run.marker_hits[marker]++;
                 if (g_run.marker_hits[marker] == 200000)
                 {
-                    fprintf(stderr, "[spike] marker %" PRIu64 " hit 200000 times - runaway loop, rip=0x%llx rcx=%llu\n",
-                            marker, static_cast<unsigned long long>(frame->State.rip),
+                    fprintf(stderr, "[spike] marker %" PRIu64 " hit 200000 times - runaway loop, rip=0x%llx rcx=%llu\n", marker,
+                            static_cast<unsigned long long>(frame->State.rip),
                             static_cast<unsigned long long>(frame->State.gregs[FEXCore::X86State::REG_RCX]));
                     std::exit(2);
                 }
@@ -732,7 +734,7 @@ namespace
         }
 
         std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(FEXCore::Core::InternalThreadState* /*thread*/,
-                                                                                     uint64_t /*guest_addr*/) override
+                                                                                      uint64_t /*guest_addr*/) override
         {
             return std::nullopt;
         }
@@ -809,6 +811,7 @@ namespace
             uint32_t encoding;
             uint64_t count;
         };
+
         std::vector<sysreg_hit> mrs_hits;
         uint64_t hlt_count = 0;
         uint64_t hlt_nonzero_imm = 0;
@@ -882,11 +885,11 @@ namespace
             const uint32_t crn = (hit.encoding >> 7) & 15;
             const uint32_t crm = (hit.encoding >> 3) & 15;
             const uint32_t op2 = hit.encoding & 7;
-            printf("  s%u_%u_c%u_c%u_%u (raw 0x%x): %" PRIu64 " occurrence(s)%s\n", op0, op1, crn, crm, op2, hit.encoding,
-                   hit.count, known_sysreg(hit.encoding) ? "" : "  <-- UNEXPECTED");
+            printf("  s%u_%u_c%u_c%u_%u (raw 0x%x): %" PRIu64 " occurrence(s)%s\n", op0, op1, crn, crm, op2, hit.encoding, hit.count,
+                   known_sysreg(hit.encoding) ? "" : "  <-- UNEXPECTED");
         }
-        printf("[audit] hlt instructions: %" PRIu64 " (nonzero-imm: %" PRIu64 ", vixl indirect calls would use these)\n",
-               hlt_count, hlt_nonzero_imm);
+        printf("[audit] hlt instructions: %" PRIu64 " (nonzero-imm: %" PRIu64 ", vixl indirect calls would use these)\n", hlt_count,
+               hlt_nonzero_imm);
         printf("[audit] verdict: %s\n", unexpected ? "UNEXPECTED host-state reads found" : "clean");
     }
 
@@ -1027,11 +1030,9 @@ namespace
     // Same-VA sanity gate: hand-assembled ARM64 at its host VA, before any FEXCore involvement.
     void run_sanity_blob(vcpu_context& vc, vm_mapper& mapper)
     {
-        auto* code =
-            static_cast<uint32_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        auto* code = static_cast<uint32_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
         CHECK_TRUE(code != MAP_FAILED);
-        auto* data =
-            static_cast<uint64_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        auto* data = static_cast<uint64_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
         CHECK_TRUE(data != MAP_FAILED);
 
         code[0] = 0xF9000020; // str x0, [x1]
@@ -1107,15 +1108,13 @@ int main(int argc, char** argv)
     CHECK_TRUE(context->InitCore());
 
     const auto& dispatcher_config = signal_delegator->GetConfig();
-    printf("[hvf-spike] dispatcher: begin=0x%llx end=0x%llx\n",
-           static_cast<unsigned long long>(dispatcher_config.DispatcherBegin),
+    printf("[hvf-spike] dispatcher: begin=0x%llx end=0x%llx\n", static_cast<unsigned long long>(dispatcher_config.DispatcherBegin),
            static_cast<unsigned long long>(dispatcher_config.DispatcherEnd));
 
     // Guest program + stack.
     x86_program program;
     program.build();
-    auto* program_page =
-        static_cast<uint8_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    auto* program_page = static_cast<uint8_t*>(::mmap(nullptr, host_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     CHECK_TRUE(program_page != MAP_FAILED);
     memcpy(program_page, program.bytes.data(), program.bytes.size());
     const auto program_base = reinterpret_cast<uint64_t>(program_page);
@@ -1150,8 +1149,7 @@ int main(int argc, char** argv)
     // Call-ret stack: embedder glue FEXCore expects (mirrors fex_vcpu::ensure_callret_stack).
     {
         constexpr size_t callret_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
-        void* callret = FEXCore::Allocator::mmap(nullptr, callret_size + 2 * host_page, PROT_NONE,
-                                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        void* callret = FEXCore::Allocator::mmap(nullptr, callret_size + 2 * host_page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         CHECK_TRUE(callret != MAP_FAILED);
         auto* callret_base = static_cast<uint8_t*>(callret) + host_page;
         // The spike arena hands out already-RW memory in HVF mode; mprotect still validates the range.
@@ -1341,10 +1339,8 @@ int main(int argc, char** argv)
             CHECK_HV(hv_vcpu_set_reg(vc.vcpu, HV_REG_X1, gprs[1]));
             if (slot.needs_fp)
             {
-                CHECK_HV(hv_vcpu_set_simd_fp_reg(vc.vcpu, HV_SIMD_FP_REG_Q0,
-                                                 *reinterpret_cast<hv_simd_fp_uchar16_t*>(&vecs[0])));
-                CHECK_HV(hv_vcpu_set_simd_fp_reg(vc.vcpu, HV_SIMD_FP_REG_Q1,
-                                                 *reinterpret_cast<hv_simd_fp_uchar16_t*>(&vecs[16])));
+                CHECK_HV(hv_vcpu_set_simd_fp_reg(vc.vcpu, HV_SIMD_FP_REG_Q0, *reinterpret_cast<hv_simd_fp_uchar16_t*>(&vecs[0])));
+                CHECK_HV(hv_vcpu_set_simd_fp_reg(vc.vcpu, HV_SIMD_FP_REG_Q1, *reinterpret_cast<hv_simd_fp_uchar16_t*>(&vecs[16])));
             }
 
             if (id == syscall_slot_index && g_run.stop_requested && !stop_armed)
@@ -1367,8 +1363,7 @@ int main(int argc, char** argv)
             }
             fprintf(stderr, "[hvf-spike] unexpected stage-2 %s abort: VA=0x%llx IPA=0x%llx (mapped VA for that IPA: 0x%llx)\n",
                     ec == 0x24 ? "data" : "instruction", static_cast<unsigned long long>(fault_va),
-                    static_cast<unsigned long long>(fault_ipa),
-                    static_cast<unsigned long long>(mapper.va_of_ipa(fault_ipa)));
+                    static_cast<unsigned long long>(fault_ipa), static_cast<unsigned long long>(mapper.va_of_ipa(fault_ipa)));
             dump_guest_state(vc);
             return 1;
         }
@@ -1390,8 +1385,7 @@ int main(int argc, char** argv)
     // Results.
     // ------------------------------------------------------------------------------------------
     printf("\n================= hvf-spike results =================\n");
-    printf("EnTSO readback after run: %llu (%s)\n", static_cast<unsigned long long>((actlr_final >> 1) & 1),
-           entso_final ? "OK" : "LOST");
+    printf("EnTSO readback after run: %llu (%s)\n", static_cast<unsigned long long>((actlr_final >> 1) & 1), entso_final ? "OK" : "LOST");
 
     const double expected_sin = std::sin(0.5);
     const double got_sin = *g_run.fsin_result;
@@ -1405,15 +1399,19 @@ int main(int argc, char** argv)
     const uint64_t rtt_exits = g_run.marker_exits[5] - g_run.marker_exits[3];
     const uint64_t tight_ns = g_run.marker_time[3] - g_run.marker_time[2];
     const uint64_t rtt_ns = g_run.marker_time[5] - g_run.marker_time[4];
-    printf("block-linking phase (%u two-block iterations): %" PRIu64 " exits total -> %s\n", x86_program::ping_iters,
-           ping_exits, ping_exits < 16 ? "linking effective (near-zero steady-state exits)" : "LINKING NOT EFFECTIVE");
-    printf("tight loop (%u iterations): %" PRIu64 " exits, %.1f ms (%.2f ns/iter) -> %s\n", x86_program::tight_iters,
-           tight_exits, tight_ns / 1e6, static_cast<double>(tight_ns) / x86_program::tight_iters,
+    printf("block-linking phase (%u two-block iterations): %" PRIu64 " exits total -> %s\n", x86_program::ping_iters, ping_exits,
+           ping_exits < 16 ? "linking effective (near-zero steady-state exits)" : "LINKING NOT EFFECTIVE");
+    printf("tight loop (%u iterations): %" PRIu64 " exits, %.1f ms (%.2f ns/iter) -> %s\n", x86_program::tight_iters, tight_exits,
+           tight_ns / 1e6, static_cast<double>(tight_ns) / x86_program::tight_iters,
            tight_exits < 8 ? "~zero steady-state exit rate" : "UNEXPECTED EXITS");
     printf("syscall hypercall round trip: %" PRIu64 " syscalls (%" PRIu64 " exits) in %.1f ms -> %.0f ns each "
            "(standalone hvc baseline ~720)\n",
-           static_cast<uint64_t>(x86_program::rtt_iters), rtt_exits, rtt_ns / 1e6,
-           static_cast<double>(rtt_ns) / x86_program::rtt_iters);
+           static_cast<uint64_t>(x86_program::rtt_iters), rtt_exits, rtt_ns / 1e6, static_cast<double>(rtt_ns) / x86_program::rtt_iters);
+    const uint64_t x87_exits = g_run.marker_exits[6] - g_run.marker_exits[5];
+    const uint64_t x87_ns = g_run.marker_time[6] - g_run.marker_time[5];
+    printf("x87 fallback phase (%u fld/fsin/fstp iterations): %" PRIu64 " exits in %.1f ms -> %.0f ns per exit "
+           "(FP-class hypercall incl. q0-q7 transfer)\n",
+           x86_program::x87_iters, x87_exits, x87_ns / 1e6, static_cast<double>(x87_ns) / x87_exits);
     printf("total exits: %" PRIu64 " in %.1f ms\n", g_run.total_exits, (run_end - run_start) / 1e6);
 
     printf("\nper-callback exit counts (fallback counter harness):\n");
@@ -1425,8 +1423,7 @@ int main(int argc, char** argv)
         }
     }
 
-    printf("\nfinal guest state: rip=0x%llx (stop protocol: %s)\n",
-           static_cast<unsigned long long>(thread->CurrentFrame->State.rip),
+    printf("\nfinal guest state: rip=0x%llx (stop protocol: %s)\n", static_cast<unsigned long long>(thread->CurrentFrame->State.rip),
            done ? "clean ThreadStopHandler unwind through exit stub" : "did not complete");
 
     hv_vcpu_destroy(vc.vcpu);
