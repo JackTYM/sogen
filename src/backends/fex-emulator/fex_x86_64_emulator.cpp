@@ -1533,6 +1533,20 @@ namespace sogen::fex
 
             this->initialize_context();
 
+#ifdef __APPLE__
+            if (g_hvf != nullptr)
+            {
+                const auto max_vcpus = g_hvf->max_vcpu_count();
+                if (vcpu_count > max_vcpus)
+                {
+                    char buf[160];
+                    snprintf(buf, sizeof(buf), "EMULATOR_FEX_HVF=1 supports at most %u vCPUs on this machine (%zu requested)", max_vcpus,
+                             vcpu_count);
+                    throw std::runtime_error(buf);
+                }
+            }
+#endif
+
             this->vcpus_.reserve(vcpu_count);
             for (size_t i = 0; i < vcpu_count; ++i)
             {

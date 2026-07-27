@@ -3,6 +3,7 @@
 #ifdef __APPLE__
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 #include <Hypervisor/Hypervisor.h>
@@ -45,6 +46,11 @@ namespace sogen::fex::hvf
         // Forces a running hv_vcpu_run to return; callable from any thread.
         void kick();
 
+        // kick() plus a latch the run loop consumes before re-entering hv_vcpu_run, closing the
+        // window where the loop has already sampled the stage-1 generation but has not yet entered
+        // the guest - in that window a bare kick has nothing to cancel and would be lost.
+        void kick_for_stage1_invalidation();
+
         uint64_t get_gpr(unsigned index) const;
         void set_gpr(unsigned index, uint64_t value);
         uint64_t get_pc() const;
@@ -69,6 +75,7 @@ namespace sogen::fex::hvf
         hv_vcpu_t vcpu_ = 0;
         hv_vcpu_exit_t* exit_ = nullptr;
         uint64_t seen_stage1_generation_ = 0;
+        std::atomic<bool> stage1_invalidation_pending_{false};
 
         // EMULATOR_FEX_HVF_STATS=<seconds>: periodic VM-exit rate report on stderr.
         bool stats_enabled_ = false;

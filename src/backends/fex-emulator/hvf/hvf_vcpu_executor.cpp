@@ -121,15 +121,24 @@ namespace sogen::fex::hvf
                 this->stats_interval_ns_ = static_cast<uint64_t>(interval * 1e9);
             }
         }
+
+        this->vm_.register_vcpu(*this);
     }
 
     hvf_vcpu_executor::~hvf_vcpu_executor()
     {
+        this->vm_.unregister_vcpu(*this);
         hv_vcpu_destroy(this->vcpu_);
     }
 
     void hvf_vcpu_executor::kick()
     {
+        hv_vcpus_exit(&this->vcpu_, 1);
+    }
+
+    void hvf_vcpu_executor::kick_for_stage1_invalidation()
+    {
+        this->stage1_invalidation_pending_.store(true, std::memory_order_release);
         hv_vcpus_exit(&this->vcpu_, 1);
     }
 
@@ -277,8 +286,8 @@ namespace sogen::fex::hvf
             hvf_callback_slot slot{};
             const char* name = "?";
             Dl_info info{};
-            if (this->vm_.lookup_callback(static_cast<uint16_t>(id), slot) &&
-                dladdr(reinterpret_cast<void*>(slot.original), &info) != 0 && info.dli_sname != nullptr)
+            if (this->vm_.lookup_callback(static_cast<uint16_t>(id), slot) && dladdr(reinterpret_cast<void*>(slot.original), &info) != 0 &&
+                info.dli_sname != nullptr)
             {
                 name = info.dli_sname;
             }
@@ -368,6 +377,10 @@ namespace sogen::fex::hvf
         for (;;)
         {
             this->flush_stage1_tlb_if_stale();
+            if (this->stage1_invalidation_pending_.exchange(false, std::memory_order_acquire))
+            {
+                continue;
+            }
             if (this->stats_enabled_)
             {
                 this->maybe_report_stats();
