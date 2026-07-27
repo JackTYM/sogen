@@ -17,12 +17,14 @@ SET EMU_SYSDIR_WOW64=%EMU_WINDIR%\syswow64
 SET EMU_CURSORDIR=%EMU_WINDIR%\cursors
 SET EMU_REGDIR=%EMU_ROOT%\registry
 SET EMU_STEAMDIR=%EMU_FILESYS%\c\steam
+SET EMU_GLOBALIZATION_SORTING=%EMU_WINDIR%\globalization\sorting
 
 MKDIR %EMU_SYSDIR%
 MKDIR %EMU_SYSDIR_WOW64%
 MKDIR %EMU_CURSORDIR%
 MKDIR %EMU_REGDIR%
 MKDIR %EMU_STEAMDIR%
+MKDIR %EMU_GLOBALIZATION_SORTING%
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
 
@@ -183,6 +185,7 @@ CALL :collect c_850.nls
 CALL :collect wdmaud.drv
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
+CALL :collect_file "%WINDIR%\Globalization\Sorting", SortDefault.nls, %EMU_GLOBALIZATION_SORTING%
 
 EXIT /B 0
 
