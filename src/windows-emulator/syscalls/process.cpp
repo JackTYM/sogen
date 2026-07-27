@@ -424,14 +424,10 @@ namespace sogen
                 || info_class == ProcessQuotaLimits                          //
                 || info_class == ProcessPriorityClass                        //
                 || info_class == ProcessAffinityMask                         //
-                || info_class == ProcessTelemetryCoverage)
+                || info_class == ProcessTelemetryCoverage                    //
+                || info_class == ProcessExecuteFlags)
             {
                 return STATUS_SUCCESS;
-            }
-
-            if (info_class == ProcessExecuteFlags)
-            {
-                return STATUS_NOT_SUPPORTED;
             }
 
             if (info_class == ProcessTlsInformation)
