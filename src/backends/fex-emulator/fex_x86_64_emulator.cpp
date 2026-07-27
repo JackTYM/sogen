@@ -2465,19 +2465,14 @@ namespace sogen::fex
             }
 #endif
 
-            ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
 #ifdef __APPLE__
+            ::mprotect(reinterpret_cast<void*>(host_address), size, to_host_prot_hvf(to_prot(permissions)));
             if (g_hvf != nullptr)
             {
-                // Deliberately NOT mapped into the VM. The only caller is the GPU bridge, aliasing
-                // driver-owned buffers whose frames SPTM may track as XNU_IO/XNU_PROTECTED_IO -
-                // types whose insertion into a guest stage-2 table panics the machine outright
-                // (see to_host_prot_hvf), so there is no failure this could catch and recover from.
-                // GPU-alias plumbing is Phase 4 scope; until then the range stays unreachable from
-                // the vCPU and faults there like any other unmapped guest address.
-                fprintf(stderr, "[FEX backend] HVF: host-memory alias at 0x%llx stays unmapped inside the vCPU\n",
-                        static_cast<unsigned long long>(host_address));
+                g_hvf->map(host_address, size, to_prot_apple(permissions));
             }
+#else
+            ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
 #endif
             this->erase_region_range(address, size);
             this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
