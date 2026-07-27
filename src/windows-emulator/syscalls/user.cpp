@@ -2295,7 +2295,7 @@ namespace sogen
 
         NTSTATUS handle_NtUserFindExistingCursorIcon()
         {
-            return STATUS_NOT_SUPPORTED;
+            return 0;
         }
 
         BOOL handle_NtUserDestroyCursor(const syscall_context&, const hicon icon, const DWORD /*flags*/)
@@ -2674,12 +2674,12 @@ namespace sogen
 
         NTSTATUS handle_NtUserSetWindowsHookEx()
         {
-            return STATUS_NOT_SUPPORTED;
+            return 0;
         }
 
         NTSTATUS handle_NtUserUnhookWindowsHookEx()
         {
-            return STATUS_NOT_SUPPORTED;
+            return 0;
         }
 
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, const DWORD ex_style, const emulator_object<LARGE_STRING> class_name,
