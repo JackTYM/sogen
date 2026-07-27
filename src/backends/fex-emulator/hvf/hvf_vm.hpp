@@ -114,6 +114,13 @@ namespace sogen::fex::hvf
 
         mutable std::mutex lock_;
 
+        // callbacks_ is disjoint from every piece of state lock_ protects (pages_, the stage-1
+        // tables, vcpus_) and is looked up on every guest hypercall dispatch (100k+/s per vCPU).
+        // Sharing lock_ would serialize that hot path behind map()/unmap()/protect(), which hold
+        // lock_ across a real hv_vm_map/hv_vm_protect syscall - occasional but, per profiling
+        // (request_thread_stop()'s InterruptFaultPage toggle), not cheap.
+        mutable std::mutex callbacks_mutex_;
+
         bool created_ = false;
         bool active_ = false;
         vm_create_result create_result_ = vm_create_result::unavailable;

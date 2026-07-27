@@ -449,7 +449,7 @@ namespace sogen::fex::hvf
 
     uint64_t hvf_vm::register_callback(const uint64_t original, const bool needs_fp)
     {
-        const std::lock_guard guard(this->lock_);
+        const std::lock_guard guard(this->callbacks_mutex_);
 
         for (size_t i = 0; i < this->callbacks_.size(); ++i)
         {
@@ -470,7 +470,7 @@ namespace sogen::fex::hvf
 
     bool hvf_vm::lookup_callback(const uint16_t id, hvf_callback_slot& out) const
     {
-        const std::lock_guard guard(this->lock_);
+        const std::lock_guard guard(this->callbacks_mutex_);
         if (id >= this->callbacks_.size())
         {
             return false;
