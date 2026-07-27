@@ -2674,12 +2674,12 @@ namespace sogen
 
         NTSTATUS handle_NtUserSetWindowsHookEx()
         {
-            return 0;
+            return static_cast<NTSTATUS>(make_pseudo_handle(0x200, handle_types::reserved).bits);
         }
 
         NTSTATUS handle_NtUserUnhookWindowsHookEx()
         {
-            return 0;
+            return TRUE;
         }
 
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, const DWORD ex_style, const emulator_object<LARGE_STRING> class_name,
