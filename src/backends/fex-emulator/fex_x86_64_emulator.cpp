@@ -65,11 +65,13 @@
 #include <mach-o/loader.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cerrno>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -821,10 +823,48 @@ namespace sogen::fex
             }
         }
 
-        // Guest-executed JIT output dereferences pointers into libFEXCore's data segments
-        // (NamedVectorConstants, indexed LUTs - CPUBackend.cpp), so every non-pagezero segment of
-        // the image must be visible inside the VM at its host VA.
-        void hvf_map_fexcore_image()
+        // Apple Silicon's SPTM tracks a type for every physical frame and refuses - with a
+        // whole-machine panic (VIOLATION_ILLEGAL_MAPPING_TYPE), not a returnable error - to insert
+        // a frame typed XNU_USER_EXEC or XNU_USER_DEBUG into a guest stage-2 page table. Those are
+        // exactly the types a frame acquires while it is mapped executable in this process, so no
+        // host mapping that is PROT_EXEC may be handed to hv_vm_map, whatever permissions the
+        // stage-2 entry itself asks for. The insertion is lazy - it happens when
+        // the guest first touches the page from inside hv_vcpu_run, not at hv_vm_map time - which
+        // is why an offending mapping only panics on the runs that actually reach that page.
+        int to_host_prot_hvf(const int prot)
+        {
+            return g_hvf != nullptr ? (prot & ~PROT_EXEC) : prot;
+        }
+
+        // libFEXCore's own image therefore cannot be mapped into the VM: its __TEXT is live,
+        // code-signed, executing host code. Guest-executed JIT output does dereference pointers
+        // into the image (the NamedVectorConstants and indexed LUT tables in CPUBackend.cpp, which
+        // Apple's linker places in __TEXT,__const and __DATA_CONST,__const), so publish an
+        // anonymous snapshot of the image at the same relative layout instead and rebase those
+        // JITPointers slots onto it (hvf_shim_thread_pointers). Only immutable constant tables are
+        // ever read through those slots, so a snapshot is equivalent to the live image; a pointer
+        // into the image that this misses lands outside the mirror and faults inside the vCPU
+        // rather than reading stale data.
+        struct fexcore_image_mirror
+        {
+            uint64_t image_base = 0;
+            uint64_t image_size = 0;
+            uint64_t mirror_base = 0;
+
+            bool contains(const uint64_t address) const
+            {
+                return this->image_size != 0 && address >= this->image_base && address < this->image_base + this->image_size;
+            }
+
+            uint64_t rebase(const uint64_t address) const
+            {
+                return this->mirror_base + (address - this->image_base);
+            }
+        };
+
+        fexcore_image_mirror g_fexcore_mirror{};
+
+        void hvf_publish_fexcore_constants()
         {
             Dl_info info{};
             if (dladdr(reinterpret_cast<void*>(&FEXCore::Config::Initialize), &info) == 0)
@@ -843,21 +883,55 @@ namespace sogen::fex
                 }
             }
 
-            const auto* cmd = reinterpret_cast<const load_command*>(header + 1);
-            for (uint32_t i = 0; i < header->ncmds; ++i)
-            {
-                if (cmd->cmd == LC_SEGMENT_64)
+            const auto for_each_segment = [header, slide](auto&& callback) {
+                const auto* cmd = reinterpret_cast<const load_command*>(header + 1);
+                for (uint32_t i = 0; i < header->ncmds; ++i)
                 {
-                    const auto* seg = reinterpret_cast<const segment_command_64*>(cmd);
-                    if (strcmp(seg->segname, SEG_PAGEZERO) != 0 && seg->vmsize != 0)
+                    if (cmd->cmd == LC_SEGMENT_64)
                     {
-                        const auto va = static_cast<uint64_t>(seg->vmaddr) + static_cast<uint64_t>(slide);
-                        const bool writable = (seg->initprot & VM_PROT_WRITE) != 0;
-                        g_hvf->map(va, seg->vmsize, writable ? (PROT_READ | PROT_WRITE) : PROT_READ);
+                        const auto* seg = reinterpret_cast<const segment_command_64*>(cmd);
+                        if (strcmp(seg->segname, SEG_PAGEZERO) != 0 && seg->vmsize != 0)
+                        {
+                            callback(*seg, static_cast<uint64_t>(seg->vmaddr) + static_cast<uint64_t>(slide));
+                        }
                     }
+                    cmd = reinterpret_cast<const load_command*>(reinterpret_cast<const uint8_t*>(cmd) + cmd->cmdsize);
                 }
-                cmd = reinterpret_cast<const load_command*>(reinterpret_cast<const uint8_t*>(cmd) + cmd->cmdsize);
+            };
+
+            uint64_t lowest = std::numeric_limits<uint64_t>::max();
+            uint64_t highest = 0;
+            for_each_segment([&lowest, &highest](const segment_command_64& seg, const uint64_t va) {
+                lowest = std::min(lowest, va);
+                highest = std::max(highest, va + seg.vmsize);
+            });
+
+            if (highest <= lowest)
+            {
+                throw std::runtime_error("HVF: the FEXCore image has no mappable segments");
             }
+
+            const size_t size = highest - lowest;
+            void* mirror = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (mirror == MAP_FAILED)
+            {
+                throw std::runtime_error("HVF: failed to allocate the FEXCore constant mirror");
+            }
+
+            // filesize, not vmsize: the tail of a segment beyond its file content is bss the loader
+            // zero-filled, which a fresh anonymous mapping already matches.
+            for_each_segment([mirror, lowest](const segment_command_64& seg, const uint64_t va) {
+                std::memcpy(static_cast<uint8_t*>(mirror) + (va - lowest), reinterpret_cast<const void*>(va), seg.filesize);
+            });
+
+            if (::mprotect(mirror, size, PROT_READ) != 0)
+            {
+                throw std::runtime_error("HVF: failed to seal the FEXCore constant mirror");
+            }
+
+            g_fexcore_mirror =
+                fexcore_image_mirror{.image_base = lowest, .image_size = size, .mirror_base = reinterpret_cast<uint64_t>(mirror)};
+            g_hvf->map(g_fexcore_mirror.mirror_base, size, PROT_READ);
         }
 
         // ===========================================================================================
@@ -2395,18 +2469,14 @@ namespace sogen::fex
 #ifdef __APPLE__
             if (g_hvf != nullptr)
             {
-                // GPU-alias plumbing is Phase 4 scope; hv_vm_map can legitimately refuse exotic
-                // backings (remap aliases of driver memory), so a failure here must not take down
-                // an otherwise-working run - the range simply stays unreachable from the vCPU.
-                try
-                {
-                    g_hvf->map(host_address, size, to_prot(permissions));
-                }
-                catch (const std::exception& e)
-                {
-                    fprintf(stderr, "[FEX backend] HVF: failed to map host-memory alias at 0x%llx: %s\n",
-                            static_cast<unsigned long long>(host_address), e.what());
-                }
+                // Deliberately NOT mapped into the VM. The only caller is the GPU bridge, aliasing
+                // driver-owned buffers whose frames SPTM may track as XNU_IO/XNU_PROTECTED_IO -
+                // types whose insertion into a guest stage-2 table panics the machine outright
+                // (see to_host_prot_hvf), so there is no failure this could catch and recover from.
+                // GPU-alias plumbing is Phase 4 scope; until then the range stays unreachable from
+                // the vCPU and faults there like any other unmapped guest address.
+                fprintf(stderr, "[FEX backend] HVF: host-memory alias at 0x%llx stays unmapped inside the vCPU\n",
+                        static_cast<unsigned long long>(host_address));
             }
 #endif
             this->erase_region_range(address, size);
@@ -2770,7 +2840,7 @@ namespace sogen::fex
                     throw host_memory_collision{};
                 }
                 ::munmap(host_ptr, host_page_size_apple);
-                void* result = ::mmap(host_ptr, host_page_size_apple, to_prot_apple(effective),
+                void* result = ::mmap(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective)),
                                       MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                 if (result == MAP_FAILED || result != host_ptr)
                 {
@@ -2784,7 +2854,7 @@ namespace sogen::fex
                 return;
             }
 
-            if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
+            if (::mprotect(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective))) != 0)
             {
                 throw std::runtime_error("FEX backend failed to change memory protection");
             }
@@ -2824,7 +2894,7 @@ namespace sogen::fex
                 g_hvf = &vm;
                 fex_internal_arena::instance().enable_hvf_mode();
                 FEXCore::Allocator::PagesReplaced = &hvf_pages_replaced_hook;
-                hvf_map_fexcore_image();
+                hvf_publish_fexcore_constants();
             }
 
             fex_internal_arena::instance().install();
@@ -4336,6 +4406,24 @@ namespace sogen::fex
         for (size_t i = 0; i < FEXCore::Core::OPINDEX_MAX; ++i)
         {
             shim(pointers.FallbackHandlerPointers[i].Func, true);
+        }
+
+        // These two are the only slots the guest dereferences rather than calls; every host
+        // function above stays at its real address because the host, not the guest, runs it.
+        const auto rebase_constant = [](uint64_t& slot) {
+            if (g_fexcore_mirror.contains(slot))
+            {
+                slot = g_fexcore_mirror.rebase(slot);
+            }
+        };
+
+        for (auto& slot : pointers.NamedVectorConstantPointers)
+        {
+            rebase_constant(slot);
+        }
+        for (auto& slot : pointers.IndexedNamedVectorConstantPointers)
+        {
+            rebase_constant(slot);
         }
     }
 
