@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <set>
@@ -44,6 +46,32 @@ namespace sogen
         std::string import_module{};
     };
 
+    struct input_action
+    {
+        enum class kind
+        {
+            wait,
+            mouse_move,
+            button_down,
+            button_up,
+            key_down,
+            key_up,
+            send_text,
+        };
+
+        kind type{};
+        uint32_t delay_ms{};
+        float x{};
+        float y{};
+        bool normalized{};
+        uint16_t vk{};
+        uint8_t scan{};
+        bool extended{};
+        std::string text{};
+    };
+
+    std::vector<input_action> parse_input_script(std::string_view script);
+
     struct analysis_context
     {
         const analysis_settings* settings{};
@@ -65,6 +93,11 @@ namespace sogen
 
         std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
         std::set<uint64_t> clicked_dialogs{};
+
+        std::vector<input_action> input_script{};
+        size_t input_script_pos{};
+        std::optional<std::chrono::steady_clock::time_point> input_script_deadline{};
+        uint64_t input_target_window{};
 
         mutable std::pair<uint64_t, uint64_t> mapping_violation{0, 0};
         mutable uint64_t next_event_sequence{1};

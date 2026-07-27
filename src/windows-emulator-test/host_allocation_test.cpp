@@ -36,9 +36,10 @@ namespace sogen::test
             std::vector<host_reserved_range> claimed_ranges{};
             std::vector<host_reserved_range> released_ranges{};
 
-            void reserve_guest_address_range(const uint64_t address, const size_t size) override
+            bool reserve_guest_address_range(const uint64_t address, const size_t size) override
             {
                 this->claimed_ranges.push_back({.address = address, .size = size});
+                return true;
             }
 
             void release_guest_address_range(const uint64_t address, const size_t size) override

@@ -3,6 +3,8 @@
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
 
+#include <utils/string.hpp>
+
 namespace sogen
 {
 
@@ -69,12 +71,14 @@ namespace sogen
             }
 
             uint64_t section_backing_address = 0;
+            uint32_t section_mapped_views = 0;
             if (value.type == handle_types::section)
             {
                 auto* section = c.proc.sections.get(h);
                 if (section && section->ref_count == 1)
                 {
                     section_backing_address = section->backing_address;
+                    section_mapped_views = section->mapped_view_count;
                 }
             }
 
@@ -83,7 +87,29 @@ namespace sogen
             {
                 if (section_backing_address != 0)
                 {
-                    c.win_emu.memory.release_memory(section_backing_address, 0);
+                    // Mapped views keep section memory alive past the last handle close on real Windows,
+                    // so defer the release until every view is unmapped.
+                    if (section_mapped_views == 0)
+                    {
+                        c.win_emu.memory.release_memory(section_backing_address, 0);
+
+                        if (c.win_emu.callbacks.on_generic_activity)
+                        {
+                            c.win_emu.callbacks.on_generic_activity(
+                                utils::string::va("Pagefile backing released on section close: base=0x%" PRIx64, section_backing_address));
+                        }
+                    }
+                    else
+                    {
+                        c.proc.orphaned_section_backings[section_backing_address] = section_mapped_views;
+
+                        if (c.win_emu.callbacks.on_generic_activity)
+                        {
+                            c.win_emu.callbacks.on_generic_activity(
+                                utils::string::va("Pagefile backing orphaned on section close: base=0x%" PRIx64 " views=%u",
+                                                  section_backing_address, section_mapped_views));
+                        }
+                    }
                 }
                 return STATUS_SUCCESS;
             }

@@ -447,6 +447,10 @@ namespace sogen
         uint64_t dbwin_buffer{0};
         uint64_t dbwin_buffer_size{0};
 
+        // Pagefile-section backings whose last handle was closed while views were still mapped
+        // (backing address -> outstanding view count). Released once the view count drains to zero.
+        std::map<uint64_t, uint32_t> orphaned_section_backings{};
+
         std::optional<NTSTATUS> exit_status{};
 
         emulator_allocator base_allocator;
@@ -591,6 +595,7 @@ namespace sogen
 
         std::vector<audio_render_stream> audio_render_streams{};
         std::vector<handle> audio_render_events{};
+        uint64_t next_audio_tick_ns{}; // steady-clock ns; throttles the tick to real time instead of switch count
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx

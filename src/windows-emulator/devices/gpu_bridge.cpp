@@ -3,7 +3,12 @@
 #include "vulkan_host.hpp"
 #include "../windows_emulator.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <algorithm>
+
 #include <gpu_bridge_protocol.hpp>
+#include <utils/string.hpp>
 
 namespace sogen
 {
@@ -248,9 +253,19 @@ namespace sogen
                 uint64_t size{};
                 uint64_t device{};
                 void* host_ptr{};
+                bool is_host_coherent{};
             };
 
             std::unordered_map<uint64_t, direct_mapping> direct_mappings_{};
+
+            static void log_alias_lifecycle(windows_emulator& win_emu, const char* action, const direct_mapping& mapping)
+            {
+                if (win_emu.callbacks.on_generic_activity)
+                {
+                    win_emu.callbacks.on_generic_activity(utils::string::va("GPU memory alias %s: base=0x%" PRIx64 " size=0x%" PRIx64,
+                                                                            action, mapping.guest_address, mapping.size));
+                }
+            }
 
             // Before the host GPU reads guest-produced data, make the guest's writes to every directly-aliased
             // buffer visible. On backends that alias host memory non-coherently (KVM: guest writes are
@@ -263,11 +278,36 @@ namespace sogen
                     return;
                 }
 
+                const bool time_flush = std::getenv("EMULATOR_FEX_FLUSH_TIMING") != nullptr;
+                const auto flush_start = time_flush ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
                 for (const auto& [id, mapping] : this->direct_mappings_)
                 {
-                    if (mapping.host_ptr != nullptr && mapping.size != 0)
+                    // A memory type that reports HOST_COHERENT is a Vulkan-spec guarantee from the
+                    // driver itself that CPU writes are visible to the GPU without an explicit flush -
+                    // independent of whatever the backend's own (unverifiable) coherence assumption is.
+                    if (mapping.host_ptr != nullptr && mapping.size != 0 && !mapping.is_host_coherent)
                     {
                         win_emu.memory.flush_host_memory_cache(mapping.host_ptr, static_cast<size_t>(mapping.size));
+                    }
+                }
+
+                if (time_flush)
+                {
+                    static uint64_t flush_us_accum = 0;
+                    static auto flush_window_start = std::chrono::steady_clock::now();
+
+                    const auto flush_end = std::chrono::steady_clock::now();
+                    flush_us_accum +=
+                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(flush_end - flush_start).count());
+
+                    const std::chrono::duration<double> flush_elapsed = flush_end - flush_window_start;
+                    if (flush_elapsed.count() >= 1.0)
+                    {
+                        fprintf(stderr, "GPU flush: %llu us/s (%.1f%% of wall time)\n", static_cast<unsigned long long>(flush_us_accum),
+                                100.0 * (static_cast<double>(flush_us_accum) / 1e6) / flush_elapsed.count());
+                        flush_us_accum = 0;
+                        flush_window_start = flush_end;
                     }
                 }
             }
@@ -402,6 +442,7 @@ namespace sogen
                 // aliases first to prevent stale mappings to freed host pages.
                 for (auto it = this->direct_mappings_.begin(); it != this->direct_mappings_.end();)
                 {
+                    log_alias_lifecycle(win_emu, "released on instance destroy", it->second);
                     win_emu.memory.release_memory(it->second.guest_address, static_cast<size_t>(it->second.size));
                     this->vulkan_.unmap_memory(it->second.device, it->first);
                     it = this->direct_mappings_.erase(it);
@@ -748,6 +789,7 @@ namespace sogen
                         continue;
                     }
 
+                    log_alias_lifecycle(win_emu, "released on device destroy", it->second);
                     win_emu.memory.release_memory(it->second.guest_address, static_cast<size_t>(it->second.size));
                     this->vulkan_.unmap_memory(it->second.device, it->first);
                     it = this->direct_mappings_.erase(it);
@@ -1241,6 +1283,7 @@ namespace sogen
                 // dereference (e.g. while DXVK frees buffers during shutdown).
                 if (const auto it = this->direct_mappings_.find(request.memory); it != this->direct_mappings_.end())
                 {
+                    log_alias_lifecycle(win_emu, "released on free", it->second);
                     win_emu.memory.release_memory(it->second.guest_address, static_cast<size_t>(it->second.size));
                     this->vulkan_.unmap_memory(it->second.device, request.memory);
                     this->direct_mappings_.erase(it);
@@ -1416,15 +1459,21 @@ namespace sogen
 
                 const uint64_t mapped_size = (host_size + page - 1) & ~(page - 1);
                 const uint64_t va = win_emu.memory.find_free_allocation_base(static_cast<size_t>(mapped_size));
-                if (va == 0 ||
-                    !win_emu.memory.allocate_host_memory(va, static_cast<size_t>(mapped_size), host_ptr, memory_permission::read_write))
+                const bool alloc_ok = va != 0 && win_emu.memory.allocate_host_memory(va, static_cast<size_t>(mapped_size), host_ptr,
+                                                                                     memory_permission::read_write);
+                if (!alloc_ok)
                 {
                     this->vulkan_.unmap_memory(request.device, request.memory);
                     return write_output(win_emu, context, response);
                 }
 
                 this->direct_mappings_[request.memory] =
-                    direct_mapping{.guest_address = va, .size = mapped_size, .device = request.device, .host_ptr = host_ptr};
+                    direct_mapping{.guest_address = va,
+                                   .size = mapped_size,
+                                   .device = request.device,
+                                   .host_ptr = host_ptr,
+                                   .is_host_coherent = this->vulkan_.is_memory_host_coherent(request.memory)};
+                log_alias_lifecycle(win_emu, "mapped", this->direct_mappings_[request.memory]);
                 response.guest_address = (request.offset < mapped_size) ? (va + request.offset) : 0;
                 return write_output(win_emu, context, response);
             }
@@ -1440,6 +1489,7 @@ namespace sogen
                 const auto it = this->direct_mappings_.find(request.memory);
                 if (it != this->direct_mappings_.end())
                 {
+                    log_alias_lifecycle(win_emu, "released on unmap", it->second);
                     win_emu.memory.release_memory(it->second.guest_address, static_cast<size_t>(it->second.size));
                     this->vulkan_.unmap_memory(it->second.device, request.memory);
                     this->direct_mappings_.erase(it);
@@ -1492,10 +1542,18 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                // TEMPDIAG EXPERIMENT: force MSAA image creation down to 1 sample, to test whether the
+                // corruption is caused by blending into a genuinely multisampled render target (as opposed
+                // to the resolve/presenter stage, which has already been ruled out).
+                uint32_t samples = request.samples;
+                if (std::getenv("SOGEN_DEBUG_NO_MSAA") && samples > 1)
+                {
+                    samples = 1;
+                }
                 uint64_t image = gpu_bridge::null_object;
-                const int32_t result = this->vulkan_.create_image(
-                    request.device, request.format, request.width, request.height, request.usage, request.tiling, request.samples,
-                    request.image_type, request.depth, request.mip_levels, request.array_layers, request.flags, image);
+                const int32_t result = this->vulkan_.create_image(request.device, request.format, request.width, request.height,
+                                                                  request.usage, request.tiling, samples, request.image_type, request.depth,
+                                                                  request.mip_levels, request.array_layers, request.flags, image);
                 return write_output(win_emu, context,
                                     gpu_bridge::create_image_response{.vk_result = result, .reserved = 0, .image = image});
             }
@@ -1721,6 +1779,35 @@ namespace sogen
                     present_surface_if_ready(win_emu, hwnd_value, width, height, pixels);
                 }
 
+                if (std::getenv("EMULATOR_FPS_COUNTER"))
+                {
+                    static auto window_start = std::chrono::steady_clock::now();
+                    static auto last_frame = window_start;
+                    static std::vector<double> frame_times_ms;
+
+                    const auto now = std::chrono::steady_clock::now();
+                    frame_times_ms.push_back(std::chrono::duration<double, std::milli>(now - last_frame).count());
+                    last_frame = now;
+
+                    const std::chrono::duration<double> elapsed = now - window_start;
+                    if (elapsed.count() >= 1.0 && !frame_times_ms.empty())
+                    {
+                        auto sorted = frame_times_ms;
+                        std::sort(sorted.begin(), sorted.end());
+                        const auto percentile = [&](const double p) {
+                            const auto idx = std::min(sorted.size() - 1, static_cast<size_t>(p * static_cast<double>(sorted.size())));
+                            return sorted[idx];
+                        };
+
+                        fprintf(stderr, "GPU present: %.1f FPS (%zu frames / %.2fs) | frame time p50=%.2fms p95=%.2fms p99=%.2fms\n",
+                                static_cast<double>(sorted.size()) / elapsed.count(), sorted.size(), elapsed.count(), percentile(0.50),
+                                percentile(0.95), percentile(0.99));
+
+                        frame_times_ms.clear();
+                        window_start = now;
+                    }
+                }
+
                 return write_output(win_emu, context, gpu_bridge::result_response{.vk_result = result, .reserved = 0});
             }
 
@@ -1743,6 +1830,19 @@ namespace sogen
 
                 uint64_t module = gpu_bridge::null_object;
                 const int32_t result = this->vulkan_.create_shader_module(request.device, code.data(), code.size(), module);
+                if (result == 0 && !code.empty())
+                {
+                    char path[256];
+                    snprintf(path, sizeof(path),
+                             "/private/tmp/claude-501/-Users-jack-Documents-Coding-C---sogen/9696d14d-d600-4b90-a4b1-3ebb901f36cc/"
+                             "scratchpad/shaders/shader_0x%llx.spv",
+                             static_cast<unsigned long long>(module));
+                    if (FILE* f = fopen(path, "wb"))
+                    {
+                        fwrite(code.data(), 1, code.size(), f);
+                        fclose(f);
+                    }
+                }
                 return write_output(win_emu, context, gpu_bridge::object_response{.vk_result = result, .reserved = 0, .object = module});
             }
 
@@ -1765,10 +1865,18 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
                 uint64_t view = gpu_bridge::null_object;
-                const int32_t result = this->vulkan_.create_image_view(request.device, request.image, request.format, request.aspect_mask,
-                                                                       request.view_type, request.base_mip_level, request.level_count,
-                                                                       request.base_array_layer, request.layer_count, request.swizzle_r,
-                                                                       request.swizzle_g, request.swizzle_b, request.swizzle_a, view);
+                // TEMPDIAG EXPERIMENT: force identity swizzle for the suspected luminance-alpha glyph
+                // format (R8G8_UNORM, swizzle {R,R,R,G}) when SOGEN_DEBUG_NO_GLYPH_SWIZZLE is set, to test
+                // whether MoltenVK's swizzle handling is actually part of the text-rendering bug's causal chain.
+                uint32_t sw_r = request.swizzle_r, sw_g = request.swizzle_g, sw_b = request.swizzle_b, sw_a = request.swizzle_a;
+                if (std::getenv("SOGEN_DEBUG_NO_GLYPH_SWIZZLE") && request.format == 16 && sw_r == 3 && sw_g == 3 && sw_b == 3 && sw_a == 4)
+                {
+                    sw_r = sw_g = sw_b = sw_a = 0;
+                    win_emu.log.error("TEMPDIAG SWIZZLE_OVERRIDE_APPLIED img=0x%llx", static_cast<unsigned long long>(request.image));
+                }
+                const int32_t result = this->vulkan_.create_image_view(
+                    request.device, request.image, request.format, request.aspect_mask, request.view_type, request.base_mip_level,
+                    request.level_count, request.base_array_layer, request.layer_count, sw_r, sw_g, sw_b, sw_a, view);
                 return write_output(win_emu, context, gpu_bridge::object_response{.vk_result = result, .reserved = 0, .object = view});
             }
 
@@ -2014,7 +2122,6 @@ namespace sogen
                     attribute_offset += sizeof(a);
                     attribute = {.location = a.location, .binding = a.binding, .format = a.format, .offset = a.offset};
                 }
-
                 const size_t dynamic_bytes = static_cast<size_t>(request.dynamic_state_count) * sizeof(uint32_t);
                 if (dynamic_bytes > trailer.size() - bindings_bytes - attributes_bytes)
                 {
@@ -2066,6 +2173,28 @@ namespace sogen
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
+                // TEMPDIAG EXPERIMENT: force the DXVK presenter shader's c_dst_is_srgb spec constant (id=5,
+                // matched by the presenter's distinctive 8-entry spec layout) to 0, to test whether the
+                // destination image view being an sRGB format itself ALSO double-encodes on top of the
+                // shader's own manual gamma encoding.
+                if (std::getenv("SOGEN_DEBUG_NO_DST_SRGB") && fs_entries.size() == 8)
+                {
+                    for (const auto& e : fs_entries)
+                    {
+                        if (e.constant_id == 5 && e.size == 4 && e.offset + 4 <= fs_data.size())
+                        {
+                            uint32_t v = 0;
+                            std::memcpy(&v, fs_data.data() + e.offset, 4);
+                            if (v == 1)
+                            {
+                                v = 0;
+                                std::memcpy(fs_data.data() + e.offset, &v, 4);
+                                win_emu.log.error("TEMPDIAG DST_SRGB_OVERRIDE_APPLIED fs=0x%llx",
+                                                  static_cast<unsigned long long>(request.fragment_shader));
+                            }
+                        }
+                    }
+                }
 
                 const vulkan_host::depth_state depth{.test_enable = request.depth_test_enable,
                                                      .write_enable = request.depth_write_enable,
@@ -2090,14 +2219,27 @@ namespace sogen
                                                .dst_alpha_blend_factor = b.dst_alpha_blend_factor,
                                                .alpha_blend_op = b.alpha_blend_op,
                                                .color_write_mask = b.color_write_mask};
+                    // TEMPDIAG EXPERIMENT: force-disable blending for the identified text/UI alpha-blend
+                    // signature (SRC_ALPHA/ONE_MINUS_SRC_ALPHA), to test whether blending was ever actually
+                    // taking effect at all for this pipeline+MSAA-target combination.
+                    if (std::getenv("SOGEN_DEBUG_NO_BLEND") && blend_attachments[i].blend_enable &&
+                        blend_attachments[i].src_color_blend_factor == 6 && blend_attachments[i].dst_color_blend_factor == 7)
+                    {
+                        blend_attachments[i].blend_enable = 0;
+                    }
                 }
 
+                uint32_t rasterization_samples = request.rasterization_samples;
+                if (std::getenv("SOGEN_DEBUG_NO_MSAA") && rasterization_samples > 1)
+                {
+                    rasterization_samples = 1;
+                }
                 uint64_t pipeline = gpu_bridge::null_object;
                 const int32_t result = this->vulkan_.create_graphics_pipeline(
                     request.device, request.render_pass, request.pipeline_layout, request.vertex_shader, request.fragment_shader,
                     request.width, request.height, bindings, attributes, depth, color_formats, request.depth_format, request.stencil_format,
-                    request.rasterization_samples, request.primitive_topology, request.primitive_restart_enable, dynamic_states, vs_spec,
-                    fs_spec, blend_attachments, pipeline);
+                    rasterization_samples, request.primitive_topology, request.primitive_restart_enable, dynamic_states, vs_spec, fs_spec,
+                    blend_attachments, pipeline);
                 if (result != 0)
                 {
                     win_emu.log.error(
@@ -2230,6 +2372,23 @@ namespace sogen
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
+                if (std::getenv("EMULATOR_IOCTL_VOLUME_DIAG"))
+                {
+                    static std::atomic<uint64_t> calls{};
+                    static std::atomic<uint64_t> sets_requested{};
+                    static auto window_start = std::chrono::steady_clock::now();
+                    calls.fetch_add(1, std::memory_order_relaxed);
+                    sets_requested.fetch_add(request.set_count, std::memory_order_relaxed);
+                    const auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration<double>(now - window_start).count() >= 1.0)
+                    {
+                        fprintf(stderr, "IOCTL_VOLUME_DIAG: allocate_descriptor_sets calls=%llu sets_requested=%llu\n",
+                                static_cast<unsigned long long>(calls.exchange(0)),
+                                static_cast<unsigned long long>(sets_requested.exchange(0)));
+                        window_start = now;
+                    }
+                }
+
                 std::vector<uint64_t> set_layouts;
                 if (!read_trailing_array(win_emu, context, sizeof(request_t), request.set_count, set_layouts))
                 {
@@ -2355,6 +2514,22 @@ namespace sogen
 
                 std::vector<std::byte> buffer(context.input_buffer_length);
                 win_emu.emu().read_memory(context.input_buffer, buffer.data(), buffer.size());
+
+                if (std::getenv("EMULATOR_IOCTL_VOLUME_DIAG"))
+                {
+                    static std::atomic<uint64_t> calls{};
+                    static std::atomic<uint64_t> bytes{};
+                    static auto window_start = std::chrono::steady_clock::now();
+                    calls.fetch_add(1, std::memory_order_relaxed);
+                    bytes.fetch_add(buffer.size(), std::memory_order_relaxed);
+                    const auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration<double>(now - window_start).count() >= 1.0)
+                    {
+                        fprintf(stderr, "IOCTL_VOLUME_DIAG: update_descriptor_sets_batch calls=%llu bytes=%llu\n",
+                                static_cast<unsigned long long>(calls.exchange(0)), static_cast<unsigned long long>(bytes.exchange(0)));
+                        window_start = now;
+                    }
+                }
 
                 int32_t result = 0; // VK_SUCCESS
                 size_t offset = 0;

@@ -62,6 +62,7 @@ namespace sogen
 #endif
             std::optional<uint64_t> break_call{};
             std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
+            std::vector<input_action> input_script{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
@@ -611,6 +612,7 @@ namespace sogen
                 .settings = &options,
                 .auto_break_before_call = options.break_call,
                 .click_dialog_rules = options.click_dialog_rules,
+                .input_script = options.input_script,
             };
 
             const auto concise_logging = options.concise_logging;
@@ -932,8 +934,18 @@ namespace sogen
             app.add_option("--click-dialog-button", click_dialog_button_args,
                            "Auto-dismiss a modal dialog whose title contains TITLE by clicking control ID "
                            "(repeatable, e.g. --click-dialog-button \"Safe Mode\" 7). A dialog whose title "
-                           "matches no rule is left alone rather than guessed at. Requires --vcpus 1")
+                           "matches no rule is left alone rather than guessed at.")
                 ->type_name("TITLE ID")
+                ->allow_extra_args(false);
+
+            std::vector<std::string> send_input_args{};
+            app.add_option("--send-input", send_input_args,
+                           "Scripted synthetic input for the main window, starting once it exists. Semicolon-separated "
+                           "actions: wait:MS, move:X:Y, click:X:Y, key:NAME, keydown:NAME, keyup:NAME, text:STRING. "
+                           "Coordinates containing a decimal point are normalized (0..1) against the client area, "
+                           "integers are client pixels. NAME is e.g. enter, esc, space, up, f5, a, 3, grave, or a raw "
+                           "0xNN virtual-key code. text: sends WM_CHAR per character. "
+                           "(repeatable, e.g. --send-input \"wait:90000; click:0.5:0.6; wait:2000; key:enter\")")
                 ->allow_extra_args(false);
 
             CLI11_PARSE(app, argc, argv);
@@ -951,11 +963,6 @@ namespace sogen
                     throw std::runtime_error("GDB debugging requires --vcpus 1");
                 }
 
-                if (!click_dialog_button_args.empty() && options.vcpu_count > 1)
-                {
-                    throw std::runtime_error("--click-dialog-button requires --vcpus 1");
-                }
-
                 if (!backend_name.empty())
                 {
                     static const std::map<std::string, backend_type> backends{
@@ -968,6 +975,12 @@ namespace sogen
                 for (const auto& [title, id] : click_dialog_button_args)
                 {
                     options.click_dialog_rules.emplace_back(title, parse_dialog_control_id(id));
+                }
+
+                for (const auto& script : send_input_args)
+                {
+                    auto actions = parse_input_script(script);
+                    options.input_script.insert(options.input_script.end(), actions.begin(), actions.end());
                 }
 
                 for (auto& module_name : tracked_modules)

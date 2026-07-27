@@ -113,19 +113,25 @@ namespace sogen
                     }
                     const auto algorithm_name = utils::string::to_string_view<char16_t>(algorithm_name_buffer);
 
-                    // The response is a fixed-size record; never write past the guest-declared output buffer.
+                    // The response record is a fixed size, but real callers can (and do, e.g. MW2's WOW64
+                    // boot querying SHA1/RSA) pass an output buffer larger than that - the extra bytes are
+                    // reserved fields real KsecDD still initializes. Leaving them as whatever the guest
+                    // buffer already held (uninitialized stack contents) let bcryptprimitives.dll read
+                    // garbage there and abort its own init with STATUS_DLL_INIT_FAILED, so zero the full
+                    // caller-declared length before writing the known prefix.
                     const auto write_response = [&](const auto& output_data) -> NTSTATUS {
                         if (!c.output_buffer || c.output_buffer_length < sizeof(output_data))
                         {
                             return STATUS_BUFFER_TOO_SMALL;
                         }
 
+                        win_emu.emu().set_memory(c.output_buffer, 0, c.output_buffer_length);
                         win_emu.emu().write_memory(c.output_buffer, output_data);
 
                         if (c.io_status_block)
                         {
                             IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
-                            block.Information = sizeof(output_data);
+                            block.Information = c.output_buffer_length;
                             c.io_status_block.write(block);
                         }
 

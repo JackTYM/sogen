@@ -4,6 +4,7 @@
 #include "../memory_manager.hpp"
 
 #include <utils/io.hpp>
+#include <utils/string.hpp>
 
 namespace sogen
 {
@@ -182,6 +183,33 @@ namespace sogen
                     ucs.Buffer = ucs.Buffer - obj_address;
                 });
             }
+
+            // find_free_host_allocation_base already retries internally against a stale pick (a foreign
+            // host mapping landing in the gap since the last scan), but the fixed-address allocate_memory
+            // call below can still fail on a genuine collision the pick itself couldn't foresee (a
+            // backend sharing the guest address space with the host process makes its claim atomic - see
+            // host_memory_collision's doc comment). Retrying with a fresh pick here, instead of ignoring
+            // the return value, mirrors handle_NtAllocateVirtualMemoryEx's own auto-placement retry.
+            uint64_t allocate_pagefile_section(const syscall_context& c, const uint64_t size)
+            {
+                constexpr int max_attempts = 8;
+                for (int attempt = 0; attempt < max_attempts; ++attempt)
+                {
+                    const auto address = c.win_emu.memory.find_free_host_allocation_base(size, 0);
+                    if (!address)
+                    {
+                        break;
+                    }
+
+                    if (c.win_emu.memory.allocate_memory(address, size, memory_permission::read_write, false,
+                                                         memory_region_kind::pagefile_section_view))
+                    {
+                        return address;
+                    }
+                }
+
+                return 0;
+            }
         }
 
         NTSTATUS handle_NtCreateSection(const syscall_context& c, const emulator_object<handle> section_handle,
@@ -254,9 +282,12 @@ namespace sogen
             {
                 constexpr auto shared_section_size = 0x10000;
 
-                const auto address = c.win_emu.memory.find_free_allocation_base(shared_section_size);
-                c.win_emu.memory.allocate_memory(address, shared_section_size, memory_permission::read_write, false,
-                                                 memory_region_kind::pagefile_section_view);
+                const auto address = allocate_pagefile_section(c, shared_section_size);
+                if (!address)
+                {
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+
                 c.proc.shared_section_address = address;
                 c.proc.shared_section_size = shared_section_size;
 
@@ -268,9 +299,12 @@ namespace sogen
             {
                 constexpr auto dbwin_buffer_section_size = 0x1000;
 
-                const auto address = c.win_emu.memory.find_free_allocation_base(dbwin_buffer_section_size);
-                c.win_emu.memory.allocate_memory(address, dbwin_buffer_section_size, memory_permission::read_write, false,
-                                                 memory_region_kind::pagefile_section_view);
+                const auto address = allocate_pagefile_section(c, dbwin_buffer_section_size);
+                if (!address)
+                {
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+
                 c.proc.dbwin_buffer = address;
                 c.proc.dbwin_buffer_size = dbwin_buffer_section_size;
 
@@ -476,6 +510,12 @@ namespace sogen
                         return STATUS_NO_MEMORY;
                     }
                     section_entry->backing_address = backing;
+
+                    if (c.win_emu.callbacks.on_generic_activity)
+                    {
+                        c.win_emu.callbacks.on_generic_activity(
+                            utils::string::va("Pagefile section backing allocated: base=0x%" PRIx64 " size=0x%zx", backing, backing_size));
+                    }
                 }
 
                 const auto aligned_offset = page_align_down(static_cast<uint64_t>(offset));
@@ -489,6 +529,15 @@ namespace sogen
                     view_size.write(backing_size - aligned_offset);
                 }
                 base_address.write(section_entry->backing_address + aligned_offset);
+                ++section_entry->mapped_view_count;
+
+                if (c.win_emu.callbacks.on_generic_activity)
+                {
+                    c.win_emu.callbacks.on_generic_activity(
+                        utils::string::va("Pagefile view mapped: backing=0x%" PRIx64 " offset=0x%" PRIx64 " views=%u",
+                                          section_entry->backing_address, aligned_offset, section_entry->mapped_view_count));
+                }
+
                 return STATUS_SUCCESS;
             }
 
@@ -521,6 +570,12 @@ namespace sogen
             if (view_size)
             {
                 view_size.write(aligned_size);
+            }
+
+            if (c.win_emu.callbacks.on_generic_activity)
+            {
+                c.win_emu.callbacks.on_generic_activity(
+                    utils::string::va("File section view mapped: base=0x%" PRIx64 " size=0x%zx", address, aligned_size));
             }
 
             base_address.write(address);
@@ -683,15 +738,57 @@ namespace sogen
             if (region_info.is_reserved && memory_region_policy::is_section_kind(region_info.kind))
             {
                 // A pagefile section keeps one persistent backing shared by every view, so unmapping a view
-                // must not free it (other views and open section handles may still reference it); it is released
-                // when the last section handle is closed.
+                // must not free it (other views and open section handles may still reference it). The backing
+                // is released once no handle and no mapped view references it, matching real Windows, where
+                // mapped views keep section memory alive even after the last handle is closed.
                 if (region_info.kind == memory_region_kind::pagefile_section_view)
                 {
+                    const auto backing = region_info.allocation_base;
+
+                    for (auto& [_, section_entry] : c.proc.sections)
+                    {
+                        if (section_entry.backing_address == backing)
+                        {
+                            if (section_entry.mapped_view_count > 0)
+                            {
+                                --section_entry.mapped_view_count;
+                            }
+
+                            if (c.win_emu.callbacks.on_generic_activity)
+                            {
+                                c.win_emu.callbacks.on_generic_activity(
+                                    utils::string::va("Pagefile view unmapped: backing=0x%" PRIx64 " base=0x%" PRIx64 " views=%u", backing,
+                                                      base_address, section_entry.mapped_view_count));
+                            }
+
+                            return STATUS_SUCCESS;
+                        }
+                    }
+
+                    const auto orphan = c.proc.orphaned_section_backings.find(backing);
+                    if (orphan != c.proc.orphaned_section_backings.end() && --orphan->second == 0)
+                    {
+                        c.proc.orphaned_section_backings.erase(orphan);
+                        c.win_emu.memory.release_memory(backing, 0);
+
+                        if (c.win_emu.callbacks.on_generic_activity)
+                        {
+                            c.win_emu.callbacks.on_generic_activity(
+                                utils::string::va("Pagefile backing released after orphan drain: base=0x%" PRIx64, backing));
+                        }
+                    }
+
                     return STATUS_SUCCESS;
                 }
 
                 if (c.win_emu.memory.release_memory(region_info.allocation_base, 0))
                 {
+                    if (c.win_emu.callbacks.on_generic_activity)
+                    {
+                        c.win_emu.callbacks.on_generic_activity(
+                            utils::string::va("Section view released: base=0x%" PRIx64, region_info.allocation_base));
+                    }
+
                     return STATUS_SUCCESS;
                 }
             }

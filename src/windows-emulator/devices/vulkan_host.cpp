@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <string_view>
@@ -16,6 +17,9 @@
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
+// VkPhysicalDevicePortabilitySubsetFeaturesKHR (VK_KHR_portability_subset) lives here, not in
+// vulkan_core.h, in this vendored Vulkan-Headers copy -- self-contained, no macro gate needed.
+#include <vulkan/vulkan_beta.h>
 
 #include <gpu_bridge_protocol.hpp>
 #include <vk_feature_chain.hpp>
@@ -493,6 +497,7 @@ namespace sogen
             void* persistent_host_pointer{};
             uint64_t mapped_size{};
             uint64_t allocation_size{};
+            bool is_host_coherent{};
         };
 
         struct buffer_data
@@ -1347,6 +1352,13 @@ namespace sogen
         out.max_mip_levels = properties.maxMipLevels;
         out.max_array_layers = properties.maxArrayLayers;
         out.sample_counts = properties.sampleCounts;
+        // TEMPDIAG EXPERIMENT: report only 1x sample support, so DXVK itself chooses a non-multisampled
+        // backbuffer (and compiles its own shaders accordingly) instead of sogen silently overriding sample
+        // counts after DXVK has already committed to MSAA -- avoids an image/shader type mismatch.
+        if (std::getenv("SOGEN_DEBUG_FORCE_1X_SAMPLES"))
+        {
+            out.sample_counts = 1;
+        }
         out.max_extent_width = properties.maxExtent.width;
         out.max_extent_height = properties.maxExtent.height;
         out.max_extent_depth = properties.maxExtent.depth;
@@ -1911,6 +1923,36 @@ namespace sogen
             }
         }
 
+        // MoltenVK disables non-identity VkComponentMapping swizzles on image views by default --
+        // VkPhysicalDevicePortabilitySubsetFeaturesKHR::imageViewFormatSwizzle is VK_FALSE unless
+        // explicitly requested, and the validation layer then requires every swizzle component to be
+        // VK_COMPONENT_SWIZZLE_IDENTITY (see KhronosGroup/MoltenVK#1364). This struct type isn't in
+        // gpu_bridge::feature_struct_size's recognized set, so even if the guest (DXVK) requests it,
+        // the marshaling protocol silently drops it before it ever reaches this point -- same
+        // reasoning as the portability_subset extension force-add above, so force the feature on here
+        // too whenever the device supports it. Without this, any texture needing a real channel remap
+        // (e.g. D3D9's single/dual-channel luminance-alpha formats sampled through a swizzled image
+        // view) silently samples as if unswizzled.
+        if (portability && instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDevicePortabilitySubsetFeaturesKHR supported_portability{};
+            supported_portability.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+            VkPhysicalDeviceFeatures2 supported2{};
+            supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            supported2.pNext = &supported_portability;
+            instance->second.get_physical_device_features2(pd->second.handle, &supported2);
+            if (supported_portability.imageViewFormatSwizzle)
+            {
+                auto& buffer = chained.emplace_back(sizeof(VkPhysicalDevicePortabilitySubsetFeaturesKHR), std::byte{});
+                auto* portability_features = reinterpret_cast<VkPhysicalDevicePortabilitySubsetFeaturesKHR*>(buffer.data());
+                portability_features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+                portability_features->imageViewFormatSwizzle = VK_TRUE;
+                auto* base = reinterpret_cast<VkBaseOutStructure*>(buffer.data());
+                feature_tail->pNext = base;
+                feature_tail = base;
+            }
+        }
+
         VkDeviceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
@@ -1919,7 +1961,7 @@ namespace sogen
         create_info.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
         // Enabled features ride the pNext chain (VkPhysicalDeviceFeatures2 + the chained structs); a
         // chain present means pEnabledFeatures must stay null.
-        if (has_feature_chain)
+        if (has_feature_chain || !chained.empty())
         {
             create_info.pNext = &features2;
         }
@@ -2908,7 +2950,10 @@ namespace sogen
         }
 
         const uint64_t id = this->impl_->next_id++;
-        this->impl_->memories.emplace(id, impl::memory_data{.handle = memory, .device_id = device, .allocation_size = aligned_size});
+        this->impl_->memories.emplace(id, impl::memory_data{.handle = memory,
+                                                            .device_id = device,
+                                                            .allocation_size = aligned_size,
+                                                            .is_host_coherent = (type_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0});
         out_memory = id;
         return VK_SUCCESS;
     }
@@ -3186,6 +3231,12 @@ namespace sogen
         dev->second.unmap_memory(dev->second.handle, mem->second.handle);
         mem->second.persistent_host_pointer = nullptr;
         mem->second.mapped_size = 0;
+    }
+
+    bool vulkan_host::is_memory_host_coherent(uint64_t memory) const
+    {
+        const auto mem = this->impl_->memories.find(memory);
+        return mem != this->impl_->memories.end() && mem->second.is_host_coherent;
     }
 
     int32_t vulkan_host::create_image(uint64_t device, uint32_t format, uint32_t width, uint32_t height, uint32_t usage, uint32_t tiling,

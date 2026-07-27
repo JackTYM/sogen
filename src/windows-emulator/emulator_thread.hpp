@@ -383,8 +383,14 @@ namespace sogen
 
         void restore(x86_64_cpu& emu) const
         {
-            emu.restore_registers(this->last_registers);
+            // Must run before restore_registers: on a vCPU handling this thread for the very first
+            // time, restore_registers can lazily create the FEX engine (including, for a WoW64
+            // thread, the 32-bit engine via create_thread32), which needs this vCPU's own GDT base
+            // already loaded (see fex_vcpu::create_thread32's doc comment) - refresh_execution_context
+            // is what actually calls load_gdt for this vCPU. Reversed, a fresh vCPU's first WoW64
+            // thread would create its 32-bit engine's segment table pointing at GDT base 0.
             this->refresh_execution_context(emu);
+            emu.restore_registers(this->last_registers);
         }
 
         void setup_if_necessary(x86_64_cpu& emu, const process_context& context)

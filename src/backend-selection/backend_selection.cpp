@@ -52,7 +52,7 @@ namespace sogen
 
 #if defined(SOGEN_ENABLE_FEX)
             case backend_type::fex:
-                return fex::create_x86_64_emulator();
+                return fex::create_x86_64_emulator(vcpu_count);
 #endif
 
             default:

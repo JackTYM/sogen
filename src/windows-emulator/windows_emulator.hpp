@@ -437,6 +437,16 @@ namespace sogen
         void setup_hooks();
         void setup_process();
         void vcpu_worker(vcpu_context& vcpu);
+
+        // See vcpu_worker_thread_trampoline's doc comment (windows_emulator.cpp).
+        struct vcpu_worker_thread_args
+        {
+            windows_emulator* self;
+            uint32_t index;
+            std::atomic<uint32_t>* active_workers;
+        };
+
+        static void* vcpu_worker_thread_trampoline(void* raw_args);
         void on_instruction_execution(vcpu_context& vcpu, uint64_t address);
         void on_basic_block_execution(vcpu_context& vcpu, const basic_block& block);
 

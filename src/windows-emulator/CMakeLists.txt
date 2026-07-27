@@ -40,6 +40,11 @@ if(TARGET SDL3::SDL3)
   target_compile_definitions(windows-emulator PRIVATE SOGEN_HAS_SDL3=1)
 endif()
 
+# VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR's enum value in vulkan_core.h's
+# own VkStructureType enum is gated behind this macro (the struct body itself lives in the separate
+# vulkan_beta.h, included directly by vulkan_host.cpp -- this only unlocks the enum value).
+target_compile_definitions(windows-emulator PRIVATE VK_ENABLE_BETA_EXTENSIONS)
+
 target_include_directories(windows-emulator INTERFACE "${CMAKE_CURRENT_LIST_DIR}")
 
 sogen_strip_target(windows-emulator)

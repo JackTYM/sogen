@@ -527,7 +527,17 @@ namespace sogen
 
         if (!reserve_only)
         {
-            this->map_memory(address, size, this->get_effective_permissions(permissions));
+            // See commit_memory's identical try/catch for why: map_memory can throw host_memory_collision
+            // if its atomic host-level claim finds the target genuinely occupied.
+            try
+            {
+                this->map_memory(address, size, this->get_effective_permissions(permissions));
+            }
+            catch (const host_memory_collision&)
+            {
+                this->reserved_regions_.erase(entry);
+                return false;
+            }
             entry->second.committed_regions[address] = committed_region{
                 .length = size,
                 .permissions = permissions,
@@ -601,7 +611,19 @@ namespace sogen
 
                 if (map_length > 0)
                 {
-                    this->map_memory(map_start, static_cast<size_t>(map_length), effective_permission);
+                    // A host_memory_collision here means map_memory's atomic host-level claim found the
+                    // target genuinely occupied by a foreign mapping (see the exception's doc comment) -
+                    // bail out rather than let it propagate as an unhandled exception. The caller
+                    // (try_map_module_at_current_base) already rolls back and its own caller already
+                    // retries at a different address on any commit_memory/commit_image_memory failure.
+                    try
+                    {
+                        this->map_memory(map_start, static_cast<size_t>(map_length), effective_permission);
+                    }
+                    catch (const host_memory_collision&)
+                    {
+                        return false;
+                    }
                     committed_regions[map_start] = committed_region{
                         .length = static_cast<size_t>(map_length),
                         .permissions = permissions,
@@ -622,7 +644,15 @@ namespace sogen
             const auto map_start = last_region ? (last_region_start + last_region->length) : address;
             const auto map_length = end - map_start;
 
-            this->map_memory(map_start, static_cast<size_t>(map_length), effective_permission);
+            // See the identical try/catch above.
+            try
+            {
+                this->map_memory(map_start, static_cast<size_t>(map_length), effective_permission);
+            }
+            catch (const host_memory_collision&)
+            {
+                return false;
+            }
             committed_regions[map_start] = committed_region{
                 .length = static_cast<size_t>(map_length),
                 .permissions = permissions,
@@ -874,31 +904,46 @@ namespace sogen
         // latter records a *clamped* window slice into reserved_regions_, which would then block the
         // full rescan below from recording an intruder's full extent and make re-picking crawl across
         // it in size-sized steps instead of skipping it in one go.
-        const uint64_t allocation_base = this->find_free_host_allocation_base(size, start);
-        if (!allocation_base)
+        for (int attempt = 0;; ++attempt)
         {
-            return 0;
+            const uint64_t allocation_base = this->find_free_host_allocation_base(size, start);
+            if (!allocation_base)
+            {
+                return 0;
+            }
+
+            // Claim the range at the host OS level immediately, even though it may only be
+            // reserve-only (not yet backed by map_memory) - see reserve_guest_address_range's doc
+            // comment. A backend makes this claim atomic (fails rather than silently overwriting an
+            // intervening foreign mapping), so a false return here means a foreign host allocation
+            // landed in this exact window between the confirm above and this claim - rescan and
+            // re-pick, same backstop as find_free_host_allocation_base.
+            if (!this->memory_->reserve_guest_address_range(allocation_base, size))
+            {
+                if (attempt >= max_host_reserved_retries)
+                {
+                    return 0;
+                }
+
+                this->reserve_host_memory_ranges();
+                this->reserve_host_memory_ranges_in(allocation_base, size);
+                continue;
+            }
+
+            // Uses allocate_memory_raw (not the public allocate_memory(address, ...), which itself
+            // rescans via reserve_host_memory_ranges) - a rescan here would immediately re-discover the
+            // reserve_guest_address_range call just above as a "foreign" host allocation (it is a real
+            // host mmap, made before reserved_regions_ knows about it) and mark allocation_base
+            // host_reserved, making the allocate_memory_raw call right below self-conflict and fail. The
+            // confirm above already covers this window.
+            if (!this->allocate_memory_raw(allocation_base, size, permissions, reserve_only, kind))
+            {
+                this->release_host_claims(allocation_base + size);
+                return 0;
+            }
+
+            return allocation_base;
         }
-
-        // Claim the range at the host OS level immediately, even though it may only be reserve-only
-        // (not yet backed by map_memory) - see reserve_guest_address_range's doc comment. Safe now that
-        // the window above was confirmed free; done only for this freshly-picked address sogen doesn't
-        // already know about.
-        this->memory_->reserve_guest_address_range(allocation_base, size);
-
-        // Uses allocate_memory_raw (not the public allocate_memory(address, ...), which itself rescans
-        // via reserve_host_memory_ranges) - a rescan here would immediately re-discover the
-        // reserve_guest_address_range call just above as a "foreign" host allocation (it is a real
-        // host mmap, made before reserved_regions_ knows about it) and mark allocation_base
-        // host_reserved, making the allocate_memory_raw call right below self-conflict and fail. The
-        // confirm above already covers this window.
-        if (!this->allocate_memory_raw(allocation_base, size, permissions, reserve_only, kind))
-        {
-            this->release_host_claims(allocation_base + size);
-            return 0;
-        }
-
-        return allocation_base;
     }
 
     uint64_t memory_manager::find_free_host_allocation_base(const size_t size, const uint64_t start)
