@@ -1356,6 +1356,12 @@ namespace sogen
         UCHAR DriveType[32];
     };
 
+    struct PROCESS_WINDOW_INFORMATION
+    {
+        ULONG WindowFlags;
+        USHORT WindowTitleLength;
+    };
+
     struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION
     {
         ULONG Version;

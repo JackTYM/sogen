@@ -390,6 +390,13 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            case ProcessWindowInformation:
+                return handle_query<PROCESS_WINDOW_INFORMATION>(c.emu, process_information, process_information_length, return_length,
+                                                                [](PROCESS_WINDOW_INFORMATION& info) {
+                                                                    info.WindowFlags = 0;
+                                                                    info.WindowTitleLength = 0;
+                                                                });
+
             default:
                 c.win_emu.log.error("Unsupported process info class: 0x%X\n", info_class);
                 c.emu.stop();
