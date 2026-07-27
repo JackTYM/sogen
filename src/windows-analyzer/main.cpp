@@ -621,11 +621,13 @@ namespace sogen
             std::vector<std::unique_ptr<analysis_context>> child_contexts{};
             std::vector<std::unique_ptr<analysis_reporter>> child_reporters{};
 
-            win_emu->callbacks.create_child_emulator = [&options, &child_emulator_count, &child_contexts,
-                                                        &child_reporters](application_settings settings) {
+            std::function<std::unique_ptr<windows_emulator>(application_settings)> create_child_emulator{};
+            create_child_emulator = [&options, &child_emulator_count, &child_contexts, &child_reporters,
+                                     &create_child_emulator](application_settings settings) {
                 auto child = std::make_unique<windows_emulator>(create_configured_backend(options), std::move(settings),
                                                                 create_emulator_settings(options));
                 child->log.set_prefix("[child " + std::to_string(++child_emulator_count) + "] ");
+                child->callbacks.create_child_emulator = create_child_emulator;
 
                 auto& child_context = *child_contexts.emplace_back(std::make_unique<analysis_context>());
                 child_context.settings = &options;
@@ -644,6 +646,8 @@ namespace sogen
 
                 return child;
             };
+
+            win_emu->callbacks.create_child_emulator = create_child_emulator;
 
             std::vector<std::unique_ptr<analysis_reporter>> reporters{};
             reporters.emplace_back(create_console_reporter(win_emu->log, console_reporter_settings{
