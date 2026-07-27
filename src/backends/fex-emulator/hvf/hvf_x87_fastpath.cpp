@@ -34,8 +34,8 @@ namespace sogen::fex::hvf
         // control has been extracted. The fast paths never touch the frame - every case that would
         // raise an x87 exception flag defers instead.
         constexpr uint32_t reg_scratch = 1;
-        constexpr uint32_t reg_sig = 2;      // later: rounded significand
-        constexpr uint32_t reg_signexp = 3;  // later: round bits
+        constexpr uint32_t reg_sig = 2;     // later: rounded significand
+        constexpr uint32_t reg_signexp = 3; // later: round bits
         constexpr uint32_t reg_sign = 4;
         constexpr uint32_t reg_exp = 5;
         constexpr uint32_t reg_tmp = 6;
