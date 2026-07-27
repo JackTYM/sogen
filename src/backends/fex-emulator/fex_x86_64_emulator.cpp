@@ -4381,7 +4381,7 @@ namespace sogen::fex
     {
         auto& pointers = frame.Pointers;
         const auto shim = [](uint64_t& slot, const bool needs_fp) {
-            if (slot == 0 || g_hvf->runtime().contains_stub(slot))
+            if (slot == 0 || g_hvf->runtime().contains_stub(slot) || g_hvf->x87_fastpath().contains_entry(slot))
             {
                 return;
             }
@@ -4406,6 +4406,22 @@ namespace sogen::fex
         for (size_t i = 0; i < FEXCore::Core::OPINDEX_MAX; ++i)
         {
             shim(pointers.FallbackHandlerPointers[i].Func, true);
+        }
+
+        // Ops with a guest-resident implementation call it instead of exiting; it falls back to the
+        // hypercall stub installed above for the operand shapes it does not handle.
+        static constexpr std::pair<FEXCore::Core::FallbackHandlerIndex, hvf::hvf_x87_fastpath::op> fastpath_ops[] = {
+            {FEXCore::Core::OPINDEX_F80CVT_4, hvf::hvf_x87_fastpath::op::f80_cvt_f32},
+            {FEXCore::Core::OPINDEX_F80CVT_8, hvf::hvf_x87_fastpath::op::f80_cvt_f64},
+        };
+
+        for (const auto& [index, which] : fastpath_ops)
+        {
+            auto& slot = pointers.FallbackHandlerPointers[index].Func;
+            if (slot != 0 && g_hvf->runtime().contains_stub(slot))
+            {
+                slot = g_hvf->x87_fastpath().bind(which, slot);
+            }
         }
 
         // These two are the only slots the guest dereferences rather than calls; every host

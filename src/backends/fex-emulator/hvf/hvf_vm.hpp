@@ -9,6 +9,7 @@
 #include <atomic>
 
 #include "hvf_hypercalls.hpp"
+#include "hvf_x87_fastpath.hpp"
 
 namespace sogen::fex::hvf
 {
@@ -68,6 +69,11 @@ namespace sogen::fex::hvf
             return this->runtime_;
         }
 
+        hvf_x87_fastpath& x87_fastpath()
+        {
+            return this->x87_fastpath_;
+        }
+
         // Registers (or finds) the hypercall shim for a host function; returns the guest stub VA.
         uint64_t register_callback(uint64_t original, bool needs_fp);
         bool lookup_callback(uint16_t id, hvf_callback_slot& out) const;
@@ -112,6 +118,7 @@ namespace sogen::fex::hvf
         uint64_t root_ipa_ = 0;
 
         hvf_guest_runtime runtime_{};
+        hvf_x87_fastpath x87_fastpath_{};
 
         std::vector<hvf_callback_slot> callbacks_;
     };

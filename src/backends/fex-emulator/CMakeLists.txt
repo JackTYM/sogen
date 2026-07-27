@@ -28,6 +28,9 @@ add_dependencies(fex-emulator fex_external)
 if(APPLE)
   target_sources(fex-emulator PRIVATE
     hvf/hvf_hypercalls.hpp
+    hvf/hvf_arm64_emitter.hpp
+    hvf/hvf_x87_fastpath.hpp
+    hvf/hvf_x87_fastpath.cpp
     hvf/hvf_vm.hpp
     hvf/hvf_vm.cpp
     hvf/hvf_vcpu_executor.hpp

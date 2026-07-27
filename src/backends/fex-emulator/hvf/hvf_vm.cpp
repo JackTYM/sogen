@@ -175,6 +175,9 @@ namespace sogen::fex::hvf
         this->runtime_.build();
         this->map_locked(reinterpret_cast<uint64_t>(this->runtime_.page), hvf_guest_runtime::page_bytes, PROT_READ | PROT_EXEC);
 
+        this->x87_fastpath_.build();
+        this->map_locked(reinterpret_cast<uint64_t>(this->x87_fastpath_.page()), hvf_x87_fastpath::page_bytes, PROT_READ | PROT_EXEC);
+
         this->active_ = true;
         this->create_result_ = vm_create_result::hardware_tso;
         return this->create_result_;
