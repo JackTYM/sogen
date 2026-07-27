@@ -834,7 +834,10 @@ namespace
         for (const auto& range : spike_arena::instance().exec_ranges())
         {
             const auto* insns = reinterpret_cast<const uint32_t*>(range.addr);
-            const size_t count = range.size / 4;
+            // FEXCore's CodeBuffer mprotects its trailing page PROT_NONE as a guard
+            // (CPUBackend.h UsableSize()); never scan into it.
+            const size_t scannable = range.size > host_page ? range.size - host_page : range.size;
+            const size_t count = scannable / 4;
             for (size_t i = 0; i < count; ++i)
             {
                 const uint32_t insn = insns[i];
@@ -1233,6 +1236,9 @@ int main(int argc, char** argv)
         shim(pointers.MonoBackpatcherWrite, "MonoBackpatcherWrite", false);
         shim(pointers.LUDIV, "LUDIV", false);
         shim(pointers.LDIV, "LDIV", false);
+        shim(pointers.CompileBlockFunc, "CompileBlock", false);
+        shim(pointers.CompileSingleStepFunc, "CompileSingleStep", false);
+        shim(pointers.SleepFunc, "SleepThread", false);
 
         for (size_t i = 0; i < FEXCore::Core::OPINDEX_MAX; ++i)
         {
