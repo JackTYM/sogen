@@ -147,8 +147,7 @@ namespace sogen::fex::hvf
             bool tso_ok = hv_vcpu_get_sys_reg(probe_vcpu, sys_reg_actlr_el1, &actlr) == HV_SUCCESS;
             tso_ok = tso_ok && hv_vcpu_set_sys_reg(probe_vcpu, sys_reg_actlr_el1, actlr | (1ull << 1)) == HV_SUCCESS;
             uint64_t readback = 0;
-            tso_ok = tso_ok && hv_vcpu_get_sys_reg(probe_vcpu, sys_reg_actlr_el1, &readback) == HV_SUCCESS &&
-                     ((readback >> 1) & 1) == 1;
+            tso_ok = tso_ok && hv_vcpu_get_sys_reg(probe_vcpu, sys_reg_actlr_el1, &readback) == HV_SUCCESS && ((readback >> 1) & 1) == 1;
             hv_vcpu_destroy(probe_vcpu);
 
             if (!tso_ok)
@@ -169,8 +168,7 @@ namespace sogen::fex::hvf
         }
         this->table_pool_ = static_cast<uint8_t*>(pool);
         this->table_pool_ipa_ = this->alloc_ipa_locked(this->table_pool_size_);
-        check_hv("hv_vm_map(table pool)",
-                 hv_vm_map(pool, this->table_pool_ipa_, this->table_pool_size_, HV_MEMORY_READ | HV_MEMORY_WRITE));
+        check_hv("hv_vm_map(table pool)", hv_vm_map(pool, this->table_pool_ipa_, this->table_pool_size_, HV_MEMORY_READ | HV_MEMORY_WRITE));
         this->stage1_root_ = this->stage1_alloc_table_locked();
         this->root_ipa_ = this->stage1_table_ipa(this->stage1_root_);
 
@@ -202,8 +200,7 @@ namespace sogen::fex::hvf
 
     uint64_t hvf_vm::stage1_table_ipa(const uint64_t* table) const
     {
-        return this->table_pool_ipa_ +
-               (reinterpret_cast<uintptr_t>(table) - reinterpret_cast<uintptr_t>(this->table_pool_));
+        return this->table_pool_ipa_ + (reinterpret_cast<uintptr_t>(table) - reinterpret_cast<uintptr_t>(this->table_pool_));
     }
 
     uint64_t* hvf_vm::stage1_walk_locked(const uint64_t va)

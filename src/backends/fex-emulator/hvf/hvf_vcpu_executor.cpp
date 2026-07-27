@@ -260,8 +260,8 @@ namespace sogen::fex::hvf
 
     void hvf_vcpu_executor::fail_unhandled_exit(const char* what, const uint64_t syndrome)
     {
-        fprintf(stderr, "[FEX backend] HVF vcpu: unhandled exit (%s): reason=%u syndrome=0x%llx EC=0x%x VA=0x%llx IPA=0x%llx\n",
-                what, this->exit_->reason, static_cast<unsigned long long>(syndrome), esr_ec(syndrome),
+        fprintf(stderr, "[FEX backend] HVF vcpu: unhandled exit (%s): reason=%u syndrome=0x%llx EC=0x%x VA=0x%llx IPA=0x%llx\n", what,
+                this->exit_->reason, static_cast<unsigned long long>(syndrome), esr_ec(syndrome),
                 static_cast<unsigned long long>(this->exit_->exception.virtual_address),
                 static_cast<unsigned long long>(this->exit_->exception.physical_address));
         for (unsigned i = 0; i < 31; ++i)
@@ -275,9 +275,8 @@ namespace sogen::fex::hvf
         hv_vcpu_get_reg(this->vcpu_, HV_REG_PC, &pc);
         hv_vcpu_get_sys_reg(this->vcpu_, HV_SYS_REG_SP_EL1, &sp);
         fprintf(stderr, "\n  pc = 0x%016llx sp_el1 = 0x%016llx esr_el1 = 0x%016llx elr_el1 = 0x%016llx far_el1 = 0x%016llx\n",
-                static_cast<unsigned long long>(pc), static_cast<unsigned long long>(sp),
-                static_cast<unsigned long long>(this->esr_el1()), static_cast<unsigned long long>(this->elr_el1()),
-                static_cast<unsigned long long>(this->far_el1()));
+                static_cast<unsigned long long>(pc), static_cast<unsigned long long>(sp), static_cast<unsigned long long>(this->esr_el1()),
+                static_cast<unsigned long long>(this->elr_el1()), static_cast<unsigned long long>(this->far_el1()));
         throw std::runtime_error("HVF vcpu: unhandled VM exit");
     }
 
@@ -334,8 +333,8 @@ namespace sogen::fex::hvf
 
             if (ec == 0x24 || ec == 0x20) // stage-2 data / instruction abort from a lower EL
             {
-                if (!handler.on_stage2_abort(*this, this->exit_->exception.virtual_address,
-                                             this->exit_->exception.physical_address, syndrome))
+                if (!handler.on_stage2_abort(*this, this->exit_->exception.virtual_address, this->exit_->exception.physical_address,
+                                             syndrome))
                 {
                     this->fail_unhandled_exit("stage-2 abort", syndrome);
                 }

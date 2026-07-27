@@ -1062,8 +1062,8 @@ namespace sogen::fex
                     // Same trailing-guard trick as the MAP_JIT branch below, but committed plain RW:
                     // the guest is the only executor of this memory, via its stage-2 EXEC mapping.
                     const size_t exec_size = rounded > host_page_size_apple ? rounded - host_page_size_apple : rounded;
-                    void* result = ::mmap(reinterpret_cast<void*>(slot), exec_size, PROT_READ | PROT_WRITE,
-                                          (flags & ~MAP_JIT) | MAP_FIXED, fd, offset);
+                    void* result = ::mmap(reinterpret_cast<void*>(slot), exec_size, PROT_READ | PROT_WRITE, (flags & ~MAP_JIT) | MAP_FIXED,
+                                          fd, offset);
                     if (result != reinterpret_cast<void*>(slot))
                     {
                         this->free_list_.push_back({slot, rounded});
@@ -1386,14 +1386,12 @@ namespace sogen::fex
         bool hvf_on_guest_exception(hvf::hvf_vcpu_executor& vcpu, uint32_t vector_entry);
         void hvf_complete_decoded_load(hvf::hvf_vcpu_executor& vcpu, const decoded_arm64_load& decoded, const void* data,
                                        uint64_t pc) const;
-        bool hvf_handle_mmio_fault(hvf::hvf_vcpu_executor& vcpu, const mmio_region& region, uint64_t guest_fault_addr,
-                                   uint64_t pc) const;
+        bool hvf_handle_mmio_fault(hvf::hvf_vcpu_executor& vcpu, const mmio_region& region, uint64_t guest_fault_addr, uint64_t pc) const;
         bool hvf_handle_misaligned_atomic_fault(hvf::hvf_vcpu_executor& vcpu, uint64_t fault_addr, uint64_t pc);
         bool hvf_handle_callret_stack_fault(hvf::hvf_vcpu_executor& vcpu, uint64_t fault_addr) const;
         bool hvf_handle_general_memory_violation(hvf::hvf_vcpu_executor& vcpu, uint64_t fault_addr, uint64_t pc,
                                                  memory_operation operation);
-        void hvf_defer_hook_dispatch(hvf::hvf_vcpu_executor& vcpu, const pending_fault_dispatch& dispatch,
-                                     bool sra_already_spilled);
+        void hvf_defer_hook_dispatch(hvf::hvf_vcpu_executor& vcpu, const pending_fault_dispatch& dispatch, bool sra_already_spilled);
 
         std::unique_ptr<hvf::hvf_vcpu_executor> hvf_executor_;
         // request_thread_stop() kicks the vCPU from arbitrary threads (quantum timer); the unique_ptr
@@ -3785,8 +3783,7 @@ namespace sogen::fex
 #ifdef __APPLE__
         if (g_hvf != nullptr)
         {
-            g_hvf->map(reinterpret_cast<uint64_t>(this->thread_), sizeof(FEXCore::Core::InternalThreadState),
-                       PROT_READ | PROT_WRITE);
+            g_hvf->map(reinterpret_cast<uint64_t>(this->thread_), sizeof(FEXCore::Core::InternalThreadState), PROT_READ | PROT_WRITE);
             this->hvf_shim_thread_pointers(*this->thread_->CurrentFrame);
         }
         else
@@ -3797,8 +3794,7 @@ namespace sogen::fex
             // vCPU's thread shares the same original pointer - write-once. Not installed on the HVF
             // path: code buffers are plain RW there, so there is no W^X state to toggle.
             uint64_t expected_zero = 0;
-            g_original_exit_function_link.compare_exchange_strong(expected_zero,
-                                                                  this->thread_->CurrentFrame->Pointers.ExitFunctionLink);
+            g_original_exit_function_link.compare_exchange_strong(expected_zero, this->thread_->CurrentFrame->Pointers.ExitFunctionLink);
             this->thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
         }
 #endif
@@ -3818,8 +3814,7 @@ namespace sogen::fex
 #ifdef __APPLE__
         if (g_hvf != nullptr)
         {
-            g_hvf->map(reinterpret_cast<uint64_t>(this->thread32_), sizeof(FEXCore::Core::InternalThreadState),
-                       PROT_READ | PROT_WRITE);
+            g_hvf->map(reinterpret_cast<uint64_t>(this->thread32_), sizeof(FEXCore::Core::InternalThreadState), PROT_READ | PROT_WRITE);
             this->hvf_shim_thread_pointers(*this->thread32_->CurrentFrame);
         }
 #endif
@@ -4276,8 +4271,7 @@ namespace sogen::fex
             {
                 throw std::runtime_error("FEX backend failed to allocate the HVF emulator stack");
             }
-            this->hvf_emulator_stack_top_ =
-                (reinterpret_cast<uint64_t>(stack) + emulator_stack_size - 64) & ~static_cast<uint64_t>(15);
+            this->hvf_emulator_stack_top_ = (reinterpret_cast<uint64_t>(stack) + emulator_stack_size - 64) & ~static_cast<uint64_t>(15);
         }
 
         this->stop_requested_ = false;
@@ -4291,9 +4285,8 @@ namespace sogen::fex
         for (;;)
         {
             auto* const active = this->active_thread_.load();
-            auto* const delegator = (this->active_context_ == this->emulator_.context32_.get())
-                                        ? this->emulator_.signal_delegator32_.get()
-                                        : this->emulator_.signal_delegator_.get();
+            auto* const delegator = (this->active_context_ == this->emulator_.context32_.get()) ? this->emulator_.signal_delegator32_.get()
+                                                                                                : this->emulator_.signal_delegator_.get();
             const auto& cfg = delegator->GetConfig();
 
             this->hvf_executor_->run_dispatch(cfg.DispatcherBegin, reinterpret_cast<uint64_t>(active->CurrentFrame),
@@ -4380,7 +4373,7 @@ namespace sogen::fex
         // permission fault. The syndrome's WnR bit (ISS[6]) classifies the access exactly, unlike
         // the deliberately-narrow store decode table (which cannot see plain stores - and with
         // hardware TSO every guest store is a plain store).
-        const memory_operation operation = !is_data                   ? memory_operation::exec
+        const memory_operation operation = !is_data                     ? memory_operation::exec
                                            : ((syndrome >> 6) & 1) != 0 ? memory_operation::write
                                                                         : memory_operation::read;
         return this->hvf_handle_general_memory_violation(vcpu, va, vcpu.get_pc(), operation);
@@ -4630,9 +4623,8 @@ namespace sogen::fex
             int host_probe = -1;
             char probe_byte = 0;
             mach_vm_size_t read_count = 0;
-            const kern_return_t kr =
-                ::mach_vm_read_overwrite(mach_task_self(), fault_addr & ~static_cast<uint64_t>(0xFFF), 1,
-                                         reinterpret_cast<mach_vm_address_t>(&probe_byte), &read_count);
+            const kern_return_t kr = ::mach_vm_read_overwrite(mach_task_self(), fault_addr & ~static_cast<uint64_t>(0xFFF), 1,
+                                                              reinterpret_cast<mach_vm_address_t>(&probe_byte), &read_count);
             host_probe = (kr == KERN_SUCCESS) ? 1 : 0;
             fprintf(stderr,
                     "[HVF diag] general violation: fault=0x%llx guest=0x%llx pc=0x%llx declared=%d op=%d vm_mapped=%d "
