@@ -17,6 +17,7 @@ namespace sogen::fex::hvf
         constexpr uint32_t cond_eq = 0;
         constexpr uint32_t cond_ne = 1;
         constexpr uint32_t cond_hs = 2;
+        constexpr uint32_t cond_lo = 3;
         constexpr uint32_t cond_mi = 4;
         constexpr uint32_t cond_pl = 5;
         constexpr uint32_t cond_hi = 8;
@@ -522,6 +523,193 @@ namespace sogen::fex::hvf
             emit_f80_addsub(em, slow, true);
         }
 
+        // extF80_cmp, the eq/lt/le triple X80SoftFloat::FCMP composes into the LT/UNORDERED/EQ flag
+        // word. Every operand shape is handled except a NaN on either side, which is the only case
+        // any of the three comparisons raises the invalid flag for. The comparisons themselves are
+        // pure bit tests on the raw operands - no rounding, no precision control - so the emitted
+        // form is softfloat's own predicates rather than an approximation of them.
+        void emit_f80_cmp(arm64_emitter& em, const arm64_emitter::label slow)
+        {
+            constexpr uint32_t sig_a = 2;
+            constexpr uint32_t signexp_a = 3;
+            constexpr uint32_t sig_b = 4;
+            constexpr uint32_t signexp_b = 5;
+            constexpr uint32_t sign_a = 6;
+            constexpr uint32_t sign_b = 7;
+            constexpr uint32_t any_nonzero = 8;
+            constexpr uint32_t result_eq = 16;
+            constexpr uint32_t bits_eq = 17;
+            constexpr uint32_t any_zero = 0;
+            constexpr uint32_t lt128 = 1;
+
+            em.umov_d(sig_a, 0, 0);
+            em.umov_h(signexp_a, 0, 4);
+            em.umov_d(sig_b, 1, 0);
+            em.umov_h(signexp_b, 1, 4);
+
+            const auto defer_if_nan = [&](const uint32_t sig, const uint32_t signexp) {
+                em.and_low_mask(sign_a, signexp, 15);
+                em.cmp_shifted(false, sign_a, bits_eq);
+                em.cset(false, sign_a, cond_eq);
+                em.lsl_imm(true, sign_b, sig, 1);
+                em.cmp_imm(true, sign_b, 0);
+                em.cset(false, sign_b, cond_ne);
+                em.and_shifted(false, sign_a, sign_a, sign_b);
+                em.cmp_imm(false, sign_a, 0);
+                em.b_cond(cond_ne, slow);
+            };
+
+            em.movz(false, bits_eq, 0x7FFF);
+            defer_if_nan(sig_a, signexp_a);
+            defer_if_nan(sig_b, signexp_b);
+
+            em.lsr_imm(false, sign_a, signexp_a, 15);
+            em.lsr_imm(false, sign_b, signexp_b, 15);
+
+            em.orr_shifted(false, any_zero, signexp_a, signexp_b);
+            em.and_low_mask(any_zero, any_zero, 15);
+            em.orr_shifted(true, any_zero, any_zero, sig_a);
+            em.orr_shifted(true, any_zero, any_zero, sig_b);
+            em.cmp_imm(true, any_zero, 0);
+            em.cset(false, any_nonzero, cond_ne);
+            em.cset(false, any_zero, cond_eq);
+
+            em.cmp_shifted(true, sig_a, sig_b);
+            em.cset(false, result_eq, cond_eq);
+            em.cmp_shifted(false, signexp_a, signexp_b);
+            em.cset(false, bits_eq, cond_eq);
+            em.and_shifted(false, bits_eq, result_eq, bits_eq);
+            em.and_shifted(false, result_eq, result_eq, any_zero);
+            em.orr_shifted(false, result_eq, result_eq, bits_eq);
+
+            em.cmp_shifted(true, sig_a, sig_b);
+            em.sbcs(true, wzr, signexp_a, signexp_b);
+            em.cset(false, lt128, cond_lo);
+
+            em.eor_shifted(false, 2, sign_a, sign_b); // signs disagree
+            em.movz(false, 3, 1);
+            em.eor_shifted(false, 4, bits_eq, 3); // !bits_eq
+
+            em.eor_shifted(false, 5, sign_a, lt128);
+            em.and_shifted(false, 5, 5, 4);
+            em.and_shifted(false, 3, sign_a, any_nonzero);
+            em.cmp_imm(false, 2, 0);
+            em.csel(false, 5, 3, 5, cond_ne); // extF80_lt
+
+            em.movz(false, 3, 1);
+            em.eor_shifted(false, 3, lt128, 3);
+            em.and_shifted(false, 3, 3, 4); // softfloat_lt128(b, a)
+            em.eor_shifted(false, 3, sign_a, 3);
+            em.orr_shifted(false, 3, 3, bits_eq);
+            em.orr_shifted(false, 4, sign_b, any_zero);
+            em.cmp_imm(false, 2, 0);
+            em.csel(false, 3, 4, 3, cond_ne); // extF80_le(b, a)
+
+            em.movz(false, 4, 1);
+            em.eor_shifted(false, 6, result_eq, 4);
+            em.eor_shifted(false, 7, 5, 4);
+            em.and_shifted(false, 6, 6, 7);
+            em.and_shifted(false, 3, 6, 3); // gt
+            em.eor_shifted(false, 3, 3, 4);
+            em.and_shifted(false, 3, 6, 3); // unordered
+
+            em.orr_shifted(false, 0, result_eq, 5, 1);
+            em.orr_shifted(false, 0, 0, 3, 2);
+            em.ret();
+        }
+
+        // extF80_to_i64 with softfloat_roundToI64's `exact` argument false, so the only flag it can
+        // raise is the invalid one both of its overflow arms take; those defer, as does an exponent
+        // large enough for extF80_to_i64's own out-of-range test to fire.
+        void emit_f80_cvtint_i64(arm64_emitter& em, const arm64_emitter::label slow)
+        {
+            constexpr uint32_t sig = 2;
+            constexpr uint32_t signexp = 3;
+            constexpr uint32_t rc = 3;
+            constexpr uint32_t exp = 4;
+            constexpr uint32_t sign = 5;
+            constexpr uint32_t dist = 6;
+            constexpr uint32_t tmp = 7;
+            constexpr uint32_t sig_z = 16;
+            constexpr uint32_t sig_extra = 17;
+
+            const auto whole_word = em.new_label();
+            const auto round = em.new_label();
+            const auto no_increment = em.new_label();
+
+            em.umov_d(sig, 0, 0);
+            em.umov_h(signexp, 0, 4);
+            em.and_low_mask(exp, signexp, 15);
+            em.lsr_imm(false, sign, signexp, 15);
+
+            em.movz(false, dist, 0x403E);
+            em.sub_shifted(false, dist, dist, exp);
+            em.cmp_imm(false, dist, 0);
+            em.b_cond(cond_mi, slow); // shiftDist <= 0 with a nonzero shiftDist is the invalid arm
+
+            em.cmp_imm(false, dist, 64);
+            em.b_cond(cond_hs, whole_word);
+
+            // softfloat_shiftRightJam64Extra's dist < 64 arm, except that extF80_to_i64 bypasses it
+            // entirely for shiftDist == 0 and uses a zero sigExtra.
+            em.movz(false, tmp, 64);
+            em.sub_shifted(false, tmp, tmp, dist);
+            em.lsrv(true, sig_z, sig, dist);
+            em.lslv(true, sig_extra, sig, tmp);
+            em.cmp_imm(false, dist, 0);
+            em.csel(true, sig_extra, wzr, sig_extra, cond_eq);
+            em.b_cond(cond_al, round);
+
+            em.bind(whole_word);
+            em.cmp_imm(true, sig, 0);
+            em.cset(true, sig_extra, cond_ne);
+            em.cmp_imm(false, dist, 64);
+            em.csel(true, sig_extra, sig, sig_extra, cond_eq);
+            em.movz(true, sig_z, 0);
+
+            em.bind(round);
+            em.ubfx(false, rc, 0, 10, 2);
+            em.lsr_imm(true, exp, sig_extra, 63);
+            em.cmp_imm(true, sig_extra, 0);
+            em.cset(false, dist, cond_ne);
+            em.movz(false, tmp, 2);
+            em.sub_shifted(false, tmp, tmp, sign);
+            em.cmp_shifted(false, rc, tmp);
+            em.cset(false, tmp, cond_eq);
+            em.and_shifted(false, dist, dist, tmp);
+            em.cmp_imm(false, rc, 0);
+            em.csel(false, dist, exp, dist, cond_eq);
+
+            em.cmp_imm(false, dist, 0);
+            em.b_cond(cond_eq, no_increment);
+            em.add_imm(true, sig_z, sig_z, 1);
+            em.cmp_imm(true, sig_z, 0);
+            em.b_cond(cond_eq, slow);
+            em.movz(true, tmp, 1);
+            em.lsl_imm(true, tmp, tmp, 63);
+            em.cmp_shifted(true, sig_extra, tmp);
+            em.cset(false, tmp, cond_eq);
+            em.cmp_imm(false, rc, 0);
+            em.cset(false, exp, cond_eq);
+            em.and_shifted(false, tmp, tmp, exp);
+            em.bic_shifted(true, sig_z, sig_z, tmp);
+
+            em.bind(no_increment);
+            em.sub_shifted(true, exp, wzr, sig_z);
+            em.cmp_imm(false, sign, 0);
+            em.csel(true, exp, sig_z, exp, cond_eq);
+            em.cmp_imm(true, exp, 0);
+            em.cset(false, dist, cond_ne);
+            em.lsr_imm(true, tmp, exp, 63);
+            em.eor_shifted(false, tmp, tmp, sign);
+            em.and_shifted(false, dist, dist, tmp);
+            em.cmp_imm(false, dist, 0);
+            em.b_cond(cond_ne, slow);
+
+            em.orr_shifted(true, 0, wzr, exp);
+            em.ret();
+        }
+
         using op_emitter = void (*)(arm64_emitter&, arm64_emitter::label);
 
         op_emitter emitter_for(const hvf_x87_fastpath::op which)
@@ -532,6 +720,10 @@ namespace sogen::fex::hvf
                 return emit_f80_cvt_f32;
             case hvf_x87_fastpath::op::f80_cvt_f64:
                 return emit_f80_cvt_f64;
+            case hvf_x87_fastpath::op::f80_cmp:
+                return emit_f80_cmp;
+            case hvf_x87_fastpath::op::f80_cvtint_i64:
+                return emit_f80_cvtint_i64;
             case hvf_x87_fastpath::op::f80_mul:
                 return emit_f80_mul;
             case hvf_x87_fastpath::op::f80_add:

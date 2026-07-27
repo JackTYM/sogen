@@ -163,6 +163,11 @@ namespace sogen::fex::hvf
             this->emit(0x4B000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (shift << 10) | (rn << 5) | rd);
         }
 
+        void sbcs(const bool is64, const uint32_t rd, const uint32_t rn, const uint32_t rm)
+        {
+            this->emit(0x7A000000u | (is64 ? 0x80000000u : 0u) | (rm << 16) | (rn << 5) | rd);
+        }
+
         void cmp_imm(const bool is64, const uint32_t rn, const uint32_t imm12, const bool shift12 = false)
         {
             this->emit(0x7100001Fu | (is64 ? 0x80000000u : 0u) | (shift12 ? (1u << 22) : 0u) | (imm12 << 10) | (rn << 5));

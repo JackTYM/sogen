@@ -30,6 +30,7 @@ namespace sogen::fex::hvf
             f80_cvt_f32,
             f80_cvt_f64,
             f80_cmp,
+            f80_cvtint_i64,
             f80_mul,
             f80_add,
             f80_sub,

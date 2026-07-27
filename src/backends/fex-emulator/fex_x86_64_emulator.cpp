@@ -4408,6 +4408,8 @@ namespace sogen::fex
         static constexpr std::pair<FEXCore::Core::FallbackHandlerIndex, hvf::hvf_x87_fastpath::op> fastpath_ops[] = {
             {FEXCore::Core::OPINDEX_F80CVT_4, hvf::hvf_x87_fastpath::op::f80_cvt_f32},
             {FEXCore::Core::OPINDEX_F80CVT_8, hvf::hvf_x87_fastpath::op::f80_cvt_f64},
+            {FEXCore::Core::OPINDEX_F80CMP, hvf::hvf_x87_fastpath::op::f80_cmp},
+            {FEXCore::Core::OPINDEX_F80CVTINT_8, hvf::hvf_x87_fastpath::op::f80_cvtint_i64},
             {FEXCore::Core::OPINDEX_F80MUL, hvf::hvf_x87_fastpath::op::f80_mul},
             {FEXCore::Core::OPINDEX_F80ADD, hvf::hvf_x87_fastpath::op::f80_add},
             {FEXCore::Core::OPINDEX_F80SUB, hvf::hvf_x87_fastpath::op::f80_sub},
