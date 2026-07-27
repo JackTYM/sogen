@@ -4,6 +4,7 @@
 #include "emulator_utils.hpp"
 #include "syscall_utils.hpp"
 #include "devices/console.hpp"
+#include "devices/mountmgr.hpp"
 
 #include <numeric>
 #include <cwctype>
@@ -278,6 +279,15 @@ namespace sogen
         NTSTATUS handle_NtOpenProcessTokenEx(const syscall_context& c, handle process_handle, ACCESS_MASK desired_access,
                                              ULONG /*handle_attributes*/, emulator_object<handle> token_handle);
         NTSTATUS handle_NtTerminateProcess(const syscall_context& c, handle process_handle, NTSTATUS exit_status);
+        NTSTATUS handle_NtCreateUserProcess(const syscall_context& c, emulator_object<handle> process_handle,
+                                            emulator_object<handle> thread_handle, ACCESS_MASK process_desired_access,
+                                            ACCESS_MASK thread_desired_access,
+                                            emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> process_object_attributes,
+                                            emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> thread_object_attributes,
+                                            ULONG process_flags, ULONG thread_flags,
+                                            emulator_object<RTL_USER_PROCESS_PARAMETERS64> process_parameters,
+                                            emulator_object<PS_CREATE_INFO<EmulatorTraits<Emu64>>> create_info,
+                                            emulator_object<PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>> attribute_list);
         NTSTATUS handle_NtFlushProcessWriteBuffers(const syscall_context& c);
 
         // syscalls/registry.cpp:
@@ -366,6 +376,7 @@ namespace sogen
         NTSTATUS handle_NtSetSystemInformation();
         NTSTATUS handle_NtPowerInformation(const syscall_context& c, uint32_t information_level, uint64_t input_buffer,
                                            uint32_t input_buffer_length, uint64_t output_buffer, uint32_t output_buffer_length);
+        NTSTATUS handle_NtVdmControl(const syscall_context& c, uint32_t service_class, uint64_t service_data);
 
         // syscalls/thread.cpp:
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, handle thread_handle, THREADINFOCLASS info_class,
@@ -622,6 +633,7 @@ namespace sogen
         emulator_pointer handle_NtUserSetClassLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
                                                       BOOL Ansi);
         uint32_t handle_NtUserSetWindowLong(const syscall_context& c, handle hWnd, int nIndex, uint32_t dwNewLong, BOOL Ansi);
+        uint16_t handle_NtUserSetWindowWord(const syscall_context& c, handle hWnd, int nIndex, uint16_t wNewWord);
         uint64_t handle_NtUserGetAncestor(const syscall_context& c, hwnd child_hwnd, UINT flags);
         BOOL handle_NtUserRedrawWindow(const syscall_context& c, hwnd hwnd, emulator_object<RECT> update_rect, uint64_t update_rgn,
                                        UINT flags);
@@ -759,6 +771,7 @@ namespace sogen
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, handle bitmap);
         BOOL handle_NtGdiGetDCDword(const syscall_context& c, hdc dc, uint32_t index, emulator_pointer result);
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, hdc dc, int x, int y, emulator_pointer prev);
+        BOOL handle_NtGdiSetBitmapDimension(const syscall_context& c, handle bitmap, LONG width, LONG height, emulator_pointer prev_size);
         uint64_t handle_NtGdiHfontCreate(const syscall_context& c, emulator_pointer logfont, uint32_t angle);
         uint32_t handle_NtGdiExtGetObjectW(const syscall_context& c, uint32_t handle_value, uint32_t size, emulator_pointer buffer);
         BOOL handle_NtGdiEnumFonts(const syscall_context& c, hdc dc, ULONG type, ULONG win32_compat, ULONG face_name_len,
@@ -953,6 +966,40 @@ namespace sogen
             auto* device = c.proc.devices.get(resolved_file_handle);
             if (!device)
             {
+                // Real Windows answers IOCTL_MOUNTDEV_QUERY_DEVICE_NAME on the volume's own handle
+                // (e.g. a handle to "C:\" or "\\.\C:"), not on a separate mount-manager control
+                // device - shell32's drive-type resolution (used by ShellExecute) issues this on
+                // any file handle it opens, so it must be answered here rather than in
+                // mount_point_manager.cpp (which only handles the distinct IOCTL_MOUNTMGR_* codes).
+                if (io_control_code == IOCTL_MOUNTDEV_QUERY_DEVICE_NAME)
+                {
+                    if (const auto* f = c.proc.files.get(resolved_file_handle))
+                    {
+                        const auto device_name = u8_to_u16("\\Device\\HarddiskVolume" + std::to_string(f->drive_number));
+                        const auto name_bytes = static_cast<USHORT>(device_name.size() * sizeof(char16_t));
+                        const auto total_length = static_cast<ULONG>(offsetof(MOUNTDEV_NAME, Name) + name_bytes);
+
+                        if (io_status_block)
+                        {
+                            IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                            block.Information = total_length;
+                            io_status_block.write(block);
+                        }
+
+                        if (output_buffer_length < total_length)
+                        {
+                            return STATUS_BUFFER_OVERFLOW;
+                        }
+
+                        c.emu.write_memory(output_buffer, name_bytes);
+                        c.emu.write_memory(output_buffer + offsetof(MOUNTDEV_NAME, Name), device_name.c_str(), name_bytes);
+
+                        return STATUS_SUCCESS;
+                    }
+                }
+
+                c.win_emu.log.warn("NtDeviceIoControlFile on non-device handle (control code 0x%X)\n",
+                                   static_cast<uint32_t>(io_control_code));
                 return STATUS_INVALID_HANDLE;
             }
 
@@ -1037,11 +1084,6 @@ namespace sogen
                 return_length.write(0);
             }
 
-            return STATUS_NOT_SUPPORTED;
-        }
-
-        NTSTATUS handle_NtCreateUserProcess()
-        {
             return STATUS_NOT_SUPPORTED;
         }
 
@@ -1239,6 +1281,7 @@ namespace sogen
         add_handler(NtQueryPerformanceCounter);
         add_handler(NtQuerySystemInformation);
         add_handler(NtPowerInformation);
+        add_handler(NtVdmControl);
         add_handler(NtCreateEvent);
         add_handler(NtProtectVirtualMemory);
         add_handler(NtLockVirtualMemory);
@@ -1337,6 +1380,7 @@ namespace sogen
         add_handler(NtGdiGetDCforBitmap);
         add_handler(NtGdiGetDCDword);
         add_handler(NtGdiSetBrushOrg);
+        add_handler(NtGdiSetBitmapDimension);
         add_handler(NtGdiHfontCreate);
         add_handler(NtGdiExtGetObjectW);
         add_handler(NtGdiEnumFonts);
@@ -1591,6 +1635,7 @@ namespace sogen
         add_handler(NtUserSetWindowLongPtr);
         add_handler(NtUserSetClassLongPtr);
         add_handler(NtUserSetWindowLong);
+        add_handler(NtUserSetWindowWord);
         add_handler(NtUserGetAncestor);
         add_handler(NtUserPostMessage);
         add_handler(NtUserPostThreadMessage);

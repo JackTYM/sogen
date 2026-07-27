@@ -2495,6 +2495,17 @@ namespace sogen
 
         uint32_t handle_NtGdiDeleteObjectApp(const syscall_context& c, const uint32_t handle_value)
         {
+            // NtGdiOpenDCW hands out a single shared/cached DC (ensure_default_hdc) rather than a
+            // fresh one per call. Guest code that opens and deletes it in a tight loop (observed:
+            // thousands of times per second during a repaint loop) must not tear the entry down here -
+            // doing so forces the next OpenDCW back through allocate_gdi_dc's host-allocation search,
+            // which dominates CPU time under sustained load. Treat the delete as a no-op success and
+            // keep serving the same cached handle instead.
+            if (handle_value == c.proc.gdi_default_dc_handle)
+            {
+                return 1;
+            }
+
             GDI_HANDLE_ENTRY64 entry{};
             uint64_t entry_addr = 0;
             if (!read_gdi_entry_for_handle(c, handle_value, entry, entry_addr))
@@ -2509,9 +2520,15 @@ namespace sogen
                 writable.Unique = unique;
             });
 
-            if (handle_value == c.proc.gdi_default_dc_handle)
+            // entry.Object is the allocate_gdi_user_block() page backing the object's attribute
+            // block (DC_ATTR/font/brush/etc, see allocate_gdi_dc/allocate_gdi_object) - without
+            // releasing it here, every create+delete cycle leaks one page permanently, which
+            // both grows the process's memory footprint and makes every subsequent
+            // allocate_gdi_user_block call slower (find_free_host_allocation_base has to search
+            // past more and more never-freed regions).
+            if (entry.Object != 0)
             {
-                c.proc.gdi_default_dc_handle = 0;
+                c.win_emu.memory.release_memory(entry.Object, 0);
             }
 
             if (const auto bmp_it = c.proc.gdi_bitmap_surfaces.find(handle_value);
@@ -2603,6 +2620,30 @@ namespace sogen
                 constexpr POINT previous{};
                 c.emu.write_memory(prev, &previous, sizeof(previous));
             }
+
+            return TRUE;
+        }
+
+        BOOL handle_NtGdiSetBitmapDimension(const syscall_context& c, const handle bitmap, const LONG width, const LONG height,
+                                            const emulator_pointer prev_size)
+        {
+            const auto it = c.proc.gdi_bitmap_surfaces.find(static_cast<uint32_t>(bitmap.bits));
+            if (it == c.proc.gdi_bitmap_surfaces.end())
+            {
+                return FALSE;
+            }
+
+            if (prev_size != 0)
+            {
+                const SIZE previous{
+                    .cx = it->second.dimension_cx,
+                    .cy = it->second.dimension_cy,
+                };
+                c.emu.write_memory(prev_size, &previous, sizeof(previous));
+            }
+
+            it->second.dimension_cx = width;
+            it->second.dimension_cy = height;
 
             return TRUE;
         }

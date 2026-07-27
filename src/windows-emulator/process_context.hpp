@@ -47,9 +47,11 @@ namespace sogen
     // Each vCPU gets its own GDT page. Most descriptors are identical, but the WOW64 FS descriptor
     // (selector 0x53) holds a per-thread 32-bit TEB base that the guest reloads on every 64<->32
     // transition, so a shared GDT would let a WOW64 thread on one vCPU read another vCPU's TEB base.
-    constexpr uint64_t gdt_base_for_vcpu(const size_t vcpu_index) noexcept
+    // base is normally GDT_ADDR, but see memory_manager::gdt_base's doc comment for why it isn't
+    // always that fixed value.
+    constexpr uint64_t gdt_base_for_vcpu(const uint64_t base, const size_t vcpu_index) noexcept
     {
-        return GDT_ADDR + vcpu_index * GDT_LIMIT;
+        return base + vcpu_index * GDT_LIMIT;
     }
 
 // TODO: Get rid of that
@@ -123,6 +125,9 @@ namespace sogen
         bool guest_top_down{};
         bool guest_owns_memory{};
 
+        int32_t dimension_cx{};
+        int32_t dimension_cy{};
+
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->width);
@@ -133,6 +138,8 @@ namespace sogen
             buffer.write(this->guest_bpp);
             buffer.write(this->guest_top_down);
             buffer.write(this->guest_owns_memory);
+            buffer.write(this->dimension_cx);
+            buffer.write(this->dimension_cy);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -145,6 +152,8 @@ namespace sogen
             buffer.read(this->guest_bpp);
             buffer.read(this->guest_top_down);
             buffer.read(this->guest_owns_memory);
+            buffer.read(this->dimension_cx);
+            buffer.read(this->dimension_cy);
         }
     };
 
@@ -200,6 +209,31 @@ namespace sogen
             {
                 buffer.read(this->name);
                 buffer.read(this->ref_count);
+            }
+        };
+
+        // A child process created via NtCreateUserProcess and already run to completion (sogen runs
+        // children synchronously, see windows_emulator's create_child_emulator callback) - exit_status
+        // is the parent's only way to observe the outcome until NtWaitForSingleObject/
+        // NtQueryInformationProcess support for the minted process handle is added.
+        struct child_process_record
+        {
+            windows_path image_path{};
+            uint32_t pid = 0;
+            NTSTATUS exit_status = STATUS_SUCCESS;
+
+            void serialize(utils::buffer_serializer& buffer) const
+            {
+                buffer.write(this->image_path);
+                buffer.write(this->pid);
+                buffer.write(this->exit_status);
+            }
+
+            void deserialize(utils::buffer_deserializer& buffer)
+            {
+                buffer.read(this->image_path);
+                buffer.read(this->pid);
+                buffer.read(this->exit_status);
             }
         };
 
@@ -563,6 +597,10 @@ namespace sogen
         user_handle_store<handle_types::accelerator_table, accelerator_table> accelerator_tables{user_handles};
         handle_store<handle_types::registry, registry_key, 2> registry_keys{};
         std::map<uint32_t, handle> thread_handles_by_id{};
+        std::map<uint32_t, child_process_record> child_processes{};
+        // Starts at 2: pseudo process handle id 1 is already taken by STEAM_PROCESS_HANDLE
+        // (handles.hpp), and process/thread pseudo handles share this id per record.
+        uint32_t next_child_record_id{2};
         std::map<uint16_t, atom_entry> atoms{};
         utils::insensitive_u16string_map<class_entry> classes{};
 
