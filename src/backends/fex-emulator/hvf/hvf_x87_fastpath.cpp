@@ -153,6 +153,9 @@ namespace sogen::fex::hvf
         // [1, 0x7FFD] is exactly softfloat's `0x7FFD <= (uint32_t)(exp - 1)` test, so the underflow
         // and overflow arms - the only ones that raise an x87 exception flag - defer instead. All
         // three x87 precision-control settings are implemented; the reserved PC encoding defers.
+        //
+        // Both deferrals are emitted before FCW is consumed, because the stub they branch to is a
+        // tail call that reads the original arguments back out of x0 and x1.
         void emit_round_pack_ext_f80(arm64_emitter& em, const arm64_emitter::label slow)
         {
             const auto prec80 = em.new_label();
@@ -165,24 +168,25 @@ namespace sogen::fex::hvf
             em.cmp_shifted(false, 2, 4);
             em.b_cond(cond_hi, slow);
 
+            em.ubfx(false, 3, 0, 8, 2); // PC
+            em.cmp_imm(false, 3, 1);
+            em.b_cond(cond_eq, slow); // reserved precision-control encoding
+
             em.ubfx(false, 8, 0, 10, 2); // RC
-            em.ubfx(false, 0, 0, 8, 2);  // PC
             em.movz(false, 2, 2);
             em.sub_shifted(false, 2, 2, 7);
             em.cmp_shifted(false, 8, 2);
             em.cset(false, 2, cond_eq); // rounds away from zero for this sign
             em.cmp_imm(false, 8, 0);
             em.cset(false, 4, cond_eq); // round to nearest even
-            em.cmp_imm(false, 0, 3);
+            em.cmp_imm(false, 3, 3);
             em.b_cond(cond_eq, prec80);
-            em.cmp_imm(false, 0, 1);
-            em.b_cond(cond_eq, slow); // reserved precision-control encoding
 
             // 32- and 64-bit precision share softfloat's roundMask formulation.
-            em.movz(false, 3, 40);
             em.movz(false, 5, 11);
-            em.cmp_imm(false, 0, 0);
-            em.csel(false, 3, 3, 5, cond_eq);
+            em.movz(false, 0, 40);
+            em.cmp_imm(false, 3, 0);
+            em.csel(false, 3, 0, 5, cond_eq);
             em.movz(true, 5, 1);
             em.lslv(true, 5, 5, 3);
             em.sub_imm(true, 5, 5, 1); // roundMask
@@ -309,6 +313,10 @@ namespace sogen::fex::hvf
         // The exponent difference is additionally capped at 63 so the operand alignment collapses
         // to the `dist < 64` arm of softfloat_shiftRightJam64Extra and softfloat_shiftRightJam128,
         // which agree there and differ above it.
+        //
+        // This is the one op whose live set does not fit in the ABI's scratch registers, so the
+        // frame pointer is parked in v2 and restored on the deferral path, which tail-calls a stub
+        // that expects the original arguments still in x0 and x1.
         void emit_f80_addsub(arm64_emitter& em, const arm64_emitter::label slow, const bool negate_b)
         {
             constexpr uint32_t sign_z = 1;
@@ -336,6 +344,9 @@ namespace sogen::fex::hvf
             const auto sub_norm = em.new_label();
             const auto sub_norm_shift = em.new_label();
             const auto round = em.new_label();
+            const auto defer = em.new_label();
+
+            em.fmov_d_x(2, 1);
 
             em.umov_d(sig_a, 0, 0);
             em.umov_h(signexp_a, 0, 4);
@@ -353,21 +364,21 @@ namespace sogen::fex::hvf
             em.movz(false, sig_extra, 0x7FFD);
             em.sub_imm(false, sig_z, exp_z, 1);
             em.cmp_shifted(false, sig_z, sig_extra);
-            em.b_cond(cond_hi, slow);
+            em.b_cond(cond_hi, defer);
             em.sub_imm(false, sig_z, exp_b, 1);
             em.cmp_shifted(false, sig_z, sig_extra);
-            em.b_cond(cond_hi, slow);
+            em.b_cond(cond_hi, defer);
 
             em.and_shifted(true, sig_z, sig_a, sig_b);
             em.cmp_imm(true, sig_z, 0);
-            em.b_cond(cond_pl, slow); // an operand is unnormal, subnormal or zero
+            em.b_cond(cond_pl, defer); // an operand is unnormal, subnormal or zero
 
             em.sub_shifted(false, exp_diff, exp_z, exp_b);
             em.sub_shifted(false, sig_z, wzr, exp_diff);
             em.cmp_imm(false, exp_diff, 0);
             em.csel(false, sig_z, sig_z, exp_diff, cond_mi);
             em.cmp_imm(false, sig_z, 63);
-            em.b_cond(cond_hi, slow);
+            em.b_cond(cond_hi, defer);
 
             em.eor_shifted(false, sig_z, signexp_a, signexp_b);
             em.lsr_imm(false, sig_z, sig_z, 15);
@@ -494,7 +505,11 @@ namespace sogen::fex::hvf
 
             em.bind(round);
             em.orr_shifted(false, exp_b, wzr, sign_z);
-            emit_round_pack_ext_f80(em, slow);
+            emit_round_pack_ext_f80(em, defer);
+
+            em.bind(defer);
+            em.umov_d(1, 2, 0);
+            em.b_cond(cond_al, slow);
         }
 
         void emit_f80_add(arm64_emitter& em, const arm64_emitter::label slow)
