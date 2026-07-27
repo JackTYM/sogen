@@ -18,6 +18,8 @@ SET EMU_CURSORDIR=%EMU_WINDIR%\cursors
 SET EMU_REGDIR=%EMU_ROOT%\registry
 SET EMU_STEAMDIR=%EMU_FILESYS%\c\steam
 SET EMU_GLOBALIZATION_SORTING=%EMU_WINDIR%\globalization\sorting
+SET WV2_APPDIR=%ProgramFiles(x86)%\Microsoft\EdgeWebView\Application
+SET EMU_WEBVIEW2DIR=%EMU_FILESYS%\c\program files (x86)\microsoft\edgewebview\application
 
 MKDIR %EMU_SYSDIR%
 MKDIR %EMU_SYSDIR_WOW64%
@@ -25,8 +27,19 @@ MKDIR %EMU_CURSORDIR%
 MKDIR %EMU_REGDIR%
 MKDIR %EMU_STEAMDIR%
 MKDIR %EMU_GLOBALIZATION_SORTING%
+MKDIR "%EMU_WEBVIEW2DIR%"
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
+
+REM Windows Server editions (unlike Windows 10/11 client) don't bundle the WebView2 Runtime by
+REM default - install it here, before the registry capture below, so its real EdgeUpdate
+REM registration keys end up in the captured hive rather than being silently absent.
+REG QUERY "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >NUL 2>&1
+IF ERRORLEVEL 1 (
+	ECHO Installing WebView2 Runtime...
+	powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '%TEMP%\MicrosoftEdgeWebview2Setup.exe'"
+	"%TEMP%\MicrosoftEdgeWebview2Setup.exe" /silent /install
+)
 
 REM Capture this machine's registry hives and seed the Steam-bridge keys. Shared with grab-registry.bat
 REM (which writes SYSTEM/SECURITY/SOFTWARE/HARDWARE/SAM + NTUSER.DAT into the given dir) to avoid duplication.
@@ -188,6 +201,8 @@ CALL :collect wdmaud.drv
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 CALL :collect_file "%WINDIR%\Globalization\Sorting", SortDefault.nls, %EMU_GLOBALIZATION_SORTING%
 
+FOR /D %%V IN ("%WV2_APPDIR%\*") DO CALL :collect_dir "%%V" "%EMU_WEBVIEW2DIR%\%%~nxV"
+
 EXIT /B 0
 
 :normpath
@@ -207,5 +222,12 @@ EXIT /B
 :collect
 CALL :collect_file %SYSDIR%, %~1, %EMU_SYSDIR%
 CALL :collect_file %SYSDIR_WOW64%, %~1, %EMU_SYSDIR_WOW64%
+EXIT /B
+
+:collect_dir
+IF EXIST %1 (
+	ECHO %1 -^> %2
+	ROBOCOPY %1 %2 /E /NFL /NDL /NJH /NJS /NC /NS >NUL
+)
 EXIT /B
 
