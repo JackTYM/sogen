@@ -1364,6 +1364,11 @@ namespace sogen
 
         if (this->vcpu_count_ > 1)
         {
+            // Establishes this as the UI backend's owning thread before any vCPU worker starts, so a
+            // worker whose guest syscall creates the first window can't win that race and run the
+            // backend's one-time, main-thread-only init (e.g. Cocoa/AppKit setup) off the main thread.
+            this->ui_backend_->pump_events();
+
             // One worker thread per vCPU; this thread pumps UI events until the run ends.
             active_workers = this->vcpu_count_;
             workers.reserve(this->vcpu_count_);
