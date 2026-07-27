@@ -5,6 +5,9 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
 
 #include <Hypervisor/Hypervisor.h>
 
@@ -63,6 +66,11 @@ namespace sogen::fex::hvf
         uint64_t far_el1() const;
         uint64_t spsr_el1() const;
 
+        // EMULATOR_FEX_HVF_SINGLESTEP_DIAG=1: temporary diagnostic. Lets the backend supply a
+        // host-PC -> guest-RIP reconstruction (FEXCore::Context::RestoreRIPFromHostPC) without this
+        // class depending on FEXCore directly.
+        void set_singlestep_diag_rip_reconstructor(std::function<uint64_t(uint64_t host_pc)> fn);
+
       private:
         void flush_stage1_tlb_if_stale();
         void dispatch_callback(uint16_t id);
@@ -70,6 +78,13 @@ namespace sogen::fex::hvf
         [[noreturn]] void fail_unhandled_exit(const char* what, uint64_t syndrome);
         uint64_t get_sys(hv_sys_reg_t reg) const;
         void set_sys(hv_sys_reg_t reg, uint64_t value);
+
+        void singlestep_diag_init_from_env();
+        void singlestep_diag_maybe_arm();
+        void singlestep_diag_on_step_exit();
+        void singlestep_diag_finish();
+        void singlestep_diag_set_active(bool enable);
+        void singlestep_diag_arm_next_step();
 
         hvf_vm& vm_;
         hv_vcpu_t vcpu_ = 0;
@@ -84,6 +99,30 @@ namespace sogen::fex::hvf
         uint64_t stats_vector_exits_ = 0;
         uint64_t stats_stage2_aborts_ = 0;
         std::array<uint64_t, hvf_guest_runtime::max_stubs> stats_callback_counts_{};
+
+        struct singlestep_diag_sample
+        {
+            uint64_t t_ns;
+            uint64_t guest_rip;
+        };
+
+        enum class singlestep_diag_phase
+        {
+            idle,
+            stepping,
+            finished
+        };
+
+        bool singlestep_diag_enabled_ = false;
+        uint64_t singlestep_diag_delay_ns_ = 0;
+        uint64_t singlestep_diag_max_duration_ns_ = 0;
+        uint64_t singlestep_diag_max_steps_ = 0;
+        std::string singlestep_diag_log_path_;
+        bool singlestep_diag_exit_after_ = false;
+        singlestep_diag_phase singlestep_diag_phase_ = singlestep_diag_phase::idle;
+        uint64_t singlestep_diag_window_start_ns_ = 0;
+        std::vector<singlestep_diag_sample> singlestep_diag_samples_;
+        std::function<uint64_t(uint64_t)> singlestep_diag_rip_fn_;
     };
 }
 

@@ -3,6 +3,7 @@
 #include "hvf_vcpu_executor.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,7 @@
 
 #include <dlfcn.h>
 #include <time.h>
+#include <unistd.h>
 
 namespace sogen::fex::hvf
 {
@@ -22,6 +24,16 @@ namespace sogen::fex::hvf
         constexpr uint64_t tcr_el1_value = 0x200803510ull;
         constexpr uint64_t mair_el1_value = 0xFF; // attr0 = Normal WB RW-alloc
         constexpr uint64_t cpsr_el1h_daif_masked = 0x3c5;
+
+        constexpr uint32_t esr_ec_software_step = 0x32;
+        constexpr uint64_t cpsr_ss_bit = 1ull << 21;
+
+        // Process-start reference for EMULATOR_FEX_HVF_SINGLESTEP_DIAG_DELAY_S: initialized by this
+        // TU's static init, i.e. before any vCPU work begins.
+        const uint64_t g_singlestep_diag_process_epoch_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+
+        // Only one vCPU ever arms the capture, whichever one first crosses the deadline.
+        std::atomic<bool> g_singlestep_diag_claimed{false};
 
         void check_hv(const char* what, const hv_return_t r)
         {
@@ -122,6 +134,8 @@ namespace sogen::fex::hvf
             }
         }
 
+        this->singlestep_diag_init_from_env();
+
         this->vm_.register_vcpu(*this);
     }
 
@@ -214,12 +228,23 @@ namespace sogen::fex::hvf
         return this->get_sys(HV_SYS_REG_SPSR_EL1);
     }
 
+    void hvf_vcpu_executor::set_singlestep_diag_rip_reconstructor(std::function<uint64_t(uint64_t)> fn)
+    {
+        this->singlestep_diag_rip_fn_ = std::move(fn);
+    }
+
     void hvf_vcpu_executor::flush_stage1_tlb_if_stale()
     {
         const uint64_t generation = this->vm_.stage1_generation();
         if (generation == this->seen_stage1_generation_)
         {
             return;
+        }
+
+        const bool was_stepping = this->singlestep_diag_phase_ == singlestep_diag_phase::stepping;
+        if (was_stepping)
+        {
+            this->singlestep_diag_set_active(false);
         }
 
         const uint64_t saved_pc = this->get_pc();
@@ -245,6 +270,12 @@ namespace sogen::fex::hvf
         }
         this->set_pc(saved_pc);
         this->seen_stage1_generation_ = generation;
+
+        if (was_stepping)
+        {
+            this->singlestep_diag_set_active(true);
+            this->singlestep_diag_arm_next_step();
+        }
     }
 
     void hvf_vcpu_executor::maybe_report_stats()
@@ -298,6 +329,127 @@ namespace sogen::fex::hvf
         this->stats_vector_exits_ = 0;
         this->stats_stage2_aborts_ = 0;
         this->stats_interval_start_ns_ = now;
+    }
+
+    void hvf_vcpu_executor::singlestep_diag_init_from_env()
+    {
+        if (const char* diag = std::getenv("EMULATOR_FEX_HVF_SINGLESTEP_DIAG"); diag != nullptr && diag[0] != '0')
+        {
+            this->singlestep_diag_enabled_ = true;
+
+            const char* delay = std::getenv("EMULATOR_FEX_HVF_SINGLESTEP_DIAG_DELAY_S");
+            const double delay_s = delay != nullptr ? std::atof(delay) : 175.0;
+            this->singlestep_diag_delay_ns_ = static_cast<uint64_t>(std::max(0.0, delay_s) * 1e9);
+
+            const char* duration = std::getenv("EMULATOR_FEX_HVF_SINGLESTEP_DIAG_DURATION_MS");
+            const double duration_ms = duration != nullptr ? std::atof(duration) : 8000.0;
+            this->singlestep_diag_max_duration_ns_ = static_cast<uint64_t>(std::max(1.0, duration_ms) * 1e6);
+
+            const char* max_steps = std::getenv("EMULATOR_FEX_HVF_SINGLESTEP_DIAG_MAX_STEPS");
+            this->singlestep_diag_max_steps_ = max_steps != nullptr ? std::strtoull(max_steps, nullptr, 10) : 2'000'000ull;
+
+            const char* log_path = std::getenv("EMULATOR_FEX_HVF_SINGLESTEP_DIAG_LOG");
+            this->singlestep_diag_log_path_ = log_path != nullptr ? log_path : "/tmp/hvf_singlestep_diag.log";
+
+            this->singlestep_diag_exit_after_ = std::getenv("EMULATOR_FEX_HVF_SINGLESTEP_DIAG_EXIT_AFTER") != nullptr;
+        }
+    }
+
+    void hvf_vcpu_executor::singlestep_diag_set_active(const bool enable)
+    {
+        check_hv("hv_vcpu_set_trap_debug_exceptions", hv_vcpu_set_trap_debug_exceptions(this->vcpu_, enable));
+        uint64_t mdscr = this->get_sys(HV_SYS_REG_MDSCR_EL1);
+        if (enable)
+        {
+            mdscr |= 1ull;
+        }
+        else
+        {
+            mdscr &= ~1ull;
+        }
+        this->set_sys(HV_SYS_REG_MDSCR_EL1, mdscr);
+    }
+
+    void hvf_vcpu_executor::singlestep_diag_arm_next_step()
+    {
+        uint64_t cpsr = 0;
+        check_hv("get CPSR for step", hv_vcpu_get_reg(this->vcpu_, HV_REG_CPSR, &cpsr));
+        cpsr |= cpsr_ss_bit;
+        check_hv("set CPSR for step", hv_vcpu_set_reg(this->vcpu_, HV_REG_CPSR, cpsr));
+    }
+
+    void hvf_vcpu_executor::singlestep_diag_maybe_arm()
+    {
+        if (!this->singlestep_diag_enabled_ || this->singlestep_diag_phase_ != singlestep_diag_phase::idle)
+        {
+            return;
+        }
+
+        const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (now - g_singlestep_diag_process_epoch_ns < this->singlestep_diag_delay_ns_)
+        {
+            return;
+        }
+
+        bool expected = false;
+        if (!g_singlestep_diag_claimed.compare_exchange_strong(expected, true))
+        {
+            this->singlestep_diag_enabled_ = false;
+            return;
+        }
+
+        this->singlestep_diag_phase_ = singlestep_diag_phase::stepping;
+        this->singlestep_diag_window_start_ns_ = now;
+        this->singlestep_diag_samples_.reserve(this->singlestep_diag_max_steps_);
+        this->singlestep_diag_set_active(true);
+        this->singlestep_diag_arm_next_step();
+        fprintf(stderr, "[HVF singlestep-diag] arming single-step capture on vcpu=%p at t=%.3fs since process start\n",
+                static_cast<const void*>(this), static_cast<double>(now - g_singlestep_diag_process_epoch_ns) / 1e9);
+    }
+
+    void hvf_vcpu_executor::singlestep_diag_on_step_exit()
+    {
+        const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        const uint64_t host_pc = this->get_pc();
+        const uint64_t guest_rip = this->singlestep_diag_rip_fn_ ? this->singlestep_diag_rip_fn_(host_pc) : 0;
+        this->singlestep_diag_samples_.push_back({now, guest_rip != 0 ? guest_rip : host_pc});
+
+        const uint64_t elapsed = now - this->singlestep_diag_window_start_ns_;
+        if (elapsed >= this->singlestep_diag_max_duration_ns_ || this->singlestep_diag_samples_.size() >= this->singlestep_diag_max_steps_)
+        {
+            this->singlestep_diag_finish();
+            return;
+        }
+
+        this->singlestep_diag_arm_next_step();
+    }
+
+    void hvf_vcpu_executor::singlestep_diag_finish()
+    {
+        this->singlestep_diag_set_active(false);
+        this->singlestep_diag_phase_ = singlestep_diag_phase::finished;
+        this->singlestep_diag_enabled_ = false;
+
+        FILE* f = fopen(this->singlestep_diag_log_path_.c_str(), "w");
+        if (f != nullptr)
+        {
+            for (const auto& sample : this->singlestep_diag_samples_)
+            {
+                fprintf(f, "%llu %llx\n", static_cast<unsigned long long>(sample.t_ns), static_cast<unsigned long long>(sample.guest_rip));
+            }
+            fclose(f);
+        }
+
+        const double seconds = static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - this->singlestep_diag_window_start_ns_) / 1e9;
+        fprintf(stderr, "[HVF singlestep-diag] capture finished: %zu samples over %.3fs, written to %s%s\n",
+                this->singlestep_diag_samples_.size(), seconds, this->singlestep_diag_log_path_.c_str(),
+                f == nullptr ? " (FAILED TO OPEN LOG FILE)" : "");
+
+        if (this->singlestep_diag_exit_after_)
+        {
+            fflush(nullptr);
+            _exit(0);
+        }
     }
 
     void hvf_vcpu_executor::dispatch_callback(const uint16_t id)
@@ -385,6 +537,7 @@ namespace sogen::fex::hvf
             {
                 this->maybe_report_stats();
             }
+            this->singlestep_diag_maybe_arm();
 
             check_hv("hv_vcpu_run", hv_vcpu_run(this->vcpu_));
 
@@ -404,6 +557,12 @@ namespace sogen::fex::hvf
 
             const uint64_t syndrome = this->exit_->exception.syndrome;
             const uint32_t ec = esr_ec(syndrome);
+
+            if (ec == esr_ec_software_step)
+            {
+                this->singlestep_diag_on_step_exit();
+                continue;
+            }
 
             if (ec == 0x16) // HVC64
             {

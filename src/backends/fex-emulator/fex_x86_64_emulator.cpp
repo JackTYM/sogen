@@ -4336,6 +4336,14 @@ namespace sogen::fex
         {
             this->hvf_executor_ = std::make_unique<hvf::hvf_vcpu_executor>(*g_hvf);
             this->hvf_executor_for_kick_.store(this->hvf_executor_.get());
+            this->hvf_executor_->set_singlestep_diag_rip_reconstructor([this](const uint64_t host_pc) -> uint64_t {
+                auto* const active = this->active_thread_.load();
+                if (active == nullptr || this->active_context_ == nullptr)
+                {
+                    return 0;
+                }
+                return this->active_context_->RestoreRIPFromHostPC(active, host_pc);
+            });
         }
 
         if (this->hvf_emulator_stack_top_ == 0)
