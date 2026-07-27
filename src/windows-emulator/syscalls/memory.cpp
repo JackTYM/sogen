@@ -153,6 +153,26 @@ namespace sogen
                     return mod->module_path.to_unc_path();
                 }
             }
+
+            uint32_t map_emulator_to_nt_allocation_protection(const memory_permission permission, const memory_region_kind kind)
+            {
+                const auto protection = map_emulator_to_nt_protection(permission);
+
+                if (kind != memory_region_kind::section_image)
+                {
+                    return protection;
+                }
+
+                switch (protection)
+                {
+                case PAGE_EXECUTE_READWRITE:
+                    return PAGE_EXECUTE_WRITECOPY;
+                case PAGE_READWRITE:
+                    return PAGE_WRITECOPY;
+                default:
+                    return protection;
+                }
+            }
         }
 
         NTSTATUS handle_NtQueryVirtualMemory(const syscall_context& c, const handle process_handle, const uint64_t base_address,
@@ -206,7 +226,8 @@ namespace sogen
                     image_info.RegionSize = static_cast<int64_t>(region_info.length);
 
                     image_info.Protect = map_emulator_to_nt_protection(region_info.permissions);
-                    image_info.AllocationProtect = map_emulator_to_nt_protection(region_info.initial_permissions);
+                    image_info.AllocationProtect =
+                        map_emulator_to_nt_allocation_protection(region_info.initial_permissions, region_info.kind);
 
                     if (!region_info.is_reserved)
                     {
@@ -315,7 +336,8 @@ namespace sogen
                     memset(&image_info, 0, sizeof(image_info));
 
                     image_info.AllocationBase = region_info.allocation_base;
-                    image_info.AllocationProtect = map_emulator_to_nt_protection(region_info.initial_permissions);
+                    image_info.AllocationProtect =
+                        map_emulator_to_nt_allocation_protection(region_info.initial_permissions, region_info.kind);
                     image_info.RegionType = memory_region_policy::to_memory_region_information_type(region_info.kind);
                     image_info.RegionSize = static_cast<int64_t>(region_info.allocation_length);
 
