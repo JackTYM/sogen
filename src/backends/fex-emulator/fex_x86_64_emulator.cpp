@@ -60,6 +60,9 @@
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #include <libproc.h>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #endif
 
 #include <atomic>
@@ -94,6 +97,11 @@
 #include <FEXCore/Utils/LongJump.h>
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/AllocatorHooks.h>
+
+#ifdef __APPLE__
+#include "hvf/hvf_vm.hpp"
+#include "hvf/hvf_vcpu_executor.hpp"
+#endif
 
 namespace sogen::fex
 {
@@ -792,6 +800,67 @@ namespace sogen::fex
         }
 
         // ===========================================================================================
+        // HVF hardware-TSO execution path (see docs in the FEX-on-HVF integration plan). Phase 1 is
+        // strictly opt-in: EMULATOR_FEX_HVF=1 requires HVF + EnTSO and hard-errors otherwise, so a
+        // silent fallback can never mask a regression; unset/0 leaves the in-process software-TSO
+        // path bit-for-bit unchanged (g_hvf stays null and every branch below is dead).
+        // ===========================================================================================
+        hvf::hvf_vm* g_hvf = nullptr;
+
+        bool hvf_requested()
+        {
+            const char* value = std::getenv("EMULATOR_FEX_HVF");
+            return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+        }
+
+        void hvf_pages_replaced_hook(void* ptr, size_t size)
+        {
+            if (g_hvf != nullptr)
+            {
+                g_hvf->refresh_backing(reinterpret_cast<uint64_t>(ptr), size);
+            }
+        }
+
+        // Guest-executed JIT output dereferences pointers into libFEXCore's data segments
+        // (NamedVectorConstants, indexed LUTs - CPUBackend.cpp), so every non-pagezero segment of
+        // the image must be visible inside the VM at its host VA.
+        void hvf_map_fexcore_image()
+        {
+            Dl_info info{};
+            if (dladdr(reinterpret_cast<void*>(&FEXCore::Config::Initialize), &info) == 0)
+            {
+                throw std::runtime_error("HVF: failed to locate the FEXCore image");
+            }
+
+            const auto* header = static_cast<const mach_header_64*>(info.dli_fbase);
+            intptr_t slide = 0;
+            for (uint32_t i = 0; i < _dyld_image_count(); ++i)
+            {
+                if (_dyld_get_image_header(i) == reinterpret_cast<const mach_header*>(header))
+                {
+                    slide = _dyld_get_image_vmaddr_slide(i);
+                    break;
+                }
+            }
+
+            const auto* cmd = reinterpret_cast<const load_command*>(header + 1);
+            for (uint32_t i = 0; i < header->ncmds; ++i)
+            {
+                if (cmd->cmd == LC_SEGMENT_64)
+                {
+                    const auto* seg = reinterpret_cast<const segment_command_64*>(cmd);
+                    if (strcmp(seg->segname, SEG_PAGEZERO) != 0 && seg->vmsize != 0)
+                    {
+                        const auto va = static_cast<uint64_t>(seg->vmaddr) + static_cast<uint64_t>(slide);
+                        const bool writable = (seg->initprot & VM_PROT_WRITE) != 0;
+                        g_hvf->map(va, seg->vmsize, writable ? (PROT_READ | PROT_WRITE) : PROT_READ);
+                    }
+                }
+                cmd = reinterpret_cast<const load_command*>(reinterpret_cast<const uint8_t*>(cmd) + cmd->cmdsize);
+            }
+        }
+
+        // ===========================================================================================
         // FEXCore-internal host allocation arena (Apple, guest VA == host VA).
         //
         // This backend runs guest VA == host VA, so any host allocation the kernel is free to place
@@ -904,7 +973,16 @@ namespace sogen::fex
                 return this->base_ != 0;
             }
 
+            // Must be enabled before install(): in HVF mode the host never executes JIT output
+            // (only the guest does, via stage-2 EXEC), so executable requests are committed plain
+            // RW without MAP_JIT, and every committed sub-range is mirrored into the VM.
+            void enable_hvf_mode()
+            {
+                this->hvf_mode_ = true;
+            }
+
           private:
+            bool hvf_mode_ = false;
             uintptr_t base_ = 0;
             uintptr_t cursor_ = 0; // bump pointer, monotonically increasing within the arena
             std::mutex lock_;
@@ -979,6 +1057,24 @@ namespace sogen::fex
                     return MAP_FAILED;
                 }
 
+                if ((flags & MAP_JIT) && this->hvf_mode_)
+                {
+                    // Same trailing-guard trick as the MAP_JIT branch below, but committed plain RW:
+                    // the guest is the only executor of this memory, via its stage-2 EXEC mapping.
+                    const size_t exec_size = rounded > host_page_size_apple ? rounded - host_page_size_apple : rounded;
+                    void* result = ::mmap(reinterpret_cast<void*>(slot), exec_size, PROT_READ | PROT_WRITE,
+                                          (flags & ~MAP_JIT) | MAP_FIXED, fd, offset);
+                    if (result != reinterpret_cast<void*>(slot))
+                    {
+                        this->free_list_.push_back({slot, rounded});
+                        fprintf(stderr, "[FEX backend] FATAL: could not commit an HVF code buffer inside the FEXCore arena\n");
+                        errno = ENOMEM;
+                        return MAP_FAILED;
+                    }
+                    g_hvf->map(slot, exec_size, PROT_READ | PROT_WRITE | PROT_EXEC);
+                    return result;
+                }
+
                 if (flags & MAP_JIT)
                 {
                     // FEXCore's CodeBuffer sizes its request to include a trailing guard page at the
@@ -1022,7 +1118,12 @@ namespace sogen::fex
                 }
 
                 // Non-executable: commit directly over the reserved region.
-                return ::mmap(reinterpret_cast<void*>(slot), rounded, prot, flags | MAP_FIXED, fd, offset);
+                void* result = ::mmap(reinterpret_cast<void*>(slot), rounded, prot, flags | MAP_FIXED, fd, offset);
+                if (this->hvf_mode_ && result == reinterpret_cast<void*>(slot) && prot != PROT_NONE)
+                {
+                    g_hvf->map(slot, rounded, prot);
+                }
+                return result;
             }
 
             int release(void* addr, size_t length)
@@ -1035,6 +1136,10 @@ namespace sogen::fex
                 const size_t rounded = host_page_align_up_apple(length);
 
                 std::lock_guard<std::mutex> guard(this->lock_);
+                if (this->hvf_mode_)
+                {
+                    g_hvf->unmap(reinterpret_cast<uint64_t>(addr), rounded);
+                }
                 // Return the region to the reserved (PROT_NONE) state so it stays part of the arena's
                 // contiguous reservation, and record it for reuse. Arena VA is never returned to the OS.
                 void* r = ::mmap(addr, rounded, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -1253,6 +1358,49 @@ namespace sogen::fex
         bool dispatch_pending_hook_if_any();
         void defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled);
 
+        // --[ HVF execution path (active only when g_hvf != nullptr) ]-------------------------------
+
+        struct hvf_exit_adapter final : hvf::hvf_exit_handler
+        {
+            explicit hvf_exit_adapter(fex_vcpu& vcpu)
+                : vcpu_(vcpu)
+            {
+            }
+
+            bool on_stage2_abort(hvf::hvf_vcpu_executor& vcpu, uint64_t va, uint64_t ipa, uint64_t syndrome) override
+            {
+                return this->vcpu_.hvf_on_stage2_abort(vcpu, va, ipa, syndrome);
+            }
+
+            bool on_guest_exception(hvf::hvf_vcpu_executor& vcpu, uint32_t vector_entry) override
+            {
+                return this->vcpu_.hvf_on_guest_exception(vcpu, vector_entry);
+            }
+
+            fex_vcpu& vcpu_;
+        };
+
+        void start_hvf(size_t count);
+        void hvf_shim_thread_pointers(FEXCore::Core::CpuStateFrame& frame) const;
+        bool hvf_on_stage2_abort(hvf::hvf_vcpu_executor& vcpu, uint64_t va, uint64_t ipa, uint64_t syndrome);
+        bool hvf_on_guest_exception(hvf::hvf_vcpu_executor& vcpu, uint32_t vector_entry);
+        void hvf_complete_decoded_load(hvf::hvf_vcpu_executor& vcpu, const decoded_arm64_load& decoded, const void* data,
+                                       uint64_t pc) const;
+        bool hvf_handle_mmio_fault(hvf::hvf_vcpu_executor& vcpu, const mmio_region& region, uint64_t guest_fault_addr,
+                                   uint64_t pc) const;
+        bool hvf_handle_misaligned_atomic_fault(hvf::hvf_vcpu_executor& vcpu, uint64_t fault_addr, uint64_t pc);
+        bool hvf_handle_callret_stack_fault(hvf::hvf_vcpu_executor& vcpu, uint64_t fault_addr) const;
+        bool hvf_handle_general_memory_violation(hvf::hvf_vcpu_executor& vcpu, uint64_t fault_addr, uint64_t pc,
+                                                 memory_operation operation);
+        void hvf_defer_hook_dispatch(hvf::hvf_vcpu_executor& vcpu, const pending_fault_dispatch& dispatch,
+                                     bool sra_already_spilled);
+
+        std::unique_ptr<hvf::hvf_vcpu_executor> hvf_executor_;
+        // request_thread_stop() kicks the vCPU from arbitrary threads (quantum timer); the unique_ptr
+        // above is only ever touched by the owning worker thread, this mirror is the cross-thread view.
+        std::atomic<hvf::hvf_vcpu_executor*> hvf_executor_for_kick_{nullptr};
+        uint64_t hvf_emulator_stack_top_ = 0;
+
         pending_fault_dispatch pending_fault_dispatch_{};
         // Set by handle_fault_signal when it unwinds ExecuteThread through an InterruptFaultPage hit;
         // consumed by start()'s loop to tell that unwind apart from any other clean return. No atomics:
@@ -1335,11 +1483,23 @@ namespace sogen::fex
             {
                 if (vcpu->thread_ != nullptr && this->context_)
                 {
+#ifdef __APPLE__
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->unmap(reinterpret_cast<uint64_t>(vcpu->thread_), sizeof(FEXCore::Core::InternalThreadState));
+                    }
+#endif
                     this->context_->DestroyThread(vcpu->thread_);
                     vcpu->thread_ = nullptr;
                 }
                 if (vcpu->thread32_ != nullptr && this->context32_)
                 {
+#ifdef __APPLE__
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->unmap(reinterpret_cast<uint64_t>(vcpu->thread32_), sizeof(FEXCore::Core::InternalThreadState));
+                    }
+#endif
                     this->context32_->DestroyThread(vcpu->thread32_);
                     vcpu->thread32_ = nullptr;
                 }
@@ -1356,6 +1516,10 @@ namespace sogen::fex
             for (const auto host_page : this->mapped_host_pages_apple_)
             {
                 const auto rebase = rebase_for(this->is_wow64_process_, host_page);
+                if (g_hvf != nullptr)
+                {
+                    g_hvf->sync_page(host_page + rebase, PROT_NONE);
+                }
                 if (rebase != 0 && this->wow64_host_window_reserved_)
                 {
                     // Covered by the whole-window munmap below.
@@ -1954,6 +2118,12 @@ namespace sogen::fex
 #endif
             this->context32_ = FEXCore::Context::Context::CreateNewContext(features);
             this->context32_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
+#ifdef __APPLE__
+            if (g_hvf != nullptr)
+            {
+                this->context32_->SetHardwareTSOSupport(true);
+            }
+#endif
 
             this->syscall_handler32_ = std::make_unique<fex_syscall_handler>(*this);
             this->context32_->SetSyscallHandler(this->syscall_handler32_.get());
@@ -1997,6 +2167,16 @@ namespace sogen::fex
             {
                 read_cb(0, host_backing, size);
                 ::mprotect(host_backing, host_backing_size, PROT_READ);
+#ifdef __APPLE__
+                if (g_hvf != nullptr)
+                {
+                    // Read-only inside the VM for the whole region lifetime: the once-per-quantum
+                    // refresh writes through the host mapping (same physical pages), so the guest
+                    // sees fresh content without any stage-2 churn, and guest writes abort exactly
+                    // like the host-mprotect path faults today.
+                    g_hvf->map(reinterpret_cast<uint64_t>(host_backing), host_backing_size, PROT_READ);
+                }
+#endif
 
                 // KUSD-collision fix: register the covering host page(s) in mapped_host_pages_apple_
                 // (without a page_shadow_apple_ entry) right after establishing the real backing.
@@ -2105,6 +2285,10 @@ namespace sogen::fex
                     for (const auto rollback_page : claimed_this_call)
                     {
                         const auto rollback_rebase = rebase_for(this->is_wow64_process_, rollback_page);
+                        if (g_hvf != nullptr)
+                        {
+                            g_hvf->sync_page(rollback_page + rollback_rebase, PROT_NONE);
+                        }
                         ::munmap(reinterpret_cast<void*>(rollback_page + rollback_rebase), host_page_size_apple);
                         this->mapped_host_pages_apple_.erase(rollback_page);
                     }
@@ -2112,6 +2296,13 @@ namespace sogen::fex
                 }
                 this->mapped_host_pages_apple_.insert(host_page);
                 claimed_this_call.push_back(host_page);
+                if (g_hvf != nullptr)
+                {
+                    // mach_vm_allocate hands back VM_PROT_DEFAULT (rw) memory; mirror that so the
+                    // page behaves identically inside the vCPU until a shadow sync assigns real
+                    // guest permissions.
+                    g_hvf->sync_page(host_page + rebase, PROT_READ | PROT_WRITE);
+                }
             }
             return true;
         }
@@ -2138,11 +2329,19 @@ namespace sogen::fex
                     // this placeholder), so a later claim attempt for it would incorrectly believe it
                     // needs a fresh mach_vm_allocate, which then correctly (but uselessly) fails since
                     // the page really is still ours, throwing a false-positive host_memory_collision.
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->sync_page(reinterpret_cast<uint64_t>(host_ptr), PROT_NONE);
+                    }
                     ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                     ++it;
                 }
                 else
                 {
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->sync_page(reinterpret_cast<uint64_t>(host_ptr), PROT_NONE);
+                    }
                     ::munmap(host_ptr, host_page_size_apple);
                     it = this->mapped_host_pages_apple_.erase(it);
                 }
@@ -2195,6 +2394,23 @@ namespace sogen::fex
 #endif
 
             ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
+#ifdef __APPLE__
+            if (g_hvf != nullptr)
+            {
+                // GPU-alias plumbing is Phase 4 scope; hv_vm_map can legitimately refuse exotic
+                // backings (remap aliases of driver memory), so a failure here must not take down
+                // an otherwise-working run - the range simply stays unreachable from the vCPU.
+                try
+                {
+                    g_hvf->map(host_address, size, to_prot(permissions));
+                }
+                catch (const std::exception& e)
+                {
+                    fprintf(stderr, "[FEX backend] HVF: failed to map host-memory alias at 0x%llx: %s\n",
+                            static_cast<unsigned long long>(host_address), e.what());
+                }
+            }
+#endif
             this->erase_region_range(address, size);
             this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
             this->mark_executable_range_locked(address, size, permissions);
@@ -2241,6 +2457,12 @@ namespace sogen::fex
                         }
                         if (region.host_backing != nullptr)
                         {
+#ifdef __APPLE__
+                            if (g_hvf != nullptr)
+                            {
+                                g_hvf->unmap(reinterpret_cast<uint64_t>(region.host_backing), region.host_backing_size);
+                            }
+#endif
                             ::munmap(region.host_backing, region.host_backing_size);
                         }
                         return true;
@@ -2520,6 +2742,10 @@ namespace sogen::fex
             {
                 if (currently_mapped)
                 {
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->sync_page(host_page_addr + rebase, PROT_NONE);
+                    }
                     void* result =
                         ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                     if (result != host_ptr)
@@ -2553,12 +2779,20 @@ namespace sogen::fex
                     throw std::runtime_error("FEX backend failed to map guest memory at requested address");
                 }
                 this->mapped_host_pages_apple_.insert(host_page_addr);
+                if (g_hvf != nullptr)
+                {
+                    g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective));
+                }
                 return;
             }
 
             if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
             {
                 throw std::runtime_error("FEX backend failed to change memory protection");
+            }
+            if (g_hvf != nullptr)
+            {
+                g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective));
             }
         }
 
@@ -2581,6 +2815,20 @@ namespace sogen::fex
             LogMan::Throw::InstallHandler([](const char* message) { fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message); });
 
 #ifdef __APPLE__
+            if (hvf_requested())
+            {
+                auto& vm = hvf::hvf_vm::instance();
+                if (vm.create() != hvf::vm_create_result::hardware_tso)
+                {
+                    throw std::runtime_error("EMULATOR_FEX_HVF=1 requires Hypervisor.framework with hardware TSO "
+                                             "(missing entitlement, unsupported chip/OS, or nested virtualization)");
+                }
+                g_hvf = &vm;
+                fex_internal_arena::instance().enable_hvf_mode();
+                FEXCore::Allocator::PagesReplaced = &hvf_pages_replaced_hook;
+                hvf_map_fexcore_image();
+            }
+
             fex_internal_arena::instance().install();
             this->reserve_wow64_host_window();
 #endif
@@ -2668,6 +2916,12 @@ namespace sogen::fex
 #endif
             this->context_ = FEXCore::Context::Context::CreateNewContext(features);
             this->context_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
+#ifdef __APPLE__
+            if (g_hvf != nullptr)
+            {
+                this->context_->SetHardwareTSOSupport(true);
+            }
+#endif
 
             this->syscall_handler_ = std::make_unique<fex_syscall_handler>(*this);
             this->context_->SetSyscallHandler(this->syscall_handler_.get());
@@ -2980,6 +3234,12 @@ namespace sogen::fex
 #ifdef __APPLE__
     void fex_vcpu::start(size_t count)
     {
+        if (g_hvf != nullptr)
+        {
+            this->start_hvf(count);
+            return;
+        }
+
         this->emulator_.refresh_mmio_backings();
 
         if (count != 0)
@@ -3492,6 +3752,21 @@ namespace sogen::fex
             return;
         }
 
+#ifdef __APPLE__
+        if (g_hvf != nullptr)
+        {
+            // Host mprotect has no effect on stage-2 translation - the same protocol needs the HVF
+            // lever instead: revoke stage-2 write so the JIT's per-block-entry store aborts, plus an
+            // immediate kick so a mid-block vCPU exits without waiting for the next block entry.
+            g_hvf->protect(reinterpret_cast<uint64_t>(active->InterruptFaultPage), sizeof(active->InterruptFaultPage), PROT_READ);
+            if (auto* const executor = this->hvf_executor_for_kick_.load())
+            {
+                executor->kick();
+            }
+            return;
+        }
+#endif
+
         ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_NONE);
     }
 
@@ -3508,13 +3783,24 @@ namespace sogen::fex
         this->ensure_callret_stack(this->thread_->CurrentFrame->State);
 
 #ifdef __APPLE__
-        // See exit_function_link_jit_write_wrapper's doc comment: intercept the plain function-
-        // pointer slot JIT-compiled code calls through to patch call sites, so the write into the
-        // (MAP_JIT) code buffer happens with this thread's JIT write-protection disabled. Every
-        // vCPU's thread shares the same original pointer - write-once.
-        uint64_t expected_zero = 0;
-        g_original_exit_function_link.compare_exchange_strong(expected_zero, this->thread_->CurrentFrame->Pointers.ExitFunctionLink);
-        this->thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
+        if (g_hvf != nullptr)
+        {
+            g_hvf->map(reinterpret_cast<uint64_t>(this->thread_), sizeof(FEXCore::Core::InternalThreadState),
+                       PROT_READ | PROT_WRITE);
+            this->hvf_shim_thread_pointers(*this->thread_->CurrentFrame);
+        }
+        else
+        {
+            // See exit_function_link_jit_write_wrapper's doc comment: intercept the plain function-
+            // pointer slot JIT-compiled code calls through to patch call sites, so the write into the
+            // (MAP_JIT) code buffer happens with this thread's JIT write-protection disabled. Every
+            // vCPU's thread shares the same original pointer - write-once. Not installed on the HVF
+            // path: code buffers are plain RW there, so there is no W^X state to toggle.
+            uint64_t expected_zero = 0;
+            g_original_exit_function_link.compare_exchange_strong(expected_zero,
+                                                                  this->thread_->CurrentFrame->Pointers.ExitFunctionLink);
+            this->thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
+        }
 #endif
 
         // Build thread32_ here too, in this ordinary call context, rather than leaving it to be
@@ -3528,6 +3814,15 @@ namespace sogen::fex
     void fex_vcpu::create_thread32()
     {
         this->thread32_ = this->emulator_.context32_->CreateThread(0, 0, nullptr);
+
+#ifdef __APPLE__
+        if (g_hvf != nullptr)
+        {
+            g_hvf->map(reinterpret_cast<uint64_t>(this->thread32_), sizeof(FEXCore::Core::InternalThreadState),
+                       PROT_READ | PROT_WRITE);
+            this->hvf_shim_thread_pointers(*this->thread32_->CurrentFrame);
+        }
+#endif
 
         // Real Windows shares one GDT across both bitnesses of a wow64 process - point context32_'s
         // segment table at the exact same physical GDT memory sogen's loader wrote for this vCPU's
@@ -3564,6 +3859,16 @@ namespace sogen::fex
             {
                 throw std::runtime_error("FEX backend failed to make the call-ret stack writable");
             }
+
+#ifdef __APPLE__
+            // The PROT_NONE allocation above is invisible to the VM (the arena mirror skips
+            // PROT_NONE commits); only the writable interior gets mapped, so the surrounding guard
+            // pages fault inside the vCPU exactly like they do on the host.
+            if (g_hvf != nullptr)
+            {
+                g_hvf->map(reinterpret_cast<uint64_t>(callret_stack_base), callret_stack_size, PROT_READ | PROT_WRITE);
+            }
+#endif
 
             state._pad1 = reinterpret_cast<uint64_t>(callret_stack_base);
             state.callret_sp = reinterpret_cast<uint64_t>(callret_stack_base) + callret_stack_size / 4;
@@ -3929,6 +4234,438 @@ namespace sogen::fex
             }
         }
         return false;
+    }
+
+    // -----------------------------------------------------------------------------------------------
+    // HVF execution path: the same quantum/stop/hook state machine as the signal-based start()
+    // above, but guest execution happens inside a Hypervisor.framework vCPU with hardware TSO, and
+    // guest faults arrive as VM exits in ordinary thread context instead of POSIX signals.
+    // -----------------------------------------------------------------------------------------------
+
+    void fex_vcpu::start_hvf(const size_t count)
+    {
+        this->emulator_.refresh_mmio_backings();
+
+        if (count != 0)
+        {
+            throw std::runtime_error("FEX backend does not support exact instruction counts yet");
+        }
+
+        const current_vcpu_scope current_vcpu_guard(*this);
+
+        if (this->active_thread_.load() == nullptr)
+        {
+            this->create_thread();
+        }
+
+        if (!this->hvf_executor_)
+        {
+            this->hvf_executor_ = std::make_unique<hvf::hvf_vcpu_executor>(*g_hvf);
+            this->hvf_executor_for_kick_.store(this->hvf_executor_.get());
+        }
+
+        if (this->hvf_emulator_stack_top_ == 0)
+        {
+            // Stands in for the host thread stack ExecuteDispatch would use: the dispatcher's
+            // PushCalleeSavedRegisters frame and the Syscall op's argument staging live here.
+            // Allocated through the FEX allocator hooks so it lands in the already-mirrored arena.
+            constexpr size_t emulator_stack_size = 8ull << 20;
+            void* stack =
+                FEXCore::Allocator::mmap(nullptr, emulator_stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (stack == MAP_FAILED)
+            {
+                throw std::runtime_error("FEX backend failed to allocate the HVF emulator stack");
+            }
+            this->hvf_emulator_stack_top_ =
+                (reinterpret_cast<uint64_t>(stack) + emulator_stack_size - 64) & ~static_cast<uint64_t>(15);
+        }
+
+        this->stop_requested_ = false;
+        {
+            auto* const active = this->active_thread_.load();
+            g_hvf->protect(reinterpret_cast<uint64_t>(active->InterruptFaultPage), sizeof(active->InterruptFaultPage),
+                           PROT_READ | PROT_WRITE);
+        }
+
+        hvf_exit_adapter adapter{*this};
+        for (;;)
+        {
+            auto* const active = this->active_thread_.load();
+            auto* const delegator = (this->active_context_ == this->emulator_.context32_.get())
+                                        ? this->emulator_.signal_delegator32_.get()
+                                        : this->emulator_.signal_delegator_.get();
+            const auto& cfg = delegator->GetConfig();
+
+            this->hvf_executor_->run_dispatch(cfg.DispatcherBegin, reinterpret_cast<uint64_t>(active->CurrentFrame),
+                                              this->hvf_emulator_stack_top_, adapter);
+
+            const bool hook_dispatched = this->dispatch_pending_hook_if_any();
+            const bool interrupt_page_unwind = std::exchange(this->interrupt_page_unwind_, false);
+
+            // Same quantum-timer-race handling as the signal-based loop above.
+            if (this->stop_requested_ || (!hook_dispatched && !interrupt_page_unwind))
+            {
+                break;
+            }
+
+            auto* const now_active = this->active_thread_.load();
+            g_hvf->protect(reinterpret_cast<uint64_t>(now_active->InterruptFaultPage), sizeof(now_active->InterruptFaultPage),
+                           PROT_READ | PROT_WRITE);
+        }
+    }
+
+    void fex_vcpu::hvf_shim_thread_pointers(FEXCore::Core::CpuStateFrame& frame) const
+    {
+        auto& pointers = frame.Pointers;
+        const auto shim = [](uint64_t& slot, const bool needs_fp) {
+            if (slot == 0 || g_hvf->runtime().contains_stub(slot))
+            {
+                return;
+            }
+            slot = g_hvf->register_callback(slot, needs_fp);
+        };
+
+        shim(pointers.PrintValue, false);
+        shim(pointers.PrintVectorValue, false);
+        shim(pointers.PrintMsgValue, false);
+        shim(pointers.ThreadRemoveCodeEntryFromJIT, false);
+        shim(pointers.CPUIDFunction, false);
+        shim(pointers.XCRFunction, false);
+        shim(pointers.SyscallHandlerFunc, false);
+        shim(pointers.ExitFunctionLink, false);
+        shim(pointers.MonoBackpatcherWrite, false);
+        shim(pointers.LUDIV, false);
+        shim(pointers.LDIV, false);
+        shim(pointers.CompileBlockFunc, false);
+        shim(pointers.CompileSingleStepFunc, false);
+        shim(pointers.SleepFunc, false);
+
+        for (size_t i = 0; i < FEXCore::Core::OPINDEX_MAX; ++i)
+        {
+            shim(pointers.FallbackHandlerPointers[i].Func, true);
+        }
+    }
+
+    bool fex_vcpu::hvf_on_stage2_abort(hvf::hvf_vcpu_executor& vcpu, const uint64_t va, uint64_t /*ipa*/, const uint64_t syndrome)
+    {
+        auto* const active_thread = this->active_thread_.load();
+        if (active_thread == nullptr)
+        {
+            return false;
+        }
+
+        const bool is_data = ((syndrome >> 26) & 0x3F) == 0x24;
+        const auto interrupt_page_addr = reinterpret_cast<uint64_t>(active_thread->InterruptFaultPage);
+        if (is_data && va >= interrupt_page_addr && va < interrupt_page_addr + sizeof(active_thread->InterruptFaultPage))
+        {
+            const uint64_t fault_pc = vcpu.get_pc();
+            const bool is_dispatch_code = this->active_context_ && this->active_context_->IsAddressInCodeBuffer(active_thread, fault_pc);
+            const bool is_strb_epilogue_write = (*reinterpret_cast<const uint32_t*>(fault_pc) & 0xFFC00000u) == 0x39000000u;
+
+            if (is_dispatch_code && !is_strb_epilogue_write)
+            {
+                active_thread->CurrentFrame->State.rip = this->active_context_->RestoreRIPFromHostPC(active_thread, fault_pc);
+                this->interrupt_page_unwind_ = true;
+                const auto& stop_cfg = this->emulator_.signal_delegator_->GetConfig();
+                vcpu.set_pc(stop_cfg.ThreadStopHandlerAddressSpillSRA);
+                return true;
+            }
+
+            vcpu.set_pc(fault_pc + 4);
+            return true;
+        }
+
+        // Anything else reaching stage-2 has a valid stage-1 entry but revoked backing permissions
+        // (e.g. a guest write to the read-only-mapped real MMIO backing) - same dispatch as a
+        // permission fault. The syndrome's WnR bit (ISS[6]) classifies the access exactly, unlike
+        // the deliberately-narrow store decode table (which cannot see plain stores - and with
+        // hardware TSO every guest store is a plain store).
+        const memory_operation operation = !is_data                   ? memory_operation::exec
+                                           : ((syndrome >> 6) & 1) != 0 ? memory_operation::write
+                                                                        : memory_operation::read;
+        return this->hvf_handle_general_memory_violation(vcpu, va, vcpu.get_pc(), operation);
+    }
+
+    bool fex_vcpu::hvf_on_guest_exception(hvf::hvf_vcpu_executor& vcpu, uint32_t /*vector_entry*/)
+    {
+        auto* const active_thread = this->active_thread_.load();
+        if (active_thread == nullptr)
+        {
+            return false;
+        }
+
+        const uint64_t esr = vcpu.esr_el1();
+        const uint64_t elr = vcpu.elr_el1();
+        const auto ec = static_cast<uint32_t>((esr >> 26) & 0x3F);
+
+        if (ec == 0x25) // data abort taken at EL1: stage-1 unmapped / permission / alignment
+        {
+            const uint64_t fault_addr = vcpu.far_el1();
+            const uint32_t dfsc = esr & 0x3F;
+
+            if (this->hvf_handle_callret_stack_fault(vcpu, fault_addr))
+            {
+                vcpu.set_pc(elr);
+                return true;
+            }
+
+            {
+                const auto guest_fault_addr = this->emulator_.unrebase_fault_addr(fault_addr);
+                const std::shared_lock lock(this->emulator_.tables_mutex_);
+                for (const auto& region : this->emulator_.mmio_regions_)
+                {
+                    if (guest_fault_addr >= region.address && guest_fault_addr < region.address + region.size)
+                    {
+                        return this->hvf_handle_mmio_fault(vcpu, region, guest_fault_addr, elr);
+                    }
+                }
+            }
+
+            constexpr uint32_t dfsc_alignment_fault = 0x21;
+            if (dfsc == dfsc_alignment_fault && this->hvf_handle_misaligned_atomic_fault(vcpu, fault_addr, elr))
+            {
+                return true;
+            }
+
+            const memory_operation operation = ((esr >> 6) & 1) != 0 ? memory_operation::write : memory_operation::read;
+            return this->hvf_handle_general_memory_violation(vcpu, fault_addr, elr, operation);
+        }
+
+        if (ec == 0x21) // instruction abort taken at EL1
+        {
+            return this->hvf_handle_general_memory_violation(vcpu, elr, elr, memory_operation::exec);
+        }
+
+        // Break-op traps: the dispatcher's GuestSignal_* stubs execute hlt(0) (UNDEF at EL1,
+        // EC 0x00) or brk(0) (EC 0x3C) to surface a guest-generated exception - the same events
+        // that arrive as SIGILL/SIGTRAP on the in-process path.
+        if (!this->host_pc_in_any_dispatcher(elr))
+        {
+            return false;
+        }
+
+        auto* frame = active_thread->CurrentFrame;
+        if (!frame->SynchronousFaultData.FaultToTopAndGeneratedException)
+        {
+            return false;
+        }
+
+        auto vector = static_cast<int>(frame->SynchronousFaultData.TrapNo);
+
+        constexpr int gp_fault_vector = 13;
+        constexpr uint32_t idt_reference_bit = 0x2;
+        if (vector == gp_fault_vector && (frame->SynchronousFaultData.err_code & idt_reference_bit) != 0)
+        {
+            vector = static_cast<int>(frame->SynchronousFaultData.err_code >> 3);
+        }
+
+        frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
+
+        pending_fault_dispatch dispatch{};
+        if (vector == 14)
+        {
+            if (const auto gate = this->emulator_.find_gate_crossing(frame->State.rip))
+            {
+                auto* const source_signal_delegator = (this->active_context_ == this->emulator_.context32_.get())
+                                                          ? this->emulator_.signal_delegator32_.get()
+                                                          : this->emulator_.signal_delegator_.get();
+
+                if (this->perform_gate_crossing(*gate))
+                {
+                    this->pending_fault_dispatch_.kind = pending_fault_kind::gate_crossing;
+                    const auto& stop_cfg = source_signal_delegator->GetConfig();
+                    vcpu.set_pc(stop_cfg.ThreadStopHandlerAddress);
+                    return true;
+                }
+            }
+
+            const auto err_code = frame->SynchronousFaultData.err_code;
+            const bool is_write = (err_code & 0x2) != 0;
+            const bool is_instr_fetch = (err_code & 0x10) != 0;
+            dispatch.kind = pending_fault_kind::memory_violation;
+            dispatch.address = frame->State.rip;
+            dispatch.size = 1;
+            dispatch.operation = is_instr_fetch ? memory_operation::exec : is_write ? memory_operation::write : memory_operation::read;
+            dispatch.type = (err_code & 0x1) ? memory_violation_type::protection : memory_violation_type::unmapped;
+        }
+        else
+        {
+            dispatch.kind = pending_fault_kind::interrupt;
+            dispatch.vector = vector;
+        }
+
+        this->hvf_defer_hook_dispatch(vcpu, dispatch, /*sra_already_spilled=*/true);
+        return true;
+    }
+
+    void fex_vcpu::hvf_complete_decoded_load(hvf::hvf_vcpu_executor& vcpu, const decoded_arm64_load& decoded, const void* data,
+                                             const uint64_t pc) const
+    {
+        if (decoded.is_vector)
+        {
+            vcpu.set_simd(decoded.rt, data);
+            vcpu.set_pc(pc + 4);
+            return;
+        }
+
+        uint64_t raw_value = 0;
+        std::memcpy(&raw_value, data, decoded.size);
+
+        uint64_t result = 0;
+        switch (decoded.size)
+        {
+        case 1:
+            result =
+                decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(raw_value))) : (raw_value & 0xFFULL);
+            break;
+        case 2:
+            result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(raw_value)))
+                                         : (raw_value & 0xFFFFULL);
+            break;
+        case 4:
+            result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(raw_value)))
+                                         : (raw_value & 0xFFFFFFFFULL);
+            break;
+        default:
+            result = raw_value;
+            break;
+        }
+
+        if (!decoded.dest_is_64bit)
+        {
+            result &= 0xFFFFFFFFULL;
+        }
+
+        if (decoded.rt <= 30)
+        {
+            vcpu.set_gpr(decoded.rt, result);
+        }
+
+        vcpu.set_pc(pc + 4);
+    }
+
+    bool fex_vcpu::hvf_handle_mmio_fault(hvf::hvf_vcpu_executor& vcpu, const mmio_region& region, const uint64_t guest_fault_addr,
+                                         const uint64_t pc) const
+    {
+        const auto insn = *reinterpret_cast<const uint32_t*>(pc);
+        const auto decoded = decode_arm64_load(insn);
+        if (!decoded)
+        {
+            fprintf(stderr, "[MMIO] unrecognized instruction 0x%08x at pc=0x%llx for fault_addr=0x%llx\n", insn,
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(guest_fault_addr));
+            return false;
+        }
+
+        alignas(16) std::byte buffer[16]{};
+        region.read_cb(guest_fault_addr - region.address, buffer, decoded->size);
+        this->hvf_complete_decoded_load(vcpu, *decoded, buffer, pc);
+        return true;
+    }
+
+    bool fex_vcpu::hvf_handle_misaligned_atomic_fault(hvf::hvf_vcpu_executor& vcpu, const uint64_t fault_addr, const uint64_t pc)
+    {
+        const auto insn = *reinterpret_cast<const uint32_t*>(pc);
+
+        const std::unique_lock lock(this->emulator_.tables_mutex_);
+
+        if (const auto load = decode_arm64_load(insn))
+        {
+            alignas(16) std::byte buffer[16]{};
+            read_memory_single_copy_atomic(fault_addr, buffer, load->size);
+            this->hvf_complete_decoded_load(vcpu, *load, buffer, pc);
+            return true;
+        }
+
+        if (const auto store = decode_arm64_store(insn))
+        {
+            const uint64_t value = store->rt <= 30 ? vcpu.get_gpr(store->rt) : 0;
+            write_memory_single_copy_atomic(fault_addr, &value, store->size);
+            vcpu.set_pc(pc + 4);
+            return true;
+        }
+
+        return false;
+    }
+
+    bool fex_vcpu::hvf_handle_callret_stack_fault(hvf::hvf_vcpu_executor& vcpu, const uint64_t fault_addr) const
+    {
+        auto* const active = this->active_thread_.load();
+        if (active == nullptr || active->CallRetStackBase == nullptr)
+        {
+            return false;
+        }
+        const auto base = reinterpret_cast<uint64_t>(active->CallRetStackBase);
+        const auto host_page = static_cast<uint64_t>(::getpagesize());
+        constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+        if (fault_addr < base - host_page || fault_addr >= base + callret_stack_size + host_page)
+        {
+            return false;
+        }
+        constexpr unsigned reg_callret_sp = 25;
+        vcpu.set_gpr(reg_callret_sp, base + callret_stack_size / 4);
+        return true;
+    }
+
+    bool fex_vcpu::hvf_handle_general_memory_violation(hvf::hvf_vcpu_executor& vcpu, const uint64_t fault_addr, const uint64_t pc,
+                                                       const memory_operation operation)
+    {
+        const auto guest_fault_addr = this->emulator_.unrebase_fault_addr(fault_addr);
+        const auto guest_page = guest_fault_addr & ~(page_size - 1);
+        memory_permission declared;
+        {
+            const std::shared_lock lock(this->emulator_.tables_mutex_);
+            const auto shadow_it = this->emulator_.page_shadow_apple_.find(guest_page);
+            declared = (shadow_it != this->emulator_.page_shadow_apple_.end()) ? shadow_it->second : memory_permission::none;
+        }
+
+        if ((declared & operation) == operation)
+        {
+            return this->hvf_handle_misaligned_atomic_fault(vcpu, fault_addr, pc);
+        }
+
+        const auto type = (declared == memory_permission::none) ? memory_violation_type::unmapped : memory_violation_type::protection;
+
+        if (std::getenv("EMULATOR_FEX_HVF_DIAG") != nullptr)
+        {
+            int host_probe = -1;
+            char probe_byte = 0;
+            mach_vm_size_t read_count = 0;
+            const kern_return_t kr =
+                ::mach_vm_read_overwrite(mach_task_self(), fault_addr & ~static_cast<uint64_t>(0xFFF), 1,
+                                         reinterpret_cast<mach_vm_address_t>(&probe_byte), &read_count);
+            host_probe = (kr == KERN_SUCCESS) ? 1 : 0;
+            fprintf(stderr,
+                    "[HVF diag] general violation: fault=0x%llx guest=0x%llx pc=0x%llx declared=%d op=%d vm_mapped=%d "
+                    "host_readable=%d esr=0x%llx insn=0x%08x\n",
+                    static_cast<unsigned long long>(fault_addr), static_cast<unsigned long long>(guest_fault_addr),
+                    static_cast<unsigned long long>(pc), static_cast<int>(declared), static_cast<int>(operation),
+                    g_hvf->is_mapped_page(fault_addr) ? 1 : 0, host_probe, static_cast<unsigned long long>(vcpu.esr_el1()),
+                    *reinterpret_cast<const uint32_t*>(pc));
+        }
+
+        auto* const active = this->active_thread_.load();
+        if (const uint64_t recon_rip = this->active_context_->RestoreRIPFromHostPC(active, pc))
+        {
+            active->CurrentFrame->State.rip = recon_rip;
+        }
+
+        pending_fault_dispatch dispatch{};
+        dispatch.kind = pending_fault_kind::memory_violation;
+        dispatch.address = guest_fault_addr;
+        dispatch.size = 1;
+        dispatch.operation = operation;
+        dispatch.type = type;
+
+        this->hvf_defer_hook_dispatch(vcpu, dispatch, /*sra_already_spilled=*/false);
+        return true;
+    }
+
+    void fex_vcpu::hvf_defer_hook_dispatch(hvf::hvf_vcpu_executor& vcpu, const pending_fault_dispatch& dispatch,
+                                           const bool sra_already_spilled)
+    {
+        this->pending_fault_dispatch_ = dispatch;
+        const auto& cfg = this->emulator_.signal_delegator_->GetConfig();
+        vcpu.set_pc(sra_already_spilled ? cfg.ThreadStopHandlerAddress : cfg.ThreadStopHandlerAddressSpillSRA);
     }
 
     bool fex_vcpu::dispatch_pending_hook_if_any()

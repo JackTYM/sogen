@@ -25,6 +25,17 @@ target_link_libraries(fex-emulator PRIVATE emulator-common)
 target_link_libraries(fex-emulator PRIVATE fexcore)
 add_dependencies(fex-emulator fex_external)
 
+if(APPLE)
+  target_sources(fex-emulator PRIVATE
+    hvf/hvf_hypercalls.hpp
+    hvf/hvf_vm.hpp
+    hvf/hvf_vm.cpp
+    hvf/hvf_vcpu_executor.hpp
+    hvf/hvf_vcpu_executor.cpp
+  )
+  target_link_libraries(fex-emulator PRIVATE "-framework Hypervisor")
+endif()
+
 sogen_strip_target(fex-emulator)
 
 # Phase-0 feasibility spike: run real FEXCore JIT output inside a Hypervisor.framework vCPU with

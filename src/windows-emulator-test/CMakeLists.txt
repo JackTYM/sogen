@@ -29,3 +29,10 @@ add_test(NAME windows-emulator-test
 sogen_targets_set_folder("tests" windows-emulator-test)
 
 sogen_strip_target(windows-emulator-test)
+
+# See src/analyzer/CMakeLists.txt: entitlement for the FEX backend's opt-in HVF path.
+if(APPLE AND SOGEN_ENABLE_FEX)
+  add_custom_command(TARGET windows-emulator-test POST_BUILD
+    COMMAND codesign --sign - --force --entitlements "${PROJECT_SOURCE_DIR}/src/backends/fex-emulator/hvf/hvf-entitlements.plist" "$<TARGET_FILE:windows-emulator-test>"
+    COMMENT "Codesigning windows-emulator-test with the hypervisor entitlement")
+endif()
