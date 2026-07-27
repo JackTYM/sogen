@@ -109,7 +109,7 @@ namespace sogen::fex::hvf
         // movi <Vd>.2D, #0
         void movi_2d_zero(const uint32_t vd)
         {
-            this->emit(0x6E005400u | vd);
+            this->emit(0x6F00E400u | vd);
         }
 
         // 32-bit AND (immediate) against a mask of `ones` low set bits. The N:immr:imms encoding of

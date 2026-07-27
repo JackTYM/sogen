@@ -148,57 +148,17 @@ namespace sogen::fex::hvf
             em.ret();
         }
 
-        // extF80_mul. Handles two normalized finite operands (explicit integer bit set, exponent in
-        // [1, 0x7FFE]) whose product exponent stays in [1, 0x7FFD], which is exactly the set of
-        // inputs for which softfloat_roundPackToExtF80 takes its plain rounding path - no NaN or
-        // infinity propagation, no subnormal normalization, no underflow or overflow. All three x87
-        // precision-control settings are implemented; the reserved PC encoding defers.
-        void emit_f80_mul(arm64_emitter& em, const arm64_emitter::label slow)
+        // softfloat_roundPackToExtF80 with x6 = expZ, x7 = signZ, x16 = sig, x17 = sigExtra and x0
+        // still holding FCW. Only the plain rounding path is emitted: an exponent outside
+        // [1, 0x7FFD] is exactly softfloat's `0x7FFD <= (uint32_t)(exp - 1)` test, so the underflow
+        // and overflow arms - the only ones that raise an x87 exception flag - defer instead. All
+        // three x87 precision-control settings are implemented; the reserved PC encoding defers.
+        void emit_round_pack_ext_f80(arm64_emitter& em, const arm64_emitter::label slow)
         {
-            const auto no_shift = em.new_label();
             const auto prec80 = em.new_label();
             const auto no_carry = em.new_label();
             const auto no_wrap = em.new_label();
             const auto pack = em.new_label();
-
-            em.umov_d(2, 0, 0); // sigA
-            em.umov_h(3, 0, 4); // signExpA
-            em.umov_d(4, 1, 0); // sigB
-            em.umov_h(5, 1, 4); // signExpB
-
-            em.and_low_mask(6, 3, 15); // expA
-            em.and_low_mask(7, 5, 15); // expB
-            em.movz(false, 17, 0x7FFD);
-            em.sub_imm(false, 16, 6, 1);
-            em.cmp_shifted(false, 16, 17);
-            em.b_cond(cond_hi, slow);
-            em.sub_imm(false, 16, 7, 1);
-            em.cmp_shifted(false, 16, 17);
-            em.b_cond(cond_hi, slow);
-
-            em.and_shifted(true, 16, 2, 4);
-            em.cmp_imm(true, 16, 0);
-            em.b_cond(cond_pl, slow); // an operand is unnormal, subnormal or zero
-
-            em.add_shifted(false, 6, 6, 7);
-            em.sub_imm(false, 6, 6, 3, true);
-            em.sub_imm(false, 6, 6, 0xFFE); // expZ = expA + expB - 0x3FFE
-
-            em.eor_shifted(false, 7, 3, 5);
-            em.lsr_imm(false, 7, 7, 15);
-            em.and_low_mask(7, 7, 1); // signZ
-
-            em.umulh(16, 2, 4);
-            em.mul(true, 17, 2, 4);
-
-            em.cmp_imm(true, 16, 0);
-            em.b_cond(cond_mi, no_shift);
-            em.sub_imm(false, 6, 6, 1);
-            em.lsr_imm(true, 2, 17, 63);
-            em.lsl_imm(true, 16, 16, 1);
-            em.orr_shifted(true, 16, 16, 2);
-            em.lsl_imm(true, 17, 17, 1);
-            em.bind(no_shift);
 
             em.sub_imm(false, 2, 6, 1);
             em.movz(false, 4, 0x7FFC);
@@ -289,6 +249,264 @@ namespace sogen::fex::hvf
             em.ret();
         }
 
+        // extF80_mul. Handles two normalized finite operands (explicit integer bit set, exponent in
+        // [1, 0x7FFE]) whose product exponent stays in [1, 0x7FFD], which is exactly the set of
+        // inputs for which softfloat_roundPackToExtF80 takes its plain rounding path - no NaN or
+        // infinity propagation, no subnormal normalization, no underflow or overflow.
+        void emit_f80_mul(arm64_emitter& em, const arm64_emitter::label slow)
+        {
+            const auto no_shift = em.new_label();
+
+            em.umov_d(2, 0, 0); // sigA
+            em.umov_h(3, 0, 4); // signExpA
+            em.umov_d(4, 1, 0); // sigB
+            em.umov_h(5, 1, 4); // signExpB
+
+            em.and_low_mask(6, 3, 15); // expA
+            em.and_low_mask(7, 5, 15); // expB
+            em.movz(false, 17, 0x7FFD);
+            em.sub_imm(false, 16, 6, 1);
+            em.cmp_shifted(false, 16, 17);
+            em.b_cond(cond_hi, slow);
+            em.sub_imm(false, 16, 7, 1);
+            em.cmp_shifted(false, 16, 17);
+            em.b_cond(cond_hi, slow);
+
+            em.and_shifted(true, 16, 2, 4);
+            em.cmp_imm(true, 16, 0);
+            em.b_cond(cond_pl, slow); // an operand is unnormal, subnormal or zero
+
+            em.add_shifted(false, 6, 6, 7);
+            em.sub_imm(false, 6, 6, 3, true);
+            em.sub_imm(false, 6, 6, 0xFFE); // expZ = expA + expB - 0x3FFE
+
+            em.eor_shifted(false, 7, 3, 5);
+            em.lsr_imm(false, 7, 7, 15);
+            em.and_low_mask(7, 7, 1); // signZ
+
+            em.umulh(16, 2, 4);
+            em.mul(true, 17, 2, 4);
+
+            em.cmp_imm(true, 16, 0);
+            em.b_cond(cond_mi, no_shift);
+            em.sub_imm(false, 6, 6, 1);
+            em.lsr_imm(true, 2, 17, 63);
+            em.lsl_imm(true, 16, 16, 1);
+            em.orr_shifted(true, 16, 16, 2);
+            em.lsl_imm(true, 17, 17, 1);
+            em.bind(no_shift);
+
+            emit_round_pack_ext_f80(em, slow);
+        }
+
+        // extF80_add, and extF80_sub via `negate_b` - softfloat implements the two as one routine
+        // selected by whether the operand signs agree, so flipping B's sign bit turns either into
+        // the other. Both operands must be normalized finite (explicit integer bit set, exponent in
+        // [1, 0x7FFE]), which removes softfloat's NaN, infinity, zero and subnormal arms from both
+        // addMagsExtF80 and subMagsExtF80 - including the only one that raises a flag, the
+        // infinity-minus-infinity invalid case.
+        //
+        // The exponent difference is additionally capped at 63 so the operand alignment collapses
+        // to the `dist < 64` arm of softfloat_shiftRightJam64Extra and softfloat_shiftRightJam128,
+        // which agree there and differ above it.
+        void emit_f80_addsub(arm64_emitter& em, const arm64_emitter::label slow, const bool negate_b)
+        {
+            constexpr uint32_t sign_z = 1;
+            constexpr uint32_t sig_a = 2;
+            constexpr uint32_t signexp_a = 3;
+            constexpr uint32_t sig_b = 4;
+            constexpr uint32_t signexp_b = 5;
+            constexpr uint32_t exp_z = 6;
+            constexpr uint32_t exp_b = 7;
+            constexpr uint32_t exp_diff = 8;
+            constexpr uint32_t sig_z = 16;
+            constexpr uint32_t sig_extra = 17;
+            constexpr uint32_t tmp = signexp_a;
+            constexpr uint32_t tmp2 = signexp_b;
+
+            const auto sub_mags = em.new_label();
+            const auto add_b_bigger = em.new_label();
+            const auto add_same_exp = em.new_label();
+            const auto add_aligned = em.new_label();
+            const auto add_shift_right1 = em.new_label();
+            const auto sub_b_bigger = em.new_label();
+            const auto sub_same_exp = em.new_label();
+            const auto sub_same_exp_a = em.new_label();
+            const auto sub_same_exp_b = em.new_label();
+            const auto sub_norm = em.new_label();
+            const auto sub_norm_shift = em.new_label();
+            const auto round = em.new_label();
+
+            em.umov_d(sig_a, 0, 0);
+            em.umov_h(signexp_a, 0, 4);
+            em.umov_d(sig_b, 1, 0);
+            em.umov_h(signexp_b, 1, 4);
+
+            if (negate_b)
+            {
+                em.movz(false, exp_diff, 0x8000);
+                em.eor_shifted(false, signexp_b, signexp_b, exp_diff);
+            }
+
+            em.and_low_mask(exp_z, signexp_a, 15);
+            em.and_low_mask(exp_b, signexp_b, 15);
+            em.movz(false, sig_extra, 0x7FFD);
+            em.sub_imm(false, sig_z, exp_z, 1);
+            em.cmp_shifted(false, sig_z, sig_extra);
+            em.b_cond(cond_hi, slow);
+            em.sub_imm(false, sig_z, exp_b, 1);
+            em.cmp_shifted(false, sig_z, sig_extra);
+            em.b_cond(cond_hi, slow);
+
+            em.and_shifted(true, sig_z, sig_a, sig_b);
+            em.cmp_imm(true, sig_z, 0);
+            em.b_cond(cond_pl, slow); // an operand is unnormal, subnormal or zero
+
+            em.sub_shifted(false, exp_diff, exp_z, exp_b);
+            em.sub_shifted(false, sig_z, wzr, exp_diff);
+            em.cmp_imm(false, exp_diff, 0);
+            em.csel(false, sig_z, sig_z, exp_diff, cond_mi);
+            em.cmp_imm(false, sig_z, 63);
+            em.b_cond(cond_hi, slow);
+
+            em.eor_shifted(false, sig_z, signexp_a, signexp_b);
+            em.lsr_imm(false, sig_z, sig_z, 15);
+            em.lsr_imm(false, sign_z, signexp_a, 15);
+            em.cmp_imm(false, sig_z, 0);
+            em.b_cond(cond_ne, sub_mags);
+
+            em.cmp_imm(false, exp_diff, 0);
+            em.b_cond(cond_eq, add_same_exp);
+            em.b_cond(cond_mi, add_b_bigger);
+
+            em.lsrv(true, tmp, sig_b, exp_diff);
+            em.sub_shifted(false, tmp2, wzr, exp_diff);
+            em.lslv(true, sig_extra, sig_b, tmp2);
+            em.add_shifted(true, sig_z, sig_a, tmp);
+            em.b_cond(cond_al, add_aligned);
+
+            em.bind(add_b_bigger);
+            em.orr_shifted(false, exp_z, wzr, exp_b);
+            em.sub_shifted(false, exp_diff, wzr, exp_diff);
+            em.lsrv(true, tmp, sig_a, exp_diff);
+            em.sub_shifted(false, tmp2, wzr, exp_diff);
+            em.lslv(true, sig_extra, sig_a, tmp2);
+            em.add_shifted(true, sig_z, tmp, sig_b);
+            em.b_cond(cond_al, add_aligned);
+
+            em.bind(add_same_exp);
+            em.add_shifted(true, sig_z, sig_a, sig_b);
+            em.movz(true, sig_extra, 0);
+            em.b_cond(cond_al, add_shift_right1);
+
+            em.bind(add_aligned);
+            em.cmp_imm(true, sig_z, 0);
+            em.b_cond(cond_mi, round);
+
+            em.bind(add_shift_right1);
+            em.cmp_imm(true, sig_extra, 0);
+            em.cset(false, tmp, cond_ne);
+            em.lsl_imm(true, tmp2, sig_z, 63);
+            em.orr_shifted(true, sig_extra, tmp2, tmp);
+            em.lsr_imm(true, sig_z, sig_z, 1);
+            em.movz(true, tmp, 1);
+            em.lsl_imm(true, tmp, tmp, 63);
+            em.orr_shifted(true, sig_z, sig_z, tmp);
+            em.add_imm(false, exp_z, exp_z, 1);
+            em.b_cond(cond_al, round);
+
+            em.bind(sub_mags);
+            em.cmp_imm(false, exp_diff, 0);
+            em.b_cond(cond_eq, sub_same_exp);
+            em.b_cond(cond_mi, sub_b_bigger);
+
+            em.lsrv(true, tmp, sig_b, exp_diff);
+            em.sub_shifted(false, tmp2, wzr, exp_diff);
+            em.lslv(true, tmp2, sig_b, tmp2);
+            em.sub_shifted(true, sig_extra, wzr, tmp2);
+            em.cmp_imm(true, tmp2, 0);
+            em.cset(true, exp_diff, cond_ne);
+            em.sub_shifted(true, sig_z, sig_a, tmp);
+            em.sub_shifted(true, sig_z, sig_z, exp_diff);
+            em.b_cond(cond_al, sub_norm);
+
+            em.bind(sub_b_bigger);
+            em.orr_shifted(false, exp_z, wzr, exp_b);
+            em.sub_shifted(false, exp_diff, wzr, exp_diff);
+            em.lsrv(true, tmp, sig_a, exp_diff);
+            em.sub_shifted(false, tmp2, wzr, exp_diff);
+            em.lslv(true, tmp2, sig_a, tmp2);
+            em.movz(false, exp_b, 1);
+            em.eor_shifted(false, sign_z, sign_z, exp_b);
+            em.sub_shifted(true, sig_extra, wzr, tmp2);
+            em.cmp_imm(true, tmp2, 0);
+            em.cset(true, exp_diff, cond_ne);
+            em.sub_shifted(true, sig_z, sig_b, tmp);
+            em.sub_shifted(true, sig_z, sig_z, exp_diff);
+            em.b_cond(cond_al, sub_norm);
+
+            em.bind(sub_same_exp);
+            em.cmp_shifted(true, sig_a, sig_b);
+            em.b_cond(cond_hi, sub_same_exp_a);
+            em.b_cond(cond_ne, sub_same_exp_b);
+
+            // Exact cancellation. softfloat answers -0 under round-toward-negative and +0 for every
+            // other x87 rounding mode, and records no flag.
+            em.ubfx(false, sig_z, 0, 10, 2);
+            em.cmp_imm(false, sig_z, 1);
+            em.cset(false, sig_z, cond_eq);
+            em.lsl_imm(false, sig_z, sig_z, 15);
+            em.movi_2d_zero(0);
+            em.ins_d(0, 1, sig_z);
+            em.ret();
+
+            em.bind(sub_same_exp_a);
+            em.sub_shifted(true, sig_z, sig_a, sig_b);
+            em.movz(true, sig_extra, 0);
+            em.b_cond(cond_al, sub_norm);
+
+            em.bind(sub_same_exp_b);
+            em.movz(false, exp_b, 1);
+            em.eor_shifted(false, sign_z, sign_z, exp_b);
+            em.sub_shifted(true, sig_z, sig_b, sig_a);
+            em.movz(true, sig_extra, 0);
+
+            // softfloat_normRoundPackToExtF80. The 128-bit difference is never zero here - exact
+            // cancellation only happens with equal exponents and equal significands, which returned
+            // above - so the leading-zero count is always well defined.
+            em.bind(sub_norm);
+            em.cmp_imm(true, sig_z, 0);
+            em.b_cond(cond_ne, sub_norm_shift);
+            em.sub_imm(false, exp_z, exp_z, 64);
+            em.orr_shifted(true, sig_z, wzr, sig_extra);
+            em.movz(true, sig_extra, 0);
+
+            em.bind(sub_norm_shift);
+            em.clz(true, tmp, sig_z);
+            em.sub_shifted(false, exp_z, exp_z, tmp);
+            em.cmp_imm(false, tmp, 0);
+            em.b_cond(cond_eq, round);
+            em.sub_shifted(false, tmp2, wzr, tmp);
+            em.lsrv(true, tmp2, sig_extra, tmp2);
+            em.lslv(true, sig_z, sig_z, tmp);
+            em.orr_shifted(true, sig_z, sig_z, tmp2);
+            em.lslv(true, sig_extra, sig_extra, tmp);
+
+            em.bind(round);
+            em.orr_shifted(false, exp_b, wzr, sign_z);
+            emit_round_pack_ext_f80(em, slow);
+        }
+
+        void emit_f80_add(arm64_emitter& em, const arm64_emitter::label slow)
+        {
+            emit_f80_addsub(em, slow, false);
+        }
+
+        void emit_f80_sub(arm64_emitter& em, const arm64_emitter::label slow)
+        {
+            emit_f80_addsub(em, slow, true);
+        }
+
         using op_emitter = void (*)(arm64_emitter&, arm64_emitter::label);
 
         op_emitter emitter_for(const hvf_x87_fastpath::op which)
@@ -301,6 +519,10 @@ namespace sogen::fex::hvf
                 return emit_f80_cvt_f64;
             case hvf_x87_fastpath::op::f80_mul:
                 return emit_f80_mul;
+            case hvf_x87_fastpath::op::f80_add:
+                return emit_f80_add;
+            case hvf_x87_fastpath::op::f80_sub:
+                return emit_f80_sub;
             default:
                 return nullptr;
             }
