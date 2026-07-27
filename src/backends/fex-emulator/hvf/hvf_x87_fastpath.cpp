@@ -713,9 +713,11 @@ namespace sogen::fex::hvf
             em.umov_d(sig_b, 1, 0);
             em.umov_h(signexp_b, 1, 4);
 
+            constexpr uint32_t nan_exp = bits_eq;
+
             const auto defer_if_nan = [&](const uint32_t sig, const uint32_t signexp) {
                 em.and_low_mask(sign_a, signexp, 15);
-                em.cmp_shifted(false, sign_a, bits_eq);
+                em.cmp_shifted(false, sign_a, nan_exp);
                 em.cset(false, sign_a, cond_eq);
                 em.lsl_imm(true, sign_b, sig, 1);
                 em.cmp_imm(true, sign_b, 0);
@@ -725,7 +727,7 @@ namespace sogen::fex::hvf
                 em.b_cond(cond_ne, slow);
             };
 
-            em.movz(false, bits_eq, 0x7FFF);
+            em.movz(false, nan_exp, 0x7FFF);
             defer_if_nan(sig_a, signexp_a);
             defer_if_nan(sig_b, signexp_b);
 
