@@ -660,6 +660,16 @@ namespace sogen
             return create_default_ui_backend();
         }
 
+        std::unique_ptr<audio_backend> get_audio_backend(emulator_interfaces& interfaces)
+        {
+            if (interfaces.audio)
+            {
+                return std::move(interfaces.audio);
+            }
+
+            return create_default_audio_backend();
+        }
+
         // The guest must see at least as many logical processors as there are vCPUs, otherwise a
         // thread running on a higher-indexed vCPU would report a processor number the guest
         // considers out of range. The configured fake value still wins when it is larger (e.g. the
@@ -687,6 +697,7 @@ namespace sogen
           dns_lookup_(get_dns_lookup(interfaces)),
           socket_factory_(get_socket_factory(interfaces)),
           ui_backend_(get_ui_backend(interfaces)),
+          audio_backend_(get_audio_backend(interfaces)),
           emulation_root{settings.emulation_root.empty() ? settings.emulation_root : absolute(settings.emulation_root)},
           fake_env(effective_fake_env(settings, static_cast<uint32_t>(this->emu_->vcpu_count()))),
           callbacks(std::move(callbacks)),
@@ -1331,6 +1342,15 @@ namespace sogen
 
                     if (!this->should_stop)
                     {
+                        // Under the kernel lock so this switch_thread/stop() pair can't straddle a vCPU's
+                        // own scheduling step: perform_thread_switch consumes switch_thread (exchange to
+                        // false) under the lock, and a preemption whose switch request lands before that
+                        // consume while its stop() only lands inside the next quantum surfaces there as a
+                        // stop with no pending switch - the exact shape of a fatal wind-down, tearing the
+                        // whole run off at a random parked rip. Serialized against the scheduler, the pair
+                        // lands either fully before the consume (plain early switch) or fully inside the
+                        // running quantum (ordinary preemption), never split across it.
+                        const std::scoped_lock kernel_lock(this->kernel_lock_);
                         for (uint32_t i = 0; i < this->vcpu_count_; ++i)
                         {
                             auto& v = this->vcpu(i);
@@ -1553,8 +1573,14 @@ namespace sogen
 
         // Mirror the foreground window into the shared SERVERINFO so the guest's client-side
         // GetForegroundWindow (which reads gpsi directly, never syscalling) returns the active window.
-        this->process.user_handles.get_server_info().access(
-            [&](USER_SERVERINFO& server_info) { server_info.foregroundWindow = this->process.foreground_window; });
+        // Fall back to the desktop window when no app window is active: real Windows always has a
+        // foreground window, and code that needs a valid HWND (e.g. DirectSound's SetCooperativeLevel,
+        // which Miles feeds from GetForegroundWindow) breaks on a null one.
+        const auto foreground =
+            this->process.foreground_window != 0 ? this->process.foreground_window : this->process.default_desktop_window_handle.bits;
+        this->process.user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
+            server_info.foregroundWindow = foreground; //
+        });
 
         // Maintain the polled key state from key and mouse-button transitions. GetKeyState reports the high
         // down bit; GetAsyncKeyState also reports a low edge bit that is set once when a key transitions from
@@ -1659,6 +1685,25 @@ namespace sogen
                             e.vcpu, e.tid, static_cast<unsigned long long>(e.rip), describe(e.rip).c_str(),
                             static_cast<unsigned long long>(e.info), describe(e.info).c_str());
         }
+    }
+
+    bool windows_emulator::try_signal_guest_event(const handle event_handle)
+    {
+        if (!this->kernel_lock_.try_lock())
+        {
+            return false;
+        }
+
+        const std::lock_guard<kernel_lock> lock{this->kernel_lock_, std::adopt_lock};
+
+        auto* entry = this->process.events.get(event_handle);
+        if (!entry)
+        {
+            return false;
+        }
+
+        entry->signaled = true;
+        return true;
     }
 
     void windows_emulator::dump_lock_profile()
@@ -1780,6 +1825,7 @@ namespace sogen
     void windows_emulator::restore_ui_backend()
     {
         this->ui().reset();
+        this->audio().stop();
 
         std::vector<const window*> pending{};
         pending.reserve(this->process.windows.size());

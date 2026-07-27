@@ -428,6 +428,7 @@ namespace sogen
         generic_handle_store* get_handle_store(handle handle);
         emulator_thread* find_thread_by_id(uint32_t thread_id);
         const emulator_thread* find_thread_by_id(uint32_t thread_id) const;
+        bool is_window_effectively_visible(hwnd window) const;
         bool is_current_process_handle(handle handle) const;
         bool is_current_thread_handle(handle handle, const emulator_thread* active_thread) const;
         bool is_object_pseudo_handle(handle handle) const;
@@ -534,7 +535,7 @@ namespace sogen
         handle_store<handle_types::event, event> events{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
-        handle_store<handle_types::section, section> sections{};
+        handle_store<handle_types::section, section, 2> sections{};
         handle_store<handle_types::device, io_device_container> devices{};
         handle console_handle{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
@@ -567,6 +568,18 @@ namespace sogen
         static constexpr uint32_t process_id = 4;
         uint32_t spawned_thread_count{0};
         handle_store<handle_types::thread, emulator_thread> threads{};
+
+        // Handles delivered with the most recent ALPC reply message (NtAlpcSendWaitReceivePort). rpcrt4's
+        // system-handle import retrieves them via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation)
+        // rather than reading the handle attribute directly. Transient (valid only until the next reply).
+        std::vector<alpc_reply_handle> pending_alpc_message_handles{};
+
+        // The guest event a WASAPI EVENTCALLBACK client registered via SetEventHandle on its render endpoint.
+        // The audio render thread signals it at the device rate so the client's render loop wakes and refills the
+        // shared buffer. Stored as a handle rather than a pointer: the render thread is host-owned, so it resolves
+        // this through windows_emulator::try_signal_guest_event under the kernel lock instead of racing a close on
+        // an emulator thread. Transient runtime state, not serialized (re-established on the next SetEventHandle).
+        std::atomic<uint64_t> audio_render_event{};
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx
