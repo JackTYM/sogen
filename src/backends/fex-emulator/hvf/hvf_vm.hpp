@@ -7,12 +7,15 @@
 #include <map>
 #include <mutex>
 #include <atomic>
+#include <vector>
 
 #include "hvf_hypercalls.hpp"
 #include "hvf_x87_fastpath.hpp"
 
 namespace sogen::fex::hvf
 {
+    class hvf_vcpu_executor;
+
     constexpr size_t guest_page_size = 0x1000;
     constexpr size_t vm_page_size = 0x4000; // hv_vm_map / Apple host page granularity
 
@@ -37,6 +40,14 @@ namespace sogen::fex::hvf
         {
             return this->active_;
         }
+
+        // 0 when the VM is not up. Hypervisor.framework refuses hv_vcpu_create past this count.
+        uint32_t max_vcpu_count() const;
+
+        // Every executor registers for the lifetime of its hv_vcpu so stage-1 edits made by one
+        // vCPU's host thread can shoot down the TLBs of the others.
+        void register_vcpu(hvf_vcpu_executor& vcpu);
+        void unregister_vcpu(hvf_vcpu_executor& vcpu);
 
         // All addresses are host VAs; ranges are rounded outward to vm_page_size. map() establishes
         // or updates; protect() requires the pages to be mapped; unmap()/sync_page(PROT_NONE) drop
@@ -90,6 +101,7 @@ namespace sogen::fex::hvf
             int prot = 0;
         };
 
+        void bump_stage1_generation_locked();
         uint64_t alloc_ipa_locked(size_t size);
         uint64_t* stage1_walk_locked(uint64_t va);
         uint64_t* stage1_alloc_table_locked();
@@ -109,6 +121,7 @@ namespace sogen::fex::hvf
         uint64_t next_ipa_ = 0x10000;
         std::map<uint64_t, page_state> pages_;
         std::atomic<uint64_t> stage1_generation_{1};
+        std::vector<hvf_vcpu_executor*> vcpus_;
 
         uint8_t* table_pool_ = nullptr;
         size_t table_pool_size_ = 0;

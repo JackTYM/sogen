@@ -2,9 +2,12 @@
 
 #include "hvf_vm.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+
+#include "hvf_vcpu_executor.hpp"
 
 #include <sys/mman.h>
 #include <Hypervisor/Hypervisor.h>
@@ -183,6 +186,41 @@ namespace sogen::fex::hvf
         return this->create_result_;
     }
 
+    uint32_t hvf_vm::max_vcpu_count() const
+    {
+        uint32_t count = 0;
+        if (hv_vm_get_max_vcpu_count(&count) != HV_SUCCESS)
+        {
+            return 0;
+        }
+        return count;
+    }
+
+    void hvf_vm::register_vcpu(hvf_vcpu_executor& vcpu)
+    {
+        const std::lock_guard guard(this->lock_);
+        this->vcpus_.push_back(&vcpu);
+    }
+
+    void hvf_vm::unregister_vcpu(hvf_vcpu_executor& vcpu)
+    {
+        const std::lock_guard guard(this->lock_);
+        this->vcpus_.erase(std::remove(this->vcpus_.begin(), this->vcpus_.end(), &vcpu), this->vcpus_.end());
+    }
+
+    // A vCPU only re-walks the stage-1 tables when its run loop notices the generation moved, and it
+    // can only notice that between hv_vcpu_run calls. Any other vCPU currently inside hv_vcpu_run
+    // would keep using cached translations for entries this edit just invalidated, so force it out:
+    // HV_EXIT_REASON_CANCELED lands back at the top of the run loop, which flushes before re-entering.
+    void hvf_vm::bump_stage1_generation_locked()
+    {
+        this->stage1_generation_.fetch_add(1, std::memory_order_release);
+        for (auto* const vcpu : this->vcpus_)
+        {
+            vcpu->kick_for_stage1_invalidation();
+        }
+    }
+
     uint64_t hvf_vm::alloc_ipa_locked(const size_t size)
     {
         const uint64_t ipa = this->next_ipa_;
@@ -238,7 +276,7 @@ namespace sogen::fex::hvf
         }
         if (replaced_valid)
         {
-            this->stage1_generation_.fetch_add(1, std::memory_order_release);
+            this->bump_stage1_generation_locked();
         }
     }
 
@@ -248,7 +286,7 @@ namespace sogen::fex::hvf
         {
             *this->stage1_walk_locked(va + off) = 0;
         }
-        this->stage1_generation_.fetch_add(1, std::memory_order_release);
+        this->bump_stage1_generation_locked();
     }
 
     void hvf_vm::map_locked(const uint64_t va, const size_t size, const int prot)
