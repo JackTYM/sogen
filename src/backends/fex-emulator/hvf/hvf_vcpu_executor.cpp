@@ -2,9 +2,15 @@
 
 #include "hvf_vcpu_executor.hpp"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
+
+#include <dlfcn.h>
+#include <time.h>
 
 namespace sogen::fex::hvf
 {
@@ -103,6 +109,18 @@ namespace sogen::fex::hvf
         check_hv("set vtimer offset", hv_vcpu_set_vtimer_offset(this->vcpu_, 0));
         check_hv("set FPCR", hv_vcpu_set_reg(this->vcpu_, HV_REG_FPCR, 0));
         check_hv("set FPSR", hv_vcpu_set_reg(this->vcpu_, HV_REG_FPSR, 0));
+
+        // EMULATOR_FEX_HVF_STATS=<seconds> sets the report interval; any non-numeric value keeps
+        // the 5s default.
+        if (const char* stats = std::getenv("EMULATOR_FEX_HVF_STATS"); stats != nullptr)
+        {
+            this->stats_enabled_ = true;
+            const double interval = std::atof(stats);
+            if (interval >= 0.1)
+            {
+                this->stats_interval_ns_ = static_cast<uint64_t>(interval * 1e9);
+            }
+        }
     }
 
     hvf_vcpu_executor::~hvf_vcpu_executor()
@@ -220,12 +238,70 @@ namespace sogen::fex::hvf
         this->seen_stage1_generation_ = generation;
     }
 
+    void hvf_vcpu_executor::maybe_report_stats()
+    {
+        const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (this->stats_interval_start_ns_ == 0)
+        {
+            this->stats_interval_start_ns_ = now;
+            return;
+        }
+
+        const uint64_t elapsed = now - this->stats_interval_start_ns_;
+        if (elapsed < this->stats_interval_ns_)
+        {
+            return;
+        }
+
+        const double seconds = static_cast<double>(elapsed) / 1e9;
+        uint64_t total_callbacks = 0;
+        std::vector<std::pair<uint64_t, size_t>> ranked;
+        for (size_t id = 0; id < this->stats_callback_counts_.size(); ++id)
+        {
+            const uint64_t count = this->stats_callback_counts_[id];
+            if (count != 0)
+            {
+                total_callbacks += count;
+                ranked.emplace_back(count, id);
+            }
+        }
+        std::sort(ranked.rbegin(), ranked.rend());
+
+        fprintf(stderr, "[HVF stats vcpu=%p] %.1fs: hypercalls %llu (%.0f/s), vector exits %llu (%.0f/s), stage-2 aborts %llu\n",
+                static_cast<const void*>(this), seconds, static_cast<unsigned long long>(total_callbacks),
+                static_cast<double>(total_callbacks) / seconds, static_cast<unsigned long long>(this->stats_vector_exits_),
+                static_cast<double>(this->stats_vector_exits_) / seconds, static_cast<unsigned long long>(this->stats_stage2_aborts_));
+        for (size_t rank = 0; rank < ranked.size() && rank < 10; ++rank)
+        {
+            const auto [count, id] = ranked[rank];
+            hvf_callback_slot slot{};
+            const char* name = "?";
+            Dl_info info{};
+            if (this->vm_.lookup_callback(static_cast<uint16_t>(id), slot) &&
+                dladdr(reinterpret_cast<void*>(slot.original), &info) != 0 && info.dli_sname != nullptr)
+            {
+                name = info.dli_sname;
+            }
+            fprintf(stderr, "    %10.0f/s  id=%zu  %s\n", static_cast<double>(count) / seconds, id, name);
+        }
+
+        this->stats_callback_counts_.fill(0);
+        this->stats_vector_exits_ = 0;
+        this->stats_stage2_aborts_ = 0;
+        this->stats_interval_start_ns_ = now;
+    }
+
     void hvf_vcpu_executor::dispatch_callback(const uint16_t id)
     {
         hvf_callback_slot slot{};
         if (!this->vm_.lookup_callback(id, slot))
         {
             this->fail_unhandled_exit("unknown hypercall id", id);
+        }
+
+        if (this->stats_enabled_)
+        {
+            ++this->stats_callback_counts_[id];
         }
 
         uint64_t gprs[9];
@@ -292,6 +368,10 @@ namespace sogen::fex::hvf
         for (;;)
         {
             this->flush_stage1_tlb_if_stale();
+            if (this->stats_enabled_)
+            {
+                this->maybe_report_stats();
+            }
 
             check_hv("hv_vcpu_run", hv_vcpu_run(this->vcpu_));
 
@@ -321,6 +401,10 @@ namespace sogen::fex::hvf
                 }
                 if (id >= hc_vector_base && id < hc_vector_base + 16)
                 {
+                    if (this->stats_enabled_)
+                    {
+                        ++this->stats_vector_exits_;
+                    }
                     if (!handler.on_guest_exception(*this, id - hc_vector_base))
                     {
                         this->fail_unhandled_exit("guest EL1 exception", syndrome);
@@ -333,6 +417,10 @@ namespace sogen::fex::hvf
 
             if (ec == 0x24 || ec == 0x20) // stage-2 data / instruction abort from a lower EL
             {
+                if (this->stats_enabled_)
+                {
+                    ++this->stats_stage2_aborts_;
+                }
                 if (!handler.on_stage2_abort(*this, this->exit_->exception.virtual_address, this->exit_->exception.physical_address,
                                              syndrome))
                 {

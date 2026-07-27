@@ -2,6 +2,7 @@
 
 #ifdef __APPLE__
 
+#include <array>
 #include <cstdint>
 
 #include <Hypervisor/Hypervisor.h>
@@ -59,6 +60,7 @@ namespace sogen::fex::hvf
       private:
         void flush_stage1_tlb_if_stale();
         void dispatch_callback(uint16_t id);
+        void maybe_report_stats();
         [[noreturn]] void fail_unhandled_exit(const char* what, uint64_t syndrome);
         uint64_t get_sys(hv_sys_reg_t reg) const;
         void set_sys(hv_sys_reg_t reg, uint64_t value);
@@ -67,6 +69,14 @@ namespace sogen::fex::hvf
         hv_vcpu_t vcpu_ = 0;
         hv_vcpu_exit_t* exit_ = nullptr;
         uint64_t seen_stage1_generation_ = 0;
+
+        // EMULATOR_FEX_HVF_STATS=<seconds>: periodic VM-exit rate report on stderr.
+        bool stats_enabled_ = false;
+        uint64_t stats_interval_ns_ = 5'000'000'000ull;
+        uint64_t stats_interval_start_ns_ = 0;
+        uint64_t stats_vector_exits_ = 0;
+        uint64_t stats_stage2_aborts_ = 0;
+        std::array<uint64_t, hvf_guest_runtime::max_stubs> stats_callback_counts_{};
     };
 }
 
