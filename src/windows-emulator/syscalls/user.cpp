@@ -1463,6 +1463,8 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // win32k client-interactivity-tracking telemetry hook; audioses pokes it while starting/stopping a
+        // stream. There is nothing to track in the emulator, so acknowledge it.
         NTSTATUS handle_NtUserCitSetInfo()
         {
             return STATUS_SUCCESS;
