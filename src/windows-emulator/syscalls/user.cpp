@@ -15,6 +15,7 @@ namespace sogen
 
     namespace
     {
+        constexpr ULONG k_thread_state_active_window = 0x1;
         constexpr ULONG k_thread_state_win32_thread_info = 0xE;
         constexpr ULONG k_thread_state_dialog_state = 0xA;
         constexpr ULONG k_thread_state_message_time = 0x9;
@@ -1375,6 +1376,17 @@ namespace sogen
             if (routine == k_thread_state_dialog_state)
             {
                 return c.vcpu.active_thread ? c.vcpu.active_thread->win32k_thread_state : 0;
+            }
+
+            if (routine == k_thread_state_active_window)
+            {
+                if (!c.vcpu.active_thread)
+                {
+                    return 0;
+                }
+
+                const auto* foreground = c.proc.windows.get(c.proc.foreground_window);
+                return foreground && foreground->thread_id == c.vcpu.active_thread->id ? c.proc.foreground_window : 0;
             }
 
             if (routine != k_thread_state_win32_thread_info)
