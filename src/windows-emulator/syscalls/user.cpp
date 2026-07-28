@@ -5651,8 +5651,21 @@ namespace sogen
             return FALSE;
         }
 
-        BOOL handle_NtUserGetWindowPlacement()
+        BOOL handle_NtUserGetWindowPlacement(const syscall_context& c, const hwnd window,
+                                             const emulator_object<EMU_WINDOWPLACEMENT> placement)
         {
+            const auto* win = c.proc.windows.get(window);
+            if (!win || !placement)
+            {
+                return FALSE;
+            }
+
+            EMU_WINDOWPLACEMENT wp{};
+            wp.length = sizeof(wp);
+            wp.showCmd = (win->style & WS_MINIMIZE) ? SW_SHOWMINIMIZED : (win->style & WS_MAXIMIZE) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+            wp.rcNormalPosition = get_window_rect(*win);
+            placement.write(wp);
+
             return TRUE;
         }
 
