@@ -310,11 +310,25 @@ namespace sogen
 
         struct audio_service_port : rpc_port
         {
+            // Some Windows builds' mmdevapi.dll/audioses.dll bind to a syntax GUID that doesn't match either
+            // constant above (observed on this host: the "\RPC Control\Audiosrv" connection's handshake carries
+            // a third, unrecognized interface GUID for what is otherwise an ordinary GetDefaultAudioEndpoint
+            // call). The three named ports each map to exactly one of the two surfaces on real Windows
+            // regardless of which exact interface revision the client negotiated, so fall back to that mapping
+            // whenever the bound interface isn't one of the two known GUIDs.
+            explicit audio_service_port(const bool name_hints_audio_client)
+                : name_hints_audio_client_(name_hints_audio_client)
+            {
+            }
+
             NTSTATUS handle_rpc(windows_emulator& win_emu, const uint32_t procedure_id, const lpc_request_context& c,
                                 utils::aligned_binary_writer& writer, std::vector<alpc_reply_handle>& reply_handles) override
             {
                 const auto& iface = this->bound_interface();
-                if (iface == k_iface_audio_client)
+                const auto is_audio_client =
+                    iface == k_iface_audio_client || (iface != k_iface_mmdevice_enum && this->name_hints_audio_client_);
+
+                if (is_audio_client)
                 {
                     switch (procedure_id)
                     {
@@ -350,11 +364,6 @@ namespace sogen
                     }
                 }
 
-                if (iface != k_iface_mmdevice_enum)
-                {
-                    return STATUS_NOT_SUPPORTED;
-                }
-
                 switch (procedure_id)
                 {
                 case k_audio_opnum_mmdev_get_blob:
@@ -367,6 +376,7 @@ namespace sogen
             }
 
           private:
+            bool name_hints_audio_client_{};
             std::unique_ptr<render_stream> render_stream_{};
 
             // {D574D111} opnum 0: AudioServerGetMixFormat(endpointId, VadServerSettings*, [out] WAVEFORMATEX**).
@@ -712,9 +722,9 @@ namespace sogen
         };
     }
 
-    std::unique_ptr<port> create_audio_service_port()
+    std::unique_ptr<port> create_audio_service_port(const std::u16string_view port_name)
     {
-        return std::make_unique<audio_service_port>();
+        return std::make_unique<audio_service_port>(port_name == u"\\RPC Control\\AudioClientRpc");
     }
 
 } // namespace sogen
