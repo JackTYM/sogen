@@ -116,6 +116,8 @@ CALL :collect msvcp_win.dll
 CALL :collect msvcr120_clr0400.dll
 CALL :collect msvcrt.dll
 CALL :collect mswsock.dll
+CALL :collect msxml6.dll
+CALL :collect msxml6r.dll
 CALL :collect napinsp.dll
 CALL :collect ncrypt.dll
 CALL :collect netapi32.dll
