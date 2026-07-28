@@ -41,6 +41,54 @@ namespace sogen
             }
         };
 
+        // The per-stream WASAPI CrossProcessEndpoint control channel. Event-driven (AUDCLNT_STREAMFLAGS_
+        // EVENTCALLBACK) DirectSound clients connect a dedicated ALPC port and send small fixed command
+        // messages here (SetEventHandle, opcode in the first data dword, the event handle as a client->server
+        // ALPC handle attribute), then read an NTSTATUS the server writes at data offset 4. The engine side is
+        // this emulator (the render_stream drains the shared buffer directly, so we do not need the event), so
+        // acknowledge every command with STATUS_SUCCESS. Without this the send lands on a dummy port
+        // (STATUS_NOT_SUPPORTED -> AUDCLNT NOT_SUPPORTED) and Initialize fails.
+        struct endpoint_control_port : port
+        {
+            lpc_request_result handle_request(windows_emulator& win_emu, const lpc_request_context& c) override
+            {
+                // SetEventHandle delivers the client's render event as a client->server ALPC handle attribute.
+                // Remember it so the audio render thread can signal it at the device rate (EVENTCALLBACK); without
+                // that wake the client writes one pre-roll buffer and then blocks forever waiting on the event.
+                if (c.send_handle)
+                {
+                    win_emu.process.audio_render_event.store(c.send_handle, std::memory_order_relaxed);
+                }
+
+                std::vector<uint8_t> payload(c.send_buffer_length, 0);
+                if (c.send_buffer && c.send_buffer_length)
+                {
+                    win_emu.emu().read_memory(c.send_buffer, payload.data(), payload.size());
+                }
+
+                constexpr size_t status_offset = 4; // command status the client reads back
+                if (payload.size() >= status_offset + sizeof(uint32_t))
+                {
+                    std::memset(payload.data() + status_offset, 0, sizeof(uint32_t));
+                }
+
+                return {STATUS_SUCCESS, std::move(payload)};
+            }
+        };
+
+        // Minimal RPC stub: completes the LRPC bind and answers every call with an S_OK return and no [out]
+        // data. Enough for fire-and-forget power/notification registrations (e.g. \RPC Control\umpo) that the
+        // audio stack performs during stream setup and only checks for success.
+        struct stub_rpc_port : rpc_port
+        {
+            NTSTATUS handle_rpc(windows_emulator& /*win_emu*/, uint32_t /*procedure_id*/, const lpc_request_context& /*c*/,
+                                utils::aligned_binary_writer& writer, std::vector<alpc_reply_handle>& /*reply_handles*/) override
+            {
+                writer.write<uint32_t>(0); // return HRESULT S_OK
+                return STATUS_SUCCESS;
+            }
+        };
+
     }
 
     std::unique_ptr<port> create_port(const std::u16string_view port)
@@ -62,7 +110,7 @@ namespace sogen
 
         if (port == u"\\RPC Control\\Audiosrv" || port == u"\\RPC Control\\AudioClientRpc" || port == u"\\RPC Control\\AudioSrvServiceRpc")
         {
-            return create_audio_service_port(port);
+            return create_audio_service_port();
         }
 
         if (port == u"\\WindowsErrorReportingServicePort")
@@ -85,10 +133,15 @@ namespace sogen
 
         if (port == u"\\RPC Control\\umpo")
         {
-            // User Mode Power Object RPC port. The audio stack queries this to manage power policy
-            // for the audio endpoint (e.g. before activating a render stream). An empty success
-            // reply for all procedures is sufficient to let mmdevapi proceed to OpenStream.
-            return std::make_unique<noop_port>();
+            // User-Mode Power Orchestrator. The audio stack registers a power request here while starting a
+            // stream; without a responder the render worker retries and then stalls.
+            return std::make_unique<stub_rpc_port>();
+        }
+
+        if (port.empty())
+        {
+            // Unnamed ALPC ports in the audio stack are the per-stream WASAPI endpoint control channel.
+            return std::make_unique<endpoint_control_port>();
         }
 
         return std::make_unique<dummy_port>(std::u16string(port));
@@ -100,15 +153,6 @@ namespace sogen
 
         if (!c.receive_message)
         {
-            // A send with no reply buffer is a one-way ALPC datagram (e.g. rpcrt4's LRPC
-            // notification after a stream is created). Deliver it to the port for any side
-            // effects and acknowledge the send; there is nowhere to write a reply.
-            if (c.send_message)
-            {
-                this->port_->handle_message(win_emu, c);
-                return {.status = STATUS_SUCCESS};
-            }
-
             return {.status = STATUS_INVALID_PARAMETER};
         }
 
@@ -182,6 +226,7 @@ namespace sogen
         context.recv_buffer = c.receive_message ? c.receive_message.value() + header_size : 0;
         context.recv_buffer_length =
             c.receive_buffer_length >= header_size ? static_cast<ULONG>(c.receive_buffer_length - header_size) : data_length;
+        context.send_handle = c.send_handle;
 
         auto request_result = this->handle_request(win_emu, context);
         const auto payload_size = request_result.payload ? static_cast<ULONG>(request_result.payload->size()) : context.recv_buffer_length;

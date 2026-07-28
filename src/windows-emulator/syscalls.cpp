@@ -255,9 +255,11 @@ namespace sogen
                                                   emulator_object<ALPC_MESSAGE_ATTRIBUTES>
                                                   /*receive_message_attributes*/,
                                                   emulator_object<LARGE_INTEGER> /*timeout*/);
+        NTSTATUS handle_NtAlpcDisconnectPort(const syscall_context& c, handle port_handle, ULONG flags);
         NTSTATUS handle_NtAlpcQueryInformation();
-        NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& c, handle port_handle, uint64_t message,
-                                                      uint32_t message_info_class, uint64_t message_info, ULONG length,
+        NTSTATUS handle_NtAlpcQueryInformationMessage(const syscall_context& c, handle port_handle,
+                                                      emulator_object<PORT_MESSAGE64> port_message, uint32_t message_information_class,
+                                                      emulator_pointer message_information, uint32_t length,
                                                       emulator_object<ULONG> return_length);
         NTSTATUS handle_NtAlpcSetInformation();
         NTSTATUS handle_NtAlpcCreateSecurityContext();
@@ -1020,6 +1022,16 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
+        NTSTATUS handle_NtCreateWnfStateName()
+        {
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtDeleteWnfStateName()
+        {
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle /*job_handle*/,
                                                     const uint32_t /*job_object_information_class*/, const uint64_t job_object_information,
                                                     const uint32_t job_object_information_length,
@@ -1104,6 +1116,13 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUserModifyUserStartupInfoFlags()
+        {
+            return STATUS_SUCCESS;
+        }
+
+        // win32k client-interactivity-tracking telemetry hook; audioses pokes it while starting/stopping a
+        // stream. There is nothing to track in the emulator, so acknowledge it.
+        NTSTATUS handle_NtUserCitSetInfo()
         {
             return STATUS_SUCCESS;
         }
@@ -1389,6 +1408,8 @@ namespace sogen
         add_handler(NtQueryDefaultUILanguage);
         add_handler(NtQueryInstallUILanguage);
         add_handler(NtUpdateWnfStateData);
+        add_handler(NtCreateWnfStateName);
+        add_handler(NtDeleteWnfStateName);
         add_handler(NtRaiseException);
         add_handler(NtQueryInformationJobObject);
         add_handler(NtSetSystemInformation);
@@ -1441,6 +1462,7 @@ namespace sogen
         add_handler(NtGetContextThread);
         add_handler(NtYieldExecution);
         add_handler(NtUserModifyUserStartupInfoFlags);
+        add_handler(NtUserCitSetInfo);
         add_handler(NtUserGetDCEx);
         add_handler(NtUserGetDC);
         add_handler(NtUserGetWindowDC);
@@ -1466,7 +1488,9 @@ namespace sogen
         add_handler(NtAlpcCreatePort);
         add_handler(NtAlpcConnectPortEx);
         add_handler(NtAlpcConnectPort);
+        add_handler(NtAlpcDisconnectPort);
         add_handler(NtAlpcQueryInformation);
+        add_handler(NtAlpcQueryInformationMessage);
         add_handler(NtGetNextThread);
         add_handler(NtSetInformationObject);
         add_handler(NtUserGetCursorPos);

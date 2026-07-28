@@ -5,6 +5,6 @@
 namespace sogen
 {
 
-    std::unique_ptr<port> create_audio_service_port(std::u16string_view port_name);
+    std::unique_ptr<port> create_audio_service_port();
 
 } // namespace sogen

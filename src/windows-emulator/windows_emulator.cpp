@@ -380,91 +380,6 @@ namespace sogen
 
         vcpu_context* find_vcpu_running_thread(windows_emulator& win_emu, const emulator_thread& thread);
 
-        // Simulate the WASAPI render engine sogen otherwise lacks. dsound opens its stream event-driven, so its
-        // render thread blocks on a buffer-ready event a real engine signals every period; we signal the events
-        // dsound registered via SetEventHandle (captured in capture_audio_render_event) so it produces, then
-        // advance the shared render section's read cursor at real time. dsound's DirectSound play cursor is the
-        // engine-consumed byte position (control offset +0x18); moving it is what stops MSS's "non-moving
-        // playback cursor" watchdog from continuously resetting the stream and lets MW2 proceed past audio setup.
-        void drive_audio_render_engine(windows_emulator& win_emu)
-        {
-            auto& process = win_emu.process;
-            if (process.audio_render_streams.empty() && process.audio_render_events.empty())
-            {
-                return;
-            }
-
-            const auto now_ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(win_emu.clock().steady_now().time_since_epoch()).count());
-
-            // Matches the 10 ms default device period advertised to dsound by audio_service.cpp's
-            // AudioServerGetDevicePeriod reply. Without this gate, the render thread got re-signaled on
-            // every reschedule attempt of every thread in the process (perform_context_switch_work runs on
-            // every yield), waking it orders of magnitude faster than a real engine's period and burning
-            // scheduler throughput the rest of the game needs.
-            constexpr uint64_t render_period_ns = 10'000'000ULL;
-            const bool should_signal = now_ns >= process.next_audio_tick_ns;
-            if (should_signal)
-            {
-                process.next_audio_tick_ns = now_ns + render_period_ns;
-            }
-
-            // Wake dsound's render thread(s): the buffer-ready event is auto-reset, so a set that no thread is
-            // waiting on is simply consumed by the next wait. Drop handles that no longer resolve to an event.
-            std::erase_if(process.audio_render_events, [&](const handle e) {
-                auto* event = process.events.get(e);
-                if (!event)
-                {
-                    return true;
-                }
-                if (should_signal)
-                {
-                    event->signaled = true;
-                }
-                return false;
-            });
-
-            constexpr uint64_t bytes_per_second = 44100ULL * 2ULL * 4ULL; // 44100 Hz, 2ch, 32-bit float
-            constexpr uint64_t block_align = 2ULL * 4ULL;
-            constexpr uint64_t write_cursor_offset = 0x10;
-            constexpr uint64_t read_cursor_offset = 0x18;
-            constexpr uint64_t clock_position_offset = 0x98;
-
-            // The guest maps and later unmaps each render section (dsound churns stream setup until playback
-            // stabilizes), so a tracked section's backing can become unmapped. Probe with try_read and prune
-            // any stream whose control block is no longer accessible rather than faulting the emulator.
-            std::erase_if(process.audio_render_streams, [&](auto& stream) {
-                uint64_t write_cursor = 0;
-                if (!win_emu.emu().try_read_memory(stream.control_base + write_cursor_offset, &write_cursor, sizeof(write_cursor)))
-                {
-                    return true; // section unmapped -> stop tracking it
-                }
-
-                if (write_cursor == 0)
-                {
-                    return false; // dsound has not submitted any audio on this stream yet
-                }
-
-                if (stream.start_time_ns == 0)
-                {
-                    stream.start_time_ns = now_ns; // anchor real-time consumption at first submission
-                }
-
-                const auto elapsed_ns = now_ns - stream.start_time_ns;
-                const auto consumed = std::min<uint64_t>(elapsed_ns * bytes_per_second / 1'000'000'000ULL, write_cursor);
-
-                uint64_t read_cursor = 0;
-                if (win_emu.emu().try_read_memory(stream.control_base + read_cursor_offset, &read_cursor, sizeof(read_cursor)) &&
-                    consumed > read_cursor)
-                {
-                    const uint64_t clock = consumed / block_align;
-                    win_emu.emu().try_write_memory(stream.control_base + read_cursor_offset, &consumed, sizeof(consumed));
-                    win_emu.emu().try_write_memory(stream.control_base + clock_position_offset, &clock, sizeof(clock));
-                }
-                return false;
-            });
-        }
-
         void perform_context_switch_work(windows_emulator& win_emu, vcpu_context& vcpu)
         {
             auto& threads = win_emu.process.threads;
@@ -510,8 +425,6 @@ namespace sogen
             {
                 dev.work(win_emu);
             }
-
-            drive_audio_render_engine(win_emu);
         }
 
         emulator_thread* get_thread_by_id(process_context& process, const uint32_t id)
@@ -766,6 +679,16 @@ namespace sogen
             return create_default_ui_backend();
         }
 
+        std::unique_ptr<audio_backend> get_audio_backend(emulator_interfaces& interfaces)
+        {
+            if (interfaces.audio)
+            {
+                return std::move(interfaces.audio);
+            }
+
+            return create_default_audio_backend();
+        }
+
         // The guest must see at least as many logical processors as there are vCPUs, otherwise a
         // thread running on a higher-indexed vCPU would report a processor number the guest
         // considers out of range. The configured fake value still wins when it is larger (e.g. the
@@ -793,6 +716,7 @@ namespace sogen
           dns_lookup_(get_dns_lookup(interfaces)),
           socket_factory_(get_socket_factory(interfaces)),
           ui_backend_(get_ui_backend(interfaces)),
+          audio_backend_(get_audio_backend(interfaces)),
           emulation_root{settings.emulation_root.empty() ? settings.emulation_root : absolute(settings.emulation_root)},
           fake_env(effective_fake_env(settings, static_cast<uint32_t>(this->emu_->vcpu_count()))),
           callbacks(std::move(callbacks)),
@@ -1778,8 +1702,14 @@ namespace sogen
 
         // Mirror the foreground window into the shared SERVERINFO so the guest's client-side
         // GetForegroundWindow (which reads gpsi directly, never syscalling) returns the active window.
-        this->process.user_handles.get_server_info().access(
-            [&](USER_SERVERINFO& server_info) { server_info.foregroundWindow = this->process.foreground_window; });
+        // Fall back to the desktop window when no app window is active: real Windows always has a
+        // foreground window, and code that needs a valid HWND (e.g. DirectSound's SetCooperativeLevel,
+        // which Miles feeds from GetForegroundWindow) breaks on a null one.
+        const auto foreground =
+            this->process.foreground_window != 0 ? this->process.foreground_window : this->process.default_desktop_window_handle.bits;
+        this->process.user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
+            server_info.foregroundWindow = foreground; //
+        });
 
         // Maintain the polled key state from key and mouse-button transitions. GetKeyState reports the high
         // down bit; GetAsyncKeyState also reports a low edge bit that is set once when a key transitions from
@@ -1884,6 +1814,25 @@ namespace sogen
                             e.vcpu, e.tid, static_cast<unsigned long long>(e.rip), describe(e.rip).c_str(),
                             static_cast<unsigned long long>(e.info), describe(e.info).c_str());
         }
+    }
+
+    bool windows_emulator::try_signal_guest_event(const handle event_handle)
+    {
+        if (!this->kernel_lock_.try_lock())
+        {
+            return false;
+        }
+
+        const std::lock_guard<kernel_lock> lock{this->kernel_lock_, std::adopt_lock};
+
+        auto* entry = this->process.events.get(event_handle);
+        if (!entry)
+        {
+            return false;
+        }
+
+        entry->signaled = true;
+        return true;
     }
 
     void windows_emulator::dump_lock_profile()
@@ -2005,6 +1954,7 @@ namespace sogen
     void windows_emulator::restore_ui_backend()
     {
         this->ui().reset();
+        this->audio().stop();
 
         std::vector<const window*> pending{};
         pending.reserve(this->process.windows.size());

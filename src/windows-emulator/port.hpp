@@ -157,6 +157,7 @@ namespace sogen
         emulator_object<PORT_MESSAGE64> send_message;
         emulator_object<PORT_MESSAGE64> receive_message;
         EmulatorTraits<Emu64>::SIZE_T receive_buffer_length{};
+        uint64_t send_handle{}; // handle delivered by a client->server ALPC HANDLE attribute (0 = none)
 
         lpc_message_context(memory_interface& emu)
             : send_message(emu),
@@ -190,6 +191,7 @@ namespace sogen
         ULONG send_buffer_length{};
         emulator_pointer recv_buffer{};
         ULONG recv_buffer_length{};
+        uint64_t send_handle{}; // handle delivered by a client->server ALPC HANDLE attribute (0 = none)
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -197,6 +199,7 @@ namespace sogen
             buffer.write(send_buffer_length);
             buffer.write(recv_buffer);
             buffer.write(recv_buffer_length);
+            buffer.write(send_handle);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -205,6 +208,31 @@ namespace sogen
             buffer.read(send_buffer_length);
             buffer.read(recv_buffer);
             buffer.read(recv_buffer_length);
+            buffer.read(send_handle);
+        }
+    };
+
+    // A kernel handle to hand to the receiver of an LRPC reply via an ALPC HANDLE message attribute. NDR
+    // [system_handle] members (e.g. the shared render section in SYSTEM_AUDIO_STREAM) are transferred this
+    // way: the wire carries a handle index, the real handle rides in the message attributes.
+    struct alpc_reply_handle
+    {
+        uint64_t handle{};
+        uint32_t object_type{};
+        uint32_t desired_access{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(handle);
+            buffer.write(object_type);
+            buffer.write(desired_access);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(handle);
+            buffer.read(object_type);
+            buffer.read(desired_access);
         }
     };
 

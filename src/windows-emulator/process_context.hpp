@@ -428,6 +428,7 @@ namespace sogen
         generic_handle_store* get_handle_store(handle handle);
         emulator_thread* find_thread_by_id(uint32_t thread_id);
         const emulator_thread* find_thread_by_id(uint32_t thread_id) const;
+        bool is_window_effectively_visible(hwnd window) const;
         bool is_current_process_handle(handle handle) const;
         bool is_current_thread_handle(handle handle, const emulator_thread* active_thread) const;
         bool is_object_pseudo_handle(handle handle) const;
@@ -542,7 +543,7 @@ namespace sogen
         handle_store<handle_types::event, event> events{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
-        handle_store<handle_types::section, section> sections{};
+        handle_store<handle_types::section, section, 2> sections{};
         handle_store<handle_types::device, io_device_container> devices{};
         handle console_handle{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
@@ -581,21 +582,12 @@ namespace sogen
         // rather than reading the handle attribute directly. Transient (valid only until the next reply).
         std::vector<alpc_reply_handle> pending_alpc_message_handles{};
 
-        // Transient (not serialized) WASAPI render-engine simulation. sogen has no host audio engine draining
-        // the shared ring, so dsound opens its stream event-driven (AUDCLNT_STREAMFLAGS_EVENTCALLBACK) and its
-        // render thread would block forever on the buffer-ready event a real engine signals every period. We
-        // model that engine on the per-context-switch tick: signal the auto-reset events dsound registered via
-        // IAudioClient::SetEventHandle so it produces, and advance the shared read cursor at real time so its
-        // DirectSound play cursor moves and MSS's "non-moving playback cursor" watchdog stops resetting.
-        struct audio_render_stream
-        {
-            uint64_t control_base{};  // guest backing address of the "DCPE" render-section control header
-            uint64_t start_time_ns{}; // steady-clock ns anchor for the read cursor (0 = anchor on first tick)
-        };
-
-        std::vector<audio_render_stream> audio_render_streams{};
-        std::vector<handle> audio_render_events{};
-        uint64_t next_audio_tick_ns{}; // steady-clock ns; throttles the tick to real time instead of switch count
+        // The guest event a WASAPI EVENTCALLBACK client registered via SetEventHandle on its render endpoint.
+        // The audio render thread signals it at the device rate so the client's render loop wakes and refills the
+        // shared buffer. Stored as a handle rather than a pointer: the render thread is host-owned, so it resolves
+        // this through windows_emulator::try_signal_guest_event under the kernel lock instead of racing a close on
+        // an emulator thread. Transient runtime state, not serialized (re-established on the next SetEventHandle).
+        std::atomic<uint64_t> audio_render_event{};
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx

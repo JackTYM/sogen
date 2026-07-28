@@ -716,6 +716,12 @@ namespace sogen
             window.processId = process_context::process_id;
         });
 
+        // Seed the shared foreground window with the desktop so the guest's client-side GetForegroundWindow
+        // never returns null before an app window activates (UI activation events later refine it).
+        this->user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
+            server_info.foregroundWindow = this->default_desktop_window_handle.bits; //
+        });
+
         const auto create_shell_window = [&](const std::u16string_view class_name, const std::u16string_view title, const int32_t x,
                                              const int32_t y, const int32_t width, const int32_t height) {
             auto [handle, shell_win] = this->windows.create(win_emu.memory);
@@ -1055,6 +1061,27 @@ namespace sogen
         return nullptr;
     }
 
+    bool process_context::is_window_effectively_visible(const hwnd window) const
+    {
+        const auto* current = this->windows.get(window);
+        if (!current)
+        {
+            return false;
+        }
+
+        for (size_t guard = 0; current && guard < this->windows.size(); ++guard)
+        {
+            if (current->message_only || (current->style & WS_VISIBLE) == 0)
+            {
+                return false;
+            }
+
+            current = current->parent_handle != 0 ? this->windows.get(current->parent_handle) : nullptr;
+        }
+
+        return current == nullptr;
+    }
+
     // NOLINTNEXTLINE(cert-dcl50-cpp,readability-convert-member-functions-to-static)
     bool process_context::is_current_process_handle(const handle handle) const
     {
@@ -1106,6 +1133,20 @@ namespace sogen
         emulator_thread t{memory, *this, start_address, argument, stack_size, create_flags, thread_id, initial_thread};
         auto [h, thr] = this->threads.store_and_get(std::move(t));
         this->thread_handles_by_id[thr->id] = h;
+
+        // The desktop window is created during process setup, before any thread exists, so it has no owning
+        // thread. GetWindowThreadProcessId(GetDesktopWindow()) must return a real thread id (DirectSound, for
+        // one, stores it as the buffer's focus thread and rejects a zero id), so attribute the desktop window
+        // to the initial thread once it exists.
+        if (initial_thread)
+        {
+            if (auto* desktop = this->windows.get(this->default_desktop_window_handle))
+            {
+                desktop->thread_id = thread_id;
+            }
+            this->user_handles.set_owner(static_cast<uint32_t>(this->default_desktop_window_handle.value.id), thread_id);
+        }
+
         this->callbacks_->on_thread_create(h, *thr);
         return h;
     }
