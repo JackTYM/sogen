@@ -363,6 +363,12 @@ namespace sogen
             {
                 if (!section.name.empty() && utils::string::equals_ignore_case(section.name, filename))
                 {
+                    // This handle aliases the same stored section object as every other handle pointing at
+                    // it (make_handle just re-encodes the existing index), so the object's ref_count must be
+                    // bumped like any other handle-duplicating path. Without this, closing whichever handle
+                    // happens to have ref_count==1 releases the section's shared backing - even though this
+                    // handle, and any views mapped through it, are still alive.
+                    ++section.ref_count;
                     section_handle.write(c.proc.sections.make_handle(handle));
                     return STATUS_SUCCESS;
                 }
