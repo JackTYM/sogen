@@ -88,9 +88,23 @@ namespace sogen
             }
 #endif
 
+            // The emulation-root fallback below resolves host symlinks via weakly_canonical, which costs
+            // a real stat() per path component; guest code that repeatedly probes the same missing path
+            // (e.g. retrying a failed NtCreateFile with no backoff) would otherwise pay that cost on every
+            // attempt. translate() is a pure function of win_path for a fixed root_/mappings_, so memoize it;
+            // the cache is invalidated wholesale on map() since a new mapping can change the result for paths
+            // under it.
+            const std::lock_guard cache_lock(this->confine_cache_mutex_);
+            if (const auto cached = this->confine_cache_.find(win_path); cached != this->confine_cache_.end())
+            {
+                return cached->second;
+            }
+
             // Emulation-root translation, confined to the drive root.
             const std::array<char, 2> root_drive{win_path.get_drive().value_or('c'), 0};
-            return confine(this->root_ / root_drive.data(), this->root_ / win_path.to_portable_path());
+            auto result = confine(this->root_ / root_drive.data(), this->root_ / win_path.to_portable_path());
+            this->confine_cache_.emplace(win_path, result);
+            return result;
         }
 
         template <typename F>
@@ -109,6 +123,9 @@ namespace sogen
         void map(windows_path src, std::filesystem::path dest)
         {
             this->mappings_[std::move(src)] = std::move(dest);
+
+            const std::lock_guard cache_lock(this->confine_cache_mutex_);
+            this->confine_cache_.clear();
         }
 
       private:
@@ -155,6 +172,9 @@ namespace sogen
 
         std::filesystem::path root_{};
         std::unordered_map<windows_path, std::filesystem::path> mappings_{};
+
+        mutable std::mutex confine_cache_mutex_{};
+        mutable std::unordered_map<windows_path, std::filesystem::path> confine_cache_{};
     };
 
 } // namespace sogen
