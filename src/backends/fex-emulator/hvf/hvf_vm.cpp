@@ -384,12 +384,33 @@ namespace sogen::fex::hvf
                 snprintf(buf, sizeof(buf), "HVF: protect of unmapped page 0x%llx", static_cast<unsigned long long>(cursor));
                 throw std::runtime_error(buf);
             }
-            if (it->second.prot != prot)
+
+            if (it->second.prot == prot)
             {
-                check_hv("hv_vm_protect", hv_vm_protect(it->second.ipa, vm_page_size, to_hv_flags(prot)));
-                it->second.prot = prot;
+                cursor += vm_page_size;
+                continue;
             }
-            cursor += vm_page_size;
+
+            uint64_t expected_ipa = it->second.ipa + vm_page_size;
+            uint64_t run_end = cursor + vm_page_size;
+            while (run_end < end)
+            {
+                const auto next = this->pages_.find(run_end);
+                if (next == this->pages_.end() || next->second.prot == prot || next->second.ipa != expected_ipa)
+                {
+                    break;
+                }
+                run_end += vm_page_size;
+                expected_ipa += vm_page_size;
+            }
+
+            const size_t run_size = run_end - cursor;
+            check_hv("hv_vm_protect", hv_vm_protect(it->second.ipa, run_size, to_hv_flags(prot)));
+            for (uint64_t page = cursor; page < run_end; page += vm_page_size)
+            {
+                this->pages_[page].prot = prot;
+            }
+            cursor = run_end;
         }
     }
 
@@ -431,13 +452,30 @@ namespace sogen::fex::hvf
         while (cursor < end)
         {
             const auto it = this->pages_.find(cursor);
-            if (it != this->pages_.end())
+            if (it == this->pages_.end())
             {
-                check_hv("hv_vm_unmap(refresh)", hv_vm_unmap(it->second.ipa, vm_page_size));
-                check_hv("hv_vm_map(refresh)",
-                         hv_vm_map(reinterpret_cast<void*>(cursor), it->second.ipa, vm_page_size, to_hv_flags(it->second.prot)));
+                cursor += vm_page_size;
+                continue;
             }
-            cursor += vm_page_size;
+
+            const int prot = it->second.prot;
+            uint64_t expected_ipa = it->second.ipa + vm_page_size;
+            uint64_t run_end = cursor + vm_page_size;
+            while (run_end < end)
+            {
+                const auto next = this->pages_.find(run_end);
+                if (next == this->pages_.end() || next->second.ipa != expected_ipa || next->second.prot != prot)
+                {
+                    break;
+                }
+                run_end += vm_page_size;
+                expected_ipa += vm_page_size;
+            }
+
+            const size_t run_size = run_end - cursor;
+            check_hv("hv_vm_unmap(refresh)", hv_vm_unmap(it->second.ipa, run_size));
+            check_hv("hv_vm_map(refresh)", hv_vm_map(reinterpret_cast<void*>(cursor), it->second.ipa, run_size, to_hv_flags(prot)));
+            cursor = run_end;
         }
     }
 
