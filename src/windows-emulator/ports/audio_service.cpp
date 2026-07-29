@@ -49,11 +49,17 @@ namespace sogen
         constexpr std::array<uint8_t, 16> k_session_context_uuid = {0x53, 0x6f, 0x67, 0x65, 0x6e, 0x41, 0x75, 0x64,
                                                                     0x69, 0x6f, 0x53, 0x65, 0x73, 0x73, 0x00, 0x01};
 
+        struct default_endpoint
+        {
+            std::u16string id;
+            uint32_t state;
+        };
+
         // The audio endpoint database lives in the registry under
         // HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render,Capture}. Each endpoint is a
         // sub-key named by its endpoint id ("{0.0.<flow>.00000000}.{<guid>}"). mmdevapi resolves a device by
         // opening that registry key, so GetDefaultEndpoint must return an id that actually exists there.
-        std::optional<std::u16string> find_default_endpoint_id(windows_emulator& win_emu, const uint32_t data_flow)
+        std::optional<default_endpoint> find_default_endpoint_id(windows_emulator& win_emu, const uint32_t data_flow)
         {
             const std::string base = R"(\Registry\Machine\Software\Microsoft\Windows\CurrentVersion\MMDevices\Audio\)";
 
@@ -63,8 +69,8 @@ namespace sogen
             const std::array<const char*, 2> folders = data_flow == 0 ? std::array<const char*, 2>{"Render", "RemoteRender"}
                                                                       : std::array<const char*, 2>{"Capture", "RemoteCapture"};
 
-            std::optional<std::u16string> first_active{};
-            std::optional<std::u16string> first_any{};
+            std::optional<default_endpoint> first_active{};
+            std::optional<default_endpoint> first_any{};
 
             for (const auto* folder : folders)
             {
@@ -97,11 +103,11 @@ namespace sogen
 
                     if (!first_any)
                     {
-                        first_any = id;
+                        first_any = default_endpoint{id, state};
                     }
                     if (state == 1 /* DEVICE_STATE_ACTIVE */ && !first_active)
                     {
-                        first_active = id;
+                        first_active = default_endpoint{id, state};
                     }
                 }
             }
@@ -708,13 +714,12 @@ namespace sogen
                 {
                     return static_cast<NTSTATUS>(0x80070490); // ERROR_NOT_FOUND -> no default endpoint
                 }
-                const auto& id = *found;
 
                 writer.write_ndr_pointer(true);
-                writer.write_ndr_u16string(id, true);
+                writer.write_ndr_u16string(found->id, true);
                 writer.align_to(sizeof(uint32_t));
 
-                writer.write<uint32_t>(0); // [out] state
+                writer.write<uint32_t>(found->state); // [out] state
 
                 writer.write(k_hr_ok); // return HRESULT
                 return STATUS_SUCCESS;
