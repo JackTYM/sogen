@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -18,6 +19,7 @@ namespace sogen::fex::hvf
 {
     namespace
     {
+        std::mutex g_rip_sample_file_mutex;
         constexpr auto sys_reg_actlr_el1 = static_cast<hv_sys_reg_t>(0xc081);
 
         // T0SZ=16 (48-bit VA), IRGN0/ORGN0=WB-WA, SH0=inner, TG0=4KB, EPD1=1, IPS=40-bit.
@@ -135,12 +137,14 @@ namespace sogen::fex::hvf
         }
 
         this->singlestep_diag_init_from_env();
+        this->rip_sample_init_from_env();
 
         this->vm_.register_vcpu(*this);
     }
 
     hvf_vcpu_executor::~hvf_vcpu_executor()
     {
+        this->rip_sample_flush();
         this->vm_.unregister_vcpu(*this);
         hv_vcpu_destroy(this->vcpu_);
     }
@@ -452,6 +456,51 @@ namespace sogen::fex::hvf
         }
     }
 
+    void hvf_vcpu_executor::rip_sample_init_from_env()
+    {
+        if (const char* sample = std::getenv("EMULATOR_FEX_HVF_RIP_SAMPLE"); sample != nullptr && sample[0] != '0')
+        {
+            this->rip_sample_enabled_ = true;
+            const char* log_path = std::getenv("EMULATOR_FEX_HVF_RIP_SAMPLE_LOG");
+            this->rip_sample_log_path_ = log_path != nullptr ? log_path : "/tmp/hvf_rip_sample.log";
+            this->rip_samples_.reserve(256);
+        }
+    }
+
+    void hvf_vcpu_executor::rip_sample_capture()
+    {
+        const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        const uint64_t host_pc = this->get_pc();
+        const uint64_t guest_rip = this->singlestep_diag_rip_fn_ ? this->singlestep_diag_rip_fn_(host_pc) : 0;
+        this->rip_samples_.push_back({now, guest_rip != 0 ? guest_rip : host_pc});
+
+        if (this->rip_samples_.size() >= 256)
+        {
+            this->rip_sample_flush();
+        }
+    }
+
+    void hvf_vcpu_executor::rip_sample_flush()
+    {
+        if (this->rip_samples_.empty())
+        {
+            return;
+        }
+
+        const std::lock_guard<std::mutex> lock(g_rip_sample_file_mutex);
+        FILE* f = fopen(this->rip_sample_log_path_.c_str(), "a");
+        if (f != nullptr)
+        {
+            for (const auto& sample : this->rip_samples_)
+            {
+                fprintf(f, "%llu %p %llx\n", static_cast<unsigned long long>(sample.t_ns), static_cast<const void*>(this),
+                        static_cast<unsigned long long>(sample.guest_rip));
+            }
+            fclose(f);
+        }
+        this->rip_samples_.clear();
+    }
+
     void hvf_vcpu_executor::dispatch_callback(const uint16_t id)
     {
         hvf_callback_slot slot{};
@@ -548,6 +597,10 @@ namespace sogen::fex::hvf
             }
             if (this->exit_->reason == HV_EXIT_REASON_CANCELED)
             {
+                if (this->rip_sample_enabled_)
+                {
+                    this->rip_sample_capture();
+                }
                 continue;
             }
             if (this->exit_->reason != HV_EXIT_REASON_EXCEPTION)

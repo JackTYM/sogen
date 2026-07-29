@@ -86,6 +86,10 @@ namespace sogen::fex::hvf
         void singlestep_diag_set_active(bool enable);
         void singlestep_diag_arm_next_step();
 
+        void rip_sample_init_from_env();
+        void rip_sample_capture();
+        void rip_sample_flush();
+
         hvf_vm& vm_;
         hv_vcpu_t vcpu_ = 0;
         hv_vcpu_exit_t* exit_ = nullptr;
@@ -123,6 +127,13 @@ namespace sogen::fex::hvf
         uint64_t singlestep_diag_window_start_ns_ = 0;
         std::vector<singlestep_diag_sample> singlestep_diag_samples_;
         std::function<uint64_t(uint64_t)> singlestep_diag_rip_fn_;
+
+        // EMULATOR_FEX_HVF_RIP_SAMPLE=1: records the guest RIP on every exit already caused by the
+        // scheduler's periodic kick() (HV_EXIT_REASON_CANCELED), i.e. at the existing ~20ms quantum
+        // cadence, instead of forcing single-instruction-granularity exits.
+        bool rip_sample_enabled_ = false;
+        std::string rip_sample_log_path_;
+        std::vector<singlestep_diag_sample> rip_samples_;
     };
 }
 
