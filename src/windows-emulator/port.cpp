@@ -138,6 +138,16 @@ namespace sogen
             return std::make_unique<stub_rpc_port>();
         }
 
+        if (port == u"\\PdcPort")
+        {
+            // Power Dependency Coordinator, the kernel-hosted port umpdc.dll's RtlRegisterForPowerDependency-
+            // style client calls into. The same audio power-request registration that talks to umpo also
+            // registers a dependency here; a dummy_port's STATUS_NOT_SUPPORTED reply sends the client down a
+            // fallback RtlWaitOnAddress wait for a coordinator update that never arrives (nothing ever calls
+            // NtAlertThreadByThreadId for it), permanently parking the calling thread.
+            return std::make_unique<noop_port>();
+        }
+
         if (port.empty())
         {
             // Unnamed ALPC ports in the audio stack are the per-stream WASAPI endpoint control channel.

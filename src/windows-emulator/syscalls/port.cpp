@@ -357,8 +357,25 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAlpcSetInformation()
+        NTSTATUS handle_NtAlpcSetInformation(const syscall_context& /*c*/, const handle /*port_handle*/,
+                                             const uint32_t port_information_class, const emulator_pointer /*port_information*/,
+                                             const uint32_t /*length*/)
         {
+            // AlpcAssociateCompletionPortInformation: real Windows services this by delivering completions
+            // through a threadpool worker thread, which is what eventually drops the TP_ALPC completion
+            // object's reference count and wakes RtlWaitOnAddress waiters in e.g. TpReleaseAlpcCompletion.
+            // Our ALPC ports are handled synchronously in the calling thread (port_container::handle_message),
+            // so no such completion is ever independently delivered - claiming success here leaves the caller
+            // believing a real completion port was associated and permanently waiting for a wakeup that can
+            // never come (observed hanging umpdc.dll's PdcPortClose on MW2's audio/power-dependency
+            // teardown). Failing the association makes the caller fall back to synchronous completion
+            // handling instead, matching what our ALPC implementation actually provides.
+            constexpr uint32_t alpc_associate_completion_port_information = 2;
+            if (port_information_class == alpc_associate_completion_port_information)
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
             return STATUS_SUCCESS;
         }
 
