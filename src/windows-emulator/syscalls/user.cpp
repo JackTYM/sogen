@@ -3006,6 +3006,11 @@ namespace sogen
             {
                 invalidate_window(c, win);
 
+                if (!has_child_parent)
+                {
+                    c.proc.set_foreground_window(handle.bits);
+                }
+
                 EMU_WINDOWPOS wp{};
                 wp.hwnd = handle.bits;
                 wp.hwndInsertAfter = 0;
@@ -3240,6 +3245,12 @@ namespace sogen
 
             if (want_visible)
             {
+                const bool has_child_parent = (win->style & WS_CHILD) != 0 && (win->style & WS_POPUP) == 0;
+                if (!has_child_parent)
+                {
+                    c.proc.set_foreground_window(hwnd);
+                }
+
                 const auto move_lparam = static_cast<uint64_t>(((win->y & 0xFFFF) << 16) | (win->x & 0xFFFF));
                 const auto size_lparam = static_cast<uint64_t>(((win->height & 0xFFFF) << 16) | (win->width & 0xFFFF));
 
@@ -4166,9 +4177,16 @@ namespace sogen
             return TRUE;
         }
 
-        NTSTATUS handle_NtUserSetForegroundWindow()
+        BOOL handle_NtUserSetForegroundWindow(const syscall_context& c, const hwnd hWnd)
         {
-            return STATUS_SUCCESS;
+            const auto* win = c.proc.windows.get(hWnd);
+            if (!win)
+            {
+                return FALSE;
+            }
+
+            c.proc.set_foreground_window(hWnd);
+            return TRUE;
         }
 
         hwnd find_foreground_window(const syscall_context& c)
@@ -5371,9 +5389,17 @@ namespace sogen
             return TRUE;
         }
 
-        BOOL handle_NtUserSetActiveWindow()
+        hwnd handle_NtUserSetActiveWindow(const syscall_context& c, const hwnd hWnd)
         {
-            return TRUE;
+            const auto* win = c.proc.windows.get(hWnd);
+            if (!win)
+            {
+                return 0;
+            }
+
+            const auto previous = c.proc.foreground_window;
+            c.proc.set_foreground_window(hWnd);
+            return previous;
         }
 
         NTSTATUS handle_NtUserSelectPalette()

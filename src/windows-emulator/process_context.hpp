@@ -442,6 +442,8 @@ namespace sogen
                              bool initial_thread = false);
         void terminate_thread(emulator_thread& thread, NTSTATUS thread_exit_status);
 
+        void set_foreground_window(hwnd handle);
+
         std::optional<uint16_t> find_atom(std::u16string_view name);
         uint16_t add_or_find_atom(std::u16string name);
         bool delete_atom(const std::u16string& name);

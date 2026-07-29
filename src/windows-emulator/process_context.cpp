@@ -1114,6 +1114,15 @@ namespace sogen
         return h;
     }
 
+    void process_context::set_foreground_window(const hwnd handle)
+    {
+        this->foreground_window = handle;
+
+        this->user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
+            server_info.foregroundWindow = handle; //
+        });
+    }
+
     void process_context::terminate_thread(emulator_thread& thread, const NTSTATUS thread_exit_status)
     {
         thread.exit_status = thread_exit_status;
