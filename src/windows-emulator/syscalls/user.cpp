@@ -2550,6 +2550,74 @@ namespace sogen
             return 0;
         }
 
+        struct wow64_wndclassex
+        {
+            uint32_t cbSize;
+            uint32_t style;
+            uint32_t lpfnWndProc;
+            int32_t cbClsExtra;
+            int32_t cbWndExtra;
+            uint32_t hInstance;
+            uint32_t hIcon;
+            uint32_t hCursor;
+            uint32_t hbrBackground;
+            uint32_t lpszMenuName;
+            uint32_t lpszClassName;
+            uint32_t hIconSm;
+        };
+
+        static_assert(sizeof(wow64_wndclassex) == 48);
+
+        EMU_WNDCLASSEX read_wnd_class_ex(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex)
+        {
+            if (!c.proc.is_wow64_process)
+            {
+                return wnd_class_ex.read();
+            }
+
+            const auto w = emulator_object<wow64_wndclassex>{c.emu, wnd_class_ex.value()}.read();
+
+            EMU_WNDCLASSEX wnd_class{};
+            wnd_class.cbSize = w.cbSize;
+            wnd_class.style = w.style;
+            wnd_class.lpfnWndProc = w.lpfnWndProc;
+            wnd_class.cbClsExtra = w.cbClsExtra;
+            wnd_class.cbWndExtra = w.cbWndExtra;
+            wnd_class.hInstance = w.hInstance;
+            wnd_class.hIcon = w.hIcon;
+            wnd_class.hCursor = w.hCursor;
+            wnd_class.hbrBackground = w.hbrBackground;
+            wnd_class.lpszMenuName = w.lpszMenuName;
+            wnd_class.lpszClassName = w.lpszClassName;
+            wnd_class.hIconSm = w.hIconSm;
+            return wnd_class;
+        }
+
+        void write_wnd_class_ex(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
+                                const EMU_WNDCLASSEX& wnd_class)
+        {
+            if (!c.proc.is_wow64_process)
+            {
+                wnd_class_ex.write(wnd_class);
+                return;
+            }
+
+            wow64_wndclassex w{};
+            w.cbSize = static_cast<uint32_t>(wnd_class.cbSize);
+            w.style = wnd_class.style;
+            w.lpfnWndProc = static_cast<uint32_t>(wnd_class.lpfnWndProc);
+            w.cbClsExtra = wnd_class.cbClsExtra;
+            w.cbWndExtra = wnd_class.cbWndExtra;
+            w.hInstance = static_cast<uint32_t>(wnd_class.hInstance);
+            w.hIcon = static_cast<uint32_t>(wnd_class.hIcon);
+            w.hCursor = static_cast<uint32_t>(wnd_class.hCursor);
+            w.hbrBackground = static_cast<uint32_t>(wnd_class.hbrBackground);
+            w.lpszMenuName = static_cast<uint32_t>(wnd_class.lpszMenuName);
+            w.lpszClassName = static_cast<uint32_t>(wnd_class.lpszClassName);
+            w.hIconSm = static_cast<uint32_t>(wnd_class.hIconSm);
+            emulator_object<wow64_wndclassex>{c.emu, wnd_class_ex.value()}.write(w);
+        }
+
         uint16_t handle_NtUserRegisterClassExWOW(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
                                                  const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
                                                  const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*class_version*/,
@@ -2567,7 +2635,7 @@ namespace sogen
 
             const auto cls_ptr = process_context::allocate_user_class(c.win_emu.memory, class_name_str);
 
-            const auto wnd_class = wnd_class_ex.read();
+            const auto wnd_class = read_wnd_class_ex(c, wnd_class_ex);
             const auto entry = process_context::class_entry{cls_ptr, wnd_class, class_menu_name.read()};
 
             if (c.win_emu.callbacks.on_generic_activity)
@@ -2631,7 +2699,7 @@ namespace sogen
 
             if (wnd_class_ex)
             {
-                wnd_class_ex.write(it->second.wnd_class);
+                write_wnd_class_ex(c, wnd_class_ex, it->second.wnd_class);
             }
 
             return TRUE;

@@ -191,6 +191,14 @@ namespace sogen
             case ProcessDebugPort:
                 c.win_emu.callbacks.on_suspicious_activity("Anti-debug check with ProcessDebugPort");
 
+                if (c.proc.is_wow64_process)
+                {
+                    return handle_query<EmulatorTraits<Emu32>::PVOID>(c.emu, process_information, process_information_length, return_length,
+                                                                      [](EmulatorTraits<Emu32>::PVOID& ptr) {
+                                                                          ptr = 0; //
+                                                                      });
+                }
+
                 return handle_query<EmulatorTraits<Emu64>::PVOID>(c.emu, process_information, process_information_length, return_length,
                                                                   [](EmulatorTraits<Emu64>::PVOID& ptr) {
                                                                       ptr = 0; //
