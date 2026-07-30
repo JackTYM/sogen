@@ -3126,12 +3126,12 @@ namespace sogen::fex
         // --[ state ]--------------------------------------------------------------------------------
 
         // Protects every machine-wide table below (regions_, mmio_regions_, gate_crossings_, the
-        // Apple host-page shadow tables, callret_buffers_, hook maps) against concurrent access from
-        // multiple vCPUs' host threads. Never held across a call into guest-execution code (JIT
-        // dispatch/ExecuteThread) or across a hook callback that re-enters the kernel lock - only
-        // ever taken to protect a bounded, non-reentrant table mutation/read. A synchronous fault
-        // interrupts JIT/dispatcher code only, which never holds this mutex, so signal-context
-        // acquisition here can't self-deadlock.
+        // Apple host-page shadow tables, callret_buffers_, callret_buffer_owners_, hook maps) against
+        // concurrent access from multiple vCPUs' host threads. Never held across a call into guest-
+        // execution code (JIT dispatch/ExecuteThread) or across a hook callback that re-enters the
+        // kernel lock - only ever taken to protect a bounded, non-reentrant table mutation/read. A
+        // synchronous fault interrupts JIT/dispatcher code only, which never holds this mutex, so
+        // signal-context acquisition here can't self-deadlock.
         mutable std::shared_mutex tables_mutex_;
 
         std::vector<std::unique_ptr<fex_vcpu>> vcpus_;
@@ -3154,6 +3154,11 @@ namespace sogen::fex
         std::map<uint64_t, mapped_region> regions_;
         std::vector<mmio_region> mmio_regions_;
         std::vector<std::pair<void*, size_t>> callret_buffers_;
+        // Keyed by a buffer's base address (state._pad1): which engine's InternalThreadState last
+        // owned it. See restore_state_into's doc comment - the buffer is per logical thread, reused
+        // verbatim across whichever engine that thread migrates to, so this is what lets a migration
+        // be told apart from an ordinary same-engine restore.
+        std::unordered_map<uint64_t, FEXCore::Core::InternalThreadState*> callret_buffer_owners_;
         std::vector<gate_crossing> gate_crossings_;
 
 #ifdef __APPLE__
@@ -3596,15 +3601,33 @@ namespace sogen::fex
         this->ensure_callret_buffer(state);
         thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
 
-        // The snapshot's callret_sp would resurrect call-ret entries pushed during an earlier
-        // scheduling quantum - host JIT code pointers that are only valid for the engine thread and
-        // code-buffer generation that pushed them. FEXCore wipes only the callret buffer attached to
-        // an engine thread when that thread rotates its code buffer or invalidates code (see
-        // CheckCodeBufferUpdate/InvalidateThreadCachedCodeRange); a descheduled thread's buffer is
-        // never wiped, so a resumed thread's RET can pop a matching guest address paired with a host
-        // pointer into freed or foreign-generation JIT memory (observed as ExitFunctionLink "Record
-        // outside code buffer" bails and wild host jumps under --vcpus > 1). The entries are purely a
-        // RET fast path, so dropping them on every restore is always safe.
+        // Repositioning callret_sp resurrects nothing by itself for the engine that owned this
+        // buffer last time - handle_callret_stack_fault/hvf_handle_callret_stack_fault reset the same
+        // way on overflow/underflow, and that is safe there because the entries below the reset point
+        // still belong to the same engine's code buffer, which FEXCore's own
+        // CheckCodeBufferUpdate/InvalidateThreadCachedCodeRange keep consistent with callret_sp.
+        // But this buffer is per LOGICAL THREAD (see ensure_callret_buffer), reused verbatim across
+        // whichever engine the thread migrates to. If a different engine owned it last, the bytes
+        // sitting at and below the reset point still pair a guest return address with a host pointer
+        // into THAT OTHER engine's code buffer - a pointer this engine's invalidation tracking knows
+        // nothing about. Because the reset point never moves, a later RET on the new engine popping
+        // through that exact slot only needs the guest address to match (likely for hot, frequently
+        // repeated call sites, since every reset funnels back to the same few slots) to jump to that
+        // stale, possibly freed or foreign-generation host pointer - observed as ExitFunctionLink
+        // "Record outside code buffer" bails and wild host jumps under --vcpus > 1. Zero the buffer
+        // whenever its owning engine actually changes, so a stale slot can only ever read back as an
+        // all-zero entry, which can never match a real guest RIP. A same-engine restore (by far the
+        // common case - every ordinary thread switch, not just a cross-vCPU migration) still just
+        // repositions the pointer, exactly as before.
+        {
+            const std::unique_lock lock(this->emulator_.tables_mutex_);
+            auto [owner_it, inserted] = this->emulator_.callret_buffer_owners_.try_emplace(state._pad1, thread);
+            if (!inserted && owner_it->second != thread)
+            {
+                std::memset(reinterpret_cast<void*>(state._pad1), 0, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+                owner_it->second = thread;
+            }
+        }
         state.callret_sp = state._pad1 + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4;
     }
 
