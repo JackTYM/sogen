@@ -206,12 +206,28 @@ namespace sogen
             return this->dep_enabled_;
         }
 
+        // Where this instance's per-vCPU GDT pages actually ended up (see gdt_base_for_vcpu,
+        // process_context.hpp). Set once by setup_gdt: normally the fixed GDT_ADDR, but a nested
+        // child process (NtCreateUserProcess) sharing host==guest address space with an already-live
+        // parent instance (FEX on Apple) can't reuse that same fixed host address, so setup_gdt falls
+        // back to a dynamically found one and records it here for refresh_execution_context to use.
+        uint64_t gdt_base() const
+        {
+            return this->gdt_base_address_;
+        }
+
+        void set_gdt_base(const uint64_t address)
+        {
+            this->gdt_base_address_ = address;
+        }
+
       private:
         memory_interface* memory_{};
         reserved_region_map reserved_regions_{};
         std::atomic<std::uint64_t> layout_version_{0};
         std::uint64_t default_allocation_address_{0x100000000ULL};
         bool dep_enabled_{true};
+        uint64_t gdt_base_address_{0};
         // Addresses reserved by reserve_host_memory_ranges() so far, so reset_host_memory_ranges can
         // release the previous set before asking the backend for a fresh one.
         std::vector<uint64_t> host_reserved_addresses_{};

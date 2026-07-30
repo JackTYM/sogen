@@ -5,6 +5,7 @@
 #include <utils/win.hpp>
 
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -63,6 +64,14 @@ namespace sogen
             this->sink_ = std::move(s);
         }
 
+        // Prepended to every message (sinks and terminal alike) - lets an embedder tag a nested
+        // child emulator's output (e.g. "[child 1] ") so it reads as a legible tree instead of being
+        // indistinguishable from the parent's own trace. Empty by default (no prefix).
+        void set_prefix(std::string prefix)
+        {
+            this->prefix_ = std::move(prefix);
+        }
+
       private:
 #ifdef _WIN32
         UINT old_cp{};
@@ -70,6 +79,7 @@ namespace sogen
         bool disable_output_{false};
         bool silent_{false};
         sink sink_{};
+        std::string prefix_{};
         mutable std::mutex print_mutex_{};
         void print_message(color c, std::string_view message, bool force = false) const;
     };

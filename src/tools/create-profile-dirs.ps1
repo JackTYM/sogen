@@ -23,5 +23,8 @@ Get-ChildItem $profileListPath -ErrorAction SilentlyContinue | ForEach-Object {
             New-Item -ItemType Directory -Path $sub -Force | Out-Null
             Write-Host 'Created:' $sub
         }
+        $localTemp = Join-Path $appData 'local\temp'
+        New-Item -ItemType Directory -Path $localTemp -Force | Out-Null
+        Write-Host 'Created:' $localTemp
     }
 }

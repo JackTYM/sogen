@@ -152,17 +152,20 @@ namespace sogen
     {
         const std::scoped_lock lock(this->print_mutex_);
 
+        const std::string prefixed_storage = this->prefix_.empty() ? std::string{} : this->prefix_ + std::string(message);
+        const std::string_view effective_message = this->prefix_.empty() ? message : std::string_view(prefixed_storage);
+
         // Sinks observe all log activity, regardless of disable_output_. That lets
         // consumers capture a full structured log even when they've silenced the
         // terminal (e.g. --silent, or a Python wrapper capturing via callback).
-        this->sink_(c, message);
+        this->sink_(c, effective_message);
 
         if (this->silent_ || (!force && this->disable_output_))
         {
             return;
         }
 
-        print_colored(message, get_color_type(c));
+        print_colored(effective_message, get_color_type(c));
     }
 
     void logger::print(const color c, const std::string_view message)

@@ -18,8 +18,20 @@ namespace sogen
     {
         struct dummy_device : stateless_device
         {
-            NTSTATUS io_control(windows_emulator&, const io_device_context&) override
+            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
             {
+                if (context.output_buffer && context.output_buffer_length)
+                {
+                    win_emu.emu().set_memory(context.output_buffer, 0, context.output_buffer_length);
+                }
+
+                if (context.io_status_block)
+                {
+                    IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                    block.Information = context.output_buffer_length;
+                    context.io_status_block.write(block);
+                }
+
                 return STATUS_SUCCESS;
             }
         };

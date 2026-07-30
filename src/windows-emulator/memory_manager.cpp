@@ -170,6 +170,7 @@ namespace sogen
         buffer.write_atomic(this->layout_version_);
         buffer.write(this->default_allocation_address_);
         buffer.write(this->dep_enabled_);
+        buffer.write(this->gdt_base_address_);
         buffer.write_map(this->reserved_regions_);
 
         if (is_snapshot)
@@ -207,6 +208,7 @@ namespace sogen
         buffer.read_atomic(this->layout_version_);
         buffer.read(this->default_allocation_address_);
         buffer.read(this->dep_enabled_);
+        buffer.read(this->gdt_base_address_);
         buffer.read_map(this->reserved_regions_);
 
         if (is_snapshot)

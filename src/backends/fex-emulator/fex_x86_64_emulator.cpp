@@ -750,16 +750,19 @@ namespace sogen::fex
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
 
-        void install_fault_signal_handlers(fex_x86_64_emulator& emulator)
+        // Returns the previously active instance (nullptr if none), for the caller - a member
+        // function of the now-complete fex_x86_64_emulator, unlike this free function - to stash in
+        // previous_active_emulator_ and restore on destruction.
+        [[nodiscard]] fex_x86_64_emulator* install_fault_signal_handlers(fex_x86_64_emulator& emulator)
         {
             // Fault routing is process-global (one sigaction handler set, one active-instance
-            // pointer). A second live instance would silently receive the first one's faults, so
-            // refuse it outright - reachable e.g. via the Python bindings constructing two emulators.
-            if (g_active_emulator != nullptr)
-            {
-                throw std::runtime_error("Only one FEX emulator instance can be active per process");
-            }
-
+            // pointer), but a strictly nested second instance is legitimate: NtCreateUserProcess runs
+            // a child windows_emulator synchronously to completion on the same host thread while the
+            // parent's own instance is blocked inside that same syscall handler, so the two never
+            // execute guest code concurrently and routing faults to whichever is innermost is correct.
+            // Save-and-swap rather than refuse outright; the returned previous instance is restored
+            // once the child's destructor runs (see ~fex_x86_64_emulator).
+            auto* const previous = g_active_emulator;
             g_active_emulator = &emulator;
 
             // A dedicated alternate signal stack (SA_ONSTACK), so a second, different signal
@@ -790,6 +793,8 @@ namespace sogen::fex
             // trap, terminating the process (exit 128+SIGTRAP) instead of reaching the vector-dispatch
             // logic below, which already handles vector 3 (breakpoint) correctly once it runs.
             ::sigaction(SIGTRAP, &action, nullptr);
+
+            return previous;
         }
 
         // FEXCore::CPU::Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call
@@ -1167,7 +1172,15 @@ namespace sogen::fex
 
             if (g_active_emulator == this)
             {
-                g_active_emulator = nullptr;
+                g_active_emulator = this->previous_active_emulator_;
+            }
+            else if (g_active_emulator != nullptr)
+            {
+                // Non-LIFO teardown: this instance wasn't the innermost active one when it was
+                // destroyed, meaning two instances actually overlapped concurrently rather than
+                // nesting strictly - the genuine misuse the old throw-on-second-instance guard caught.
+                fprintf(stderr, "[FEX backend] FATAL: fex_x86_64_emulator destroyed out of nesting "
+                                "order - two instances were active concurrently\n");
             }
 #else
             for (const auto& [address, region] : this->regions_)
@@ -2975,7 +2988,7 @@ namespace sogen::fex
             this->context_->InitCore();
 
 #ifdef __APPLE__
-            install_fault_signal_handlers(*this);
+            this->previous_active_emulator_ = install_fault_signal_handlers(*this);
 #endif
         }
 
@@ -4694,6 +4707,10 @@ namespace sogen::fex
         // __APPLE__-gated (the whole mechanism is a macOS/mach_vm_region-specific fix), so this
         // member is unused - and -Werror,-Wunused-private-field - on other platforms without this.
         bool wow64_host_window_reserved_ = false;
+        // The g_active_emulator that was active when this instance's constructor ran, restored on
+        // destruction - see install_fault_signal_handlers's doc comment for the nested-instance model
+        // this supports (a synchronously-run child instance during NtCreateUserProcess).
+        fex_x86_64_emulator* previous_active_emulator_ = nullptr;
 #endif
         // wow64cpu.dll's real TurboDispatchJumpAddressEnd export address, set via
         // set_wow64_turbo_dispatch_end once module_manager resolves it - see that method's doc

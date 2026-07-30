@@ -22,6 +22,8 @@ namespace sogen
 {
 
     struct io_device;
+    class windows_emulator;
+    struct application_settings;
 
     struct emulator_callbacks : module_manager::callbacks, process_context::callbacks
     {
@@ -31,6 +33,14 @@ namespace sogen
         using continuation = instruction_hook_continuation;
 
         opt_func<void()> on_exception{};
+
+        // Constructs and returns a fully independent windows_emulator for a child process
+        // (NtCreateUserProcess), configured from the given application_settings but otherwise
+        // sharing the parent's backend type, emulator_settings, and interfaces - only the embedder
+        // (e.g. the analyzer's main.cpp) has that configuration, so child construction can't happen
+        // inside windows_emulator itself. Unset means the embedder doesn't support child processes;
+        // the handler reports STATUS_NOT_SUPPORTED in that case, matching prior behavior.
+        opt_func<std::unique_ptr<windows_emulator>(application_settings)> create_child_emulator{};
 
         opt_func<void(uint64_t address, uint64_t length, memory_permission)> on_memory_protect{};
         opt_func<void(uint64_t address, uint64_t length, memory_permission, bool commit)> on_memory_allocate{};
@@ -57,6 +67,16 @@ namespace sogen
         windows_path working_directory{};
         std::vector<std::u16string> arguments{};
         utils::unordered_insensitive_u16string_map<std::u16string> environment{};
+        // When set, used verbatim as the child's RTL_USER_PROCESS_PARAMETERS.CommandLine instead of
+        // composing one from application/arguments - preserves a real caller's exact quoting (e.g. a
+        // guest process relaunching itself via NtCreateUserProcess) rather than round-tripping it
+        // through a tokenizer this codebase doesn't otherwise need.
+        std::optional<std::u16string> command_line{};
+        // When set, used verbatim as the child's RTL_USER_PROCESS_PARAMETERS.ImagePathName instead of
+        // application.u16string() - windows_path canonicalizes (lower-cases) every component for use
+        // as a case-insensitive filesystem lookup key, but real Windows preserves the caller-supplied
+        // casing in ImagePathName, which guest code can observe (e.g. via GetModuleFileName).
+        std::optional<std::u16string> image_path{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -64,6 +84,8 @@ namespace sogen
             buffer.write(this->working_directory);
             buffer.write_vector(this->arguments);
             buffer.write_map(this->environment);
+            buffer.write_optional(this->command_line);
+            buffer.write_optional(this->image_path);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -72,6 +94,8 @@ namespace sogen
             buffer.read(this->working_directory);
             buffer.read_vector(this->arguments);
             buffer.read_map(this->environment);
+            buffer.read_optional(this->command_line);
+            buffer.read_optional(this->image_path);
         }
     };
 

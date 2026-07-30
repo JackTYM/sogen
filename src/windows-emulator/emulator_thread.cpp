@@ -1330,7 +1330,7 @@ namespace sogen
         // Point this vCPU's GDTR at its own per-vCPU GDT. The saved thread context restores whatever
         // GDTR the thread last ran with (possibly another vCPU's GDT), so re-assert it here on every
         // switch. Cheap and keeps each vCPU reading its own descriptors.
-        const auto gdt_base = gdt_base_for_vcpu(emu.index());
+        const auto gdt_base = gdt_base_for_vcpu(this->memory_ptr->gdt_base(), emu.index());
         emu.load_gdt(gdt_base, GDT_LIMIT);
 
         if (this->teb32.has_value())

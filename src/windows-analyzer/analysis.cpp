@@ -728,20 +728,29 @@ namespace sogen
             // Prune entries whose dialog window no longer exists so a later, unrelated dialog
             // can't silently reuse the destroyed dialog's recycled HWND and get treated as
             // already clicked.
-            std::erase_if(c.clicked_dialogs, [&](const uint64_t handle) { return proc.windows.get(static_cast<hwnd>(handle)) == nullptr; });
+            std::erase_if(c.clicked_dialogs,
+                          [&](const auto& entry) { return proc.windows.get(static_cast<hwnd>(entry.first)) == nullptr; });
 
             for (auto& win : proc.windows | std::views::values)
             {
-                if (!win.is_dialog() || c.clicked_dialogs.contains(win.handle))
+                if (!win.is_dialog())
                 {
                     continue;
                 }
 
-                // A dialog whose title matches none of the rules is left alone: it might be a
-                // real, unexpected error rather than one of the known dialogs to auto-dismiss.
                 const auto title = u16_to_u8(win.name);
-                const auto rule = std::ranges::find_if(c.click_dialog_rules,
-                                                       [&](const auto& entry) { return title.find(entry.first) != std::string::npos; });
+
+                // A dialog can have several matching rules (e.g. checking a checkbox before
+                // clicking OK); click the first one not yet applied to this dialog instance and
+                // leave the rest for the next pump call. A dialog whose title matches no rule at
+                // all is left alone: it might be a real, unexpected error rather than one of the
+                // known dialogs to auto-dismiss. Matching is exact, not substring: an SFX that
+                // reuses a common title prefix across dialogs (e.g. "WinZip Self-Extractor" for
+                // both its main dialog and a later confirmation dialog) would otherwise have a
+                // rule meant for one dialog silently also fire on the other.
+                const auto rule = std::ranges::find_if(c.click_dialog_rules, [&](const auto& entry) {
+                    return title == entry.first && !c.clicked_dialogs.contains({win.handle, entry.second});
+                });
                 if (rule == c.click_dialog_rules.end())
                 {
                     continue;
@@ -780,6 +789,18 @@ namespace sogen
                     continue;
                 }
 
+                // A checkable button's internal checked state is toggled by its own window procedure
+                // processing a real click (mouse-down/up on the button itself), not by the WM_COMMAND
+                // notification alone - that message only tells the parent a click happened. Since this
+                // harness synthesizes the notification directly rather than routing through a real
+                // click, explicitly set the checked state too; BM_SETCHECK is a no-op for buttons that
+                // aren't checkable, so this is safe to send unconditionally.
+                ui_event check_event{};
+                check_event.window = child_handle;
+                check_event.message = 0x00F1; // BM_SETCHECK
+                check_event.wParam = 1;       // BST_CHECKED
+                c.win_emu->handle_ui_event(check_event);
+
                 ui_event event{};
                 event.window = win.handle;
                 event.message = WM_COMMAND;
@@ -787,7 +808,7 @@ namespace sogen
                 event.lParam = child_handle;
 
                 c.win_emu->handle_ui_event(event);
-                c.clicked_dialogs.insert(win.handle);
+                c.clicked_dialogs.insert({win.handle, wanted});
                 return;
             }
         }

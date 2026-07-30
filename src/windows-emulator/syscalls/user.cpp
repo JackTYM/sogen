@@ -31,6 +31,7 @@ namespace sogen
         constexpr uint32_t k_fn_inout_nc_calc_size_callback_id = 0x15;
         constexpr size_t k_client_pfn_button_wndproc_index = 7;
         constexpr size_t k_client_pfn_dialog_wndproc_index = 10;
+        constexpr size_t k_client_pfn_edit_wndproc_index = 11;
         constexpr size_t k_client_pfn_static_wndproc_index = 14;
         constexpr uint32_t k_ctlcolor_edit = 1;
         constexpr uint32_t k_ctlcolor_listbox = 2;
@@ -160,7 +161,7 @@ namespace sogen
         bool is_builtin_window_class_name(const std::u16string_view class_name)
         {
             const auto normalized = normalize_builtin_window_class_name(class_name);
-            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Static";
+            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Static" || normalized == u"Edit";
         }
 
         uint16_t get_builtin_window_fnid(const std::u16string_view class_name)
@@ -173,6 +174,10 @@ namespace sogen
             if (normalized == builtin_dialog_class_name)
             {
                 return 0x02A4;
+            }
+            if (normalized == u"Edit")
+            {
+                return 0x02A5;
             }
             if (normalized == u"Static")
             {
@@ -241,9 +246,17 @@ namespace sogen
                         wnd_proc = server_info.apfnClientA[k_client_pfn_dialog_wndproc_index];
                     }
                 }
+                else if (normalized_name == u"Edit")
+                {
+                    wnd_proc = server_info.apfnClientW[k_client_pfn_edit_wndproc_index];
+                    if (wnd_proc == 0)
+                    {
+                        wnd_proc = server_info.apfnClientA[k_client_pfn_edit_wndproc_index];
+                    }
+                }
             });
 
-            if (normalized_name == u"Button" || normalized_name == u"Static")
+            if (normalized_name == u"Button" || normalized_name == u"Static" || normalized_name == u"Edit")
             {
                 wnd_extra = 8;
             }
@@ -1928,7 +1941,13 @@ namespace sogen
                 return FALSE;
             }
 
-            update_window_title(c, *win, read_def_set_text_string(c, text));
+            auto new_text = read_def_set_text_string(c, text);
+            if (c.win_emu.callbacks.on_generic_activity)
+            {
+                c.win_emu.callbacks.on_generic_activity("DefSetText hwnd=0x" + utils::string::to_hex_number(window) + " text='" +
+                                                        u16_to_u8(new_text) + "'");
+            }
+            update_window_title(c, *win, std::move(new_text));
             return TRUE;
         }
 
@@ -2595,31 +2614,6 @@ namespace sogen
             return wnd_class;
         }
 
-        void write_wnd_class_ex(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
-                                const EMU_WNDCLASSEX& wnd_class)
-        {
-            if (!c.proc.is_wow64_process)
-            {
-                wnd_class_ex.write(wnd_class);
-                return;
-            }
-
-            wow64_wndclassex w{};
-            w.cbSize = static_cast<uint32_t>(wnd_class.cbSize);
-            w.style = wnd_class.style;
-            w.lpfnWndProc = static_cast<uint32_t>(wnd_class.lpfnWndProc);
-            w.cbClsExtra = wnd_class.cbClsExtra;
-            w.cbWndExtra = wnd_class.cbWndExtra;
-            w.hInstance = static_cast<uint32_t>(wnd_class.hInstance);
-            w.hIcon = static_cast<uint32_t>(wnd_class.hIcon);
-            w.hCursor = static_cast<uint32_t>(wnd_class.hCursor);
-            w.hbrBackground = static_cast<uint32_t>(wnd_class.hbrBackground);
-            w.lpszMenuName = static_cast<uint32_t>(wnd_class.lpszMenuName);
-            w.lpszClassName = static_cast<uint32_t>(wnd_class.lpszClassName);
-            w.hIconSm = static_cast<uint32_t>(wnd_class.hIconSm);
-            emulator_object<wow64_wndclassex>{c.emu, wnd_class_ex.value()}.write(w);
-        }
-
         uint16_t handle_NtUserRegisterClassExWOW(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
                                                  const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
                                                  const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*class_version*/,
@@ -2701,7 +2695,13 @@ namespace sogen
 
             if (wnd_class_ex)
             {
-                write_wnd_class_ex(c, wnd_class_ex, it->second.wnd_class);
+                // Unlike NtUserRegisterClassExWOW (a dedicated WOW64 entry point that receives the
+                // guest's narrow WNDCLASSEXW as-is), NtUserGetClassInfoEx is shared with native
+                // callers: real wow64win.dll's client-side thunk (whNtUserGetClassInfoEx) widens the
+                // whole structure into a native-shaped scratch buffer on its own stack before invoking
+                // this syscall, then narrows the result back into the guest's buffer itself after we
+                // return - so this pointer is always native-shaped here, even for a WOW64 process.
+                wnd_class_ex.write(it->second.wnd_class);
             }
 
             return TRUE;
@@ -2791,6 +2791,7 @@ namespace sogen
             }
 
             const auto cls_name = read_large_string_or_atom(c, class_name);
+
             if (c.win_emu.callbacks.on_generic_activity)
             {
                 auto style_string = utils::string::to_hex_number(style);
@@ -2929,6 +2930,7 @@ namespace sogen
                 {
                     guest_win.spmenu = menu;
                 }
+
                 guest_win.windowBand = 1; // ZBID_DESKTOP
                 guest_win.dpiContext = USER_DEFAULT_DPI_CONTEXT;
                 guest_win.fnid = get_builtin_window_fnid(normalized_class);
@@ -3111,7 +3113,7 @@ namespace sogen
             if (c.win_emu.callbacks.on_generic_activity)
             {
                 c.win_emu.callbacks.on_generic_activity("CreateWindowEx async class='" + u16_to_u8(cls_name) + "' hwnd=0x" +
-                                                        utils::string::to_hex_number(handle.bits));
+                                                        utils::string::to_hex_number(handle.bits) + " name='" + u16_to_u8(win.name) + "'");
             }
 
             dispatch_next_message(c, callback_id::NtUserCreateWindowEx, std::move(state), win, state.message_queue);
@@ -3153,6 +3155,12 @@ namespace sogen
             if (!win)
             {
                 return FALSE;
+            }
+
+            if (c.win_emu.callbacks.on_generic_activity)
+            {
+                c.win_emu.callbacks.on_generic_activity("DestroyWindow hwnd=0x" + utils::string::to_hex_number(window) + " class='" +
+                                                        u16_to_u8(win->class_name) + "' name='" + u16_to_u8(win->name) + "'");
             }
 
             if (win->thread_id != c.vcpu.active_thread->id)
@@ -4435,6 +4443,34 @@ namespace sogen
         {
             const auto oldValue = handle_NtUserSetWindowLongPtr(c, hWnd, nIndex, static_cast<emulator_pointer>(dwNewLong), Ansi);
             return static_cast<uint32_t>(oldValue);
+        }
+
+        uint16_t handle_NtUserSetWindowWord(const syscall_context& c, handle hWnd, int nIndex, uint16_t wNewWord)
+        {
+            auto* win = c.proc.windows.get(hWnd);
+            if (!win || nIndex < 0)
+            {
+                return static_cast<uint16_t>(handle_NtUserSetWindowLongPtr(c, hWnd, nIndex, wNewWord, TRUE));
+            }
+
+            uint16_t oldValue = 0;
+
+            win->guest.access([&](USER_WINDOW& guest_win) {
+                const auto offsetCorrection = guest_win.wndExtraOffset;
+                const auto pBaseExtraBytes = guest_win.pExtraBytes;
+
+                if (pBaseExtraBytes == 0)
+                {
+                    return;
+                }
+
+                const auto targetAddress = pBaseExtraBytes + (nIndex - offsetCorrection);
+
+                c.win_emu.memory.read_memory(targetAddress, &oldValue, sizeof(oldValue));
+                c.win_emu.memory.write_memory(targetAddress, &wNewWord, sizeof(wNewWord));
+            });
+
+            return oldValue;
         }
 
         uint64_t handle_NtUserGetAncestor(const syscall_context& c, const hwnd child_hwnd, const UINT flags)

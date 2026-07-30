@@ -748,6 +748,30 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
+        NTSTATUS handle_NtVdmControl(const syscall_context& c, const uint32_t service_class, const uint64_t service_data)
+        {
+            // VdmQueryVdmProcess (14): user32's UserRegisterWowHandlers gates its whole WOW64 GUI
+            // handler-table registration (used for e.g. the Edit control class) on this call
+            // succeeding with a nonzero flag - without it, dialog templates referencing Edit/ListBox/
+            // ComboBox/ScrollBar silently fail to create those controls.
+            constexpr uint32_t vdm_query_vdm_process = 14;
+
+            if (service_class == vdm_query_vdm_process && service_data)
+            {
+                struct vdm_query_vdm_process_info
+                {
+                    uint32_t reserved;
+                    uint8_t is_vdm_process;
+                };
+
+                const vdm_query_vdm_process_info info{0, 1};
+                c.emu.write_memory(service_data, &info, sizeof(info));
+                return STATUS_SUCCESS;
+            }
+
+            return STATUS_NOT_SUPPORTED;
+        }
+
         NTSTATUS handle_NtPowerInformation(const syscall_context& c, const uint32_t information_level, const uint64_t /*input_buffer*/,
                                            const uint32_t /*input_buffer_length*/, const uint64_t output_buffer,
                                            const uint32_t output_buffer_length)

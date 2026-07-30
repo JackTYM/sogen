@@ -209,14 +209,29 @@ namespace sogen
         void setup_gdt(x86_64_emulator& emu, memory_manager& memory)
         {
             const auto vcpu_count = emu.vcpu_count();
+            const auto gdt_region_size = static_cast<size_t>(page_align_up(vcpu_count * GDT_LIMIT));
 
             // One GDT page per vCPU (see gdt_base_for_vcpu): the WOW64 FS descriptor holds a per-thread
             // TEB base, so a shared GDT cannot serve WOW64 threads on different vCPUs at the same time.
-            memory.allocate_memory(GDT_ADDR, static_cast<size_t>(page_align_up(vcpu_count * GDT_LIMIT)), memory_permission::read_write);
+            uint64_t gdt_address = GDT_ADDR;
+            if (!memory.allocate_memory(gdt_address, gdt_region_size, memory_permission::read_write))
+            {
+                // The fixed address is already claimed - possible on a backend sharing host==guest
+                // address space (FEX on Apple) when this is a nested child process
+                // (NtCreateUserProcess) run while the parent windows_emulator instance, which already
+                // holds GDT_ADDR, is still alive. Fall back to any free region instead.
+                gdt_address = memory.allocate_memory(gdt_region_size, memory_permission::read_write);
+                if (!gdt_address)
+                {
+                    throw std::runtime_error("Failed to allocate GDT memory");
+                }
+            }
+
+            memory.set_gdt_base(gdt_address);
 
             for (size_t i = 0; i < vcpu_count; ++i)
             {
-                const auto gdt_base = gdt_base_for_vcpu(i);
+                const auto gdt_base = gdt_base_for_vcpu(gdt_address, i);
 
                 // Index 1 (0x08) - 64-bit kernel code (Ring 0): P=1, DPL=0, S=1, Type=0xA, L=1
                 emu.write_memory<uint64_t>(gdt_base + (1 * sizeof(uint64_t)), 0x00AF9B000000FFFF);
@@ -344,8 +359,8 @@ namespace sogen
             env_map[u"SystemDrive"] = system_drive;
             env_map[u"SystemRoot"] = system_root;
             env_map[u"SystemTemp"] = system_temp;
-            env_map[u"TMP"] = user_profile + u"\\AppData\\Temp";
-            env_map[u"TEMP"] = user_profile + u"\\AppData\\Temp";
+            env_map[u"TMP"] = user_profile + u"\\AppData\\Local\\Temp";
+            env_map[u"TEMP"] = user_profile + u"\\AppData\\Local\\Temp";
             env_map[u"USERPROFILE"] = user_profile;
 
             for (const auto& [key, value] : app_settings.environment)
@@ -439,24 +454,32 @@ namespace sogen
 
             const auto application_str = app_settings.application.u16string();
 
-            std::u16string command_line = u"\"" + application_str + u"\"";
-
-            for (const auto& arg : app_settings.arguments)
+            std::u16string command_line{};
+            if (app_settings.command_line)
             {
-                command_line.push_back(u' ');
-                if (arg.find(' ') != std::string::npos)
+                command_line = *app_settings.command_line;
+            }
+            else
+            {
+                command_line = u"\"" + application_str + u"\"";
+
+                for (const auto& arg : app_settings.arguments)
                 {
-                    command_line.append(u"\"" + arg + u"\"");
-                }
-                else
-                {
-                    command_line.append(arg);
+                    command_line.push_back(u' ');
+                    if (arg.find(' ') != std::string::npos)
+                    {
+                        command_line.append(u"\"" + arg + u"\"");
+                    }
+                    else
+                    {
+                        command_line.append(arg);
+                    }
                 }
             }
 
             allocator.make_unicode_string(proc_params.CommandLine, command_line);
             allocator.make_unicode_string(proc_params.CurrentDirectory.DosPath, app_settings.working_directory.u16string() + u"\\", 1024);
-            allocator.make_unicode_string(proc_params.ImagePathName, application_str);
+            allocator.make_unicode_string(proc_params.ImagePathName, app_settings.image_path ? *app_settings.image_path : application_str);
 
             const auto total_length = allocator.get_next_address() - this->process_params64.value();
 
@@ -852,6 +875,8 @@ namespace sogen
         buffer.write(this->private_namespaces);
         buffer.write_map(this->atoms);
         buffer.write_map(this->classes);
+        buffer.write_map(this->child_processes);
+        buffer.write(this->next_child_record_id);
 
         buffer.write_map(this->apiset);
         buffer.write_map(this->knowndlls32_sections);
@@ -949,6 +974,8 @@ namespace sogen
         buffer.read(this->private_namespaces);
         buffer.read_map(this->atoms);
         buffer.read_map(this->classes);
+        buffer.read_map(this->child_processes);
+        buffer.read(this->next_child_record_id);
 
         buffer.read_map(this->apiset);
         buffer.read_map(this->knowndlls32_sections);
@@ -1260,6 +1287,29 @@ namespace sogen
 
     std::optional<std::u16string> process_context::get_atom_name(const uint16_t atom_id) const
     {
+        // Predefined system window class ordinals (0x80-0x85), reserved by Windows in the global
+        // atom table below MAXINTATOM. Dialog templates reference these classes by ordinal rather
+        // than name, and real user32.dll resolves them via NtUserGetAtomName expecting these exact
+        // names back - not the generic "#<id>" numeric-atom format used for everything else below
+        // MAXINTATOM.
+        switch (atom_id)
+        {
+        case 0x80:
+            return u"Button";
+        case 0x81:
+            return u"Edit";
+        case 0x82:
+            return u"Static";
+        case 0x83:
+            return u"ListBox";
+        case 0x84:
+            return u"ScrollBar";
+        case 0x85:
+            return u"ComboBox";
+        default:
+            break;
+        }
+
         if (atom_id && atom_id < MAXINTATOM)
         {
             std::u16string name = u"#";

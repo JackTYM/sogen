@@ -130,6 +130,26 @@ namespace sogen
             }
         }
 
+        // Real user32.dll (VerNtUserCreateWindowEx/ClassNameToVersion) resolves a DLGTEMPLATE's
+        // predefined control-class ordinal (0x80=Button..0x85=ComboBox) into a class atom by indexing
+        // SERVERINFO.atomSysClass[ICLS] at gpsi+0x364 (see resolve_builtin_class_atom in
+        // syscalls/user.cpp) and calling NtUserGetAtomName on the result - an empty/unset entry there
+        // makes that lookup fail, silently aborting creation of that control class (e.g. dialog
+        // templates with Edit/ListBox/ScrollBar/ComboBox controls). Real Windows populates this table
+        // once during session GUI-subsystem bootstrap, which we don't emulate, so seed it directly -
+        // get_atom_name already maps these ordinals back to their real class names, making them a
+        // stable, build-independent choice of atom value. gpsi+0x364 also falls inside our
+        // apfnClientWorker's byte range (our USER_SERVERINFO layout isn't a byte-exact match of real
+        // Windows' tagSERVERINFO beyond the fields we explicitly verified), so this must be re-applied
+        // every time apfnClientWorker gets (re)written, not just once at process setup.
+        void seed_atom_sys_class(memory_interface& memory, const uint64_t serverinfo_base)
+        {
+            constexpr uint64_t k_atom_sys_class_offset = 0x364;
+            constexpr std::array<uint16_t, 6> k_atom_sys_class = {0x80, 0x81, 0x82, 0x83, 0x84, 0x85};
+            memory.write_memory(serverinfo_base + k_atom_sys_class_offset, k_atom_sys_class.data(),
+                                 k_atom_sys_class.size() * sizeof(uint16_t));
+        }
+
         bool try_copy_client_pfn_arrays(memory_interface& memory, process_context& process, const client_pfn_arrays arrays)
         {
             if (arrays.ansi == 0 || arrays.wide == 0 || arrays.worker == 0)
@@ -150,6 +170,7 @@ namespace sogen
             }
 
             seed_messagebox_button_strings(memory, process.user_handles.get_server_info().value());
+            seed_atom_sys_class(memory, process.user_handles.get_server_info().value());
 
             refresh_dispatch_client_message(process);
             return true;
