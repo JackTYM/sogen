@@ -2571,47 +2571,17 @@ namespace sogen
             return 0;
         }
 
-        struct wow64_wndclassex
+        // Like NtUserGetClassInfoEx (see handle_NtUserGetClassInfoEx's comment), the real
+        // IsolationAwareRegisterClassW path (SxS/manifest-aware, what MFC's AfxRegisterWndClass
+        // actually calls) widens the guest's narrow WNDCLASSEXW into a native-shaped scratch buffer
+        // before invoking NtUserRegisterClassExWOW - live traces confirm every observed call lands on
+        // the exact same native-shaped per-thread scratch address whNtUserGetClassInfoEx uses. Reading
+        // it as the WOW64-narrow 48-byte layout truncates any lpfnWndProc that doesn't fit in 32 bits
+        // (real Windows stores non-built-in window classes' wndproc as a native wow64win.dll-side
+        // pointer, not the raw 32-bit application address), corrupting the window's stored wndproc.
+        EMU_WNDCLASSEX read_wnd_class_ex(const emulator_object<EMU_WNDCLASSEX> wnd_class_ex)
         {
-            uint32_t cbSize;
-            uint32_t style;
-            uint32_t lpfnWndProc;
-            int32_t cbClsExtra;
-            int32_t cbWndExtra;
-            uint32_t hInstance;
-            uint32_t hIcon;
-            uint32_t hCursor;
-            uint32_t hbrBackground;
-            uint32_t lpszMenuName;
-            uint32_t lpszClassName;
-            uint32_t hIconSm;
-        };
-
-        static_assert(sizeof(wow64_wndclassex) == 48);
-
-        EMU_WNDCLASSEX read_wnd_class_ex(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex)
-        {
-            if (!c.proc.is_wow64_process)
-            {
-                return wnd_class_ex.read();
-            }
-
-            const auto w = emulator_object<wow64_wndclassex>{c.emu, wnd_class_ex.value()}.read();
-
-            EMU_WNDCLASSEX wnd_class{};
-            wnd_class.cbSize = w.cbSize;
-            wnd_class.style = w.style;
-            wnd_class.lpfnWndProc = w.lpfnWndProc;
-            wnd_class.cbClsExtra = w.cbClsExtra;
-            wnd_class.cbWndExtra = w.cbWndExtra;
-            wnd_class.hInstance = w.hInstance;
-            wnd_class.hIcon = w.hIcon;
-            wnd_class.hCursor = w.hCursor;
-            wnd_class.hbrBackground = w.hbrBackground;
-            wnd_class.lpszMenuName = w.lpszMenuName;
-            wnd_class.lpszClassName = w.lpszClassName;
-            wnd_class.hIconSm = w.hIconSm;
-            return wnd_class;
+            return wnd_class_ex.read();
         }
 
         uint16_t handle_NtUserRegisterClassExWOW(const syscall_context& c, const emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
@@ -2631,7 +2601,7 @@ namespace sogen
 
             const auto cls_ptr = process_context::allocate_user_class(c.win_emu.memory, class_name_str);
 
-            const auto wnd_class = read_wnd_class_ex(c, wnd_class_ex);
+            const auto wnd_class = read_wnd_class_ex(wnd_class_ex);
             const auto entry = process_context::class_entry{cls_ptr, wnd_class, class_menu_name.read()};
 
             if (c.win_emu.callbacks.on_generic_activity)
