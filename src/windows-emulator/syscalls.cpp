@@ -701,6 +701,8 @@ namespace sogen
         BOOL handle_NtUserSetWindowRgn();
         BOOL handle_NtUserAlterWindowStyle();
         hwnd handle_NtUserSetActiveWindow(const syscall_context& c, hwnd hWnd);
+        BOOL handle_NtUserZapActiveAndFocus(const syscall_context& c);
+        BOOL handle_NtUserShowScrollBar(const syscall_context& c, hwnd hWnd, uint32_t bar, BOOL show);
         NTSTATUS handle_NtUserSelectPalette();
         BOOL handle_NtUserSwapMouseButton();
         hwnd handle_NtUserWindowFromPoint(const syscall_context& c, int32_t x, int32_t y);
@@ -777,6 +779,7 @@ namespace sogen
         uint64_t handle_NtGdiSelectFont(const syscall_context& c, hdc dc, uint64_t font);
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, handle bitmap);
         BOOL handle_NtGdiGetDCDword(const syscall_context& c, hdc dc, uint32_t index, emulator_pointer result);
+        BOOL handle_NtGdiGetAndSetDCDword(const syscall_context& c, hdc dc, uint32_t index, uint32_t value, emulator_pointer prev_value);
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, hdc dc, int x, int y, emulator_pointer prev);
         BOOL handle_NtGdiSetBitmapDimension(const syscall_context& c, handle bitmap, LONG width, LONG height, emulator_pointer prev_size);
         uint64_t handle_NtGdiHfontCreate(const syscall_context& c, emulator_pointer logfont, uint32_t angle);
@@ -1387,6 +1390,7 @@ namespace sogen
         add_handler(NtGdiSelectBitmap);
         add_handler(NtGdiGetDCforBitmap);
         add_handler(NtGdiGetDCDword);
+        add_handler(NtGdiGetAndSetDCDword);
         add_handler(NtGdiSetBrushOrg);
         add_handler(NtGdiSetBitmapDimension);
         add_handler(NtGdiHfontCreate);
@@ -1717,6 +1721,8 @@ namespace sogen
         add_handler(NtUserSetWindowRgn);
         add_handler(NtUserAlterWindowStyle);
         add_handler(NtUserSetActiveWindow);
+        add_handler(NtUserZapActiveAndFocus);
+        add_handler(NtUserShowScrollBar);
         add_handler(NtUserCreateAcceleratorTable);
         add_handler(NtUserDestroyAcceleratorTable);
         add_handler(NtUserCopyAcceleratorTable);

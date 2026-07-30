@@ -5575,6 +5575,25 @@ namespace sogen
             return previous;
         }
 
+        BOOL handle_NtUserZapActiveAndFocus(const syscall_context& c)
+        {
+            const auto thread_id = c.vcpu.active_thread ? c.vcpu.active_thread->id : 0;
+
+            const auto* foreground = c.proc.windows.get(c.proc.foreground_window);
+            if (foreground && foreground->thread_id == thread_id)
+            {
+                c.proc.set_foreground_window(0);
+            }
+
+            set_thread_window_context(c, 0, 0);
+            return TRUE;
+        }
+
+        BOOL handle_NtUserShowScrollBar(const syscall_context& c, const hwnd hWnd, const uint32_t /*bar*/, const BOOL /*show*/)
+        {
+            return c.proc.windows.get(hWnd) != nullptr;
+        }
+
         NTSTATUS handle_NtUserSelectPalette()
         {
             return STATUS_SUCCESS;

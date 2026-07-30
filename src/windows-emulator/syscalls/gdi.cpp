@@ -2622,6 +2622,34 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtGdiGetAndSetDCDword(const syscall_context& c, const hdc dc, const uint32_t index, const uint32_t value,
+                                          const emulator_pointer prev_value)
+        {
+            constexpr uint32_t gdi_get_set_map_mode = 8; // GETSETDCDWORD::GdiGetSetMapMode
+
+            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (it == c.proc.gdi_dc_states.end())
+            {
+                return FALSE;
+            }
+
+            // GetAndSetDCDWord's gdi32 caller only falls back to this syscall for DC dwords it does
+            // not cache client-side; the only one this build's guest actually exercises is SetMapMode.
+            if (index != gdi_get_set_map_mode)
+            {
+                return FALSE;
+            }
+
+            if (prev_value != 0)
+            {
+                const auto previous = it->second.map_mode;
+                c.emu.write_memory(prev_value, &previous, sizeof(previous));
+            }
+
+            it->second.map_mode = value;
+            return TRUE;
+        }
+
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, const hdc dc, const int /*x*/, const int /*y*/, const emulator_pointer prev)
         {
             if (dc == 0)

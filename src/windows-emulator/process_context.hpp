@@ -164,6 +164,7 @@ namespace sogen
         int32_t current_x{};
         int32_t current_y{};
         bool is_memory_dc{};
+        uint32_t map_mode{1}; // MM_TEXT, the real GDI default for a freshly created DC
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -172,6 +173,7 @@ namespace sogen
             buffer.write(this->current_x);
             buffer.write(this->current_y);
             buffer.write(this->is_memory_dc);
+            buffer.write(this->map_mode);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -181,6 +183,7 @@ namespace sogen
             buffer.read(this->current_x);
             buffer.read(this->current_y);
             buffer.read(this->is_memory_dc);
+            buffer.read(this->map_mode);
         }
     };
 
