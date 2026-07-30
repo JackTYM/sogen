@@ -103,6 +103,14 @@ namespace sogen
         }
     };
 
+    struct cursor_icon : user_object<USER_CURSOR>
+    {
+        cursor_icon(memory_interface& memory)
+            : user_object(memory)
+        {
+        }
+    };
+
     // WC_DIALOG = MAKEINTATOM(0x8002); user32 creates dialogs and message boxes with this fixed
     // system atom, which the kernel reports as the class name "#32770". The atom value is constant
     // across Windows builds (unlike the builtin control-class atoms, which vary per build and are

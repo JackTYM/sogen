@@ -847,6 +847,7 @@ namespace sogen
         buffer.write(this->windows);
         buffer.write(this->timers);
         buffer.write(this->accelerator_tables);
+        buffer.write(this->icons);
         buffer.write(this->registry_keys);
         buffer.write(this->private_namespaces);
         buffer.write_map(this->atoms);
@@ -943,6 +944,7 @@ namespace sogen
         buffer.read(this->windows);
         buffer.read(this->timers);
         buffer.read(this->accelerator_tables);
+        buffer.read(this->icons);
         buffer.read(this->registry_keys);
         buffer.read(this->private_namespaces);
         buffer.read_map(this->atoms);

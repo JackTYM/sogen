@@ -525,7 +525,7 @@ namespace sogen
         BOOL handle_NtUserSetCursorPos(const syscall_context& c, int32_t x, int32_t y);
         hcursor handle_NtUserSetCursor(const syscall_context& c, hcursor cursor);
         hcursor handle_NtUserGetCursor(const syscall_context& c);
-        hicon handle_NtUserCreateEmptyCursorObject();
+        hicon handle_NtUserCreateEmptyCursorObject(const syscall_context& c);
         BOOL handle_NtUserSetCursorIconData();
         BOOL handle_NtUserSetCursorIconDataEx();
         BOOL handle_NtUserGetRequiredCursorSizes();

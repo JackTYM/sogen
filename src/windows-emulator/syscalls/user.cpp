@@ -2285,9 +2285,11 @@ namespace sogen
             return c.proc.current_cursor;
         }
 
-        hicon handle_NtUserCreateEmptyCursorObject()
+        hicon handle_NtUserCreateEmptyCursorObject(const syscall_context& c)
         {
-            return make_pseudo_handle(0x100, handle_types::reserved).bits;
+            const auto [h, obj] = c.proc.icons.create(c.win_emu.memory);
+            (void)obj;
+            return h.bits;
         }
 
         BOOL handle_NtUserSetCursorIconData()
