@@ -869,6 +869,7 @@ namespace sogen
         buffer.write(this->desktops);
         buffer.write(this->windows);
         buffer.write(this->timers);
+        buffer.write(this->tokens);
         buffer.write(this->accelerator_tables);
         buffer.write(this->icons);
         buffer.write(this->registry_keys);
@@ -970,6 +971,7 @@ namespace sogen
         buffer.read(this->desktops);
         buffer.read(this->windows);
         buffer.read(this->timers);
+        buffer.read(this->tokens);
         buffer.read(this->accelerator_tables);
         buffer.read(this->icons);
         buffer.read(this->registry_keys);
@@ -1039,6 +1041,8 @@ namespace sogen
             return &mutants;
         case handle_types::timer:
             return &timers;
+        case handle_types::token:
+            return &tokens;
         case handle_types::desktop:
             return &desktops;
         case handle_types::port:

@@ -612,6 +612,7 @@ namespace sogen
         user_handle_store<handle_types::window, window> windows{user_handles};
         user_handle_store<handle_types::type::menu, menu> menus{user_handles};
         handle_store<handle_types::timer, timer> timers{};
+        handle_store<handle_types::token, process_token> tokens{};
         user_handle_store<handle_types::accelerator_table, accelerator_table> accelerator_tables{user_handles};
         user_handle_store<handle_types::cursor_icon, cursor_icon> icons{user_handles};
         handle_store<handle_types::registry, registry_key, 2> registry_keys{};

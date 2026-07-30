@@ -5594,6 +5594,17 @@ namespace sogen
             return c.proc.windows.get(hWnd) != nullptr;
         }
 
+        BOOL handle_NtUserGetWindowBand(const syscall_context& c, const hwnd hWnd, const emulator_object<uint32_t> band)
+        {
+            if (c.proc.windows.get(hWnd) == nullptr)
+            {
+                return FALSE;
+            }
+
+            band.write(0);
+            return TRUE;
+        }
+
         NTSTATUS handle_NtUserSelectPalette()
         {
             return STATUS_SUCCESS;

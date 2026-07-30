@@ -29,6 +29,17 @@ namespace sogen
         }
     };
 
+    struct process_token : ref_counted_object
+    {
+        void serialize_object(utils::buffer_serializer&) const override
+        {
+        }
+
+        void deserialize_object(utils::buffer_deserializer&) override
+        {
+        }
+    };
+
     struct event : ref_counted_object
     {
         bool signaled{};

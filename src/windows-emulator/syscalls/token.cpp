@@ -53,6 +53,13 @@ namespace sogen
                 }
                 return access;
             }
+
+            bool is_recognized_token_handle(process_context& proc, const handle token_handle)
+            {
+                return token_handle == CURRENT_PROCESS_TOKEN || token_handle == CURRENT_THREAD_TOKEN ||
+                       token_handle == CURRENT_THREAD_EFFECTIVE_TOKEN || token_handle == DUMMY_IMPERSONATION_TOKEN ||
+                       proc.tokens.get(token_handle) != nullptr;
+            }
         }
 
         TOKEN_TYPE get_token_type(const handle token_handle)
@@ -88,8 +95,7 @@ namespace sogen
                                                 const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
                                                 const ULONG token_information_length, const emulator_object<ULONG> return_length)
         {
-            if (token_handle != CURRENT_PROCESS_TOKEN && token_handle != CURRENT_THREAD_TOKEN &&
-                token_handle != CURRENT_THREAD_EFFECTIVE_TOKEN && token_handle != DUMMY_IMPERSONATION_TOKEN)
+            if (!is_recognized_token_handle(c.proc, token_handle))
             {
                 return STATUS_NOT_SUPPORTED;
             }
@@ -464,8 +470,7 @@ namespace sogen
                                       const uint64_t /*privilege_set*/, const emulator_object<ULONG> privilege_set_length,
                                       const emulator_object<ACCESS_MASK> granted_access, const emulator_object<NTSTATUS> access_status)
         {
-            if (client_token != CURRENT_PROCESS_TOKEN && client_token != CURRENT_THREAD_TOKEN &&
-                client_token != CURRENT_THREAD_EFFECTIVE_TOKEN && client_token != DUMMY_IMPERSONATION_TOKEN)
+            if (!is_recognized_token_handle(c.proc, client_token))
             {
                 return STATUS_INVALID_HANDLE;
             }
@@ -535,8 +540,7 @@ namespace sogen
                                                        const ULONG number_of_attributes, const uint64_t buffer, const ULONG buffer_length,
                                                        const emulator_object<ULONG> return_length)
         {
-            if (token_handle != CURRENT_PROCESS_TOKEN && token_handle != CURRENT_THREAD_TOKEN &&
-                token_handle != CURRENT_THREAD_EFFECTIVE_TOKEN && token_handle != DUMMY_IMPERSONATION_TOKEN)
+            if (!is_recognized_token_handle(c.proc, token_handle))
             {
                 return STATUS_NOT_SUPPORTED;
             }

@@ -637,7 +637,7 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            token_handle.write(CURRENT_PROCESS_TOKEN);
+            token_handle.write(c.proc.tokens.store({}));
 
             return STATUS_SUCCESS;
         }
