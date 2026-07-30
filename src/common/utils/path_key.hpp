@@ -50,9 +50,9 @@ namespace sogen
             {
                 auto key_string = key.u16string();
                 std::ranges::replace(key_string, u'\\', '/');
+                utils::string::to_lower_inplace(key_string);
 
-                auto path = std::filesystem::path(key_string).lexically_normal().wstring();
-                return utils::string::to_lower_consume(path);
+                return std::filesystem::path(std::move(key_string)).lexically_normal();
             }
 
           private:
