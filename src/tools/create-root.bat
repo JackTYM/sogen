@@ -48,6 +48,7 @@ CALL "%~dp0grab-registry.bat" "%EMU_REGDIR%"
 CALL :collect advapi32.dll
 CALL :collect bcrypt.dll
 CALL :collect bcryptprimitives.dll
+CALL :collect bthprops.cpl
 CALL :collect cabinet.dll
 CALL :collect cfgmgr32.dll
 CALL :collect ci.dll
@@ -57,9 +58,12 @@ CALL :collect combase.dll
 CALL :collect comctl32.dll
 CALL :collect comdlg32.dll
 CALL :collect coremessaging.dll
+CALL :collect credui.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
 CALL :collect cryptsp.dll
+CALL :collect CRYPTUI.dll
+CALL :collect d2d1.dll
 CALL :collect d3d10.dll
 CALL :collect d3d10core.dll
 CALL :collect d3d10warp.dll
@@ -71,16 +75,20 @@ CALL :collect d3dcompiler_47.dll
 CALL :collect dbghelp.dll
 CALL :collect dbgcore.dll
 CALL :collect dciman32.dll
+CALL :collect dcomp.dll
 CALL :collect ddraw.dll
 CALL :collect devobj.dll
+CALL :collect dhcpcsvc.DLL
 CALL :collect diagnosticdatasettings.dll
 CALL :collect dinput8.dll
 CALL :collect dnsapi.dll
 CALL :collect dsound.dll
 CALL :collect dwmapi.dll
+CALL :collect DWrite.dll
 CALL :collect dxcore.dll
 CALL :collect dxgi.dll
 CALL :collect dxva2.dll
+CALL :collect ESENT.dll
 CALL :collect fwpuclnt.dll
 CALL :collect gdi32.dll
 CALL :collect gdi32full.dll
@@ -97,8 +105,10 @@ CALL :collect kernel.appcore.dll
 CALL :collect kernel32.dll
 CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
+CALL :collect MF.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
+CALL :collect MFSENSORGROUP.dll
 CALL :collect mmdevapi.dll
 CALL :collect mobilenetworking.dll
 CALL :collect mpr.dll
@@ -120,6 +130,7 @@ CALL :collect msxml6.dll
 CALL :collect msxml6r.dll
 CALL :collect napinsp.dll
 CALL :collect ncrypt.dll
+CALL :collect NDFAPI.DLL
 CALL :collect netapi32.dll
 CALL :collect netmsg.dll
 CALL :collect netutils.dll
@@ -129,6 +140,7 @@ CALL :collect nsi.dll
 CALL :collect ntasn1.dll
 CALL :collect ntdll.dll
 CALL :collect ole32.dll
+CALL :collect OLEACC.dll
 CALL :collect oleaut32.dll
 CALL :collect opengl32.dll
 CALL :collect pdh.dll
@@ -142,6 +154,7 @@ CALL :collect rpcrt4.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
 CALL :collect sechost.dll
+CALL :collect Secur32.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll
 CALL :collect shell32.dll
@@ -150,6 +163,7 @@ CALL :collect slwga.dll
 CALL :collect sppc.dll
 CALL :collect srvcli.dll
 CALL :collect sspicli.dll
+CALL :collect tbs.dll
 CALL :collect ucrtbase.dll
 CALL :collect ucrtbased.dll
 CALL :collect uiautomationcore.dll
@@ -165,6 +179,7 @@ CALL :collect vcruntime140_1d.dll
 CALL :collect vcruntime140d.dll
 CALL :collect version.dll
 CALL :collect wer.dll
+CALL :collect wevtapi.dll
 CALL :collect win32u.dll
 CALL :collect windows.internal.graphics.display.displaycolormanagement.dll
 CALL :collect windows.storage.dll
@@ -174,8 +189,10 @@ CALL :collect wininet.dll
 CALL :collect winmm.dll
 CALL :collect winmmbase.dll
 CALL :collect winnlsres.dll
+CALL :collect WINSPOOL.DRV
 CALL :collect wintrust.dll
 CALL :collect wintypes.dll
+CALL :collect WINUSB.DLL
 CALL :collect wlanapi.dll
 CALL :collect wldap32.dll
 CALL :collect wow64.dll
