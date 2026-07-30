@@ -328,6 +328,35 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadNameInformation)
+            {
+                const auto string_length = thread->name.size() * sizeof(char16_t);
+                const auto required_length = sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>) + string_length + sizeof(char16_t);
+
+                if (return_length)
+                {
+                    return_length.write(static_cast<uint32_t>(required_length));
+                }
+
+                if (thread_information_length < required_length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const auto buffer = thread_information + sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>);
+                c.emu.write_memory(buffer, thread->name.c_str(), string_length + sizeof(char16_t));
+                emulator_object<THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>>{c.emu, thread_information}.write({
+                    .ThreadName =
+                        {
+                            .Length = static_cast<USHORT>(string_length),
+                            .MaximumLength = static_cast<USHORT>(string_length + sizeof(char16_t)),
+                            .Buffer = buffer,
+                        },
+                });
+
+                return STATUS_SUCCESS;
+            }
+
             if (info_class == ThreadBasicInformation)
             {
                 if (return_length)
@@ -463,6 +492,26 @@ namespace sogen
 
                 const emulator_object<LONG> info{c.emu, thread_information};
                 info.write(normal_priority);
+
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == ThreadPagePriority)
+            {
+                if (return_length)
+                {
+                    return_length.write(sizeof(ULONG));
+                }
+
+                if (thread_information_length < sizeof(ULONG))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                constexpr ULONG memory_priority_normal = 5;
+
+                const emulator_object<ULONG> info{c.emu, thread_information};
+                info.write(memory_priority_normal);
 
                 return STATUS_SUCCESS;
             }
