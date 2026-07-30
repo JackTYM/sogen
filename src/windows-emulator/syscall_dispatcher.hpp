@@ -55,6 +55,7 @@ namespace sogen
         emulator_stack_allocation window_pos_alloc{};
 
         std::vector<qmsg> message_queue{};
+        bool cbt_hook_pending{};
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
@@ -65,6 +66,7 @@ namespace sogen
             buffer.write(this->create_struct_alloc);
             buffer.write(this->window_pos_alloc);
             buffer.write_vector(this->message_queue);
+            buffer.write(this->cbt_hook_pending);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -75,6 +77,7 @@ namespace sogen
             buffer.read(this->create_struct_alloc);
             buffer.read(this->window_pos_alloc);
             buffer.read_vector(this->message_queue);
+            buffer.read(this->cbt_hook_pending);
         }
     };
 

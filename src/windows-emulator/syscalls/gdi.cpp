@@ -2015,6 +2015,20 @@ namespace sogen
             return font_handle != 0 ? TRUE : FALSE;
         }
 
+        // SetBitmapDimensionEx stores an optional, separate "intended print size" alongside a
+        // bitmap's real pixel dimensions; sogen doesn't track it anywhere, and its real default
+        // (never having been set) is (0,0), which real callers already handle.
+        BOOL handle_NtGdiGetBitmapDimension(const syscall_context& c, const uint64_t /*bitmap*/, const emulator_pointer size)
+        {
+            if (size)
+            {
+                constexpr int32_t zero_size[2]{};
+                c.emu.write_memory(size, zero_size, sizeof(zero_size));
+            }
+
+            return TRUE;
+        }
+
         uint64_t handle_NtGdiCreateCompatibleBitmap(const syscall_context& c, const hdc /*dc*/, const uint32_t width, const uint32_t height)
         {
             return create_gdi_bitmap_surface(c, width, height);

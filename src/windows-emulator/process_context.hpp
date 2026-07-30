@@ -237,6 +237,17 @@ namespace sogen
             }
         };
 
+        // A thread-specific hook installed via NtUserSetWindowsHookEx. MFC's AfxHookWindowCreate
+        // relies on a WH_CBT hook receiving a real HCBT_CREATEWND notification (dispatched by
+        // NtUserCreateWindowEx) to bind CWnd::m_hWnd to a newly created window - see
+        // handle_NtUserSetWindowsHookEx/handle_NtUserCreateWindowEx.
+        struct windows_hook_entry
+        {
+            int32_t id_hook{};
+            uint32_t thread_id{};
+            emulator_pointer proc{};
+        };
+
         struct class_entry
         {
             emulator_pointer guest_obj_addr{};
@@ -444,6 +455,8 @@ namespace sogen
 
         void set_foreground_window(hwnd handle);
 
+        const windows_hook_entry* find_windows_hook(int32_t id_hook, uint32_t thread_id) const;
+
         std::optional<uint16_t> find_atom(std::u16string_view name);
         uint16_t add_or_find_atom(std::u16string name);
         bool delete_atom(const std::u16string& name);
@@ -601,6 +614,8 @@ namespace sogen
         handle_store<handle_types::registry, registry_key, 2> registry_keys{};
         std::map<uint32_t, handle> thread_handles_by_id{};
         std::map<uint32_t, child_process_record> child_processes{};
+        std::map<uint32_t, windows_hook_entry> windows_hooks{};
+        uint32_t next_windows_hook_id{0x300};
         // Starts at 2: pseudo process handle id 1 is already taken by STEAM_PROCESS_HANDLE
         // (handles.hpp), and process/thread pseudo handles share this id per record.
         uint32_t next_child_record_id{2};

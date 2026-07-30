@@ -877,6 +877,8 @@ namespace sogen
         buffer.write_map(this->classes);
         buffer.write_map(this->child_processes);
         buffer.write(this->next_child_record_id);
+        buffer.write_map(this->windows_hooks);
+        buffer.write(this->next_windows_hook_id);
 
         buffer.write_map(this->apiset);
         buffer.write_map(this->knowndlls32_sections);
@@ -976,6 +978,8 @@ namespace sogen
         buffer.read_map(this->classes);
         buffer.read_map(this->child_processes);
         buffer.read(this->next_child_record_id);
+        buffer.read_map(this->windows_hooks);
+        buffer.read(this->next_windows_hook_id);
 
         buffer.read_map(this->apiset);
         buffer.read_map(this->knowndlls32_sections);
@@ -1150,6 +1154,19 @@ namespace sogen
         this->user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
             server_info.foregroundWindow = handle; //
         });
+    }
+
+    const process_context::windows_hook_entry* process_context::find_windows_hook(const int32_t id_hook, const uint32_t thread_id) const
+    {
+        for (const auto& entry : this->windows_hooks | std::views::values)
+        {
+            if (entry.id_hook == id_hook && entry.thread_id == thread_id)
+            {
+                return &entry;
+            }
+        }
+
+        return nullptr;
     }
 
     void process_context::terminate_thread(emulator_thread& thread, const NTSTATUS thread_exit_status)

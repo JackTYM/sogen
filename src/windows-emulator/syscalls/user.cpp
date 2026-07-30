@@ -29,6 +29,9 @@ namespace sogen
         constexpr uint32_t k_fn_in_lp_window_pos_callback_id = 0x11;
         constexpr uint32_t k_fn_inout_lp_point5_callback_id = 0x12;
         constexpr uint32_t k_fn_inout_nc_calc_size_callback_id = 0x15;
+        constexpr uint32_t k_fn_hk_cbt_createwnd_callback_id = 0x2A;
+        constexpr int32_t k_wh_cbt = 5;
+        constexpr int32_t k_hcbt_createwnd = 3;
         constexpr size_t k_client_pfn_button_wndproc_index = 7;
         constexpr size_t k_client_pfn_dialog_wndproc_index = 10;
         constexpr size_t k_client_pfn_edit_wndproc_index = 11;
@@ -65,6 +68,27 @@ namespace sogen
             lparam lParam{};
             pointer xParam{};
             pointer xpfnProc{};
+        };
+
+        // Wire format for KernelCallbackTable index 42 (fnHkINLPCBTCREATESTRUCT), the real callback
+        // win32k uses to deliver a WH_CBT hook's HCBT_CREATEWND notification. Field offsets were
+        // recovered by decompiling the real wow64win.dll/user32.dll pair: wow64win.dll's
+        // whcbfnHkINLPCBTCREATESTRUCT narrows this 64-bit buffer field-by-field into the 32-bit
+        // buffer user32.dll's ___fnHkINLPCBTCREATESTRUCT@4 reads (nCode/wParam/lpcs at its own
+        // offsets 32/36/40, the hook procedure at offset 92 via NtWow64MapKernelClientFnToClientFn,
+        // the ANSI/Unicode flag at offset 96). lpcs only needs to be a readable pointer (real MFC's
+        // _AfxCbtFilterHook dereferences it once unconditionally before branching), not a fully
+        // populated CREATESTRUCT, since its own CWnd::Attach(wParam) path never reads through it.
+        struct fn_hk_cbt_createwnd_message
+        {
+            std::array<uint8_t, 48> reserved0{};
+            int32_t nCode{};
+            std::array<uint8_t, 4> reserved1{};
+            uint64_t wParam{};
+            uint64_t lpcs{};
+            std::array<uint8_t, 80> reserved2{};
+            uint64_t hookProc{};
+            uint32_t ansiFlag{};
         };
 
         struct fn_in_lp_create_struct_message
@@ -2724,13 +2748,30 @@ namespace sogen
             return static_cast<int>(copied_chars);
         }
 
-        NTSTATUS handle_NtUserSetWindowsHookEx()
+        NTSTATUS handle_NtUserSetWindowsHookEx(const syscall_context& c, const hinstance /*hmod*/, const pointer /*module_name*/,
+                                               const DWORD thread_id, const int32_t id_hook, const pointer lpfn, const DWORD /*flags*/)
         {
-            return static_cast<NTSTATUS>(make_pseudo_handle(0x200, handle_types::reserved).bits);
+            const auto target_thread_id = thread_id != 0 ? thread_id : c.thread().id;
+
+            const auto id = c.proc.next_windows_hook_id++;
+            c.proc.windows_hooks[id] = process_context::windows_hook_entry{
+                .id_hook = id_hook,
+                .thread_id = target_thread_id,
+                .proc = lpfn,
+            };
+
+            return static_cast<NTSTATUS>(make_pseudo_handle(id, handle_types::reserved).bits);
         }
 
-        NTSTATUS handle_NtUserUnhookWindowsHookEx()
+        NTSTATUS handle_NtUserUnhookWindowsHookEx(const syscall_context& c, const handle hook)
         {
+            const auto it = c.proc.windows_hooks.find(static_cast<uint32_t>(hook.value.id));
+            if (it == c.proc.windows_hooks.end())
+            {
+                return FALSE;
+            }
+
+            c.proc.windows_hooks.erase(it);
             return TRUE;
         }
 
@@ -3086,6 +3127,25 @@ namespace sogen
                                                         utils::string::to_hex_number(handle.bits) + " name='" + u16_to_u8(win.name) + "'");
             }
 
+            // Real CreateWindowEx delivers a WH_CBT hook's HCBT_CREATEWND notification before any
+            // window message, since it's what MFC's AfxHookWindowCreate/_AfxCbtFilterHook relies on
+            // to bind CWnd::m_hWnd for the window it's about to create (SetWindowsHookEx(WH_CBT,...)
+            // is always called immediately before CreateWindowEx for this exact reason).
+            if (const auto* hook = c.proc.find_windows_hook(k_wh_cbt, c.thread().id))
+            {
+                state.cbt_hook_pending = true;
+
+                fn_hk_cbt_createwnd_message args{};
+                args.nCode = k_hcbt_createwnd;
+                args.wParam = handle.bits;
+                args.lpcs = state.create_struct_alloc.address();
+                args.hookProc = hook->proc;
+                args.ansiFlag = 0;
+
+                dispatch_user_callback(c, callback_id::NtUserCreateWindowEx, k_fn_hk_cbt_createwnd_callback_id, std::move(state), args);
+                return {};
+            }
+
             dispatch_next_message(c, callback_id::NtUserCreateWindowEx, std::move(state), win, state.message_queue);
             return {};
         }
@@ -3100,6 +3160,13 @@ namespace sogen
         {
             auto& s = c.get_completion_state<window_create_state>();
             const auto* win = c.proc.windows.get(s.handle);
+
+            if (s.cbt_hook_pending)
+            {
+                s.cbt_hook_pending = false;
+                dispatch_next_message(c, callback_id::NtUserCreateWindowEx, std::move(s), *win, s.message_queue);
+                return {};
+            }
 
             if (!s.message_queue.empty())
             {
@@ -4222,6 +4289,36 @@ namespace sogen
                 invalidate_window_tree(c, *win);
             }
 
+            return TRUE;
+        }
+
+        // BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos exist purely to batch multiple
+        // SetWindowPos calls into one visual update on real Windows; that batching has no observable
+        // effect here, so applying each deferred position immediately is behaviorally equivalent.
+        emulator_pointer handle_NtUserBeginDeferWindowPos(const syscall_context& /*c*/, const int /*num_windows*/)
+        {
+            return make_pseudo_handle(0x400, handle_types::reserved).bits;
+        }
+
+        emulator_pointer handle_NtUserDeferWindowPos(const syscall_context& c, const emulator_pointer hdwp, const hwnd hWnd,
+                                                     const hwnd hwnd_insert_after, const int x, const int y, const int cx, const int cy,
+                                                     const UINT flags)
+        {
+            if (!handle_NtUserSetWindowPos(c, hWnd, hwnd_insert_after, x, y, cx, cy, flags))
+            {
+                return 0;
+            }
+
+            return hdwp;
+        }
+
+        BOOL handle_NtUserEndDeferWindowPos(const syscall_context& /*c*/, const emulator_pointer /*hdwp*/)
+        {
+            return TRUE;
+        }
+
+        BOOL handle_NtUserEndDeferWindowPosEx(const syscall_context& /*c*/, const emulator_pointer /*hdwp*/, const BOOL /*async*/)
+        {
             return TRUE;
         }
 

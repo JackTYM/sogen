@@ -559,8 +559,9 @@ namespace sogen
                                          emulator_object<EMU_WNDCLASSEX> wnd_class_ex, emulator_pointer menu_name, BOOL /*ansi*/);
         int handle_NtUserGetClassName(const syscall_context& c, hwnd win_hwnd, BOOL real,
                                       emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name);
-        NTSTATUS handle_NtUserSetWindowsHookEx();
-        NTSTATUS handle_NtUserUnhookWindowsHookEx();
+        NTSTATUS handle_NtUserSetWindowsHookEx(const syscall_context& c, hinstance hmod, pointer module_name, DWORD thread_id,
+                                               int32_t id_hook, pointer lpfn, DWORD flags);
+        NTSTATUS handle_NtUserUnhookWindowsHookEx(const syscall_context& c, handle hook);
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, DWORD ex_style, emulator_object<LARGE_STRING> class_name,
                                          emulator_object<LARGE_STRING> cls_version, emulator_object<LARGE_STRING> window_name, DWORD style,
                                          int x, int y, int width, int height, hwnd parent, hmenu menu, hinstance instance, pointer l_param,
@@ -625,6 +626,11 @@ namespace sogen
         hwnd handle_NtUserSetParent(const syscall_context& c, hwnd hwnd_child, hwnd hwnd_new_parent);
         BOOL handle_NtUserSetWindowPos(const syscall_context& c, hwnd hWnd, hwnd hwnd_insert_after, int x, int y, int cx, int cy,
                                        UINT flags);
+        emulator_pointer handle_NtUserBeginDeferWindowPos(const syscall_context& c, int num_windows);
+        emulator_pointer handle_NtUserDeferWindowPos(const syscall_context& c, emulator_pointer hdwp, hwnd hWnd, hwnd hwnd_insert_after,
+                                                     int x, int y, int cx, int cy, UINT flags);
+        BOOL handle_NtUserEndDeferWindowPos(const syscall_context& c, emulator_pointer hdwp);
+        BOOL handle_NtUserEndDeferWindowPosEx(const syscall_context& c, emulator_pointer hdwp, BOOL async);
         BOOL handle_NtUserSetForegroundWindow(const syscall_context& c, hwnd hWnd);
         hwnd handle_NtUserGetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
@@ -744,6 +750,7 @@ namespace sogen
                                                   emulator_pointer design_vector, uint32_t design_vector_size,
                                                   emulator_object<uint32_t> num_fonts);
         BOOL handle_NtGdiRemoveFontMemResourceEx(const syscall_context& c, uint64_t font_handle);
+        BOOL handle_NtGdiGetBitmapDimension(const syscall_context& c, uint64_t bitmap, emulator_pointer size);
         uint64_t handle_NtGdiCreateCompatibleBitmap(const syscall_context& c, hdc dc, uint32_t width, uint32_t height);
         uint64_t handle_NtGdiCreateBitmap(const syscall_context& c, uint32_t width, uint32_t height, uint32_t planes, uint32_t bits_pixel,
                                           emulator_pointer bits);
@@ -1368,6 +1375,7 @@ namespace sogen
         add_handler(NtGdiRestoreDC);
         add_handler(NtGdiAddFontMemResourceEx);
         add_handler(NtGdiRemoveFontMemResourceEx);
+        add_handler(NtGdiGetBitmapDimension);
         add_handler(NtGdiCreateCompatibleBitmap);
         add_handler(NtGdiCreateBitmap);
         add_handler(NtGdiCreateDIBitmapInternal);
@@ -1629,6 +1637,10 @@ namespace sogen
         add_handler(NtUserTransformRect);
         add_handler(NtUserSetParent);
         add_handler(NtUserSetWindowPos);
+        add_handler(NtUserBeginDeferWindowPos);
+        add_handler(NtUserDeferWindowPos);
+        add_handler(NtUserEndDeferWindowPos);
+        add_handler(NtUserEndDeferWindowPosEx);
         add_handler(NtUserSetForegroundWindow);
         add_handler(NtUserGetForegroundWindow);
         add_handler(NtUserSetFocus);
