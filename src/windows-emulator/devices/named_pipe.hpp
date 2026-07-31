@@ -5,6 +5,10 @@ namespace sogen
 {
     // FSCTL_PIPE_PEEK = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 3, METHOD_BUFFERED, FILE_READ_DATA)
     constexpr ULONG FSCTL_PIPE_PEEK = 0x11400C;
+    // FSCTL_PIPE_DISCONNECT = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    constexpr ULONG FSCTL_PIPE_DISCONNECT = 0x110004;
+    // FSCTL_PIPE_LISTEN = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    constexpr ULONG FSCTL_PIPE_LISTEN = 0x110008;
     constexpr ULONG FILE_PIPE_CONNECTED_STATE = 3;
 
     // Header of FILE_PIPE_PEEK_BUFFER; the peeked data follows immediately after.
@@ -30,6 +34,13 @@ namespace sogen
         ULONG outbound_quota;
         LARGE_INTEGER default_timeout;
 
+        // Backs FSCTL_PIPE_LISTEN: parks the listening thread on an event that sogen never signals, since
+        // it has no cross-instance/cross-process named-pipe connect modeling. This matches real Windows
+        // for a server whose real client never connects (e.g. Crashpad's own handler, which only ever gets
+        // a connection when a monitored process reports a crash) -- ConnectNamedPipe genuinely blocks the
+        // calling thread forever in that case too.
+        handle listen_event{};
+
         void create(windows_emulator&, const io_device_creation_data&) override
         {
         }
@@ -45,6 +56,18 @@ namespace sogen
                 return this->peek(win_emu, c);
             }
 
+            if (c.io_control_code == FSCTL_PIPE_LISTEN)
+            {
+                return this->listen(win_emu, c);
+            }
+
+            if (c.io_control_code == FSCTL_PIPE_DISCONNECT)
+            {
+                // DisconnectNamedPipe is synchronous on real Windows -- it never waits for a peer, it just
+                // tears down whatever connection state exists (none, here) immediately.
+                return STATUS_SUCCESS;
+            }
+
             win_emu.log.warn("Unsupported named pipe FSCTL: 0x%X\n", static_cast<uint32_t>(c.io_control_code));
             return STATUS_NOT_SUPPORTED;
         }
@@ -58,6 +81,25 @@ namespace sogen
         }
 
       private:
+        NTSTATUS listen(windows_emulator& win_emu, const io_device_context& c)
+        {
+            if (!this->listen_event.bits)
+            {
+                event e{};
+                e.type = NotificationEvent;
+                e.signaled = false;
+                this->listen_event = win_emu.process.events.store(std::move(e));
+            }
+
+            auto& t = c.thread();
+            t.await_objects = {this->listen_event};
+            t.await_any = false;
+            t.await_time = {};
+            win_emu.yield_thread(*c.vcpu, false);
+
+            return STATUS_PENDING;
+        }
+
         NTSTATUS peek(windows_emulator& win_emu, const io_device_context& c)
         {
             constexpr auto header_size = static_cast<ULONG>(sizeof(file_pipe_peek_buffer));
