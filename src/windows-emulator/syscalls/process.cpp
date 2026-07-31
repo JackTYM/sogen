@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../devices/named_pipe.hpp"
 
 #include <utils/finally.hpp>
 
@@ -716,6 +717,7 @@ namespace sogen
             }
 
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> client_id_attribute{};
+            std::vector<handle> inherited_handles{};
 
             if (attribute_list)
             {
@@ -738,6 +740,12 @@ namespace sogen
                             else if (type == PsAttributeClientId)
                             {
                                 client_id_attribute = attribute;
+                            }
+                            else if (type == PsAttributeHandleList)
+                            {
+                                const auto handle_count = attribute.Size / sizeof(handle);
+                                inherited_handles.resize(handle_count);
+                                c.emu.read_memory(attribute.Value, inherited_handles.data(), attribute.Size);
                             }
                             else
                             {
@@ -767,6 +775,11 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
+            const auto record_id = c.proc.next_child_record_id++;
+
+            c.win_emu.log.log("NtCreateUserProcess: launching child %u: %s\n", record_id, u16_to_u8(image_path).c_str());
+            c.win_emu.log.log("NtCreateUserProcess: child %u cmdline: %s\n", record_id, u16_to_u8(command_line).c_str());
+
             application_settings child_settings{
                 .application = image_windows_path,
                 .working_directory = windows_path{working_directory},
@@ -774,10 +787,6 @@ namespace sogen
                 .command_line = std::move(command_line),
                 .image_path = image_path,
             };
-
-            const auto record_id = c.proc.next_child_record_id++;
-
-            c.win_emu.log.log("NtCreateUserProcess: launching child %u: %s\n", record_id, u16_to_u8(image_path).c_str());
 
             std::unique_ptr<windows_emulator> child{};
             try
@@ -794,6 +803,47 @@ namespace sogen
             {
                 c.win_emu.log.error("NtCreateUserProcess: child %u construction returned null\n", record_id);
                 return STATUS_UNSUCCESSFUL;
+            }
+
+            for (const auto& src_handle : inherited_handles)
+            {
+                if (src_handle.value.type != handle_types::device)
+                {
+                    c.win_emu.log.log("NtCreateUserProcess: child %u: inheriting handle type %u not yet supported, "
+                                      "skipping handle 0x%" PRIx64 "\n",
+                                      record_id, static_cast<unsigned>(src_handle.value.type), static_cast<uint64_t>(src_handle.bits));
+                    continue;
+                }
+
+                auto* device = c.proc.devices.get(src_handle);
+                auto* pipe = device ? device->get_internal_device<named_pipe>() : nullptr;
+                if (!pipe)
+                {
+                    c.win_emu.log.log("NtCreateUserProcess: child %u: inherited device handle 0x%" PRIx64
+                                      " has no backing named pipe, skipping\n",
+                                      record_id, static_cast<uint64_t>(src_handle.bits));
+                    continue;
+                }
+
+                io_device_container container{u"NamedPipe", *child, io_device_creation_data{}};
+                if (auto* child_pipe = container.get_internal_device<named_pipe>())
+                {
+                    child_pipe->name = pipe->name;
+                    child_pipe->access = pipe->access;
+                    child_pipe->pipe_type = pipe->pipe_type;
+                    child_pipe->read_mode = pipe->read_mode;
+                    child_pipe->completion_mode = pipe->completion_mode;
+                    child_pipe->max_instances = pipe->max_instances;
+                    child_pipe->inbound_quota = pipe->inbound_quota;
+                    child_pipe->outbound_quota = pipe->outbound_quota;
+                    child_pipe->default_timeout = pipe->default_timeout;
+                }
+
+                if (!child->process.devices.store_at(src_handle, std::move(container)))
+                {
+                    c.win_emu.log.error("NtCreateUserProcess: child %u: failed to inherit device handle 0x%" PRIx64 "\n", record_id,
+                                        static_cast<uint64_t>(src_handle.bits));
+                }
             }
 
             child->start();

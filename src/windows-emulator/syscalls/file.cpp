@@ -602,6 +602,42 @@ namespace sogen
             const auto* f = c.proc.files.get(file_handle);
             if (!f)
             {
+                auto* device = c.proc.devices.get(file_handle);
+                auto* pipe = device ? device->get_internal_device<named_pipe>() : nullptr;
+
+                if (pipe && (info_class == FileNameInformation || info_class == FileNormalizedNameInformation))
+                {
+                    std::u16string relative_name = pipe->name;
+                    for (const std::u16string_view prefix :
+                         {std::u16string_view(u"\\Device\\NamedPipe"), std::u16string_view(u"\\??\\Pipe")})
+                    {
+                        if (utils::string::starts_with_ignore_case(std::u16string_view(relative_name), prefix))
+                        {
+                            relative_name = relative_name.substr(prefix.size());
+                            break;
+                        }
+                    }
+
+                    const auto required_length =
+                        static_cast<uint32_t>((relative_name.size() * 2) + offsetof(FILE_NAME_INFORMATION, FileName));
+
+                    if (length < sizeof(FILE_NAME_INFORMATION))
+                    {
+                        return ret(STATUS_INFO_LENGTH_MISMATCH);
+                    }
+
+                    const uint32_t copy_length = std::min(length, required_length) - offsetof(FILE_NAME_INFORMATION, FileName);
+
+                    c.emu.write_memory(file_information, FILE_NAME_INFORMATION{
+                                                             .FileNameLength = static_cast<ULONG>(relative_name.size() * 2),
+                                                             .FileName = {},
+                                                         });
+                    c.emu.write_memory(file_information + offsetof(FILE_NAME_INFORMATION, FileName), relative_name.c_str(), copy_length);
+
+                    const uint32_t total_copied = copy_length + offsetof(FILE_NAME_INFORMATION, FileName);
+                    return ret(total_copied == required_length ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW, total_copied);
+                }
+
                 return ret(STATUS_INVALID_HANDLE);
             }
 

@@ -220,6 +220,22 @@ namespace sogen
             return this->store_and_get(std::move(value)).first;
         }
 
+        bool store_at(const handle target, T value)
+        {
+            if (this->block_mutation_)
+            {
+                throw std::runtime_error("Mutation of handle store is blocked!");
+            }
+
+            if (target.value.type != Type || (target.value.id & ((1u << IndexShift) - 1)) != 0)
+            {
+                return false;
+            }
+
+            const index_type index = target.value.id >> IndexShift;
+            return this->store_.emplace(index, std::move(value)).second;
+        }
+
         handle make_handle(const index_type index) const
         {
             handle h{};
