@@ -1,6 +1,8 @@
 #include "std_include.hpp"
 #include "windows_emulator.hpp"
 
+#include <pthread.h>
+
 #include "cpu_context.hpp"
 
 #include <utils/io.hpp>
@@ -929,6 +931,27 @@ namespace sogen
         return true;
     }
 
+    // pthread_create's start routine can't be a capturing lambda; args carries what the old
+    // std::thread-based spawn loop used to capture directly, and this owns/frees it (matching
+    // pthread_create's contract that the start routine receives sole ownership of its argument).
+    void* windows_emulator::vcpu_worker_thread_trampoline(void* raw_args)
+    {
+        const std::unique_ptr<vcpu_worker_thread_args> args(static_cast<vcpu_worker_thread_args*>(raw_args));
+
+        try
+        {
+            args->self->vcpu_worker(args->self->vcpu(args->index));
+        }
+        catch (const std::exception& e)
+        {
+            args->self->log.error("vCPU %u worker terminated: %s\n", args->index, e.what());
+            args->self->stop();
+        }
+
+        --(*args->active_workers);
+        return nullptr;
+    }
+
     void windows_emulator::vcpu_worker(vcpu_context& vcpu)
     {
         std::unique_lock lock(this->kernel_lock_);
@@ -1421,7 +1444,7 @@ namespace sogen
         std::mutex interrupt_mutex{};
         std::condition_variable interrupt_cond{};
         std::thread interrupt_thread{};
-        std::vector<std::thread> workers{};
+        std::vector<pthread_t> workers{};
         std::atomic<uint32_t> active_workers{0};
 
         const auto _ = utils::finally([&] {
@@ -1439,10 +1462,7 @@ namespace sogen
 
             for (auto& worker : workers)
             {
-                if (worker.joinable())
-                {
-                    worker.join();
-                }
+                pthread_join(worker, nullptr);
             }
 
             if (interrupt_thread.joinable())
@@ -1497,19 +1517,33 @@ namespace sogen
 
             for (uint32_t i = 0; i < this->vcpu_count_; ++i)
             {
-                workers.emplace_back([this, i, &active_workers] {
-                    try
-                    {
-                        this->vcpu_worker(this->vcpu(i));
-                    }
-                    catch (const std::exception& e)
-                    {
-                        this->log.error("vCPU %u worker terminated: %s\n", i, e.what());
-                        this->stop();
-                    }
+                auto* args = new vcpu_worker_thread_args{this, i, &active_workers};
 
-                    --active_workers;
-                });
+                pthread_attr_t attr{};
+                pthread_attr_init(&attr);
+
+                // See reserve_worker_thread_stack's doc comment (arch_emulator.hpp): backends whose
+                // guest memory shares the host's own address space (FEX) need their worker threads'
+                // stacks to come from a pre-reserved arena instead of the OS's default placement, or
+                // a new thread's stack can land on an address the guest program is about to use.
+                void* stack_base = nullptr;
+                size_t stack_size = 0;
+                if (this->emu().reserve_worker_thread_stack(i, stack_base, stack_size))
+                {
+                    pthread_attr_setstack(&attr, stack_base, stack_size);
+                }
+
+                pthread_t handle{};
+                const auto rc = pthread_create(&handle, &attr, &windows_emulator::vcpu_worker_thread_trampoline, args);
+                pthread_attr_destroy(&attr);
+
+                if (rc != 0)
+                {
+                    delete args;
+                    throw std::runtime_error("Failed to create vCPU worker thread");
+                }
+
+                workers.push_back(handle);
             }
 
             while (active_workers.load() > 0)
