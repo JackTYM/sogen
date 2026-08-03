@@ -1377,9 +1377,15 @@ namespace sogen
                     }
 
                     this->callbacks.on_generic_activity(utils::string::va(
-                        "Memory violation context: addr=0x%" PRIx64 " %s ebp=0x%" PRIx64 " [ebp+8]=0x%x [ebp+c]=0x%x [ebp+10]=0x%x"
+                        "Memory violation context: addr=0x%" PRIx64 " %s tid=%u vcpu=%zu"
+                        " eax=0x%x ecx=0x%x edx=0x%x ebx=0x%x esi=0x%x edi=0x%x"
+                        " ebp=0x%" PRIx64 " [ebp+8]=0x%x [ebp+c]=0x%x [ebp+10]=0x%x"
                         " esp=0x%" PRIx64 " stack[esp-16..esp+40]=%s",
-                        address, neighborhood.c_str(), ebp, stack_args[0], stack_args[1], stack_args[2], esp, stack_window.c_str()));
+                        address, neighborhood.c_str(), vcpu.thread().id, cpu.index(), acting.reg<uint32_t>(x86_register::eax),
+                        acting.reg<uint32_t>(x86_register::ecx), acting.reg<uint32_t>(x86_register::edx),
+                        acting.reg<uint32_t>(x86_register::ebx), acting.reg<uint32_t>(x86_register::esi),
+                        acting.reg<uint32_t>(x86_register::edi), ebp, stack_args[0], stack_args[1], stack_args[2], esp,
+                        stack_window.c_str()));
                 }
 
                 this->callbacks.on_memory_violate(address, size, operation, type);
