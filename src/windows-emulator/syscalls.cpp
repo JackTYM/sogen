@@ -704,6 +704,7 @@ namespace sogen
         BOOL handle_NtUserZapActiveAndFocus(const syscall_context& c);
         BOOL handle_NtUserShowScrollBar(const syscall_context& c, hwnd hWnd, uint32_t bar, BOOL show);
         BOOL handle_NtUserGetWindowBand(const syscall_context& c, hwnd hWnd, emulator_object<uint32_t> band);
+        BOOL handle_NtUserRegisterPointerDeviceNotifications(const syscall_context& c, hwnd hWnd, BOOL notify_range);
         NTSTATUS handle_NtUserSelectPalette();
         BOOL handle_NtUserSwapMouseButton();
         hwnd handle_NtUserWindowFromPoint(const syscall_context& c, int32_t x, int32_t y);
@@ -1725,6 +1726,7 @@ namespace sogen
         add_handler(NtUserZapActiveAndFocus);
         add_handler(NtUserShowScrollBar);
         add_handler(NtUserGetWindowBand);
+        add_handler(NtUserRegisterPointerDeviceNotifications);
         add_handler(NtUserCreateAcceleratorTable);
         add_handler(NtUserDestroyAcceleratorTable);
         add_handler(NtUserCopyAcceleratorTable);

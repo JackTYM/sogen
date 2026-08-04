@@ -5605,6 +5605,11 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserRegisterPointerDeviceNotifications(const syscall_context& c, const hwnd hWnd, const BOOL /*notify_range*/)
+        {
+            return c.proc.windows.get(hWnd) != nullptr;
+        }
+
         NTSTATUS handle_NtUserSelectPalette()
         {
             return STATUS_SUCCESS;

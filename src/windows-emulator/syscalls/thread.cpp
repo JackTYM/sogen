@@ -140,7 +140,9 @@ namespace sogen
             }
 
             if (info_class == ThreadSchedulerSharedDataSlot || info_class == ThreadBasePriority || info_class == ThreadAffinityMask ||
-                info_class == ThreadPriorityBoost || info_class == ThreadEnableAlignmentFaultFixup)
+                info_class == ThreadPriorityBoost || info_class == ThreadEnableAlignmentFaultFixup ||
+                info_class == ThreadActualBasePriority || info_class == ThreadPagePriority || info_class == ThreadIoPriority ||
+                info_class == ThreadPowerThrottlingState)
             {
                 return STATUS_SUCCESS;
             }
@@ -397,6 +399,24 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadIsIoPending)
+            {
+                if (return_length)
+                {
+                    return_length.write(sizeof(ULONG));
+                }
+
+                if (thread_information_length < sizeof(ULONG))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                const emulator_object<ULONG> info{c.emu, thread_information};
+                info.write(FALSE);
+
+                return STATUS_SUCCESS;
+            }
+
             if (info_class == ThreadQuerySetWin32StartAddress)
             {
                 if (return_length)
@@ -512,6 +532,26 @@ namespace sogen
 
                 const emulator_object<ULONG> info{c.emu, thread_information};
                 info.write(memory_priority_normal);
+
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == ThreadIoPriority)
+            {
+                if (return_length)
+                {
+                    return_length.write(sizeof(ULONG));
+                }
+
+                if (thread_information_length < sizeof(ULONG))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                constexpr ULONG io_priority_normal = 2; // IoPriorityNormal
+
+                const emulator_object<ULONG> info{c.emu, thread_information};
+                info.write(io_priority_normal);
 
                 return STATUS_SUCCESS;
             }

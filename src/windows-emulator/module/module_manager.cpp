@@ -1002,20 +1002,25 @@ namespace sogen
             // (see load_native_64bit_modules/load_wow64_modules, which only map exe+ntdll+win32u
             // upfront) - so this must be resolved on_module_load, not at setup() time (a prior attempt
             // to resolve it there found kernelbase.dll never mapped yet and always fell back to the
-            // placeholder, below, for every thread). By the time this fires, the only thread that
-            // exists is the initial one, which is fine: it never reaches BaseNlsThreadCleanup via
-            // DLL_THREAD_DETACH (that only fires for a thread exiting while others remain live - the
-            // process's own final exit instead goes through DLL_PROCESS_DETACH, a separate code path
-            // that never touches NlsCache at all) - every thread the guest's own code spawns afterwards
-            // (i.e. any real DLL_THREAD_DETACH candidate) is created well after this callback has
-            // already run, since kernelbase.dll loads during the loader's own import resolution,
-            // strictly before the app's own code can call CreateThread. Its RVA is specific to the
-            // exact kernelbase.dll build it was originally identified against (via static analysis) -
-            // resolve_kernelbase_nls_cache_address validates it still lands on writable data before
-            // trusting it, since that drifts across Windows builds. Registered only once per
-            // module_manager instance - safe, since the callback captures `context` by reference and
-            // every caller of this function passes the SAME process_context the module_manager was
-            // constructed for.
+            // placeholder, below, for every thread). By the time this fires, the only thread that is
+            // guaranteed to exist is the initial one, which is fine on its own: it never reaches
+            // BaseNlsThreadCleanup via DLL_THREAD_DETACH (that only fires for a thread exiting while
+            // others remain live - the process's own final exit instead goes through DLL_PROCESS_DETACH,
+            // a separate code path that never touches NlsCache at all). However, real ntdll can spin up
+            // additional, non-initial loader worker threads (LdrpDrainWorkQueue's parallel DLL-loading
+            // mechanism) to load the REST of the import graph concurrently, and kernelbase.dll can
+            // legitimately still be one of the DLLs still in flight when such a worker thread is
+            // created - so a genuine, non-initial DLL_THREAD_DETACH candidate can already exist by the
+            // time this callback fires. Any such thread's TEB.NlsCache was set to its own private
+            // placeholder (resolve_nls_cache, emulator_thread.cpp) at creation time; retarget it to the
+            // now-resolved real cache below, matching the same "worker threads may already exist"
+            // precedent already handled for TEB32.WOW32Reserved further up in this function. Its RVA is
+            // specific to the exact kernelbase.dll build it was originally identified against (via
+            // static analysis) - resolve_kernelbase_nls_cache_address validates it still lands on
+            // writable data before trusting it, since that drifts across Windows builds. Registered only
+            // once per module_manager instance - safe, since the callback captures `context` by
+            // reference and every caller of this function passes the SAME process_context the
+            // module_manager was constructed for.
             this->callbacks_->on_module_load.add([this, &context](mapped_module& mod) {
                 if (mod.name != "kernelbase.dll")
                 {
@@ -1023,6 +1028,18 @@ namespace sogen
                 }
 
                 context.kernelbase_nls_process_local_cache = resolve_kernelbase_nls_cache_address(*this->memory_, mod);
+                if (context.kernelbase_nls_process_local_cache == 0)
+                {
+                    return;
+                }
+
+                for (auto& t : context.threads | std::views::values)
+                {
+                    if (t.teb64.has_value())
+                    {
+                        t.teb64->access([&](TEB64& teb64_obj) { teb64_obj.NlsCache = context.kernelbase_nls_process_local_cache; });
+                    }
+                }
             });
         }
 
