@@ -4937,7 +4937,11 @@ namespace sogen
                     UINT8 padding2[40]; // NOLINT
                     UINT32 sourceWidth;
                     UINT32 sourceHeight;
-                    UINT8 padding3[84]; // NOLINT
+                    // Real user32.dll's QueryDisplayConfig allocates exactly
+                    // RtlAllocateHeap(pUserHeap, 8, 200 * numPathArrayElements) bytes per element - i.e. the real,
+                    // internal DISPLAYCONFIG_PATH_INFO_INTERNAL is 200 bytes wide. This struct must match that size
+                    // exactly: writing more overflows user32's heap allocation and corrupts adjacent heap metadata.
+                    UINT8 padding3[68]; // NOLINT
                 } internal_path{};
 
                 internal_path.flags = 0x2000000000020003ULL;
