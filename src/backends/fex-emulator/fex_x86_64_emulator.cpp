@@ -1394,6 +1394,19 @@ namespace sogen::fex
         void request_thread_stop();
         void create_thread();
 
+        // EMULATOR_FEX_AVDIAG: dumps a decisive snapshot at the exact moment of a memory-violation
+        // dispatch - this vcpu's acting engine identity/GPRs/FS base, plus every vcpu's thread_/
+        // thread32_ identity, active_thread_/active_context_, and each engine's call/ret buffer state
+        // (_pad1/callret_sp) and FS base. Root-cause tooling for the still-open --vcpus 2 WoW64 crash
+        // investigation (see the plan/memory notes): the live evidence is a stable fault address
+        // across different guest modules, which points at ONE corrupted stored pointer value read at
+        // different member offsets rather than independent per-site corruption. This dump is what
+        // distinguishes the real candidates - a TEB32/FS-base mixup (this engine's fs_cached not
+        // matching what it should), a torn active_thread_/active_context_ read (two vcpus reporting
+        // the same active_thread_ pointer), or call/ret buffer sharing (two engines reporting the same
+        // _pad1) - from a single, cheap fprintf, no live debugger needed.
+        void dump_avdiag(uint64_t fault_addr, uint64_t recon_rip, const char* site) const;
+
 #ifdef __APPLE__
         bool handle_fault_signal(int sig, siginfo_t* info, void* raw_ucontext);
 #endif
@@ -4314,6 +4327,55 @@ namespace sogen::fex
         return true;
     }
 
+    void fex_vcpu::dump_avdiag(const uint64_t fault_addr, const uint64_t recon_rip, const char* const site) const
+    {
+        static const bool enabled = std::getenv("EMULATOR_FEX_AVDIAG") != nullptr;
+        if (!enabled)
+        {
+            return;
+        }
+
+        auto* const active = this->active_thread_.load();
+        const bool active_is_32 = (active == this->thread32_);
+        const auto& state = active->CurrentFrame->State;
+
+        fprintf(stderr,
+                "[FEX_AVDIAG] site=%s vcpu=%zu fault=0x%llx rip=0x%llx active_is_32=%d active=%p"
+                " eax=0x%llx ecx=0x%llx edx=0x%llx ebx=0x%llx esp=0x%llx ebp=0x%llx esi=0x%llx edi=0x%llx"
+                " fs_base=0x%llx pad1=0x%llx callret_sp=0x%llx gdt=%p\n",
+                site, this->index(), static_cast<unsigned long long>(fault_addr), static_cast<unsigned long long>(recon_rip),
+                active_is_32, static_cast<void*>(active), static_cast<unsigned long long>(state.gregs[detail::greg_rax]),
+                static_cast<unsigned long long>(state.gregs[detail::greg_rcx]),
+                static_cast<unsigned long long>(state.gregs[detail::greg_rdx]),
+                static_cast<unsigned long long>(state.gregs[detail::greg_rbx]),
+                static_cast<unsigned long long>(state.gregs[detail::greg_rsp]),
+                static_cast<unsigned long long>(state.gregs[detail::greg_rbp]),
+                static_cast<unsigned long long>(state.gregs[detail::greg_rsi]),
+                static_cast<unsigned long long>(state.gregs[detail::greg_rdi]), static_cast<unsigned long long>(state.fs_cached),
+                static_cast<unsigned long long>(state._pad1), static_cast<unsigned long long>(state.callret_sp),
+                static_cast<void*>(state.segment_arrays[0]));
+
+        for (const auto& other : this->emulator_.vcpus_)
+        {
+            fprintf(stderr, "[FEX_AVDIAG]   vcpu=%zu thread_=%p thread32_=%p active_thread_=%p active_context_=%p", other->index(),
+                    static_cast<void*>(other->thread_), static_cast<void*>(other->thread32_),
+                    static_cast<void*>(other->active_thread_.load()), static_cast<void*>(other->active_context_));
+            if (other->thread_ != nullptr)
+            {
+                const auto& s = other->thread_->CurrentFrame->State;
+                fprintf(stderr, " | 64bit pad1=0x%llx callret_sp=0x%llx fs=0x%llx", static_cast<unsigned long long>(s._pad1),
+                        static_cast<unsigned long long>(s.callret_sp), static_cast<unsigned long long>(s.fs_cached));
+            }
+            if (other->thread32_ != nullptr)
+            {
+                const auto& s = other->thread32_->CurrentFrame->State;
+                fprintf(stderr, " | 32bit pad1=0x%llx callret_sp=0x%llx fs=0x%llx", static_cast<unsigned long long>(s._pad1),
+                        static_cast<unsigned long long>(s.callret_sp), static_cast<unsigned long long>(s.fs_cached));
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
     bool fex_vcpu::handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr)
     {
         // See t_tables_write_locked's doc comment.
@@ -4350,10 +4412,13 @@ namespace sogen::fex
         // real guest rip from the live host PC (FEX's block-chaining advances execution without
         // rewriting CurrentFrame->State.rip, which is frequently stale here).
         auto* const active = this->active_thread_.load();
-        if (const uint64_t recon_rip = this->active_context_->RestoreRIPFromHostPC(active, pc))
+        const uint64_t recon_rip = this->active_context_->RestoreRIPFromHostPC(active, pc);
+        if (recon_rip)
         {
             active->CurrentFrame->State.rip = recon_rip;
         }
+
+        this->dump_avdiag(guest_fault_addr, recon_rip, "signal");
 
         pending_fault_dispatch dispatch{};
         dispatch.kind = pending_fault_kind::memory_violation;
@@ -4851,10 +4916,13 @@ namespace sogen::fex
         }
 
         auto* const active = this->active_thread_.load();
-        if (const uint64_t recon_rip = this->active_context_->RestoreRIPFromHostPC(active, pc))
+        const uint64_t recon_rip = this->active_context_->RestoreRIPFromHostPC(active, pc);
+        if (recon_rip)
         {
             active->CurrentFrame->State.rip = recon_rip;
         }
+
+        this->dump_avdiag(guest_fault_addr, recon_rip, "hvf");
 
         pending_fault_dispatch dispatch{};
         dispatch.kind = pending_fault_kind::memory_violation;
