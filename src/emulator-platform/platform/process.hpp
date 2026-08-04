@@ -1362,6 +1362,12 @@ namespace sogen
         USHORT WindowTitleLength;
     };
 
+    struct PROCESS_CYCLE_TIME_INFORMATION
+    {
+        ULONGLONG AccumulatedCycles;
+        ULONGLONG CurrentCycleCount;
+    };
+
     struct PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION
     {
         ULONG Version;

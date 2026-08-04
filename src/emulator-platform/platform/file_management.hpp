@@ -418,6 +418,33 @@ namespace sogen
         LARGE_INTEGER EndOfFile;
     } FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
 
+    typedef struct _FILE_TRACKING_INFORMATION
+    {
+        EMULATOR_CAST(uint64_t, HANDLE) DestinationFile;
+        ULONG ObjectInformationLength;
+        CHAR ObjectInformation[1];
+    } FILE_TRACKING_INFORMATION, *PFILE_TRACKING_INFORMATION;
+
+    typedef enum _STORAGE_RESERVE_ID
+    {
+        StorageReserveIdNone = 0,
+        StorageReserveIdHard,
+        StorageReserveIdSoft,
+        StorageReserveIdUpdateScratch,
+        StorageReserveIdMax,
+    } STORAGE_RESERVE_ID, *PSTORAGE_RESERVE_ID;
+
+    typedef struct _FILE_STORAGE_RESERVE_ID_INFORMATION
+    {
+        STORAGE_RESERVE_ID StorageReserveId;
+    } FILE_STORAGE_RESERVE_ID_INFORMATION, *PFILE_STORAGE_RESERVE_ID_INFORMATION;
+
+    typedef struct _FILE_COMPLETION_INFORMATION
+    {
+        EMULATOR_CAST(uint64_t, HANDLE) Port;
+        EMULATOR_CAST(uint64_t, PVOID) Key;
+    } FILE_COMPLETION_INFORMATION, *PFILE_COMPLETION_INFORMATION;
+
     typedef struct _FILE_ATTRIBUTE_TAG_INFORMATION
     {
         ULONG FileAttributes;

@@ -406,6 +406,13 @@ namespace sogen
                                                                     info.WindowTitleLength = 0;
                                                                 });
 
+            case ProcessCycleTime:
+                return handle_query<PROCESS_CYCLE_TIME_INFORMATION>(c.emu, process_information, process_information_length, return_length,
+                                                                    [&](PROCESS_CYCLE_TIME_INFORMATION& info) {
+                                                                        info.AccumulatedCycles = c.win_emu.get_executed_instructions();
+                                                                        info.CurrentCycleCount = 0;
+                                                                    });
+
             default:
                 c.win_emu.log.error("Unsupported process info class: 0x%X\n", info_class);
                 c.emu.stop();

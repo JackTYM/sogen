@@ -282,6 +282,43 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == FileCompletionInformation)
+            {
+                if (length < sizeof(FILE_COMPLETION_INFORMATION))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto info = c.emu.read_memory<FILE_COMPLETION_INFORMATION>(file_information);
+
+                if (!c.proc.io_completions.get(info.Port))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == FileStorageReserveIdInformation)
+            {
+                if (length < sizeof(FILE_STORAGE_RESERVE_ID_INFORMATION))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                return STATUS_SUCCESS;
+            }
+
+            if (info_class == FileTrackingInformation)
+            {
+                if (length < offsetof(FILE_TRACKING_INFORMATION, ObjectInformation))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                return STATUS_SUCCESS;
+            }
+
             c.win_emu.log.error("Unsupported set file info class: 0x%X\n", info_class);
             c.emu.stop();
 
@@ -692,6 +729,25 @@ namespace sogen
             if (info_class == FileRemoteProtocolInformation)
             {
                 return ret(STATUS_INVALID_PARAMETER);
+            }
+
+            if (info_class == FileStorageReserveIdInformation)
+            {
+                constexpr auto required_length = sizeof(FILE_STORAGE_RESERVE_ID_INFORMATION);
+
+                if (length < required_length)
+                {
+                    return ret(STATUS_INFO_LENGTH_MISMATCH);
+                }
+
+                const emulator_object<FILE_STORAGE_RESERVE_ID_INFORMATION> info{c.emu, file_information};
+                FILE_STORAGE_RESERVE_ID_INFORMATION i{};
+
+                i.StorageReserveId = StorageReserveIdNone;
+
+                info.write(i);
+
+                return ret(STATUS_SUCCESS, required_length);
             }
 
             if (info_class == FileIdInformation)
