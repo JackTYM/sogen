@@ -515,6 +515,31 @@ namespace sogen
             return nullptr;
         }
 
+        // EMULATOR_STICKY_VCPU: pins each guest thread to whichever vCPU first ran it, for the
+        // lifetime of the process. Originally built as a bisection tool for a live FEX-backend crash
+        // investigation (a WoW64 guest reliably corrupting memory under --vcpus > 1 - see the bug-hunt
+        // workflow report referenced in the plan): landing every migration-family fix the research
+        // turned up (cross-engine call/ret shadow-stack ownership, the non-atomic active-context/
+        // active-thread pair read cross-thread) did NOT resolve the crash, but disabling migration
+        // entirely via this flag does, reliably (6/6 vs 0/8 in matched A/B batches on an idle
+        // machine). The true remaining root cause is still open, so until it's found this is the
+        // practical way to get a stable FEX+WoW64+multi-vCPU run - recommended for MW2-like workloads.
+        // Off by default: it defeats real load-balancing (a thread never migrates to a less-busy
+        // vCPU even if one is idle), and WHP's own multi-vCPU implementation has no evidence of
+        // needing it. Scoped to the anonymous namespace (not a windows_emulator member) since running
+        // under kernel_lock_ (see vcpu_worker) makes a plain map safe here without one.
+        bool sticky_vcpu_enabled()
+        {
+            static const bool enabled = std::getenv("EMULATOR_STICKY_VCPU") != nullptr;
+            return enabled;
+        }
+
+        std::unordered_map<uint32_t, uint32_t>& sticky_vcpu_assignments()
+        {
+            static std::unordered_map<uint32_t, uint32_t> assignments{};
+            return assignments;
+        }
+
         bool switch_to_thread(windows_emulator& win_emu, vcpu_context& vcpu, emulator_thread& thread, const bool force = false)
         {
             if (thread.is_terminated())
@@ -538,6 +563,18 @@ namespace sogen
             if (!is_ready && !force && !can_dispatch_apcs)
             {
                 return false;
+            }
+
+            // Checked only once every other gate has passed, so a thread we're merely scanning past
+            // (not actually about to switch to) never claims a vCPU it will never run on.
+            if (sticky_vcpu_enabled())
+            {
+                auto& assignments = sticky_vcpu_assignments();
+                const auto [it, inserted] = assignments.try_emplace(thread.id, vcpu.cpu.index());
+                if (!inserted && it->second != vcpu.cpu.index())
+                {
+                    return false;
+                }
             }
 
             auto* active_thread = vcpu.active_thread;
