@@ -4078,7 +4078,30 @@ namespace sogen::fex
         if (include_inactive_contexts && this->emulator_.context32_.get() != nullptr &&
             this->emulator_.context32_.get() != this->active_context_ && this->thread32_ != nullptr)
         {
-            this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
+            // The inactive engine's call/ret buffer can be STALE: it is owned per LOGICAL THREAD and
+            // travels with a migrating thread across vCPUs (see restore_state_into's doc comment), so
+            // when a thread migrates away, the engine slot it leaves behind keeps pointing at the same
+            // physical buffer the migrated thread is now actively using elsewhere. FEXCore's own
+            // InvalidateThreadCachedCodeRange unconditionally VirtualDontNeed's CallRetStackBase
+            // whenever the invalidated range overlaps that engine's OWN cached code (its own comment:
+            // "may cause access violations... handled by the frontend" - sogen is that frontend, and
+            // this is the case it needs to handle) - catastrophic if this buffer is actually still
+            // live under a different, currently-executing thread elsewhere. Skip the whole
+            // invalidation for a definitively-abandoned engine (current owner is a different thread):
+            // nothing will ever execute through an abandoned engine slot again until some thread is
+            // freshly restored into it, which re-validates translations from scratch regardless.
+            bool owned_by_this_engine = true;
+            {
+                const std::shared_lock lock(this->emulator_.tables_mutex_);
+                const auto owner_it =
+                    this->emulator_.callret_buffer_owners_.find(this->thread32_->CurrentFrame->State._pad1);
+                owned_by_this_engine =
+                    (owner_it == this->emulator_.callret_buffer_owners_.end() || owner_it->second == this->thread32_);
+            }
+            if (owned_by_this_engine)
+            {
+                this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
+            }
         }
     }
 
