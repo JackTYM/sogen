@@ -633,6 +633,62 @@ namespace sogen::fex
             instruction_hook_callback callback;
         };
 
+        // POSIX synchronous signals (SIGSEGV/SIGBUS/SIGILL/SIGTRAP) always deliver to the thread that
+        // caused them, so a thread_local pointer to whichever fex_vcpu this host thread is currently
+        // driving is a lock-free, correct way to route a fault to the right vCPU's state under
+        // multi-vCPU. Set/cleared by fex_vcpu::start() for the duration of guest execution; null on
+        // any other thread (UI pump, watchdog), which correctly falls through fault_signal_handler to
+        // the existing unhandled-crash report instead of misrouting to some arbitrary vCPU. Declared
+        // outside the Apple-only block below because fex_syscall_handler::HandleSyscall (which needs
+        // the acting vCPU on every platform) is not itself Apple-only.
+        thread_local fex_vcpu* t_current_vcpu = nullptr;
+
+        // RAII guard for t_current_vcpu, scoped to fex_vcpu::start()'s ExecuteThread loop.
+        struct current_vcpu_scope
+        {
+            explicit current_vcpu_scope(fex_vcpu& vcpu)
+            {
+                t_current_vcpu = &vcpu;
+            }
+
+            ~current_vcpu_scope()
+            {
+                t_current_vcpu = nullptr;
+            }
+
+            current_vcpu_scope(const current_vcpu_scope&) = delete;
+            current_vcpu_scope& operator=(const current_vcpu_scope&) = delete;
+        };
+
+        // A synchronous fault taken while THIS thread already holds tables_mutex_ exclusively (e.g. a
+        // stray SIGSEGV/SIGBUS inside try_write_memory_impl's guest memmove) would otherwise have the
+        // fault handler try to re-acquire the same non-recursive std::shared_mutex - a guaranteed
+        // silent deadlock inside a signal handler, hanging every other vCPU with it. tables_mutex_'s
+        // own doc comment claims "a synchronous fault interrupts JIT/dispatcher code only, which never
+        // holds this mutex" - true for JIT-compiled guest code, false for this backend's own locked
+        // memmove. Checked at every fault-handling entry point that (transitively) locks tables_mutex_;
+        // on a hit, fall through to the existing unhandled-signal reporter instead of hanging.
+        thread_local bool t_tables_write_locked = false;
+
+        struct tables_write_lock
+        {
+            explicit tables_write_lock(std::shared_mutex& mutex) : lock_(mutex)
+            {
+                t_tables_write_locked = true;
+            }
+
+            ~tables_write_lock()
+            {
+                t_tables_write_locked = false;
+            }
+
+            tables_write_lock(const tables_write_lock&) = delete;
+            tables_write_lock& operator=(const tables_write_lock&) = delete;
+
+          private:
+            std::unique_lock<std::shared_mutex> lock_;
+        };
+
 #ifdef __APPLE__
         bool sysctl_flag(const char* name)
         {
@@ -714,35 +770,11 @@ namespace sogen::fex
         // Guards against a second live FEX emulator instance in this process - fault routing below
         // uses one shared, process-wide sigaction handler, and only one instance may ever install it
         // (reachable e.g. via the Python bindings constructing two emulators). Unrelated to per-vCPU
-        // fault routing, which is t_current_vcpu below: FEXCore's own real Linux embedding
-        // (SignalDelegator::HandleSignal) validates exactly this split - one shared handler, routed
-        // per-thread via a thread-keyed lookup, not a single global "the" active instance.
+        // fault routing, which is t_current_vcpu (declared above, outside this Apple-only block):
+        // FEXCore's own real Linux embedding (SignalDelegator::HandleSignal) validates exactly this
+        // split - one shared handler, routed per-thread via a thread-keyed lookup, not a single
+        // global "the" active instance.
         fex_x86_64_emulator* g_active_emulator = nullptr;
-
-        // POSIX synchronous signals (SIGSEGV/SIGBUS/SIGILL/SIGTRAP) always deliver to the thread that
-        // caused them, so a thread_local pointer to whichever fex_vcpu this host thread is currently
-        // driving is a lock-free, correct way to route a fault to the right vCPU's state under
-        // multi-vCPU. Set/cleared by fex_vcpu::start() for the duration of guest execution; null on
-        // any other thread (UI pump, watchdog), which correctly falls through fault_signal_handler to
-        // the existing unhandled-crash report instead of misrouting to some arbitrary vCPU.
-        thread_local fex_vcpu* t_current_vcpu = nullptr;
-
-        // RAII guard for t_current_vcpu, scoped to fex_vcpu::start()'s ExecuteThread loop.
-        struct current_vcpu_scope
-        {
-            explicit current_vcpu_scope(fex_vcpu& vcpu)
-            {
-                t_current_vcpu = &vcpu;
-            }
-
-            ~current_vcpu_scope()
-            {
-                t_current_vcpu = nullptr;
-            }
-
-            current_vcpu_scope(const current_vcpu_scope&) = delete;
-            current_vcpu_scope& operator=(const current_vcpu_scope&) = delete;
-        };
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
 
@@ -1871,7 +1903,7 @@ namespace sogen::fex
             // tables_mutex_ into GetCodeInvalidationMutex here, a real ABBA deadlock hit on the very
             // first genuine --vcpus 2 run.
             {
-                const std::unique_lock lock(this->tables_mutex_);
+                const tables_write_lock lock(this->tables_mutex_);
 
                 if (!this->is_range_mapped(address, size))
                 {
@@ -2297,7 +2329,7 @@ namespace sogen::fex
         // misclassification documented elsewhere in this file). A unique lock excludes both.
         void refresh_mmio_backings()
         {
-            const std::unique_lock lock(this->tables_mutex_);
+            const tables_write_lock lock(this->tables_mutex_);
             for (const auto& region : this->mmio_regions_)
             {
                 if (region.host_backing == nullptr)
@@ -3402,6 +3434,10 @@ namespace sogen::fex
             throw std::runtime_error("FEX backend does not support exact instruction counts yet");
         }
 
+        // Routes this host thread's faults and syscalls to this vCPU's state for the duration of
+        // guest execution (see t_current_vcpu's doc comment).
+        const current_vcpu_scope current_vcpu_guard(*this);
+
         if (this->active_thread_.load() == nullptr)
         {
             this->create_thread();
@@ -4215,6 +4251,14 @@ namespace sogen::fex
     // never fault and thus never take the mutex.
     bool fex_vcpu::handle_misaligned_atomic_fault(ucontext_t* uctx, uint64_t fault_addr)
     {
+        // See t_tables_write_locked's doc comment: this thread already holds tables_mutex_
+        // exclusively from inside try_write_memory_impl/refresh_mmio_backings, so re-acquiring it
+        // below would deadlock. Fall through to the existing unhandled-signal reporter instead.
+        if (t_tables_write_locked)
+        {
+            return false;
+        }
+
         const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
         const auto insn = *reinterpret_cast<const uint32_t*>(pc);
 
@@ -4272,6 +4316,12 @@ namespace sogen::fex
 
     bool fex_vcpu::handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr)
     {
+        // See t_tables_write_locked's doc comment.
+        if (t_tables_write_locked)
+        {
+            return false;
+        }
+
         const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
         const auto guest_fault_addr = this->emulator_.unrebase_fault_addr(fault_addr);
         const auto guest_page = guest_fault_addr & ~(page_size - 1);
@@ -5202,7 +5252,11 @@ namespace sogen::fex
             }
 
             const auto pc_for_mmio_check = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-            if (fault_addr != pc_for_mmio_check)
+            // See t_tables_write_locked's doc comment: this is the first tables_mutex_ acquisition
+            // any data-address fault reaches, unconditionally - skip it (there is nothing to find
+            // among MMIO regions from a fault taken inside our own locked memmove anyway) rather than
+            // deadlock re-acquiring the mutex this thread already holds exclusively.
+            if (fault_addr != pc_for_mmio_check && !t_tables_write_locked)
             {
                 const auto guest_fault_addr = this->emulator_.unrebase_fault_addr(fault_addr);
                 const std::shared_lock lock(this->emulator_.tables_mutex_);
