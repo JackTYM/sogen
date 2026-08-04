@@ -4071,7 +4071,27 @@ namespace sogen::fex
             return;
         }
 
-        this->invalidate_code_range_in(this->active_context_, this->active_thread_.load(), address, size);
+        // invalidate_code_range_locked's fan-out calls this on EVERY vCPU, not just whichever one
+        // triggered the underlying memory operation - so "active_thread_" here is not necessarily this
+        // vCPU's own trigger, and its call/ret buffer ownership deserves the same check applied to the
+        // inactive engine below, for the same reason (see that branch's doc comment): a currently-
+        // active engine's buffer should always be self-owned (bind_callret_buffer keeps ownership in
+        // sync on every restore), but a stale reference surviving from before this vCPU's OWN thread
+        // last migrated away is not ruled out by construction, and the cost of checking is one shared-
+        // lock map lookup.
+        {
+            auto* const active = this->active_thread_.load();
+            bool owned_by_this_engine = true;
+            {
+                const std::shared_lock lock(this->emulator_.tables_mutex_);
+                const auto owner_it = this->emulator_.callret_buffer_owners_.find(active->CurrentFrame->State._pad1);
+                owned_by_this_engine = (owner_it == this->emulator_.callret_buffer_owners_.end() || owner_it->second == active);
+            }
+            if (owned_by_this_engine)
+            {
+                this->invalidate_code_range_in(this->active_context_, active, address, size);
+            }
+        }
 
         // A WoW64 process runs two independent FEXCore contexts - invalidating only active_context_
         // leaves stale translations in the inactive one behind on an unmap.
