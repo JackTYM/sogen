@@ -769,9 +769,9 @@ namespace sogen
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            if (!c.win_emu.callbacks.create_child_emulator)
+            if (!c.win_emu.callbacks.create_child_process)
             {
-                c.win_emu.log.log("NtCreateUserProcess: no create_child_emulator callback registered\n");
+                c.win_emu.log.log("NtCreateUserProcess: no create_child_process callback registered\n");
                 return STATUS_NOT_SUPPORTED;
             }
 
@@ -788,23 +788,7 @@ namespace sogen
                 .image_path = image_path,
             };
 
-            std::unique_ptr<windows_emulator> child{};
-            try
-            {
-                child = c.win_emu.callbacks.create_child_emulator(std::move(child_settings));
-            }
-            catch (const std::exception& e)
-            {
-                c.win_emu.log.error("NtCreateUserProcess: failed to construct child %u: %s\n", record_id, e.what());
-                return STATUS_UNSUCCESSFUL;
-            }
-
-            if (!child)
-            {
-                c.win_emu.log.error("NtCreateUserProcess: child %u construction returned null\n", record_id);
-                return STATUS_UNSUCCESSFUL;
-            }
-
+            std::vector<inherited_pipe_handle> inherited_pipes{};
             for (const auto& src_handle : inherited_handles)
             {
                 if (src_handle.value.type != handle_types::device)
@@ -825,57 +809,47 @@ namespace sogen
                     continue;
                 }
 
-                io_device_container container{u"NamedPipe", *child, io_device_creation_data{}};
-                if (auto* child_pipe = container.get_internal_device<named_pipe>())
-                {
-                    child_pipe->name = pipe->name;
-                    child_pipe->access = pipe->access;
-                    child_pipe->pipe_type = pipe->pipe_type;
-                    child_pipe->read_mode = pipe->read_mode;
-                    child_pipe->completion_mode = pipe->completion_mode;
-                    child_pipe->max_instances = pipe->max_instances;
-                    child_pipe->inbound_quota = pipe->inbound_quota;
-                    child_pipe->outbound_quota = pipe->outbound_quota;
-                    child_pipe->default_timeout = pipe->default_timeout;
-                }
-
-                if (!child->process.devices.store_at(src_handle, std::move(container)))
-                {
-                    c.win_emu.log.error("NtCreateUserProcess: child %u: failed to inherit device handle 0x%" PRIx64 "\n", record_id,
-                                        static_cast<uint64_t>(src_handle.bits));
-                }
+                inherited_pipes.push_back({
+                    .target_handle = src_handle,
+                    .name = pipe->name,
+                    .access = pipe->access,
+                    .pipe_type = pipe->pipe_type,
+                    .read_mode = pipe->read_mode,
+                    .completion_mode = pipe->completion_mode,
+                    .max_instances = pipe->max_instances,
+                    .inbound_quota = pipe->inbound_quota,
+                    .outbound_quota = pipe->outbound_quota,
+                    .default_timeout = pipe->default_timeout,
+                });
             }
 
-            child->start();
-
-            // The windows_emulator side never calls record_stop for a clean exit or a fail-fast crash
-            // (both just set process.exit_status and stop() directly - see handle_NtTerminateProcess and
-            // the STATUS_FAIL_FAST_EXCEPTION case in windows_emulator.cpp) - only the three syscall-
-            // dispatch fatal cases (unknown/unimplemented syscall, syscall exception) call record_stop,
-            // which is what leaves last_stop_reason() at its default `none` for everything else. So a
-            // fail-fast crash has to be excluded explicitly instead of being caught by last_stop_reason().
-            const auto succeeded = child->last_stop_reason() == stop_reason::none && child->process.exit_status.has_value() &&
-                                   *child->process.exit_status != STATUS_FAIL_FAST_EXCEPTION;
-            if (!succeeded)
+            child_process_outcome outcome{};
+            try
             {
-                if (child->process.exit_status == STATUS_FAIL_FAST_EXCEPTION)
-                {
-                    c.win_emu.log.error("NtCreateUserProcess: child %u crashed (fail-fast exception)\n", record_id);
-                }
-                else
-                {
-                    c.win_emu.log.error("NtCreateUserProcess: child %u failed: %s\n", record_id, child->last_stop_detail().c_str());
-                }
+                outcome = c.win_emu.callbacks.create_child_process(std::move(child_settings), std::move(inherited_pipes));
+            }
+            catch (const std::exception& e)
+            {
+                c.win_emu.log.error("NtCreateUserProcess: failed to spawn child %u: %s\n", record_id, e.what());
+                return STATUS_UNSUCCESSFUL;
+            }
+
+            if (!outcome.success)
+            {
+                c.win_emu.log.error("NtCreateUserProcess: child %u failed: %s\n", record_id, outcome.failure_detail.c_str());
                 return STATUS_UNSUCCESSFUL;
             }
 
             process_context::child_process_record record{};
             record.image_path = image_windows_path;
             record.pid = 0x1000 + 4 * record_id;
-            record.exit_status = *child->process.exit_status;
+            // The child now runs as an independent, real host OS process rather than being run to
+            // completion synchronously before this syscall returns - its real exit status isn't known
+            // yet, and nothing in this codebase queries it today (NtWaitForSingleObject/
+            // NtQueryInformationProcess on the minted handle remain unimplemented, same as before).
+            record.exit_status = STATUS_PENDING;
 
-            c.win_emu.log.log("NtCreateUserProcess: child %u exited with status 0x%08X\n", record_id,
-                              static_cast<uint32_t>(record.exit_status));
+            c.win_emu.log.log("NtCreateUserProcess: child %u started\n", record_id);
 
             if (process_handle)
             {
@@ -900,10 +874,10 @@ namespace sogen
                 info.SuccessState.OutputFlags = 0;
                 info.SuccessState.FileHandle = 0;
                 info.SuccessState.SectionHandle = 0;
-                info.SuccessState.UserProcessParametersNative = child->process.process_params64.value();
+                info.SuccessState.UserProcessParametersNative = outcome.process_parameters_address;
                 info.SuccessState.UserProcessParametersWow64 = 0;
                 info.SuccessState.CurrentParameterFlags = 0x6001;
-                info.SuccessState.PebAddressNative = child->process.peb64.value();
+                info.SuccessState.PebAddressNative = outcome.peb_address;
                 info.SuccessState.PebAddressWow64 = 0;
                 info.SuccessState.ManifestAddress = 0;
                 info.SuccessState.ManifestSize = 0;

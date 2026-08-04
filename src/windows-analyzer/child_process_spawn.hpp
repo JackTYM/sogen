@@ -1,0 +1,60 @@
+#pragma once
+
+#include <windows_emulator.hpp>
+#include <backend_selection.hpp>
+
+namespace sogen
+{
+    // Deliberately narrower than analysis_options (which is private to main.cpp) - only the fields
+    // that affect a spawned child's own emulation correctness or this investigation's own
+    // dialog-automation harness need to survive the real process boundary as reconstructed CLI
+    // flags. Everything else (application/command line/working directory/environment) travels over
+    // the IPC channel as a real application_settings instead.
+    struct child_process_spawn_config
+    {
+        std::filesystem::path executable_path{};
+        std::filesystem::path emulation_root{};
+        std::filesystem::path registry_path{};
+        std::vector<std::pair<windows_path, std::filesystem::path>> path_mappings{};
+        uint32_t vcpu_count{1};
+        std::optional<backend_type> backend{};
+        std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
+        bool silent{};
+        bool verbose_logging{};
+        bool buffer_stdout{};
+        bool concise_logging{};
+        bool skip_syscalls{};
+        bool reproducible{};
+        bool disable_instruction_precision{};
+    };
+
+    struct child_bootstrap_data
+    {
+        application_settings settings{};
+        std::vector<inherited_pipe_handle> inherited_pipes{};
+    };
+
+    // True on platforms where a child can genuinely be spawned as a separate host OS process
+    // running its own copy of this same binary (POSIX hosts only - not Windows, not Emscripten).
+    bool supports_child_process_spawning();
+
+    std::filesystem::path resolve_own_executable_path();
+
+    // Forks+execs config.executable_path as a child running in --child-ipc-fd mode, hands it
+    // settings/inherited_pipes over a real socketpair, and blocks (bounded by a timeout) until the
+    // child reports it has completed its own initial setup or failed. Does NOT wait for the child
+    // to exit - once it answers, it keeps running independently.
+    child_process_outcome spawn_child_process(const child_process_spawn_config& config, application_settings settings,
+                                              std::vector<inherited_pipe_handle> inherited_pipes);
+
+    // Used by a process running in --child-ipc-fd mode: reads the settings/inherited_pipes its
+    // parent sent right after spawning it.
+    std::optional<child_bootstrap_data> receive_child_bootstrap_data(int fd);
+
+    // Used by a process running in --child-ipc-fd mode, once it has completed its own initial
+    // setup (windows_emulator::setup_process_if_necessary), to answer its parent's blocked
+    // spawn_child_process call.
+    void send_child_ready(int fd, uint64_t peb_address, uint64_t process_parameters_address);
+    void send_child_failed(int fd, const std::string& detail);
+
+} // namespace sogen

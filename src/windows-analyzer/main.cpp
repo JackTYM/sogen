@@ -15,9 +15,13 @@
 #include "jsonl_reporter.hpp"
 #include "stdout_file_reporter.hpp"
 #include "tenet_tracer.hpp"
+#include "child_process_spawn.hpp"
+
+#include <devices/named_pipe.hpp>
 
 #include <utils/finally.hpp>
 #include <utils/interupt_handler.hpp>
+#include <utils/file_handle.hpp>
 
 #if defined(OS_EMSCRIPTEN) && !defined(SOGEN_EMSCRIPTEN_SUPPORT_NODEJS)
 #include <event_handler.hpp>
@@ -25,6 +29,7 @@
 
 #ifndef _WIN32
 #include <csignal>
+#include <unistd.h>
 #endif
 
 namespace sogen
@@ -75,6 +80,10 @@ namespace sogen
             std::filesystem::path emulation_root{};
             std::unordered_map<windows_path, std::filesystem::path> path_mappings{};
             utils::unordered_insensitive_u16string_map<std::u16string> environment{};
+            // Set only on a process spawned by spawn_child_process (NtCreateUserProcess) to carry the
+            // real inherited socketpair fd it should read its application_settings/inherited pipes
+            // from - not user-facing, hidden from --help (see its CLI registration below).
+            int child_ipc_fd{-1};
         };
 
         void split_and_insert(std::set<std::string, std::less<>>& container, const std::string_view str, const char splitter = ',')
@@ -539,6 +548,12 @@ namespace sogen
             return std::make_unique<windows_emulator>(create_configured_backend(options), settings);
         }
 
+        std::unique_ptr<windows_emulator> create_application_emulator(const analysis_options& options, application_settings app_settings)
+        {
+            const auto settings = create_emulator_settings(options);
+            return std::make_unique<windows_emulator>(create_configured_backend(options), std::move(app_settings), settings);
+        }
+
         std::unique_ptr<windows_emulator> create_application_emulator(const analysis_options& options,
                                                                       const std::span<const std::string_view> args)
         {
@@ -553,12 +568,17 @@ namespace sogen
                 .environment = options.environment,
             };
 
-            const auto settings = create_emulator_settings(options);
-            return std::make_unique<windows_emulator>(create_configured_backend(options), std::move(app_settings), settings);
+            return create_application_emulator(options, std::move(app_settings));
         }
 
-        std::unique_ptr<windows_emulator> setup_emulator(const analysis_options& options, const std::span<const std::string_view> args)
+        std::unique_ptr<windows_emulator> setup_emulator(const analysis_options& options, const std::span<const std::string_view> args,
+                                                         application_settings* child_app_settings)
         {
+            if (child_app_settings)
+            {
+                return create_application_emulator(options, std::move(*child_app_settings));
+            }
+
             if (!options.dump.empty())
             {
                 // load snapshot
@@ -605,8 +625,63 @@ namespace sogen
             return "?";
         }
 
+        child_process_spawn_config build_child_process_spawn_config(const analysis_options& options)
+        {
+            child_process_spawn_config config{};
+            config.executable_path = resolve_own_executable_path();
+            config.emulation_root = options.emulation_root;
+            config.registry_path = options.registry_path;
+            for (const auto& [source, target] : options.path_mappings)
+            {
+                config.path_mappings.emplace_back(source, target);
+            }
+            config.vcpu_count = options.vcpu_count;
+            config.backend = options.backend;
+            config.click_dialog_rules = options.click_dialog_rules;
+            config.silent = options.silent;
+            config.verbose_logging = options.verbose_logging;
+            config.buffer_stdout = options.buffer_stdout;
+            config.concise_logging = options.concise_logging;
+            config.skip_syscalls = options.skip_syscalls;
+            config.reproducible = options.reproducible;
+            config.disable_instruction_precision = options.disable_instruction_precision;
+            return config;
+        }
+
+        void recreate_inherited_pipe(windows_emulator& win_emu, const inherited_pipe_handle& inherited)
+        {
+            io_device_container container{u"NamedPipe", win_emu, io_device_creation_data{}};
+            if (auto* pipe = container.get_internal_device<named_pipe>())
+            {
+                pipe->name = inherited.name;
+                pipe->access = inherited.access;
+                pipe->pipe_type = inherited.pipe_type;
+                pipe->read_mode = inherited.read_mode;
+                pipe->completion_mode = inherited.completion_mode;
+                pipe->max_instances = inherited.max_instances;
+                pipe->inbound_quota = inherited.inbound_quota;
+                pipe->outbound_quota = inherited.outbound_quota;
+                pipe->default_timeout = inherited.default_timeout;
+            }
+
+            if (!win_emu.process.devices.store_at(inherited.target_handle, std::move(container)))
+            {
+                win_emu.log.error("Failed to inherit device handle 0x%" PRIx64 "\n", static_cast<uint64_t>(inherited.target_handle.bits));
+            }
+        }
+
         bool run(const analysis_options& options, const std::span<const std::string_view> args)
         {
+            std::optional<child_bootstrap_data> child_bootstrap{};
+            if (options.child_ipc_fd >= 0)
+            {
+                child_bootstrap = receive_child_bootstrap_data(options.child_ipc_fd);
+                if (!child_bootstrap)
+                {
+                    return false;
+                }
+            }
+
             analysis_context context{
                 .settings = &options,
                 .auto_break_before_call = options.break_call,
@@ -614,40 +689,58 @@ namespace sogen
             };
 
             const auto concise_logging = options.concise_logging;
-            const auto win_emu = setup_emulator(options, args);
+
+            const auto child_application = child_bootstrap ? child_bootstrap->settings.application : windows_path{};
+
+            std::unique_ptr<windows_emulator> win_emu{};
+            try
+            {
+                win_emu = setup_emulator(options, args, child_bootstrap ? &child_bootstrap->settings : nullptr);
+
+                if (child_bootstrap)
+                {
+#ifndef _WIN32
+                    win_emu->log.set_prefix("[pid " + std::to_string(::getpid()) + "] ");
+#endif
+
+                    utils::file_handle::pin_for_process_lifetime(win_emu->file_sys.translate(child_application));
+
+                    for (const auto& inherited : child_bootstrap->inherited_pipes)
+                    {
+                        recreate_inherited_pipe(*win_emu, inherited);
+                    }
+
+                    win_emu->setup_process_if_necessary();
+                }
+            }
+            catch (const std::exception& e)
+            {
+                if (child_bootstrap)
+                {
+                    send_child_failed(options.child_ipc_fd, e.what());
+                }
+                throw;
+            }
+
             context.win_emu = win_emu.get();
 
-            size_t child_emulator_count = 0;
-            std::vector<std::unique_ptr<analysis_context>> child_contexts{};
-            std::vector<std::unique_ptr<analysis_reporter>> child_reporters{};
+            child_process_spawn_config spawn_config{};
+            if (supports_child_process_spawning())
+            {
+                spawn_config = build_child_process_spawn_config(options);
+                win_emu->callbacks.create_child_process = [&spawn_config](application_settings settings,
+                                                                          std::vector<inherited_pipe_handle> pipes) {
+                    return spawn_child_process(spawn_config, std::move(settings), std::move(pipes));
+                };
+            }
 
-            std::function<std::unique_ptr<windows_emulator>(application_settings)> create_child_emulator{};
-            create_child_emulator = [&options, &child_emulator_count, &child_contexts, &child_reporters,
-                                     &create_child_emulator](application_settings settings) {
-                auto child = std::make_unique<windows_emulator>(create_configured_backend(options), std::move(settings),
-                                                                create_emulator_settings(options));
-                child->log.set_prefix("[child " + std::to_string(++child_emulator_count) + "] ");
-                child->callbacks.create_child_emulator = create_child_emulator;
-
-                auto& child_context = *child_contexts.emplace_back(std::make_unique<analysis_context>());
-                child_context.settings = &options;
-                child_context.win_emu = child.get();
-                child_context.click_dialog_rules = options.click_dialog_rules;
-
-                child_context.reporters.push_back(child_reporters
-                                                      .emplace_back(create_console_reporter(child->log,
-                                                                                            console_reporter_settings{
-                                                                                                .silent = options.silent,
-                                                                                                .buffer_stdout = options.buffer_stdout,
-                                                                                            }))
-                                                      .get());
-
-                register_analysis_callbacks(child_context);
-
-                return child;
-            };
-
-            win_emu->callbacks.create_child_emulator = create_child_emulator;
+            if (child_bootstrap)
+            {
+                send_child_ready(options.child_ipc_fd, win_emu->process.peb64.value(), win_emu->process.process_params64.value());
+#ifndef _WIN32
+                ::close(options.child_ipc_fd);
+#endif
+            }
 
             std::vector<std::unique_ptr<analysis_reporter>> reporters{};
             reporters.emplace_back(create_console_reporter(win_emu->log, console_reporter_settings{
@@ -967,6 +1060,11 @@ namespace sogen
                            "matches no rule is left alone rather than guessed at. Requires --vcpus 1")
                 ->type_name("TITLE ID")
                 ->allow_extra_args(false);
+
+            app.add_option("--child-ipc-fd", options.child_ipc_fd,
+                           "Internal use only: inherited socketpair fd to bootstrap this process as a "
+                           "spawn_child_process (NtCreateUserProcess) child")
+                ->group("");
 
             CLI11_PARSE(app, argc, argv);
 

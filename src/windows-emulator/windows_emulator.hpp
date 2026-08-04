@@ -25,6 +25,67 @@ namespace sogen
     class windows_emulator;
     struct application_settings;
 
+    // Describes one PsAttributeHandleList device handle (always a named pipe in practice, see
+    // handle_NtCreateUserProcess) the child must inherit, sent across the real process boundary so
+    // the child can reconstruct an equivalent named_pipe device in its own process_context before
+    // its guest code starts running. handle values are guest-facing numeric identities, meaningful
+    // independently in both processes - no translation is needed, only the descriptive fields.
+    struct inherited_pipe_handle
+    {
+        handle target_handle{};
+        std::u16string name{};
+        ACCESS_MASK access{};
+        ULONG pipe_type{};
+        ULONG read_mode{};
+        ULONG completion_mode{};
+        ULONG max_instances{};
+        ULONG inbound_quota{};
+        ULONG outbound_quota{};
+        LARGE_INTEGER default_timeout{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->target_handle);
+            buffer.write_string(std::u16string_view(this->name));
+            buffer.write(this->access);
+            buffer.write(this->pipe_type);
+            buffer.write(this->read_mode);
+            buffer.write(this->completion_mode);
+            buffer.write(this->max_instances);
+            buffer.write(this->inbound_quota);
+            buffer.write(this->outbound_quota);
+            buffer.write(this->default_timeout);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->target_handle);
+            buffer.read_string(this->name);
+            buffer.read(this->access);
+            buffer.read(this->pipe_type);
+            buffer.read(this->read_mode);
+            buffer.read(this->completion_mode);
+            buffer.read(this->max_instances);
+            buffer.read(this->inbound_quota);
+            buffer.read(this->outbound_quota);
+            buffer.read(this->default_timeout);
+        }
+    };
+
+    // Result of spawning a child process (NtCreateUserProcess) as a genuinely separate host OS
+    // process. success reports whether the child got far enough through its own startup
+    // (setup_process_if_necessary) to hand back real guest addresses for PS_CREATE_INFO -
+    // peb_address/process_parameters_address are the child's own PEB/RTL_USER_PROCESS_PARAMETERS
+    // guest virtual addresses, meaningless as host pointers since the child lives in its own
+    // address space entirely.
+    struct child_process_outcome
+    {
+        bool success{};
+        std::string failure_detail{};
+        uint64_t peb_address{};
+        uint64_t process_parameters_address{};
+    };
+
     struct emulator_callbacks : module_manager::callbacks, process_context::callbacks
     {
         template <typename T>
@@ -34,13 +95,13 @@ namespace sogen
 
         opt_func<void()> on_exception{};
 
-        // Constructs and returns a fully independent windows_emulator for a child process
-        // (NtCreateUserProcess), configured from the given application_settings but otherwise
-        // sharing the parent's backend type, emulator_settings, and interfaces - only the embedder
-        // (e.g. the analyzer's main.cpp) has that configuration, so child construction can't happen
-        // inside windows_emulator itself. Unset means the embedder doesn't support child processes;
-        // the handler reports STATUS_NOT_SUPPORTED in that case, matching prior behavior.
-        opt_func<std::unique_ptr<windows_emulator>(application_settings)> create_child_emulator{};
+        // Spawns a child process (NtCreateUserProcess) as a genuinely separate host OS process
+        // running its own copy of the analyzer, and blocks until that child has either completed
+        // its own initial setup (module mapping, PEB/process-parameters construction) or failed -
+        // only the embedder (e.g. the analyzer's main.cpp) knows how to re-invoke itself as a
+        // child, so this can't happen inside windows_emulator itself. Unset means the embedder
+        // doesn't support child processes; the handler reports STATUS_NOT_SUPPORTED in that case.
+        opt_func<child_process_outcome(application_settings, std::vector<inherited_pipe_handle>)> create_child_process{};
 
         opt_func<void(uint64_t address, uint64_t length, memory_permission)> on_memory_protect{};
         opt_func<void(uint64_t address, uint64_t length, memory_permission, bool commit)> on_memory_allocate{};

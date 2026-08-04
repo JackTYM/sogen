@@ -7,6 +7,8 @@
 #include <corecrt_io.h>
 #else
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #endif
 
 namespace sogen
@@ -163,6 +165,32 @@ namespace sogen
                 deferred_delete_ = delete_information{.filepath = std::move(name)};
             }
 
+            // Holds an advisory shared lock on `path` for the remaining lifetime of this host
+            // process (the fd is intentionally never closed - the kernel releases the lock on
+            // process exit). Used by a freshly-spawned child process (NtCreateUserProcess) to
+            // protect its own main image file, on the real host filesystem, against a concurrently
+            // running sibling/parent process's deferred-delete (see is_pinned_by_another_process) -
+            // real Windows only actually removes a delete-pending file once every handle across
+            // every process has closed; sogen's own per-process file_handle has no cross-process
+            // visibility of that on its own, so real advisory file locks fill that gap.
+            static void pin_for_process_lifetime(const std::filesystem::path& path)
+            {
+#ifndef OS_WINDOWS
+                const int fd = ::open(path.c_str(), O_RDONLY);
+                if (fd < 0)
+                {
+                    return;
+                }
+
+                if (::flock(fd, LOCK_SH | LOCK_NB) != 0)
+                {
+                    ::close(fd);
+                }
+#else
+                (void)path;
+#endif
+            }
+
             void serialize(utils::buffer_serializer& buffer) const
             {
                 buffer.write(this->tell());
@@ -189,6 +217,29 @@ namespace sogen
             std::optional<rename_information> deferred_rename_;
             std::optional<delete_information> deferred_delete_;
 
+            static bool is_pinned_by_another_process(const std::filesystem::path& path)
+            {
+#ifndef OS_WINDOWS
+                const int fd = ::open(path.c_str(), O_RDONLY);
+                if (fd < 0)
+                {
+                    return false;
+                }
+
+                const bool acquired = ::flock(fd, LOCK_EX | LOCK_NB) == 0;
+                if (acquired)
+                {
+                    ::flock(fd, LOCK_UN);
+                }
+
+                ::close(fd);
+                return !acquired;
+#else
+                (void)path;
+                return false;
+#endif
+            }
+
             void release()
             {
                 if (this->file_)
@@ -206,8 +257,11 @@ namespace sogen
 
                 if (this->deferred_delete_)
                 {
-                    std::error_code ec{};
-                    std::filesystem::remove(this->deferred_delete_->filepath, ec);
+                    if (!is_pinned_by_another_process(this->deferred_delete_->filepath))
+                    {
+                        std::error_code ec{};
+                        std::filesystem::remove(this->deferred_delete_->filepath, ec);
+                    }
                     this->deferred_delete_ = {};
                 }
             }

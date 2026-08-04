@@ -701,9 +701,9 @@ namespace sogen
         NTSTATUS handle_NtResumeThread(const syscall_context& c, const handle thread_handle,
                                        const emulator_object<ULONG> previous_suspend_count)
         {
-            // A child process created via NtCreateUserProcess already ran to completion (sogen runs
-            // children synchronously) and only has a pseudo thread handle - there's no emulator_thread
-            // to resume, but CreateProcessInternalW always resumes the (always-suspended) thread it got
+            // A child process created via NtCreateUserProcess runs as a separate host OS process and
+            // only has a pseudo thread handle in this process - there's no local emulator_thread to
+            // resume, but CreateProcessInternalW always resumes the (always-suspended) thread it got
             // back, so tolerate it here rather than let a real thread-not-found error surface.
             if (thread_handle.value.is_pseudo && thread_handle.value.type == handle_types::thread &&
                 c.proc.child_processes.contains(thread_handle.value.id))

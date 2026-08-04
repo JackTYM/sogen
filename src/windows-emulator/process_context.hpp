@@ -215,10 +215,11 @@ namespace sogen
             }
         };
 
-        // A child process created via NtCreateUserProcess and already run to completion (sogen runs
-        // children synchronously, see windows_emulator's create_child_emulator callback) - exit_status
-        // is the parent's only way to observe the outcome until NtWaitForSingleObject/
-        // NtQueryInformationProcess support for the minted process handle is added.
+        // A child process created via NtCreateUserProcess, running as a separate, independent host OS
+        // process (see windows_emulator's create_child_process callback) - exit_status is STATUS_PENDING
+        // for the lifetime of this record, since nothing observes a still-running child's real exit
+        // status yet (NtWaitForSingleObject/NtQueryInformationProcess support for the minted process
+        // handle remains unimplemented).
         struct child_process_record
         {
             windows_path image_path{};
