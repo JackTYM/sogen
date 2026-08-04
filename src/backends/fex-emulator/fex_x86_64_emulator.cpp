@@ -1406,7 +1406,7 @@ namespace sogen::fex
 
         void create_thread32();
         void ensure_callret_buffer(FEXCore::Core::CPUState& state);
-        void ensure_callret_stack(FEXCore::Core::CPUState& state);
+        void bind_callret_buffer(FEXCore::Core::CPUState& state, FEXCore::Core::InternalThreadState* thread);
         void restore_state_into(FEXCore::Core::InternalThreadState* thread, const std::byte* src);
         void mark_executable_range(uint64_t address, size_t size, memory_permission permissions);
         void invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread, uint64_t address,
@@ -1528,16 +1528,37 @@ namespace sogen::fex
         // The always-64-bit FEXCore::Context - see notify_process_bitness's doc comment. Per-vCPU
         // pointer to the shared, machine-wide context this vCPU's thread_ belongs to.
         FEXCore::Core::InternalThreadState* thread_ = nullptr;
-        FEXCore::Core::InternalThreadState* thread32_ = nullptr;
+
+        // Written exactly once (create_thread32, lazily, nullptr -> real pointer, never reassigned
+        // afterward) but read cross-thread by invalidate_code_range's fan-out (see context_of): every
+        // OTHER vCPU calls this->invalidate_code_range() on ITS OWN thread with `this` pointing at a
+        // foreign fex_vcpu, needing a safe snapshot of that foreign vcpu's thread32_/active_thread_
+        // without any lock (the writer can be in signal context). Atomic so that snapshot is well-
+        // defined instead of a data race on a plain pointer.
+        std::atomic<FEXCore::Core::InternalThreadState*> thread32_{nullptr};
 
         // Whichever context/thread is *currently executing* on this vCPU - starts out equal to
         // context_/thread_ (execution always begins on the 64-bit engine) and is flipped by the gate
-        // crossings; it is what every JIT-operation call site below actually uses. Atomic: the
-        // quantum-timer watchdog reads/writes active_thread_ cross-thread via stop()/
-        // request_thread_stop() (a missed stop is benign - the watchdog refires next quantum, the same
-        // window that existed under single-vCPU).
+        // crossings; it is what every JIT-operation call site below actually uses (all same-thread
+        // self-reads: every reader is this vCPU's own owning host thread, safe without
+        // synchronization). Atomic: the quantum-timer watchdog reads/writes active_thread_ cross-
+        // thread via stop()/request_thread_stop() (a missed stop is benign - the watchdog refires
+        // next quantum, the same window that existed under single-vCPU).
         FEXCore::Context::Context* active_context_ = nullptr;
         std::atomic<FEXCore::Core::InternalThreadState*> active_thread_{nullptr};
+
+        // Derives which context owns a given thread from thread identity, for the ONE place that
+        // legitimately reads a FOREIGN vcpu's state cross-thread: invalidate_code_range's fan-out
+        // (every vCPU calls this->invalidate_code_range() on ITS OWN thread with `this` pointing at
+        // every OTHER vcpu too). Reading that foreign vcpu's active_context_/active_thread_ as a pair
+        // is unsafe - they are two separately-written fields, so a reader could observe a half-
+        // updated combination while the owning thread is mid-gate-crossing in signal context, where
+        // no lock is available. thread_/thread32_ never change identity once set, so comparing against
+        // them is safe to do cross-thread with no synchronization beyond thread32_'s own atomicity -
+        // unlike active_context_, which must only ever be read by this vcpu's own thread. Defined out
+        // of line (like restore_state_into etc.) since fex_x86_64_emulator is only forward-declared
+        // here.
+        FEXCore::Context::Context* context_of(const FEXCore::Core::InternalThreadState* thread) const;
 
         FEXCore::Core::CPUState staged_state_{};
 
@@ -1610,15 +1631,15 @@ namespace sogen::fex
                     this->context_->DestroyThread(vcpu->thread_);
                     vcpu->thread_ = nullptr;
                 }
-                if (vcpu->thread32_ != nullptr && this->context32_)
+                if (auto* const t32 = vcpu->thread32_.load(); t32 != nullptr && this->context32_)
                 {
 #ifdef __APPLE__
                     if (g_hvf != nullptr)
                     {
-                        g_hvf->unmap(reinterpret_cast<uint64_t>(vcpu->thread32_), sizeof(FEXCore::Core::InternalThreadState));
+                        g_hvf->unmap(reinterpret_cast<uint64_t>(t32), sizeof(FEXCore::Core::InternalThreadState));
                     }
 #endif
-                    this->context32_->DestroyThread(vcpu->thread32_);
+                    this->context32_->DestroyThread(t32);
                     vcpu->thread32_ = nullptr;
                 }
             }
@@ -3473,7 +3494,7 @@ namespace sogen::fex
             // KiUserExceptionDispatcher -> wow64!Wow64PrepareForException) carries the real values.
             auto* const active = this->active_thread_.load();
             const FEXCore::Core::CPUState& gpr_state =
-                (this->emulator_.is_wow64_process_ && active == this->thread32_ && this->thread_ != nullptr &&
+                (this->emulator_.is_wow64_process_ && active == this->thread32_.load() && this->thread_ != nullptr &&
                  mapping.gpr.index >= detail::greg_r8 && mapping.gpr.index <= detail::greg_r8 + 7)
                     ? this->thread_->CurrentFrame->State
                     : state;
@@ -3600,13 +3621,13 @@ namespace sogen::fex
         // BOTH engines (active + parked). Snapshot both, tagged with which one is active, so a
         // thread switch preserves the parked excursion frame instead of leaking it to whichever
         // logical thread next runs the shared engine.
-        if (this->emulator_.is_wow64_process_ && this->thread32_ != nullptr && this->thread_ != nullptr)
+        if (auto* const t32 = this->thread32_.load(); this->emulator_.is_wow64_process_ && t32 != nullptr && this->thread_ != nullptr)
         {
             std::vector<std::byte> data(wow64_snapshot_size());
             const uint64_t active_is_32 = (this->active_context_ == this->emulator_.context32_.get()) ? 1 : 0;
             std::memcpy(data.data(), &active_is_32, sizeof(active_is_32));
             std::memcpy(data.data() + kWow64SnapshotHeader, &this->thread_->CurrentFrame->State, sizeof(FEXCore::Core::CPUState));
-            std::memcpy(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState), &this->thread32_->CurrentFrame->State,
+            std::memcpy(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState), &t32->CurrentFrame->State,
                         sizeof(FEXCore::Core::CPUState));
             return data;
         }
@@ -3635,36 +3656,7 @@ namespace sogen::fex
         state.L1Mask = l1_mask;
         state.segment_arrays[0] = segment_array_0;
         this->ensure_callret_buffer(state);
-        thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
-
-        // Repositioning callret_sp resurrects nothing by itself for the engine that owned this
-        // buffer last time - handle_callret_stack_fault/hvf_handle_callret_stack_fault reset the same
-        // way on overflow/underflow, and that is safe there because the entries below the reset point
-        // still belong to the same engine's code buffer, which FEXCore's own
-        // CheckCodeBufferUpdate/InvalidateThreadCachedCodeRange keep consistent with callret_sp.
-        // But this buffer is per LOGICAL THREAD (see ensure_callret_buffer), reused verbatim across
-        // whichever engine the thread migrates to. If a different engine owned it last, the bytes
-        // sitting at and below the reset point still pair a guest return address with a host pointer
-        // into THAT OTHER engine's code buffer - a pointer this engine's invalidation tracking knows
-        // nothing about. Because the reset point never moves, a later RET on the new engine popping
-        // through that exact slot only needs the guest address to match (likely for hot, frequently
-        // repeated call sites, since every reset funnels back to the same few slots) to jump to that
-        // stale, possibly freed or foreign-generation host pointer - observed as ExitFunctionLink
-        // "Record outside code buffer" bails and wild host jumps under --vcpus > 1. Zero the buffer
-        // whenever its owning engine actually changes, so a stale slot can only ever read back as an
-        // all-zero entry, which can never match a real guest RIP. A same-engine restore (by far the
-        // common case - every ordinary thread switch, not just a cross-vCPU migration) still just
-        // repositions the pointer, exactly as before.
-        {
-            const std::unique_lock lock(this->emulator_.tables_mutex_);
-            auto [owner_it, inserted] = this->emulator_.callret_buffer_owners_.try_emplace(state._pad1, thread);
-            if (!inserted && owner_it->second != thread)
-            {
-                std::memset(reinterpret_cast<void*>(state._pad1), 0, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
-                owner_it->second = thread;
-            }
-        }
-        state.callret_sp = state._pad1 + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4;
+        this->bind_callret_buffer(state, thread);
     }
 
     void fex_vcpu::restore_registers(const std::vector<std::byte>& register_data)
@@ -3679,18 +3671,18 @@ namespace sogen::fex
                 // emulator_thread::restore() calls refresh_execution_context (load_gdt) first.
                 this->create_thread();
             }
-            if (this->thread32_ == nullptr)
+            if (this->thread32_.load() == nullptr)
             {
                 this->create_thread32();
             }
             uint64_t active_is_32 = 0;
             std::memcpy(&active_is_32, register_data.data(), sizeof(active_is_32));
             this->restore_state_into(this->thread_, register_data.data() + kWow64SnapshotHeader);
-            this->restore_state_into(this->thread32_, register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
+            this->restore_state_into(this->thread32_.load(), register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
             if (active_is_32)
             {
                 this->active_context_ = this->emulator_.context32_.get();
-                this->active_thread_ = this->thread32_;
+                this->active_thread_ = this->thread32_.load();
             }
             else
             {
@@ -3717,17 +3709,34 @@ namespace sogen::fex
         const bool incoming_is_32bit = this->emulator_.is_wow64_process_ && incoming_cs == 0x23;
         if (incoming_is_32bit)
         {
-            if (this->thread32_ == nullptr)
+            if (this->thread32_.load() == nullptr)
             {
                 this->create_thread32();
             }
             this->active_context_ = this->emulator_.context32_.get();
-            this->active_thread_ = this->thread32_;
+            this->active_thread_ = this->thread32_.load();
         }
         else
         {
             this->active_context_ = this->emulator_.context_.get();
             this->active_thread_ = this->thread_;
+        }
+
+        // A legacy (single-CPUState) snapshot carries state for exactly one engine - restore_state_
+        // into below only ever touches the ACTIVE engine. Every emulator_thread starts life with a
+        // legacy-format snapshot (see process_context's default_register_set), so this path runs on
+        // every thread's first restore, not just an edge case. If the PEER engine still has a call-
+        // ret buffer bound from whatever logical thread last used this vCPU, leaving it bound lets
+        // two logical threads push/pop through the same buffer from two vCPUs at once - detach it and
+        // give it a fresh private buffer, exactly as if it belonged to a brand-new thread. A legacy
+        // snapshot never carries data for the peer engine, so there is nothing to lose here.
+        if (auto* const peer = incoming_is_32bit ? this->thread_ : this->thread32_.load(); peer != nullptr)
+        {
+            auto& peer_state = peer->CurrentFrame->State;
+            peer_state._pad1 = 0;
+            peer_state.callret_sp = 0;
+            this->ensure_callret_buffer(peer_state);
+            this->bind_callret_buffer(peer_state, peer);
         }
 
         this->restore_state_into(this->active_thread_.load(), register_data.data());
@@ -3916,7 +3925,8 @@ namespace sogen::fex
 
         // FEXCore's core does not set up the "call-ret stack" (its own dedicated shadow stack for
         // x86 CALL/RET emulation, SRA-mapped to callret_sp) - replicate the embedder glue here.
-        this->ensure_callret_stack(this->thread_->CurrentFrame->State);
+        this->ensure_callret_buffer(this->thread_->CurrentFrame->State);
+        this->bind_callret_buffer(this->thread_->CurrentFrame->State, this->thread_);
 
 #ifdef __APPLE__
         if (g_hvf != nullptr)
@@ -3939,7 +3949,7 @@ namespace sogen::fex
 
         // Build thread32_ here too, in this ordinary call context, rather than leaving it to be
         // lazily created on the process's first gate crossing (unsafe from a signal handler).
-        if (this->emulator_.is_wow64_process_ && this->thread32_ == nullptr)
+        if (this->emulator_.is_wow64_process_ && this->thread32_.load() == nullptr)
         {
             this->create_thread32();
         }
@@ -3947,13 +3957,14 @@ namespace sogen::fex
 
     void fex_vcpu::create_thread32()
     {
-        this->thread32_ = this->emulator_.context32_->CreateThread(0, 0, nullptr);
+        auto* const t32 = this->emulator_.context32_->CreateThread(0, 0, nullptr);
+        this->thread32_.store(t32, std::memory_order_release);
 
 #ifdef __APPLE__
         if (g_hvf != nullptr)
         {
-            g_hvf->map(reinterpret_cast<uint64_t>(this->thread32_), sizeof(FEXCore::Core::InternalThreadState), PROT_READ | PROT_WRITE);
-            this->hvf_shim_thread_pointers(*this->thread32_->CurrentFrame);
+            g_hvf->map(reinterpret_cast<uint64_t>(t32), sizeof(FEXCore::Core::InternalThreadState), PROT_READ | PROT_WRITE);
+            this->hvf_shim_thread_pointers(*t32->CurrentFrame);
         }
 #endif
 
@@ -3961,16 +3972,11 @@ namespace sogen::fex
         // segment table at the exact same physical GDT memory sogen's loader wrote for this vCPU's
         // context_ engine.
         const auto rebase = this->emulator_.rebase_for(this->emulator_.is_wow64_process_, this->gdt_base_);
-        this->thread32_->CurrentFrame->State.segment_arrays[0] =
+        t32->CurrentFrame->State.segment_arrays[0] =
             reinterpret_cast<FEXCore::Core::CPUState::gdt_segment*>(this->gdt_base_ + rebase);
 
-        // ensure_callret_stack writes into whatever this->active_thread_ currently is - temporarily
-        // point it at the new thread32_ engine so it gets its own private call-ret stack set up
-        // correctly, then restore whatever was active before.
-        auto* const previously_active_thread = this->active_thread_.load();
-        this->active_thread_ = this->thread32_;
-        this->ensure_callret_stack(this->thread32_->CurrentFrame->State);
-        this->active_thread_ = previously_active_thread;
+        this->ensure_callret_buffer(t32->CurrentFrame->State);
+        this->bind_callret_buffer(t32->CurrentFrame->State, t32);
     }
 
     void fex_vcpu::ensure_callret_buffer(FEXCore::Core::CPUState& state)
@@ -4011,10 +4017,34 @@ namespace sogen::fex
         }
     }
 
-    void fex_vcpu::ensure_callret_stack(FEXCore::Core::CPUState& state)
+    // Binds a (freshly allocated or already-existing) call-ret buffer to the given engine, updating
+    // the ownership map that tells whether the buffer belonged to a DIFFERENT logical thread last
+    // time an engine used it (see callret_buffer_owners_'s doc comment) - the buffer is per LOGICAL
+    // thread and reused verbatim across whichever engine that thread migrates to. If a different
+    // thread owned it last, the bytes sitting in it still pair a guest return address with a host
+    // pointer into that other thread's (possibly now-freed or wrong-generation) code buffer; a later
+    // RET popping through a matching slot would jump to that stale pointer - observed as
+    // ExitFunctionLink "Record outside code buffer" bails and wild host jumps under --vcpus > 1.
+    // Zero the buffer whenever its logical owner actually changes, so a stale slot can only ever read
+    // back as an all-zero entry, which can never match a real guest RIP. This is the ONLY place that
+    // writes callret_buffer_owners_ - every caller that binds a buffer to an engine (fresh thread
+    // creation, an ordinary same-generation restore, or a cross-vCPU migration) must go through here,
+    // or the map fails open and this exact memset gets silently skipped on a later real migration.
+    void fex_vcpu::bind_callret_buffer(FEXCore::Core::CPUState& state, FEXCore::Core::InternalThreadState* thread)
     {
-        this->ensure_callret_buffer(state);
-        this->active_thread_.load()->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
+        thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
+
+        {
+            const std::unique_lock lock(this->emulator_.tables_mutex_);
+            auto [owner_it, inserted] = this->emulator_.callret_buffer_owners_.try_emplace(state._pad1, thread);
+            if (!inserted && owner_it->second != thread)
+            {
+                std::memset(reinterpret_cast<void*>(state._pad1), 0, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+                owner_it->second = thread;
+            }
+        }
+
+        state.callret_sp = state._pad1 + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4;
     }
 
     void fex_vcpu::mark_executable_range(uint64_t address, size_t size, memory_permission permissions)
@@ -4051,21 +4081,49 @@ namespace sogen::fex
 #endif
     }
 
+    // Called on EVERY vCPU by invalidate_code_range_locked's fan-out, on whichever vCPU's own host
+    // thread happened to trigger the invalidation - so `this` here is very often a FOREIGN vcpu whose
+    // owning thread can be concurrently mid-gate-crossing in signal context. active_context_ is safe
+    // to read only from that owning thread; derive the context from active_thread_ (already atomic)
+    // via context_of() instead of reading active_context_ directly, so a torn (context, thread) pair
+    // can never be observed. See restore_state_into/bind_callret_buffer's doc comments for what a
+    // mispaired invalidation call does to the wrong engine's call/ret buffer.
+    FEXCore::Context::Context* fex_vcpu::context_of(const FEXCore::Core::InternalThreadState* thread) const
+    {
+        if (thread == nullptr)
+        {
+            return nullptr;
+        }
+        return (thread == this->thread32_.load(std::memory_order_acquire)) ? this->emulator_.context32_.get()
+                                                                            : this->emulator_.context_.get();
+    }
+
     void fex_vcpu::invalidate_code_range(uint64_t address, size_t size, bool include_inactive_contexts) const
     {
-        if (!this->active_context_)
+        auto* const active = this->active_thread_.load(std::memory_order_acquire);
+        auto* const ctx = this->context_of(active);
+        if (ctx == nullptr)
         {
             return;
         }
 
-        this->invalidate_code_range_in(this->active_context_, this->active_thread_.load(), address, size);
+        this->invalidate_code_range_in(ctx, active, address, size);
 
-        // A WoW64 process runs two independent FEXCore contexts - invalidating only active_context_
-        // leaves stale translations in the inactive one behind on an unmap.
-        if (include_inactive_contexts && this->emulator_.context32_.get() != nullptr &&
-            this->emulator_.context32_.get() != this->active_context_ && this->thread32_ != nullptr)
+        // A WoW64 process runs two independent FEXCore contexts - invalidating only the active one
+        // leaves stale translations in the inactive one behind on an unmap. Derived from thread
+        // identity rather than hardcoded to context32_/thread32_, so this correctly invalidates
+        // context_ when the 32-bit engine is the active one - the common case for a WoW64 guest,
+        // where the old hardcoded check silently never invalidated the inactive 64-bit engine at all.
+        if (!include_inactive_contexts)
         {
-            this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
+            return;
+        }
+
+        auto* const t32 = this->thread32_.load(std::memory_order_acquire);
+        auto* const other = (active == t32) ? this->thread_ : t32;
+        if (other != nullptr)
+        {
+            this->invalidate_code_range_in(this->context_of(other), other, address, size);
         }
     }
 
@@ -4952,11 +5010,12 @@ namespace sogen::fex
             return false;
         }
 
-        if (this->thread32_ == nullptr)
+        auto* const t32 = this->thread32_.load();
+        if (t32 == nullptr)
         {
             return false;
         }
-        auto& dst = this->thread32_->CurrentFrame->State;
+        auto& dst = t32->CurrentFrame->State;
 
         marshal_architectural_state(src, dst);
 
@@ -5014,7 +5073,7 @@ namespace sogen::fex
         state64.gregs[15] = (gate.address & ~static_cast<uint64_t>(0xFFFF)) + 0x36d0;
 
         this->active_context_ = this->emulator_.context32_.get();
-        this->active_thread_ = this->thread32_;
+        this->active_thread_ = t32;
         return true;
     }
 
@@ -5113,12 +5172,12 @@ namespace sogen::fex
         }
         else
         {
-            if (this->thread32_ == nullptr)
+            dst_thread = this->thread32_.load();
+            if (dst_thread == nullptr)
             {
                 return false;
             }
             dst_context = this->emulator_.context32_.get();
-            dst_thread = this->thread32_;
         }
 
         auto& dst = dst_thread->CurrentFrame->State;
