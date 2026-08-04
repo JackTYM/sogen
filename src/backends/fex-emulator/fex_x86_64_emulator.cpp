@@ -4676,6 +4676,25 @@ namespace sogen::fex
             return true;
         }
 
+        // The non-HVF signal path and the HVF stage-1 (EC 0x25) path both check for a call/ret
+        // shadow-stack over/underflow before falling through to general fault handling - this stage-2
+        // path never did. A stage-2 abort is exactly what a VirtualDontNeed on the call/ret buffer
+        // produces here: on Apple it's a real mmap(MAP_FIXED) followed by the PagesReplaced hook,
+        // which does hv_vm_unmap then hv_vm_map on just that range (see hvf_vm::refresh_backing) -
+        // between those two calls the buffer genuinely has no stage-2 mapping, and a vCPU inside
+        // hv_vcpu_run that touches callret_sp in that window takes exactly this abort. Unlike the
+        // stage-1 path, do NOT advance pc here: a stage-2 abort doesn't advance elr on its own, and
+        // the faulting ldp/stp is meant to be re-executed against the reset callret_sp - which is
+        // FEXCore's own designed recovery for this class of fault (see the doc comment on
+        // hvf_handle_callret_stack_fault and BranchOps.cpp's shadow-stack comment: "an exception
+        // handler is expected to be installed by the frontend, to reset the shadow stack ... on
+        // overflow/underflow" - sogen is that frontend, and this stage-2 path is the one place that
+        // requirement wasn't met).
+        if (is_data && this->hvf_handle_callret_stack_fault(vcpu, va))
+        {
+            return true;
+        }
+
         // Anything else reaching stage-2 has a valid stage-1 entry but revoked backing permissions
         // (e.g. a guest write to the read-only-mapped real MMIO backing) - same dispatch as a
         // permission fault. The syndrome's WnR bit (ISS[6]) classifies the access exactly, unlike
