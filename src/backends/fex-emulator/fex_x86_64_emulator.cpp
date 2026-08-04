@@ -3171,7 +3171,7 @@ namespace sogen::fex
         // --[ state ]--------------------------------------------------------------------------------
 
         // Protects every machine-wide table below (regions_, mmio_regions_, gate_crossings_, the
-        // Apple host-page shadow tables, callret_buffers_, callret_buffer_owners_, hook maps) against
+        // Apple host-page shadow tables, callret_buffers_, hook maps) against
         // concurrent access from multiple vCPUs' host threads. Never held across a call into guest-
         // execution code (JIT dispatch/ExecuteThread) or across a hook callback that re-enters the
         // kernel lock - only ever taken to protect a bounded, non-reentrant table mutation/read. A
@@ -3199,11 +3199,6 @@ namespace sogen::fex
         std::map<uint64_t, mapped_region> regions_;
         std::vector<mmio_region> mmio_regions_;
         std::vector<std::pair<void*, size_t>> callret_buffers_;
-        // Keyed by a buffer's base address (state._pad1): which engine's InternalThreadState last
-        // owned it. See restore_state_into's doc comment - the buffer is per logical thread, reused
-        // verbatim across whichever engine that thread migrates to, so this is what lets a migration
-        // be told apart from an ordinary same-engine restore.
-        std::unordered_map<uint64_t, FEXCore::Core::InternalThreadState*> callret_buffer_owners_;
         std::vector<gate_crossing> gate_crossings_;
 
 #ifdef __APPLE__
@@ -3613,6 +3608,14 @@ namespace sogen::fex
         // BOTH engines (active + parked). Snapshot both, tagged with which one is active, so a
         // thread switch preserves the parked excursion frame instead of leaking it to whichever
         // logical thread next runs the shared engine.
+        // _pad1/callret_sp identify this engine SLOT's own private call/ret shadow-stack buffer (see
+        // restore_state_into's doc comment) - guest-invisible JIT bookkeeping, not architectural
+        // state, and never meaningful once detached from the engine that owns the buffer. Zeroing them
+        // in the emitted snapshot (never in the live state read from) makes the "a slot's own buffer
+        // is never adopted from a restored snapshot" invariant structural rather than positional: no
+        // future restore path can reintroduce buffer sharing by forgetting to preserve, because there
+        // is nothing left to preserve against. This also means a save-stated snapshot never embeds a
+        // raw host pointer.
         if (this->emulator_.is_wow64_process_ && this->thread32_ != nullptr && this->thread_ != nullptr)
         {
             std::vector<std::byte> data(wow64_snapshot_size());
@@ -3621,12 +3624,22 @@ namespace sogen::fex
             std::memcpy(data.data() + kWow64SnapshotHeader, &this->thread_->CurrentFrame->State, sizeof(FEXCore::Core::CPUState));
             std::memcpy(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState), &this->thread32_->CurrentFrame->State,
                         sizeof(FEXCore::Core::CPUState));
+            auto* const state64 = reinterpret_cast<FEXCore::Core::CPUState*>(data.data() + kWow64SnapshotHeader);
+            auto* const state32 =
+                reinterpret_cast<FEXCore::Core::CPUState*>(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
+            state64->_pad1 = 0;
+            state64->callret_sp = 0;
+            state32->_pad1 = 0;
+            state32->callret_sp = 0;
             return data;
         }
 
         const auto& state = this->cpu_state();
         std::vector<std::byte> data(sizeof(FEXCore::Core::CPUState));
         std::memcpy(data.data(), &state, sizeof(state));
+        auto* const emitted = reinterpret_cast<FEXCore::Core::CPUState*>(data.data());
+        emitted->_pad1 = 0;
+        emitted->callret_sp = 0;
         return data;
     }
 
@@ -3643,40 +3656,23 @@ namespace sogen::fex
         // access (TEB base, stack segment base) for the rest of this thread's life on this vCPU.
         // Preserve it exactly like L1Pointer/L1Mask below.
         const auto segment_array_0 = state.segment_arrays[0];
+        // _pad1/callret_sp: this engine SLOT's own call/ret shadow-stack buffer, per
+        // fex_x86_64_marshal.hpp's doc comment ("each FEXCore thread owns its own call-ret shadow
+        // stack ... copying them across would point the destination engine's bookkeeping at the
+        // source engine's private buffers, corrupting both engines' independent state the next time
+        // either runs"). A migrating thread's saved snapshot carries whichever engine it last ran on's
+        // buffer address - preserve this slot's own, exactly like segment_arrays[0] above, instead of
+        // adopting a foreign one. ensure_callret_buffer's "allocate iff zero" check means a slot's
+        // _pad1 is zero exactly once (at slot creation) and non-zero forever after, so this never
+        // discards anything: every subsequent restore just keeps repositioning the same pointer.
+        const auto callret_base = state._pad1;
         std::memcpy(&state, src, sizeof(FEXCore::Core::CPUState));
         state.L1Pointer = l1_pointer;
         state.L1Mask = l1_mask;
         state.segment_arrays[0] = segment_array_0;
+        state._pad1 = callret_base;
         this->ensure_callret_buffer(state);
         thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
-
-        // Repositioning callret_sp resurrects nothing by itself for the engine that owned this
-        // buffer last time - handle_callret_stack_fault/hvf_handle_callret_stack_fault reset the same
-        // way on overflow/underflow, and that is safe there because the entries below the reset point
-        // still belong to the same engine's code buffer, which FEXCore's own
-        // CheckCodeBufferUpdate/InvalidateThreadCachedCodeRange keep consistent with callret_sp.
-        // But this buffer is per LOGICAL THREAD (see ensure_callret_buffer), reused verbatim across
-        // whichever engine the thread migrates to. If a different engine owned it last, the bytes
-        // sitting at and below the reset point still pair a guest return address with a host pointer
-        // into THAT OTHER engine's code buffer - a pointer this engine's invalidation tracking knows
-        // nothing about. Because the reset point never moves, a later RET on the new engine popping
-        // through that exact slot only needs the guest address to match (likely for hot, frequently
-        // repeated call sites, since every reset funnels back to the same few slots) to jump to that
-        // stale, possibly freed or foreign-generation host pointer - observed as ExitFunctionLink
-        // "Record outside code buffer" bails and wild host jumps under --vcpus > 1. Zero the buffer
-        // whenever its owning engine actually changes, so a stale slot can only ever read back as an
-        // all-zero entry, which can never match a real guest RIP. A same-engine restore (by far the
-        // common case - every ordinary thread switch, not just a cross-vCPU migration) still just
-        // repositions the pointer, exactly as before.
-        {
-            const std::unique_lock lock(this->emulator_.tables_mutex_);
-            auto [owner_it, inserted] = this->emulator_.callret_buffer_owners_.try_emplace(state._pad1, thread);
-            if (!inserted && owner_it->second != thread)
-            {
-                std::memset(reinterpret_cast<void*>(state._pad1), 0, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
-                owner_it->second = thread;
-            }
-        }
         state.callret_sp = state._pad1 + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4;
     }
 
@@ -3721,8 +3717,18 @@ namespace sogen::fex
         if (this->active_thread_.load() == nullptr)
         {
             // No thread yet: writing into staged_state_, which create_thread() will seed the
-            // real thread from.
+            // real thread from. Preserve _pad1/callret_sp exactly like restore_state_into does for a
+            // live engine: create_thread's ContextImpl::CreateThread(rip, rsp, &staged_state_) memcpys
+            // this whole struct verbatim into the new thread's CurrentFrame->State, so a non-zero
+            // _pad1 here would make ensure_callret_buffer skip allocating that new thread's own
+            // buffer and silently adopt whatever engine this snapshot's _pad1 last belonged to.
+            // staged_state_ never itself owns a buffer (ensure_callret_buffer only ever runs on a
+            // live engine's own CurrentFrame->State), so this keeps it pinned at zero.
+            const auto staged_callret_base = this->staged_state_._pad1;
+            const auto staged_callret_sp = this->staged_state_.callret_sp;
             std::memcpy(&this->staged_state_, register_data.data(), sizeof(FEXCore::Core::CPUState));
+            this->staged_state_._pad1 = staged_callret_base;
+            this->staged_state_.callret_sp = staged_callret_sp;
             return;
         }
 
@@ -4071,57 +4077,17 @@ namespace sogen::fex
             return;
         }
 
-        // invalidate_code_range_locked's fan-out calls this on EVERY vCPU, not just whichever one
-        // triggered the underlying memory operation - so "active_thread_" here is not necessarily this
-        // vCPU's own trigger, and its call/ret buffer ownership deserves the same check applied to the
-        // inactive engine below, for the same reason (see that branch's doc comment): a currently-
-        // active engine's buffer should always be self-owned (bind_callret_buffer keeps ownership in
-        // sync on every restore), but a stale reference surviving from before this vCPU's OWN thread
-        // last migrated away is not ruled out by construction, and the cost of checking is one shared-
-        // lock map lookup.
-        {
-            auto* const active = this->active_thread_.load();
-            bool owned_by_this_engine = true;
-            {
-                const std::shared_lock lock(this->emulator_.tables_mutex_);
-                const auto owner_it = this->emulator_.callret_buffer_owners_.find(active->CurrentFrame->State._pad1);
-                owned_by_this_engine = (owner_it == this->emulator_.callret_buffer_owners_.end() || owner_it->second == active);
-            }
-            if (owned_by_this_engine)
-            {
-                this->invalidate_code_range_in(this->active_context_, active, address, size);
-            }
-        }
+        this->invalidate_code_range_in(this->active_context_, this->active_thread_.load(), address, size);
 
         // A WoW64 process runs two independent FEXCore contexts - invalidating only active_context_
-        // leaves stale translations in the inactive one behind on an unmap.
+        // leaves stale translations in the inactive one behind on an unmap. Safe unconditionally now
+        // that every engine SLOT owns its own permanent call/ret buffer (see restore_state_into's doc
+        // comment) rather than sharing one per logical thread across vCPU migrations - there is no
+        // "stale, still-live-elsewhere buffer" case left to guard against.
         if (include_inactive_contexts && this->emulator_.context32_.get() != nullptr &&
             this->emulator_.context32_.get() != this->active_context_ && this->thread32_ != nullptr)
         {
-            // The inactive engine's call/ret buffer can be STALE: it is owned per LOGICAL THREAD and
-            // travels with a migrating thread across vCPUs (see restore_state_into's doc comment), so
-            // when a thread migrates away, the engine slot it leaves behind keeps pointing at the same
-            // physical buffer the migrated thread is now actively using elsewhere. FEXCore's own
-            // InvalidateThreadCachedCodeRange unconditionally VirtualDontNeed's CallRetStackBase
-            // whenever the invalidated range overlaps that engine's OWN cached code (its own comment:
-            // "may cause access violations... handled by the frontend" - sogen is that frontend, and
-            // this is the case it needs to handle) - catastrophic if this buffer is actually still
-            // live under a different, currently-executing thread elsewhere. Skip the whole
-            // invalidation for a definitively-abandoned engine (current owner is a different thread):
-            // nothing will ever execute through an abandoned engine slot again until some thread is
-            // freshly restored into it, which re-validates translations from scratch regardless.
-            bool owned_by_this_engine = true;
-            {
-                const std::shared_lock lock(this->emulator_.tables_mutex_);
-                const auto owner_it =
-                    this->emulator_.callret_buffer_owners_.find(this->thread32_->CurrentFrame->State._pad1);
-                owned_by_this_engine =
-                    (owner_it == this->emulator_.callret_buffer_owners_.end() || owner_it->second == this->thread32_);
-            }
-            if (owned_by_this_engine)
-            {
-                this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
-            }
+            this->invalidate_code_range_in(this->emulator_.context32_.get(), this->thread32_, address, size);
         }
     }
 
