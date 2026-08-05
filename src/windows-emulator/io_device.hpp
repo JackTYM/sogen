@@ -2,6 +2,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <arch_emulator.hpp>
 #include <serialization.hpp>
@@ -94,6 +95,16 @@ namespace sogen
         return status;
     }
 
+    // Mirrors FILE_COMPLETION_INFORMATION (the payload of NtSetInformationFile's FileCompletionInformation
+    // class, the syscall behind CreateIoCompletionPort for an already-open handle): which I/O completion
+    // port this device's completed requests should be posted to, and the caller-chosen key returned to
+    // GetQueuedCompletionStatus alongside them.
+    struct completion_port_association
+    {
+        handle port{};
+        uint64_t key{};
+    };
+
     struct io_device : ref_counted_object
     {
         io_device() = default;
@@ -118,7 +129,20 @@ namespace sogen
             (void)win_emu;
         }
 
+        virtual void associate_completion_port(const handle port, const uint64_t key)
+        {
+            this->completion_port_ = completion_port_association{port, key};
+        }
+
+        virtual std::optional<completion_port_association> get_completion_port() const
+        {
+            return this->completion_port_;
+        }
+
         NTSTATUS execute_ioctl(windows_emulator& win_emu, const io_device_context& c);
+
+      private:
+        std::optional<completion_port_association> completion_port_{};
     };
 
     struct stateless_device : io_device
@@ -171,6 +195,18 @@ namespace sogen
 
         void work(windows_emulator& win_emu) override;
         NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override;
+
+        void associate_completion_port(handle port, uint64_t key) override
+        {
+            this->assert_validity();
+            this->device_->associate_completion_port(port, key);
+        }
+
+        std::optional<completion_port_association> get_completion_port() const override
+        {
+            this->assert_validity();
+            return this->device_->get_completion_port();
+        }
 
         void serialize_object(utils::buffer_serializer& buffer) const override;
         void deserialize_object(utils::buffer_deserializer& buffer) override;

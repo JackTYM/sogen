@@ -160,6 +160,27 @@ namespace sogen
             }
         }
 
+        // A handle associated with an I/O completion port (NtSetInformationFile's FileCompletionInformation,
+        // i.e. CreateIoCompletionPort on an already-open handle) posts a completion packet for every finished
+        // request on real Windows, independent of the Event parameter above and regardless of whether the
+        // request completed synchronously - callers built around GetQueuedCompletionStatus (e.g. any IOCP-based
+        // network server) never poll the event or the synchronous return value at all.
+        if (result != STATUS_PENDING)
+        {
+            if (const auto association = this->get_completion_port())
+            {
+                if (auto* completion = win_emu.process.io_completions.get(association->port))
+                {
+                    io_completion_message message{};
+                    message.key_context = association->key;
+                    message.apc_context = c.apc_context;
+                    message.io_status_block.Status = result;
+                    message.io_status_block.Information = c.io_status_block ? c.io_status_block.read().Information : 0;
+                    completion->enqueue(message);
+                }
+            }
+        }
+
         return result;
     }
 
