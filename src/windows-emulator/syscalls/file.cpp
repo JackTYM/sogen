@@ -121,6 +121,41 @@ namespace sogen
                     return {fh{}, STATUS_NOT_SUPPORTED};
                 }
             }
+
+            NTSTATUS perform_file_rename(const syscall_context& c, file& f, const uint64_t root_directory, std::u16string new_name,
+                                         const bool replace_if_exists)
+            {
+                if (root_directory)
+                {
+                    const auto* root = c.proc.files.get(root_directory);
+                    if (!root)
+                    {
+                        return STATUS_INVALID_HANDLE;
+                    }
+
+                    const auto has_separator = root->name.ends_with(u"\\") || root->name.ends_with(u"/");
+                    new_name = root->name + (has_separator ? u"" : u"\\") + new_name;
+                }
+
+                c.win_emu.log.warn("--> File rename requested: %s --> %s\n", u16_to_u8(f.name).c_str(), u16_to_u8(new_name).c_str());
+
+                std::error_code ec{};
+                const bool file_exists = std::filesystem::exists(c.win_emu.file_sys.translate(new_name), ec);
+
+                if (ec)
+                {
+                    return STATUS_ACCESS_DENIED;
+                }
+
+                if (!replace_if_exists && file_exists)
+                {
+                    return STATUS_OBJECT_NAME_EXISTS;
+                }
+
+                f.handle.defer_rename(c.win_emu.file_sys.translate(f.name), c.win_emu.file_sys.translate(new_name));
+
+                return STATUS_SUCCESS;
+            }
         }
 
         NTSTATUS handle_NtSetInformationFile(const syscall_context& c, const handle file_handle,
@@ -154,36 +189,22 @@ namespace sogen
                 auto new_name =
                     read_string<char16_t>(c.emu, file_information + offsetof(FILE_RENAME_INFORMATION, FileName), info.FileNameLength / 2);
 
-                if (info.RootDirectory)
-                {
-                    const auto* root = c.proc.files.get(info.RootDirectory);
-                    if (!root)
-                    {
-                        return STATUS_INVALID_HANDLE;
-                    }
+                return perform_file_rename(c, *f, info.RootDirectory, std::move(new_name), info.ReplaceIfExists != 0);
+            }
 
-                    const auto has_separator = root->name.ends_with(u"\\") || root->name.ends_with(u"/");
-                    new_name = root->name + (has_separator ? u"" : u"\\") + new_name;
+            if (info_class == FileRenameInformationEx)
+            {
+                if (length < sizeof(FILE_RENAME_INFORMATION_EX))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
                 }
 
-                c.win_emu.log.warn("--> File rename requested: %s --> %s\n", u16_to_u8(f->name).c_str(), u16_to_u8(new_name).c_str());
+                const auto info = c.emu.read_memory<FILE_RENAME_INFORMATION_EX>(file_information);
+                auto new_name = read_string<char16_t>(c.emu, file_information + offsetof(FILE_RENAME_INFORMATION_EX, FileName),
+                                                      info.FileNameLength / 2);
 
-                std::error_code ec{};
-                bool file_exists = std::filesystem::exists(c.win_emu.file_sys.translate(new_name), ec);
-
-                if (ec)
-                {
-                    return STATUS_ACCESS_DENIED;
-                }
-
-                if (!info.ReplaceIfExists && file_exists)
-                {
-                    return STATUS_OBJECT_NAME_EXISTS;
-                }
-
-                f->handle.defer_rename(c.win_emu.file_sys.translate(f->name), c.win_emu.file_sys.translate(new_name));
-
-                return STATUS_SUCCESS;
+                return perform_file_rename(c, *f, info.RootDirectory, std::move(new_name),
+                                           (info.Flags & FILE_RENAME_REPLACE_IF_EXISTS) != 0);
             }
 
             if (info_class == FileDispositionInformation)

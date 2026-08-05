@@ -5823,6 +5823,11 @@ namespace sogen
             return 500;
         }
 
+        uint32_t handle_NtUserGetCaretBlinkTime()
+        {
+            return 530;
+        }
+
         BOOL handle_NtUserModifyWindowTouchCapability()
         {
             return TRUE;

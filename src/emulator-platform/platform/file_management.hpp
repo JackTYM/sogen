@@ -580,6 +580,16 @@ namespace sogen
         char16_t FileName[1];
     } FILE_RENAME_INFORMATION, *PFILE_RENAME_INFORMATION;
 
+    constexpr ULONG FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001;
+
+    typedef struct _FILE_RENAME_INFORMATION_EX
+    {
+        ULONG Flags;
+        EMULATOR_CAST(uint64_t, HANDLE) RootDirectory;
+        ULONG FileNameLength;
+        char16_t FileName[1];
+    } FILE_RENAME_INFORMATION_EX, *PFILE_RENAME_INFORMATION_EX;
+
     typedef struct _FILE_DISPOSITION_INFORMATION
     {
         BOOLEAN DeleteFile;
