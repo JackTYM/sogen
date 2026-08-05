@@ -41,6 +41,7 @@ namespace sogen
 
           private:
             socket socket_{};
+            bool listening_{false};
         };
     }
 
