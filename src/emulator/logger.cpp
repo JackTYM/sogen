@@ -1,7 +1,15 @@
-#include "std_include.hpp"
 #include "logger.hpp"
 
 #include <utils/finally.hpp>
+#include <utils/win.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cstdarg>
+#include <cstdio>
+#include <span>
+#include <string>
+#include <string_view>
 
 namespace sogen
 {
@@ -127,7 +135,7 @@ namespace sogen
         }
     }
 
-#ifdef OS_WINDOWS
+#ifdef _WIN32
     logger::logger()
     {
         old_cp = GetConsoleOutputCP();
@@ -142,12 +150,14 @@ namespace sogen
 
     void logger::print_message(const color c, const std::string_view message, const bool force) const
     {
+        const std::scoped_lock lock(this->print_mutex_);
+
         // Sinks observe all log activity, regardless of disable_output_. That lets
         // consumers capture a full structured log even when they've silenced the
         // terminal (e.g. --silent, or a Python wrapper capturing via callback).
         this->sink_(c, message);
 
-        if (!force && this->disable_output_)
+        if (this->silent_ || (!force && this->disable_output_))
         {
             return;
         }

@@ -62,6 +62,8 @@ namespace sogen::kvm
         constexpr uint32_t vp_index = 0;
         constexpr uint32_t breakpoint_interrupt = 3;
         constexpr int invalid_opcode_interrupt = 6;
+        constexpr std::byte int3_opcode{0xCC};
+        constexpr uint64_t syscall_instruction_size = 2;
 
         constexpr uintptr_t cache_line_size = 64;
         constexpr uint64_t guest_physical_page_base = 0x0000000100000000ull;
@@ -117,6 +119,7 @@ namespace sogen::kvm
         constexpr uint64_t exception_stub_stride = 8;
         constexpr uint16_t kernel_code_selector = 0x08; // 64-bit ring-0 code segment in the guest GDT
         constexpr uint16_t task_state_selector = 0x38;
+        constexpr uint16_t tss_descriptor_limit = 0x67;
         constexpr uint8_t exception_ist_index = 1;
 
         bool exception_has_error_code(const uint32_t vector)
@@ -151,6 +154,59 @@ namespace sogen::kvm
                 throw_errno(action);
             }
         }
+
+#if defined(KVM_SET_GUEST_DEBUG) && defined(KVM_GUESTDBG_ENABLE) && defined(KVM_GUESTDBG_SINGLESTEP)
+        void enable_guest_single_step(const int vcpu_fd)
+        {
+            kvm_guest_debug debug{};
+            debug.control = KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP;
+            check_ioctl_result(::ioctl(vcpu_fd, KVM_SET_GUEST_DEBUG, &debug), "KVM_SET_GUEST_DEBUG");
+        }
+
+        void clear_guest_debug_control_noexcept(const int vcpu_fd) noexcept
+        {
+            kvm_guest_debug debug{};
+            (void)::ioctl(vcpu_fd, KVM_SET_GUEST_DEBUG, &debug);
+        }
+#else
+        void enable_guest_single_step(const int)
+        {
+            throw std::runtime_error("KVM backend single-step requires KVM guest debug support");
+        }
+
+        void clear_guest_debug_control_noexcept(const int) noexcept
+        {
+        }
+#endif
+
+        class scoped_guest_debug
+        {
+          public:
+            scoped_guest_debug(const int vcpu_fd, const bool enable)
+                : vcpu_fd_(vcpu_fd),
+                  active_(enable)
+            {
+                if (this->active_)
+                {
+                    enable_guest_single_step(this->vcpu_fd_);
+                }
+            }
+
+            scoped_guest_debug(const scoped_guest_debug&) = delete;
+            scoped_guest_debug& operator=(const scoped_guest_debug&) = delete;
+
+            ~scoped_guest_debug()
+            {
+                if (this->active_)
+                {
+                    clear_guest_debug_control_noexcept(this->vcpu_fd_);
+                }
+            }
+
+          private:
+            int vcpu_fd_ = -1;
+            bool active_ = false;
+        };
 
         // No-op handler whose only purpose is to interrupt a blocking KVM_RUN ioctl so the
         // run loop can observe a pending stop request. Installed without SA_RESTART so the
@@ -389,10 +445,13 @@ namespace sogen::kvm
             }
             void start(size_t count) override
             {
-                if (count != 0)
+                if (count > 1)
                 {
-                    throw std::runtime_error("KVM backend does not support exact instruction counts yet");
+                    throw std::runtime_error("KVM backend does not support exact instruction counts greater than one yet");
                 }
+
+                const bool single_step = count == 1;
+                const scoped_guest_debug guest_debug(this->vcpu_fd_.get(), single_step);
 
                 this->stop_requested_ = false;
                 this->vcpu_thread_.store(pthread_self(), std::memory_order_release);
@@ -400,12 +459,20 @@ namespace sogen::kvm
 
                 while (!this->stop_requested_)
                 {
+                    const auto step_rip = this->read_instruction_pointer();
                     if (this->handle_pre_run_instruction())
                     {
+                        this->run_memory_execution_hooks(step_rip);
+                        if (single_step)
+                        {
+                            return;
+                        }
+
                         continue;
                     }
 
                     this->refresh_mmio_pages();
+                    this->flush_dirty_mappings();
                     this->flush_register_cache();
 
                     this->run_active_ = true;
@@ -434,8 +501,14 @@ namespace sogen::kvm
                         const auto rip = this->read_instruction_pointer();
                         if (this->syscall_hook_ && rip == (this->syscall_hook_page_ + 1))
                         {
-                            if (this->handle_syscall_halt())
+                            if (const auto executed_rip = this->handle_syscall_halt())
                             {
+                                if (single_step)
+                                {
+                                    this->run_memory_execution_hooks(*executed_rip);
+                                    return;
+                                }
+
                                 continue;
                             }
 
@@ -470,6 +543,12 @@ namespace sogen::kvm
 
                         return;
                     case KVM_EXIT_DEBUG:
+                        if (single_step)
+                        {
+                            this->run_memory_execution_hooks(step_rip);
+                            return;
+                        }
+
                         if (this->handle_debug_exit())
                         {
                             continue;
@@ -860,6 +939,13 @@ namespace sogen::kvm
                 return true;
             }
 
+            bool supports_multiple_vcpus() const override
+            {
+                // KVM could support multiple vCPUs per VM, but the backend is
+                // single-vCPU for now (docs/multi-vcpu-design.md, Phase 5).
+                return false;
+            }
+
             std::string get_name() const override
             {
                 return "Linux KVM";
@@ -882,6 +968,7 @@ namespace sogen::kvm
                 sregs.gdt.base = address;
                 sregs.gdt.limit = static_cast<uint16_t>(limit);
                 this->set_sregs(sregs);
+                this->install_exception_gdt_entries();
             }
 
             void read_memory(uint64_t address, void* data, size_t size) const override
@@ -999,6 +1086,23 @@ namespace sogen::kvm
             void deserialize_state(utils::buffer_deserializer& buffer, bool) override
             {
                 this->restore_registers(buffer.read_vector<std::byte>());
+            }
+
+            void run_memory_execution_hooks(const uint64_t address)
+            {
+                std::vector<memory_execution_hook_callback> callbacks{};
+                for (const auto& [_, hook] : this->memory_execution_hooks_)
+                {
+                    if (!hook.address || (hook.size != 0 && address >= *hook.address && address - *hook.address < hook.size))
+                    {
+                        callbacks.push_back(hook.callback);
+                    }
+                }
+
+                for (const auto& callback : callbacks)
+                {
+                    callback(*this, address);
+                }
             }
 
           private:
@@ -1157,7 +1261,16 @@ namespace sogen::kvm
 
                 for (size_t offset = 0; offset < size; offset += page_size)
                 {
-                    this->mapped_pages_.erase(address + offset);
+                    const auto entry = this->mapped_pages_.find(address + offset);
+                    if (entry == this->mapped_pages_.end())
+                    {
+                        continue;
+                    }
+                    if (entry->second && entry->second->physical_page)
+                    {
+                        this->gpa_pages_.erase(*entry->second->physical_page);
+                    }
+                    this->mapped_pages_.erase(entry);
                 }
 
                 // Drop any MMIO region whose backing pages were just removed. Regions are mapped and
@@ -1184,16 +1297,38 @@ namespace sogen::kvm
                     throw std::runtime_error("KVM protection changes must be page aligned");
                 }
 
+                // Only presence and writability (read-only vs read-write) are projected into KVM memslots;
+                // finer protection bits (NX, read-vs-execute) are enforced elsewhere and never change a memslot.
+                // A protection change that leaves the memslot projection identical (the common case, e.g. the
+                // game's frequent NtProtectVirtualMemory) needs no reconciliation, so skip the O(total mappings)
+                // rebuild unless a page's memslot contribution actually changes.
+                constexpr uint32_t absent = ~0u;
+                bool memslot_change = false;
                 for (size_t offset = 0; offset < size; offset += page_size)
                 {
                     const auto it = this->mapped_pages_.find(address + offset);
-                    if (it != this->mapped_pages_.end())
+                    if (it == this->mapped_pages_.end() || !it->second)
                     {
-                        it->second->permissions = permissions;
+                        continue;
                     }
+
+                    auto& page = *it->second;
+                    const bool present = page.host_page != nullptr;
+                    const auto old_key =
+                        (present && page.permissions != memory_permission::none) ? this->to_kvm_map_flags(page.permissions) : absent;
+                    const auto new_key = (present && permissions != memory_permission::none) ? this->to_kvm_map_flags(permissions) : absent;
+                    if (old_key != new_key)
+                    {
+                        memslot_change = true;
+                    }
+
+                    page.permissions = permissions;
                 }
 
-                this->rebuild_mappings();
+                if (memslot_change)
+                {
+                    this->rebuild_mappings();
+                }
             }
 
             void ensure_platform_support()
@@ -1317,6 +1452,20 @@ namespace sogen::kvm
                     stubs[vector * exception_stub_stride] = 0xF4;
                 }
 
+                // Trampoline used to return into a 32-bit compatibility-mode (WOW64) context past the per-vector
+                // stubs. KVM_SET_SREGS sets segment descriptors but cannot switch the vCPU out of 64-bit mode,
+                // so compat faults are returned through a real IRETQ which performs the hardware mode transition
+                // from the frame's CS (and reloads SS from the GDT). DS/ES are not part of the IRET frame and a
+                // 64-bit data-segment load on this host can leave their cached descriptor with G=0 (1 MB limit),
+                // which faults once compat mode enforces the limit; reload them (KGDT64_R3_DATA 0x2B) from the
+                // GDT here so the flat 4 GB descriptor persists across the IRETQ. Runs at CPL0; RAX is preserved.
+                //   push rax; mov eax,0x2B; mov ds,ax; mov es,ax; pop rax; iretq
+                constexpr uint32_t iretq_stub_offset = exception_vector_count * exception_stub_stride;
+                static constexpr std::array<uint8_t, 13> iretq_trampoline_code = {0x50, 0xB8, 0x2B, 0x00, 0x00, 0x00, 0x8E,
+                                                                                  0xD8, 0x8E, 0xC0, 0x58, 0x48, 0xCF};
+                std::memcpy(stubs + iretq_stub_offset, iretq_trampoline_code.data(), iretq_trampoline_code.size());
+                this->iretq_trampoline_ = this->exception_stub_page_ + iretq_stub_offset;
+
                 // 64-bit interrupt gates (DPL 3 so software int instructions are also trapped) using IST1.
                 auto* idt = static_cast<uint8_t*>(this->mapped_pages_.at(this->exception_idt_page_)->host_page);
                 for (uint32_t vector = 0; vector < exception_vector_count; ++vector)
@@ -1355,6 +1504,41 @@ namespace sogen::kvm
                 sregs.tr.unusable = 0;
                 this->set_sregs(sregs);
             }
+            void install_exception_gdt_entries()
+            {
+                if (this->exception_tss_page_ == 0)
+                {
+                    return;
+                }
+
+                const auto sregs = this->get_sregs();
+                const auto gdt_base = sregs.gdt.base;
+                const auto gdt_limit = static_cast<uint64_t>(sregs.gdt.limit);
+                const auto tss_offset = static_cast<uint64_t>(task_state_selector);
+                if (gdt_base == 0 || gdt_limit < tss_offset + sizeof(uint64_t) * 2 - 1)
+                {
+                    return;
+                }
+
+                uint64_t code_descriptor = 0x00AF9B000000FFFFull;
+                if (!detail::access_memory(this->mapped_pages_, gdt_base + kernel_code_selector, &code_descriptor, sizeof(code_descriptor),
+                                           true))
+                {
+                    throw std::runtime_error("Failed to install KVM exception code descriptor");
+                }
+
+                const auto base = this->exception_tss_page_;
+                const uint32_t limit = tss_descriptor_limit;
+                uint64_t tss_low = (limit & 0xFFFFull) | ((base & 0xFFFFFFull) << 16) | (0x8Bull << 40) |
+                                   (((static_cast<uint64_t>(limit) >> 16) & 0xFull) << 48) | (((base >> 24) & 0xFFull) << 56);
+                uint64_t tss_high = base >> 32;
+                const auto descriptor_address = gdt_base + task_state_selector;
+                if (!detail::access_memory(this->mapped_pages_, descriptor_address, &tss_low, sizeof(tss_low), true) ||
+                    !detail::access_memory(this->mapped_pages_, descriptor_address + sizeof(tss_low), &tss_high, sizeof(tss_high), true))
+                {
+                    throw std::runtime_error("Failed to install KVM exception TSS descriptor");
+                }
+            }
             void initialize_long_mode_page_tables()
             {
                 this->pml4_gpa_ = this->allocate_internal_page(false, false);
@@ -1374,6 +1558,10 @@ namespace sogen::kvm
                 page->physical_page = page_gpa;
 
                 this->mapped_pages_[page_gpa] = std::move(page);
+                if (!this->gpa_pages_.emplace(page_gpa, this->mapped_pages_[page_gpa].get()).second)
+                {
+                    throw std::logic_error("Duplicate KVM guest physical page");
+                }
                 this->page_table_views_[page_gpa] = reinterpret_cast<uint64_t*>(raw_page);
 
                 if (map_into_guest)
@@ -1400,6 +1588,10 @@ namespace sogen::kvm
                 if (!page.physical_page)
                 {
                     page.physical_page = this->allocate_guest_physical_page();
+                    if (!this->gpa_pages_.emplace(*page.physical_page, &page).second)
+                    {
+                        throw std::logic_error("Duplicate KVM guest physical page");
+                    }
                 }
 
                 return *page.physical_page;
@@ -1413,7 +1605,26 @@ namespace sogen::kvm
                     },
                     guest_address, physical_page);
             }
+            // Defer the (O(total mappings)) memslot reconciliation. A single high-level memory operation can
+            // allocate several page-table pages, each of which would otherwise trigger its own full rebuild,
+            // making memory mapping quadratic. Mark the layout dirty here and flush it once before the next
+            // KVM_RUN: the memslots are only consumed by the guest (the emulator accesses guest memory through
+            // host pointers, not memslots), so they need only be current when the vCPU actually runs.
             void rebuild_mappings()
+            {
+                this->mappings_dirty_ = true;
+            }
+            void flush_dirty_mappings()
+            {
+                if (!this->mappings_dirty_)
+                {
+                    return;
+                }
+
+                this->mappings_dirty_ = false;
+                this->synchronize_memslots();
+            }
+            void synchronize_memslots()
             {
                 // Project mapped_pages_ onto the desired memslot layout (physically contiguous,
                 // host-contiguous runs of pages with the same flags become one memslot), then reconcile it
@@ -1423,56 +1634,45 @@ namespace sogen::kvm
                 // each time.
                 struct desired_page
                 {
+                    uint64_t gpa = 0;
                     uint8_t* host = nullptr;
                     uint32_t flags = 0;
                 };
 
-                std::map<uint64_t, desired_page> pages{};
-                for (const auto& entry : this->mapped_pages_)
+                // Iterate the GPA-sorted view directly: it is already ordered and deduplicated (unique
+                // physical addresses), so no per-flush sort or std::map rebuild is needed even with
+                // hundreds of thousands of mapped pages.
+                std::vector<desired_page> pages{};
+                pages.reserve(this->gpa_pages_.size());
+                for (const auto& [gpa, page] : this->gpa_pages_)
                 {
-                    const auto& page = entry.second;
                     if (!page || page->host_page == nullptr || page->permissions == memory_permission::none)
                     {
                         continue;
                     }
-                    if (!page->physical_page)
-                    {
-                        throw std::logic_error("KVM mapped page is missing a guest physical address");
-                    }
 
-                    const auto inserted =
-                        pages
-                            .emplace(*page->physical_page, desired_page{.host = static_cast<uint8_t*>(page->host_page),
-                                                                        .flags = this->to_kvm_map_flags(page->permissions)})
-                            .second;
-                    if (!inserted)
-                    {
-                        throw std::logic_error("Duplicate KVM guest physical page");
-                    }
+                    pages.push_back(desired_page{
+                        .gpa = gpa, .host = static_cast<uint8_t*>(page->host_page), .flags = this->to_kvm_map_flags(page->permissions)});
                 }
 
                 std::map<uint64_t, installed_memslot> desired{};
-                for (auto it = pages.begin(); it != pages.end();)
+                for (size_t i = 0; i < pages.size();)
                 {
-                    const auto run_gpa = it->first;
-                    auto* const run_host_base = it->second.host;
-                    const auto run_flags = it->second.flags;
+                    const auto run_gpa = pages[i].gpa;
+                    auto* const run_host_base = pages[i].host;
+                    const auto run_flags = pages[i].flags;
 
                     size_t run_size = page_size;
-                    auto jt = std::next(it);
-                    while (jt != pages.end())
+                    size_t j = i + 1;
+                    while (j < pages.size() && pages[j].gpa == run_gpa + run_size && pages[j].host == run_host_base + run_size &&
+                           pages[j].flags == run_flags)
                     {
-                        if (jt->first != run_gpa + run_size || jt->second.host != run_host_base + run_size || jt->second.flags != run_flags)
-                        {
-                            break;
-                        }
-
                         run_size += page_size;
-                        ++jt;
+                        ++j;
                     }
 
                     desired[run_gpa] = installed_memslot{.size = run_size, .host = run_host_base, .flags = run_flags};
-                    it = jt;
+                    i = j;
                 }
 
                 for (auto it = this->current_slots_.begin(); it != this->current_slots_.end();)
@@ -1594,12 +1794,36 @@ namespace sogen::kvm
                     return this->handle_instruction_hook(x86_hookable_instructions::rdtscp, 3);
                 }
 
+                if (opcode[0] == int3_opcode)
+                {
+                    return this->handle_breakpoint_instruction();
+                }
+
                 if (opcode[0] == std::byte{0x0F} && opcode[1] == std::byte{0x0B})
                 {
                     return this->handle_invalid_instruction_hook();
                 }
 
                 return false;
+            }
+            bool handle_breakpoint_instruction()
+            {
+                const auto rip = this->read_instruction_pointer();
+                bool handled = false;
+                bool rip_changed = false;
+                for (auto& [_, hook] : this->interrupt_hooks_)
+                {
+                    hook(*this, static_cast<int>(breakpoint_interrupt));
+                    handled = true;
+                    rip_changed = rip_changed || this->read_instruction_pointer() != rip;
+                }
+
+                if (handled && !rip_changed && !this->stop_requested_)
+                {
+                    this->advance_rip(1);
+                }
+
+                return handled;
             }
             bool handle_instruction_hook(x86_hookable_instructions type, uint64_t instruction_size)
             {
@@ -1617,7 +1841,7 @@ namespace sogen::kvm
                     }
 
                     handled = true;
-                    if (hook.callback(0) == instruction_hook_continuation::skip_instruction)
+                    if (hook.callback(*this, 0) == instruction_hook_continuation::skip_instruction)
                     {
                         skip = true;
                     }
@@ -1646,7 +1870,7 @@ namespace sogen::kvm
                         continue;
                     }
 
-                    if (hook.callback(0) == instruction_hook_continuation::skip_instruction)
+                    if (hook.callback(*this, 0) == instruction_hook_continuation::skip_instruction)
                     {
                         consumed = true;
                     }
@@ -1724,7 +1948,7 @@ namespace sogen::kvm
                 const auto operation = mmio.is_write ? memory_operation::write : memory_operation::read;
                 for (auto& [_, hook] : this->memory_violation_hooks_)
                 {
-                    const auto result = hook(violation_address, mmio.len, operation, violation_type);
+                    const auto result = hook(*this, violation_address, mmio.len, operation, violation_type);
                     if (result == memory_violation_continuation::resume || result == memory_violation_continuation::restart)
                     {
                         return true;
@@ -1747,7 +1971,7 @@ namespace sogen::kvm
                     const auto type = (error_code & 0x1) ? memory_violation_type::protection : memory_violation_type::unmapped;
                     for (auto& [_, hook] : this->memory_violation_hooks_)
                     {
-                        const auto result = hook(fault_address, 1, operation, type);
+                        const auto result = hook(*this, fault_address, 1, operation, type);
                         if (result == memory_violation_continuation::resume || result == memory_violation_continuation::restart)
                         {
                             return true;
@@ -1755,13 +1979,14 @@ namespace sogen::kvm
                     }
                 }
 
+                bool handled = false;
                 for (auto& [_, hook] : this->interrupt_hooks_)
                 {
-                    hook(static_cast<int>(exception));
-                    return true;
+                    hook(*this, static_cast<int>(exception));
+                    handled = true;
                 }
 
-                return false;
+                return handled;
             }
             bool handle_exception_trap(uint64_t stub_rip)
             {
@@ -1788,6 +2013,11 @@ namespace sogen::kvm
                 } frame{};
                 this->read_memory(frame_address, &frame, sizeof(frame));
 
+                // A 32-bit compatibility-mode (WOW64) fault must be resumed through a real IRETQ: KVM_SET_SREGS
+                // applies segment descriptors but cannot switch the vCPU out of 64-bit mode. 64-bit contexts
+                // are resumed directly from the reconstructed state below.
+                const bool compat_mode = (static_cast<uint16_t>(frame.cs) | 3u) != 0x33;
+
                 // Undo the exception entry so the emulator's handlers observe the faulting context, and
                 // a resumed instruction re-executes from where it faulted.
                 regs.rip = frame.rip;
@@ -1804,11 +2034,58 @@ namespace sogen::kvm
                 this->set_regs(regs);
 
                 auto sregs = this->get_sregs();
-                sregs.cs = make_segment(static_cast<uint16_t>(frame.cs), true, (frame.cs & 3) == 3);
-                sregs.ss = make_segment(static_cast<uint16_t>(frame.ss), false, (frame.ss & 3) == 3);
+                if (!compat_mode)
+                {
+                    sregs.cs = make_segment(static_cast<uint16_t>(frame.cs), true, (frame.cs & 3) == 3);
+                    sregs.ss = make_segment(static_cast<uint16_t>(frame.ss), false, (frame.ss & 3) == 3);
+                }
+                // Refresh DS/ES from their selectors too. A 64-bit `mov ds` on this host can leave a G=0
+                // (1 MB) cached descriptor; once compatibility mode (WOW64) enforces the limit, a data access
+                // above 1 MB faults. The CPU does not save DS/ES in the exception frame, so rebuild them from
+                // the current selectors as flat 4 GB segments, matching what the GDT describes.
+                if (sregs.ds.selector & ~3u)
+                {
+                    sregs.ds = make_segment(sregs.ds.selector, false, (sregs.ds.selector & 3) == 3);
+                }
+                if (sregs.es.selector & ~3u)
+                {
+                    sregs.es = make_segment(sregs.es.selector, false, (sregs.es.selector & 3) == 3);
+                }
                 this->set_sregs(sregs);
 
-                return this->handle_exception(vector, error_code);
+                if (!this->handle_exception(vector, error_code))
+                {
+                    return false;
+                }
+
+                if (compat_mode)
+                {
+                    // Re-arm the exception frame with the (possibly handler-adjusted) register state and return
+                    // through the CPL0 IRETQ trampoline, which loads CS from the GDT and switches the vCPU back
+                    // into 32-bit compatibility mode. CS/SS stay at the kernel stub segments so the trampoline
+                    // runs at CPL0; the IRETQ transitions to the CPL3 user context. DS/ES (set above) persist.
+                    const auto resumed = this->get_regs();
+                    const exception_frame iret_frame{
+                        .rip = resumed.rip,
+                        .cs = frame.cs,
+                        .rflags = resumed.rflags,
+                        .rsp = resumed.rsp,
+                        .ss = frame.ss,
+                    };
+                    this->write_memory(frame_address, &iret_frame, sizeof(iret_frame));
+
+                    auto trampoline = resumed;
+                    trampoline.rsp = frame_address;
+                    trampoline.rip = this->iretq_trampoline_;
+                    // Clear TF for the trampoline itself: if the faulting context had single-stepping
+                    // enabled, each trampoline instruction would raise a #DB before IRETQ runs, and since
+                    // every vector shares IST1 that nested trap would overwrite the iret_frame staged
+                    // above. IRETQ still restores the guest's real TF from iret_frame.rflags.
+                    trampoline.rflags &= ~(1ULL << 8);
+                    this->set_regs(trampoline);
+                }
+
+                return true;
             }
             void clear_pending_exception_state()
             {
@@ -1838,19 +2115,33 @@ namespace sogen::kvm
             }
             bool handle_debug_exit()
             {
-                for (auto& [_, hook] : this->interrupt_hooks_)
+                const auto rip = this->read_instruction_pointer();
+                auto vector = 1;
+                std::byte opcode{};
+                if (detail::access_memory(this->mapped_pages_, rip, &opcode, sizeof(opcode), false) && opcode == int3_opcode)
                 {
-                    hook(1);
-                    return true;
+                    vector = static_cast<int>(breakpoint_interrupt);
+                }
+                else if (rip > 0 && detail::access_memory(this->mapped_pages_, rip - 1, &opcode, sizeof(opcode), false) &&
+                         opcode == int3_opcode)
+                {
+                    vector = static_cast<int>(breakpoint_interrupt);
                 }
 
-                return false;
+                bool handled = false;
+                for (auto& [_, hook] : this->interrupt_hooks_)
+                {
+                    hook(*this, vector);
+                    handled = true;
+                }
+
+                return handled;
             }
-            bool handle_syscall_halt()
+            std::optional<uint64_t> handle_syscall_halt()
             {
                 if (!this->syscall_hook_)
                 {
-                    return false;
+                    return std::nullopt;
                 }
 
                 auto regs = this->get_regs();
@@ -1859,7 +2150,7 @@ namespace sogen::kvm
                 const auto post_syscall_rcx = regs.rcx;
                 const auto post_syscall_r10 = regs.r10;
                 const auto saved_rflags = regs.r11;
-                const auto pre_syscall_rip = post_syscall_rcx - 2;
+                const auto pre_syscall_rip = post_syscall_rcx - syscall_instruction_size;
 
                 regs.rip = pre_syscall_rip;
                 regs.rcx = post_syscall_r10;
@@ -1869,19 +2160,19 @@ namespace sogen::kvm
                 this->set_regs(regs);
                 this->set_sregs(sregs);
 
-                const auto continuation = this->syscall_hook_->callback(0);
+                const auto continuation = this->syscall_hook_->callback(*this, 0);
 
                 regs = this->get_regs();
-                if (continuation == instruction_hook_continuation::skip_instruction && regs.rip == pre_syscall_rip)
+                if (continuation != instruction_hook_continuation::finalized_instruction_pointer)
                 {
-                    regs.rip = post_syscall_rcx;
-                }
-                else
-                {
-                    // Advance past the syscall instruction. This also covers handlers that moved RIP and
-                    // expect the syscall length to be added back (e.g. the instrumentation-callback
-                    // redirect sets RIP to callback-2). Matches the WHP backend.
-                    regs.rip += 2;
+                    if (continuation == instruction_hook_continuation::skip_instruction && regs.rip == pre_syscall_rip)
+                    {
+                        regs.rip = post_syscall_rcx;
+                    }
+                    else
+                    {
+                        regs.rip += syscall_instruction_size;
+                    }
                 }
 
                 sregs = this->get_sregs();
@@ -1889,7 +2180,7 @@ namespace sogen::kvm
                 sregs.ss = make_segment(0x2B, false, true);
                 this->set_regs(regs);
                 this->set_sregs(sregs);
-                return true;
+                return pre_syscall_rip;
             }
             void advance_rip(uint64_t amount)
             {
@@ -2167,8 +2458,12 @@ namespace sogen::kvm
             bool readonly_mem_supported_ = false;
             int next_slot_id_ = 0;
             std::map<uint64_t, installed_memslot> current_slots_{};
+            bool mappings_dirty_ = false;
             std::vector<int> free_slot_ids_{};
             std::map<uint64_t, std::unique_ptr<mapped_page>> mapped_pages_{};
+            // GPA-sorted view of mapped_pages_ (guest physical address -> page), kept in sync so
+            // synchronize_memslots can project in memslot order without re-sorting every flush.
+            std::map<uint64_t, mapped_page*> gpa_pages_{};
             std::unordered_map<uint64_t, uint64_t*> page_table_views_{};
             uint64_t pml4_gpa_ = 0;
             uint64_t next_guest_physical_page_ = guest_physical_page_base;
@@ -2179,6 +2474,7 @@ namespace sogen::kvm
             int kick_signal_ = 0;
             uint64_t syscall_hook_page_ = 0;
             uint64_t exception_stub_page_ = 0;
+            uint64_t iretq_trampoline_ = 0;
             uint64_t exception_idt_page_ = 0;
             uint64_t exception_tss_page_ = 0;
             uint64_t exception_stack_page_ = 0;
@@ -2197,6 +2493,12 @@ namespace sogen::kvm
 
         kvm_segment make_segment(const uint16_t selector, const bool is_code, const bool is_user)
         {
+            // A 64-bit code segment runs in long mode (L=1, D=0); 32-bit compatibility-mode code (the WOW64
+            // selector 0x23) and all data segments use D=1, L=0. Deriving this from the selector is required
+            // when reconstructing a faulting WOW64 context: hardcoding L=1 on a 32-bit code selector re-enters
+            // the 32-bit code in 64-bit mode and misdecodes it. Windows x64 uses 0x33 for 64-bit user code.
+            const bool long_mode_code = is_code && ((selector | 3) == 0x33);
+
             kvm_segment segment{};
             segment.base = 0;
             segment.limit = 0xFFFFF;
@@ -2204,9 +2506,9 @@ namespace sogen::kvm
             segment.type = is_code ? 0xB : 0x3;
             segment.present = 1;
             segment.dpl = is_user ? 3 : 0;
-            segment.db = is_code ? 0 : 1;
+            segment.db = long_mode_code ? 0 : 1;
             segment.s = 1;
-            segment.l = is_code ? 1 : 0;
+            segment.l = long_mode_code ? 1 : 0;
             segment.g = 1;
             segment.avl = 0;
             segment.unusable = 0;

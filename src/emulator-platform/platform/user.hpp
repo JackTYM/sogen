@@ -42,31 +42,40 @@ namespace sogen
     {
         DWORD dwSRVIFlags;
         uint64_t cHandleEntries;
-        uint8_t unknown1[0x178];
+        uint8_t pad_10[0x178];
         uint64_t apfnClientA[FNID_ARRAY_SIZE];
         uint64_t apfnClientW[FNID_ARRAY_SIZE];
         uint64_t apfnClientWorker[FNID_ARRAY_SIZE];
-        uint8_t unknown2[0xE90];
+        uint8_t pad_3c8[0x3A0];
+        int32_t systemMetrics[0x61];
+        uint8_t pad_8ec[0x96C];
         uint64_t ahbrSystem[USER_SERVERINFO_BRUSH_SLOT_COUNT];
-        uint8_t unknown3a[0x34];
+        uint8_t pad_1358[0x34];
         int32_t defaultFontHeightScale;
         int32_t defaultFontWidthScale;
-        uint8_t unknown3b[0x7C2];
+        uint8_t pad_1394[0x7C2];
         uint16_t systemDpi;
+        uint8_t pad_1b58[0x286];
+        uint64_t foregroundWindow;
     };
     static_assert(offsetof(USER_SERVERINFO, apfnClientA) == 0x188);
+    static_assert(offsetof(USER_SERVERINFO, systemMetrics) == 0x768);
     static_assert(offsetof(USER_SERVERINFO, ahbrSystem) == 0x1258);
     static_assert(offsetof(USER_SERVERINFO, defaultFontHeightScale) == 0x138C);
     static_assert(offsetof(USER_SERVERINFO, defaultFontWidthScale) == 0x1390);
     static_assert(offsetof(USER_SERVERINFO, systemDpi) == 0x1B56);
-    static_assert(sizeof(USER_SERVERINFO) == 0x1B58);
+    static_assert(offsetof(USER_SERVERINFO, foregroundWindow) == 0x1DE0);
+    static_assert(sizeof(USER_SERVERINFO) == 0x1de8);
 
     struct USER_DISPINFO
     {
         DWORD dwMonitorCount;
         EMULATOR_CAST(uint64_t, USER_MONITOR*) pPrimaryMonitor;
+        uint8_t pad_10[0x8];
+        RECT rcScreen;
         uint8_t unknown[0xFF];
     };
+    static_assert(offsetof(USER_DISPINFO, rcScreen) == 0x18);
 
     struct USER_HANDLEENTRY
     {
@@ -137,7 +146,9 @@ namespace sogen
     static_assert(offsetof(WIN32K_USERCONNECT32, disp_info_low) == 0x18);
     static_assert(offsetof(WIN32K_USERCONNECT32, monitor_info_low) == 0x30);
     static_assert(offsetof(WIN32K_USERCONNECT32, wndmsg_count) == 0x108);
+    static_assert(offsetof(WIN32K_USERCONNECT32, wndmsg_bits) == 0x110);
     static_assert(offsetof(WIN32K_USERCONNECT32, ime_msg_count) == 0x118);
+    static_assert(offsetof(WIN32K_USERCONNECT32, ime_msg_bits) == 0x120);
     static_assert(sizeof(WIN32K_USERCONNECT32) == 0x238);
 
     // WoW64 (32-bit) raw-input structures, as the guest's user32/win32u marshal them.
@@ -272,7 +283,8 @@ namespace sogen
         RECT rcClient;
         uint64_t lpfnWndProc;
         uint64_t pcls;
-        uint8_t pad_088[16];
+        uint64_t hrgnUpdate;
+        uint8_t pad_090[8];
         uint64_t spmenu;
         uint8_t pad_0A0[24];
         uint32_t dwTextLengthBytes;
@@ -314,6 +326,11 @@ namespace sogen
     static_assert(offsetof(USER_MENU, rgItems) == 0x20);
     static_assert(offsetof(USER_MENU, flags) == 0x28);
     static_assert(offsetof(USER_MENU, cItems) == 0x2C);
+
+    struct USER_ACCELERATOR_TABLE
+    {
+        uint8_t padding[0xFF]{};
+    };
 
     struct USER_MENU_ITEM
     {

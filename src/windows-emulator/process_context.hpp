@@ -23,18 +23,45 @@ namespace sogen
 
     struct fake_environment_config;
 
-#define PEB_SEGMENT_SIZE        (20 << 20) // 20 MB
-#define GS_SEGMENT_SIZE         (1 << 20)  // 1 MB
+#define PEB_SEGMENT_SIZE (20 << 20) // 20 MB
+#define GS_SEGMENT_SIZE  (1 << 20)  // 1 MB
 
-#define STACK_SIZE              0x40000ULL // 256KB
+#define STACK_SIZE       0x40000ULL // 256KB
 
-#define GDT_ADDR                0x35000
-#define GDT_LIMIT               0x1000
-#define GDT_ENTRY_SIZE          0x8
+#ifdef __APPLE__
+// Darwin refuses MAP_FIXED anywhere in the low ~4GB regardless of ASLR (the standard 64-bit
+// Mach-O __PAGEZERO convention, enforced at the mmap syscall level) - a backend sharing the guest
+// address space with the host process (guest VA == host VA, e.g. FEX) can never place anything
+// there. GDT_ADDR is a fixed constant sogen always uses directly (not chosen dynamically via
+// find_free_allocation_base, so the reserved-host-ranges mechanism can't route around it), so it
+// has to live well above that floor here. Chosen far from typical host dyld/heap/stack placement
+// (which stays within a few GB above 4GB) to also avoid the *dynamic*, ASLR-dependent collisions
+// that reserved-host-ranges handles for everything else.
+#define GDT_ADDR 0x7ffff0000000ULL
+#else
+#define GDT_ADDR 0x35000
+#endif
+#define GDT_LIMIT      0x1000
+#define GDT_ENTRY_SIZE 0x8
+
+    // Each vCPU gets its own GDT page. Most descriptors are identical, but the WOW64 FS descriptor
+    // (selector 0x53) holds a per-thread 32-bit TEB base that the guest reloads on every 64<->32
+    // transition, so a shared GDT would let a WOW64 thread on one vCPU read another vCPU's TEB base.
+    constexpr uint64_t gdt_base_for_vcpu(const size_t vcpu_index) noexcept
+    {
+        return GDT_ADDR + vcpu_index * GDT_LIMIT;
+    }
 
 // TODO: Get rid of that
-#define WOW64_NATIVE_STACK_SIZE 0x8000
-#define WOW64_32BIT_STACK_SIZE  (1 << 20)
+#define WOW64_NATIVE_STACK_SIZE      0x40000ULL
+#define WOW64_32BIT_STACK_SIZE       (1 << 20)
+
+// A WoW64 thread's *native* 64-bit stack must live in the low 4GB: wow64win.dll's win32k
+// callback-marshaling thunks (e.g. fnINLPCREATESTRUCT for WM_NCCREATE) build the 32-bit call
+// frame on the native stack and truncate the 64-bit stack pointer to 32 bits before handing it
+// to the 32-bit window proc. Search from a base above the 32-bit module/heap region to avoid the
+// low-address collisions that made a raw 0x10000-default allocation land structurally wrong.
+#define WOW64_NATIVE_STACK_BASE_HINT 0x70000000ULL
 
     struct emulator_settings;
     struct application_settings;
@@ -322,10 +349,8 @@ namespace sogen
         {
         }
 
-        void setup(x86_64_emulator& emu, memory_manager& memory, registry_manager& registry, file_system& file_system,
-                   windows_version_manager& version, const fake_environment_config& fake_env, const application_settings& app_settings,
-                   const mapped_module& executable, const mapped_module& ntdll, const apiset::container& apiset_container,
-                   const mapped_module* ntdll32 = nullptr);
+        void setup(windows_emulator& win_emu, const application_settings& app_settings, const mapped_module& executable,
+                   const mapped_module& ntdll, const apiset::container& apiset_container, const mapped_module* ntdll32 = nullptr);
 
         handle create_thread(memory_manager& memory, uint64_t start_address, uint64_t argument, uint64_t stack_size, uint32_t create_flags,
                              bool initial_thread = false);
@@ -345,16 +370,16 @@ namespace sogen
         void add_knowndll_section(const std::u16string& name, const section& section, bool is_32bit);
         bool has_knowndll_section(const std::u16string& name, bool is_32bit) const;
 
-        void serialize(utils::buffer_serializer& buffer) const;
-        void deserialize(utils::buffer_deserializer& buffer);
+        void serialize(utils::buffer_serializer& buffer, const emulator_thread* active_thread) const;
+        void deserialize(utils::buffer_deserializer& buffer, emulator_thread*& active_thread);
 
         generic_handle_store* get_handle_store(handle handle);
         emulator_thread* find_thread_by_id(uint32_t thread_id);
         const emulator_thread* find_thread_by_id(uint32_t thread_id) const;
         bool is_current_process_handle(handle handle) const;
-        bool is_current_thread_handle(handle handle) const;
+        bool is_current_thread_handle(handle handle, const emulator_thread* active_thread) const;
         bool is_object_pseudo_handle(handle handle) const;
-        handle resolve_object_pseudo_handle(handle handle) const;
+        handle resolve_object_pseudo_handle(handle handle, const emulator_thread* active_thread) const;
 
         size_t get_live_thread_count() const;
 
@@ -379,6 +404,13 @@ namespace sogen
         kusd_mmio kusd;
 
         uint64_t ntdll_image_base{};
+        // Guest address of kernelbase.dll's private gNlsProcessLocalCache global, resolved once
+        // kernelbase.dll is mapped (see setup()). Real Windows points every thread's TEB.NlsCache at
+        // this shared, process-wide fallback structure until that thread does its own locale/NLS API
+        // work; BaseNlsThreadCleanup (kernelbase.dll, DLL_THREAD_DETACH) skips freeing TEB.NlsCache
+        // whenever it still points here. 0 if kernelbase.dll wasn't found (emulator_thread falls back
+        // to a zeroed placeholder in that case - see nls_cache_placeholder's doc comment).
+        uint64_t kernelbase_nls_process_local_cache{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};
@@ -395,7 +427,7 @@ namespace sogen
         // Persistent per-top-level-window paint surface; child controls composite into it at their offset.
         std::map<uint32_t, gdi_bitmap_surface> gdi_window_surfaces{};
         dxgk_state dxgk{};
-        std::optional<handle> etw_notification_event{};
+        std::vector<handle> etw_notification_events{};
         hwnd mouse_capture_window{};
         // The window that currently holds keyboard focus / is the foreground window, and the last known
         // cursor position in screen coordinates. Games poll these via GetForegroundWindow/GetActiveWindow
@@ -413,6 +445,9 @@ namespace sogen
         // Per-virtual-key pressed state (0x80 = down), updated from key/mouse-button events and reported by
         // GetKeyState; games poll this for in-game input (movement, etc.) rather than window messages.
         std::array<uint8_t, 256> key_state{};
+        // Per-virtual-key transition state for GetAsyncKeyState's low bit. A value of 1 means the key or
+        // mouse button was pressed since the last GetAsyncKeyState query for that virtual key.
+        std::array<uint8_t, 256> async_key_state{};
 
         // Raw mouse input registration (NtUserRegisterRawInputDevices). When registered, mouse motion
         // synthesizes relative-mouse RAWINPUT delivered as WM_INPUT, so in-game mouse-look works.
@@ -427,13 +462,15 @@ namespace sogen
         // HRAWINPUT token posted in WM_INPUT's lParam; consumed by NtUserGetRawInputData.
         struct raw_input_payload
         {
-            bool keyboard{};          // false = mouse, true = keyboard
-            int32_t dx{};             // mouse relative motion
-            int32_t dy{};             //
-            uint16_t mouse_buttons{}; // RI_MOUSE_* button transition flags
-            uint16_t vkey{};          // keyboard virtual key
-            uint16_t scan_code{};     // keyboard scan code
-            uint16_t key_release{};   // 0 = key down (RI_KEY_MAKE), 1 = key up (RI_KEY_BREAK)
+            bool keyboard{};              // false = mouse, true = keyboard
+            int32_t dx{};                 // mouse relative motion
+            int32_t dy{};                 //
+            uint16_t mouse_buttons{};     // RI_MOUSE_* button transition flags
+            uint16_t mouse_button_data{}; // wheel delta for RI_MOUSE_WHEEL/RI_MOUSE_HWHEEL
+            uint16_t vkey{};              // keyboard virtual key
+            uint16_t scan_code{};         // keyboard scan code
+            uint32_t key_message{};       // corresponding WM_KEY* or WM_SYSKEY* message
+            bool key_extended{};          // true when the key's scan code has an E0 prefix (lParam bit 24)
         };
         std::map<uint32_t, raw_input_payload> raw_inputs{};
         uint32_t next_raw_input_token{1};
@@ -451,6 +488,7 @@ namespace sogen
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
         handle_store<handle_types::section, section> sections{};
         handle_store<handle_types::device, io_device_container> devices{};
+        handle console_handle{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
         handle_store<handle_types::io_completion, io_completion> io_completions{};
         handle_store<handle_types::wait_completion_packet, wait_completion_packet> wait_completion_packets{};
@@ -463,6 +501,7 @@ namespace sogen
         user_handle_store<handle_types::window, window> windows{user_handles};
         user_handle_store<handle_types::type::menu, menu> menus{user_handles};
         handle_store<handle_types::timer, timer> timers{};
+        user_handle_store<handle_types::accelerator_table, accelerator_table> accelerator_tables{user_handles};
         handle_store<handle_types::registry, registry_key, 2> registry_keys{};
         std::map<uint32_t, handle> thread_handles_by_id{};
         std::map<uint16_t, atom_entry> atoms{};
@@ -480,7 +519,11 @@ namespace sogen
         static constexpr uint32_t process_id = 4;
         uint32_t spawned_thread_count{0};
         handle_store<handle_types::thread, emulator_thread> threads{};
-        emulator_thread* active_thread{nullptr};
+
+        // Handles delivered with the most recent ALPC reply message (NtAlpcSendWaitReceivePort). rpcrt4's
+        // system-handle import retrieves them via NtAlpcQueryInformationMessage(AlpcMessageHandleInformation)
+        // rather than reading the handle attribute directly. Transient (valid only until the next reply).
+        std::vector<alpc_reply_handle> pending_alpc_message_handles{};
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx

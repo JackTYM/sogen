@@ -13,8 +13,9 @@ namespace sogen
         icicle,
         whp,
         kvm,
+        fex,
     };
 
-    std::unique_ptr<x86_64_emulator> create_x86_64_emulator(backend_type backend = backend_type::unicorn);
-    std::unique_ptr<x86_64_emulator> create_x86_64_emulator_from_environment();
+    std::unique_ptr<x86_64_emulator> create_x86_64_emulator(backend_type backend = backend_type::unicorn, size_t vcpu_count = 1);
+    std::unique_ptr<x86_64_emulator> create_x86_64_emulator_from_environment(size_t vcpu_count = 1);
 } // namespace sogen

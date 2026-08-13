@@ -2,7 +2,11 @@
 #include "generic_logger.hpp"
 
 #include <utils/function.hpp>
+#include <utils/win.hpp>
+
+#include <mutex>
 #include <string_view>
+#include <utility>
 
 namespace sogen
 {
@@ -17,7 +21,7 @@ namespace sogen
         // output is disabled, so they observe all log activity.
         using sink = utils::optional_function<void(color c, std::string_view message)>;
 
-#ifdef OS_WINDOWS
+#ifdef _WIN32
         logger();
         ~logger() override;
 #endif
@@ -40,6 +44,18 @@ namespace sogen
             return this->disable_output_;
         }
 
+        // Fully mute terminal output, including force-printed errors that disable_output() lets through.
+        // Sinks still observe everything. Intended for headless consumers (e.g. fuzzing).
+        void set_silent(const bool value)
+        {
+            this->silent_ = value;
+        }
+
+        bool is_silent() const
+        {
+            return this->silent_;
+        }
+
         // Install a sink callback. Passing an empty std::function clears it.
         // Single-sink: installing replaces any previously installed sink.
         void set_sink(sink s)
@@ -48,11 +64,13 @@ namespace sogen
         }
 
       private:
-#ifdef OS_WINDOWS
+#ifdef _WIN32
         UINT old_cp{};
 #endif
         bool disable_output_{false};
+        bool silent_{false};
         sink sink_{};
+        mutable std::mutex print_mutex_{};
         void print_message(color c, std::string_view message, bool force = false) const;
     };
 

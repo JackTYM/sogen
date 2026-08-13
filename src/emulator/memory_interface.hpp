@@ -1,4 +1,8 @@
 #pragma once
+#include <array>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 #include <functional>
 #include <stdexcept>
@@ -10,6 +14,12 @@ namespace sogen
 
     using mmio_read_callback = std::function<void(uint64_t addr, void* data, size_t size)>;
     using mmio_write_callback = std::function<void(uint64_t addr, const void* data, size_t size)>;
+
+    struct host_reserved_range
+    {
+        uint64_t address;
+        size_t size;
+    };
 
     class memory_manager;
     class linux_memory_manager;
@@ -32,9 +42,6 @@ namespace sogen
         virtual void map_memory(uint64_t address, size_t size, memory_permission permissions) = 0;
         virtual void unmap_memory(uint64_t address, size_t size) = 0;
 
-        // Maps caller-owned host memory directly into the guest address space so the guest sees it
-        // coherently (no staging copy). The backend must not take ownership of host_pointer. Backends that
-        // cannot alias host memory (e.g. icicle) keep the default and throw.
         virtual void map_host_memory(uint64_t /*address*/, size_t /*size*/, void* /*host_pointer*/, memory_permission /*permissions*/)
         {
             throw std::runtime_error("Host memory mapping is not supported by this backend");
@@ -42,27 +49,49 @@ namespace sogen
 
         virtual void apply_memory_protection(uint64_t address, size_t size, memory_permission permissions) = 0;
 
-        // Add new virtuals at the end of the class so the vtable slots of existing methods never move; this
-        // keeps separately built backends (e.g. the dynamically loaded KVM/unicorn backends) ABI-compatible
-        // with the analyzer that calls through this interface.
-        //
-        // Whether memory aliased via map_host_memory is cache-coherent with external devices (e.g. a GPU)
-        // without explicit cache maintenance. KVM aliases host memory write-back into the guest while the GPU
-        // may read the same physical pages through a write-combined mapping, so it reports false and callers
-        // must flush the CPU cache (flush_host_memory_cache) for an aliased range before device access.
+      public:
         virtual bool host_memory_aliasing_is_coherent() const
         {
             return true;
         }
 
-        // Evicts the CPU cache for a host range previously passed to map_host_memory, making the guest's
-        // pending writes visible to a device that reads the same physical memory non-coherently. No-op when
-        // aliasing is already coherent.
         virtual void flush_host_memory_cache(const void* /*host_pointer*/, size_t /*size*/)
         {
         }
 
-      public:
+        // Ranges of the *host* process's own address space the guest address space must avoid, for
+        // backends that share one address space with the guest (guest VA == host VA) rather than
+        // sandboxing/translating it independently - e.g. the analyzer's own loaded image, dyld, and
+        // shared libraries. Queried once, early, before any guest memory is allocated, so the memory
+        // manager can pre-reserve these ranges. Backends with a fully independent guest address space
+        // (the default) have nothing to report. This is a best-effort snapshot taken at that one point
+        // in time - host allocations that happen afterwards are not covered.
+        virtual std::vector<host_reserved_range> reserved_host_ranges() const
+        {
+            return {};
+        }
+
+        // Windowed form of reserved_host_ranges(), for callers that only need to know whether ONE
+        // specific range has been claimed by a foreign host mapping (e.g. a fixed-address allocation
+        // checking its exact target), rather than re-enumerating the whole address space. Returns
+        // only the reserved sub-ranges intersecting [address, address + size). Default: fall back to
+        // the full query, so backends that don't specialize keep identical behavior.
+        virtual std::vector<host_reserved_range> reserved_host_ranges_in(uint64_t /*address*/, size_t /*size*/) const
+        {
+            return this->reserved_host_ranges();
+        }
+
+        // Called by the memory manager whenever it claims a guest address range - both when reserved
+        // (MEM_RESERVE, not yet backed by any real mapping) and when committed - so backends sharing
+        // the host address space with the guest (see reserved_host_ranges) can claim the same range at
+        // the host OS level immediately. Without this, a reserved-but-uncommitted range is invisible to
+        // the host allocator, so nothing stops an unconstrained host allocation (e.g. a JIT code buffer)
+        // from landing there before the guest range is actually committed. No-op for backends with an
+        // independent guest address space (the default).
+        virtual void reserve_guest_address_range(uint64_t /*address*/, size_t /*size*/)
+        {
+        }
+
         template <typename T>
         T read_memory(const uint64_t address) const
         {
@@ -128,6 +157,22 @@ namespace sogen
                 this->write_memory(p_dst, elem);
                 p_src += increment;
                 p_dst += increment;
+            }
+        }
+
+        // Fill a guest range with a byte value (memset). Writes in bounded chunks so a large size never
+        // materializes a matching host allocation.
+        void set_memory(uint64_t address, uint8_t value, uint64_t size)
+        {
+            std::array<std::byte, 0x1000> buffer{};
+            buffer.fill(static_cast<std::byte>(value));
+
+            while (size > 0)
+            {
+                const auto count = static_cast<size_t>(std::min<uint64_t>(buffer.size(), size));
+                this->write_memory(address, buffer.data(), count);
+                address += count;
+                size -= count;
             }
         }
     };

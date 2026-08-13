@@ -23,7 +23,11 @@ namespace sogen
             switch (info_class)
             {
             case ProcessExecuteFlags:
-                return STATUS_NOT_SUPPORTED;
+                return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length, [&](ULONG& flags) {
+                    constexpr ULONG dep_enabled_execute_flags = 0x0D;
+                    constexpr ULONG dep_disabled_execute_flags = 0x32;
+                    flags = c.win_emu.memory.is_dep_enabled() ? dep_enabled_execute_flags : dep_disabled_execute_flags;
+                });
             case ProcessGroupInformation:
             case ProcessMitigationPolicy: {
                 // ProcessMitigationPolicy requires special handling because the caller
@@ -186,6 +190,30 @@ namespace sogen
                         i.CheckSum = optional_header.CheckSum;
                     });
 
+            case ProcessQuotaLimits: {
+                constexpr uint32_t quota_limits32_size = 0x20;
+                constexpr uint32_t quota_limits64_size = 0x30;
+
+                if (process_information_length != quota_limits32_size && process_information_length != quota_limits64_size)
+                {
+                    if (return_length)
+                    {
+                        return_length.write(quota_limits64_size);
+                    }
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const std::vector<std::byte> zeroed(process_information_length, std::byte{0});
+                c.emu.write_memory(process_information, zeroed.data(), zeroed.size());
+
+                if (return_length)
+                {
+                    return_length.write(process_information_length);
+                }
+
+                return STATUS_SUCCESS;
+            }
+
             case ProcessVmCounters: {
                 constexpr uint32_t vm_counters_size = 88;
                 constexpr uint32_t vm_counters_ex_size = 96;
@@ -209,6 +237,31 @@ namespace sogen
                     return_length.write(process_information_length);
                 }
 
+                return STATUS_SUCCESS;
+            }
+
+            case ProcessImageFileName: {
+                const auto image_path = c.win_emu.mod_manager.executable->module_path.to_device_path();
+                const auto string_length = image_path.size() * sizeof(char16_t);
+                const auto required_length = sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>) + string_length + sizeof(char16_t);
+
+                if (return_length)
+                {
+                    return_length.write(static_cast<uint32_t>(required_length));
+                }
+
+                if (process_information_length < required_length)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto buffer = process_information + sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>);
+                c.emu.write_memory(buffer, image_path.c_str(), string_length + sizeof(char16_t));
+                emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, process_information}.write({
+                    .Length = static_cast<USHORT>(string_length),
+                    .MaximumLength = static_cast<USHORT>(string_length + sizeof(char16_t)),
+                    .Buffer = buffer,
+                });
                 return STATUS_SUCCESS;
             }
 
@@ -242,7 +295,7 @@ namespace sogen
             }
 
             default:
-                c.win_emu.log.error("Unsupported process info class: %X\n", info_class);
+                c.win_emu.log.error("Unsupported process info class: 0x%X\n", info_class);
                 c.emu.stop();
 
                 return STATUS_NOT_SUPPORTED;
@@ -266,7 +319,9 @@ namespace sogen
                 || info_class == ProcessPriorityBoost                        //
                 || info_class == ProcessPriorityClassEx                      //
                 || info_class == ProcessQuotaLimits                          //
-                || info_class == ProcessPriorityClass || info_class == ProcessAffinityMask)
+                || info_class == ProcessPriorityClass                        //
+                || info_class == ProcessAffinityMask                         //
+                || info_class == ProcessTelemetryCoverage)
             {
                 return STATUS_SUCCESS;
             }
@@ -430,7 +485,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported info process class: %X\n", info_class);
+            c.win_emu.log.error("Unsupported info process class: 0x%X\n", info_class);
             c.emu.stop();
 
             return STATUS_NOT_SUPPORTED;
@@ -466,7 +521,7 @@ namespace sogen
             {
                 for (auto& thread : c.proc.threads | std::views::values)
                 {
-                    if (&thread != c.proc.active_thread)
+                    if (&thread != c.vcpu.active_thread)
                     {
                         c.proc.terminate_thread(thread, exit_status);
                     }

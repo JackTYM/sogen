@@ -35,6 +35,7 @@ namespace sogen
             worker_factory,
             private_namespace,
             process,
+            accelerator_table,
         };
     };
 
@@ -44,7 +45,16 @@ namespace sogen
 #pragma pack(1)
     struct handle_value
     {
-        uint64_t id : 23;
+        // The low 2 bits of a Windows HANDLE are reserved: the kernel ignores them and user-mode code
+        // is free to use them as tag bits, so real handles are always 4-aligned. Genuine Windows
+        // binaries rely on this - e.g. wow64.dll's generic NtClose thunk (whNtClose) does
+        // `and handle, ~1` before the 64-bit syscall. Keeping the id in the low bits (values like
+        // 0x800003) made that mask alias a *different* live handle (0x800002), silently closing the
+        // wrong object under the WoW64/FEX generic-dispatch path. Reserving the low 2 bits here keeps
+        // every handle 4-aligned so those masks are the no-ops they are on real Windows. type/
+        // is_system/is_pseudo/high_bits keep their exact bit positions (2 + 21 == 23); only id shifts.
+        uint64_t reserved : 2;
+        uint64_t id : 21;
         uint64_t type : 7;
         uint64_t is_system : 1;
         uint64_t is_pseudo : 1;
@@ -167,7 +177,6 @@ namespace sogen
             return --e.ref_count == 0;
         }
 
-      private:
         virtual void serialize_object(utils::buffer_serializer& buffer) const = 0;
         virtual void deserialize_object(utils::buffer_deserializer& buffer) = 0;
     };
@@ -268,7 +277,7 @@ namespace sogen
             return h;
         }
 
-        std::pair<typename value_map::iterator, bool> erase(const typename value_map::iterator& entry)
+        std::pair<typename value_map::iterator, bool> erase(const value_map::iterator& entry)
         {
             if (this->block_mutation_)
             {
@@ -329,7 +338,7 @@ namespace sogen
             buffer.read_map(this->store_);
         }
 
-        typename value_map::iterator find(const T& value)
+        value_map::iterator find(const T& value)
         {
             auto i = this->store_.begin();
             for (; i != this->store_.end(); ++i)
@@ -343,7 +352,7 @@ namespace sogen
             return i;
         }
 
-        typename value_map::const_iterator find(const T& value) const
+        value_map::const_iterator find(const T& value) const
         {
             auto i = this->store_.begin();
             for (; i != this->store_.end(); ++i)
@@ -378,28 +387,28 @@ namespace sogen
             return this->find_handle(*value);
         }
 
-        typename value_map::iterator begin()
+        value_map::iterator begin()
         {
             return this->store_.begin();
         }
 
-        typename value_map::const_iterator begin() const
+        value_map::const_iterator begin() const
         {
             return this->store_.begin();
         }
 
-        typename value_map::iterator end()
+        value_map::iterator end()
         {
             return this->store_.end();
         }
 
-        typename value_map::const_iterator end() const
+        value_map::const_iterator end() const
         {
             return this->store_.end();
         }
 
       private:
-        typename value_map::iterator get_iterator(const handle_value h)
+        value_map::iterator get_iterator(const handle_value h)
         {
             if (h.type != Type || h.is_pseudo)
             {
@@ -556,22 +565,22 @@ namespace sogen
             return value ? this->find_handle(*value) : handle{};
         }
 
-        typename value_map::iterator begin()
+        value_map::iterator begin()
         {
             return this->store_.begin();
         }
 
-        typename value_map::const_iterator begin() const
+        value_map::const_iterator begin() const
         {
             return this->store_.begin();
         }
 
-        typename value_map::iterator end()
+        value_map::iterator end()
         {
             return this->store_.end();
         }
 
-        typename value_map::const_iterator end() const
+        value_map::const_iterator end() const
         {
             return this->store_.end();
         }

@@ -232,7 +232,7 @@ namespace sogen
 
             if (!is_knowndll && attributes.RootDirectory != BASE_NAMED_OBJECTS_DIRECTORY)
             {
-                c.win_emu.log.error("Unsupported section\n");
+                c.win_emu.log.error("Unsupported section: %s\n", u16_to_u8(filename_sv).c_str());
                 c.emu.stop();
                 return STATUS_NOT_SUPPORTED;
             }
@@ -295,7 +295,8 @@ namespace sogen
                 const auto shared_section_size = c.proc.shared_section_size;
                 const auto address = c.proc.shared_section_address;
 
-                const std::u16string_view windows_dir = c.proc.kusd.get().NtSystemRoot.arr;
+                const auto windows_dir =
+                    c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return std::u16string{kusd.NtSystemRoot.arr}; });
 
                 uint64_t obj_address{};
                 if (const auto status =
@@ -420,6 +421,13 @@ namespace sogen
             // File-backed section: map a fresh copy of the file contents.
             std::vector<std::byte> file_data{};
             if (!utils::io::read_file(c.win_emu.file_sys.translate(section_entry->file_name), &file_data))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            // The guest fully controls the mapping offset. Reject anything past the file so the
+            // subtraction below cannot underflow into a huge copy that reads past file_data.
+            if (static_cast<uint64_t>(offset) > file_data.size())
             {
                 return STATUS_INVALID_PARAMETER;
             }

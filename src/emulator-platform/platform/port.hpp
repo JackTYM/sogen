@@ -55,8 +55,8 @@ namespace sogen
 
         union
         {
-            typename Traits::SIZE_T ClientViewSize; // only valid for LPC_CONNECTION_REQUEST messages
-            ULONG CallbackId;                       // only valid for LPC_REQUEST messages
+            Traits::SIZE_T ClientViewSize; // only valid for LPC_CONNECTION_REQUEST messages
+            ULONG CallbackId;              // only valid for LPC_REQUEST messages
         };
     };
 
@@ -69,10 +69,17 @@ namespace sogen
         ULONG ValidAttributes;
     };
 
+#define ALPC_MESSAGE_SECURITY_ATTRIBUTE 0x80000000
+#define ALPC_MESSAGE_VIEW_ATTRIBUTE     0x40000000
+#define ALPC_MESSAGE_CONTEXT_ATTRIBUTE  0x20000000
+#define ALPC_MESSAGE_HANDLE_ATTRIBUTE   0x10000000
+#define ALPC_MESSAGE_TOKEN_ATTRIBUTE    0x08000000
+#define ALPC_MESSAGE_DIRECT_ATTRIBUTE   0x04000000
+
     template <typename Traits>
     struct PORT_DATA_ENTRY
     {
-        typename Traits::PVOID Base;
+        Traits::PVOID Base;
         ULONG Size;
     };
 
@@ -80,8 +87,8 @@ namespace sogen
     struct ALPC_SECURITY_ATTR
     {
         ULONG Flags;
-        typename Traits::PVOID SecurityQos;
-        typename Traits::HANDLE ContextHandle;
+        Traits::PVOID SecurityQos;
+        Traits::HANDLE ContextHandle;
     };
 
     // NOLINTEND(modernize-use-using,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-enum-class)

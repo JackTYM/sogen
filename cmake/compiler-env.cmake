@@ -40,6 +40,12 @@ endif()
 
 ##########################################
 
+if(SOGEN_ENABLE_FUZZING)
+    add_compile_definitions(SOGEN_ENABLE_FUZZING)
+endif()
+
+##########################################
+
 set(SOGEN_ENABLE_RUST OFF)
 if(SOGEN_ENABLE_RUST_CODE AND NOT MINGW AND NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten")
   find_program(CARGO cargo)
@@ -275,6 +281,14 @@ endif()
 if(SOGEN_ENABLE_SANITIZER)
   sogen_add_c_and_cxx_compile_options(-fsanitize=address)
   add_link_options(-fsanitize=address)
+endif()
+
+# Instrument all code with libFuzzer edge coverage so the fuzzer sees the emulator's own handlers,
+# not just the harness. The fuzz executable adds -fsanitize=fuzzer at link time; pair with
+# SOGEN_ENABLE_SANITIZER=On for ASAN. libFuzzer is clang-only; on other toolchains only the
+# uninstrumented standalone replay driver is built (still useful for smoke/regression).
+if(SOGEN_ENABLE_FUZZING AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  sogen_add_c_and_cxx_compile_options(-fsanitize=fuzzer-no-link)
 endif()
 
 ##########################################

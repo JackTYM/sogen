@@ -36,7 +36,7 @@ namespace sogen
             };
         }
 
-        std::string get_instruction_string(const disassembler& d, const emulator& emu, const uint64_t address)
+        std::string get_instruction_string(const disassembler& d, x86_64_cpu& emu, const uint64_t address)
         {
             std::array<uint8_t, MAX_INSTRUCTION_BYTES> instruction_bytes{};
             const auto result = emu.try_read_memory(address, instruction_bytes.data(), instruction_bytes.size());
@@ -45,10 +45,8 @@ namespace sogen
                 return {};
             }
 
-            uint16_t reg_cs = 0;
-            auto& emu_ref = const_cast<emulator&>(emu);
-            emu_ref.read_raw_register(static_cast<int>(x86_register::cs), &reg_cs, sizeof(reg_cs));
-            const auto instructions = d.disassemble(emu_ref, reg_cs, instruction_bytes, 1, address);
+            const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
+            const auto instructions = d.disassemble(emu, reg_cs, instruction_bytes, 1, address);
             if (instructions.empty())
             {
                 return {};
@@ -399,7 +397,7 @@ namespace sogen
             }
         }
 
-        bool is_return(const disassembler& d, const emulator& emu, const uint64_t address)
+        bool is_return(const disassembler& d, x86_64_cpu& emu, const uint64_t address)
         {
             std::array<uint8_t, MAX_INSTRUCTION_BYTES> instruction_bytes{};
             const auto result = emu.try_read_memory(address, instruction_bytes.data(), instruction_bytes.size());
@@ -408,16 +406,14 @@ namespace sogen
                 return false;
             }
 
-            uint16_t reg_cs = 0;
-            auto& emu_ref = const_cast<emulator&>(emu);
-            emu_ref.read_raw_register(static_cast<int>(x86_register::cs), &reg_cs, sizeof(reg_cs));
-            const auto instructions = d.disassemble(emu_ref, reg_cs, instruction_bytes, 1, address);
+            const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
+            const auto instructions = d.disassemble(emu, reg_cs, instruction_bytes, 1, address);
             if (instructions.empty())
             {
                 return false;
             }
 
-            const auto handle = d.resolve_handle(emu_ref, reg_cs);
+            const auto handle = d.resolve_handle(emu, reg_cs);
             return cs_insn_group(handle, instructions.data(), CS_GRP_RET);
         }
 
@@ -597,7 +593,7 @@ namespace sogen
         void handle_rdtsc(analysis_context& c)
         {
             auto& win_emu = *c.win_emu;
-            auto& emu = win_emu.emu();
+            auto& emu = win_emu.active_cpu();
 
             const auto rip = emu.read_instruction_pointer();
             const auto mod = get_module_if_interesting(win_emu.mod_manager, c.settings->modules, rip);
@@ -613,7 +609,7 @@ namespace sogen
         void handle_rdtscp(analysis_context& c)
         {
             auto& win_emu = *c.win_emu;
-            auto& emu = win_emu.emu();
+            auto& emu = win_emu.active_cpu();
 
             const auto rip = emu.read_instruction_pointer();
             const auto mod = get_module_if_interesting(win_emu.mod_manager, c.settings->modules, rip);
@@ -634,7 +630,7 @@ namespace sogen
             }
 
             auto& win_emu = *c.win_emu;
-            auto& emu = win_emu.emu();
+            auto& emu = win_emu.active_cpu();
 
             const auto address = emu.read_instruction_pointer();
             if (c.syscall_to_resume_after_break)
@@ -720,6 +716,87 @@ namespace sogen
             return instruction_hook_continuation::run_instruction;
         }
 
+        void handle_event_pump(analysis_context& c)
+        {
+            if (c.click_dialog_buttons.empty())
+            {
+                return;
+            }
+
+            auto& proc = c.win_emu->process;
+
+            // Prune entries whose dialog window no longer exists -- an append-only set would
+            // otherwise let a later, genuinely different dialog silently reuse the destroyed
+            // dialog's now-recycled HWND and get skipped as "already clicked". Only pruning on
+            // destruction (not on the owning thread merely un-parking, which happens almost
+            // immediately after injection) keeps this dialog itself protected from re-injection
+            // spam for as long as it's still on screen.
+            std::erase_if(c.clicked_dialogs, [&](const uint64_t handle) { return proc.windows.get(static_cast<hwnd>(handle)) == nullptr; });
+
+            for (auto& win : proc.windows | std::views::values)
+            {
+                if (!win.is_dialog() || c.clicked_dialogs.contains(win.handle))
+                {
+                    continue;
+                }
+
+                const emulator_thread* owner = proc.find_thread_by_id(win.thread_id);
+                if (!owner || !(owner->await_msg.has_value() || owner->await_msg_mask.has_value()))
+                {
+                    continue;
+                }
+
+                // Click whichever of the requested control ids is actually present on this
+                // dialog, honoring the caller's priority order. Different dialogs in the same run
+                // carry different buttons (e.g. mw2's Yes/No prompts have IDYES=6 while its fatal
+                // Miles error box has only IDOK=1), so a single fixed id can't dismiss them all.
+                uint32_t target_id = 0;
+                hwnd child_handle = 0;
+                for (const auto wanted : c.click_dialog_buttons)
+                {
+                    for (auto& child : proc.windows | std::views::values)
+                    {
+                        if (child.parent_handle != win.handle)
+                        {
+                            continue;
+                        }
+
+                        uint32_t control_id = 0;
+                        child.guest.access([&](const USER_WINDOW& gw) { control_id = static_cast<uint32_t>(gw.wID); });
+                        if (control_id == wanted)
+                        {
+                            target_id = wanted;
+                            child_handle = child.handle;
+                            break;
+                        }
+                    }
+
+                    if (child_handle != 0)
+                    {
+                        break;
+                    }
+                }
+
+                if (child_handle == 0)
+                {
+                    // None of the requested buttons exist on this dialog; leave it untouched
+                    // rather than force an ignored WM_COMMAND (which would mark it dismissed and
+                    // starve a later, matching id).
+                    continue;
+                }
+
+                ui_event event{};
+                event.window = win.handle;
+                event.message = WM_COMMAND;
+                event.wParam = target_id & 0xFFFF; // BN_CLICKED=0 in high word
+                event.lParam = static_cast<uint32_t>(child_handle);
+
+                c.win_emu->handle_ui_event(event);
+                c.clicked_dialogs.insert(win.handle);
+                return;
+            }
+        }
+
         void handle_stdout(analysis_context& c, const std::string_view data)
         {
             c.emit_observation<stdout_chunk_event>([&](auto& event) { event.data = std::string(data); });
@@ -749,30 +826,31 @@ namespace sogen
                 max = std::max(import_thunk, max);
             }
 
-            c.win_emu->emu().hook_memory_write(min, max - min, [&c](const uint64_t address, const void* value, size_t size) {
-                const auto& watched_module = *c.win_emu->mod_manager.executable;
+            c.win_emu->emu().hook_memory_write(min, max - min,
+                                               [&c](cpu_interface&, const uint64_t address, const void* value, size_t size) {
+                                                   const auto& watched_module = *c.win_emu->mod_manager.executable;
 
-                const auto sym = watched_module.imports.find(address);
-                if (sym == watched_module.imports.end())
-                {
-                    // TODO: Print unaligned write accesses?
-                    return;
-                }
+                                                   const auto sym = watched_module.imports.find(address);
+                                                   if (sym == watched_module.imports.end())
+                                                   {
+                                                       // TODO: Print unaligned write accesses?
+                                                       return;
+                                                   }
 
-                uint64_t int_value{};
-                memcpy(&int_value, value, std::min(size, sizeof(int_value)));
+                                                   uint64_t int_value{};
+                                                   memcpy(&int_value, value, std::min(size, sizeof(int_value)));
 
-                const auto import_module = watched_module.imported_modules.at(sym->second.module_index);
+                                                   const auto import_module = watched_module.imported_modules.at(sym->second.module_index);
 
-                c.emit_observation<import_write_event>([&](auto& event) {
-                    event.size = size;
-                    event.value = int_value;
-                    event.import_name = sym->second.name;
-                    event.import_module = import_module;
-                });
-            });
+                                                   c.emit_observation<import_write_event>([&](auto& event) {
+                                                       event.size = size;
+                                                       event.value = int_value;
+                                                       event.import_name = sym->second.name;
+                                                       event.import_module = import_module;
+                                                   });
+                                               });
 
-            c.win_emu->emu().hook_memory_read(min, max - min, [&c](const uint64_t address, const void*, size_t) {
+            c.win_emu->emu().hook_memory_read(min, max - min, [&c](cpu_interface&, const uint64_t address, const void*, size_t) {
                 const auto rip = c.win_emu->emu().read_instruction_pointer();
                 const auto& watched_module = *c.win_emu->mod_manager.executable;
                 const auto accessor_module = get_module_if_interesting(c.win_emu->mod_manager, c.settings->modules, rip);
@@ -812,7 +890,7 @@ namespace sogen
 
     execution_context analysis_context::make_execution_context() const
     {
-        auto& emu = this->win_emu->emu();
+        auto& emu = this->win_emu->active_cpu();
         const auto rip = emu.read_instruction_pointer();
         const auto* rip_module = this->win_emu->mod_manager.find_name(rip);
 
@@ -871,6 +949,7 @@ namespace sogen
         cb.on_thread_set_name = make_callback(c, handle_thread_set_name);
 
         cb.on_instruction = make_callback(c, handle_instruction);
+        cb.on_event_pump = make_callback(c, handle_event_pump);
         cb.on_debug_string.add(make_callback(c, handle_debug_string));
         cb.on_generic_access = make_callback(c, handle_generic_access);
         cb.on_generic_activity = make_callback(c, handle_generic_activity);

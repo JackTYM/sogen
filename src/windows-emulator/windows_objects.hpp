@@ -50,6 +50,14 @@ namespace sogen
         }
     };
 
+    struct accelerator_table_entry
+    {
+        uint8_t flags{};
+        uint16_t key{};
+        uint16_t command{};
+    };
+    static_assert(sizeof(accelerator_table_entry) == 6);
+
     template <typename GuestType>
     struct user_object : ref_counted_object
     {
@@ -69,6 +77,28 @@ namespace sogen
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->guest);
+        }
+    };
+
+    struct accelerator_table : user_object<USER_ACCELERATOR_TABLE>
+    {
+        std::vector<accelerator_table_entry> entries{};
+
+        accelerator_table(memory_interface& memory)
+            : user_object(memory)
+        {
+        }
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            user_object::serialize_object(buffer);
+            buffer.write_vector(this->entries);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            user_object::deserialize_object(buffer);
+            buffer.read_vector(this->entries);
         }
     };
 
@@ -104,7 +134,6 @@ namespace sogen
         {
             return u"ComboBox";
         }
-
         return class_name;
     }
 
@@ -303,7 +332,7 @@ namespace sogen
             auto next_text = this->text_storage;
             for (size_t i = 0; i < this->items.size(); ++i)
             {
-                const auto& item = this->items[i];
+                const auto& item = this->items.at(i);
                 const auto text_ptr = !item.text.empty() ? next_text : 0;
                 const auto guest_item = make_guest_item(item, text_ptr);
                 write_guest_item_text(memory, item, text_ptr);
@@ -331,7 +360,7 @@ namespace sogen
                 return;
             }
 
-            const auto& item = this->items[index];
+            const auto& item = this->items.at(index);
             const auto text_ptr = this->get_guest_text_ptr(index);
             const auto guest_item = make_guest_item(item, text_ptr);
             write_guest_item_text(memory, item, text_ptr);
@@ -420,13 +449,14 @@ namespace sogen
             auto text_ptr = this->text_storage;
             for (size_t i = 0; i < index; ++i)
             {
-                if (!this->items[i].text.empty())
+                const auto& item = this->items.at(i);
+                if (!item.text.empty())
                 {
-                    text_ptr += (this->items[i].text.size() + 1) * sizeof(char16_t);
+                    text_ptr += (item.text.size() + 1) * sizeof(char16_t);
                 }
             }
 
-            return this->items[index].text.empty() ? 0 : text_ptr;
+            return this->items.at(index).text.empty() ? 0 : text_ptr;
         }
 
         size_t text_storage_size() const

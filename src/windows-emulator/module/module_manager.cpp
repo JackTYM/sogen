@@ -2,13 +2,14 @@
 #include "module_manager.hpp"
 #include "module_mapping.hpp"
 #include "platform/win_pefile.hpp"
-#include "windows-emulator/logger.hpp"
+#include <logger.hpp>
 #include "../wow64_heaven_gate.hpp"
 #include "../version/windows_version_manager.hpp"
 #include "../process_context.hpp"
 
 #include <serialization_helper.hpp>
 #include <cinttypes>
+#include <cstring>
 #include <vector>
 
 namespace sogen
@@ -16,6 +17,98 @@ namespace sogen
 
     namespace
     {
+        // gNlsProcessLocalCache's RVA silently drifts across different Windows servicing/OS-build
+        // combinations (confirmed directly: it differs between the Windows 2022 and 2025 CI-baked
+        // kernelbase.dll builds - one relocates the global entirely, out of where the other build's
+        // RVA would land). Since real ntdll/kernelbase code eventually WRITES through whatever
+        // TEB.NlsCache points at, resolving to a stale RVA that now falls on the wrong page/section is
+        // a guaranteed guest access violation rather than a silent correctness gap - so validate
+        // against the module's own section table (parsed from the real PE headers at map time, so it's
+        // always accurate for THIS build) before trusting any resolved address.
+        bool address_is_in_writable_section(const mapped_module& mod, const uint64_t address)
+        {
+            for (const auto& section : mod.sections)
+            {
+                const auto& region = section.region;
+                if (address >= region.start && address - region.start < region.length)
+                {
+                    return (region.permissions & memory_permission::write) != memory_permission::none;
+                }
+            }
+
+            return false;
+        }
+
+        // Locates kernelbase.dll's private (non-exported) gNlsProcessLocalCache global by scanning the
+        // module's own code for the fixed TEB.NlsCache access sequence inside BaseNlsThreadCleanup:
+        //   65 48 8B 04 25 30 00 00 00   mov rax, gs:[0x30]      (TEB self-pointer)
+        //   48 8B 98 A0 17 00 00         mov rbx, [rax+0x17A0]    (TEB.NlsCache)
+        //   48 8D 05 xx xx xx xx         lea rax, [rip+disp32]    (&gNlsProcessLocalCache)
+        // Confirmed via idasql against both the Windows 2022 and 2025 CI-baked kernelbase.dll builds:
+        // this exact 19-byte prefix is byte-identical across both (the TEB access is an ABI-level,
+        // fixed-offset structure read that the compiler always emits the same way), and only the
+        // trailing RIP-relative displacement - the actual per-build variable - differs. This is what
+        // makes the scan build-independent, unlike a hardcoded RVA (see address_is_in_writable_section's
+        // doc comment above for why a stale RVA is dangerous, not just wrong).
+        std::optional<uint64_t> scan_kernelbase_nls_cache_reference(const memory_manager& memory, const mapped_module& kernelbase)
+        {
+            static constexpr std::array<uint8_t, 19> pattern{
+                0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // mov rax, gs:[0x30]
+                0x48, 0x8B, 0x98, 0xA0, 0x17, 0x00, 0x00,             // mov rbx, [rax+0x17A0]
+                0x48, 0x8D, 0x05,                                     // lea rax, [rip+disp32]
+            };
+
+            for (const auto& section : kernelbase.sections)
+            {
+                const auto& region = section.region;
+                if (!is_executable(region.permissions) || region.length < pattern.size() + sizeof(int32_t))
+                {
+                    continue;
+                }
+
+                std::vector<uint8_t> data(region.length);
+                if (!memory.try_read_memory(region.start, data.data(), data.size()))
+                {
+                    continue;
+                }
+
+                const auto search_end = data.size() - pattern.size() - sizeof(int32_t);
+                for (size_t i = 0; i <= search_end; ++i)
+                {
+                    if (std::memcmp(data.data() + i, pattern.data(), pattern.size()) != 0)
+                    {
+                        continue;
+                    }
+
+                    int32_t displacement{};
+                    std::memcpy(&displacement, data.data() + i + pattern.size(), sizeof(displacement));
+
+                    const auto instruction_end = region.start + i + pattern.size() + sizeof(displacement);
+                    return static_cast<uint64_t>(static_cast<int64_t>(instruction_end) + displacement);
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        // Returns 0 (unresolved) if neither the build-independent code scan above nor the hardcoded-RVA
+        // fallback land on writable data for THIS specific build - see address_is_in_writable_section's
+        // doc comment. The scan is the primary path; the hardcoded RVA (derived once via static analysis
+        // of the original macOS dev-build kernelbase.dll) is kept only as a last-resort fallback for the
+        // case where BaseNlsThreadCleanup's code shape changes enough that the scan no longer matches.
+        uint64_t resolve_kernelbase_nls_cache_address(const memory_manager& memory, const mapped_module& kernelbase)
+        {
+            if (const auto scanned = scan_kernelbase_nls_cache_reference(memory, kernelbase);
+                scanned.has_value() && address_is_in_writable_section(kernelbase, *scanned))
+            {
+                return *scanned;
+            }
+
+            constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
+            const auto address = kernelbase.image_base + kernelbase_gnls_process_local_cache_rva;
+            return address_is_in_writable_section(kernelbase, address) ? address : 0;
+        }
+
         uint64_t get_system_dll_init_block_size(const windows_version_manager& version)
         {
             if (version.is_build_after_or_equal(WINDOWS_VERSION::WINDOWS_11_24H2))
@@ -96,6 +189,7 @@ namespace sogen
             buffer.write(mod.entry_point);
 
             buffer.write(mod.machine);
+            buffer.write(mod.dll_characteristics);
             buffer.write(mod.size_of_stack_reserve);
             buffer.write(mod.size_of_stack_commit);
             buffer.write(mod.size_of_heap_reserve);
@@ -121,6 +215,7 @@ namespace sogen
             buffer.read(mod.entry_point);
 
             buffer.read(mod.machine);
+            buffer.read(mod.dll_characteristics);
             buffer.read(mod.size_of_stack_reserve);
             buffer.read(mod.size_of_stack_commit);
             buffer.read(mod.size_of_heap_reserve);
@@ -287,11 +382,14 @@ namespace sogen
                                                    const windows_path& win32u_path, const logger& logger)
     {
         this->executable = this->map_module_or_throw(executable_path, logger, true);
+        this->memory_->set_dep_enabled(this->executable->machine != static_cast<uint16_t>(PEMachineType::I386) ||
+                                       (this->executable->dll_characteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT) != 0);
+
         this->ntdll = this->map_module_or_throw(ntdll_path, logger, true);
         this->win32u = this->map_module_or_throw(win32u_path, logger, true);
     }
 
-    void module_manager::load_wow64_modules(const windows_path& executable_path, const windows_path& ntdll_path,
+    void module_manager::load_wow64_modules(x86_64_emulator& emu, const windows_path& executable_path, const windows_path& ntdll_path,
                                             const windows_path& win32u_path, const windows_path& ntdll32_path,
                                             windows_version_manager& version, const logger& logger)
     {
@@ -370,10 +468,10 @@ namespace sogen
         this->memory_->write_memory(ldr_init_block_addr, &init_block, static_cast<size_t>(init_block_size));
 
         // Install the WOW64 Heaven's Gate trampoline used for compat-mode -> 64-bit transitions.
-        this->install_wow64_heaven_gate(logger);
+        this->install_wow64_heaven_gate(emu, logger);
     }
 
-    void module_manager::install_wow64_heaven_gate(const logger& logger)
+    void module_manager::install_wow64_heaven_gate(x86_64_emulator& emu, const logger& logger)
     {
         using wow64::heaven_gate::kCodeBase;
         using wow64::heaven_gate::kCodeSize;
@@ -381,52 +479,159 @@ namespace sogen
         using wow64::heaven_gate::kStackSize;
         using wow64::heaven_gate::kTrampolineBytes;
 
-        auto allocate_or_validate = [&](uint64_t base, size_t size, memory_permission perms, const char* name) {
-            if (!this->memory_->allocate_memory(base, size, perms))
+        // Unlike a real module's preferred base, kCodeBase/kStackBase aren't addresses real
+        // Windows/wow64cpu.dll require - they're sogen-internal implementation details (kTrampolineBytes
+        // is itself fully position-independent code: its one "call" targets its own next instruction,
+        // not an absolute address), so there's no compatibility reason they must sit exactly there. Try
+        // the preferred address first (the common, fast path - almost always free), but fall back to
+        // searching for any free spot below 4GB if it isn't. This matters on a backend sharing the guest
+        // address space with the host process (FEX on Apple Silicon): a real regression showed the
+        // preferred kCodeBase can already be claimed by a foreign host mapping - this process's own
+        // Cocoa/Metal GPU subsystem reserves a large host VA range whose ASLR placement occasionally
+        // lands exactly there. Confirmed to be a genuine, ongoing race (not just a one-time startup
+        // ordering issue): even when the address reads as free at allocation time, Metal's own
+        // background thread can still claim it in the narrow window before the trampoline bytes are
+        // actually written, so the write itself must be retried at a new address on failure too, not
+        // just the initial allocation. With none of this handled, real wow64 runs failed outright in
+        // roughly 20-40% of runs.
+        constexpr uint64_t heaven_gate_below_4gb_ceiling = 0xFFFFFFFFULL;
+        constexpr int max_heaven_gate_retries = 8;
+
+        auto allocate_or_validate = [&](uint64_t preferred_base, size_t size, memory_permission perms,
+                                        const char* name) -> std::optional<uint64_t> {
+            if (this->memory_->allocate_memory(preferred_base, size, perms))
             {
-                const auto region = this->memory_->get_region_info(base);
-                if (!region.is_reserved || region.allocation_length < size)
-                {
-                    logger.error("Failed to allocate %s at 0x%" PRIx64 " (size 0x%zx)\n", name, base, size);
-                    return false;
-                }
+                return preferred_base;
             }
-            return true;
+
+            const auto region = this->memory_->get_region_info(preferred_base);
+            if (region.is_reserved && region.allocation_length >= size)
+            {
+                return preferred_base;
+            }
+
+            const uint64_t relocated_base =
+                this->memory_->find_free_host_allocation_base(size, preferred_base, heaven_gate_below_4gb_ceiling);
+            if (!relocated_base || !this->memory_->allocate_memory(relocated_base, size, perms))
+            {
+                logger.error("Failed to allocate %s (size 0x%zx)\n", name, size);
+                return std::nullopt;
+            }
+
+            return relocated_base;
         };
 
-        bool code_initialized = false;
-        if (allocate_or_validate(kCodeBase, kCodeSize, memory_permission::read_write, "WOW64 heaven gate code"))
-        {
-            if (!this->memory_->protect_memory(kCodeBase, kCodeSize, nt_memory_permission(memory_permission::read_write)))
+        // Allocates (or relocates) preferred_base, then runs `commit` (the actual writes/protection
+        // changes). If `commit` reports failure, releases the allocation and retries at a fresh
+        // address, up to max_heaven_gate_retries times.
+        //
+        // Deliberately does NOT just retry allocate_or_validate(preferred_base, ...) unchanged: on this
+        // backend, the fixed-address path's underlying host mmap uses MAP_FIXED, which unconditionally
+        // succeeds by silently clobbering whatever was already there - it can't detect Metal's
+        // background thread continuing to reclaim the exact same address after we do (a genuinely
+        // adversarial, repeated race, confirmed empirically: identical retries at the same preferred
+        // address kept reporting the same commit failure every time). So after the first failure this
+        // switches straight to a real search (find_free_host_allocation_base, which confirms host
+        // availability and rescans past foreign occupants).
+        //
+        // The relocation search always restarts from heaven_gate_search_floor (a low, fixed address),
+        // never from just past the last failed range: kCodeBase/kStackBase sit near the TOP of the
+        // below-4GB range, so "search upward from the failure" would only ever cover the last few MB
+        // before hitting the 4GB ceiling, silently ignoring the (likely much larger) free space below
+        // the preferred address entirely. Restarting from the floor each time lets the full below-4GB
+        // range be considered; find_free_host_allocation_base's own rescan-and-retry already keeps a
+        // repeat failure at the same spot from looping forever.
+        constexpr uint64_t heaven_gate_search_floor = 0x10000ULL;
+
+        auto commit_with_retry = [&](uint64_t preferred_base, size_t size, const char* name,
+                                     const std::function<bool(uint64_t)>& commit) -> std::optional<uint64_t> {
+            bool force_relocate = false;
+
+            for (int attempt = 0; attempt <= max_heaven_gate_retries; ++attempt)
             {
-                logger.error("Failed to change protection for WOW64 heaven gate code at 0x%" PRIx64 "\n", kCodeBase);
-            }
-            else
-            {
-                std::vector<uint8_t> buffer(kCodeSize, 0);
-                this->memory_->write_memory(kCodeBase, buffer.data(), buffer.size());
-                this->memory_->write_memory(kCodeBase, kTrampolineBytes.data(), kTrampolineBytes.size());
-                this->memory_->protect_memory(kCodeBase, kCodeSize,
-                                              nt_memory_permission(memory_permission::read | memory_permission::exec));
-                code_initialized = true;
+                std::optional<uint64_t> base;
+                if (!force_relocate)
+                {
+                    base = allocate_or_validate(preferred_base, size, memory_permission::read_write, name);
+                }
+                else
+                {
+                    const uint64_t relocated_base =
+                        this->memory_->find_free_host_allocation_base(size, heaven_gate_search_floor, heaven_gate_below_4gb_ceiling);
+                    if (relocated_base && this->memory_->allocate_memory(relocated_base, size, memory_permission::read_write))
+                    {
+                        base = relocated_base;
+                    }
+                }
+
+                if (!base)
+                {
+                    logger.error("Failed to allocate %s (size 0x%zx)\n", name, size);
+                    return std::nullopt;
+                }
+
+                if (commit(*base))
+                {
+                    return base;
+                }
+
+                logger.error("Failed to commit %s at 0x%" PRIx64 " (size 0x%zx) - retrying elsewhere\n", name, *base, size);
+                this->memory_->release_memory(*base, size);
+                force_relocate = true;
             }
 
-            if (code_initialized && this->modules_.contains(kCodeBase))
+            logger.error("Failed to commit %s after %d retries\n", name, max_heaven_gate_retries);
+            return std::nullopt;
+        };
+
+        const auto code_base = commit_with_retry(kCodeBase, kCodeSize, "WOW64 heaven gate code", [&](uint64_t base) {
+            if (!this->memory_->protect_memory(base, kCodeSize, nt_memory_permission(memory_permission::read_write)))
+            {
+                return false;
+            }
+
+            std::vector<uint8_t> buffer(kCodeSize, 0);
+            if (!this->memory_->try_write_memory(base, buffer.data(), buffer.size()) ||
+                !this->memory_->try_write_memory(base, kTrampolineBytes.data(), kTrampolineBytes.size()))
+            {
+                return false;
+            }
+
+            this->memory_->protect_memory(base, kCodeSize, nt_memory_permission(memory_permission::read | memory_permission::exec));
+            return true;
+        });
+        if (code_base)
+        {
+            this->wow64_heaven_gate_code_base_ = *code_base;
+
+            // KVM/Unicorn genuinely execute the trampoline's real machine code (a real CS-segment
+            // mode switch via retf/iretq) - real|exec is correct and sufficient for them, so
+            // register_gate_crossing is a no-op default there. A JIT-based backend (FEXCore)
+            // cannot execute that at all (bitness fixed per compiled Context - see
+            // notify_process_bitness's doc comment) and instead intercepts execution reaching this
+            // page before any of it is ever JIT-compiled, then synthesizes the mode switch itself
+            // (marshal register state into its other-bitness Context and flip which one runs) -
+            // see register_gate_crossing / gate_crossing_kind::heaven_gate (arch_emulator.hpp).
+            // The trampoline is driven with the confirmed convention RAX=RIP, RBX=RSP, RCX=CS,
+            // RDX=SS (see exception_dispatch.cpp), which the FEX crossing handler decodes.
+            emu.register_gate_crossing(*code_base, kCodeSize, x86_64_emulator::gate_crossing_kind::heaven_gate);
+
+            if (this->modules_.contains(*code_base))
             {
                 mapped_module module{};
                 module.name = "wow64_heaven_gate";
                 module.path = "<wow64-heaven-gate>";
-                module.image_base = kCodeBase;
-                module.image_base_file = kCodeBase;
+                module.image_base = *code_base;
+                module.image_base_file = *code_base;
                 module.size_of_image = kCodeSize;
-                module.entry_point = kCodeBase;
+                module.entry_point = *code_base;
                 constexpr uint16_t kMachineAmd64 = 0x8664;
                 module.machine = kMachineAmd64;
                 module.is_static = true;
 
                 mapped_section section{};
                 section.name = ".gate";
-                section.region.start = kCodeBase;
+                section.region.start = *code_base;
                 section.region.length = kCodeSize;
                 section.region.permissions = memory_permission::read | memory_permission::exec;
                 module.sections.emplace_back(std::move(section));
@@ -436,15 +641,77 @@ namespace sogen
             }
         }
 
-        if (allocate_or_validate(kStackBase, kStackSize, memory_permission::read_write, "WOW64 heaven gate stack"))
-        {
+        const auto stack_base = commit_with_retry(kStackBase, kStackSize, "WOW64 heaven gate stack", [&](uint64_t base) {
             std::vector<uint8_t> buffer(kStackSize, 0);
-            this->memory_->write_memory(kStackBase, buffer.data(), buffer.size());
+            return this->memory_->try_write_memory(base, buffer.data(), buffer.size());
+        });
+        if (stack_base)
+        {
+            this->wow64_heaven_gate_stack_top_ = *stack_base + kStackSize;
         }
     }
 
-    void module_manager::map_main_modules(const windows_path& executable_path, windows_version_manager& version, process_context& context,
-                                          const logger& logger)
+    void module_manager::ensure_kernelbase_nls_cache_hook(process_context& context)
+    {
+        if (!this->kernelbase_nls_cache_hook_registered_)
+        {
+            this->kernelbase_nls_cache_hook_registered_ = true;
+
+            // Resolve kernelbase.dll's private (non-exported) gNlsProcessLocalCache global as soon as
+            // it's mapped, for emulator_thread.cpp's TEB64.NlsCache setup - real Windows points every
+            // thread's TEB.NlsCache at this shared, process-wide fallback structure until that thread
+            // does its own locale/NLS API work, and kernelbase.dll's BaseNlsThreadCleanup
+            // (DLL_THREAD_DETACH) relies on pointer equality with it to know whether to RtlFreeHeap the
+            // TEB's NlsCache value.
+            //
+            // kernelbase.dll is never a parameter to process_context::setup() - unlike ntdll/win32u, it
+            // is not mapped eagerly here; it loads later via the guest loader's own import resolution
+            // (see load_native_64bit_modules/load_wow64_modules, which only map exe+ntdll+win32u
+            // upfront) - so this must be resolved on_module_load, not at setup() time (a prior attempt
+            // to resolve it there found kernelbase.dll never mapped yet and always fell back to the
+            // placeholder, below, for every thread). By the time this fires, the only thread that
+            // exists is the initial one, which is fine: it never reaches BaseNlsThreadCleanup via
+            // DLL_THREAD_DETACH (that only fires for a thread exiting while others remain live - the
+            // process's own final exit instead goes through DLL_PROCESS_DETACH, a separate code path
+            // that never touches NlsCache at all) - every thread the guest's own code spawns afterwards
+            // (i.e. any real DLL_THREAD_DETACH candidate) is created well after this callback has
+            // already run, since kernelbase.dll loads during the loader's own import resolution,
+            // strictly before the app's own code can call CreateThread. Its RVA is specific to the
+            // exact kernelbase.dll build it was originally identified against (via static analysis) -
+            // resolve_kernelbase_nls_cache_address validates it still lands on writable data before
+            // trusting it, since that drifts across Windows builds. Registered only once per
+            // module_manager instance - safe, since the callback captures `context` by reference and
+            // every caller of this function passes the SAME process_context the module_manager was
+            // constructed for.
+            this->callbacks_->on_module_load.add([this, &context](mapped_module& mod) {
+                if (mod.name != "kernelbase.dll")
+                {
+                    return;
+                }
+
+                context.kernelbase_nls_process_local_cache = resolve_kernelbase_nls_cache_address(*this->memory_, mod);
+            });
+        }
+
+        // Unlike the registration above, this must run every time this function is called, not just
+        // once: a windows_emulator's deserialize()/restore_snapshot() calls this AFTER resetting both
+        // mod_manager's module list and process_context back to a snapshot's state, but
+        // kernelbase_nls_process_local_cache is deliberately not part of process_context's own
+        // serialized state (it is host-side bookkeeping meant to be re-derived, not guest state) - so
+        // without this, a reset to a snapshot taken BEFORE kernelbase.dll loaded would leave
+        // context.kernelbase_nls_process_local_cache holding a stale, no-longer-valid guest address
+        // left over from whatever ran on this object before the reset, instead of correctly falling
+        // back to 0 (which resolve_nls_cache, emulator_thread.cpp, treats as "not resolved yet, use the
+        // placeholder"). Resolve from the CURRENT module list every time: if kernelbase.dll is mapped
+        // right now, point at its cache global; if it isn't (e.g. right after a reset to a
+        // pre-kernelbase.dll-load snapshot), reset to 0 so a thread created before the on_module_load
+        // callback above fires again gets the placeholder instead of a stale/invalid address.
+        const auto* kernelbase = this->find_by_name("kernelbase.dll");
+        context.kernelbase_nls_process_local_cache = kernelbase ? resolve_kernelbase_nls_cache_address(*this->memory_, *kernelbase) : 0;
+    }
+
+    void module_manager::map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
+                                          process_context& context, const logger& logger)
     {
         const auto& system_root = version.get_system_root();
         const auto system32_path = system_root / "System32";
@@ -453,6 +720,17 @@ namespace sogen
         current_execution_mode_ = detect_execution_mode(executable_path, logger);
         context.is_wow64_process = (current_execution_mode_ == execution_mode::wow64_32bit);
 
+        // Must happen before any module gets mapped below: a JIT-based backend (FEXCore) needs to
+        // know the bitness before compiling its first block (see notify_process_bitness's doc
+        // comment), and a 32-bit process's own image/ntdll32 map into the low 4GB - a range some
+        // backends must steer real host allocations away from for a 64-bit process, but must NOT for
+        // a 32-bit one (see reserve_host_memory_ranges's doc comment) - so the reservation has to be
+        // recomputed now that the bitness is known, before either module is mapped.
+        emu.notify_process_bitness(context.is_wow64_process);
+        this->memory_->reset_host_memory_ranges();
+
+        this->ensure_kernelbase_nls_cache_hook(context);
+
         switch (current_execution_mode_)
         {
         case execution_mode::native_64bit:
@@ -460,7 +738,100 @@ namespace sogen
             break;
 
         case execution_mode::wow64_32bit:
-            load_wow64_modules(executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
+            // Data-driven interception of the real WoW64 CPU-simulation dispatcher: unlike
+            // ntdll32/win32u/native-ntdll (mapped directly by load_wow64_modules), wow64cpu.dll is
+            // never mapped by sogen - real ntdll loads it dynamically through the guest loader (task
+            // #27), which flows through map_module_core and fires on_module_load. When it appears,
+            // register its turbo-thunk dispatcher (TurboDispatchJumpAddressStart..End - the address
+            // ntdll32's Wow64Transition points at) as a gate crossing so a JIT backend intercepts the
+            // 32<->64 mode switch there instead of mis-compiling that 64-bit dispatch code. A no-op on
+            // native-execution backends (register_gate_crossing's default). See fex_x86_64_emulator's
+            // perform_gate_crossing for the (not-yet-decodable) wow64cpu_dispatch convention.
+            this->callbacks_->on_module_load.add([emu_ptr = &emu](mapped_module& mod) {
+                if (mod.name != "wow64cpu.dll")
+                {
+                    return;
+                }
+                const auto dispatch_start = mod.find_export("TurboDispatchJumpAddressStart");
+                if (dispatch_start == 0)
+                {
+                    return;
+                }
+                // wow64cpu.dll layout (decoded by hand from the shipped binary, cross-checked by
+                // objdump; all RVAs relative to the image base, which we recover from the
+                // TurboDispatchJumpAddressStart export @ 0x17a6 so everything tracks ASLR):
+                //   BTCpuSimulate (export, 0x11c0) = `L: call RunSimulatedCode; jmp L`;
+                //   RunSimulatedCode (0x1650, NOT an export) = the 64->32 forward transition;
+                //   TurboDispatchJumpAddressStart (export, 0x17a6) = the 64-bit turbo dispatcher tail;
+                //   the WOW64SVC far-transition thunk (0x2010) = the 32->64 reverse gate.
+                constexpr uint64_t turbo_dispatch_start_rva = 0x17a6;
+                const auto image_base = dispatch_start - turbo_dispatch_start_rva;
+
+                // Register the forward (64->32) transition, RunSimulatedCode. Its body contains the
+                // un-JIT-able `mov gs, cx`; registering the span makes a JIT backend intercept it at
+                // its entry and marshal the 32-bit register block itself instead of compiling those
+                // bytes. See the FEX backend's enter_wow64_32bit_from_run_simulated_code
+                // (gate_crossing_kind::wow64_run_simulated_code).
+                constexpr uint64_t run_simulated_code_rva = 0x1650;
+                emu_ptr->register_gate_crossing(image_base + run_simulated_code_rva, turbo_dispatch_start_rva - run_simulated_code_rva,
+                                                x86_64_emulator::gate_crossing_kind::wow64_run_simulated_code);
+
+                // Register the reverse (32->64) transition. The 32-bit ntdll syscall stub reaches the
+                // WOW64SVC thunk @ 0x2010 via `call fs:[0xC0]` (Wow64Transition); the thunk does a far
+                // `ljmp 0x33:...` into 64-bit mode, which the fixed-bitness 32-bit Context cannot do.
+                // Registering the 32-bit portion of the thunk [0x2010, 0x2024) makes the JIT intercept
+                // it, marshal the 32-bit state, and hand control to the real 64-bit TurboDispatch so
+                // wow64.dll services the syscall (see enter_wow64_64bit_from_wow64svc_thunk,
+                // gate_crossing_kind::wow64cpu_dispatch). NOTE: TurboDispatchJumpAddressStart itself is
+                // deliberately NOT registered - that 64-bit dispatch code MUST execute to translate the
+                // 32-bit service number and issue the real 64-bit syscall sogen hooks.
+                constexpr uint64_t wow64svc_thunk_rva = 0x2010;
+                constexpr uint64_t wow64svc_thunk_size = 0x14;
+                emu_ptr->register_gate_crossing(image_base + wow64svc_thunk_rva, wow64svc_thunk_size,
+                                                x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
+
+                // BTCpuProcessInit enables "turbo thunks" by default (it sets the flag at RVA 0x4590),
+                // so BTCpuGetBopCode (RVA 0x11e0) returns the W64SVC *turbo* bop (RVA 0x6000) instead of
+                // the WOW64SVC thunk (0x2010). The 32-bit syscall stub's `call fs:[0xC0]` (Wow64Transition)
+                // therefore targets 0x6000, whose `ljmp 0x33:...; jmp [r15+0xf8]` is the same un-executable
+                // 32-bit bitness switch. Register it as a reverse gate too, routed to the SAME handler:
+                // enter_wow64_64bit_from_wow64svc_thunk is bop-agnostic - it marshals the live 32-bit
+                // register file into the CONTEXT block and resumes the 64-bit TurboDispatch, never executing
+                // the thunk bytes - so the reverse transition works whichever bop code BTCpuGetBopCode
+                // hands the guest.
+                constexpr uint64_t w64svc_turbo_bop_rva = 0x6000;
+                constexpr uint64_t w64svc_turbo_bop_size = 0x10;
+                emu_ptr->register_gate_crossing(image_base + w64svc_turbo_bop_rva, w64svc_turbo_bop_size,
+                                                x86_64_emulator::gate_crossing_kind::wow64cpu_dispatch);
+
+                // BTCpuProcessInit also writes a standalone compatibility-mode-to-long-mode probe into
+                // its own freshly-r-x'd page: a bare `jmp far 0x33:<target>` (opcode 0xEA), which real
+                // hardware executes to verify the CPU can actually switch into 64-bit mode - a
+                // one-time sanity check unrelated to the two dispatch mechanisms above, but exactly as
+                // un-JIT-able (0xEA is undefined in 64-bit long mode). See perform_gate_crossing's
+                // decode of it (gate_crossing_kind::far_jmp_bitness_switch).
+                //
+                // Confirmed empirically (not by hand like the RVAs above): the probe faults at
+                // image_base+0x6d41. This is NOT the same as (mapped base)+0x7000 - image_base here
+                // (dispatch_start - turbo_dispatch_start_rva) sits a fixed 0x2bf bytes above wow64cpu.dll's
+                // real mapped base, so RVAs measured directly against the PE mapping (as first done
+                // for this one) land 0x2bf too high once added to image_base instead. The other three
+                // gates above don't have this problem because their RVAs were decoded by hand directly
+                // against image_base's own frame of reference, not the PE mapping.
+                constexpr uint64_t cpu_mode_probe_rva = 0x6d41;
+                // Exactly the far jmp's own encoding length (1-byte opcode + 4-byte offset + 2-byte
+                // selector) - NOT rounded up like the other gates above. The probe's target sits just
+                // 9 bytes past its own start (jmp far 0x33:<9 bytes ahead>), so a padded size (0x10, as
+                // first tried here) would cover the landing address too: execution would re-enter this
+                // same "non-executable" gate immediately after the crossing, decode the identical bytes,
+                // and cross again forever - an infinite loop rather than the crash this gate exists to
+                // fix. Confirmed via a hung CI run before narrowing this to the true instruction length.
+                constexpr uint64_t cpu_mode_probe_size = 0x7;
+                emu_ptr->register_gate_crossing(image_base + cpu_mode_probe_rva, cpu_mode_probe_size,
+                                                x86_64_emulator::gate_crossing_kind::far_jmp_bitness_switch);
+            });
+
+            load_wow64_modules(emu, executable_path, system32_path / "ntdll.dll", system32_path / "win32u.dll", syswow64_path / "ntdll.dll",
                                version, logger);
             break;
 

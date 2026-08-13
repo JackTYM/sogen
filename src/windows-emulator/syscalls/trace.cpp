@@ -38,18 +38,13 @@ namespace sogen
                     return STATUS_INVALID_HANDLE;
                 }
 
-                if (c.proc.etw_notification_event)
-                {
-                    return STATUS_UNSUCCESSFUL;
-                }
-
                 const auto held_handle = c.proc.events.duplicate(event_handle);
                 if (!held_handle)
                 {
                     return STATUS_INVALID_HANDLE;
                 }
 
-                c.proc.etw_notification_event = *held_handle;
+                c.proc.etw_notification_events.push_back(*held_handle);
                 return STATUS_SUCCESS;
             }
 

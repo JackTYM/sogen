@@ -9,6 +9,80 @@ namespace sogen
     {
         namespace
         {
+            NTSTATUS handle_system_memory_usage_information(const syscall_context& c, const uint32_t info_class,
+                                                            const uint64_t system_information, const uint32_t system_information_length,
+                                                            const emulator_object<uint32_t> return_length)
+            {
+                struct basic_memory_status_information
+                {
+                    uint64_t total_physical_bytes;
+                    uint64_t available_physical_bytes;
+                    uint64_t reserved0;
+                    uint64_t committed_bytes;
+                    uint64_t reserved1;
+                    uint64_t commit_limit_bytes;
+                    uint64_t reserved2;
+                };
+
+                if (info_class == SystemMemoryUsageInformation && system_information_length == sizeof(basic_memory_status_information))
+                {
+                    // Simulated physical memory size (~13 GB).
+                    constexpr uint64_t total_physical_bytes = 0x00c9c7ffULL * 0x1000;
+
+                    const basic_memory_status_information info{
+                        .total_physical_bytes = total_physical_bytes,
+                        .available_physical_bytes = total_physical_bytes / 2,
+                        .reserved0 = 0,
+                        .committed_bytes = total_physical_bytes / 4,
+                        .reserved1 = 0,
+                        .commit_limit_bytes = total_physical_bytes + total_physical_bytes / 2,
+                        .reserved2 = 0,
+                    };
+
+                    c.emu.write_memory(system_information, &info, sizeof(info));
+                    if (return_length)
+                    {
+                        return_length.write(sizeof(info));
+                    }
+
+                    return STATUS_SUCCESS;
+                }
+
+                using Traits = EmulatorTraits<Emu64>;
+                using info_t = SYSTEM_MEMORY_USAGE_INFORMATION<Traits>;
+                using usage_t = SYSTEM_MEMORY_USAGE<Traits>;
+
+                constexpr auto header_size = static_cast<uint32_t>(offsetof(info_t, MemoryUsage));
+                constexpr auto usage_name = std::to_array(u"System Memory");
+                constexpr auto required_length = header_size + static_cast<uint32_t>(sizeof(usage_t) + sizeof(usage_name));
+
+                if (return_length)
+                {
+                    return_length.write(required_length);
+                }
+
+                if (system_information_length < required_length)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const info_t header{.Reserved = 0, .EndOfData = system_information + header_size + sizeof(usage_t), .MemoryUsage = {}};
+                c.emu.write_memory(system_information, &header, header_size);
+
+                const USHORT base_valid = info_class == SystemFullMemoryInformation ? 0x2000 : 0x1000;
+                const usage_t usage{
+                    .Name = system_information + header_size + sizeof(usage_t),
+                    .Valid = base_valid,
+                    .Standby = static_cast<USHORT>(base_valid / 2),
+                    .Modified = static_cast<USHORT>(base_valid / 8),
+                    .PageTables = static_cast<USHORT>(base_valid / 16),
+                };
+
+                c.emu.write_memory(system_information + header_size, &usage, sizeof(usage));
+                c.emu.write_memory(system_information + header_size + sizeof(usage), usage_name.data(), sizeof(usage_name));
+                return STATUS_SUCCESS;
+            }
+
             NTSTATUS handle_logical_processor_and_group_information(const syscall_context& c, const uint64_t input_buffer,
                                                                     const uint32_t input_buffer_length, const uint64_t system_information,
                                                                     const uint32_t system_information_length,
@@ -31,7 +105,8 @@ namespace sogen
                     group.MaximumGroupCount = 1;
 
                     auto& group_info = group.GroupInfo[0];
-                    group_info.ActiveProcessorCount = static_cast<uint8_t>(c.proc.kusd.get().ActiveProcessorCount);
+                    group_info.ActiveProcessorCount =
+                        static_cast<uint8_t>(c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; }));
                     group_info.ActiveProcessorMask = (1ULL << group_info.ActiveProcessorCount) - 1;
                     group_info.MaximumProcessorCount = group_info.ActiveProcessorCount;
 
@@ -203,9 +278,9 @@ namespace sogen
 
             uint64_t process_id = process_context::process_id;
             uint64_t active_tid = 0;
-            if (c.proc.active_thread && c.proc.active_thread->teb64)
+            if (c.vcpu.active_thread && c.vcpu.active_thread->teb64)
             {
-                c.proc.active_thread->teb64->access([&](const TEB64& teb) {
+                c.vcpu.active_thread->teb64->access([&](const TEB64& teb) {
                     process_id = teb.ClientId.UniqueProcess;
                     active_tid = teb.ClientId.UniqueThread;
                 });
@@ -277,7 +352,6 @@ namespace sogen
 
             case 250: // Build 27744
             case SystemFlushInformation:
-            case SystemMemoryUsageInformation:
             case SystemCodeIntegrityPolicyInformation:
             case SystemHypervisorSharedPageInformation:
             case SystemFeatureConfigurationInformation:
@@ -379,6 +453,11 @@ namespace sogen
                         dtzi.DynamicDaylightTimeDisabled = FALSE;
                     });
 
+            case SystemMemoryUsageInformation:
+            case SystemFullMemoryInformation:
+            case SystemSummaryMemoryInformation:
+                return handle_system_memory_usage_information(c, info_class, system_information, system_information_length, return_length);
+
             case SystemRangeStartInformation:
                 return handle_query<SYSTEM_RANGE_START_INFORMATION64>(c.emu, system_information, system_information_length, return_length,
                                                                       [&](SYSTEM_RANGE_START_INFORMATION64& info) {
@@ -390,7 +469,7 @@ namespace sogen
                 // IdleTime == KernelTime (Windows kernel time includes idle), UserTime == 0. Use the
                 // executed-instruction tick as a monotonic clock so consecutive samples differ and callers
                 // computing usage from deltas don't divide by zero.
-                const auto processor_count = c.proc.kusd.get().ActiveProcessorCount;
+                const auto processor_count = c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
                 constexpr auto entry_size = sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION);
                 const auto required = static_cast<uint32_t>(processor_count * entry_size);
 
@@ -470,7 +549,8 @@ namespace sogen
                     if (processor_group == 0)
                     {
                         using mask_type = decltype(info.ProcessorMask);
-                        const auto active_processor_count = c.proc.kusd.get().ActiveProcessorCount;
+                        const auto active_processor_count =
+                            c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
                         info.ProcessorMask = (static_cast<mask_type>(1) << active_processor_count) - 1;
                     }
                 });
@@ -478,19 +558,21 @@ namespace sogen
 
             case SystemBasicInformation:
             case SystemEmulationBasicInformation:
-                return handle_query<SYSTEM_BASIC_INFORMATION64>(c.emu, system_information, system_information_length, return_length,
-                                                                [&](SYSTEM_BASIC_INFORMATION64& basic_info) {
-                                                                    basic_info.Reserved = 0;
-                                                                    basic_info.TimerResolution = 0x0002625a;
-                                                                    basic_info.PageSize = 0x1000;
-                                                                    basic_info.LowestPhysicalPageNumber = 0x00000001;
-                                                                    basic_info.HighestPhysicalPageNumber = 0x00c9c7ff;
-                                                                    basic_info.AllocationGranularity = ALLOCATION_GRANULARITY;
-                                                                    basic_info.MinimumUserModeAddress = MIN_ALLOCATION_ADDRESS;
-                                                                    basic_info.MaximumUserModeAddress = MAX_ALLOCATION_ADDRESS;
-                                                                    basic_info.ActiveProcessorsAffinityMask = 0x0000000000000f;
-                                                                    basic_info.NumberOfProcessors = 4;
-                                                                });
+                return handle_query<SYSTEM_BASIC_INFORMATION64>(
+                    c.emu, system_information, system_information_length, return_length, [&](SYSTEM_BASIC_INFORMATION64& basic_info) {
+                        basic_info.Reserved = 0;
+                        basic_info.TimerResolution = 0x0002625a;
+                        basic_info.PageSize = 0x1000;
+                        basic_info.LowestPhysicalPageNumber = 0x00000001;
+                        basic_info.HighestPhysicalPageNumber = 0x00c9c7ff;
+                        basic_info.AllocationGranularity = ALLOCATION_GRANULARITY;
+                        basic_info.MinimumUserModeAddress = MIN_ALLOCATION_ADDRESS;
+                        basic_info.MaximumUserModeAddress = MAX_ALLOCATION_ADDRESS;
+                        const auto processor_count =
+                            c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
+                        basic_info.ActiveProcessorsAffinityMask = (processor_count >= 64) ? ~0ull : ((1ull << processor_count) - 1);
+                        basic_info.NumberOfProcessors = static_cast<char>(processor_count);
+                    });
 
             case SystemDeviceInformation:
                 return handle_query<SYSTEM_DEVICE_INFORMATION>(c.emu, system_information, system_information_length, return_length,
@@ -536,8 +618,7 @@ namespace sogen
                 // of rejecting an unexpected size.
                 if (system_information)
                 {
-                    const std::vector<std::byte> zeros(system_information_length, std::byte{});
-                    c.emu.write_memory(system_information, zeros.data(), zeros.size());
+                    c.emu.set_memory(system_information, 0, system_information_length);
                 }
                 if (return_length)
                 {
@@ -548,6 +629,13 @@ namespace sogen
             case SystemRecommendedSharedDataAlignment:
                 return handle_query<ULONG>(c.emu, system_information, system_information_length, return_length,
                                            [&](ULONG& alignment) { alignment = 64; });
+
+            case SystemNumaAvailableMemory:
+                return handle_query<SYSTEM_NUMA_INFORMATION64>(c.emu, system_information, system_information_length, return_length,
+                                                               [&](SYSTEM_NUMA_INFORMATION64& info) {
+                                                                   memset(&info, 0, sizeof(info));
+                                                                   info.AvailableMemory[0] = 0x80000000ull;
+                                                               });
 
             case SystemSupportedProcessorArchitectures: {
                 constexpr auto num_arch = 2;
@@ -648,8 +736,7 @@ namespace sogen
             // "power/idle status" queries without modeling the full power subsystem.
             if (output_buffer && output_buffer_length > 0)
             {
-                const std::vector<std::byte> zeros(output_buffer_length, std::byte{});
-                c.emu.write_memory(output_buffer, zeros.data(), zeros.size());
+                c.emu.set_memory(output_buffer, 0, output_buffer_length);
             }
 
             return STATUS_SUCCESS;
