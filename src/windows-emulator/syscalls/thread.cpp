@@ -536,6 +536,15 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadCycleTime)
+            {
+                return handle_query<THREAD_CYCLE_TIME_INFORMATION>(c.emu, thread_information, thread_information_length, return_length,
+                                                                   [&](THREAD_CYCLE_TIME_INFORMATION& info) {
+                                                                       info.AccumulatedCycles = c.win_emu.get_executed_instructions();
+                                                                       info.CurrentCycleCount = 0;
+                                                                   });
+            }
+
             if (info_class == ThreadIoPriority)
             {
                 if (return_length)

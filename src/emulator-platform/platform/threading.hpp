@@ -95,6 +95,12 @@ namespace sogen
         ULONG BytesToRead;                           // Number of bytes to read.
     } THREAD_TEB_INFORMATION, *PTHREAD_TEB_INFORMATION;
 
+    struct THREAD_CYCLE_TIME_INFORMATION
+    {
+        ULONGLONG AccumulatedCycles;
+        ULONGLONG CurrentCycleCount;
+    };
+
     typedef enum _KCONTINUE_TYPE
     {
         KCONTINUE_UNWIND,
