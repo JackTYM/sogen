@@ -168,6 +168,8 @@ namespace sogen
                 return u"Directory";
             case handle_types::process:
                 return u"Process";
+            case handle_types::job:
+                return u"Job";
             default:
                 return u"";
             }
@@ -790,8 +792,23 @@ namespace sogen
             return handle_NtWaitForSingleObject(c, wait_handle, alertable, timeout);
         }
 
-        NTSTATUS handle_NtSetInformationObject()
+        NTSTATUS handle_NtSetInformationObject(const syscall_context& c, const handle /*h*/,
+                                               const OBJECT_INFORMATION_CLASS object_information_class,
+                                               const emulator_pointer /*object_information*/, const ULONG object_information_length)
         {
+            if (object_information_class == ObjectHandleFlagInformation)
+            {
+                if (object_information_length < sizeof(OBJECT_HANDLE_FLAG_INFORMATION))
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                return STATUS_SUCCESS;
+            }
+
+            c.win_emu.log.error("Unsupported object info class for NtSetInformationObject: %X\n",
+                                static_cast<uint32_t>(object_information_class));
+            c.emu.stop();
             return STATUS_NOT_SUPPORTED;
         }
 

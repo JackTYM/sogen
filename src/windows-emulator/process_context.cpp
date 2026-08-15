@@ -1051,6 +1051,8 @@ namespace sogen
             return &sections;
         case handle_types::private_namespace:
             return &private_namespaces;
+        case handle_types::job:
+            return &jobs;
         default:
             return nullptr;
         }

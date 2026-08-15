@@ -208,7 +208,8 @@ namespace sogen
                                               emulator_object<LARGE_INTEGER> timeout);
         NTSTATUS handle_NtSignalAndWaitForSingleObject(const syscall_context& c, handle signal_handle, handle wait_handle,
                                                        BOOLEAN alertable, emulator_object<LARGE_INTEGER> timeout);
-        NTSTATUS handle_NtSetInformationObject();
+        NTSTATUS handle_NtSetInformationObject(const syscall_context& c, handle /*h*/, OBJECT_INFORMATION_CLASS object_information_class,
+                                               emulator_pointer /*object_information*/, ULONG object_information_length);
         NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, handle /*h*/, SECURITY_INFORMATION /*security_information*/,
                                               emulator_pointer security_descriptor, ULONG length, emulator_object<ULONG> length_needed);
         NTSTATUS handle_NtSetSecurityObject();
@@ -289,6 +290,13 @@ namespace sogen
                                             emulator_object<PS_CREATE_INFO<EmulatorTraits<Emu64>>> create_info,
                                             emulator_object<PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>> attribute_list);
         NTSTATUS handle_NtFlushProcessWriteBuffers(const syscall_context& c);
+
+        // syscalls/job.cpp:
+        NTSTATUS handle_NtCreateJobObject(const syscall_context& c, emulator_object<handle> job_handle, ACCESS_MASK desired_access,
+                                          emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes);
+        NTSTATUS handle_NtAssignProcessToJobObject(const syscall_context& c, handle job_handle, handle process_handle);
+        NTSTATUS handle_NtSetInformationJobObject(const syscall_context& c, handle job_handle, uint32_t job_object_information_class,
+                                                  uint64_t job_object_information, uint32_t job_object_information_length);
 
         // syscalls/registry.cpp:
         NTSTATUS handle_NtOpenKey(const syscall_context& c, emulator_object<handle> key_handle, ACCESS_MASK /*desired_access*/,
@@ -1344,6 +1352,9 @@ namespace sogen
         add_handler(NtContinueEx);
         add_handler(NtTerminateProcess);
         add_handler(NtFlushProcessWriteBuffers);
+        add_handler(NtCreateJobObject);
+        add_handler(NtAssignProcessToJobObject);
+        add_handler(NtSetInformationJobObject);
         add_handler(NtWriteFile);
         add_handler(NtCopyFileChunk);
         add_handler(NtLockFile);
