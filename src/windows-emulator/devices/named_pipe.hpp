@@ -20,7 +20,7 @@ namespace sogen
         ULONG message_length;
     };
 
-    class named_pipe : public io_device_container
+    class named_pipe : public io_device
     {
       public:
         std::u16string name;
@@ -33,6 +33,13 @@ namespace sogen
         ULONG inbound_quota;
         ULONG outbound_quota;
         LARGE_INTEGER default_timeout;
+
+        // Set by a client's NtCreateFile on this same pipe name (see handle_named_pipe_create) when that
+        // open happens before this server instance calls FSCTL_PIPE_LISTEN -- the common case for
+        // same-process client/server pairs (e.g. mojo::PlatformChannel's CreateNamedPipe+CreateFile
+        // self-connect idiom). Real ConnectNamedPipe returns FALSE with ERROR_PIPE_CONNECTED immediately
+        // in that case rather than waiting, since there is nothing left to wait for.
+        bool client_connected{false};
 
         // Backs FSCTL_PIPE_LISTEN: parks the listening thread on an event that sogen never signals, since
         // it has no cross-instance/cross-process named-pipe connect modeling. This matches real Windows
@@ -83,6 +90,12 @@ namespace sogen
       private:
         NTSTATUS listen(windows_emulator& win_emu, const io_device_context& c)
         {
+            if (this->client_connected)
+            {
+                this->client_connected = false;
+                return STATUS_PIPE_CONNECTED;
+            }
+
             if (!this->listen_event.bits)
             {
                 event e{};

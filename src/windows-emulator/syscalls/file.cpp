@@ -1846,6 +1846,16 @@ namespace sogen
 
             c.win_emu.callbacks.on_generic_access("Creating/opening named pipe", filename);
 
+            for (auto& entry : c.proc.devices)
+            {
+                auto* existing_pipe = entry.second.get_internal_device<named_pipe>();
+                if (existing_pipe && existing_pipe->name == filename)
+                {
+                    existing_pipe->client_connected = true;
+                    break;
+                }
+            }
+
             io_device_creation_data data{};
 
             std::u16string device_name = u"NamedPipe";
