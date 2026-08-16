@@ -2948,11 +2948,27 @@ namespace sogen
                 // reasons -- the source resource is unknown to d3d9_host, or no presentable window was
                 // found -- and neither is distinguishable from "the app never presented at all" in the
                 // frame-stats line below. Env-gated so a real title's per-frame path stays untouched.
+                //
+                // nonblack counts the presented frame's non-black pixels. A frame that presents
+                // successfully, from the right resource, to the right window, and is still entirely black
+                // is its own distinct (and genuinely encountered) failure mode -- the frame-stats line's
+                // climbing draw/submit counts look identical whether those draws produced pixels or not,
+                // and so does every counter above. This one number separates "nothing was presented" from
+                // "something was presented and it was blank", which is the first fork any black-screen
+                // investigation has to take.
                 if (getenv("EMULATOR_D3D9_PRESENTDIAG"))
                 {
-                    win_emu.log.warn("[d3d9-presentdiag] resource=%llu snapshot=%d %ux%u window=0x%X\n",
+                    size_t nonblack = 0;
+                    for (size_t i = 0; i + 3 < pixels.size(); i += 4)
+                    {
+                        if ((pixels[i] | pixels[i + 1] | pixels[i + 2]) != std::byte{0})
+                        {
+                            ++nonblack;
+                        }
+                    }
+                    win_emu.log.warn("[d3d9-presentdiag] resource=%llu snapshot=%d %ux%u window=0x%X nonblack=%zu/%zu\n",
                                      static_cast<unsigned long long>(request.resource), snapshot_ok ? 1 : 0, width, height,
-                                     static_cast<unsigned>(window));
+                                     static_cast<unsigned>(window), nonblack, pixels.size() / 4);
                 }
 
                 this->log_d3d9_frame_stats(win_emu);

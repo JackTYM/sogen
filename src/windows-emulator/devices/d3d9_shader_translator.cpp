@@ -3,6 +3,8 @@
 #include <vkd3d_shader.h>
 
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace sogen
@@ -23,10 +25,24 @@ namespace sogen
             compile_info.source.code = tokens;
             compile_info.source.size = token_size_bytes;
             compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
-            compile_info.log_level = VKD3D_SHADER_LOG_NONE;
+            // EMULATOR_D3D9_SHADERDIAG surfaces vkd3d-shader's own diagnostics, which are otherwise
+            // requested at LOG_NONE and freed unread. Every failure on this path degrades silently --
+            // translate_d3d9_shader_pair returns false, ensure_programmable_pipeline returns nullptr, and
+            // execute_draw drops the draw with a D3D_OK -- so without this the only visible symptom of a
+            // shader the translator cannot handle is missing geometry. vkd3d's message names the exact
+            // cause (an undeclared sampler register, an unsupported opcode, ...); guessing from the
+            // rendered result does not. Costs one getenv per translation, and translations are cached.
+            const bool diag = getenv("EMULATOR_D3D9_SHADERDIAG") != nullptr;
+            compile_info.log_level = diag ? VKD3D_SHADER_LOG_WARNING : VKD3D_SHADER_LOG_NONE;
 
             char* messages = nullptr;
             const int result = vkd3d_shader_scan(&compile_info, &messages);
+            if (diag && result < 0)
+            {
+                fprintf(stderr, "[d3d9-shaderdiag] scan(%s) failed rc=%d size=%zu ver=0x%08X msgs=%s\n", want_output ? "vs" : "ps", result,
+                        token_size_bytes, token_size_bytes >= 4 ? *static_cast<const uint32_t*>(tokens) : 0u,
+                        messages != nullptr ? messages : "(none)");
+            }
             if (messages != nullptr)
             {
                 vkd3d_shader_free_messages(messages);
@@ -96,11 +112,18 @@ namespace sogen
             compile_info.source.size = token_size_bytes;
             compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
             compile_info.target_type = VKD3D_SHADER_TARGET_SPIRV_BINARY;
-            compile_info.log_level = VKD3D_SHADER_LOG_NONE;
+            const bool diag = getenv("EMULATOR_D3D9_SHADERDIAG") != nullptr;
+            compile_info.log_level = diag ? VKD3D_SHADER_LOG_WARNING : VKD3D_SHADER_LOG_NONE;
 
             vkd3d_shader_code out{};
             char* messages = nullptr;
             const int result = vkd3d_shader_compile(&compile_info, &out, &messages);
+            if (diag && result < 0)
+            {
+                fprintf(stderr, "[d3d9-shaderdiag] compile(vis=%d set=%u) failed rc=%d size=%zu ver=0x%08X msgs=%s\n",
+                        static_cast<int>(shader_visibility), descriptor_set, result, token_size_bytes,
+                        token_size_bytes >= 4 ? *static_cast<const uint32_t*>(tokens) : 0u, messages != nullptr ? messages : "(none)");
+            }
             if (messages != nullptr)
             {
                 vkd3d_shader_free_messages(messages);

@@ -7,13 +7,10 @@
 namespace sogen
 {
     // Within a shader stage's descriptor set (VS = set 0, PS = set 1; see d3d9_host.cpp's
-    // ensure_programmable_pipeline and this header's own translate_d3d9_shader_pair, below), the four
+    // ensure_programmable_pipeline and this header's own translate_d3d9_shader_pair, below), the
     // UBO/sampler bindings are laid out identically: binding 0 = float-const CBV, binding 1 = sampler
     // s0, binding 2 = int-const CBV, binding 3 = bool-const CBV, and each additional sampler stage k>=1
-    // at binding 3+k. max_sampler_stages caps how many D3D9 sampler registers (s0..s{N-1}) this scheme
-    // covers. BOTH shader stages use this ONE formula: the pixel stage samples s0..s3 (diffuse+normal,
-    // multi-texturing) and the vertex stage samples D3DVERTEXTEXTURESAMPLER0..3 (SM3.0 vertex texture
-    // fetch, e.g. tex2Dlod height-map displacement), each in its own descriptor set.
+    // at binding 3+k. BOTH shader stages share this ONE formula, each in its own descriptor set.
     //
     // The formula is centralized here -- rather than being duplicated independently in
     // d3d9_shader_translator.cpp (which builds each stage's combined-image-sampler bindings) and
@@ -22,23 +19,33 @@ namespace sogen
     // register. A drift here wouldn't produce a build error or a validation-layer message; it would
     // produce the exact "graceful degradation" failure this feature exists to avoid (a silently
     // skipped draw or a wrong pixel, no error visible to the guest).
-    //
-    // Raising max_sampler_stages beyond 4 (toward D3D9's 16-sampler cap) requires, in addition to
-    // bumping this constant: (a) verifying d3d9_host.cpp's vs_bindings/ps_bindings are actually
-    // generated from this constant/function (not hand-typed aggregate entries), and (b) bumping the
-    // descriptor pool's combined-image-sampler count (also in d3d9_host.cpp) to match.
-    constexpr uint32_t max_sampler_stages = 4;
-
     constexpr uint32_t sampler_binding_for_stage(const uint32_t stage)
     {
         return stage == 0 ? 1u : 3u + stage;
     }
 
-    // Stage-named aliases: identical formula/cap for both stages (the layout within each set is the
-    // same). They forward to the single definitions above, so the two stages and the two sides
-    // (translator/host) can never drift; the distinct names only document intent at each call site.
-    constexpr uint32_t max_ps_sampler_stages = max_sampler_stages;
-    constexpr uint32_t max_vs_sampler_stages = max_sampler_stages;
+    // The two stages have genuinely different D3D9 sampler-register counts, so their caps are separate
+    // constants rather than one shared value:
+    //
+    //   * The pixel stage covers D3D9's full ps_2_0/ps_3_0 sampler file, s0..s15. This is not headroom
+    //     for its own sake: vkd3d-shader fails the WHOLE pixel-shader compile with
+    //     "E2000: Could not find descriptor binding for type 0, space 0, registers [k:k]" if the shader
+    //     statically samples any register k this side did not declare a combined-image-sampler binding
+    //     for. That failure propagates as translate_d3d9_shader_pair -> false ->
+    //     ensure_programmable_pipeline -> nullptr -> execute_draw silently returns D3D_OK, i.e. the draw
+    //     is dropped with no error visible to the guest and no pixels on screen. Real content routinely
+    //     exceeds four samplers (Modern Warfare 2's world/model shaders sample s4 and beyond), so a cap
+    //     below D3D9's own is a correctness bug, not a resource-budget tradeoff.
+    //   * The vertex stage covers D3DVERTEXTEXTURESAMPLER0..3 only -- SM3.0 vertex texture fetch defines
+    //     exactly four such registers, so four is the real hardware cap here, not an arbitrary limit.
+    //
+    // Over-declaring a binding a given shader does not sample is inert (vkd3d only emits a SPIR-V
+    // sampler variable for a statically-referenced register, and Vulkan permits a layout/set to declare
+    // bindings the bound shader never accesses), so the pixel stage declaring all 16 unconditionally
+    // costs nothing for the common single-texture shader beyond descriptor-pool capacity, which
+    // d3d9_host.cpp's ensure_frame_descriptor_pool already derives from these constants.
+    constexpr uint32_t max_ps_sampler_stages = 16;
+    constexpr uint32_t max_vs_sampler_stages = 4;
 
     constexpr uint32_t ps_sampler_binding_for_stage(const uint32_t stage)
     {

@@ -296,9 +296,19 @@ namespace sogen
             return handle_handshake(win_emu, c);
         case 0: // Call
             return handle_rpc_call(win_emu, c);
-        default:
-            win_emu.log.print(color::gray, "Unexpected RPC operation: 0x%X\n", operation);
+        default: {
+            // Naming the bound interface matters as much as the operation number: a bare "operation 0x3"
+            // is indistinguishable from unrelated background noise, and this dispatcher is shared by every
+            // rpc_port instance (audio, service control, DNS, LSA, ...). The UUID identifies which client
+            // is actually hitting the unhandled path.
+            const auto& bi = this->bound_interface_;
+            win_emu.log.print(color::gray,
+                              "Unexpected RPC operation: 0x%X (iface=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x, "
+                              "send=%u)\n",
+                              operation, bi[0], bi[1], bi[2], bi[3], bi[4], bi[5], bi[6], bi[7], bi[8], bi[9], bi[10], bi[11], bi[12],
+                              bi[13], bi[14], bi[15], c.send_buffer_length);
             return STATUS_NOT_SUPPORTED;
+        }
         }
     }
 

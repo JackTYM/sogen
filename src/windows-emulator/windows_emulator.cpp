@@ -1199,85 +1199,81 @@ namespace sogen
     {
         // Real Microsoft d3d9.dll unconditionally strips the D3DCAPS2_CANMANAGERESOURCE caps bit
         // (bit 28) inside its own QueryLHDDICaps, then stores the stripped value back into the Caps2
-        // field (offset +0xc of the struct the routine holds a pointer to). Forcing the bit back on
-        // right after that store enables the driver-managed D3DPOOL_MANAGED path. Each architecture's
-        // real d3d9.dll compiles the strip+store differently and keeps the struct pointer in a
-        // different register, so each has its own separately-RE'd pattern/RVAs/register.
-        // See docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries for the full investigation/spike history.
-        constexpr uint32_t can_manage_resource_bit = 0x10000000;
+        // field (offset +0xc of the struct the routine holds a pointer to). With the bit stripped,
+        // d3d9.dll keeps every D3DPOOL_MANAGED texture's pixels in its OWN private CMipMap sysmem copy
+        // and never routes the app's LockRect through the driver -- so a UMD-based D3D9 implementation
+        // sees pfnLock/pfnUnlock traffic whose buffers the app never writes to, and every texture it
+        // ever samples is a zero-filled allocation. Keeping the bit set is what opens the
+        // driver-managed path (docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries have the full history).
+        //
+        // This is done by neutering the strip INSTRUCTION ITSELF -- an in-place, same-length patch of
+        // d3d9.dll's mapped image -- rather than by hooking execution just past the store and repairing
+        // the field. The behavioral effect is identical, but a plain memory write works on every
+        // backend, whereas a fine-grained execution hook does not: the FEX and KVM backends run the
+        // guest natively and accept hook_memory_execution purely for API compatibility, never firing it
+        // (see fex_x86_64_emulator.cpp's own comment). Under those backends the old hook silently did
+        // nothing -- it still logged "installed", because the RVA pattern check passed -- which is
+        // precisely how Modern Warfare 2 (a 32-bit WoW64 title, run on FEX) reached a steady, crash-free
+        // render loop that presented a solid black frame: real draws, real submits, every sampled
+        // texture all zeros.
+        //
+        // The patch turns each architecture's strip into the corresponding SET of the same bit, rather
+        // than merely deleting the strip. That distinction is load-bearing: this UMD does not report
+        // D3DCAPS2_CANMANAGERESOURCE in D3DCAPS9::Caps2 at all (see sogen_d3d9_umd.cpp's fill_d3d9caps
+        // -- the bit is not forceable through the reported-caps surface, which is the whole reason this
+        // patch exists), so the value reaching the strip never has bit 28 set and simply removing the
+        // strip would change nothing. Forcing the bit ON here reproduces exactly what the previous
+        // post-store execution hook did (`value | can_manage_resource_bit`).
+        //
+        // Each architecture's real d3d9.dll compiles the strip differently, so each has its own
+        // separately-RE'd RVA and byte pattern. In both cases the replacement is exactly as long as the
+        // instruction it replaces (no relocation), and the instruction that follows is the `mov` store,
+        // which reads no flags -- so the differing flag side effects are harmless.
         constexpr uint16_t machine_amd64 = 0x8664;
         constexpr uint16_t machine_i386 = 0x014c;
+
+        // Verifies the exact expected bytes at `rva` before overwriting the first `patch.size()` of them,
+        // so a d3d9.dll build this was not RE'd against is left completely untouched.
+        const auto patch_strip = [&](const uint64_t rva, const std::span<const uint8_t> expected, const std::span<const uint8_t> patch,
+                                     const char* sha256, const char* arch_note) {
+            std::array<uint8_t, 8> actual{};
+            const auto actual_view = std::span(actual).first(expected.size());
+            if (!this->emu().try_read_memory(mod.image_base + rva, actual.data(), expected.size()) ||
+                !std::equal(actual_view.begin(), actual_view.end(), expected.begin()))
+            {
+                this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 %s expected) -- "
+                               "MANAGED-pool caps-forcing disabled for this build\n",
+                               static_cast<unsigned long long>(rva), sha256);
+                return;
+            }
+
+            this->emu().write_memory(mod.image_base + rva, patch.data(), patch.size());
+            this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing patch applied at 0x%llx%s\n",
+                           static_cast<unsigned long long>(mod.image_base + rva), arch_note);
+        };
 
         if (mod.machine == machine_amd64)
         {
             // x64 system32/d3d9.dll (sha256 bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c):
-            // `btr eax, 0x1c` then `mov [rsi+0xc], eax`.
-            constexpr uint64_t pattern_rva = 0x158af;
-            constexpr uint64_t post_store_rva = 0x158b6;
-            constexpr std::array<uint8_t, 7> expected_pattern = {0x0F, 0xBA, 0xF0, 0x1C, 0x89, 0x46, 0x0C};
-
-            std::array<uint8_t, 7> actual_pattern{};
-            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
-                actual_pattern != expected_pattern)
-            {
-                this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
-                               "bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c expected) -- "
-                               "MANAGED-pool caps-forcing disabled for this build\n",
-                               static_cast<unsigned long long>(pattern_rva));
-                return;
-            }
-
-            auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](cpu_interface& cpu, const uint64_t) {
-                auto& c = this->vcpu(cpu.index()).cpu;
-                const auto rsi = c.reg<uint64_t>(x86_register::rsi);
-                const auto field_addr = rsi + 0xc;
-                const auto value = c.read_memory<uint32_t>(field_addr);
-                if ((value & can_manage_resource_bit) == 0)
-                {
-                    c.write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
-                }
-            });
-
-            this->d3d9_caps_hooks_[mod.image_base] = hook;
-            this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx\n",
-                           static_cast<unsigned long long>(mod.image_base + post_store_rva));
+            // `btr eax, 0x1c` (0F BA F0 1C) then `mov [rsi+0xc], eax`. BTR and BTS share an encoding
+            // that differs only in the ModRM reg field (/6 vs /5), so flipping F0 -> E8 turns the
+            // "clear bit 28" into "set bit 28" in place, same four bytes.
+            static constexpr std::array<uint8_t, 7> expected = {0x0F, 0xBA, 0xF0, 0x1C, 0x89, 0x46, 0x0C};
+            static constexpr std::array<uint8_t, 4> patch = {0x0F, 0xBA, 0xE8, 0x1C};
+            patch_strip(0x158af, expected, patch, "bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c", "");
             return;
         }
 
         if (mod.machine == machine_i386)
         {
             // 32-bit syswow64/d3d9.dll (sha256 99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302):
-            // `and eax, 0xEFFFFFFF` then `mov [ebx+0xc], eax`. The struct pointer is in EBX here (not
-            // RSI), and the strip is a literal AND rather than x64's BTR, so the guard pattern differs.
-            constexpr uint64_t pattern_rva = 0x51c91;
-            constexpr uint64_t post_store_rva = 0x51c99;
-            constexpr std::array<uint8_t, 8> expected_pattern = {0x25, 0xFF, 0xFF, 0xFF, 0xEF, 0x89, 0x43, 0x0C};
-
-            std::array<uint8_t, 8> actual_pattern{};
-            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
-                actual_pattern != expected_pattern)
-            {
-                this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
-                               "99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302 expected) -- "
-                               "MANAGED-pool caps-forcing disabled for this build\n",
-                               static_cast<unsigned long long>(pattern_rva));
-                return;
-            }
-
-            auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](cpu_interface& cpu, const uint64_t) {
-                auto& c = this->vcpu(cpu.index()).cpu;
-                const auto ebx = c.reg<uint32_t>(x86_register::ebx);
-                const auto field_addr = static_cast<uint64_t>(ebx) + 0xc;
-                const auto value = c.read_memory<uint32_t>(field_addr);
-                if ((value & can_manage_resource_bit) == 0)
-                {
-                    c.write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
-                }
-            });
-
-            this->d3d9_caps_hooks_[mod.image_base] = hook;
-            this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx (x86/WoW64)\n",
-                           static_cast<unsigned long long>(mod.image_base + post_store_rva));
+            // `and eax, 0xEFFFFFFF` (25 FF FF FF EF) then `mov [ebx+0xc], eax` -- a literal AND rather
+            // than x64's BTR, and the struct pointer is in EBX. `and eax, imm32` (opcode 25) and
+            // `or eax, imm32` (opcode 0D) are both 5-byte EAX-accumulator forms, so the whole
+            // instruction is rewritten to `or eax, 0x10000000` in place, same 5 bytes.
+            static constexpr std::array<uint8_t, 8> expected = {0x25, 0xFF, 0xFF, 0xFF, 0xEF, 0x89, 0x43, 0x0C};
+            static constexpr std::array<uint8_t, 5> patch = {0x0D, 0x00, 0x00, 0x00, 0x10};
+            patch_strip(0x51c91, expected, patch, "99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302", " (x86/WoW64)");
 
             this->install_d3d9_flip_target_hook(mod);
             return;
