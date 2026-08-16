@@ -72,9 +72,9 @@ namespace sogen
             if (value.type == handle_types::section)
             {
                 auto* section = c.proc.sections.get(h);
-                if (section && section->ref_count == 1)
+                if (section && section->object.use_count() == 1)
                 {
-                    section_backing_address = section->backing_address;
+                    section_backing_address = section->object->backing_address;
                 }
             }
 
@@ -93,7 +93,7 @@ namespace sogen
 
         NTSTATUS handle_NtDuplicateObject(const syscall_context& c, const handle source_process_handle, const handle source_handle,
                                           const handle target_process_handle, const emulator_object<handle> target_handle,
-                                          const ACCESS_MASK desired_access, const ULONG /*handle_attributes*/, const ULONG /*options*/)
+                                          const ACCESS_MASK desired_access, const ULONG /*handle_attributes*/, const ULONG options)
         {
             if (!c.proc.is_current_process_handle(source_process_handle) || !c.proc.is_current_process_handle(target_process_handle))
             {
@@ -108,7 +108,9 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (resolved_source_handle.value.type == handle_types::section)
+            const bool same_access = (options & DUPLICATE_SAME_ACCESS) != 0;
+
+            if (!same_access && resolved_source_handle.value.type == handle_types::section)
             {
                 const auto* section = c.proc.sections.get(resolved_source_handle);
                 if (section && (desired_access & ~section->granted_access) != 0)
@@ -123,7 +125,8 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            const auto new_handle = store->duplicate(resolved_source_handle);
+            const auto new_handle =
+                store->duplicate(resolved_source_handle, same_access ? std::nullopt : std::optional<ACCESS_MASK>{desired_access});
             if (!new_handle)
             {
                 return STATUS_INVALID_HANDLE;

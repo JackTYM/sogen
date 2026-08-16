@@ -381,9 +381,9 @@ namespace sogen
                 // tore the stream down immediately after CreateRemoteStream.
                 constexpr uint64_t render_section_size = 0x58000;
                 section render_section{};
-                render_section.maximum_size = render_section_size;
-                render_section.section_page_protection = PAGE_READWRITE;
-                render_section.allocation_attributes = SEC_COMMIT;
+                render_section.object->maximum_size = render_section_size;
+                render_section.object->section_page_protection = PAGE_READWRITE;
+                render_section.object->allocation_attributes = SEC_COMMIT;
 
                 static constexpr std::array<uint8_t, 0x1c0> render_control_header =
                     {
@@ -422,7 +422,7 @@ namespace sogen
                 if (backing)
                 {
                     win_emu.emu().write_memory(backing, render_control_header.data(), render_control_header.size());
-                    render_section.backing_address = backing;
+                    render_section.object->backing_address = backing;
 
                     // Register the render section so the per-context-switch audio-engine tick can advance its
                     // read cursor (see process_context::audio_render_stream). Dedupe by backing and keep only a

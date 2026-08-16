@@ -728,17 +728,19 @@ namespace sogen
         }
     };
 
-    struct section : ref_counted_object
+    // The pagefile-backed memory, name and cached PE metadata a section handle refers to. Multiple,
+    // independently-access-controlled handles (real Windows DuplicateObject/OpenSection semantics) can
+    // point at the same section_object - see `section` below, which is the actual per-handle table entry.
+    struct section_object
     {
         std::u16string name{};
         std::u16string file_name{};
         uint64_t maximum_size{};
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
-        ACCESS_MASK granted_access{};
         // Shared backing for a pagefile-backed section: allocated once (lazily, on first map) and reused by
         // every view, so all views of the section see the same memory and section offsets resolve correctly.
-        // 0 until allocated. Freed when last section handle is closed.
+        // 0 until allocated. Freed when the last handle referencing this object is closed.
         uint64_t backing_address{};
         std::optional<winpe::pe_image_basic_info> cached_image_info{};
 
@@ -781,7 +783,7 @@ namespace sogen
             }
         }
 
-        void serialize_object(utils::buffer_serializer& buffer) const override
+        void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->name);
             buffer.write(this->file_name);
@@ -790,10 +792,9 @@ namespace sogen
             buffer.write(this->allocation_attributes);
             buffer.write(this->backing_address);
             buffer.write_optional<winpe::pe_image_basic_info>(this->cached_image_info);
-            buffer.write(this->granted_access);
         }
 
-        void deserialize_object(utils::buffer_deserializer& buffer) override
+        void deserialize(utils::buffer_deserializer& buffer)
         {
             buffer.read(this->name);
             buffer.read(this->file_name);
@@ -802,7 +803,47 @@ namespace sogen
             buffer.read(this->allocation_attributes);
             buffer.read(this->backing_address);
             buffer.read_optional(this->cached_image_info);
+        }
+    };
+
+    // A handle-table entry for a section: its own independent access mask (real
+    // DuplicateObject/OpenSection can hand out narrower access to the same underlying object) plus a
+    // shared reference to the object it refers to. `duplicate_for_access` mints a new entry that shares
+    // `object` with the original but carries its own, possibly narrower, `granted_access`.
+    struct section : ref_counted_object
+    {
+        std::shared_ptr<section_object> object{std::make_shared<section_object>()};
+        ACCESS_MASK granted_access{};
+
+        section_object* operator->()
+        {
+            return this->object.get();
+        }
+
+        const section_object* operator->() const
+        {
+            return this->object.get();
+        }
+
+        section duplicate_for_access(const ACCESS_MASK desired_access) const
+        {
+            section copy{};
+            copy.object = this->object;
+            copy.granted_access = desired_access;
+            return copy;
+        }
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->granted_access);
+            this->object->serialize(buffer);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
             buffer.read(this->granted_access);
+            this->object = std::make_shared<section_object>();
+            this->object->deserialize(buffer);
         }
     };
 

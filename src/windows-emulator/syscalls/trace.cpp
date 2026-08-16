@@ -38,7 +38,7 @@ namespace sogen
                     return STATUS_INVALID_HANDLE;
                 }
 
-                const auto held_handle = c.proc.events.duplicate(event_handle);
+                const auto held_handle = c.proc.events.duplicate(event_handle, std::nullopt);
                 if (!held_handle)
                 {
                     return STATUS_INVALID_HANDLE;

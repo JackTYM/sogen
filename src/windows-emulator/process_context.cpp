@@ -1400,11 +1400,11 @@ namespace sogen
             }
 
             section s;
-            s.file_name = (system_root_path / knowndll_filename).u16string();
-            s.maximum_size = 0;
-            s.allocation_attributes = SEC_IMAGE;
-            s.section_page_protection = PAGE_EXECUTE;
-            s.cache_image_info_from_filedata(file);
+            s.object->file_name = (system_root_path / knowndll_filename).u16string();
+            s.object->maximum_size = 0;
+            s.object->allocation_attributes = SEC_IMAGE;
+            s.object->section_page_protection = PAGE_EXECUTE;
+            s.object->cache_image_info_from_filedata(file);
             add_knowndll_section(knowndll_filename, s, is_32bit);
 
             utils::safe_buffer_accessor<const std::byte> buffer{file};

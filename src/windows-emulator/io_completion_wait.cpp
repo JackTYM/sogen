@@ -99,7 +99,7 @@ namespace sogen
 
                 if (wait_packet_handle.bits != 0)
                 {
-                    if (const auto retained_wait_packet = process.wait_completion_packets.duplicate(wait_packet_handle))
+                    if (const auto retained_wait_packet = process.wait_completion_packets.duplicate(wait_packet_handle, std::nullopt))
                     {
                         message.wait_packet_handle = *retained_wait_packet;
                     }
@@ -149,7 +149,7 @@ namespace sogen
                 return false;
             }
 
-            const auto duplicated = store->duplicate(resolved_source_handle);
+            const auto duplicated = store->duplicate(resolved_source_handle, std::nullopt);
             if (!duplicated)
             {
                 return false;

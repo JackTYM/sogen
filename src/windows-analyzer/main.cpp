@@ -674,20 +674,20 @@ namespace sogen
         void recreate_inherited_section(windows_emulator& win_emu, const inherited_section_handle& inherited)
         {
             section s{};
-            s.maximum_size = inherited.maximum_size;
-            s.section_page_protection = inherited.section_page_protection;
-            s.allocation_attributes = inherited.allocation_attributes;
+            s.object->maximum_size = inherited.maximum_size;
+            s.object->section_page_protection = inherited.section_page_protection;
+            s.object->allocation_attributes = inherited.allocation_attributes;
             s.granted_access = inherited.granted_access;
 
             if (!inherited.content.empty())
             {
-                const auto protection = map_nt_to_emulator_protection(s.section_page_protection);
-                const auto reserve_only = s.allocation_attributes == SEC_RESERVE;
+                const auto protection = map_nt_to_emulator_protection(s.object->section_page_protection);
+                const auto reserve_only = s.object->allocation_attributes == SEC_RESERVE;
                 const auto backing = win_emu.memory.allocate_memory(inherited.content.size(), protection, reserve_only, 0,
                                                                     memory_region_kind::pagefile_section_view);
                 if (backing)
                 {
-                    s.backing_address = backing;
+                    s.object->backing_address = backing;
                     if (!reserve_only)
                     {
                         win_emu.emu().write_memory(backing, inherited.content.data(), inherited.content.size());

@@ -147,6 +147,18 @@ namespace sogen
             : std::is_same<decltype(T::deleter(std::declval<T&>())), bool>
         {
         };
+
+        template <typename, typename = void>
+        struct has_duplicate_for_access : std::false_type
+        {
+        };
+
+        template <typename T>
+        struct has_duplicate_for_access<T,
+                                        std::void_t<decltype(std::declval<const T&>().duplicate_for_access(std::declval<ACCESS_MASK>()))>>
+            : std::true_type
+        {
+        };
     }
 
     class ref_counted_object
@@ -186,7 +198,9 @@ namespace sogen
     {
         virtual ~generic_handle_store() = default;
         virtual bool erase(handle h) = 0;
-        virtual std::optional<handle> duplicate(handle h) = 0;
+
+        // std::nullopt means DUPLICATE_SAME_ACCESS: the new handle should carry the source's own access.
+        virtual std::optional<handle> duplicate(handle h, std::optional<ACCESS_MASK> desired_access) = 0;
     };
 
     template <handle_types::type Type, typename T, uint32_t IndexShift = 0>
@@ -282,7 +296,7 @@ namespace sogen
             return this->store_.size();
         }
 
-        std::optional<handle> duplicate(const handle h) override
+        std::optional<handle> duplicate(const handle h, const std::optional<ACCESS_MASK> desired_access) override
         {
             auto* entry = this->get(h);
             if (!entry)
@@ -290,8 +304,15 @@ namespace sogen
                 return std::nullopt;
             }
 
-            ++static_cast<ref_counted_object*>(entry)->ref_count;
-            return h;
+            if constexpr (handle_detail::has_duplicate_for_access<T>::value)
+            {
+                return this->store(entry->duplicate_for_access(desired_access.value_or(entry->granted_access)));
+            }
+            else
+            {
+                ++static_cast<ref_counted_object*>(entry)->ref_count;
+                return h;
+            }
         }
 
         std::pair<typename value_map::iterator, bool> erase(const value_map::iterator& entry)
@@ -523,7 +544,7 @@ namespace sogen
             return this->store_.size();
         }
 
-        std::optional<handle> duplicate(const handle h) override
+        std::optional<handle> duplicate(const handle h, const std::optional<ACCESS_MASK> /*desired_access*/) override
         {
             auto* entry = this->get(h);
             if (!entry)

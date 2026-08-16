@@ -483,7 +483,7 @@ namespace sogen
             return this->store_.size();
         }
 
-        std::optional<handle> duplicate(const handle h) override
+        std::optional<handle> duplicate(const handle h, const std::optional<ACCESS_MASK> /*desired_access*/) override
         {
             auto* entry = this->get(h);
             if (!entry)

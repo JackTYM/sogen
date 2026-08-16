@@ -191,15 +191,15 @@ namespace sogen
                                         const ULONG allocation_attributes, const handle file_handle)
         {
             section s{};
-            s.section_page_protection = section_page_protection;
-            s.allocation_attributes = allocation_attributes;
+            s.object->section_page_protection = section_page_protection;
+            s.object->allocation_attributes = allocation_attributes;
             s.granted_access = desired_access;
 
             const auto* file = c.proc.files.get(file_handle);
             if (file)
             {
                 c.win_emu.callbacks.on_generic_access("Section for file", file->name);
-                s.file_name = file->name;
+                s.object->file_name = file->name;
             }
 
             if (object_attributes)
@@ -209,7 +209,7 @@ namespace sogen
                 {
                     auto name = read_unicode_string(c.emu, attributes.ObjectName);
                     c.win_emu.callbacks.on_generic_access("Section with name", name);
-                    s.name = std::move(name);
+                    s.object->name = std::move(name);
                 }
             }
 
@@ -217,7 +217,7 @@ namespace sogen
             {
                 maximum_size.access([&](ULARGE_INTEGER& large_int) {
                     large_int.QuadPart = page_align_up(large_int.QuadPart);
-                    s.maximum_size = large_int.QuadPart;
+                    s.object->maximum_size = large_int.QuadPart;
                 });
             }
             else if (!file)
@@ -226,12 +226,12 @@ namespace sogen
             }
 
             // If this is an image section, parse PE headers
-            if ((allocation_attributes & SEC_IMAGE) && !s.file_name.empty())
+            if ((allocation_attributes & SEC_IMAGE) && !s.object->file_name.empty())
             {
                 std::vector<std::byte> file_data;
-                if (utils::io::read_file(c.win_emu.file_sys.translate(s.file_name), &file_data))
+                if (utils::io::read_file(c.win_emu.file_sys.translate(s.object->file_name), &file_data))
                 {
-                    s.cache_image_info_from_filedata(file_data);
+                    s.object->cache_image_info_from_filedata(file_data);
                 }
             }
 
@@ -322,17 +322,16 @@ namespace sogen
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
 
-                section.value().granted_access = desired_access;
-                section_handle.write(c.proc.sections.store(section.value()));
+                section_handle.write(c.proc.sections.store(section->duplicate_for_access(desired_access)));
                 return STATUS_SUCCESS;
             }
 
-            for (auto& [handle, section] : c.proc.sections)
+            for (auto& existing : c.proc.sections)
             {
-                if (!section.name.empty() && utils::string::equals_ignore_case(section.name, filename))
+                auto& section = existing.second;
+                if (!section->name.empty() && utils::string::equals_ignore_case(section->name, filename))
                 {
-                    section.granted_access = desired_access;
-                    section_handle.write(c.proc.sections.make_handle(handle));
+                    section_handle.write(c.proc.sections.store(section.duplicate_for_access(desired_access)));
                     return STATUS_SUCCESS;
                 }
             }
@@ -403,10 +402,10 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            if (section_entry->is_image())
+            if (section_entry->object->is_image())
             {
-                const auto file_path =
-                    std::filesystem::weakly_canonical(std::filesystem::absolute(c.win_emu.file_sys.translate(section_entry->file_name)));
+                const auto file_path = std::filesystem::weakly_canonical(
+                    std::filesystem::absolute(c.win_emu.file_sys.translate(section_entry->object->file_name)));
                 uint64_t relocation_base{};
                 for (const auto& loaded_module : c.win_emu.mod_manager.modules() | std::views::values)
                 {
@@ -418,14 +417,14 @@ namespace sogen
                 }
 
                 const auto* binary =
-                    c.win_emu.mod_manager.map_module(section_entry->file_name, c.win_emu.log, false, true, relocation_base);
+                    c.win_emu.mod_manager.map_module(section_entry->object->file_name, c.win_emu.log, false, true, relocation_base);
                 if (!binary)
                 {
                     return STATUS_FILE_INVALID;
                 }
 
                 std::u16string wide_name(binary->name.begin(), binary->name.end());
-                section_entry->name = utils::string::to_lower_consume(wide_name);
+                section_entry->object->name = utils::string::to_lower_consume(wide_name);
 
                 if (view_size.value())
                 {
@@ -440,7 +439,7 @@ namespace sogen
                     return STATUS_IMAGE_MACHINE_TYPE_MISMATCH;
                 }
 
-                if (c.win_emu.mod_manager.get_module_load_count_by_path(section_entry->file_name) > 1)
+                if (c.win_emu.mod_manager.get_module_load_count_by_path(section_entry->object->file_name) > 1)
                 {
                     return STATUS_IMAGE_NOT_AT_BASE;
                 }
@@ -455,30 +454,30 @@ namespace sogen
                 offset = std::max<int64_t>(offset, 0);
             }
 
-            const auto protection = map_nt_to_emulator_protection(section_entry->section_page_protection);
+            const auto protection = map_nt_to_emulator_protection(section_entry->object->section_page_protection);
 
             // Pagefile-backed section: keep ONE persistent backing per section and hand out views into it
             // (view = backing + offset). Real Windows shares the section's pages across every view; allocating
             // a fresh region per map (the old behavior) broke view coherency and exhausted the 32-bit address
             // space for callers like DXVK's D3D9 memory allocator, which maps one large section at many offsets.
-            if (section_entry->file_name.empty())
+            if (section_entry->object->file_name.empty())
             {
-                const auto backing_size = static_cast<size_t>(page_align_up(section_entry->maximum_size));
+                const auto backing_size = static_cast<size_t>(page_align_up(section_entry->object->maximum_size));
                 if (backing_size == 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                if (section_entry->backing_address == 0)
+                if (section_entry->object->backing_address == 0)
                 {
-                    const auto reserve_only = section_entry->allocation_attributes == SEC_RESERVE;
+                    const auto reserve_only = section_entry->object->allocation_attributes == SEC_RESERVE;
                     const auto backing = c.win_emu.memory.allocate_memory(backing_size, protection, reserve_only, 0,
                                                                           memory_region_kind::pagefile_section_view);
                     if (!backing)
                     {
                         return STATUS_NO_MEMORY;
                     }
-                    section_entry->backing_address = backing;
+                    section_entry->object->backing_address = backing;
                 }
 
                 const auto aligned_offset = page_align_down(static_cast<uint64_t>(offset));
@@ -491,13 +490,13 @@ namespace sogen
                 {
                     view_size.write(backing_size - aligned_offset);
                 }
-                base_address.write(section_entry->backing_address + aligned_offset);
+                base_address.write(section_entry->object->backing_address + aligned_offset);
                 return STATUS_SUCCESS;
             }
 
             // File-backed section: map a fresh copy of the file contents.
             std::vector<std::byte> file_data{};
-            if (!utils::io::read_file(c.win_emu.file_sys.translate(section_entry->file_name), &file_data))
+            if (!utils::io::read_file(c.win_emu.file_sys.translate(section_entry->object->file_name), &file_data))
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -511,10 +510,10 @@ namespace sogen
 
             const auto size = static_cast<size_t>(file_data.size() - offset);
             const auto aligned_size = static_cast<size_t>(page_align_up(size));
-            const auto reserve_only = section_entry->allocation_attributes == SEC_RESERVE;
+            const auto reserve_only = section_entry->object->allocation_attributes == SEC_RESERVE;
             const auto address =
                 c.win_emu.memory.allocate_memory(aligned_size, protection, reserve_only, 0, memory_region_kind::file_section_view);
-            c.win_emu.memory.set_region_mapped_filename(address, section_entry->file_name);
+            c.win_emu.memory.set_region_mapped_filename(address, section_entry->object->file_name);
 
             if (!reserve_only && !file_data.empty())
             {
@@ -748,22 +747,22 @@ namespace sogen
                 info.BaseAddress = 0;
 
                 // Attributes - combine the SEC_ flags
-                info.Attributes = section_entry->allocation_attributes;
+                info.Attributes = section_entry->object->allocation_attributes;
 
                 // If it's an image section, ensure SEC_IMAGE is set
-                if (section_entry->is_image())
+                if (section_entry->object->is_image())
                 {
                     info.Attributes |= SEC_IMAGE;
                 }
 
                 // If it's file-backed, ensure SEC_FILE is set
-                if (!section_entry->file_name.empty())
+                if (!section_entry->object->file_name.empty())
                 {
                     info.Attributes |= SEC_FILE;
                 }
 
                 // Size - maximum size of the section
-                info.Size.QuadPart = static_cast<LONGLONG>(section_entry->maximum_size);
+                info.Size.QuadPart = static_cast<LONGLONG>(section_entry->object->maximum_size);
 
                 // Write the structure to user buffer
                 c.emu.write_memory(section_information, &info, sizeof(info));
@@ -779,7 +778,7 @@ namespace sogen
 
             case SECTION_INFORMATION_CLASS::SectionImageInformation: {
                 // Only image sections support this query
-                if (!section_entry->is_image())
+                if (!section_entry->object->is_image())
                 {
                     return STATUS_SECTION_NOT_IMAGE;
                 }
@@ -793,9 +792,9 @@ namespace sogen
                 SECTION_IMAGE_INFORMATION<EmulatorTraits<Emu64>> info{};
 
                 // First check if we have cached PE information
-                if (section_entry->cached_image_info.has_value())
+                if (section_entry->object->cached_image_info.has_value())
                 {
-                    const auto& cached = section_entry->cached_image_info.value();
+                    const auto& cached = section_entry->object->cached_image_info.value();
 
                     // TransferAddress - entry point address (image base + RVA)
                     info.TransferAddress = static_cast<std::uint64_t>(cached.image_base + cached.entry_point_rva);
@@ -827,20 +826,20 @@ namespace sogen
                     info.ZeroBits = 0;
                     info.LoaderFlags = cached.loader_flags;
                     info.CheckSum = cached.checksum;
-                    info.ImageFileSize = static_cast<ULONG>(section_entry->maximum_size);
+                    info.ImageFileSize = static_cast<ULONG>(section_entry->object->maximum_size);
                 }
                 else
                 {
                     // Try to get the mapped module to extract PE information
                     // Convert u16string to string for find_by_name
                     std::string narrow_name;
-                    if (!section_entry->name.empty())
+                    if (!section_entry->object->name.empty())
                     {
-                        narrow_name = u16_to_u8(section_entry->name);
+                        narrow_name = u16_to_u8(section_entry->object->name);
                     }
-                    else if (!section_entry->file_name.empty())
+                    else if (!section_entry->object->file_name.empty())
                     {
-                        narrow_name = u16_to_u8(section_entry->file_name);
+                        narrow_name = u16_to_u8(section_entry->object->file_name);
                     }
 
                     const mapped_module* module = nullptr;
@@ -870,7 +869,7 @@ namespace sogen
                         info.DllCharacteristics = 0x8160;   // Common DLL characteristics including ASLR and DEP
 
                         // Check if it's a DLL
-                        if (section_entry->name.find(u".dll") != std::u16string::npos)
+                        if (section_entry->object->name.find(u".dll") != std::u16string::npos)
                         {
                             info.ImageCharacteristics |= IMAGE_FILE_DLL;
                         }
@@ -904,7 +903,7 @@ namespace sogen
                         info.ImageContainsCode = TRUE;
                         info.ImageMappedFlat = 1;
                         info.ImageDynamicallyRelocated = 1;
-                        info.ImageFileSize = static_cast<ULONG>(section_entry->maximum_size);
+                        info.ImageFileSize = static_cast<ULONG>(section_entry->object->maximum_size);
                     }
                 }
 

@@ -129,6 +129,11 @@ namespace sogen
     (STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_WRITE | SECTION_MAP_READ | SECTION_MAP_EXECUTE | SECTION_EXTEND_SIZE)
 #endif
 
+#ifndef DUPLICATE_CLOSE_SOURCE
+#define DUPLICATE_CLOSE_SOURCE 0x00000001
+#define DUPLICATE_SAME_ACCESS  0x00000002
+#endif
+
 #ifndef CTL_CODE
 #define CTL_CODE(DeviceType, Function, Method, Access) (((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method))
 #endif

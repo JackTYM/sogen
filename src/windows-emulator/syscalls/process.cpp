@@ -802,7 +802,7 @@ namespace sogen
                 if (src_handle.value.type == handle_types::section)
                 {
                     auto* section = c.proc.sections.get(src_handle);
-                    if (!section || section->is_image() || !section->file_name.empty())
+                    if (!section || section->object->is_image() || !section->object->file_name.empty())
                     {
                         c.win_emu.log.log("NtCreateUserProcess: child %u: inherited section handle 0x%" PRIx64
                                           " is missing, image-backed or file-backed, skipping\n",
@@ -811,17 +811,17 @@ namespace sogen
                     }
 
                     std::vector<std::byte> content{};
-                    if (section->backing_address != 0)
+                    if (section->object->backing_address != 0)
                     {
-                        content.resize(static_cast<size_t>(section->maximum_size));
-                        c.emu.read_memory(section->backing_address, content.data(), content.size());
+                        content.resize(static_cast<size_t>(section->object->maximum_size));
+                        c.emu.read_memory(section->object->backing_address, content.data(), content.size());
                     }
 
                     inherited_sections.push_back({
                         .target_handle = src_handle,
-                        .maximum_size = section->maximum_size,
-                        .section_page_protection = section->section_page_protection,
-                        .allocation_attributes = section->allocation_attributes,
+                        .maximum_size = section->object->maximum_size,
+                        .section_page_protection = section->object->section_page_protection,
+                        .allocation_attributes = section->object->allocation_attributes,
                         .granted_access = section->granted_access,
                         .content = std::move(content),
                     });
