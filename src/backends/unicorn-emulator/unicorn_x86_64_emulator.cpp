@@ -741,6 +741,11 @@ namespace sogen::unicorn
                 return false;
             }
 
+            bool syscall_hook_requires_rip_compensation() const override
+            {
+                return true;
+            }
+
             std::string get_name() const override
             {
                 return "Unicorn Engine";

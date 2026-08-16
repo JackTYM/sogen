@@ -90,9 +90,10 @@ namespace sogen
         uint64_t traced_call_count{};
         std::optional<uint64_t> auto_break_before_call{};
         std::optional<uint64_t> syscall_to_resume_after_break{};
+        std::optional<uint32_t> click_dialog_button{};
+        std::set<uint64_t> clicked_dialogs{};
 
         std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
-        std::set<uint64_t> clicked_dialogs{};
 
         std::vector<input_action> input_script{};
         size_t input_script_pos{};

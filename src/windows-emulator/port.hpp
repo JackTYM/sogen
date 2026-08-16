@@ -236,6 +236,7 @@ namespace sogen
         }
     };
 
+
     struct lpc_request_result
     {
         struct reply_in_place_t

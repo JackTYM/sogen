@@ -11,6 +11,7 @@ add_subdirectory(steam-shim)
 add_subdirectory(cpu-bench-sample)
 add_subdirectory(wow64-test-sample)
 add_subdirectory(stress-sample)
+add_subdirectory(native-gpu-clear-sample)
 
 ##########################################
 

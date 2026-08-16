@@ -391,6 +391,27 @@ namespace sogen
 
         this->peb64 = allocator.reserve_page_aligned<PEB64>();
 
+        const auto load_nls_data = [&](const char* cp_path) -> uint64_t {
+            const auto nls_data = utils::io::read_file(win_emu.file_sys.translate(cp_path));
+            if (nls_data.empty())
+            {
+                return 0;
+            }
+            const auto addr = allocator.reserve(page_align_up(nls_data.size()), 0x1000);
+            emu.write_memory(addr, nls_data.data(), nls_data.size());
+            return addr;
+        };
+
+        // PEB.AnsiCodePageData/OemCodePageData are populated from synthesized identity tables below, so the
+        // NLS files are no longer mapped for the PEB's sake. This load survives purely as the probe for a
+        // Cyrillic emulation root: ansi_code_page drives the cp1251 window-title remap in syscalls/user.cpp.
+        const auto ansi_nls_addr = load_nls_data(R"(C:\Windows\System32\C_1251.NLS)");
+
+        if (ansi_nls_addr != 0)
+        {
+            this->ansi_code_page = 1251;
+        }
+
         /* Values of the following fields must be
          * allocated relative to the process_params themselves
          * and included in the length:
@@ -625,6 +646,7 @@ namespace sogen
             if (ntdll32 != nullptr)
             {
                 this->rtl_user_thread_start32 = ntdll32->find_export("RtlUserThreadStart");
+                this->ki_user_exception_dispatcher32 = ntdll32->find_export("KiUserExceptionDispatcher");
             }
         }
 
@@ -794,6 +816,7 @@ namespace sogen
         buffer.write(this->kusd);
 
         buffer.write(this->is_wow64_process);
+        buffer.write(this->ansi_code_page);
         buffer.write(this->ntdll_image_base);
         buffer.write(this->ldr_initialize_thunk);
         buffer.write(this->rtl_user_thread_start);
@@ -801,6 +824,7 @@ namespace sogen
         buffer.write(this->ki_user_apc_dispatcher);
         buffer.write(this->ki_user_exception_dispatcher);
         buffer.write_optional(this->wow64_syscall_reentry_addr);
+        buffer.write(this->ki_user_exception_dispatcher32);
         buffer.write(this->ki_user_callback_dispatcher);
         buffer.write(this->instrumentation_callback);
         buffer.write(this->zw_callback_return);
@@ -891,6 +915,7 @@ namespace sogen
         buffer.read(this->kusd);
 
         buffer.read(this->is_wow64_process);
+        buffer.read(this->ansi_code_page);
         buffer.read(this->ntdll_image_base);
         buffer.read(this->ldr_initialize_thunk);
         buffer.read(this->rtl_user_thread_start);
@@ -898,6 +923,7 @@ namespace sogen
         buffer.read(this->ki_user_apc_dispatcher);
         buffer.read(this->ki_user_exception_dispatcher);
         buffer.read_optional(this->wow64_syscall_reentry_addr);
+        buffer.read(this->ki_user_exception_dispatcher32);
         buffer.read(this->ki_user_callback_dispatcher);
         buffer.read(this->instrumentation_callback);
         buffer.read(this->zw_callback_return);

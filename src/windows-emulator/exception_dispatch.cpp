@@ -222,6 +222,69 @@ namespace sogen
 
     }
 
+    // Dispatch a 32-bit WoW64 exception directly to the 32-bit KiUserExceptionDispatcher32
+    // in ntdll32.dll, bypassing the wow64 exception machinery entirely.
+    //
+    // The wow64 chain (64-bit KiUserExceptionDispatcher → Wow64PrepareForException →
+    // BTCpuResetToConsistentState → wow64cpu stub) relies on a fully-initialized WoW64
+    // thread environment (correct R13/R14/R15 pointing into wow64cpu.dll's per-thread
+    // structures) that sogen does not provide. Going directly to the 32-bit dispatcher
+    // avoids all of that.
+    //
+    // KiUserExceptionDispatcher32 entry (no return address on stack):
+    //   [ESP+0] = EXCEPTION_RECORD* (loaded into EBX → first arg to RtlDispatchException)
+    //   [ESP+4] = CONTEXT*          (loaded into ECX → second arg to RtlDispatchException)
+    void dispatch_exception_32bit(windows_emulator& win_emu, const CONTEXT64& ctx, const exception_record& record)
+    {
+        auto& emu = win_emu.emu();
+
+        const WOW64_CONTEXT wow64_ctx = make_wow64_context(ctx);
+
+        constexpr DWORD kMaxExceptionParameters = 15; // EXCEPTION_MAXIMUM_PARAMETERS
+
+        struct EXCEPTION_RECORD32
+        {
+            DWORD ExceptionCode;
+            DWORD ExceptionFlags;
+            DWORD ExceptionRecord;
+            DWORD ExceptionAddress;
+            DWORD NumberParameters;
+            DWORD ExceptionInformation[kMaxExceptionParameters];
+        };
+
+        EXCEPTION_RECORD32 record32{};
+        record32.ExceptionCode = record.ExceptionCode;
+        record32.ExceptionFlags = record.ExceptionFlags;
+        record32.ExceptionRecord = static_cast<DWORD>(record.ExceptionRecord);
+        record32.ExceptionAddress = static_cast<DWORD>(record.ExceptionAddress);
+        record32.NumberParameters = record.NumberParameters;
+        for (DWORD i = 0; i < record.NumberParameters && i < kMaxExceptionParameters; ++i)
+        {
+            record32.ExceptionInformation[i] = static_cast<DWORD>(record.ExceptionInformation[i]);
+        }
+
+        // Frame layout on the 32-bit stack (below current ESP):
+        //   [new_esp+0]  : DWORD = rec_ptr  (pointer to EXCEPTION_RECORD32)
+        //   [new_esp+4]  : DWORD = ctx_ptr  (pointer to WOW64_CONTEXT)
+        //   [new_esp+8]  : WOW64_CONTEXT    (0x2CC bytes)
+        //   [new_esp+8+sizeof(WOW64_CONTEXT)]: EXCEPTION_RECORD32
+        constexpr auto ptr_pair_size = 2 * sizeof(DWORD);
+        const auto frame_size = static_cast<uint32_t>(ptr_pair_size + sizeof(wow64_ctx) + sizeof(record32));
+        const auto new_esp = align_down(static_cast<uint32_t>(ctx.Rsp) - frame_size, 4u);
+
+        const DWORD ctx_ptr = new_esp + static_cast<DWORD>(ptr_pair_size);
+        const DWORD rec_ptr = ctx_ptr + static_cast<DWORD>(sizeof(wow64_ctx));
+
+        emu.write_memory(new_esp, &rec_ptr, sizeof(rec_ptr));
+        emu.write_memory(new_esp + 4, &ctx_ptr, sizeof(ctx_ptr));
+        emu.write_memory(ctx_ptr, &wow64_ctx, sizeof(wow64_ctx));
+        emu.write_memory(rec_ptr, &record32, sizeof(record32));
+
+        // CS is already 0x23 (we faulted in 32-bit mode); just redirect EIP and ESP.
+        emu.reg(x86_register::rsp, static_cast<uint64_t>(new_esp));
+        emu.reg(x86_register::rip, win_emu.process.ki_user_exception_dispatcher32);
+    }
+
     bool dispatch_debug_exception(windows_emulator& win_emu, CONTEXT64& ctx, EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>& record)
     {
         std::array<uint8_t, 2> ins = {0};

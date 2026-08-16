@@ -457,8 +457,12 @@ namespace sogen
         std::string last_stop_detail_{};
 
         std::map<uint64_t, std::vector<emulator_hook*>> section_first_execution_hooks_{};
+        std::map<uint64_t, emulator_hook*> d3d9_caps_hooks_{};
 
         void setup_hooks();
+        void install_d3d9_caps_patch_hook(const mapped_module& mod);
+        void install_d3d9_flip_target_hook(const mapped_module& mod);
+        void install_ddraw_vidmem_hook(const mapped_module& mod);
         void setup_process();
         void vcpu_worker(vcpu_context& vcpu);
 

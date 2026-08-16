@@ -17,6 +17,7 @@
 
 #include "network/static_socket_factory.hpp"
 #include "memory_permission_ext.hpp"
+#include "devices/gpu_bridge.hpp"
 
 namespace sogen
 {
@@ -427,6 +428,12 @@ namespace sogen
             {
                 dev.work(win_emu);
             }
+
+            // Drive the D3DKMTEscape GPU processor's presents on the same cadence the SogenGpu io_device uses.
+            if (const auto& gpu_processor = win_emu.process.dxgk.gpu_processor)
+            {
+                pump_gpu_presents(gpu_processor.get(), win_emu);
+            }
         }
 
         emulator_thread* get_thread_by_id(process_context& process, const uint32_t id)
@@ -818,6 +825,24 @@ namespace sogen
             this->map_port(mapping.first, mapping.second);
         }
 
+        // Register the sogen Vulkan ICD so a real Khronos loader in the guest discovers it via the standard
+        // HKLM\SOFTWARE\Khronos\Vulkan\Drivers key (native + WOW6432Node), no VK_DRIVER_FILES needed. Harmless
+        // if the guest runs the shim as vulkan-1.dll instead of a real loader, or if no registry hive exists.
+        try
+        {
+            const auto register_icd = [this](const char* drivers_key, const char* manifest_path) {
+                const auto key = this->registry.create_key({drivers_key});
+                constexpr uint32_t enabled = 0;
+                const auto* bytes = reinterpret_cast<const std::byte*>(&enabled);
+                this->registry.set_value(key, manifest_path, 4 /* REG_DWORD */, std::span<const std::byte>(bytes, sizeof(enabled)));
+            };
+            register_icd(R"(\Registry\Machine\Software\Khronos\Vulkan\Drivers)", R"(C:\Windows\System32\sogen_vk_icd.json)");
+            register_icd(R"(\Registry\Machine\Software\WOW6432Node\Khronos\Vulkan\Drivers)", R"(C:\Windows\SysWOW64\sogen_vk_icd.json)");
+        }
+        catch (const std::exception&)
+        {
+        }
+
         this->setup_hooks();
     }
 
@@ -1170,12 +1195,272 @@ namespace sogen
         }
     }
 
+    void windows_emulator::install_d3d9_caps_patch_hook(const mapped_module& mod)
+    {
+        // Real Microsoft d3d9.dll unconditionally strips the D3DCAPS2_CANMANAGERESOURCE caps bit
+        // (bit 28) inside its own QueryLHDDICaps, then stores the stripped value back into the Caps2
+        // field (offset +0xc of the struct the routine holds a pointer to). Forcing the bit back on
+        // right after that store enables the driver-managed D3DPOOL_MANAGED path. Each architecture's
+        // real d3d9.dll compiles the strip+store differently and keeps the struct pointer in a
+        // different register, so each has its own separately-RE'd pattern/RVAs/register.
+        // See docs/d3d9-roadmap.md's D3DPOOL_MANAGED entries for the full investigation/spike history.
+        constexpr uint32_t can_manage_resource_bit = 0x10000000;
+        constexpr uint16_t machine_amd64 = 0x8664;
+        constexpr uint16_t machine_i386 = 0x014c;
+
+        if (mod.machine == machine_amd64)
+        {
+            // x64 system32/d3d9.dll (sha256 bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c):
+            // `btr eax, 0x1c` then `mov [rsi+0xc], eax`.
+            constexpr uint64_t pattern_rva = 0x158af;
+            constexpr uint64_t post_store_rva = 0x158b6;
+            constexpr std::array<uint8_t, 7> expected_pattern = {0x0F, 0xBA, 0xF0, 0x1C, 0x89, 0x46, 0x0C};
+
+            std::array<uint8_t, 7> actual_pattern{};
+            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
+                actual_pattern != expected_pattern)
+            {
+                this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
+                               "bb65372a53445b5607cbd705a29b4671ab1fb250bef32b3fd0377704088c366c expected) -- "
+                               "MANAGED-pool caps-forcing disabled for this build\n",
+                               static_cast<unsigned long long>(pattern_rva));
+                return;
+            }
+
+            auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](cpu_interface& cpu, const uint64_t) {
+                auto& c = this->vcpu(cpu.index()).cpu;
+                const auto rsi = c.reg<uint64_t>(x86_register::rsi);
+                const auto field_addr = rsi + 0xc;
+                const auto value = c.read_memory<uint32_t>(field_addr);
+                if ((value & can_manage_resource_bit) == 0)
+                {
+                    c.write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
+                }
+            });
+
+            this->d3d9_caps_hooks_[mod.image_base] = hook;
+            this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx\n",
+                           static_cast<unsigned long long>(mod.image_base + post_store_rva));
+            return;
+        }
+
+        if (mod.machine == machine_i386)
+        {
+            // 32-bit syswow64/d3d9.dll (sha256 99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302):
+            // `and eax, 0xEFFFFFFF` then `mov [ebx+0xc], eax`. The struct pointer is in EBX here (not
+            // RSI), and the strip is a literal AND rather than x64's BTR, so the guard pattern differs.
+            constexpr uint64_t pattern_rva = 0x51c91;
+            constexpr uint64_t post_store_rva = 0x51c99;
+            constexpr std::array<uint8_t, 8> expected_pattern = {0x25, 0xFF, 0xFF, 0xFF, 0xEF, 0x89, 0x43, 0x0C};
+
+            std::array<uint8_t, 8> actual_pattern{};
+            if (!this->emu().try_read_memory(mod.image_base + pattern_rva, actual_pattern.data(), actual_pattern.size()) ||
+                actual_pattern != expected_pattern)
+            {
+                this->log.warn("d3d9.dll caps-patch RVA pattern mismatch at image_base+0x%llx (sha256 "
+                               "99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302 expected) -- "
+                               "MANAGED-pool caps-forcing disabled for this build\n",
+                               static_cast<unsigned long long>(pattern_rva));
+                return;
+            }
+
+            auto* hook = this->emu().hook_memory_execution(mod.image_base + post_store_rva, [this](cpu_interface& cpu, const uint64_t) {
+                auto& c = this->vcpu(cpu.index()).cpu;
+                const auto ebx = c.reg<uint32_t>(x86_register::ebx);
+                const auto field_addr = static_cast<uint64_t>(ebx) + 0xc;
+                const auto value = c.read_memory<uint32_t>(field_addr);
+                if ((value & can_manage_resource_bit) == 0)
+                {
+                    c.write_memory<uint32_t>(field_addr, value | can_manage_resource_bit);
+                }
+            });
+
+            this->d3d9_caps_hooks_[mod.image_base] = hook;
+            this->log.info("d3d9.dll D3DPOOL_MANAGED caps-forcing hook installed at 0x%llx (x86/WoW64)\n",
+                           static_cast<unsigned long long>(mod.image_base + post_store_rva));
+
+            this->install_d3d9_flip_target_hook(mod);
+            return;
+        }
+    }
+
+    void windows_emulator::install_d3d9_flip_target_hook(const mapped_module& mod)
+    {
+        // MW2 (and any fullscreen-exclusive D3DSWAPEFFECT app) presents through d3d9's own DDraw
+        // flip path: IDirect3DDevice9::Present -> CSwapChain::PresentMain -> FlipToSurface -> the
+        // DDraw HAL Flip thunk DdFlipLH (32-bit d3d9.dll RVA 0xbebe0). DdFlipLH's first act is
+        //   ebx = flipData->lpSurfTarg;  device = *(ebx + 0x44);
+        // i.e. it fetches the flip's device from the *target* surface's kernel handle.
+        //
+        // In a fullscreen flip chain d3d9 gives every buffer a "kernel handle" (a driver-side
+        // DDraw surface local). The back buffers get one via the in-process create-surface DDI,
+        // but the fullscreen primary/scanout surface never does in sogen's headless GPU model:
+        // there is no real scanout allocation to back it, so CreateSurfaceLH leaves its handle
+        // null (the path that would fill it, D3DKMTGetSharedPrimaryHandle, is never reached for
+        // this surface). The first Present still succeeds because the rendered back buffer's
+        // handle is valid, but FlipToSurface's tail rotation then cascades the primary's null
+        // handle into the back buffer, so the second Present hands DdFlipLH a null lpSurfTarg and
+        // it faults reading offset +0x44 of a null object.
+        //
+        // lpSurfCurr (the current/front surface, flip-data offset +4) is always valid and carries
+        // the same device pointer at +0x44. When lpSurfTarg is null we substitute lpSurfCurr as
+        // the flip target: a faithful no-op "flip to self" for a headless swap chain (there is no
+        // scanout to page-flip), which lets DdFlipLH obtain the device and Flush normally instead
+        // of dereferencing null. Mirrors install_d3d9_caps_patch_hook's "intercept one specific
+        // broken call and make it succeed" pattern.
+        constexpr uint16_t machine_i386 = 0x014c;
+        if (mod.machine != machine_i386)
+        {
+            return;
+        }
+
+        // Guard on DdFlipLH's prologue (`mov edi,edi; push ebp; mov ebp,esp; and esp,...`) so a
+        // differently-compiled d3d9 is not silently patched at the wrong address.
+        constexpr uint64_t flip_rva = 0xbebe0;
+        constexpr std::array<uint8_t, 6> expected_prologue = {0x8b, 0xff, 0x55, 0x8b, 0xec, 0x83};
+        std::array<uint8_t, 6> actual_prologue{};
+        if (!this->emu().try_read_memory(mod.image_base + flip_rva, actual_prologue.data(), actual_prologue.size()) ||
+            actual_prologue != expected_prologue)
+        {
+            this->log.warn("d3d9.dll DdFlipLH prologue mismatch at image_base+0x%llx -- fullscreen-flip null-target guard "
+                           "disabled for this build\n",
+                           static_cast<unsigned long long>(flip_rva));
+            return;
+        }
+
+        auto* hook = this->emu().hook_memory_execution(mod.image_base + flip_rva, [this](cpu_interface& cpu, const uint64_t) {
+            auto& c = this->vcpu(cpu.index()).cpu;
+            uint32_t flip_data = 0;
+            const auto esp = c.reg<uint32_t>(x86_register::esp);
+            if (!c.try_read_memory(esp + 4, &flip_data, sizeof(flip_data)) || flip_data == 0)
+            {
+                return;
+            }
+
+            uint32_t surf_targ = 0;
+            uint32_t surf_curr = 0;
+            c.try_read_memory(flip_data + 0x8, &surf_targ, sizeof(surf_targ));
+            c.try_read_memory(flip_data + 0x4, &surf_curr, sizeof(surf_curr));
+            if (surf_targ == 0 && surf_curr != 0)
+            {
+                c.write_memory<uint32_t>(flip_data + 0x8, surf_curr);
+            }
+        });
+
+        this->d3d9_caps_hooks_[mod.image_base + flip_rva] = hook;
+        this->log.info("d3d9.dll fullscreen-flip null-target guard installed at 0x%llx (x86/WoW64)\n",
+                       static_cast<unsigned long long>(mod.image_base + flip_rva));
+    }
+
+    void windows_emulator::install_ddraw_vidmem_hook(const mapped_module& mod)
+    {
+        // MW2's legacy DirectDraw-compatibility probe calls IDirectDraw7::GetAvailableVidMem (vtbl
+        // index 23, offset +0x5c) right after a successful DirectDrawCreateEx. On a modern WDDM
+        // config that method routes through dxgi.dll -> directxdatabasehelper.dll -> dxcore.dll's
+        // private adapter-enumeration factory, which -- in this GPU-less emulation environment --
+        // returns S_OK with a NULL IDXCoreAdapterList and then hard null-derefs inside
+        // directxdatabasehelper.dll (directxdatabasehelper.dll+0x14930, `mov eax,[eax]`). That is a
+        // robustness bug in closed-source Microsoft code that cannot be fixed at the source level.
+        // We intercept the ddraw.dll method entry and synthesize a *successful* GetAvailableVidMem --
+        // reporting a plausible amount of video memory -- so the crashing dxcore-backed body never
+        // runs. Success is the most faithful emulation: on real hardware this legacy query succeeds
+        // and returns the adapter's video memory, and the guest uses the value only to pick the
+        // adapter with the most memory (an unsigned max), so a plausible amount keeps behaviour
+        // identical to a real single-GPU machine. This mirrors install_d3d9_caps_patch_hook: a
+        // runtime, in-memory behavior patch keyed to a specific, SHA256-pinned Microsoft DLL build,
+        // never an on-disk modification. See HANDOFF_MACBOOK.md's §70-75 DirectDraw-probe arc.
+        constexpr uint16_t machine_i386 = 0x014c;
+
+        // Only the 32-bit syswow64/ddraw.dll matters (real MW2 is a 32-bit/WoW64 guest) and only that
+        // build has been RE'd; a 64-bit ddraw.dll would need its own separately-verified RVA.
+        if (mod.machine != machine_i386)
+        {
+            return;
+        }
+
+        // 32-bit syswow64/ddraw.dll (sha256 37113406...0566b0): GetAvailableVidMem entry at RVA
+        // 0x10dc0. Two relocation-invariant guard bands re-verify the build/RVA before hooking: the
+        // hotpatch+SEH prologue at the entry, and the distinctive 4-argument spill sequence at +0x38.
+        constexpr uint64_t entry_rva = 0x10dc0;
+        constexpr uint64_t argspill_rva = 0x10df8;
+        constexpr std::array<uint8_t, 7> entry_pattern = {0x8B, 0xFF, 0x55, 0x8B, 0xEC, 0x6A, 0xFE};
+        constexpr std::array<uint8_t, 18> argspill_pattern = {0x8B, 0x45, 0x08, 0x89, 0x45, 0xB8, 0x8B, 0x75, 0x0C,
+                                                              0x8B, 0x7D, 0x10, 0x8B, 0x45, 0x14, 0x89, 0x45, 0xBC};
+
+        std::array<uint8_t, 7> actual_entry{};
+        std::array<uint8_t, 18> actual_argspill{};
+        if (!this->emu().try_read_memory(mod.image_base + entry_rva, actual_entry.data(), actual_entry.size()) ||
+            actual_entry != entry_pattern ||
+            !this->emu().try_read_memory(mod.image_base + argspill_rva, actual_argspill.data(), actual_argspill.size()) ||
+            actual_argspill != argspill_pattern)
+        {
+            this->log.warn("ddraw.dll GetAvailableVidMem RVA pattern mismatch at image_base+0x%llx (sha256 "
+                           "37113406967162585c9a67c252005757459d8efe87684bbc0ce184907d0566b0 expected) -- "
+                           "DirectDraw vidmem-probe crash-guard disabled for this build\n",
+                           static_cast<unsigned long long>(entry_rva));
+            return;
+        }
+
+        // Overwrite the method prologue in the guest's mapped image (an in-memory detour; the on-disk
+        // DLL is never touched) with a tiny stub that reports a plausible amount of video memory and
+        // returns S_OK, so the crashing dxcore-backed body never runs. On entry the __stdcall frame is
+        //   [esp]      return address        [esp+4]    this (LPDIRECTDRAW7)
+        //   [esp+8]    lpDDSCaps2            [esp+0xc]  lpdwTotal    [esp+0x10] lpdwFree
+        // and the stub is:
+        //   mov eax,[esp+0xC]; test eax,eax; jz +6; mov dword[eax],0x20000000   ; *lpdwTotal
+        //   mov eax,[esp+0x10];test eax,eax; jz +6; mov dword[eax],0x20000000   ; *lpdwFree
+        //   xor eax,eax                                                          ; S_OK
+        //   ret 0x10                                                             ; __stdcall cleanup
+        // A native `ret 0x10` is used rather than an execution hook that rewrites RIP/RSP, because a
+        // single-instruction UC_HOOK_CODE on this backend does not redirect RIP -- only the RSP write
+        // would take effect, walking the stack pointer off the top of the thread's stack.
+        constexpr std::array<uint8_t, 33> stub = {
+            0x8B, 0x44, 0x24, 0x0C,             // mov eax, [esp+0xC]
+            0x85, 0xC0,                         // test eax, eax
+            0x74, 0x06,                         // jz +6
+            0xC7, 0x00, 0x00, 0x00, 0x00, 0x20, // mov dword ptr [eax], 0x20000000
+            0x8B, 0x44, 0x24, 0x10,             // mov eax, [esp+0x10]
+            0x85, 0xC0,                         // test eax, eax
+            0x74, 0x06,                         // jz +6
+            0xC7, 0x00, 0x00, 0x00, 0x00, 0x20, // mov dword ptr [eax], 0x20000000
+            0x33, 0xC0,                         // xor eax, eax  (S_OK)
+            0xC2, 0x10, 0x00,                   // ret 0x10
+        };
+
+        if (!this->emu().try_write_memory(mod.image_base + entry_rva, stub.data(), stub.size()))
+        {
+            this->log.warn("ddraw.dll GetAvailableVidMem crash-guard: failed to patch prologue at 0x%llx\n",
+                           static_cast<unsigned long long>(mod.image_base + entry_rva));
+            return;
+        }
+
+        this->log.info("ddraw.dll GetAvailableVidMem crash-guard installed at 0x%llx (x86/WoW64)\n",
+                       static_cast<unsigned long long>(mod.image_base + entry_rva));
+    }
+
     void windows_emulator::setup_hooks()
     {
         this->callbacks.on_module_load.add([this](mapped_module& mod) {
             for (size_t i = 0; i < mod.sections.size(); ++i)
             {
                 this->install_section_first_execution_hook(mod, i);
+            }
+
+            if (mod.name == "wow64.dll")
+            {
+                this->mod_manager.wow64_modules_.wow64_dll = &mod;
+            }
+            else if (mod.name == "wow64win.dll")
+            {
+                this->mod_manager.wow64_modules_.wow64win_dll = &mod;
+            }
+            else if (mod.name == "d3d9.dll")
+            {
+                this->install_d3d9_caps_patch_hook(mod);
+            }
+            else if (mod.name == "ddraw.dll")
+            {
+                this->install_ddraw_vidmem_hook(mod);
             }
         });
 
@@ -1190,6 +1475,12 @@ namespace sogen
                         this->emu().delete_hook(hook);
                     }
                 }
+            }
+
+            const auto d3d9_hook = this->d3d9_caps_hooks_.extract(mod.image_base);
+            if (d3d9_hook && d3d9_hook.mapped())
+            {
+                this->emu().delete_hook(d3d9_hook.mapped());
             }
         });
 
@@ -1413,16 +1704,16 @@ namespace sogen
                         }
                     }
 
-                    this->callbacks.on_generic_activity(utils::string::va(
-                        "Memory violation context: addr=0x%" PRIx64 " %s tid=%u vcpu=%zu"
-                        " eax=0x%x ecx=0x%x edx=0x%x ebx=0x%x esi=0x%x edi=0x%x"
-                        " ebp=0x%" PRIx64 " [ebp+8]=0x%x [ebp+c]=0x%x [ebp+10]=0x%x"
-                        " esp=0x%" PRIx64 " stack[esp-16..esp+40]=%s",
-                        address, neighborhood.c_str(), vcpu.thread().id, cpu.index(), acting.reg<uint32_t>(x86_register::eax),
-                        acting.reg<uint32_t>(x86_register::ecx), acting.reg<uint32_t>(x86_register::edx),
-                        acting.reg<uint32_t>(x86_register::ebx), acting.reg<uint32_t>(x86_register::esi),
-                        acting.reg<uint32_t>(x86_register::edi), ebp, stack_args[0], stack_args[1], stack_args[2], esp,
-                        stack_window.c_str()));
+                    this->callbacks.on_generic_activity(
+                        utils::string::va("Memory violation context: addr=0x%" PRIx64 " %s tid=%u vcpu=%zu"
+                                          " eax=0x%x ecx=0x%x edx=0x%x ebx=0x%x esi=0x%x edi=0x%x"
+                                          " ebp=0x%" PRIx64 " [ebp+8]=0x%x [ebp+c]=0x%x [ebp+10]=0x%x"
+                                          " esp=0x%" PRIx64 " stack[esp-16..esp+40]=%s",
+                                          address, neighborhood.c_str(), vcpu.thread().id, cpu.index(),
+                                          acting.reg<uint32_t>(x86_register::eax), acting.reg<uint32_t>(x86_register::ecx),
+                                          acting.reg<uint32_t>(x86_register::edx), acting.reg<uint32_t>(x86_register::ebx),
+                                          acting.reg<uint32_t>(x86_register::esi), acting.reg<uint32_t>(x86_register::edi), ebp,
+                                          stack_args[0], stack_args[1], stack_args[2], esp, stack_window.c_str()));
                 }
 
                 this->callbacks.on_memory_violate(address, size, operation, type);
@@ -1841,6 +2132,37 @@ namespace sogen
         }
 
         thread->post_message(*this, m, true);
+
+        // The 32-bit ButtonWndProc tracks BST_PUSHED via direct memory access into tagWND at
+        // 32-bit offsets that don't match our 64-bit USER_WINDOW layout, so it never reads the
+        // pushed state back and therefore never calls ReleaseCapture or posts WM_COMMAND(BN_CLICKED).
+        // Synthesize both here when WM_LBUTTONUP arrives for a captured Button-class window.
+        if (m.message == WM_LBUTTONUP && this->process.mouse_capture_window == m.window)
+        {
+            const auto* btn_win = this->process.windows.get(m.window);
+            const auto& cn = btn_win ? btn_win->class_name : std::u16string{};
+            if (cn == u"Button" || cn == u"BUTTON" || cn == u"#1")
+            {
+                uint64_t button_id = 0;
+                btn_win->guest.access([&](const USER_WINDOW& gw) { button_id = gw.wID; });
+                const auto parent_hwnd = btn_win->parent_handle;
+
+                if (const auto* parent_win = this->process.windows.get(parent_hwnd))
+                {
+                    if (auto* parent_thread = get_thread_by_id(this->process, parent_win->thread_id))
+                    {
+                        msg cmd{};
+                        cmd.window = parent_hwnd;
+                        cmd.message = WM_COMMAND;
+                        cmd.wParam = button_id & 0xFFFF; // BN_CLICKED=0 in high word
+                        cmd.lParam = static_cast<uint32_t>(m.window);
+                        parent_thread->post_message(*this, cmd, true);
+                    }
+                }
+
+                this->process.mouse_capture_window = 0;
+            }
+        }
 
         if (event.message == WM_CLOSE || event.message == WM_COMMAND || is_key_down_message(event.message) ||
             is_mouse_button_message(event.message) || is_mouse_wheel_message(event.message))

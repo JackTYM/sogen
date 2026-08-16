@@ -192,11 +192,9 @@ namespace sogen
             {
                 if (thread_information_length != sizeof(handle))
                 {
-                    return STATUS_BUFFER_OVERFLOW;
+                    // Kernel: length != sizeof(HANDLE) → STATUS_INVALID_PARAMETER
+                    return STATUS_INVALID_PARAMETER;
                 }
-
-                const emulator_object<handle> info{c.emu, thread_information};
-                info.write(DUMMY_IMPERSONATION_TOKEN);
 
                 return STATUS_SUCCESS;
             }
@@ -255,9 +253,8 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported thread set info class: %X\n", info_class);
-            c.emu.stop();
-            return STATUS_NOT_SUPPORTED;
+            c.win_emu.log.print(color::gray, "Unsupported thread set info class: %X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtQueryInformationThread(const syscall_context& c, const handle thread_handle, const uint32_t info_class,
@@ -547,10 +544,39 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported thread query info class: 0x%X\n", info_class);
-            c.emu.stop();
+            if (info_class == ThreadNameInformation)
+            {
+                const std::u16string& name16 = thread->name;
+                const auto name_bytes = static_cast<uint32_t>(name16.size() * sizeof(char16_t));
+                const auto total_size = static_cast<uint32_t>(sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>) + name_bytes);
 
-            return STATUS_NOT_SUPPORTED;
+                if (return_length)
+                {
+                    return_length.write(total_size);
+                }
+
+                if (thread_information_length < total_size)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const emulator_object<THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>> info{c.emu, thread_information};
+                info.access([&](THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>& name_info) {
+                    const auto buffer_start = thread_information + sizeof(THREAD_NAME_INFORMATION<EmulatorTraits<Emu64>>);
+                    if (name_bytes > 0)
+                    {
+                        c.emu.write_memory(buffer_start, name16.c_str(), name_bytes);
+                    }
+                    name_info.ThreadName.Length = static_cast<uint16_t>(name_bytes);
+                    name_info.ThreadName.MaximumLength = static_cast<uint16_t>(name_bytes);
+                    name_info.ThreadName.Buffer = buffer_start;
+                });
+
+                return STATUS_SUCCESS;
+            }
+
+            c.win_emu.log.print(color::gray, "Unsupported thread query info class: %X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtOpenThread(const syscall_context& c, const emulator_object<handle> thread_handle, ACCESS_MASK /*desired_access*/,
@@ -577,16 +603,16 @@ namespace sogen
         }
 
         NTSTATUS handle_NtOpenThreadToken(const syscall_context& c, const handle thread_handle, const ACCESS_MASK /*desired_access*/,
-                                          const BOOLEAN /*open_as_self*/, const emulator_object<handle> token_handle)
+                                          const BOOLEAN /*open_as_self*/, const emulator_object<handle> /*token_handle*/)
         {
             if (!c.proc.is_current_thread_handle(thread_handle, c.vcpu.active_thread))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
-            token_handle.write(CURRENT_THREAD_TOKEN);
-
-            return STATUS_SUCCESS;
+            // Kernel: PsReferenceImpersonationToken; returns STATUS_NO_TOKEN when thread has
+            // no impersonation token set. Sogen doesn't track thread impersonation state.
+            return STATUS_NO_TOKEN;
         }
 
         NTSTATUS handle_NtOpenThreadTokenEx(const syscall_context& c, const handle thread_handle, const ACCESS_MASK desired_access,
@@ -874,9 +900,7 @@ namespace sogen
 
             if (flags != 0)
             {
-                c.win_emu.log.error("NtGetNextThread flags %X not supported\n", static_cast<uint32_t>(flags));
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_PARAMETER;
             }
 
             bool return_next_thread = resolved_thread_handle == NULL_HANDLE;
@@ -976,6 +1000,12 @@ namespace sogen
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
+            }
+
+            // Kernel: (a7 & 0xFFFFFF80) != 0 → STATUS_INVALID_PARAMETER_7
+            if ((create_flags & 0xFFFFFF80u) != 0)
+            {
+                return STATUS_INVALID_PARAMETER_7;
             }
 
             if (maximum_stack_size != 0 && stack_size > maximum_stack_size)
@@ -1087,11 +1117,11 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            if (apc_flags)
+            // Kernel: if ((a3 & 0xFFFEFFFE) != 0) return STATUS_INVALID_PARAMETER
+            // Valid bits: bit 0 (QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC) and bit 16
+            if ((apc_flags & 0xFFFEFFFE) != 0)
             {
-                c.win_emu.log.warn("Unsupported APC flags: %X\n", apc_flags);
-                // c.emu.stop();
-                // return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_PARAMETER;
             }
 
             thread->pending_apcs.push_back({

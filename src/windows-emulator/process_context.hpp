@@ -18,8 +18,12 @@
 
 #include "apiset/apiset.hpp"
 
+#include <memory>
+#include <unordered_map>
+
 namespace sogen
 {
+    class vulkan_host;
 
     struct fake_environment_config;
 
@@ -227,6 +231,7 @@ namespace sogen
                 uint32_t resource_handle{};
                 uint64_t backing_memory{};
                 uint64_t backing_size{};
+                uint64_t vk_image_id{}; // runtime-only; 0 = no GPU backing
 
                 void serialize(utils::buffer_serializer& buffer) const
                 {
@@ -387,6 +392,12 @@ namespace sogen
                 buffer.read(this->allocation_list);
                 buffer.read(this->patch_location_list);
             }
+
+            // Runtime-only (snapshot/restore of a live GPU device is out of scope).
+            std::unordered_map<uint32_t, uint64_t> device_vk_ids{};
+            std::unordered_map<uint32_t, uint32_t> context_device_handles{};
+            std::shared_ptr<vulkan_host> vk_host{};
+            std::shared_ptr<void> gpu_processor{}; // gpu_command_processor for the D3DKMTEscape ICD transport
         };
 
         process_context(x86_64_emulator& emu, memory_manager& memory, utils::clock& clock, callbacks& cb)
@@ -439,6 +450,8 @@ namespace sogen
         // WOW64 support flag - set during process setup based on executable architecture
         bool is_wow64_process{false};
 
+        uint16_t ansi_code_page{1252};
+
         callbacks* callbacks_{};
 
         std::vector<uint8_t> sid{};
@@ -469,6 +482,7 @@ namespace sogen
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};
         uint64_t ki_user_exception_dispatcher{};
+        uint64_t ki_user_exception_dispatcher32{};
         uint64_t ki_user_callback_dispatcher{};
         uint64_t instrumentation_callback{};
         uint64_t zw_callback_return{};
@@ -540,12 +554,26 @@ namespace sogen
         user_handle_table user_handles;
         handle default_monitor_handle{};
         handle default_desktop_window_handle{};
+        // The mode last accepted via NtUserChangeDisplaySettings, reported back by
+        // NtUserEnumDisplaySettings(ENUM_CURRENT_SETTINGS). Defaults to the emulator's fixed virtual
+        // display size (1920x1080) so a caller that queries the current mode before ever changing it
+        // sees the same value NtUserGetDisplayConfigBufferSizes/GetSystemMetrics report.
+        uint32_t current_display_width{1920};
+        uint32_t current_display_height{1080};
         handle_store<handle_types::event, event> events{};
+        handle_store<handle_types::keyed_event, keyed_event> keyed_events{};
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
         handle_store<handle_types::section, section, 2> sections{};
         handle_store<handle_types::device, io_device_container> devices{};
         handle console_handle{};
+
+        struct named_pipe_shared_buffer
+        {
+            std::shared_ptr<std::deque<std::string>> ab = std::make_shared<std::deque<std::string>>();
+            std::shared_ptr<std::deque<std::string>> ba = std::make_shared<std::deque<std::string>>();
+        };
+        utils::insensitive_u16string_map<named_pipe_shared_buffer> named_pipe_registry{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
         handle_store<handle_types::io_completion, io_completion> io_completions{};
         handle_store<handle_types::wait_completion_packet, wait_completion_packet> wait_completion_packets{};

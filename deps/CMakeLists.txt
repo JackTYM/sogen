@@ -124,6 +124,12 @@ include(zstd.cmake)
 
 ##########################################
 
+if(NOT ANDROID AND NOT IOS AND NOT EMSCRIPTEN)
+  add_subdirectory(vkd3d-shader-bridge)
+endif()
+
+##########################################
+
 # FEX-Emu (x86 -> AArch64 JIT). Built only when the FEX backend is enabled (ARM64 Linux/Darwin +
 # Clang, resolved at the top level). FEX is not designed to be embedded via add_subdirectory: it
 # assumes it is the top-level project (~60 uses of CMAKE_SOURCE_DIR) and configures its whole

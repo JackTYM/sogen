@@ -1,7 +1,12 @@
 #include "../std_include.hpp"
 #include "../debug_font.hpp"
+#include "../font_renderer.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../devices/vulkan_host.hpp"
+#include "../devices/gpu_bridge.hpp"
+#include <dxgk_command_protocol.hpp>
+#include <gpu_bridge_protocol.hpp>
 
 #include <array>
 #include <bit>
@@ -953,6 +958,10 @@ namespace sogen
             void draw_text_glyph(gdi_bitmap_surface& surface, const int x, const int y, char32_t codepoint, const uint32_t color,
                                  const RECT* clip)
             {
+                if (ft_draw_glyph(surface, x, y, codepoint, color, clip))
+                {
+                    return;
+                }
                 if (codepoint < debug_font::first_codepoint || codepoint > debug_font::last_codepoint)
                 {
                     codepoint = U'?';
@@ -1035,8 +1044,8 @@ namespace sogen
                         const auto has_rect = (text_out->options & k_gdibs_no_rect) == 0;
                         if ((text_out->options & ETO_OPAQUE) != 0 && (text_out->options & k_gdibs_no_rect) == 0)
                         {
-                            fill_rect(*surface, clip_rect.left, clip_rect.top, clip_rect.right, clip_rect.bottom,
-                                      colorref_to_bgra(text_out->background));
+                            const auto batch_bg = colorref_to_bgra(text_out->background);
+                            fill_rect(*surface, clip_rect.left, clip_rect.top, clip_rect.right, clip_rect.bottom, batch_bg);
                         }
 
                         // The guest controls the batch contents: the variable payload after
@@ -1440,7 +1449,14 @@ namespace sogen
             void dxgk_info(const syscall_context& c, const char* fmt, Args&&... args)
             {
 #ifdef ENABLE_DXGK_LOGGING
-                c.win_emu.log.info(fmt, std::forward<Args>(args)...);
+                if constexpr (sizeof...(Args) == 0)
+                {
+                    c.win_emu.log.info("%s", fmt);
+                }
+                else
+                {
+                    c.win_emu.log.info(fmt, std::forward<Args>(args)...);
+                }
 #else
                 (void)c;
                 (void)fmt;
@@ -1452,7 +1468,14 @@ namespace sogen
             void dxgk_warn(const syscall_context& c, const char* fmt, Args&&... args)
             {
 #ifdef ENABLE_DXGK_LOGGING
-                c.win_emu.log.warn(fmt, std::forward<Args>(args)...);
+                if constexpr (sizeof...(Args) == 0)
+                {
+                    c.win_emu.log.warn("%s", fmt);
+                }
+                else
+                {
+                    c.win_emu.log.warn(fmt, std::forward<Args>(args)...);
+                }
 #else
                 (void)c;
                 (void)fmt;
@@ -1464,7 +1487,14 @@ namespace sogen
             void dxgk_error(const syscall_context& c, const char* fmt, Args&&... args)
             {
 #ifdef ENABLE_DXGK_LOGGING
-                c.win_emu.log.error(fmt, std::forward<Args>(args)...);
+                if constexpr (sizeof...(Args) == 0)
+                {
+                    c.win_emu.log.error("%s", fmt);
+                }
+                else
+                {
+                    c.win_emu.log.error(fmt, std::forward<Args>(args)...);
+                }
 #else
                 (void)c;
                 (void)fmt;
@@ -1643,21 +1673,42 @@ namespace sogen
             return resolve_dc_surface(c, dc, origin_x, origin_y, present_handle);
         }
 
-        NTSTATUS handle_NtDxgkIsFeatureEnabled()
+        NTSTATUS handle_NtDxgkIsFeatureEnabled(const syscall_context& /*c*/)
         {
-            // puts("NtDxgkIsFeatureEnabled not supported");
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtGdiInit(const syscall_context& c)
         {
-            if (ensure_gdi_shared_table(c) == 0)
+            const auto table = ensure_gdi_shared_table(c);
+            if (table == 0)
             {
                 return STATUS_UNSUCCESSFUL;
             }
 
             const auto cookie = ensure_gdi_cookie(c);
             seed_gdi_stock_objects(c);
+
+            const auto* gdi32 = c.win_emu.mod_manager.find_by_name("gdi32.dll");
+            if (gdi32)
+            {
+                const auto gcookie_addr = gdi32->find_export("gCookie");
+                const auto ptable_addr = gdi32->find_export("pGdiSharedHandleTable");
+                if (const auto addr = gdi32->find_export("gMaxGdiHandleCount"); addr != 0)
+                {
+                    constexpr uint32_t max_count = GDI_MAX_HANDLE_COUNT;
+                    c.emu.write_memory(addr, &max_count, sizeof(max_count));
+                }
+                if (gcookie_addr != 0)
+                {
+                    const auto cookie32 = static_cast<uint32_t>(cookie);
+                    c.emu.write_memory(gcookie_addr, &cookie32, sizeof(cookie32));
+                }
+                if (ptable_addr != 0)
+                {
+                    c.emu.write_memory(ptable_addr, &table, sizeof(table));
+                }
+            }
 
             return static_cast<NTSTATUS>(cookie);
         }
@@ -1883,7 +1934,7 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        uint64_t handle_NtGdiCreateCompatibleDC(const syscall_context& c, const hdc /*dc*/)
+        uint64_t handle_NtGdiCreateCompatibleDC(const syscall_context& c, const hdc /*src_dc*/)
         {
             uint64_t dc_attr = 0;
             const auto dc = allocate_gdi_dc(c, dc_attr);
@@ -2380,7 +2431,9 @@ namespace sogen
             c.emu.read_memory(info + 0, &bi_size, sizeof(bi_size));
             c.emu.read_memory(info + 32, &clr_used, sizeof(clr_used)); // BITMAPINFOHEADER.biClrUsed
 
-            if ((bit_count != 4 && bit_count != 24 && bit_count != 32) || compression != bi_rgb || bi_width <= 0 || bi_height == 0)
+            const bool valid_bit_count =
+                bit_count == 1 || bit_count == 4 || bit_count == 8 || bit_count == 16 || bit_count == 24 || bit_count == 32;
+            if (!valid_bit_count || compression != bi_rgb || bi_width <= 0 || bi_height == 0)
             {
                 c.win_emu.log.warn("NtGdiStretchDIBitsInternal: unsupported DIB (bpp=%u compression=%u width=%d)\n", bit_count, compression,
                                    bi_width);
@@ -2394,12 +2447,14 @@ namespace sogen
             // DIB scanlines are DWORD-aligned, not tightly packed.
             const size_t stride = ((static_cast<size_t>(img_width) * bit_count + 31u) / 32u) * 4u;
 
-            std::array<uint32_t, 16> palette{};
-            if (bit_count == 4)
+            std::vector<uint32_t> palette{};
+            if (bit_count <= 8)
             {
-                const uint32_t palette_entries = clr_used != 0 ? std::min<uint32_t>(clr_used, 16) : 16;
+                const uint32_t max_colors = 1u << bit_count;
+                const uint32_t palette_entries = clr_used != 0 ? std::min(clr_used, max_colors) : max_colors;
                 const uint64_t palette_ptr = info + bi_size;
 
+                palette.resize(palette_entries);
                 for (uint32_t i = 0; i < palette_entries; ++i)
                 {
                     struct
@@ -2415,6 +2470,7 @@ namespace sogen
                                  static_cast<uint32_t>(rgb.blue);
                 }
             }
+            const uint32_t* palette_data = palette.empty() ? nullptr : palette.data();
 
             std::vector<uint8_t> data(stride * img_height);
             if (data.empty())
@@ -2460,31 +2516,8 @@ namespace sogen
                         continue;
                     }
 
-                    uint32_t pixel = 0;
-
-                    if (bit_count == 32)
-                    {
-                        std::memcpy(&pixel, row + static_cast<size_t>(img_x) * sizeof(uint32_t), sizeof(pixel));
-                        pixel |= 0xFF000000u;
-                    }
-                    else if (bit_count == 24)
-                    {
-                        const uint8_t* px = row + static_cast<size_t>(img_x) * 3;
-                        pixel = static_cast<uint32_t>(px[0]) | (static_cast<uint32_t>(px[1]) << 8) | (static_cast<uint32_t>(px[2]) << 16) |
-                                0xFF000000u;
-                    }
-                    else // 4bpp BI_RGB
-                    {
-                        const uint8_t packed = row[static_cast<size_t>(img_x) / 2u];
-
-                        // In 4bpp DIBs, the left pixel is the high nibble.
-                        const uint8_t index = (img_x & 1u) == 0 ? static_cast<uint8_t>(packed >> 4) : static_cast<uint8_t>(packed & 0x0Fu);
-
-                        pixel = palette[index];
-                    }
-
                     const int out_x = x_dst + origin_x + (flip_x ? (dst_w - 1 - dx) : dx);
-                    set_surface_pixel(*surface, out_x, out_y, pixel);
+                    set_surface_pixel(*surface, out_x, out_y, dib_pixel_to_bgra32(row, img_x, bit_count, palette_data));
                 }
             }
 
@@ -3428,6 +3461,16 @@ namespace sogen
         {
             set_dc_current_point(c, dc, left, top);
 
+            gdi_dc_state* dc_state = nullptr;
+            gdi_bitmap_surface* surface = nullptr;
+            int32_t origin_x = 0;
+            int32_t origin_y = 0;
+            if (get_dc_state_and_surface(c, dc, dc_state, surface, origin_x, origin_y) && dc_state && surface)
+            {
+                const auto brush_color = get_dc_brush_color(c, dc);
+                fill_rect(*surface, left + 1 + origin_x, top + 1 + origin_y, right - 1 + origin_x, bottom - 1 + origin_y, brush_color);
+            }
+
             if (!handle_NtGdiLineTo(c, dc, right - 1, top))
             {
                 return FALSE;
@@ -3716,7 +3759,6 @@ namespace sogen
             return handle_NtGdiStretchBlt(c, dst_dc, x_dst, y_dst, dst_width, dst_height, src_dc, x_src, y_src, src_width, src_height,
                                           srccopy, 0);
         }
-
         BOOL handle_NtGdiPatBlt(const syscall_context& c, const hdc dc, const LONG x, const LONG y, const LONG width, const LONG height,
                                 const DWORD /*rop*/)
         {
@@ -3817,7 +3859,8 @@ namespace sogen
                 clip_rect.bottom += origin_y;
                 if ((options & ETO_OPAQUE) != 0)
                 {
-                    fill_rect(*surface, clip_rect.left, clip_rect.top, clip_rect.right, clip_rect.bottom, get_dc_background_color(c, dc));
+                    const auto bg_color = get_dc_background_color(c, dc);
+                    fill_rect(*surface, clip_rect.left, clip_rect.top, clip_rect.right, clip_rect.bottom, bg_color);
                 }
             }
 
@@ -3935,12 +3978,12 @@ namespace sogen
             return 0;
         }
 
-        NTSTATUS handle_NtGdiSetLayout()
+        NTSTATUS handle_NtGdiSetLayout(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiGetDCObject()
+        NTSTATUS handle_NtGdiGetDCObject(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -4061,7 +4104,7 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtGdiDdDDICloseAdapter()
+        NTSTATUS handle_NtGdiDdDDICloseAdapter(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -4088,6 +4131,25 @@ namespace sogen
 
             switch (query.Type)
             {
+            case KMTQAITYPE::KMTQAITYPE_UMDRIVERPRIVATE: {
+                if (query.PrivateDriverDataSize < 12)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                struct EMU_UMDRIVERPRIVATE
+                {
+                    uint32_t version_lo;
+                    uint32_t version_hi;
+                    uint32_t caps_flags;
+                } private_data{};
+
+                private_data.version_hi = 0x3200;
+                private_data.caps_flags = 0x8;
+
+                return write_query_adapter_info(c, query, private_data);
+            }
+
             case KMTQAITYPE::KMTQAITYPE_UMDRIVERNAME: {
                 if (query.PrivateDriverDataSize < 520) // MAX_PATH * 2
                 {
@@ -4100,7 +4162,19 @@ namespace sogen
                     char16_t UhDriverName[260]; // NOLINT
                 } driver_name{};
 
-                utils::string::copy(driver_name.UhDriverName, u"d3d10warp.dll");
+                // The runtime sets Version to the KMTUMDVERSION it wants (DX9=0, DX10=1, DX11=2, DX12=3).
+                driver_name.Version = c.emu.read_memory<uint32_t>(query.pPrivateDriverData);
+
+                // Hand the official D3D9 runtime the sogen D3D9 UMD (the vendor-driver slot); other DDI
+                // generations fall back to WARP until their host decoder exists.
+                if (driver_name.Version == 0 /* KMTUMDVERSION_DX9 */)
+                {
+                    utils::string::copy(driver_name.UhDriverName, u"sogen_d3d9um.dll");
+                }
+                else
+                {
+                    utils::string::copy(driver_name.UhDriverName, u"d3d10warp.dll");
+                }
 
                 c.emu.write_memory(query.pPrivateDriverData, &driver_name, sizeof(driver_name));
                 return STATUS_SUCCESS;
@@ -4239,6 +4313,22 @@ namespace sogen
                 return write_query_adapter_info(c, query, unique_guid);
             }
 
+            case KMTQAITYPE::KMTQAITYPE_CURRENTDISPLAYMODE: {
+                const emulator_object<EMU_D3DKMT_CURRENTDISPLAYMODE> current_mode{c.emu, query.pPrivateDriverData};
+                current_mode.access([](EMU_D3DKMT_CURRENTDISPLAYMODE& m) {
+                    m.DisplayModeInfo.Width = k_default_width;
+                    m.DisplayModeInfo.Height = k_default_height;
+                    m.DisplayModeInfo.Format = 22;
+                    m.DisplayModeInfo.IntegerRefreshRate = 60;
+                    m.DisplayModeInfo.RefreshRate = {.Numerator = 60, .Denominator = 1};
+                    m.DisplayModeInfo.ScanLineOrdering = 1;
+                    m.DisplayModeInfo.DisplayOrientation = 1;
+                    m.DisplayModeInfo.DisplayFixedOutput = 0;
+                    m.DisplayModeInfo.Flags = 0;
+                });
+                return STATUS_SUCCESS;
+            }
+
             default: {
                 dxgk_warn(c, "NtGdiDdDDIQueryAdapterInfo: Unhandled query Type %d", static_cast<UINT32>(query.Type));
 
@@ -4260,6 +4350,38 @@ namespace sogen
                 return STATUS_INVALID_PARAMETER;
             }
 
+            if (!c.proc.dxgk.vk_host)
+            {
+                c.proc.dxgk.vk_host = std::make_shared<vulkan_host>();
+                if (!c.proc.dxgk.vk_host->available())
+                {
+                    c.proc.dxgk.vk_host.reset();
+                    dxgk_warn(c, "NtGdiDdDDICreateDevice: host Vulkan not available");
+                }
+                else
+                {
+                    uint64_t instance = 0;
+                    c.proc.dxgk.vk_host->create_instance(instance);
+
+                    uint32_t phys_count = 0;
+                    std::array<uint64_t, 4> phys_ids{};
+                    c.proc.dxgk.vk_host->enumerate_physical_devices(instance, std::span{phys_ids}, phys_count);
+
+                    if (phys_count > 0)
+                    {
+                        uint64_t vk_device = 0;
+                        c.proc.dxgk.vk_host->create_device(phys_ids[0], nullptr, 0, nullptr, 0, 0, nullptr, 0, 0, vk_device);
+                        c.proc.dxgk.device_vk_ids[k_dxgk_device_handle] = vk_device;
+                        dxgk_info(c, "NtGdiDdDDICreateDevice: host Vulkan device id=0x%llX", vk_device);
+                    }
+                    else
+                    {
+                        c.proc.dxgk.vk_host.reset();
+                        dxgk_warn(c, "NtGdiDdDDICreateDevice: no host physical devices");
+                    }
+                }
+            }
+
             device_desc.access([&](EMU_D3DKMT_CREATEDEVICE& create_device) {
                 if (create_device.hAdapter != k_dxgk_adapter_handle)
                 {
@@ -4277,6 +4399,46 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtGdiDdDDICreatePagingQueue(const syscall_context& c,
+                                                    const emulator_object<EMU_D3DKMT_CREATEPAGINGQUEUE> queue_desc)
+        {
+            constexpr uint32_t k_dxgk_paging_queue_handle = 0x8000;
+            constexpr uint32_t k_dxgk_paging_queue_sync_handle = 0x9000;
+
+            if (!queue_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            queue_desc.access([&](EMU_D3DKMT_CREATEPAGINGQUEUE& q) {
+                q.hPagingQueue = k_dxgk_paging_queue_handle;
+                q.hSyncObject = k_dxgk_paging_queue_sync_handle;
+                q.FenceValueCPUVirtualAddress = 0;
+                dxgk_info(c, "NtGdiDdDDICreatePagingQueue: Created PagingQueue 0x%X on Device 0x%X", q.hPagingQueue, q.hDevice);
+            });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDICreateSynchronizationObject(const syscall_context& c,
+                                                              const emulator_object<EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT> sync_desc)
+        {
+            constexpr uint32_t k_dxgk_sync_object_base = 0xA000;
+            static uint32_t sync_handle_counter = 0;
+
+            if (!sync_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            sync_desc.access([&](EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT& s) {
+                s.hSyncObject = k_dxgk_sync_object_base + (++sync_handle_counter);
+                dxgk_info(c, "NtGdiDdDDICreateSynchronizationObject: Type=%u hSyncObject=0x%X", s.InfoType, s.hSyncObject);
+            });
+
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtGdiDdDDIEscape(const syscall_context& c, const emulator_object<EMU_D3DKMT_ESCAPE> escape_desc)
         {
             if (!escape_desc)
@@ -4289,6 +4451,41 @@ namespace sogen
             if (escape.hAdapter != k_dxgk_adapter_handle)
             {
                 dxgk_warn(c, "NtGdiDdDDIEscape: Unknown Adapter 0x%X", escape.hAdapter);
+            }
+
+            // GPU command stream carried over the Escape channel: a registered ICD marshals a Vulkan
+            // command into pPrivateDriverData and the host routes it to the shared gpu_command_processor,
+            // so no custom \\.\SogenGpu character device is needed.
+            if (escape.Type == 0 && escape.pPrivateDriverData != 0 &&
+                escape.PrivateDriverDataSize >= sizeof(gpu_bridge::escape_command_header) &&
+                c.emu.read_memory<uint32_t>(escape.pPrivateDriverData) == gpu_bridge::escape_magic)
+            {
+                auto header = c.emu.read_memory<gpu_bridge::escape_command_header>(escape.pPrivateDriverData);
+
+                const uint64_t buffer_size = escape.PrivateDriverDataSize;
+                if (uint64_t{header.input_offset} + header.input_size > buffer_size ||
+                    uint64_t{header.output_offset} + header.output_size > buffer_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (!c.proc.dxgk.gpu_processor)
+                {
+                    c.proc.dxgk.gpu_processor = create_gpu_command_processor();
+                }
+
+                io_device_context ctx{c.emu};
+                ctx.io_control_code = header.command_id;
+                ctx.input_buffer = escape.pPrivateDriverData + header.input_offset;
+                ctx.input_buffer_length = header.input_size;
+                ctx.output_buffer = escape.pPrivateDriverData + header.output_offset;
+                ctx.output_buffer_length = header.output_size;
+
+                const NTSTATUS status = dispatch_gpu_command(c.proc.dxgk.gpu_processor.get(), c.win_emu, ctx);
+
+                header.result = static_cast<int32_t>(status);
+                c.emu.write_memory(escape.pPrivateDriverData, &header, sizeof(header));
+                return status;
             }
 
             if (escape.Type == 0 && escape.pPrivateDriverData != 0 && escape.PrivateDriverDataSize >= 4)
@@ -4393,6 +4590,7 @@ namespace sogen
                 }
 
                 create_context.hContext = k_dxgk_context_handle;
+                c.proc.dxgk.context_device_handles[k_dxgk_context_handle] = create_context.hDevice;
 
                 reserve_dxgk_submission_buffers(c, k_dxgk_command_buffer_size, k_dxgk_allocation_list_count,
                                                 k_dxgk_patch_location_list_count);
@@ -4479,22 +4677,170 @@ namespace sogen
                         const emulator_object<EMU_D3DDDI_ALLOCATIONINFO> allocation_info{c.emu, current_info_ptr};
 
                         allocation_info.access([&](EMU_D3DDDI_ALLOCATIONINFO& alloc_info) {
-                            const uint64_t backing_size = infer_warp_allocation_size_from_private_data(c, alloc_info.pPrivateDriverData,
-                                                                                                       alloc_info.PrivateDriverDataSize);
+                            bool is_render_target = false;
+                            dxgk_cmd::render_target_desc rt_desc{};
+                            if (c.proc.dxgk.vk_host && alloc_info.pPrivateDriverData != 0 &&
+                                alloc_info.PrivateDriverDataSize >= sizeof(dxgk_cmd::render_target_desc))
+                            {
+                                c.emu.read_memory(alloc_info.pPrivateDriverData, &rt_desc, sizeof(rt_desc));
+                                is_render_target = (rt_desc.magic == dxgk_cmd::protocol_magic);
+                            }
+
+                            const uint64_t backing_size =
+                                is_render_target ? static_cast<uint64_t>(rt_desc.width) * rt_desc.height * 4
+                                                 : infer_warp_allocation_size_from_private_data(c, alloc_info.pPrivateDriverData,
+                                                                                                alloc_info.PrivateDriverDataSize);
 
                             alloc_info.hAllocation = c.proc.dxgk.create_allocation(c.win_emu.memory, create_alloc.hResource, backing_size);
 
-                            const auto* allocation = c.proc.dxgk.get_allocation(alloc_info.hAllocation);
-                            const auto actual_size = allocation ? allocation->backing_size : 0ull;
-                            const auto backing_memory = allocation ? allocation->backing_memory : 0ull;
-
-                            dxgk_info(c, "NtGdiDdDDICreateAllocation: Alloc %u/%u -> Handle 0x%X Size=0x%llX Address=0x%llX",
-                                      allocation_index + 1, create_alloc.NumAllocations, alloc_info.hAllocation, actual_size,
-                                      backing_memory);
+                            if (is_render_target)
+                            {
+                                const auto dev_it = c.proc.dxgk.device_vk_ids.find(create_alloc.hDevice);
+                                if (dev_it != c.proc.dxgk.device_vk_ids.end())
+                                {
+                                    uint64_t vk_image = 0;
+                                    const int32_t vk_res = c.proc.dxgk.vk_host->create_render_target(
+                                        dev_it->second, rt_desc.width, rt_desc.height, rt_desc.format, vk_image);
+                                    if (vk_res == 0 && vk_image != 0)
+                                    {
+                                        auto alloc_it = c.proc.dxgk.allocations.find(alloc_info.hAllocation);
+                                        if (alloc_it != c.proc.dxgk.allocations.end())
+                                        {
+                                            alloc_it->second.vk_image_id = vk_image;
+                                        }
+                                        dxgk_info(c, "NtGdiDdDDICreateAllocation: RT %ux%u -> Handle 0x%X vk_image=0x%llX", rt_desc.width,
+                                                  rt_desc.height, alloc_info.hAllocation, vk_image);
+                                    }
+                                    else
+                                    {
+                                        dxgk_warn(c, "NtGdiDdDDICreateAllocation: create_render_target failed (vk=%d)", vk_res);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                const auto* allocation = c.proc.dxgk.get_allocation(alloc_info.hAllocation);
+                                const auto actual_size = allocation ? allocation->backing_size : 0ull;
+                                const auto backing_memory = allocation ? allocation->backing_memory : 0ull;
+                                dxgk_info(c, "NtGdiDdDDICreateAllocation: Alloc %u/%u -> Handle 0x%X Size=0x%llX Address=0x%llX",
+                                          allocation_index + 1, create_alloc.NumAllocations, alloc_info.hAllocation, actual_size,
+                                          backing_memory);
+                            }
                         });
                     }
                 }
             });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDISubmitCommand(const syscall_context& c, const emulator_object<EMU_D3DKMT_SUBMITCOMMAND> submit_desc)
+        {
+            if (!submit_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto submit = submit_desc.read();
+
+            if (c.proc.is_wow64_process)
+            {
+                // The real (emulated) wow64win.dll thunk lands pPrivateDriverData/PrivateDriverDataSize
+                // 8 bytes later than this struct's native-x64 layout declares (0x128/0x12C, not
+                // 0x120/0x124) — verified against the actual thunked bytes, since an extra field this
+                // struct doesn't model sits between BroadcastContext and pPrivateDriverData on WoW64.
+                uint32_t wow64_private_driver_data = 0;
+                uint32_t wow64_private_driver_data_size = 0;
+                c.emu.read_memory(submit_desc.value() + 0x128, &wow64_private_driver_data, sizeof(wow64_private_driver_data));
+                c.emu.read_memory(submit_desc.value() + 0x12C, &wow64_private_driver_data_size, sizeof(wow64_private_driver_data_size));
+                submit.pPrivateDriverData = wow64_private_driver_data;
+                submit.PrivateDriverDataSize = wow64_private_driver_data_size;
+            }
+
+            if (!c.proc.dxgk.vk_host || submit.pPrivateDriverData == 0 || submit.PrivateDriverDataSize < sizeof(dxgk_cmd::clear_command))
+            {
+                return STATUS_SUCCESS;
+            }
+
+            dxgk_cmd::clear_command cmd{};
+            c.emu.read_memory(submit.pPrivateDriverData, &cmd, sizeof(cmd));
+
+            if (cmd.magic != dxgk_cmd::protocol_magic || static_cast<dxgk_cmd::command_type>(cmd.type) != dxgk_cmd::command_type::clear)
+            {
+                dxgk_warn(c, "NtGdiDdDDISubmitCommand: unknown command magic=0x%X type=0x%X", cmd.magic, cmd.type);
+                return STATUS_SUCCESS;
+            }
+
+            const auto alloc_it = c.proc.dxgk.allocations.find(cmd.target_allocation);
+            if (alloc_it == c.proc.dxgk.allocations.end() || alloc_it->second.vk_image_id == 0)
+            {
+                dxgk_warn(c, "NtGdiDdDDISubmitCommand: allocation 0x%X has no GPU backing", cmd.target_allocation);
+                return STATUS_SUCCESS;
+            }
+
+            const int32_t vk_res = c.proc.dxgk.vk_host->submit_clear(alloc_it->second.vk_image_id, cmd.color.data());
+            dxgk_info(c, "NtGdiDdDDISubmitCommand: clear alloc=0x%X vk_image=0x%llX rgba=(%.2f,%.2f,%.2f,%.2f) vk=%d",
+                      cmd.target_allocation, alloc_it->second.vk_image_id, cmd.color[0], cmd.color[1], cmd.color[2], cmd.color[3], vk_res);
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, const emulator_object<EMU_D3DKMT_PRESENT> present_desc)
+        {
+            if (!present_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto present = present_desc.read();
+
+            if (c.proc.is_wow64_process)
+            {
+                // The real (emulated) wow64win.dll thunk individually widens hWindow to a full
+                // 8-byte slot (it's treated as a genuine pointer-sized handle), which shifts every
+                // field after it by 4 bytes relative to this struct's native-x64, tightly-packed
+                // layout: hWindow moves from +0x04 to +0x08, hSource from +0x0C to +0x14.
+                uint32_t wow64_hwindow = 0;
+                uint32_t wow64_hsource = 0;
+                c.emu.read_memory(present_desc.value() + 0x08, &wow64_hwindow, sizeof(wow64_hwindow));
+                c.emu.read_memory(present_desc.value() + 0x14, &wow64_hsource, sizeof(wow64_hsource));
+                present.hWindow = wow64_hwindow;
+                present.hSource = wow64_hsource;
+            }
+
+            if (!c.proc.dxgk.vk_host || present.hSource == 0)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            const auto alloc_it = c.proc.dxgk.allocations.find(present.hSource);
+            if (alloc_it == c.proc.dxgk.allocations.end() || alloc_it->second.vk_image_id == 0)
+            {
+                dxgk_warn(c, "NtGdiDdDDIPresent: hSource 0x%X has no GPU backing", present.hSource);
+                return STATUS_SUCCESS;
+            }
+
+            std::vector<std::byte> pixels;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            const int32_t vk_res = c.proc.dxgk.vk_host->readback_render_target(alloc_it->second.vk_image_id, pixels, width, height);
+            if (vk_res != 0 || pixels.empty() || width == 0 || height == 0)
+            {
+                dxgk_warn(c, "NtGdiDdDDIPresent: readback failed (vk=%d)", vk_res);
+                return STATUS_SUCCESS;
+            }
+
+            dxgk_info(c, "NtGdiDdDDIPresent: hwnd=0x%X src=0x%X %ux%u pixels=%zu", present.hWindow, present.hSource, width, height,
+                      pixels.size());
+
+            if (present.hWindow != 0)
+            {
+                c.win_emu.ui().present_surface(present.hWindow, ui_surface_desc{.width = static_cast<int>(width),
+                                                                                .height = static_cast<int>(height),
+                                                                                .stride = static_cast<int>(width * 4),
+                                                                                .format = ui_surface_format::bgra8,
+                                                                                .pixels = pixels.data()});
+            }
 
             return STATUS_SUCCESS;
         }
@@ -4704,6 +5050,48 @@ namespace sogen
             return status;
         }
 
+        NTSTATUS handle_NtGdiDdDDILock2(const syscall_context& c, const emulator_object<EMU_D3DKMT_LOCK2> lock_desc)
+        {
+            if (!lock_desc)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            NTSTATUS status = STATUS_SUCCESS;
+
+            lock_desc.access([&](EMU_D3DKMT_LOCK2& lock) {
+                const auto* allocation = c.proc.dxgk.get_allocation(lock.hAllocation);
+                if (allocation == nullptr)
+                {
+                    dxgk_warn(c, "NtGdiDdDDILock2: Unknown allocation 0x%X", lock.hAllocation);
+                    status = STATUS_INVALID_HANDLE;
+                    return;
+                }
+
+                lock.pData = allocation->backing_memory;
+                dxgk_info(c, "NtGdiDdDDILock2: Handle 0x%X -> Address=0x%llX", lock.hAllocation, allocation->backing_memory);
+            });
+
+            return status;
+        }
+
+        NTSTATUS handle_NtGdiGetCurrentDpiInfo(const syscall_context& /*c*/, const uint64_t /*hDC*/,
+                                               const emulator_object<EMU_CURRENT_DPI_INFO> dpi_info)
+        {
+            if (!dpi_info)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            dpi_info.access([](EMU_CURRENT_DPI_INFO& info) {
+                info = {};
+                info.DpiX = 96;
+                info.DpiY = 96;
+            });
+
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtGdiDdDDIGetDisplayModeList(const syscall_context& c,
                                                      const emulator_object<EMU_D3DKMT_GETDISPLAYMODELIST> display_mode_list)
         {
@@ -4779,12 +5167,23 @@ namespace sogen
             }
 
             device_state.access([&](EMU_D3DKMT_GETDEVICESTATE& state) {
-                if (state.hDevice != k_dxgk_device_handle)
+                if (state.hDevice != k_dxgk_device_handle && state.hDevice != 0)
                 {
                     dxgk_warn(c, "NtGdiDdDDIGetDeviceState: Unknown device 0x%X", state.hDevice);
                 }
 
-                state.State = 0;
+                // StateType 3 = D3DKMT_DEVICESTATE_RESET: a healthy adapter reports the ResetState reset/
+                // desktop-switched bit (bit0) CLEAR. The D3D9 runtime's device-state check treats
+                // (ResetState & 1) == 0 as "no reset -> proceed with driver/caps init"; a set bit0 makes it
+                // mark the driver disabled and skip caps/format enumeration, so CreateDevice(HAL) fails.
+                if (state.StateType == 3)
+                {
+                    state.ResetState = 0;
+                }
+                else
+                {
+                    state.State = 0;
+                }
             });
 
             return STATUS_SUCCESS;
@@ -4819,7 +5218,7 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDICacheHybridQueryValue()
+        NTSTATUS handle_NtGdiDdDDICacheHybridQueryValue(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -4836,22 +5235,7 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiDdDDIUnlock()
-        {
-            return STATUS_SUCCESS;
-        }
-
-        // WDDM command-buffer submission. The paravirtualized GPU path used by real rendering (DXVK)
-        // runs over the separate \\.\SogenGpu ioctl bridge, not this D3DKMT kernel escape, so there is
-        // no command buffer to translate here.
-        NTSTATUS handle_NtGdiDdDDISubmitCommand(const syscall_context& /*c*/, const emulator_pointer /*submit_command*/)
-        {
-            return STATUS_SUCCESS;
-        }
-
-        // WDDM present. Real on-screen presentation for paravirtualized rendering happens over the
-        // \\.\SogenGpu bridge, not this D3DKMT kernel path.
-        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& /*c*/, const emulator_pointer /*present*/)
+        NTSTATUS handle_NtGdiDdDDIUnlock(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -5037,7 +5421,6 @@ namespace sogen
             {
                 return STATUS_INVALID_PARAMETER;
             }
-
             open_adapter.access([](EMU_D3DKMT_OPENADAPTERFROMLUID& params) { //
                 params.hAdapter = k_dxgk_adapter_handle;
             });

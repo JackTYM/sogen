@@ -63,6 +63,7 @@ namespace sogen
             std::optional<uint64_t> break_call{};
             std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
             std::vector<input_action> input_script{};
+            std::filesystem::path block_profile{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
@@ -606,6 +607,38 @@ namespace sogen
             return "?";
         }
 
+        void flush_block_profile(const std::filesystem::path& path, const std::unordered_map<uint64_t, uint64_t>& histogram,
+                                 const module_manager& mod_manager)
+        {
+            const auto temp_path = std::filesystem::path(path).concat(".tmp");
+            std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+            if (!out)
+            {
+                return;
+            }
+
+            for (const auto& mod : mod_manager.modules() | std::views::values)
+            {
+                out << "M " << std::hex << mod.image_base << ' ' << mod.size_of_image << ' ' << std::dec << mod.name << '\n';
+                for (const auto& sym : mod.exports)
+                {
+                    if (sym.address != 0)
+                    {
+                        out << "E " << std::hex << sym.address << std::dec << ' ' << sym.name << '\n';
+                    }
+                }
+            }
+
+            for (const auto& [address, count] : histogram)
+            {
+                out << "B " << std::hex << address << std::dec << ' ' << count << '\n';
+            }
+
+            out.close();
+            std::error_code ec{};
+            std::filesystem::rename(temp_path, path, ec);
+        }
+
         bool run(const analysis_options& options, const std::span<const std::string_view> args)
         {
             analysis_context context{
@@ -844,7 +877,37 @@ namespace sogen
                 }
             }
 
-            return run_emulation(context, options);
+            std::shared_ptr<std::unordered_map<uint64_t, uint64_t>> profile_histogram{};
+            if (!options.block_profile.empty())
+            {
+                profile_histogram = std::make_shared<std::unordered_map<uint64_t, uint64_t>>();
+                auto counter = std::make_shared<uint64_t>(0);
+                auto last_flush = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+                auto* mod_manager = &win_emu->mod_manager;
+                const auto profile_path = options.block_profile;
+                auto histogram = profile_histogram;
+
+                win_emu->emu().hook_basic_block(
+                    [histogram, counter, last_flush, mod_manager, profile_path](cpu_interface&, const basic_block& block) {
+                        (*histogram)[block.address] += (block.instruction_count != 0 ? block.instruction_count : block.size);
+                        if ((++(*counter) & 0xFFFFF) == 0)
+                        {
+                            const auto now = std::chrono::steady_clock::now();
+                            if (now - *last_flush > std::chrono::seconds(15))
+                            {
+                                *last_flush = now;
+                                flush_block_profile(profile_path, *histogram, *mod_manager);
+                            }
+                        }
+                    });
+            }
+
+            const auto emulation_result = run_emulation(context, options);
+            if (profile_histogram)
+            {
+                flush_block_profile(options.block_profile, *profile_histogram, win_emu->mod_manager);
+            }
+            return emulation_result;
         }
 
         int run_main(int argc, char** argv)
@@ -910,6 +973,8 @@ namespace sogen
                 ->capture_default_str()
                 ->check(CLI::IsMember({"auto", "int3"}));
             app.add_option("-r,--registry", options.registry_path, "Set registry path");
+            app.add_option("--block-profile", options.block_profile,
+                           "Write a basic-block execution profile to a file (flushed periodically while running)");
 
             app.add_option("--vcpus", options.vcpu_count, "Number of virtual CPUs (requires a backend with multi-vCPU support)")
                 ->capture_default_str();

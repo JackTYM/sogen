@@ -154,6 +154,18 @@ namespace sogen
             return std::make_unique<endpoint_control_port>();
         }
 
+        if (port == u"\\RPC Control\\umpo")
+        {
+            // User Mode Power Object RPC port. The audio stack queries this to manage power policy
+            // for the audio endpoint (e.g. before activating a render stream). An empty success
+            // reply for all procedures is sufficient to let mmdevapi proceed to OpenStream.
+            return std::make_unique<noop_port>();
+        }
+
+        if (getenv("EMULATOR_LOG_RPCALL"))
+        {
+            fprintf(stderr, "[port-connect-unknown] %s\n", u16_to_u8(std::u16string(port)).c_str());
+        }
         return std::make_unique<dummy_port>(std::u16string(port));
     }
 
@@ -163,6 +175,15 @@ namespace sogen
 
         if (!c.receive_message)
         {
+            // A send with no reply buffer is a one-way ALPC datagram (e.g. rpcrt4's LRPC
+            // notification after a stream is created). Deliver it to the port for any side
+            // effects and acknowledge the send; there is nowhere to write a reply.
+            if (c.send_message)
+            {
+                this->port_->handle_message(win_emu, c);
+                return {.status = STATUS_SUCCESS};
+            }
+
             return {.status = STATUS_INVALID_PARAMETER};
         }
 
@@ -327,6 +348,18 @@ namespace sogen
         const auto call_id = win_emu.emu().read_memory<uint32_t>(c.send_buffer + rpc_call_id_offset);
         const auto procedure_id = win_emu.emu().read_memory<uint32_t>(c.send_buffer + rpc_call_opnum_offset);
 
+        // Generic (interface, opnum) tracer across every rpc_port instance -- unlike the per-handler
+        // EMULATOR_LOG_RPC logging in audio_service.cpp, this fires even for interfaces/opnums no handler
+        // recognizes yet, which is what let us prove a suspected client-side RPC (procnum 87 on
+        // AudioClientRpc, see HANDOFF_MACBOOK.md) never reaches any port at all rather than being silently
+        // mishandled here.
+        if (getenv("EMULATOR_LOG_RPCALL"))
+        {
+            const auto& bi = this->bound_interface_;
+            win_emu.log.error("[rpcall] iface=%02x%02x%02x%02x%02x%02x%02x%02x opnum=%u send=%u\n", bi[0], bi[1], bi[2], bi[3], bi[4],
+                              bi[5], bi[6], bi[7], procedure_id, c.send_buffer_length);
+        }
+
         std::array<uint8_t, 24> header = {0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         std::memcpy(header.data() + 12, &call_id, sizeof(call_id));
@@ -349,6 +382,19 @@ namespace sogen
 
         std::vector<alpc_reply_handle> reply_handles;
         const auto status = this->handle_rpc(win_emu, procedure_id, rpc_context, writer, reply_handles);
+
+        if (getenv("EMULATOR_LOG_RPC") && procedure_id == 0 && !payload.empty())
+        {
+            std::string hex;
+            hex.reserve(payload.size() * 3);
+            for (const auto b : payload)
+            {
+                char buf[4];
+                snprintf(buf, sizeof(buf), "%02x ", static_cast<unsigned char>(b));
+                hex += buf;
+            }
+            printf("[audiosrv-resp] opnum=0 reply (%zu bytes): %s\n", payload.size(), hex.c_str());
+        }
 
         lpc_request_result result{status, std::move(payload)};
         result.handles = std::move(reply_handles);

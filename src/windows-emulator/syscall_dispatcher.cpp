@@ -4,6 +4,8 @@
 
 #include <utils/string.hpp>
 
+// #define ENABLE_NTSTATUS_PROBE
+
 namespace sogen
 {
 
@@ -203,6 +205,16 @@ namespace sogen
 
             entry->second.handler(c);
 
+#ifdef ENABLE_NTSTATUS_PROBE
+            {
+                const auto status = static_cast<uint32_t>(emu.reg<uint64_t>(x86_register::rax));
+                if (c.write_status && !c.retrigger_syscall && !c.run_callback && (status & 0xC0000000) == 0xC0000000)
+                {
+                    win_emu.log.error("[NTSTATUS_PROBE] %s -> 0x%08X (ip=0x%" PRIx64 ")\n", entry->second.name.c_str(), status, address);
+                }
+            }
+#endif
+
             dispatch_callback(win_emu, entry->second.name);
         }
         catch (std::exception& e)
@@ -229,17 +241,37 @@ namespace sogen
         // vCPU the instrumentation-callback redirect must rewrite the acting vCPU's RIP/r10, not vCPU 0's.
         auto& emu = win_emu.active_cpu();
         auto& context = win_emu.process;
+        const auto* active_thread = win_emu.vcpu(emu.index()).active_thread;
 
         if (context.instrumentation_callback != 0 && syscall_name != "NtContinue")
         {
+            // In WoW64 processes, the instrumentation callback is the wow64.dll dispatcher
+            // that transitions from 64-bit syscall return back to 32-bit guest code. It only
+            // applies to WoW64 threads (those with a WOW64_CPURESERVED). Native 64-bit threads
+            // in a WoW64 process (e.g. worker factory threads) have no 32-bit context to return
+            // to, so skip the callback for them — they continue in 64-bit mode normally.
+            if (context.is_wow64_process && (!active_thread || !active_thread->wow64_cpu_reserved.has_value()))
+            {
+                return;
+            }
+
             auto rip_old = emu.reg<uint64_t>(x86_register::rip);
 
-            // The increase in RIP caused by executing the syscall here has not yet occurred.
-            // If RIP is set directly, it will lead to an incorrect address, so the length of
-            // the syscall instruction needs to be subtracted.
-            emu.reg<uint64_t>(x86_register::rip, context.instrumentation_callback - 2);
+            const auto target = context.instrumentation_callback;
+            emu.reg<uint64_t>(x86_register::rip, emu.syscall_hook_requires_rip_compensation() ? target - 2 : target);
 
             emu.reg<uint64_t>(x86_register::r10, rip_old);
+
+            // On x64 hardware, SYSCALL clobbers R11 with RFLAGS. wow64cpu.dll places
+            // pWow64PerThreadData (TEB64.TlsSlots[1]) in R11 before SYSCALL so the
+            // instrumentation callback can find the per-thread 32-bit context via [R11+0x68].
+            // Unicorn fires its hook before SYSCALL executes so R11 still holds this pointer;
+            // KVM executes SYSCALL natively so R11 is already RFLAGS by the time we intercept.
+            // Restore R11 to the expected pointer so both backends behave identically.
+            if (active_thread && active_thread->wow64_cpu_reserved.has_value())
+            {
+                emu.reg<uint64_t>(x86_register::r11, active_thread->wow64_cpu_reserved->value());
+            }
         }
     }
 

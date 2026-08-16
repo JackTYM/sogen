@@ -69,7 +69,8 @@ namespace sogen
             }
         }
 
-        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id)
+        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id,
+                                         const std::chrono::steady_clock::time_point now = {})
         {
             const auto type = h.value.type;
 
@@ -123,7 +124,16 @@ namespace sogen
             }
 
             case handle_types::timer: {
-                return wait_state::signaled; // TODO
+                const auto* t = c.timers.get(h);
+                if (!t || !t->signal_time.has_value())
+                {
+                    return wait_state::signaled;
+                }
+                if (now != std::chrono::steady_clock::time_point{} && now >= *t->signal_time)
+                {
+                    return wait_state::signaled;
+                }
+                break;
             }
 
             case handle_types::semaphore: {
@@ -398,11 +408,6 @@ namespace sogen
             this->teb64 = this->gs_segment->reserve<TEB64>();
 
             this->teb64->access([&](TEB64& teb_obj) {
-                // Skips GetCurrentNlsCache
-                // This hack can be removed once this is fixed:
-                // https://github.com/momo5502/emulator/issues/128
-                reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
-
                 teb_obj.ClientId.UniqueProcess = process_context::process_id;
                 teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
                 teb_obj.DeallocationStack = this->stack_base;
@@ -1091,11 +1096,12 @@ namespace sogen
             if (!this->await_objects.empty())
             {
                 all_signaled = true;
+                const auto now = clock.steady_now();
                 for (uint32_t i = 0; i < this->await_objects.size(); ++i)
                 {
                     const auto& obj = this->await_objects[i];
 
-                    const auto state = observe_object_signal(process, obj, this->id);
+                    const auto state = observe_object_signal(process, obj, this->id, now);
                     const auto signaled = state != wait_state::not_signaled;
                     all_signaled &= signaled;
 
@@ -1334,12 +1340,36 @@ namespace sogen
         CONTEXT64 ctx{};
         ctx.ContextFlags = CONTEXT64_ALL;
 
+        // Windows initializes a fresh thread's FPU/SSE control state with every exception
+        // masked (x87 control word 0x037F, MXCSR 0x1F80). sogen bypasses wow64cpu.dll (which
+        // would normally load this from WOW64_CPURESERVED) and the backend's default control
+        // state is all-zero, i.e. every FP exception UNMASKED. Without seeding it, the CRT
+        // startup's _control87(_PC_53, _MCW_PC) reads 0x0000 and writes back 0x0200 (masks
+        // still clear), so the first floor()/ceil()/SSE math on an ordinary value raises a
+        // fatal STATUS_FLOAT_INVALID_OPERATION. Save() below bakes these into the CONTEXT that
+        // LdrInitializeThunk restores via NtContinue, keeping backend and saved state in sync.
+        emu.reg<uint16_t>(x86_register::fpcw, 0x037F);
+        emu.reg<uint16_t>(x86_register::fptag, 0xFFFF);
+        emu.reg<uint32_t>(x86_register::mxcsr, 0x1F80);
+
         unalign_stack(emu);
         cpu_context::save(emu, ctx);
 
         ctx.Rip = context.rtl_user_thread_start;
         ctx.Rcx = this->start_address;
         ctx.Rdx = this->argument;
+
+        // The Windows kernel initializes R11 to pWow64PerThreadData (TEB64.TlsSlots[1])
+        // for WoW64 threads so ntdll's instrumentation-callback handler can find the
+        // per-thread 32-bit context via [R11+0x68]. Backends that fire their SYSCALL hook
+        // before the hardware instruction executes (Unicorn) preserve the value that
+        // wow64cpu.dll places in R11; backends that let hardware execute SYSCALL first (KVM)
+        // see R11=RFLAGS instead. Initialise R11 here so LdrInitializeThunk → NtContinue
+        // propagates the correct pointer into the thread's first 64-bit register context.
+        if (context.is_wow64_process && this->wow64_cpu_reserved.has_value())
+        {
+            ctx.R11 = this->wow64_cpu_reserved->value();
+        }
 
         const auto ctx_obj = allocate_object_on_stack<CONTEXT64>(emu);
         ctx_obj.write(ctx);

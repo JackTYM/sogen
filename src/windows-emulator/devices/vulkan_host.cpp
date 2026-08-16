@@ -1,5 +1,7 @@
 #include "vulkan_host.hpp"
 
+#include "d3d9_format.hpp"
+
 #include <address_utils.hpp>
 
 #include <algorithm>
@@ -207,6 +209,7 @@ namespace sogen
         PFN_vkGetInstanceProcAddr get_instance_proc_addr{};
         PFN_vkCreateInstance create_instance{};
         PFN_vkEnumerateInstanceVersion enumerate_instance_version{};
+        PFN_vkEnumerateInstanceExtensionProperties enumerate_instance_extension_properties{};
 
         struct instance_data
         {
@@ -290,6 +293,7 @@ namespace sogen
             uint64_t instance_id{};
             VkPhysicalDevice physical_device{}; // the device this was created from (for memory queries)
             uint32_t queue_family_index{};      // the single family this device was created with
+            bool depth_clamp_enabled{};         // whether the depthClamp feature was enabled (gates pipeline depthClampEnable)
             PFN_vkDestroyDevice destroy_device{};
             PFN_vkGetDeviceQueue get_device_queue{};
             PFN_vkQueueWaitIdle queue_wait_idle{};
@@ -306,6 +310,7 @@ namespace sogen
             PFN_vkDestroyFence destroy_fence{};
             PFN_vkResetFences reset_fences{};
             PFN_vkGetFenceStatus get_fence_status{};
+            PFN_vkWaitForFences wait_for_fences{};
             PFN_vkCreateEvent create_event{};
             PFN_vkDestroyEvent destroy_event{};
             PFN_vkGetEventStatus get_event_status{};
@@ -628,6 +633,25 @@ namespace sogen
         std::unordered_map<uint64_t, descriptor_pool_data> descriptor_pools;
         std::unordered_map<uint64_t, descriptor_set_data> descriptor_sets;
         uint64_t next_id{1};
+
+        // A standalone render target for the native D3DKMT present path (no swapchain / no surface).
+        struct render_target_data
+        {
+            uint64_t device_id{};
+            uint32_t width{};
+            uint32_t height{};
+            VkFormat vk_format{};
+            VkImage image{};
+            VkDeviceMemory image_memory{};
+            VkBuffer readback_buffer{};
+            VkDeviceMemory readback_memory{};
+            VkCommandPool pool{};
+            VkCommandBuffer cmd{};
+            VkFence fence{};
+            VkQueue queue{};
+            VkImageLayout current_layout{VK_IMAGE_LAYOUT_UNDEFINED};
+        };
+        std::unordered_map<uint64_t, render_target_data> render_targets;
 
         static bool drain_readback(swapchain_data& sc, device_data& dev, vulkan_host::presented_frame& frame)
         {
@@ -1032,6 +1056,8 @@ namespace sogen
             this->create_instance = reinterpret_cast<PFN_vkCreateInstance>(this->get_instance_proc_addr(nullptr, "vkCreateInstance"));
             this->enumerate_instance_version =
                 reinterpret_cast<PFN_vkEnumerateInstanceVersion>(this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceVersion"));
+            this->enumerate_instance_extension_properties = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+                this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceExtensionProperties"));
         }
 
         ~impl()
@@ -1100,40 +1126,37 @@ namespace sogen
         app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app_info.apiVersion = api_version;
 
-        VkInstanceCreateInfo create_info{};
-        create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        create_info.pApplicationInfo = &app_info;
-
-        // On portability drivers (MoltenVK on macOS) the loader refuses vkCreateInstance with
-        // VK_ERROR_INCOMPATIBLE_DRIVER unless the caller opts into portability enumeration: the
-        // VK_KHR_portability_enumeration extension must be enabled and the ENUMERATE_PORTABILITY flag set.
-        // Detect the extension at runtime so this stays a no-op on native (non-portability) loaders.
+        // Non-conformant "portability" ICDs (MoltenVK on macOS, KosmicKrisp, ...) are only
+        // enumerated by loaders when VK_KHR_portability_enumeration is requested; enabling it
+        // is a no-op on loaders/platforms that don't advertise the extension.
         std::vector<const char*> instance_extensions;
-        if (const auto enumerate_instance_extensions = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
-                this->impl_->get_instance_proc_addr(nullptr, "vkEnumerateInstanceExtensionProperties")))
+        VkInstanceCreateFlags instance_flags = 0;
+        if (this->impl_->enumerate_instance_extension_properties)
         {
             uint32_t ext_count = 0;
-            enumerate_instance_extensions(nullptr, &ext_count, nullptr);
-            std::vector<VkExtensionProperties> available(ext_count);
-            if (ext_count > 0)
+            if (this->impl_->enumerate_instance_extension_properties(nullptr, &ext_count, nullptr) == VK_SUCCESS && ext_count > 0)
             {
-                enumerate_instance_extensions(nullptr, &ext_count, available.data());
-            }
-            for (const auto& ext : available)
-            {
-                if (std::strcmp(ext.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
+                std::vector<VkExtensionProperties> available(ext_count);
+                if (this->impl_->enumerate_instance_extension_properties(nullptr, &ext_count, available.data()) == VK_SUCCESS)
                 {
-                    instance_extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-                    create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-                    break;
+                    const auto has_portability = std::any_of(available.begin(), available.end(), [](const VkExtensionProperties& e) {
+                        return std::string_view{e.extensionName} == VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+                    });
+                    if (has_portability)
+                    {
+                        instance_extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                        instance_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                    }
                 }
             }
         }
-        if (!instance_extensions.empty())
-        {
-            create_info.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
-            create_info.ppEnabledExtensionNames = instance_extensions.data();
-        }
+
+        VkInstanceCreateInfo create_info{};
+        create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        create_info.flags = instance_flags;
+        create_info.pApplicationInfo = &app_info;
+        create_info.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
+        create_info.ppEnabledExtensionNames = instance_extensions.empty() ? nullptr : instance_extensions.data();
 
         VkInstance instance{};
         const VkResult result = this->impl_->create_instance(&create_info, nullptr, &instance);
@@ -1480,6 +1503,19 @@ namespace sogen
 
         const auto removed = std::ranges::remove_if(extensions, is_unsupported_device_extension);
         extensions.erase(removed.begin(), removed.end());
+
+        // Inject VK_KHR_swapchain if absent: the bridge provides a virtual swapchain that
+        // doesn't require the host instance to have surface extensions.
+        const auto has_swapchain = std::any_of(extensions.begin(), extensions.end(), [](const VkExtensionProperties& e) {
+            return std::string_view{e.extensionName} == VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        });
+        if (!has_swapchain)
+        {
+            VkExtensionProperties ext{};
+            std::strncpy(ext.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE);
+            ext.specVersion = VK_KHR_SWAPCHAIN_SPEC_VERSION;
+            extensions.push_back(ext);
+        }
 
         // MoltenVK lacks the static VK_EXT_depth_clip_enable extension, but DXVK's D3D adapter filter
         // requires it (D3D9-relevant: it emulates D3D near-plane clipping). Advertise it on portability
@@ -1877,6 +1913,27 @@ namespace sogen
             }
         }
 
+        // Depth clamping (VkPipelineRasterizationStateCreateInfo::depthClampEnable) is required to honor a
+        // guest disabling primitive clipping (D3D9 D3DRS_CLIPPING = FALSE): with clamping the near/far
+        // planes clamp instead of clip. A pipeline may only set depthClampEnable when the depthClamp device
+        // feature is enabled, so force it on here whenever the physical device advertises support -- a core
+        // Vulkan 1.0 feature (universally available, incl. MoltenVK). Gated on support so this can never turn
+        // a successful vkCreateDevice into VK_ERROR_FEATURE_NOT_PRESENT; create_graphics_pipeline reads
+        // depth_clamp_enabled back and never sets depthClampEnable = VK_TRUE unless it was actually enabled.
+        bool depth_clamp_enabled = false;
+        if (instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDeviceFeatures2 supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            instance->second.get_physical_device_features2(pd->second.handle, &supported);
+            if (supported.features.depthClamp)
+            {
+                features2.features.depthClamp = VK_TRUE;
+                has_features = true;
+                depth_clamp_enabled = true;
+            }
+        }
+
         const bool has_feature_chain = has_features || !chained.empty();
 
         // get_physical_device_features2 advertises a few features portability devices do not actually
@@ -1978,6 +2035,7 @@ namespace sogen
         data.instance_id = pd->second.instance_id;
         data.physical_device = pd->second.handle;
         data.queue_family_index = primary_family;
+        data.depth_clamp_enabled = depth_clamp_enabled;
 
         if (const auto gdpa = instance->second.get_device_proc_addr)
         {
@@ -2010,6 +2068,7 @@ namespace sogen
             data.wait_semaphores = reinterpret_cast<PFN_vkWaitSemaphores>(resolve("vkWaitSemaphores"));
             data.get_buffer_device_address = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(resolve("vkGetBufferDeviceAddress"));
             data.get_fence_status = reinterpret_cast<PFN_vkGetFenceStatus>(resolve("vkGetFenceStatus"));
+            data.wait_for_fences = reinterpret_cast<PFN_vkWaitForFences>(resolve("vkWaitForFences"));
             data.queue_submit = reinterpret_cast<PFN_vkQueueSubmit>(resolve("vkQueueSubmit"));
             data.queue_submit2 = reinterpret_cast<PFN_vkQueueSubmit2>(resolve("vkQueueSubmit2"));
             data.allocate_memory = reinterpret_cast<PFN_vkAllocateMemory>(resolve("vkAllocateMemory"));
@@ -2612,6 +2671,23 @@ namespace sogen
         }
 
         return dev->second.get_fence_status(dev->second.handle, it->second.handle);
+    }
+
+    int32_t vulkan_host::wait_for_fence(uint64_t fence, uint64_t timeout_ns)
+    {
+        const auto it = this->impl_->fences.find(fence);
+        if (it == this->impl_->fences.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev = this->impl_->devices.find(it->second.device_id);
+        if (dev == this->impl_->devices.end() || !dev->second.wait_for_fences)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        return dev->second.wait_for_fences(dev->second.handle, 1, &it->second.handle, VK_TRUE, timeout_ns);
     }
 
     int32_t vulkan_host::create_event(uint64_t device, uint32_t flags, uint64_t& out_event)
@@ -3424,6 +3500,16 @@ namespace sogen
         barrier.subresourceRange = to_vk_range(range);
 
         dev->second.cmd_pipeline_barrier(cb->second.handle, src_stage_mask, dst_stage_mask, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        // Render targets (and depth-stencils, which share the same create_render_target/id space) are
+        // also tracked in render_targets for readback_render_target's layout safety check -- keep that
+        // mirror accurate for every barrier a render target goes through, not just submit_clear's own.
+        const auto rt = this->impl_->render_targets.find(image);
+        if (rt != this->impl_->render_targets.end())
+        {
+            rt->second.current_layout = barrier.newLayout;
+        }
+
         return VK_SUCCESS;
     }
 
@@ -3869,7 +3955,6 @@ namespace sogen
         {
             VkImageCreateInfo info{};
             info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
             info.imageType = VK_IMAGE_TYPE_2D;
             info.format = vk_format;
             info.extent = {.width = width, .height = height, .depth = 1};
@@ -5110,7 +5195,8 @@ namespace sogen
                                                   uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
                                                   uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                                   const specialization& vs_spec, const specialization& fs_spec,
-                                                  std::span<const color_blend_attachment> blend_attachments_in, uint64_t& out_pipeline)
+                                                  std::span<const color_blend_attachment> blend_attachments_in, uint32_t depth_clip_enable,
+                                                  uint64_t& out_pipeline)
     {
         out_pipeline = 0;
         const auto dev = this->impl_->devices.find(device);
@@ -5256,6 +5342,10 @@ namespace sogen
 
         VkPipelineRasterizationStateCreateInfo rasterization{};
         rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        // depth_clip_enable == 0 (guest disabled clipping) clamps near/far instead of clipping. Only honor it
+        // when the device enabled the depthClamp feature -- otherwise depthClampEnable = VK_TRUE is invalid
+        // usage, so fall back to VK_FALSE (clip), which is also the default whenever clipping stays enabled.
+        rasterization.depthClampEnable = (depth_clip_enable == 0 && dev->second.depth_clamp_enabled) ? VK_TRUE : VK_FALSE;
         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
         rasterization.cullMode = VK_CULL_MODE_NONE;
         rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -6113,6 +6203,350 @@ namespace sogen
         default:
             return VK_ERROR_INITIALIZATION_FAILED;
         }
+        return VK_SUCCESS;
+    }
+
+    namespace
+    {
+        // VkFormat's contiguous depth/depth-stencil range (D16_UNORM..D32_SFLOAT_S8_UINT) -- covers both
+        // depth formats d3d9_format_to_vulkan can produce (D32_SFLOAT_S8_UINT for D3DFMT_D24S8,
+        // D32_SFLOAT for D3DFMT_D24X8).
+        bool is_depth_format(const uint32_t vk_format)
+        {
+            return vk_format >= VK_FORMAT_D16_UNORM && vk_format <= VK_FORMAT_D32_SFLOAT_S8_UINT;
+        }
+    } // namespace
+
+    int32_t vulkan_host::create_render_target(const uint64_t device, const uint32_t width, const uint32_t height, const uint32_t format,
+                                              uint64_t& out_image)
+    {
+        out_image = 0;
+
+        uint32_t vk_format = 0;
+        if (!d3d9_format_to_vulkan(format, vk_format))
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev_it = this->impl_->devices.find(device);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.create_image || !dev.allocate_memory || !dev.bind_image_memory || !dev.create_buffer || !dev.bind_buffer_memory ||
+            !dev.create_command_pool || !dev.allocate_command_buffers || !dev.create_fence || !dev.get_device_queue)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        impl::render_target_data rt{};
+        rt.device_id = device;
+        rt.width = width;
+        rt.height = height;
+        rt.vk_format = static_cast<VkFormat>(vk_format);
+
+        const auto fail = [&]() -> int32_t {
+            if (rt.image && dev.destroy_image)
+            {
+                dev.destroy_image(dev.handle, rt.image, nullptr);
+            }
+            if (rt.image_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.image_memory, nullptr);
+            }
+            if (rt.readback_buffer && dev.destroy_buffer)
+            {
+                dev.destroy_buffer(dev.handle, rt.readback_buffer, nullptr);
+            }
+            if (rt.readback_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.readback_memory, nullptr);
+            }
+            if (rt.pool && dev.destroy_command_pool)
+            {
+                dev.destroy_command_pool(dev.handle, rt.pool, nullptr);
+            }
+            if (rt.fence && dev.destroy_fence)
+            {
+                dev.destroy_fence(dev.handle, rt.fence, nullptr);
+            }
+            return VK_ERROR_INITIALIZATION_FAILED;
+        };
+
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = static_cast<VkFormat>(vk_format);
+        image_info.extent = {.width = width, .height = height, .depth = 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        // Depth-stencil resources (D3DUSAGE_DEPTHSTENCIL) reuse this same function -- give them
+        // DEPTH_STENCIL_ATTACHMENT usage instead of COLOR_ATTACHMENT, or using the image as a depth
+        // attachment (see d3d9_host::execute_draw) would be invalid.
+        image_info.usage = is_depth_format(vk_format)
+                               ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+                               : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkMemoryRequirements image_reqs{};
+        dev.get_image_memory_requirements(dev.handle, rt.image, &image_reqs);
+        uint32_t image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (image_type == UINT32_MAX)
+        {
+            image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, 0);
+        }
+        VkMemoryAllocateInfo image_alloc{};
+        image_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        image_alloc.allocationSize = image_reqs.size;
+        image_alloc.memoryTypeIndex = image_type;
+        if (dev.allocate_memory(dev.handle, &image_alloc, nullptr, &rt.image_memory) != VK_SUCCESS)
+        {
+            return fail();
+        }
+        dev.bind_image_memory(dev.handle, rt.image, rt.image_memory, 0);
+
+        // Size the readback staging buffer at the render target's real per-format stride, not a hardcoded
+        // 4 bytes/texel BGRA8 -- lets non-BGRA8 off-screen render targets (R5G6B5, R16G16B16A16_SFLOAT)
+        // read back at their true tight packing.
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * vk_format_bytes_per_texel(vk_format);
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = readback_size;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (dev.create_buffer(dev.handle, &buffer_info, nullptr, &rt.readback_buffer) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkMemoryRequirements buffer_reqs{};
+        dev.get_buffer_memory_requirements(dev.handle, rt.readback_buffer, &buffer_reqs);
+        uint32_t buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
+                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                                 VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        if (buffer_type == UINT32_MAX)
+        {
+            buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
+                                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
+        if (buffer_type == UINT32_MAX)
+        {
+            return fail();
+        }
+        VkMemoryAllocateInfo buffer_alloc{};
+        buffer_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        buffer_alloc.allocationSize = buffer_reqs.size;
+        buffer_alloc.memoryTypeIndex = buffer_type;
+        if (dev.allocate_memory(dev.handle, &buffer_alloc, nullptr, &rt.readback_memory) != VK_SUCCESS)
+        {
+            return fail();
+        }
+        dev.bind_buffer_memory(dev.handle, rt.readback_buffer, rt.readback_memory, 0);
+
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool_info.queueFamilyIndex = dev.queue_family_index;
+        if (dev.create_command_pool(dev.handle, &pool_info, nullptr, &rt.pool) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkCommandBufferAllocateInfo cb_info{};
+        cb_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cb_info.commandPool = rt.pool;
+        cb_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cb_info.commandBufferCount = 1;
+        if (dev.allocate_command_buffers(dev.handle, &cb_info, &rt.cmd) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (dev.create_fence(dev.handle, &fence_info, nullptr, &rt.fence) != VK_SUCCESS)
+        {
+            return fail();
+        }
+
+        dev.get_device_queue(dev.handle, dev.queue_family_index, 0, &rt.queue);
+        if (!rt.queue)
+        {
+            return fail();
+        }
+
+        const uint64_t id = this->impl_->next_id++;
+        this->impl_->images.emplace(id, impl::image_data{.handle = rt.image, .device_id = device});
+        this->impl_->render_targets.emplace(id, std::move(rt));
+        out_image = id;
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::submit_clear(const uint64_t image, const float* color)
+    {
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::render_target_data& rt = rt_it->second;
+
+        const auto dev_it = this->impl_->devices.find(rt.device_id);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.begin_command_buffer || !dev.end_command_buffer || !dev.cmd_pipeline_barrier || !dev.cmd_clear_color_image ||
+            !dev.reset_fences || !dev.queue_submit || !dev.wait_for_fences)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (dev.begin_command_buffer(rt.cmd, &begin) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const VkImageSubresourceRange full_range{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
+
+        // Transition to TRANSFER_DST_OPTIMAL for the clear.
+        VkImageMemoryBarrier to_dst{};
+        to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_dst.srcAccessMask = 0;
+        to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_dst.oldLayout = rt.current_layout;
+        to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.image = rt.image;
+        to_dst.subresourceRange = full_range;
+        dev.cmd_pipeline_barrier(rt.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &to_dst);
+
+        VkClearColorValue clear_value{};
+        clear_value.float32[0] = color[0];
+        clear_value.float32[1] = color[1];
+        clear_value.float32[2] = color[2];
+        clear_value.float32[3] = color[3];
+        dev.cmd_clear_color_image(rt.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_value, 1, &full_range);
+
+        // Transition to TRANSFER_SRC_OPTIMAL ready for readback.
+        VkImageMemoryBarrier to_src{};
+        to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_src.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        to_src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.image = rt.image;
+        to_src.subresourceRange = full_range;
+        dev.cmd_pipeline_barrier(rt.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &to_src);
+
+        dev.end_command_buffer(rt.cmd);
+        dev.reset_fences(dev.handle, 1, &rt.fence);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &rt.cmd;
+        if (dev.queue_submit(rt.queue, 1, &submit, rt.fence) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        dev.wait_for_fences(dev.handle, 1, &rt.fence, VK_TRUE, UINT64_MAX);
+
+        rt.current_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::readback_render_target(const uint64_t image, std::vector<std::byte>& out_pixels, uint32_t& out_width,
+                                                uint32_t& out_height)
+    {
+        out_pixels.clear();
+        out_width = 0;
+        out_height = 0;
+
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::render_target_data& rt = rt_it->second;
+
+        if (rt.current_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev_it = this->impl_->devices.find(rt.device_id);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.begin_command_buffer || !dev.end_command_buffer || !dev.cmd_copy_image_to_buffer || !dev.reset_fences ||
+            !dev.queue_submit || !dev.wait_for_fences || !dev.map_memory || !dev.unmap_memory)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (dev.begin_command_buffer(rt.cmd, &begin) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {.x = 0, .y = 0, .z = 0};
+        region.imageExtent = {.width = rt.width, .height = rt.height, .depth = 1};
+        dev.cmd_copy_image_to_buffer(rt.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rt.readback_buffer, 1, &region);
+
+        dev.end_command_buffer(rt.cmd);
+        dev.reset_fences(dev.handle, 1, &rt.fence);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &rt.cmd;
+        if (dev.queue_submit(rt.queue, 1, &submit, rt.fence) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        dev.wait_for_fences(dev.handle, 1, &rt.fence, VK_TRUE, UINT64_MAX);
+
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(rt.width) * rt.height * vk_format_bytes_per_texel(rt.vk_format);
+        void* mapped = nullptr;
+        if (dev.map_memory(dev.handle, rt.readback_memory, 0, readback_size, 0, &mapped) != VK_SUCCESS || !mapped)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        out_pixels.resize(static_cast<size_t>(readback_size));
+        std::memcpy(out_pixels.data(), mapped, out_pixels.size());
+        dev.unmap_memory(dev.handle, rt.readback_memory);
+
+        out_width = rt.width;
+        out_height = rt.height;
         return VK_SUCCESS;
     }
 }

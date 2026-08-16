@@ -48,6 +48,30 @@ namespace sogen::gpu_bridge
             return sizeof(VkPhysicalDeviceMaintenance8FeaturesKHR);
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_9_FEATURES_KHR:
             return sizeof(VkPhysicalDeviceMaintenance9FeaturesKHR);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:
+            return sizeof(VkPhysicalDeviceTimelineSemaphoreFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:
+            return sizeof(VkPhysicalDeviceBufferDeviceAddressFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceTransformFeedbackFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES:
+            return sizeof(VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceMemoryPriorityFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:
+            return sizeof(VkPhysicalDeviceHostQueryResetFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceExtendedDynamicStateFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceCustomBorderColorFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT:
+            return sizeof(VkPhysicalDevice4444FormatsFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES:
+            return sizeof(VkPhysicalDeviceShaderDrawParametersFeatures);
         default:
             return 0;
         }

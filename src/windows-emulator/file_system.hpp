@@ -88,21 +88,19 @@ namespace sogen
             }
 #endif
 
-            // The emulation-root fallback below resolves host symlinks via weakly_canonical, which costs
-            // a real stat() per path component; guest code that repeatedly probes the same missing path
-            // (e.g. retrying a failed NtCreateFile with no backoff) would otherwise pay that cost on every
-            // attempt. translate() is a pure function of win_path for a fixed root_/mappings_, so memoize it;
-            // the cache is invalidated wholesale on map() since a new mapping can change the result for paths
-            // under it.
+            // The emulation-root fallback below resolves host symlinks via weakly_canonical and may scan a
+            // directory per path component for a case-insensitive match, which costs real stat()s;
+            // guest code that repeatedly probes the same missing path (e.g. retrying a failed
+            // NtCreateFile with no backoff) would otherwise pay that cost on every attempt. translate()
+            // is a pure function of win_path for a fixed root_/mappings_, so memoize it; the cache is
+            // invalidated wholesale on map() since a new mapping can change the result for paths under it.
             const std::lock_guard cache_lock(this->confine_cache_mutex_);
             if (const auto cached = this->confine_cache_.find(win_path); cached != this->confine_cache_.end())
             {
                 return cached->second;
             }
 
-            // Emulation-root translation, confined to the drive root.
-            const std::array<char, 2> root_drive{win_path.get_drive().value_or('c'), 0};
-            auto result = confine(this->root_ / root_drive.data(), this->root_ / win_path.to_portable_path());
+            auto result = this->translate_to_root(win_path);
             this->confine_cache_.emplace(win_path, result);
             return result;
         }
@@ -172,6 +170,74 @@ namespace sogen
 
         std::filesystem::path root_{};
         std::unordered_map<windows_path, std::filesystem::path> mappings_{};
+
+        // Emulation-root translation, confined to the drive root.
+        std::filesystem::path translate_to_root(const windows_path& win_path) const
+        {
+            const std::array<char, 2> root_drive{win_path.get_drive().value_or('c'), 0};
+            const auto root = this->root_ / root_drive.data();
+
+            const auto portable = win_path.to_portable_path();
+            const auto path = this->root_ / portable;
+
+            // Confine the guest-controlled path to the drive root by resolving "." and ".."
+            // lexically, without following symlinks, so a crafted path cannot escape. Host-side
+            // symlinks placed inside the root may still point elsewhere (e.g. a mounted game
+            // directory); the OS resolves them when the file is opened.
+            if (!is_subpath(root.lexically_normal(), path.lexically_normal()))
+            {
+                return root;
+            }
+
+            std::error_code ec{};
+            if (std::filesystem::exists(path, ec))
+            {
+                return weakly_canonical(path);
+            }
+
+            // The emulation root preserves the original Windows file casing, but the guest (like
+            // Windows itself) treats paths case-insensitively. When the exact-case path does not
+            // exist, resolve each component against the matching on-disk entry regardless of case.
+            return weakly_canonical(resolve_case_insensitive(portable));
+        }
+
+        // Walk a root-relative path component by component, substituting a case-insensitive on-disk
+        // match for any component that does not exist with the requested case. Components with no
+        // match are kept verbatim so not-found / file-creation paths are unchanged. An exact-case
+        // match always wins, keeping resolution deterministic when case-variant entries coexist.
+        std::filesystem::path resolve_case_insensitive(const std::filesystem::path& relative) const
+        {
+            std::filesystem::path result = this->root_;
+            std::error_code ec{};
+
+            for (const auto& part : relative)
+            {
+                auto literal = result / part;
+                if (std::filesystem::exists(literal, ec))
+                {
+                    result = std::move(literal);
+                    continue;
+                }
+
+                std::filesystem::path match{};
+                if (std::filesystem::is_directory(result, ec))
+                {
+                    const auto part_name = part.u16string();
+                    for (const auto& entry : std::filesystem::directory_iterator(result, ec))
+                    {
+                        if (utils::string::equals_ignore_case(entry.path().filename().u16string(), part_name))
+                        {
+                            match = entry.path();
+                            break;
+                        }
+                    }
+                }
+
+                result = match.empty() ? std::move(literal) : std::move(match);
+            }
+
+            return result;
+        }
 
         mutable std::mutex confine_cache_mutex_{};
         mutable std::unordered_map<windows_path, std::filesystem::path> confine_cache_{};

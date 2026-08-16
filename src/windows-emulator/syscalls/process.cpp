@@ -190,8 +190,18 @@ namespace sogen
                     c.emu, process_information, process_information_length, return_length,
                     [&](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = c.proc.peb32 ? c.proc.peb32->value() : 0; });
 
+            case ProcessHandleCount:
+                return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length, [](ULONG& count) {
+                    count = 10; //
+                });
+
+            case ProcessAffinityMask:
+                return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(c.emu, process_information, process_information_length, return_length,
+                                                                      [](EmulatorTraits<Emu64>::ULONG_PTR& mask) { mask = 1; });
+
             case ProcessBasicInformation: {
                 const auto init_basic_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
+                    basic_info.ExitStatus = STATUS_PENDING;
                     basic_info.PebBaseAddress = c.proc.peb64.value();
                     const auto processor_count =
                         c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
@@ -354,10 +364,8 @@ namespace sogen
             }
 
             default:
-                c.win_emu.log.error("Unsupported process info class: 0x%X\n", info_class);
-                c.emu.stop();
-
-                return STATUS_NOT_SUPPORTED;
+                c.win_emu.log.print(color::gray, "Unsupported process info class: %X\n", info_class);
+                return STATUS_INVALID_INFO_CLASS;
             }
         }
 
@@ -366,7 +374,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             if (info_class == ProcessSchedulerSharedData                     //
@@ -387,7 +395,9 @@ namespace sogen
 
             if (info_class == ProcessExecuteFlags)
             {
-                return STATUS_NOT_SUPPORTED;
+                // Kernel validates NX/execute flags at the MmSetExecuteOptions level;
+                // sogen doesn't track per-process execute options.
+                return STATUS_INVALID_PARAMETER;
             }
 
             if (info_class == ProcessTlsInformation)
@@ -544,10 +554,8 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported info process class: 0x%X\n", info_class);
-            c.emu.stop();
-
-            return STATUS_NOT_SUPPORTED;
+            c.win_emu.log.print(color::gray, "Unsupported info process class: %X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtOpenProcess(const syscall_context& /*c*/, const emulator_object<handle> process_handle,
@@ -586,7 +594,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             token_handle.write(CURRENT_PROCESS_TOKEN);

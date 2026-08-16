@@ -1,5 +1,7 @@
 add_subdirectory(common)
 add_subdirectory(gpu-bridge-protocol)
+add_subdirectory(dxgk-command-protocol)
+add_subdirectory(d3d9-command-protocol)
 add_subdirectory(steam-bridge-protocol)
 
 include("${PROJECT_SOURCE_DIR}/cmake/steam-bridge.cmake")

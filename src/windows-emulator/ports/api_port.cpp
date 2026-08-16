@@ -145,6 +145,11 @@ namespace sogen
                         win_emu.log.warn("ApiPort userconnect callback-table bootstrap failed\n");
                     }
 
+                    if (!win32k_userconnect::try_write_64bit_user_shared_info(win_emu))
+                    {
+                        win_emu.log.warn("ApiPort WOW64 64-bit gSharedInfo write failed\n");
+                    }
+
                     return {STATUS_SUCCESS, lpc_request_result::reply_in_place};
                 }
 

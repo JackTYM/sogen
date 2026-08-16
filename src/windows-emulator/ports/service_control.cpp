@@ -64,6 +64,11 @@ namespace sogen
                     return STATUS_SUCCESS;
                 }
 
+                if (getenv("EMULATOR_LOG_RPC"))
+                {
+                    win_emu.log.error("[svcctl] opnum=%u send=%u\n", procedure_id, c.send_buffer_length);
+                }
+
                 switch (procedure_id)
                 {
                 case k_svcctl_open_sc_manager_w:
@@ -119,8 +124,23 @@ namespace sogen
                     write_return(writer, k_error_success);
                     return STATUS_SUCCESS;
 
-                default:
+                default: {
+                    std::string hex;
+                    const auto count = std::min<ULONG>(c.send_buffer_length, 64);
+                    std::vector<uint8_t> bytes(count, 0);
+                    if (count)
+                    {
+                        win_emu.emu().read_memory(c.send_buffer, bytes.data(), bytes.size());
+                    }
+                    char tmp[4];
+                    for (const auto b : bytes)
+                    {
+                        (void)snprintf(tmp, sizeof(tmp), "%02x ", b);
+                        hex += tmp;
+                    }
+                    win_emu.log.error("[svcctl] UNHANDLED opnum=%u send_len=%u in: %s\n", procedure_id, c.send_buffer_length, hex.c_str());
                     return STATUS_NOT_SUPPORTED;
+                }
                 }
             }
         };

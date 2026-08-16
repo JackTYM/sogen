@@ -31,7 +31,9 @@
 #include <utility>
 #include <vector>
 
+#include <utils/cpu_features.hpp>
 #include <utils/object.hpp>
+#include <segment_utils.hpp>
 
 #ifndef MSR_LSTAR
 #define MSR_LSTAR 0xC0000082
@@ -398,7 +400,7 @@ namespace sogen::kvm
             uint64_t sfmask{};
         };
 
-        kvm_segment make_segment(uint16_t selector, bool is_code, bool is_user);
+        kvm_segment make_segment(uint16_t selector, bool is_code, bool is_user, bool is_long_mode = true);
         register_mapping map_register(x86_register reg);
 
         class kvm_x86_64_emulator final : public x86_64_emulator
@@ -845,6 +847,18 @@ namespace sogen::kvm
                     {
                         std::memcpy(&segment.base, value, (std::min)(size, sizeof(segment.base)));
                     }
+                    else if (mapping.name == register_name::cs)
+                    {
+                        // Reconstruct full CS descriptor with correct L/D bits from the GDT.
+                        // A plain selector write would leave stale L/D bits (e.g., L=1 from a
+                        // prior 64-bit CS=0x33) causing the CPU to execute 32-bit code in 64-bit
+                        // mode after NtContinue restores CS=0x23.
+                        uint16_t selector = 0;
+                        std::memcpy(&selector, value, (std::min)(size, sizeof(selector)));
+                        const auto bitness = segment_utils::get_segment_bitness(*this, selector);
+                        const bool is_long = !bitness || *bitness == segment_utils::segment_bitness::bit64;
+                        segment = make_segment(selector, true, (selector & 3) == 3, is_long);
+                    }
                     else
                     {
                         std::memcpy(&segment.selector, value, (std::min)(size, sizeof(segment.selector)));
@@ -960,6 +974,14 @@ namespace sogen::kvm
             std::string get_name() const override
             {
                 return "Linux KVM";
+            }
+
+            // Ours executes SYSCALL natively and rewinds RIP to the instruction before invoking the
+            // hook, re-advancing by syscall_instruction_size afterwards - so a hook-supplied RIP needs
+            // the same -2 compensation Unicorn's pre-advance hook does.
+            bool syscall_hook_requires_rip_compensation() const override
+            {
+                return true;
             }
 
             void set_segment_base(x86_register base, pointer_type value) override
@@ -1449,10 +1471,18 @@ namespace sogen::kvm
                 sregs.fs = make_segment(0x53, false, true);
                 sregs.gs = make_segment(0x2B, false, true);
                 sregs.cr0 = 0x80000033ull; // PE | MP | ET | NE | PG
-                sregs.cr4 = 0x620ull;      // PAE | OSFXSR | OSXMMEXCPT
+                sregs.cr4 = 0x40620ull;    // PAE | OSFXSR | OSXMMEXCPT | OSXSAVE
                 sregs.cr3 = this->pml4_gpa_;
                 sregs.efer = (1ull << 0) | (1ull << 8) | (1ull << 10); // SCE | LME | LMA
                 this->set_sregs(sregs);
+
+                // Build-26100 ntdll restores thread context with XRSTOR, which #UDs unless XCR0 enables the
+                // saved state (and CR4.OSXSAVE is set, above). Mirror the WHP backend: x87 | SSE [| AVX].
+                kvm_xcrs xcrs{};
+                xcrs.nr_xcrs = 1;
+                xcrs.xcrs[0].xcr = 0;
+                xcrs.xcrs[0].value = 0x3ull | (utils::cpu_features::avx_enabled() ? 0x4ull : 0ull);
+                check_ioctl_result(::ioctl(this->vcpu_fd_.get(), KVM_SET_XCRS, &xcrs), "KVM_SET_XCRS");
 
                 auto regs = this->get_regs();
                 regs.rflags = 0x2ull;
@@ -2110,10 +2140,14 @@ namespace sogen::kvm
                 regs.rflags = frame.rflags;
                 this->set_regs(regs);
 
+                const auto cs_selector = static_cast<uint16_t>(frame.cs);
+                const auto cs_bitness = segment_utils::get_segment_bitness(*this, cs_selector);
+                const bool cs_is_long = !cs_bitness || *cs_bitness == segment_utils::segment_bitness::bit64;
+
                 auto sregs = this->get_sregs();
                 if (!compat_mode)
                 {
-                    sregs.cs = make_segment(static_cast<uint16_t>(frame.cs), true, (frame.cs & 3) == 3);
+                    sregs.cs = make_segment(cs_selector, true, (frame.cs & 3) == 3, cs_is_long);
                     sregs.ss = make_segment(static_cast<uint16_t>(frame.ss), false, (frame.ss & 3) == 3);
                 }
                 // Refresh DS/ES from their selectors too. A 64-bit `mov ds` on this host can leave a G=0
@@ -2596,17 +2630,23 @@ namespace sogen::kvm
             instruction_hook_entry* syscall_hook_ = nullptr;
         };
 
-        kvm_segment make_segment(const uint16_t selector, const bool is_code, const bool is_user)
+        kvm_segment make_segment(const uint16_t selector, const bool is_code, const bool is_user, const bool is_long_mode)
         {
             // A 64-bit code segment runs in long mode (L=1, D=0); 32-bit compatibility-mode code (the WOW64
             // selector 0x23) and all data segments use D=1, L=0. Deriving this from the selector is required
             // when reconstructing a faulting WOW64 context: hardcoding L=1 on a 32-bit code selector re-enters
             // the 32-bit code in 64-bit mode and misdecodes it. Windows x64 uses 0x33 for 64-bit user code.
-            const bool long_mode_code = is_code && ((selector | 3) == 0x33);
+            // Callers that resolved the descriptor from the GDT pass is_long_mode explicitly; both must
+            // agree before L=1 is installed, so a 32-bit selector can never be re-entered in long mode.
+            const bool long_mode_code = is_code && is_long_mode && ((selector | 3) == 0x33);
 
             kvm_segment segment{};
             segment.base = 0;
-            segment.limit = 0xFFFFF;
+            // kvm_segment.limit is the byte-granular effective limit; KVM does not re-scale it by the
+            // granularity bit. Pair g=1 with the fully scaled 4 GiB value — a raw 0xFFFFF installs a
+            // 1 MiB limit, which long mode ignores but compatibility mode (CS.L=0) enforces, faulting
+            // the first fetch of any 32-bit code mapped above 1 MiB (e.g. WoW64 exception dispatch).
+            segment.limit = 0xFFFFFFFF;
             segment.selector = selector;
             segment.type = is_code ? 0xB : 0x3;
             segment.present = 1;

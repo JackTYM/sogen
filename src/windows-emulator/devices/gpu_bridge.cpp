@@ -1,6 +1,9 @@
 #include "../std_include.hpp"
 #include "gpu_bridge.hpp"
 #include "vulkan_host.hpp"
+#ifdef SOGEN_HAS_VKD3D_SHADER
+#include "d3d9_host.hpp"
+#endif
 #include "../windows_emulator.hpp"
 
 #include <atomic>
@@ -9,6 +12,7 @@
 
 #include <gpu_bridge_protocol.hpp>
 #include <utils/string.hpp>
+#include <d3d9_command_protocol.hpp>
 
 namespace sogen
 {
@@ -21,9 +25,9 @@ namespace sogen
         //
         // Live Vulkan state cannot be serialized, so this device intentionally does not participate
         // in snapshots yet; restoring with an open GPU handle is an experimental limitation.
-        struct gpu_bridge_device : io_device
+        struct gpu_command_processor
         {
-            void work(windows_emulator& win_emu) override
+            void pump_presents(windows_emulator& win_emu)
             {
                 for (auto& frame : this->vulkan_.poll_presented_frames())
                 {
@@ -31,8 +35,25 @@ namespace sogen
                 }
             }
 
-            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
+            NTSTATUS dispatch(windows_emulator& win_emu, const io_device_context& context)
             {
+                if (getenv("EMULATOR_GPU_TRACE"))
+                {
+                    win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
+                }
+#ifdef SOGEN_HAS_VKD3D_SHADER
+                if (getenv("EMULATOR_D3D9_DRAWDIAG"))
+                {
+                    static uint64_t last_draws = 0;
+                    const uint64_t draws = this->d3d9_.draw_count();
+                    if (draws != last_draws)
+                    {
+                        last_draws = draws;
+                        win_emu.log.warn("[d3d9-drawdiag] draws=%llu submits=%llu\n", static_cast<unsigned long long>(draws),
+                                         static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
+                    }
+                }
+#endif
                 switch (context.io_control_code)
                 {
                 case gpu_bridge::ioctl_get_version:
@@ -228,22 +249,87 @@ namespace sogen
                 case gpu_bridge::ioctl_destroy_sampler:
                     return handle_destroy_sampler(win_emu, context);
 
+#ifdef SOGEN_HAS_VKD3D_SHADER
+                case gpu_bridge::ioctl_d3d9_marker:
+                    return handle_d3d9_marker(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_resource:
+                    return handle_d3d9_create_resource(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_destroy_resource:
+                    return handle_d3d9_destroy_resource(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_lock:
+                    return handle_d3d9_lock(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_unlock:
+                    return handle_d3d9_unlock(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_vertex_shader:
+                    return handle_d3d9_create_vertex_shader(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_pixel_shader:
+                    return handle_d3d9_create_pixel_shader(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_create_vertex_decl:
+                    return handle_d3d9_create_vertex_decl(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_present:
+                    return handle_d3d9_present(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_tex_blt:
+                    return handle_d3d9_tex_blt(win_emu, context);
+
+                case gpu_bridge::ioctl_d3d9_set_render_state:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_state);
+                case gpu_bridge::ioctl_d3d9_set_texture_stage_state:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_texture_stage_state);
+                case gpu_bridge::ioctl_d3d9_set_sampler_state:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_sampler_state);
+                case gpu_bridge::ioctl_d3d9_set_texture:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_texture);
+                case gpu_bridge::ioctl_d3d9_set_stream_source:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_stream_source);
+                case gpu_bridge::ioctl_d3d9_set_stream_source_freq:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_stream_source_freq);
+                case gpu_bridge::ioctl_d3d9_set_indices:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_indices);
+                case gpu_bridge::ioctl_d3d9_set_vertex_decl:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vertex_decl);
+                case gpu_bridge::ioctl_d3d9_set_vertex_shader:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vertex_shader);
+                case gpu_bridge::ioctl_d3d9_set_pixel_shader:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_pixel_shader);
+                case gpu_bridge::ioctl_d3d9_set_vs_const_f:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vs_const_f);
+                case gpu_bridge::ioctl_d3d9_set_vs_const_i:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vs_const_i);
+                case gpu_bridge::ioctl_d3d9_set_vs_const_b:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_vs_const_b);
+                case gpu_bridge::ioctl_d3d9_set_ps_const_f:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_ps_const_f);
+                case gpu_bridge::ioctl_d3d9_set_ps_const_i:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_ps_const_i);
+                case gpu_bridge::ioctl_d3d9_set_ps_const_b:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_ps_const_b);
+                case gpu_bridge::ioctl_d3d9_set_render_target:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_target);
+                case gpu_bridge::ioctl_d3d9_set_depth_stencil:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_depth_stencil);
+                case gpu_bridge::ioctl_d3d9_set_viewport:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_viewport);
+                case gpu_bridge::ioctl_d3d9_set_scissor:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_scissor);
+                case gpu_bridge::ioctl_d3d9_clear:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_clear);
+                case gpu_bridge::ioctl_d3d9_draw_primitive:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_draw_primitive);
+                case gpu_bridge::ioctl_d3d9_draw_indexed_primitive:
+                    return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_draw_indexed_primitive);
+#endif
+
                 default:
                     win_emu.log.warn("[gpu-bridge] Unsupported IOCTL: 0x%X\n", static_cast<unsigned>(context.io_control_code));
                     return STATUS_NOT_SUPPORTED;
                 }
             }
 
-            void serialize_object(utils::buffer_serializer&) const override
-            {
-            }
-
-            void deserialize_object(utils::buffer_deserializer&) override
-            {
-            }
-
           private:
             vulkan_host vulkan_{};
+#ifdef SOGEN_HAS_VKD3D_SHADER
+            d3d9_host d3d9_{this->vulkan_};
+#endif
 
             // VkDeviceMemory aliased directly into the guest address space (see handle_map_memory_direct),
             // keyed by memory object id, so unmap can release the guest range and the host mapping.
@@ -477,6 +563,7 @@ namespace sogen
                 std::vector<uint64_t> ids(max_count);
                 uint32_t count = 0;
                 const int32_t result = this->vulkan_.enumerate_physical_devices(request.instance, std::span{ids}, count);
+                win_emu.log.warn("[gpu-trace] enumerate_physical_devices -> count=%u result=%d\n", count, result);
 
                 const response_t response{
                     .vk_result = result,
@@ -518,6 +605,17 @@ namespace sogen
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
+
+                uint32_t api_ver = 0, dev_type = 0;
+                if (properties.size() >= 20)
+                {
+                    std::memcpy(&api_ver, properties.data(), sizeof(api_ver));
+                    std::memcpy(&dev_type, properties.data() + 16, sizeof(dev_type));
+                }
+                win_emu.log.warn("[gpu-trace] device_properties: apiVersion=%u.%u.%u type=%u name=%s outlen=%u\n", (api_ver >> 22) & 0x7F,
+                                 (api_ver >> 12) & 0x3FF, api_ver & 0xFFF, dev_type,
+                                 properties.size() >= 276 ? reinterpret_cast<const char*>(properties.data() + 20) : "?",
+                                 static_cast<unsigned>(context.output_buffer_length));
 
                 win_emu.emu().write_memory(context.output_buffer, properties.data(), properties.size());
                 set_information(context, static_cast<ULONG>(properties.size()));
@@ -592,6 +690,15 @@ namespace sogen
                 if (array_bytes > 0)
                 {
                     win_emu.emu().write_memory(context.output_buffer + sizeof(response_t), properties.data(), array_bytes);
+
+                    constexpr size_t ext_name_size = 256;
+                    constexpr size_t ext_entry_size = ext_name_size + sizeof(uint32_t);
+                    const uint32_t ext_count = std::min(count, static_cast<uint32_t>(properties.size() / ext_entry_size));
+                    for (uint32_t i = 0; i < ext_count; ++i)
+                    {
+                        const char* name = reinterpret_cast<const char*>(properties.data() + i * ext_entry_size);
+                        win_emu.log.warn("[gpu-trace] dev-ext: %s\n", name);
+                    }
                 }
 
                 set_information(context, static_cast<ULONG>(sizeof(response_t) + array_bytes));
@@ -620,6 +727,14 @@ namespace sogen
                 if (records_bytes > 0)
                 {
                     win_emu.emu().read_memory(context.input_buffer + sizeof(request_t), records.data(), records_bytes);
+                }
+
+                {
+                    const auto* rec = reinterpret_cast<const gpu_bridge::feature_chain_record*>(records.data());
+                    for (uint32_t i = 0; i < request.struct_count && i < records.size() / sizeof(*rec); ++i)
+                    {
+                        win_emu.log.warn("[gpu-trace] features2 stype=%u body=%u\n", rec[i].s_type, rec[i].body_size);
+                    }
                 }
 
                 std::vector<std::byte> blob;
@@ -1074,6 +1189,7 @@ namespace sogen
                 uint32_t optimal = 0;
                 uint32_t buffer = 0;
                 this->vulkan_.get_physical_device_format_properties(request.physical_device, request.format, linear, optimal, buffer);
+                win_emu.log.warn("[gpu-trace] format_props fmt=%u lin=0x%X opt=0x%X buf=0x%X\n", request.format, linear, optimal, buffer);
                 return write_output(
                     win_emu, context,
                     gpu_bridge::get_physical_device_format_properties_response{
@@ -2239,7 +2355,7 @@ namespace sogen
                     request.device, request.render_pass, request.pipeline_layout, request.vertex_shader, request.fragment_shader,
                     request.width, request.height, bindings, attributes, depth, color_formats, request.depth_format, request.stencil_format,
                     rasterization_samples, request.primitive_topology, request.primitive_restart_enable, dynamic_states, vs_spec, fs_spec,
-                    blend_attachments, pipeline);
+                    blend_attachments, /*depth_clip_enable=*/1, pipeline);
                 if (result != 0)
                 {
                     win_emu.log.error(
@@ -2574,6 +2690,290 @@ namespace sogen
                 this->vulkan_.destroy_sampler(request.device, request.object);
                 return STATUS_SUCCESS;
             }
+
+#ifdef SOGEN_HAS_VKD3D_SHADER
+            // D3D9 UMD <-> host d3d9_host bridge sync commands (see d3d9-command-protocol/
+            // d3d9_command_protocol.hpp for the payload structs). Dispatched below the same way as the
+            // Vulkan handlers above.
+
+            NTSTATUS handle_d3d9_marker(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::marker_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                win_emu.log.info("[d3d9-host] marker stage=%u\n", request.stage);
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_d3d9_create_resource(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_resource_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t resource = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_resource(request.kind, request.format, request.width, request.height, request.depth,
+                                                               request.mip_levels, request.usage, request.pool, resource);
+                return write_output(win_emu, context, d3d9_cmd::create_resource_response{.hr = hr, .reserved = 0, .resource = resource});
+            }
+
+            NTSTATUS handle_d3d9_destroy_resource(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::destroy_resource_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                this->d3d9_.destroy_resource(request.resource);
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_d3d9_tex_blt(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::tex_blt_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const int32_t hr = this->d3d9_.tex_blt(request.dst_resource, request.src_resource);
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+
+            NTSTATUS handle_d3d9_lock(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::lock_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto out_capacity = context.output_buffer_length > sizeof(d3d9_cmd::lock_response)
+                                              ? context.output_buffer_length - sizeof(d3d9_cmd::lock_response)
+                                              : 0;
+                std::vector<std::byte> data(out_capacity);
+                uint32_t data_size = 0;
+                const bool render_target_readback = this->d3d9_.is_render_target(request.resource);
+                const int32_t hr = this->d3d9_.lock(request.resource, request.subresource, request.offset, request.size, request.flags,
+                                                    data.data(), data.size(), data_size);
+                // A render-target Lock is how the frame's rendering is forced to complete for tests that
+                // read pixels back instead of presenting (e.g. d3d9-manydraws); log the frame stats here
+                // too so those runs still emit a data point. A single guest LockRect drives this path
+                // through two host lock DDI calls, so one LockRect logs this line twice -- expected, not
+                // a double-count (the counters are process-lifetime totals, unaffected either way).
+                if (render_target_readback)
+                {
+                    this->log_d3d9_frame_stats(win_emu);
+                }
+
+                if (!context.output_buffer || context.output_buffer_length < sizeof(d3d9_cmd::lock_response))
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+                const auto copy_bytes = std::min<size_t>(data.size(), data_size);
+                emulator_object<d3d9_cmd::lock_response>{win_emu.emu(), context.output_buffer}.write(
+                    d3d9_cmd::lock_response{.hr = hr, .data_size = data_size});
+                if (copy_bytes > 0)
+                {
+                    win_emu.emu().write_memory(context.output_buffer + sizeof(d3d9_cmd::lock_response), data.data(), copy_bytes);
+                }
+                set_information(context, static_cast<ULONG>(sizeof(d3d9_cmd::lock_response) + copy_bytes));
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_d3d9_unlock(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::unlock_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<std::byte> data;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.data_size, data))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const int32_t hr = this->d3d9_.unlock(request.resource, request.subresource, request.offset, data.data(), data.size());
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+
+            NTSTATUS handle_d3d9_create_vertex_shader(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_shader_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<std::byte> tokens;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.token_size_bytes, tokens))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t shader = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_vertex_shader(tokens.data(), tokens.size(), shader);
+                return write_output(win_emu, context, d3d9_cmd::create_shader_response{.hr = hr, .reserved = 0, .shader = shader});
+            }
+
+            NTSTATUS handle_d3d9_create_pixel_shader(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_shader_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<std::byte> tokens;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.token_size_bytes, tokens))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t shader = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_pixel_shader(tokens.data(), tokens.size(), shader);
+                return write_output(win_emu, context, d3d9_cmd::create_shader_response{.hr = hr, .reserved = 0, .shader = shader});
+            }
+
+            NTSTATUS handle_d3d9_create_vertex_decl(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::create_vertex_decl_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<d3d9_cmd::vertex_element> elements;
+                if (!read_trailing_array(win_emu, context, sizeof(request), request.element_count, elements))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                uint64_t decl = d3d9_cmd::null_resource;
+                const int32_t hr = this->d3d9_.create_vertex_decl(elements.data(), elements.size(), sizeof(d3d9_cmd::vertex_element), decl);
+                return write_output(win_emu, context, d3d9_cmd::create_vertex_decl_response{.hr = hr, .reserved = 0, .decl = decl});
+            }
+
+            // The real D3DDDIARG_PRESENT carries no HWND (RE-confirmed this session, live -- dumped the
+            // struct pfnPresent actually receives and it's genuinely absent; the runtime's actual
+            // on-screen presentation goes through a separate, driver-opaque kernel path, same as
+            // handle_NtGdiDdDDIPresent's own EMU_D3DKMT_PRESENT::hWindow, which our d3d9_host resources
+            // never participate in since they bypass the DXGK allocation system entirely). Mirrors
+            // syscalls/user.cpp's own find_foreground_window fallback (process.foreground_window is
+            // only ever set by a real host-side activation/focus event, which a freshly-created,
+            // never-clicked window won't have received yet): prefer the last-interacted-with window,
+            // falling back to any visible top-level window so a freshly-created single-window app like
+            // this project's own D3D9 samples still gets shown. Not a claim about how real drivers
+            // resolve this -- just the same pragmatic default GetForegroundWindow() already uses.
+            hwnd find_present_window(const windows_emulator& win_emu)
+            {
+                // Only a window with a host surface can actually display a frame: a message-only window
+                // (HWND_MESSAGE parent) is deliberately never handed to the UI backend, so presenting to
+                // one silently discards the frame with no error anywhere. MW2 creates exactly such a
+                // window and makes it the foreground window, so "is the foreground handle a live window"
+                // is not a sufficient test -- host_surface_window is. Child windows stay eligible: the UI
+                // backend composites a child's surface onto its top-level ancestor (see present_surface).
+                if (const auto* foreground = win_emu.process.windows.get(win_emu.process.foreground_window);
+                    win_emu.process.foreground_window != 0 && foreground != nullptr && foreground->host_surface_window)
+                {
+                    return win_emu.process.foreground_window;
+                }
+
+                // A top-level window's parent_handle is the desktop window, not 0 (see the
+                // NtUserCreateWindowEx handler): only a WS_CHILD window stores a real parent there. A
+                // plain `parent_handle == 0` test therefore matches nothing at all.
+                const auto desktop = win_emu.process.default_desktop_window_handle.bits;
+                for (const auto& [index, win] : win_emu.process.windows)
+                {
+                    if (win.host_surface_window && (win.parent_handle == 0 || win.parent_handle == desktop) &&
+                        (win.style & WS_VISIBLE) != 0)
+                    {
+                        return win.handle;
+                    }
+                }
+
+                return 0;
+            }
+
+            // One data point per frame completion (a Present, or a render-target Lock readback): how many
+            // execute_draw calls the frame issued vs. how many real GPU submits they collapsed into. Makes
+            // the draw-batching win directly observable (draws >> submits) rather than only inferable from
+            // wall-clock timing. Counters are process-lifetime totals (d3d9_host never resets them), so a
+            // multi-frame app's per-frame counts are the delta between consecutive lines.
+            void log_d3d9_frame_stats(windows_emulator& win_emu)
+            {
+                win_emu.log.info("[d3d9-host] frame: draws=%llu submits=%llu\n", static_cast<unsigned long long>(this->d3d9_.draw_count()),
+                                 static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
+            }
+
+            NTSTATUS handle_d3d9_present(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::present_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                constexpr int32_t d3derr_invalidcall = -2005530516; // D3DERR_INVALIDCALL
+
+                std::vector<std::byte> pixels;
+                uint32_t width = 0;
+                uint32_t height = 0;
+                int32_t hr = 0; // D3D_OK
+                hwnd window = 0;
+                const bool snapshot_ok = this->d3d9_.snapshot_resource(request.resource, pixels, width, height);
+                if (snapshot_ok)
+                {
+                    window = find_present_window(win_emu);
+                    if (window != 0)
+                    {
+                        win_emu.ui().present_surface(window, ui_surface_desc{.width = static_cast<int>(width),
+                                                                             .height = static_cast<int>(height),
+                                                                             .stride = static_cast<int>(width * 4),
+                                                                             .format = ui_surface_format::bgra8,
+                                                                             .pixels = pixels.data()});
+                    }
+                }
+                else
+                {
+                    hr = d3derr_invalidcall;
+                }
+
+                // A present that reaches this DDI but drops its frame does so for exactly one of two
+                // reasons -- the source resource is unknown to d3d9_host, or no presentable window was
+                // found -- and neither is distinguishable from "the app never presented at all" in the
+                // frame-stats line below. Env-gated so a real title's per-frame path stays untouched.
+                if (getenv("EMULATOR_D3D9_PRESENTDIAG"))
+                {
+                    win_emu.log.warn("[d3d9-presentdiag] resource=%llu snapshot=%d %ux%u window=0x%X\n",
+                                     static_cast<unsigned long long>(request.resource), snapshot_ok ? 1 : 0, width, height,
+                                     static_cast<unsigned>(window));
+                }
+
+                this->log_d3d9_frame_stats(win_emu);
+                return write_output(win_emu, context, d3d9_cmd::present_response{.hr = hr, .reserved = 0});
+            }
+
+            // Shared handler for every streamed D3D9 opcode sent as an individual sync Escape (see the
+            // ioctl_d3d9_set_render_state-and-friends block in gpu_bridge_protocol.hpp): forwards the
+            // whole input buffer verbatim to d3d9_host, which is agnostic to whether a record arrived
+            // this way or via a future batched ioctl_record_commands replay.
+            NTSTATUS handle_d3d9_streamed(windows_emulator& win_emu, const io_device_context& context, gpu_bridge::command opcode)
+            {
+                std::vector<std::byte> payload(context.input_buffer_length);
+                if (!payload.empty())
+                {
+                    win_emu.emu().read_memory(context.input_buffer, payload.data(), payload.size());
+                }
+                const int32_t hr = this->d3d9_.execute_recorded(static_cast<uint32_t>(opcode), payload.data(), payload.size());
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+#endif
 
             // Executes one recorded command-buffer command from a batch (see ioctl_record_commands). The
             // payload is the command's normal request struct; this is the per-command core shared with the
@@ -3182,6 +3582,16 @@ namespace sogen
                                                            static_cast<uint32_t>(data_bytes));
                 }
                 default:
+#ifdef SOGEN_HAS_VKD3D_SHADER
+                    // D3D9 streamed opcodes (gpu_bridge::command's 0x900 block) all forward to the same
+                    // d3d9_host entry point rather than getting one case each here -- see
+                    // d3d9-command-protocol/d3d9_command_protocol.hpp for what each opcode's payload means.
+                    if (command >= static_cast<uint32_t>(gpu_bridge::command::d3d9_marker) &&
+                        command <= static_cast<uint32_t>(gpu_bridge::command::d3d9_blt))
+                    {
+                        return this->d3d9_.execute_recorded(command, payload, size);
+                    }
+#endif
                     win_emu.log.warn("[gpu-bridge] record_commands: unsupported command 0x%X\n", command);
                     return vk_error_initialization_failed;
                 }
@@ -3264,10 +3674,51 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
         };
+
+        // Thin io_device adapter over gpu_command_processor for the legacy \\.\SogenGpu path. The same
+        // processor is reused by the D3DKMT-Escape transport, so command handling lives in one place.
+        struct gpu_bridge_device : io_device
+        {
+            void work(windows_emulator& win_emu) override
+            {
+                processor_.pump_presents(win_emu);
+            }
+
+            NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
+            {
+                return processor_.dispatch(win_emu, context);
+            }
+
+            void serialize_object(utils::buffer_serializer&) const override
+            {
+            }
+
+            void deserialize_object(utils::buffer_deserializer&) override
+            {
+            }
+
+          private:
+            gpu_command_processor processor_{};
+        };
     }
 
     std::unique_ptr<io_device> create_gpu_bridge(const device_creation_context&)
     {
         return std::make_unique<gpu_bridge_device>();
+    }
+
+    std::shared_ptr<void> create_gpu_command_processor()
+    {
+        return std::make_shared<gpu_command_processor>();
+    }
+
+    NTSTATUS dispatch_gpu_command(void* processor, windows_emulator& win_emu, const io_device_context& context)
+    {
+        return static_cast<gpu_command_processor*>(processor)->dispatch(win_emu, context);
+    }
+
+    void pump_gpu_presents(void* processor, windows_emulator& win_emu)
+    {
+        static_cast<gpu_command_processor*>(processor)->pump_presents(win_emu);
     }
 }

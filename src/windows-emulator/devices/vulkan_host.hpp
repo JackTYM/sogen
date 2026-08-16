@@ -132,6 +132,9 @@ namespace sogen
         // Non-blocking: returns VK_SUCCESS if signaled, VK_NOT_READY otherwise. Never waits.
         int32_t get_fence_status(uint64_t fence);
 
+        // Blocks the calling thread until the fence signals or timeout_ns elapses (UINT64_MAX = infinite).
+        int32_t wait_for_fence(uint64_t fence, uint64_t timeout_ns);
+
         int32_t queue_wait_idle(uint64_t queue);
         int32_t device_wait_idle(uint64_t device);
 
@@ -505,6 +508,7 @@ namespace sogen
             uint32_t test_enable;
             uint32_t write_enable;
             uint32_t compare_op;
+            auto operator<=>(const depth_state&) const = default; // lets this struct key d3d9_host::pipeline_cache_key
         };
 
         struct spec_entry
@@ -526,6 +530,7 @@ namespace sogen
             uint32_t dst_alpha_blend_factor;
             uint32_t alpha_blend_op;
             uint32_t color_write_mask;
+            auto operator<=>(const color_blend_attachment&) const = default; // lets this struct key d3d9_host::pipeline_cache_key
         };
 
         // A shader stage's specialization constants. DXVK bakes d3d9 render state (alpha-test compare op, fog,
@@ -541,6 +546,8 @@ namespace sogen
         // depth test. Empty vertex input (no bindings/attributes) leaves vertices to be baked into the shader.
         // When render_pass == 0 the pipeline is built for dynamic rendering (VK_KHR_dynamic_rendering) using
         // color_formats/depth_format/stencil_format, with viewport and scissor as dynamic state.
+        // depth_clip_enable != 0 (the D3D9 default, D3DRS_CLIPPING = TRUE) leaves depthClampEnable = VK_FALSE
+        // (near/far depth clipping on); 0 clamps instead of clips, but only if the device enabled depthClamp.
         int32_t create_graphics_pipeline(uint64_t device, uint64_t render_pass, uint64_t pipeline_layout, uint64_t vertex_shader,
                                          uint64_t fragment_shader, uint32_t width, uint32_t height,
                                          std::span<const vertex_binding> bindings, std::span<const vertex_attribute> attributes,
@@ -548,7 +555,8 @@ namespace sogen
                                          uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
                                          uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                          const specialization& vs_spec, const specialization& fs_spec,
-                                         std::span<const color_blend_attachment> blend_attachments, uint64_t& out_pipeline);
+                                         std::span<const color_blend_attachment> blend_attachments, uint32_t depth_clip_enable,
+                                         uint64_t& out_pipeline);
         int32_t create_compute_pipeline(uint64_t device, uint64_t pipeline_layout, uint64_t shader_module, uint64_t& out_pipeline);
         void destroy_pipeline(uint64_t device, uint64_t pipeline);
 
@@ -589,6 +597,21 @@ namespace sogen
         int32_t cmd_set_stencil_op(uint64_t command_buffer, uint32_t face_mask, uint32_t fail_op, uint32_t pass_op, uint32_t depth_fail_op,
                                    uint32_t compare_op);
         int32_t cmd_set_dynamic_u32(uint64_t command_buffer, uint32_t state, uint32_t value);
+
+        // --- native render target (D3DKMT path; no swapchain / no surface) ---
+
+        // Creates a single DEVICE_LOCAL B8G8R8A8_UNORM image with COLOR_ATTACHMENT|TRANSFER_SRC usage,
+        // plus a host-visible readback buffer and the reusable command infrastructure needed to clear
+        // and read it back.  out_image receives a fresh object id.
+        int32_t create_render_target(uint64_t device, uint32_t width, uint32_t height, uint32_t format, uint64_t& out_image);
+
+        // Records a clear of the render-target image to `color` (RGBA, 0..1), submits, and waits
+        // synchronously.  The image is left in TRANSFER_SRC_OPTIMAL after the call.
+        int32_t submit_clear(uint64_t image, const float* color);
+
+        // Copies the render-target image into the readback buffer, waits, and copies the result into
+        // out_pixels (BGRA8, tightly packed).  out_width / out_height are set from the image dims.
+        int32_t readback_render_target(uint64_t image, std::vector<std::byte>& out_pixels, uint32_t& out_width, uint32_t& out_height);
 
       private:
         struct impl;

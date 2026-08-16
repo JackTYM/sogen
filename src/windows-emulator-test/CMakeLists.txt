@@ -6,6 +6,13 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 
 list(SORT SRC_FILES)
 
+# Mirrors windows-emulator/CMakeLists.txt's SOGEN_HAS_VKD3D_SHADER exclusion: d3d9_host.cpp (and
+# the parse_vertex_decl() it defines) isn't compiled in on Android/iOS/Emscripten, so this test
+# for it can't be either.
+if(ANDROID OR IOS OR EMSCRIPTEN)
+  list(REMOVE_ITEM SRC_FILES "${CMAKE_CURRENT_LIST_DIR}/d3d9_vertex_decl_test.cpp")
+endif()
+
 add_executable(windows-emulator-test ${SRC_FILES})
 
 sogen_assign_source_group(${SRC_FILES})

@@ -1,0 +1,3 @@
+LIBRARY sogen_d3d9um
+EXPORTS
+    OpenAdapter
