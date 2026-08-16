@@ -15,6 +15,9 @@
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
+// VkPhysicalDevicePortabilitySubsetFeaturesKHR (VK_KHR_portability_subset) lives here, not in
+// vulkan_core.h, in this vendored Vulkan-Headers copy -- self-contained, no macro gate needed.
+#include <vulkan/vulkan_beta.h>
 
 #include <gpu_bridge_protocol.hpp>
 #include <vk_feature_chain.hpp>
@@ -73,10 +76,20 @@ namespace sogen
         }
 
 #if defined(__APPLE__)
+        // A from-source MoltenVK build, tried before Homebrew's, to isolate rendering regressions
+        // from whatever fix/behavior differs between the two rather than being at the mercy of
+        // whatever version Homebrew currently has installed.
+        constexpr const char* local_molten_vk_path =
+            "/Users/jack/Library/Developer/Xcode/DerivedData/MoltenVKPackaging-bmbsfdcxgcuowiehqqpdbhqjmirh/"
+            "Build/Products/Release/libMoltenVK.dylib";
+
         // Bare names rely on the dynamic linker's default search path, which covers Intel
         // Homebrew's /usr/local/lib but not Apple Silicon Homebrew's /opt/homebrew/lib unless
         // DYLD_LIBRARY_PATH is set; the absolute paths below are a fallback for that case.
-        constexpr std::array<const char*, 5> vulkan_loader_names{"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
+        constexpr std::array<const char*, 6> vulkan_loader_names{local_molten_vk_path,
+                                                                 "libvulkan.1.dylib",
+                                                                 "libvulkan.dylib",
+                                                                 "libMoltenVK.dylib",
                                                                  "/opt/homebrew/lib/libvulkan.1.dylib",
                                                                  "/opt/homebrew/lib/libMoltenVK.dylib"};
 #else
@@ -1572,6 +1585,7 @@ namespace sogen
         // Non-conformant "portability" ICDs (MoltenVK, ...) require VK_KHR_portability_subset to be
         // explicitly enabled whenever the physical device advertises it; the guest driver has no
         // notion of this host-only extension, so it must be force-added here rather than requested.
+        bool portability_subset_enabled = false;
         if (instance->second.enumerate_device_extension_properties)
         {
             uint32_t count = 0;
@@ -1592,6 +1606,7 @@ namespace sogen
                     {
                         extensions.push_back("VK_KHR_portability_subset");
                     }
+                    portability_subset_enabled = has_portability_subset;
                 }
             }
         }
@@ -1664,6 +1679,35 @@ namespace sogen
                 features2.features.depthClamp = VK_TRUE;
                 has_features = true;
                 depth_clamp_enabled = true;
+            }
+        }
+
+        // MoltenVK disables non-identity VkComponentMapping swizzles on image views by default --
+        // VkPhysicalDevicePortabilitySubsetFeaturesKHR::imageViewFormatSwizzle is VK_FALSE unless
+        // explicitly requested, and the validation layer then requires every swizzle component to be
+        // VK_COMPONENT_SWIZZLE_IDENTITY (see KhronosGroup/MoltenVK#1364). The guest driver has no
+        // notion of this host-only portability feature (same reasoning as the extension force-add
+        // above), so force it on whenever the device supports VK_KHR_portability_subset. Without this,
+        // any texture needing a real channel remap (e.g. D3D9's single/dual-channel luminance-alpha
+        // formats sampled through a swizzled image view) silently samples as if unswizzled.
+        if (portability_subset_enabled && instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDevicePortabilitySubsetFeaturesKHR supported_portability{};
+            supported_portability.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+            VkPhysicalDeviceFeatures2 supported2{};
+            supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            supported2.pNext = &supported_portability;
+            instance->second.get_physical_device_features2(pd->second.handle, &supported2);
+            if (supported_portability.imageViewFormatSwizzle)
+            {
+                auto& buffer = chained.emplace_back(sizeof(VkPhysicalDevicePortabilitySubsetFeaturesKHR), std::byte{});
+                auto* portability_features = reinterpret_cast<VkPhysicalDevicePortabilitySubsetFeaturesKHR*>(buffer.data());
+                portability_features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+                portability_features->imageViewFormatSwizzle = VK_TRUE;
+                auto* base = reinterpret_cast<VkBaseOutStructure*>(buffer.data());
+                feature_tail->pNext = base;
+                feature_tail = base;
+                has_features = true;
             }
         }
 

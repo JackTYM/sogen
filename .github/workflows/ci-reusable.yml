@@ -398,7 +398,13 @@ jobs:
       - name: Install Windows vkd3d-shader Build Tools
         if: "${{ matrix.msys-arch }}"
         shell: cmd
-        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-${{ matrix.msys-arch }}-tools mingw-w64-${{ matrix.msys-arch }}-vulkan-devel"
+        # MSYS2's i686 (32-bit) repo has no mingw-w64-i686-spirv-headers package at all (unlike
+        # x86_64, whose vulkan-devel group already includes it) - these are pure, architecture-
+        # agnostic headers, so always additionally grab the mingw64 copy as a fallback (harmless,
+        # already-installed no-op on the x86_64 leg).
+        run: |
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm bison libtool flex perl mingw-w64-${{ matrix.msys-arch }}-tools mingw-w64-${{ matrix.msys-arch }}-vulkan-devel"
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm mingw-w64-x86_64-spirv-headers"
 
       - name: Add MSYS2 Tools to Path
         if: "${{ matrix.msys-arch }}"
@@ -524,6 +530,13 @@ jobs:
           echo "C:\\msys64\\usr\\bin" >> "$GITHUB_PATH"
           echo "C:\\msys64\\mingw64\\bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=C:\\msys64\\mingw64" >> "$GITHUB_ENV"
+
+      - name: Install Freetype (vcpkg)
+        if: ${{ startsWith(matrix.platform, 'Windows') }}
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install freetype:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
 
       - name: CMake Build
         run: cmake --preset=${{matrix.preset}} ${{matrix.cmake-options}} && cmake --build --preset=${{matrix.preset}}

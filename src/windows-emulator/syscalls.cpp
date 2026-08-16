@@ -1082,7 +1082,7 @@ namespace sogen
         NTSTATUS handle_NtSignalAndWaitForSingleObject(const syscall_context& c, handle signal_handle, handle /*wait_handle*/,
                                                        BOOLEAN /*alertable*/, emulator_object<LARGE_INTEGER> /*timeout*/)
         {
-            handle_NtSetEvent(c, signal_handle.bits, emulator_object<LONG>{c.emu});
+            handle_NtSetEvent(c, signal_handle.bits, emulator_object<LONG>{c.emu, uint64_t{0}});
             return STATUS_SUCCESS;
         }
 
@@ -1177,7 +1177,7 @@ namespace sogen
                                               ULONG create_options, handle /*transaction_handle*/, emulator_object<ULONG> disposition)
         {
             return handle_NtCreateKey(c, key_handle, desired_access, object_attributes, 0,
-                                      emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu}, create_options,
+                                      emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, uint64_t{0}}, create_options,
                                       disposition);
         }
 

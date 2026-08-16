@@ -46,6 +46,13 @@ namespace sogen
         constexpr uint32_t vk_format_bc1_rgba_unorm_block = 133;
         constexpr uint32_t vk_format_bc2_unorm_block = 135;
         constexpr uint32_t vk_format_bc3_unorm_block = 137;
+
+        // VkComponentSwizzle values, verified against deps/Vulkan-Headers/include/vulkan/vulkan_core.h.
+        constexpr uint32_t vk_component_swizzle_identity = 0;
+        constexpr uint32_t vk_component_swizzle_zero = 1;
+        constexpr uint32_t vk_component_swizzle_one = 2;
+        constexpr uint32_t vk_component_swizzle_r = 3;
+        constexpr uint32_t vk_component_swizzle_g = 4;
     } // namespace
 
     bool d3d9_format_to_vulkan(const uint32_t d3dfmt, uint32_t& out_vk_format)
@@ -68,9 +75,8 @@ namespace sogen
             return true;
         case d3dfmt_a8l8:
             // Two-channel luminance-alpha. R8G8_UNORM is the byte-exact match (byte 0 = L -> R, byte 1 =
-            // A -> G). Sampling uses the same identity swizzle as L8/A8 above, so the luminance channel is
-            // not replicated across RGB (a pre-existing, test-accepted approximation for the single-channel
-            // luminance formats); creation and tightly-packed 2-byte-per-texel upload are exact.
+            // A -> G); d3d9_format_to_vulkan_swizzle below remaps R8G8_UNORM's raw channels to match real
+            // D3D9 sampling (R=G=B=L, A=A).
             out_vk_format = vk_format_r8g8_unorm;
             return true;
         case d3dfmt_v8u8:
@@ -111,6 +117,32 @@ namespace sogen
             return true;
         default:
             return false;
+        }
+    }
+
+    d3d9_format_swizzle d3d9_format_to_vulkan_swizzle(const uint32_t d3dfmt)
+    {
+        switch (d3dfmt)
+        {
+        case d3dfmt_a8:
+            // Real D3D9 D3DFMT_A8 samples as RGB=0, A=the stored byte. R8_UNORM's only channel is R, so
+            // without this remap the byte lands in the shader's R component (with A forced to Vulkan's
+            // default 1.0 for a format with no alpha channel) -- every alpha-blended draw using this as
+            // a coverage mask (e.g. a font glyph atlas) then reads alpha=1.0 regardless of the actual
+            // texel, rendering a solid quad instead of the intended shape.
+            return {vk_component_swizzle_zero, vk_component_swizzle_zero, vk_component_swizzle_zero, vk_component_swizzle_r};
+        case d3dfmt_l8:
+            // Real D3D9 D3DFMT_L8 samples as R=G=B=the stored byte, A=1 (opaque). R8_UNORM's identity
+            // mapping only fills R, leaving G/B at 0 -- a grayscale texture would sample as pure red
+            // instead of gray.
+            return {vk_component_swizzle_r, vk_component_swizzle_r, vk_component_swizzle_r, vk_component_swizzle_one};
+        case d3dfmt_a8l8:
+            // Real D3D9 D3DFMT_A8L8 samples as R=G=B=byte0 (L), A=byte1 (A). R8G8_UNORM's identity
+            // mapping puts A in G and leaves B at 0, matching neither channel's real placement.
+            return {vk_component_swizzle_r, vk_component_swizzle_r, vk_component_swizzle_r, vk_component_swizzle_g};
+        default:
+            return {vk_component_swizzle_identity, vk_component_swizzle_identity, vk_component_swizzle_identity,
+                    vk_component_swizzle_identity};
         }
     }
 

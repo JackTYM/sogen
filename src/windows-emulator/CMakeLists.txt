@@ -53,6 +53,12 @@ if(ANDROID OR IOS)
   set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
   set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
   set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+  # We only ever consume the `freetype` target from within this same CMake build, so skip
+  # Freetype's own install()/export() rules entirely. Left enabled, they generate a
+  # freetype-config.cmake package export whose INTERFACE_INCLUDE_DIRECTORIES fails CMake's
+  # relocatability check ("contains path ... which is prefixed in the source directory"), because
+  # add_subdirectory() nests deps/freetype inside this project's own source tree.
+  set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
   add_subdirectory(${CMAKE_SOURCE_DIR}/deps/freetype ${CMAKE_BINARY_DIR}/deps/freetype EXCLUDE_FROM_ALL)
   set(SOGEN_FREETYPE_TARGET freetype)
 elseif(NOT EMSCRIPTEN)
@@ -81,6 +87,11 @@ if(TARGET SDL3::SDL3)
   target_link_libraries(windows-emulator PRIVATE SDL3::SDL3)
   target_compile_definitions(windows-emulator PRIVATE SOGEN_HAS_SDL3=1)
 endif()
+
+# VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR's enum value in vulkan_core.h's
+# own VkStructureType enum is gated behind this macro (the struct body itself lives in the separate
+# vulkan_beta.h, included directly by vulkan_host.cpp -- this only unlocks the enum value).
+target_compile_definitions(windows-emulator PRIVATE VK_ENABLE_BETA_EXTENSIONS)
 
 target_include_directories(windows-emulator INTERFACE "${CMAKE_CURRENT_LIST_DIR}")
 

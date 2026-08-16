@@ -1833,10 +1833,10 @@ namespace sogen
                         // type/layer-count follow the resource kind (cube/volume/2D) via the shared helper.
                         const uint32_t view_levels = std::max(1u, tex.mip_levels);
                         const sampled_view_shape view_shape = sampled_view_shape_for_kind(tex.kind);
+                        const auto swizzle = d3d9_format_to_vulkan_swizzle(tex.format);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
-                                                        view_shape.view_type, 0, view_levels, 0, view_shape.layer_count,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
+                                                        view_shape.view_type, 0, view_levels, 0, view_shape.layer_count, swizzle.r,
+                                                        swizzle.g, swizzle.b, swizzle.a, tex.vk_image_view_id);
                     }
                 }
                 if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, std::max(1u, tex.mip_levels), tex_samplers[stage]))
@@ -1874,10 +1874,10 @@ namespace sogen
                     {
                         const uint32_t view_levels = std::max(1u, tex.mip_levels);
                         const sampled_view_shape view_shape = sampled_view_shape_for_kind(tex.kind);
+                        const auto swizzle = d3d9_format_to_vulkan_swizzle(tex.format);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
-                                                        view_shape.view_type, 0, view_levels, 0, view_shape.layer_count,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, tex.vk_image_view_id);
+                                                        view_shape.view_type, 0, view_levels, 0, view_shape.layer_count, swizzle.r,
+                                                        swizzle.g, swizzle.b, swizzle.a, tex.vk_image_view_id);
                     }
                 }
                 if (tex.vk_image_view_id != 0 && this->build_sampler(device, vs_stage, std::max(1u, tex.mip_levels), vs_tex_samplers[k]))
