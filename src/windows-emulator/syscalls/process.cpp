@@ -822,6 +822,7 @@ namespace sogen
                         .maximum_size = section->maximum_size,
                         .section_page_protection = section->section_page_protection,
                         .allocation_attributes = section->allocation_attributes,
+                        .granted_access = section->granted_access,
                         .content = std::move(content),
                     });
                     continue;

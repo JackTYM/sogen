@@ -83,6 +83,7 @@ namespace sogen
         uint64_t maximum_size{};
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
+        ACCESS_MASK granted_access{};
         std::vector<std::byte> content{};
 
         void serialize(utils::buffer_serializer& buffer) const
@@ -91,6 +92,7 @@ namespace sogen
             buffer.write(this->maximum_size);
             buffer.write(this->section_page_protection);
             buffer.write(this->allocation_attributes);
+            buffer.write(this->granted_access);
             buffer.write_vector(this->content);
         }
 
@@ -100,6 +102,7 @@ namespace sogen
             buffer.read(this->maximum_size);
             buffer.read(this->section_page_protection);
             buffer.read(this->allocation_attributes);
+            buffer.read(this->granted_access);
             buffer.read_vector(this->content);
         }
     };

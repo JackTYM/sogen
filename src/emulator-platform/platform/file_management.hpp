@@ -118,6 +118,17 @@ namespace sogen
 #define SEC_IMAGE_NO_EXECUTE       (SEC_IMAGE | SEC_NOCACHE)
 #endif
 
+#ifndef SECTION_QUERY
+#define SECTION_QUERY                0x00000001
+#define SECTION_MAP_WRITE            0x00000002
+#define SECTION_MAP_READ             0x00000004
+#define SECTION_MAP_EXECUTE          0x00000008
+#define SECTION_EXTEND_SIZE          0x00000010
+#define SECTION_MAP_EXECUTE_EXPLICIT 0x00000020
+#define SECTION_ALL_ACCESS \
+    (STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_WRITE | SECTION_MAP_READ | SECTION_MAP_EXECUTE | SECTION_EXTEND_SIZE)
+#endif
+
 #ifndef CTL_CODE
 #define CTL_CODE(DeviceType, Function, Method, Access) (((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method))
 #endif

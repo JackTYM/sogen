@@ -185,7 +185,7 @@ namespace sogen
         }
 
         NTSTATUS handle_NtCreateSection(const syscall_context& c, const emulator_object<handle> section_handle,
-                                        const ACCESS_MASK /*desired_access*/,
+                                        const ACCESS_MASK desired_access,
                                         const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
                                         const emulator_object<ULARGE_INTEGER> maximum_size, const ULONG section_page_protection,
                                         const ULONG allocation_attributes, const handle file_handle)
@@ -193,6 +193,7 @@ namespace sogen
             section s{};
             s.section_page_protection = section_page_protection;
             s.allocation_attributes = allocation_attributes;
+            s.granted_access = desired_access;
 
             const auto* file = c.proc.files.get(file_handle);
             if (file)
@@ -241,7 +242,7 @@ namespace sogen
         }
 
         NTSTATUS handle_NtOpenSection(const syscall_context& c, const emulator_object<handle> section_handle,
-                                      const ACCESS_MASK /*desired_access*/,
+                                      const ACCESS_MASK desired_access,
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
         {
             const auto attributes = object_attributes.read();
@@ -321,6 +322,7 @@ namespace sogen
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
 
+                section.value().granted_access = desired_access;
                 section_handle.write(c.proc.sections.store(section.value()));
                 return STATUS_SUCCESS;
             }
@@ -329,6 +331,7 @@ namespace sogen
             {
                 if (!section.name.empty() && utils::string::equals_ignore_case(section.name, filename))
                 {
+                    section.granted_access = desired_access;
                     section_handle.write(c.proc.sections.make_handle(handle));
                     return STATUS_SUCCESS;
                 }

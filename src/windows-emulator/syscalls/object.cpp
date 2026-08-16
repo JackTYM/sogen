@@ -93,7 +93,7 @@ namespace sogen
 
         NTSTATUS handle_NtDuplicateObject(const syscall_context& c, const handle source_process_handle, const handle source_handle,
                                           const handle target_process_handle, const emulator_object<handle> target_handle,
-                                          const ACCESS_MASK /*desired_access*/, const ULONG /*handle_attributes*/, const ULONG /*options*/)
+                                          const ACCESS_MASK desired_access, const ULONG /*handle_attributes*/, const ULONG /*options*/)
         {
             if (!c.proc.is_current_process_handle(source_process_handle) || !c.proc.is_current_process_handle(target_process_handle))
             {
@@ -106,6 +106,15 @@ namespace sogen
             {
                 target_handle.write(resolved_source_handle);
                 return STATUS_SUCCESS;
+            }
+
+            if (resolved_source_handle.value.type == handle_types::section)
+            {
+                const auto* section = c.proc.sections.get(resolved_source_handle);
+                if (section && (desired_access & ~section->granted_access) != 0)
+                {
+                    return STATUS_ACCESS_DENIED;
+                }
             }
 
             auto* store = c.proc.get_handle_store(resolved_source_handle);

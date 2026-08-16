@@ -677,6 +677,7 @@ namespace sogen
             s.maximum_size = inherited.maximum_size;
             s.section_page_protection = inherited.section_page_protection;
             s.allocation_attributes = inherited.allocation_attributes;
+            s.granted_access = inherited.granted_access;
 
             if (!inherited.content.empty())
             {
