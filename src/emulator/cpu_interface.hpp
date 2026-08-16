@@ -71,12 +71,20 @@ namespace sogen
         // backends cannot, so they must be preempted cooperatively from the CPU thread instead.
         virtual bool is_stop_thread_safe() const = 0;
 
-        // Returns true if the backend's syscall hook fires before the SYSCALL instruction
-        // has advanced RIP, meaning write_syscall_result must subtract 2 from any new RIP
-        // to compensate for the backend's auto-advance. Unicorn auto-advances; KVM/WHP do not.
+        // Returns true if the backend re-advances RIP by the length of the SYSCALL instruction
+        // after the syscall hook returns, meaning a hook-supplied RIP must have those 2 bytes
+        // subtracted so the guest resumes exactly at the requested target.
+        //
+        // Every backend in tree does this: Unicorn's hook fires before SYSCALL advances RIP;
+        // KVM and WHP execute SYSCALL natively, rewind RIP to the instruction, then re-advance;
+        // FEX's HandleSyscall and Icicle's handle_syscall both add 2 unconditionally after
+        // invoking the hook. The default is therefore true - a backend that resumes at the
+        // hook-supplied RIP verbatim must override this to false. Defaulting to false instead
+        // silently lands the guest 2 bytes past every callback dispatch, callback return and
+        // retriggered syscall, which is survivable often enough to look like a flaky failure.
         virtual bool syscall_hook_requires_rip_compensation() const
         {
-            return false;
+            return true;
         }
     };
 
