@@ -18,6 +18,7 @@
 #include "child_process_spawn.hpp"
 
 #include <devices/named_pipe.hpp>
+#include <memory_utils.hpp>
 
 #include <utils/finally.hpp>
 #include <utils/interupt_handler.hpp>
@@ -670,6 +671,35 @@ namespace sogen
             }
         }
 
+        void recreate_inherited_section(windows_emulator& win_emu, const inherited_section_handle& inherited)
+        {
+            section s{};
+            s.maximum_size = inherited.maximum_size;
+            s.section_page_protection = inherited.section_page_protection;
+            s.allocation_attributes = inherited.allocation_attributes;
+
+            if (!inherited.content.empty())
+            {
+                const auto protection = map_nt_to_emulator_protection(s.section_page_protection);
+                const auto reserve_only = s.allocation_attributes == SEC_RESERVE;
+                const auto backing = win_emu.memory.allocate_memory(inherited.content.size(), protection, reserve_only, 0,
+                                                                    memory_region_kind::pagefile_section_view);
+                if (backing)
+                {
+                    s.backing_address = backing;
+                    if (!reserve_only)
+                    {
+                        win_emu.emu().write_memory(backing, inherited.content.data(), inherited.content.size());
+                    }
+                }
+            }
+
+            if (!win_emu.process.sections.store_at(inherited.target_handle, std::move(s)))
+            {
+                win_emu.log.error("Failed to inherit section handle 0x%" PRIx64 "\n", static_cast<uint64_t>(inherited.target_handle.bits));
+            }
+        }
+
         bool run(const analysis_options& options, const std::span<const std::string_view> args)
         {
             std::optional<child_bootstrap_data> child_bootstrap{};
@@ -710,6 +740,11 @@ namespace sogen
                         recreate_inherited_pipe(*win_emu, inherited);
                     }
 
+                    for (const auto& inherited : child_bootstrap->inherited_sections)
+                    {
+                        recreate_inherited_section(*win_emu, inherited);
+                    }
+
                     win_emu->setup_process_if_necessary();
                 }
             }
@@ -729,8 +764,9 @@ namespace sogen
             {
                 spawn_config = build_child_process_spawn_config(options);
                 win_emu->callbacks.create_child_process = [&spawn_config](application_settings settings,
-                                                                          std::vector<inherited_pipe_handle> pipes) {
-                    return spawn_child_process(spawn_config, std::move(settings), std::move(pipes));
+                                                                          std::vector<inherited_pipe_handle> pipes,
+                                                                          std::vector<inherited_section_handle> sections) {
+                    return spawn_child_process(spawn_config, std::move(settings), std::move(pipes), std::move(sections));
                 };
             }
 

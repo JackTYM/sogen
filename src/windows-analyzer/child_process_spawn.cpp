@@ -297,12 +297,14 @@ namespace sogen
     }
 
     child_process_outcome spawn_child_process(const child_process_spawn_config& config, application_settings settings,
-                                              std::vector<inherited_pipe_handle> inherited_pipes)
+                                              std::vector<inherited_pipe_handle> inherited_pipes,
+                                              std::vector<inherited_section_handle> inherited_sections)
     {
 #if !defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
         (void)config;
         (void)settings;
         (void)inherited_pipes;
+        (void)inherited_sections;
         return {.success = false, .failure_detail = "Child process spawning is not supported on this platform"};
 #else
         install_sigchld_reaper();
@@ -348,6 +350,7 @@ namespace sogen
         utils::buffer_serializer bootstrap{};
         bootstrap.write(settings);
         bootstrap.write_vector(inherited_pipes);
+        bootstrap.write_vector(inherited_sections);
 
         if (!send_framed(parent_fd, bootstrap.get_buffer()))
         {
@@ -383,6 +386,7 @@ namespace sogen
         child_bootstrap_data data{};
         buffer.read(data.settings);
         buffer.read_vector(data.inherited_pipes);
+        buffer.read_vector(data.inherited_sections);
 
         return data;
     }

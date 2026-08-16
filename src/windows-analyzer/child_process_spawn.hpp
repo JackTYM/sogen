@@ -32,6 +32,7 @@ namespace sogen
     {
         application_settings settings{};
         std::vector<inherited_pipe_handle> inherited_pipes{};
+        std::vector<inherited_section_handle> inherited_sections{};
     };
 
     // True on platforms where a child can genuinely be spawned as a separate host OS process
@@ -41,14 +42,15 @@ namespace sogen
     std::filesystem::path resolve_own_executable_path();
 
     // Forks+execs config.executable_path as a child running in --child-ipc-fd mode, hands it
-    // settings/inherited_pipes over a real socketpair, and blocks (bounded by a timeout) until the
-    // child reports it has completed its own initial setup or failed. Does NOT wait for the child
-    // to exit - once it answers, it keeps running independently.
+    // settings/inherited_pipes/inherited_sections over a real socketpair, and blocks (bounded by a
+    // timeout) until the child reports it has completed its own initial setup or failed. Does NOT
+    // wait for the child to exit - once it answers, it keeps running independently.
     child_process_outcome spawn_child_process(const child_process_spawn_config& config, application_settings settings,
-                                              std::vector<inherited_pipe_handle> inherited_pipes);
+                                              std::vector<inherited_pipe_handle> inherited_pipes,
+                                              std::vector<inherited_section_handle> inherited_sections);
 
-    // Used by a process running in --child-ipc-fd mode: reads the settings/inherited_pipes its
-    // parent sent right after spawning it.
+    // Used by a process running in --child-ipc-fd mode: reads the settings/inherited_pipes/
+    // inherited_sections its parent sent right after spawning it.
     std::optional<child_bootstrap_data> receive_child_bootstrap_data(int fd);
 
     // Used by a process running in --child-ipc-fd mode, once it has completed its own initial

@@ -72,6 +72,38 @@ namespace sogen
         }
     };
 
+    // Describes one PsAttributeHandleList pagefile-backed section handle the child must inherit,
+    // sent across the real process boundary so the child can reconstruct an equivalent section
+    // object (with the same content, if the parent had already mapped and written it) in its own
+    // process_context before its guest code starts running. Image- and file-backed sections aren't
+    // covered here - they're re-derived from the file path instead, not meaningfully "inherited".
+    struct inherited_section_handle
+    {
+        handle target_handle{};
+        uint64_t maximum_size{};
+        uint32_t section_page_protection{};
+        uint32_t allocation_attributes{};
+        std::vector<std::byte> content{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->target_handle);
+            buffer.write(this->maximum_size);
+            buffer.write(this->section_page_protection);
+            buffer.write(this->allocation_attributes);
+            buffer.write_vector(this->content);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->target_handle);
+            buffer.read(this->maximum_size);
+            buffer.read(this->section_page_protection);
+            buffer.read(this->allocation_attributes);
+            buffer.read_vector(this->content);
+        }
+    };
+
     // Result of spawning a child process (NtCreateUserProcess) as a genuinely separate host OS
     // process. success reports whether the child got far enough through its own startup
     // (setup_process_if_necessary) to hand back real guest addresses for PS_CREATE_INFO -
@@ -101,7 +133,8 @@ namespace sogen
         // only the embedder (e.g. the analyzer's main.cpp) knows how to re-invoke itself as a
         // child, so this can't happen inside windows_emulator itself. Unset means the embedder
         // doesn't support child processes; the handler reports STATUS_NOT_SUPPORTED in that case.
-        opt_func<child_process_outcome(application_settings, std::vector<inherited_pipe_handle>)> create_child_process{};
+        opt_func<child_process_outcome(application_settings, std::vector<inherited_pipe_handle>, std::vector<inherited_section_handle>)>
+            create_child_process{};
 
         opt_func<void(uint64_t address, uint64_t length, memory_permission)> on_memory_protect{};
         opt_func<void(uint64_t address, uint64_t length, memory_permission, bool commit)> on_memory_allocate{};

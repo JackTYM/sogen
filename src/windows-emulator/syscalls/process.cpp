@@ -796,8 +796,37 @@ namespace sogen
             };
 
             std::vector<inherited_pipe_handle> inherited_pipes{};
+            std::vector<inherited_section_handle> inherited_sections{};
             for (const auto& src_handle : inherited_handles)
             {
+                if (src_handle.value.type == handle_types::section)
+                {
+                    auto* section = c.proc.sections.get(src_handle);
+                    if (!section || section->is_image() || !section->file_name.empty())
+                    {
+                        c.win_emu.log.log("NtCreateUserProcess: child %u: inherited section handle 0x%" PRIx64
+                                          " is missing, image-backed or file-backed, skipping\n",
+                                          record_id, static_cast<uint64_t>(src_handle.bits));
+                        continue;
+                    }
+
+                    std::vector<std::byte> content{};
+                    if (section->backing_address != 0)
+                    {
+                        content.resize(static_cast<size_t>(section->maximum_size));
+                        c.emu.read_memory(section->backing_address, content.data(), content.size());
+                    }
+
+                    inherited_sections.push_back({
+                        .target_handle = src_handle,
+                        .maximum_size = section->maximum_size,
+                        .section_page_protection = section->section_page_protection,
+                        .allocation_attributes = section->allocation_attributes,
+                        .content = std::move(content),
+                    });
+                    continue;
+                }
+
                 if (src_handle.value.type != handle_types::device)
                 {
                     c.win_emu.log.log("NtCreateUserProcess: child %u: inheriting handle type %u not yet supported, "
@@ -833,7 +862,8 @@ namespace sogen
             child_process_outcome outcome{};
             try
             {
-                outcome = c.win_emu.callbacks.create_child_process(std::move(child_settings), std::move(inherited_pipes));
+                outcome = c.win_emu.callbacks.create_child_process(std::move(child_settings), std::move(inherited_pipes),
+                                                                   std::move(inherited_sections));
             }
             catch (const std::exception& e)
             {
