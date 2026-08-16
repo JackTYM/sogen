@@ -32,7 +32,10 @@ namespace sogen
 
             NTSTATUS dispatch(windows_emulator& win_emu, const io_device_context& context)
             {
-                win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
+                if (getenv("EMULATOR_GPU_TRACE"))
+                {
+                    win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
+                }
 #ifdef SOGEN_HAS_VKD3D_SHADER
                 if (getenv("EMULATOR_D3D9_DRAWDIAG"))
                 {
@@ -2568,14 +2571,26 @@ namespace sogen
             // resolve this -- just the same pragmatic default GetForegroundWindow() already uses.
             hwnd find_present_window(const windows_emulator& win_emu)
             {
-                if (win_emu.process.foreground_window != 0 && win_emu.process.windows.get(win_emu.process.foreground_window) != nullptr)
+                // Only a window with a host surface can actually display a frame: a message-only window
+                // (HWND_MESSAGE parent) is deliberately never handed to the UI backend, so presenting to
+                // one silently discards the frame with no error anywhere. MW2 creates exactly such a
+                // window and makes it the foreground window, so "is the foreground handle a live window"
+                // is not a sufficient test -- host_surface_window is. Child windows stay eligible: the UI
+                // backend composites a child's surface onto its top-level ancestor (see present_surface).
+                if (const auto* foreground = win_emu.process.windows.get(win_emu.process.foreground_window);
+                    win_emu.process.foreground_window != 0 && foreground != nullptr && foreground->host_surface_window)
                 {
                     return win_emu.process.foreground_window;
                 }
 
+                // A top-level window's parent_handle is the desktop window, not 0 (see the
+                // NtUserCreateWindowEx handler): only a WS_CHILD window stores a real parent there. A
+                // plain `parent_handle == 0` test therefore matches nothing at all.
+                const auto desktop = win_emu.process.default_desktop_window_handle.bits;
                 for (const auto& [index, win] : win_emu.process.windows)
                 {
-                    if (win.parent_handle == 0 && (win.style & WS_VISIBLE) != 0)
+                    if (win.host_surface_window && (win.parent_handle == 0 || win.parent_handle == desktop) &&
+                        (win.style & WS_VISIBLE) != 0)
                     {
                         return win.handle;
                     }
@@ -2609,9 +2624,11 @@ namespace sogen
                 uint32_t width = 0;
                 uint32_t height = 0;
                 int32_t hr = 0; // D3D_OK
-                if (this->d3d9_.snapshot_resource(request.resource, pixels, width, height))
+                hwnd window = 0;
+                const bool snapshot_ok = this->d3d9_.snapshot_resource(request.resource, pixels, width, height);
+                if (snapshot_ok)
                 {
-                    const auto window = find_present_window(win_emu);
+                    window = find_present_window(win_emu);
                     if (window != 0)
                     {
                         win_emu.ui().present_surface(window, ui_surface_desc{.width = static_cast<int>(width),
@@ -2624,6 +2641,17 @@ namespace sogen
                 else
                 {
                     hr = d3derr_invalidcall;
+                }
+
+                // A present that reaches this DDI but drops its frame does so for exactly one of two
+                // reasons -- the source resource is unknown to d3d9_host, or no presentable window was
+                // found -- and neither is distinguishable from "the app never presented at all" in the
+                // frame-stats line below. Env-gated so a real title's per-frame path stays untouched.
+                if (getenv("EMULATOR_D3D9_PRESENTDIAG"))
+                {
+                    win_emu.log.warn("[d3d9-presentdiag] resource=%llu snapshot=%d %ux%u window=0x%X\n",
+                                     static_cast<unsigned long long>(request.resource), snapshot_ok ? 1 : 0, width, height,
+                                     static_cast<unsigned>(window));
                 }
 
                 this->log_d3d9_frame_stats(win_emu);

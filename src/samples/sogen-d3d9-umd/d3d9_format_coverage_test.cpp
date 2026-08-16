@@ -19,8 +19,8 @@
 //    it back. A8R8G8B8 is host-side B8G8R8A8_UNORM (4 bytes/texel), so the readback path needs no
 //    change; only the FORMATOP advertisement gated it.
 // 3. L8 texture (FMT_OP_TEXTURE): a 4x4 single-channel luminance texture (value 200). Host maps L8 ->
-//    VK_FORMAT_R8_UNORM sampled with IDENTITY swizzle, so the value lands in R and G/B read 0 -- a
-//    single-channel format sampled and confirmed.
+//    VK_FORMAT_R8_UNORM sampled through D3D9's luminance swizzle (R,R,R,1), so the value is replicated
+//    into R, G and B -- a single-channel format sampled and confirmed.
 // 4. R5G6B5 + A16B16G16R16F off-screen render targets (RT_TEX): CreateRenderTarget must SUCCEED and a
 //    ColorFill/LockRect round trip must read back the CORRECT per-format bytes at the format's TIGHT
 //    stride (R5G6B5 565-packed at 2 bytes/texel, A16B16G16R16F 4x half-float at 8 bytes/texel). This
@@ -505,14 +505,15 @@ int main()
         ++failures;
     }
 
-    // Sub-pass 3: L8 luminance 200 -> X8R8G8B8 RT. Host maps L8 -> R8_UNORM (identity swizzle), so the
-    // value lands in R; G/B read 0.
+    // Sub-pass 3: L8 luminance 200 -> X8R8G8B8 RT. Real D3D9 samples D3DFMT_L8 as R=G=B=the stored
+    // byte (A=1), and the host applies that luminance swizzle over R8_UNORM, so all three colour
+    // channels read the luminance value.
     if (render_and_read_center(dev, texL8, rtX8, px, "L8"))
     {
-        printf("[d3d9-format-coverage-test] L8 center B=%02X G=%02X R=%02X A=%02X (expected R=C8 G=00 B=00)\n", px[0], px[1], px[2], px[3]);
-        if (channel_close(px[2], 200, 4) && channel_close(px[1], 0, 4) && channel_close(px[0], 0, 4))
+        printf("[d3d9-format-coverage-test] L8 center B=%02X G=%02X R=%02X A=%02X (expected R=G=B=C8)\n", px[0], px[1], px[2], px[3]);
+        if (channel_close(px[2], 200, 4) && channel_close(px[1], 200, 4) && channel_close(px[0], 200, 4))
         {
-            printf("[d3d9-format-coverage-test] PASS: L8 single-channel value sampled into R\n");
+            printf("[d3d9-format-coverage-test] PASS: L8 luminance replicated to R, G and B\n");
         }
         else
         {

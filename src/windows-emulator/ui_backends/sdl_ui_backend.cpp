@@ -458,11 +458,17 @@ namespace sogen
                 {
                     state = this->resolve_window(this->get_top_level_ancestor(window));
                 }
-                if (state && state->renderer)
+                const bool presented = state != nullptr && state->renderer != nullptr;
+                if (presented)
                 {
                     update_surface_texture(*state, surface);
                     render_window(*state);
                 }
+                else
+                {
+                    this->report_dropped_present(window);
+                }
+                report_present_rate(window, presented);
 #else
                 (void)window;
                 (void)surface;
@@ -628,6 +634,83 @@ namespace sogen
                 SDL_UpdateTexture(state.texture, nullptr, surface.pixels, surface.stride);
             }
 
+            // One line per distinct guest window whose frames are being discarded, with the whole
+            // window table, so the "which window should this frame have gone to" question is
+            // answerable from a single run. Shares EMULATOR_FPS_COUNTER's gate.
+            void report_dropped_present(const hwnd window)
+            {
+                static const bool enabled = [] {
+                    const auto* env = getenv("EMULATOR_FPS_COUNTER");
+                    return env != nullptr && env[0] == '1' && env[1] == '\0';
+                }();
+                if (!enabled || !this->reported_drops_.insert(window).second)
+                {
+                    return;
+                }
+
+                const auto* state = this->resolve_window(window);
+                printf("[present-drop] hwnd=0x%X known=%d top_level=%d parent=0x%X ancestor=0x%X\n", static_cast<unsigned>(window),
+                       state != nullptr ? 1 : 0, state != nullptr && state->desc.top_level ? 1 : 0,
+                       state != nullptr ? static_cast<unsigned>(state->desc.parent) : 0u,
+                       static_cast<unsigned>(this->get_top_level_ancestor(window)));
+                for (const auto& [handle, entry] : this->windows_)
+                {
+                    printf("[present-drop]   window 0x%X top_level=%d renderer=%d visible=%d style=0x%X rect=%dx%d\n",
+                           static_cast<unsigned>(handle), entry.desc.top_level ? 1 : 0, entry.renderer != nullptr ? 1 : 0,
+                           entry.desc.visible ? 1 : 0, static_cast<unsigned>(entry.desc.style),
+                           static_cast<int>(entry.desc.rect.right - entry.desc.rect.left),
+                           static_cast<int>(entry.desc.rect.bottom - entry.desc.rect.top));
+                }
+                fflush(stdout);
+            }
+
+            // Opt-in (EMULATOR_FPS_COUNTER=1) present-rate probe. Every rendering path -- the native
+            // D3D9 UMD, a guest-side translation layer's Vulkan swapchain and plain GDI blits -- funnels
+            // through present_surface, so this counts frames identically for all of them. Dropped
+            // presents (no SDL window/renderer resolved for the target guest window) are counted
+            // separately: from the emulated app's side those are indistinguishable from displayed ones,
+            // so an all-drops run looks exactly like a not-presenting one without this split.
+            static void report_present_rate(const hwnd window, const bool presented)
+            {
+                static const bool enabled = [] {
+                    const auto* env = getenv("EMULATOR_FPS_COUNTER");
+                    return env != nullptr && env[0] == '1' && env[1] == '\0';
+                }();
+                if (!enabled)
+                {
+                    return;
+                }
+
+                using clock = std::chrono::steady_clock;
+                static auto window_start = clock::now();
+                static uint64_t frames = 0;
+                static uint64_t dropped = 0;
+                static hwnd last_dropped_window = 0;
+
+                if (presented)
+                {
+                    ++frames;
+                }
+                else
+                {
+                    ++dropped;
+                    last_dropped_window = window;
+                }
+
+                const auto now = clock::now();
+                const auto elapsed = std::chrono::duration<double>(now - window_start).count();
+                if (elapsed >= 5.0)
+                {
+                    printf("[fps] %.2f (%llu frames / %.1fs, %llu dropped, last-dropped-hwnd=0x%X)\n",
+                           static_cast<double>(frames) / elapsed, static_cast<unsigned long long>(frames), elapsed,
+                           static_cast<unsigned long long>(dropped), static_cast<unsigned>(last_dropped_window));
+                    fflush(stdout);
+                    window_start = now;
+                    frames = 0;
+                    dropped = 0;
+                }
+            }
+
             static void render_window(window_state& state)
             {
                 if (state.has_surface && state.texture)
@@ -745,6 +828,7 @@ namespace sogen
             hwnd active_window_{};
             std::unordered_map<hwnd, window_state> windows_{};
             std::unordered_map<SDL_WindowID, hwnd> guest_by_window_id_{};
+            std::unordered_set<hwnd> reported_drops_{};
 #endif
         };
     }
