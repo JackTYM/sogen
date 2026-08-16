@@ -7,6 +7,8 @@
 #include <map>
 #include <mutex>
 #include <atomic>
+#include <set>
+#include <utility>
 #include <vector>
 
 #include "hvf_hypercalls.hpp"
@@ -28,7 +30,9 @@ namespace sogen::fex::hvf
 
     // Process-wide Hypervisor.framework VM under the same-VA, compact-IPA model: every mapped host
     // VA range keeps its exact address inside the vCPU via 4KB-granule stage-1 tables whose output
-    // IPAs come from a compact bump allocator backed by hv_vm_map of the same physical pages.
+    // IPAs come from a compact reclaiming allocator backed by hv_vm_map of the same physical pages.
+    // IPA space is a hard, small resource - the guest-physical range tops out at 2^36 (64 GiB) -
+    // so unmapped runs must be returned for reuse rather than merely bumped past.
     class hvf_vm
     {
       public:
@@ -103,6 +107,8 @@ namespace sogen::fex::hvf
 
         void bump_stage1_generation_locked();
         uint64_t alloc_ipa_locked(size_t size);
+        void release_ipa_locked(uint64_t ipa, uint64_t size);
+        void report_ipa_stats_locked();
         uint64_t* stage1_walk_locked(uint64_t va);
         uint64_t* stage1_alloc_table_locked();
         uint64_t stage1_table_ipa(const uint64_t* table) const;
@@ -125,8 +131,21 @@ namespace sogen::fex::hvf
         bool active_ = false;
         vm_create_result create_result_ = vm_create_result::unavailable;
 
+        // Bump cursor for never-yet-used IPA space; it is also the high-water mark, since a
+        // released block that reaches it is given back to it rather than to the free list.
         uint64_t next_ipa_ = 0x10000;
         std::map<uint64_t, page_state> pages_;
+
+        // Released IPA runs available for reuse. free_ipa_ is address-ordered so a released run
+        // can coalesce with the blocks on either side of it; consequently every block in it is
+        // maximal (no two are contiguous). free_ipa_by_size_ indexes the same blocks as
+        // (size, ipa) so a best fit is a lower_bound rather than a scan.
+        std::map<uint64_t, uint64_t> free_ipa_;
+        std::set<std::pair<uint64_t, uint64_t>> free_ipa_by_size_;
+
+        uint64_t ipa_alloc_calls_ = 0;
+        uint64_t ipa_reused_calls_ = 0;
+
         std::atomic<uint64_t> stage1_generation_{1};
         std::vector<hvf_vcpu_executor*> vcpus_;
 

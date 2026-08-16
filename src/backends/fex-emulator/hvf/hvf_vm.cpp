@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -21,6 +23,10 @@ namespace sogen::fex::hvf
         constexpr auto sys_reg_actlr_el1 = static_cast<hv_sys_reg_t>(0xc081);
 
         constexpr size_t table_pool_bytes = 128ull << 20;
+
+        // Hypervisor.framework rejects hv_vm_map past a 36-bit guest-physical address on Apple
+        // silicon; the first request at or beyond this returns HV_BAD_ARGUMENT.
+        constexpr uint64_t ipa_space_end = 1ull << 36;
 
         constexpr uint64_t attr_valid_page = 0b11ull;
         constexpr uint64_t attr_valid_table = 0b11ull;
@@ -221,11 +227,112 @@ namespace sogen::fex::hvf
         }
     }
 
+    // Allocator health, printed every 8192 allocations when EMULATOR_FEX_HVF_IPA_STATS is set.
+    // "high-water" is the only number that has to stay bounded: exhausting it is fatal.
+    void hvf_vm::report_ipa_stats_locked()
+    {
+        static const bool enabled = std::getenv("EMULATOR_FEX_HVF_IPA_STATS") != nullptr;
+        if (!enabled || (++this->ipa_alloc_calls_ % 8192) != 0)
+        {
+            return;
+        }
+
+        uint64_t free_bytes = 0;
+        for (const auto& [ipa, size] : this->free_ipa_)
+        {
+            (void)ipa;
+            free_bytes += size;
+        }
+
+        fprintf(stderr,
+                "[hvf-ipa] allocs=%llu reused=%llu high-water=%llu MiB live=%llu MiB free=%llu MiB "
+                "(%zu blocks) headroom=%llu MiB\n",
+                static_cast<unsigned long long>(this->ipa_alloc_calls_), static_cast<unsigned long long>(this->ipa_reused_calls_),
+                static_cast<unsigned long long>((this->next_ipa_ - 0x10000) >> 20),
+                static_cast<unsigned long long>((static_cast<uint64_t>(this->pages_.size()) * vm_page_size) >> 20),
+                static_cast<unsigned long long>(free_bytes >> 20), this->free_ipa_.size(),
+                static_cast<unsigned long long>((ipa_space_end - this->next_ipa_) >> 20));
+    }
+
     uint64_t hvf_vm::alloc_ipa_locked(const size_t size)
     {
+        this->report_ipa_stats_locked();
+
+        const uint64_t need = page_align_up(size);
+
+        // Best fit: the smallest released block that still holds the request, so a large block is
+        // not carved up for a single page while an exactly-sized one is sitting there. Requests
+        // are whole runs of contiguous pages from map_locked, so any block this size or larger is
+        // a valid answer - there is no alignment constraint beyond vm_page_size, which every
+        // block already satisfies (both next_ipa_'s origin and every released run are aligned).
+        const auto fit = this->free_ipa_by_size_.lower_bound({need, 0});
+        if (fit != this->free_ipa_by_size_.end())
+        {
+            const auto [block_size, ipa] = *fit;
+            this->free_ipa_by_size_.erase(fit);
+            this->free_ipa_.erase(ipa);
+
+            if (block_size > need)
+            {
+                // The unused tail stays free. It cannot be contiguous with another free block -
+                // the block it was carved from was maximal - so it needs no coalescing.
+                this->free_ipa_.emplace(ipa + need, block_size - need);
+                this->free_ipa_by_size_.emplace(block_size - need, ipa + need);
+            }
+
+            ++this->ipa_reused_calls_;
+            return ipa;
+        }
+
+        if (this->next_ipa_ + need > ipa_space_end)
+        {
+            throw std::runtime_error("HVF: guest-physical address space exhausted");
+        }
+
         const uint64_t ipa = this->next_ipa_;
-        this->next_ipa_ += page_align_up(size);
+        this->next_ipa_ += need;
         return ipa;
+    }
+
+    // Returns a run whose stage-2 mapping has just been torn down to the pool alloc_ipa_locked
+    // draws from. The run is exactly what was handed to hv_vm_unmap, so the space given back can
+    // never overlap anything still mapped.
+    void hvf_vm::release_ipa_locked(uint64_t ipa, uint64_t size)
+    {
+        // Coalesce with the neighbour on each side. Without this, a session that unmaps a large
+        // region one page at a time would leave behind thousands of page-sized holes that no
+        // multi-page request could ever use, and the bump cursor would climb again regardless.
+        // At most one neighbour per side can be contiguous, because every block is maximal.
+        auto next = this->free_ipa_.lower_bound(ipa);
+        if (next != this->free_ipa_.begin())
+        {
+            const auto prev = std::prev(next);
+            if (prev->first + prev->second == ipa)
+            {
+                ipa = prev->first;
+                size += prev->second;
+                this->free_ipa_by_size_.erase({prev->second, prev->first});
+                next = this->free_ipa_.erase(prev);
+            }
+        }
+
+        if (next != this->free_ipa_.end() && next->first == ipa + size)
+        {
+            size += next->second;
+            this->free_ipa_by_size_.erase({next->second, next->first});
+            this->free_ipa_.erase(next);
+        }
+
+        // A block that runs up to the bump cursor is handed back to the cursor instead of being
+        // listed, which keeps next_ipa_ a true high-water mark rather than a monotonic drift.
+        if (ipa + size == this->next_ipa_)
+        {
+            this->next_ipa_ = ipa;
+            return;
+        }
+
+        this->free_ipa_.emplace(ipa, size);
+        this->free_ipa_by_size_.emplace(size, ipa);
     }
 
     uint64_t* hvf_vm::stage1_alloc_table_locked()
@@ -360,12 +467,16 @@ namespace sogen::fex::hvf
             }
 
             const size_t run_size = run_end - cursor;
-            check_hv("hv_vm_unmap", hv_vm_unmap(it->second.ipa, run_size));
+            const uint64_t run_ipa = it->second.ipa;
+            check_hv("hv_vm_unmap", hv_vm_unmap(run_ipa, run_size));
             this->stage1_clear_range_locked(cursor, run_size);
             for (uint64_t page = cursor; page < run_end; page += vm_page_size)
             {
                 this->pages_.erase(page);
             }
+            // Released only once nothing refers to the run any more: the stage-2 mapping is gone,
+            // no stage-1 entry still translates into it, and no page_state still records it.
+            this->release_ipa_locked(run_ipa, run_size);
             cursor = run_end;
         }
     }
