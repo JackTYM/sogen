@@ -1352,6 +1352,11 @@ namespace sogen
         // persists across every draw until this resource is destroyed.
         const vulkan_host::subresource_range depth_range{
             .aspect_mask = depth_aspect, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        // Flush any open batch first: the clear below goes out on the SHARED command_buffer_ with its own
+        // immediate submit+wait, which carries no ordering against a batch that is recorded but not yet
+        // submitted -- it would race (and, being a full-image clear, could land after) that batch's draws.
+        // Once per depth-stencil resource, since the view check above short-circuits every later call.
+        this->flush_batch();
         this->vulkan_.reset_fence(device, this->fence_);
         this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
         this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -1501,6 +1506,7 @@ namespace sogen
             resource_entry* entry{}; // nullptr = this D3D9 RT slot isn't bound/resolvable (a gap)
             uint32_t vk_format{};    // 0 (VK_FORMAT_UNDEFINED) when entry == nullptr
         };
+
         // Matches device_state::render_targets's own std::array<uint64_t, 4> size (d3d9_host.hpp).
         std::array<slot_render_target, 4> rt_slots{};
         size_t bound_rt_count = 0; // one past the highest bound+resolvable slot index
@@ -1668,12 +1674,14 @@ namespace sogen
         // above), or a referenced+usable stream the app never called SetStreamSource for, are left at
         // buffer id 0 -- cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
         frame_arena& arena = this->vertex_index_uniform_arena_;
+
         struct reserved_range
         {
             uint32_t stream;
             const std::vector<std::byte>* bytes;
             size_t offset;
         };
+
         std::vector<reserved_range> reserved_streams;
         for (uint32_t stream = 0; stream <= highest_binding; ++stream)
         {
@@ -1721,6 +1729,7 @@ namespace sogen
         // D3D9 SM3 int/bool constant-register caps (16 registers each, both stages -- fill_d3d9caps),
         // each register expanded to a 16-byte slot (see vs/ps_const_i/b's own comments in d3d9_host.hpp).
         constexpr size_t int_bool_ubo_size = 16 * 4 * sizeof(uint32_t);
+
         // Order is fixed -- both the reservation/upload here and the descriptor writes below read each UBO
         // by these names. ubo_sizes is indexed by the same enum.
         enum ubo_index : size_t
@@ -1732,6 +1741,7 @@ namespace sogen
             ubo_vs_b = 4,
             ubo_ps_b = 5,
         };
+
         const std::array<size_t, 6> ubo_sizes{vs_ubo_size,       ps_ubo_size,       int_bool_ubo_size,
                                               int_bool_ubo_size, int_bool_ubo_size, int_bool_ubo_size};
         std::array<size_t, 6> ubo_offsets{};
@@ -1783,43 +1793,39 @@ namespace sogen
         }
 
         // Batch management -- decide whether to keep accumulating into the currently-open batch or flush
-        // it first, then (re)open a batch this draw records into.
-        //   * A depth-stencil draw is never batched with others: flush any open (color-only) batch, then
-        //     run this draw as its own single-draw batch (flushed again right after recording, below).
+        // it first, then (re)open a batch this draw records into. Depth-stencil draws batch on exactly the
+        // same terms as colour ones; the only extra requirement they carry is the inter-draw depth
+        // dependency the recording step below emits (see its comment).
         //   * A draw whose slot-0 render target differs from the open batch's flushes first, so a batch
         //     never mixes render targets (the SetRenderTarget handler also flushes defensively).
+        //   * A draw whose bound depth-stencil differs from the open batch's flushes first, for the same
+        //     reason: the recording step's depth barrier only synchronizes the ONE depth image the batch
+        //     accumulates into (the SetDepthStencil handler also flushes defensively).
         //   * A programmable draw that would exceed the descriptor pool's per-batch capacity flushes
         //     first, so the pool can be reset (reset only happens on batch open, when it is idle).
         //   * A draw whose arena slices would overflow the current arena capacity flushes first, then --
         //     with the GPU now idle -- grows the arena (amortized doubling) before reopening; growing
         //     while a batch still holds recorded commands referencing the old buffer would be a
         //     use-after-free.
-        const bool is_depth_draw = ds_entry != nullptr;
         const uint64_t target_rt = this->state_.render_targets[0];
-        if (is_depth_draw)
+        const uint64_t target_ds = ds_entry != nullptr ? this->state_.depth_stencil : 0;
+        if (this->batch_open_ && (target_rt != this->batch_rt_ || target_ds != this->batch_ds_))
         {
             this->flush_batch();
         }
-        else
+        if (this->batch_open_ && use_programmable && this->frame_desc_capacity_draws_ != 0 &&
+            this->batch_draw_count_ + 1 > this->frame_desc_capacity_draws_)
         {
-            if (this->batch_open_ && target_rt != this->batch_rt_)
+            this->flush_batch();
+        }
+        if (this->batch_open_ && arena.offset + draw_arena_bytes > arena.capacity)
+        {
+            this->flush_batch();
+            if (!this->grow_arena(arena, std::max(draw_arena_bytes, arena.capacity * 2)))
             {
-                this->flush_batch();
+                return d3d_ok;
             }
-            if (this->batch_open_ && use_programmable && this->frame_desc_capacity_draws_ != 0 &&
-                this->batch_draw_count_ + 1 > this->frame_desc_capacity_draws_)
-            {
-                this->flush_batch();
-            }
-            if (this->batch_open_ && arena.offset + draw_arena_bytes > arena.capacity)
-            {
-                this->flush_batch();
-                if (!this->grow_arena(arena, std::max(draw_arena_bytes, arena.capacity * 2)))
-                {
-                    return d3d_ok;
-                }
-                arena.offset = 0;
-            }
+            arena.offset = 0;
         }
         if (!this->batch_open_)
         {
@@ -1833,6 +1839,7 @@ namespace sogen
             this->vulkan_.begin_command_buffer(this->batch_command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
             this->batch_open_ = true;
             this->batch_rt_ = target_rt;
+            this->batch_ds_ = target_ds;
         }
 
         // Reserve every arena slice now that the batch is open and the arena is guaranteed large enough
@@ -2194,7 +2201,31 @@ namespace sogen
         }
         // The one-time init above already left the depth image in DEPTH_STENCIL_ATTACHMENT_OPTIMAL, and
         // every later draw finds it already there (LOAD_OP_LOAD/STORE_OP_STORE keep it there across
-        // draws) -- no barrier needed here, unlike the color attachment's transfer-src round trip.
+        // draws) -- so no LAYOUT transition is needed here, unlike the color attachment's transfer-src
+        // round trip. A pure execution+memory dependency still is, though: every draw opens its OWN
+        // dynamic-rendering instance (cmd_begin_rendering/cmd_end_rendering below, once per draw), and
+        // Vulkan gives no ordering guarantee between two render pass instances in the same command buffer
+        // -- the "later draws in the same subpass see earlier depth writes" rule applies WITHIN a subpass,
+        // which consecutive batched draws here are not. Prior batched draws' depth writes must therefore
+        // be made visible to this draw's depth test/write explicitly, exactly as the color attachment's
+        // own per-draw barrier round trip above already does for color. Same layout on both sides, so this
+        // is a barrier and nothing more. Before batching this was implicit: every depth draw was its own
+        // submission, and queue-submission order supplied the dependency.
+        if (ds_entry != nullptr)
+        {
+            const vulkan_host::subresource_range depth_range{.aspect_mask = depth_aspect_mask(depth_vk_format),
+                                                             .base_mip_level = 0,
+                                                             .level_count = 1,
+                                                             .base_array_layer = 0,
+                                                             .layer_count = 1};
+            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, ds_entry->vk_image_id,
+                                               VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                               VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
+        }
         const vulkan_host::rendering_attachment depth_attachment{
             .image_view = ds_entry != nullptr ? ds_entry->vk_image_view_id : 0,
             .resolve_image_view = 0,
@@ -2314,14 +2345,6 @@ namespace sogen
                 continue; // gap slot -- nothing was rendered here
             }
             brt.entry->backing_dirty = true;
-        }
-
-        // A depth-stencil draw is its own single-draw batch (see batch management above): submit it now so
-        // it never accumulates with any following draw, keeping depth-using draws one-submission-per-draw
-        // exactly as before batching.
-        if (is_depth_draw)
-        {
-            this->flush_batch();
         }
 
         return d3d_ok;
@@ -2502,6 +2525,7 @@ namespace sogen
         const bool is_cube = tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube);
         const std::vector<texture_subresource> subresources =
             texture_subresource_layout(tex.kind, vk_format, tex.width, tex.height, tex.depth, mip_levels);
+
         struct subresource_upload
         {
             uint32_t width;
@@ -2513,6 +2537,7 @@ namespace sogen
             uint64_t staging_offset;
             const std::byte* src;
         };
+
         std::vector<subresource_upload> uploads;
         uint64_t total_size = 0;
         for (uint32_t index = 0; index < subresources.size(); ++index)
@@ -3302,6 +3327,11 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
+            // Flush any open batch before changing the bound depth-stencil, mirroring set_render_target
+            // above. execute_draw's own batch_ds_ guard already prevents a batch from mixing depth-stencil
+            // resources (its per-draw depth barrier only covers the one image the batch accumulates into);
+            // this is the same defensive belt-and-suspenders.
+            this->flush_batch();
             this->state_.depth_stencil = req.surface;
             return d3d_ok;
         }

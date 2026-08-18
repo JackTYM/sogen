@@ -352,6 +352,10 @@ namespace sogen
         // slot-0 render target differs flushes the batch first (execute_draw), so a batch never mixes
         // render targets.
         uint64_t batch_rt_{};
+        // Depth-stencil resource handle the currently-open batch records into; 0 = none (colour-only
+        // batch). A draw whose bound depth-stencil differs flushes the batch first (execute_draw), because
+        // the inter-draw depth barrier execute_draw emits only synchronizes this one image.
+        uint64_t batch_ds_{};
         // Draws recorded into the currently-open batch that consumed a descriptor-set pair (programmable
         // draws). Reset to 0 on batch open; when the next draw would exceed frame_desc_capacity_draws_ the
         // batch is flushed first so the pool can be reset (see execute_draw's overflow guard).
