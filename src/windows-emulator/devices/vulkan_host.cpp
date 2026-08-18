@@ -6286,9 +6286,16 @@ namespace sogen
         // Depth-stencil resources (D3DUSAGE_DEPTHSTENCIL) reuse this same function -- give them
         // DEPTH_STENCIL_ATTACHMENT usage instead of COLOR_ATTACHMENT, or using the image as a depth
         // attachment (see d3d9_host::execute_draw) would be invalid.
-        image_info.usage = is_depth_format(vk_format)
-                               ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
-                               : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        // SAMPLED usage on top of that, for both kinds: a render target an app later binds as a texture
+        // (render-to-texture -- see d3d9_host::execute_draw's sampler loop) needs it, and an image
+        // created without it can never be given a sampled view at all, however it is used later. The bit
+        // is free when unused: it constrains nothing else about the image and every driver reports it as
+        // a supported optimal-tiling feature for the colour/depth formats that reach here.
+        image_info.usage =
+            is_depth_format(vk_format)
+                ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+                : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                   VK_IMAGE_USAGE_SAMPLED_BIT);
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)

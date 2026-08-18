@@ -2909,6 +2909,33 @@ namespace sogen
             {
                 win_emu.log.info("[d3d9-host] frame: draws=%llu submits=%llu\n", static_cast<unsigned long long>(this->d3d9_.draw_count()),
                                  static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
+
+                // Same process-lifetime, delta-between-lines convention as the counts above. This breaks
+                // the single draws= number into what each draw actually did -- dropped before recording
+                // (and why), or recorded against which pipeline, with or without a live depth test -- plus
+                // the per-flag pfnClear tally. Env-gated: a real title's per-frame path stays untouched.
+                if (getenv("EMULATOR_D3D9_DRAWDIAG"))
+                {
+                    const auto& s = this->d3d9_.stats();
+                    win_emu.log.warn(
+                        "[d3d9-drawdiag] rec_prog=%llu rec_fixed=%llu depth_tested=%llu | drop_rt=%llu drop_vtx=%llu "
+                        "drop_pipe=%llu | clear_target=%llu clear_z=%llu clear_stencil=%llu\n",
+                        static_cast<unsigned long long>(s.recorded_programmable), static_cast<unsigned long long>(s.recorded_fixed),
+                        static_cast<unsigned long long>(s.recorded_depth_tested), static_cast<unsigned long long>(s.drop_no_render_target),
+                        static_cast<unsigned long long>(s.drop_no_vertex_data), static_cast<unsigned long long>(s.drop_no_pipeline),
+                        static_cast<unsigned long long>(s.clear_target), static_cast<unsigned long long>(s.clear_zbuffer),
+                        static_cast<unsigned long long>(s.clear_stencil));
+                    win_emu.log.warn("[d3d9-drawdiag] pipe_fail: shader_missing=%llu translate=%llu vk_object=%llu\n",
+                                     static_cast<unsigned long long>(s.drop_shader_missing),
+                                     static_cast<unsigned long long>(s.drop_translate_failed),
+                                     static_cast<unsigned long long>(s.drop_vk_object_failed));
+                    std::string rts;
+                    for (const auto& [rt, count] : s.draws_per_render_target)
+                    {
+                        rts += " " + std::to_string(rt) + "=" + std::to_string(count);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] draws_per_rt:%s\n", rts.c_str());
+                }
             }
 
             NTSTATUS handle_d3d9_present(windows_emulator& win_emu, const io_device_context& context)

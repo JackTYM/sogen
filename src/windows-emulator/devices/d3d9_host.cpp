@@ -675,6 +675,7 @@ namespace sogen
         const auto ps_it = this->shaders_.find(this->state_.pixel_shader);
         if (vs_it == this->shaders_.end() || ps_it == this->shaders_.end())
         {
+            ++this->stats_.drop_shader_missing;
             return nullptr;
         }
 
@@ -682,12 +683,14 @@ namespace sogen
         if (!translate_d3d9_shader_pair(vs_it->second.tokens.data(), vs_it->second.tokens.size() * sizeof(uint32_t),
                                         ps_it->second.tokens.data(), ps_it->second.tokens.size() * sizeof(uint32_t), spirv))
         {
+            ++this->stats_.drop_translate_failed;
             return nullptr;
         }
 
         const uint64_t device = this->ensure_vk_device();
         if (device == 0)
         {
+            ++this->stats_.drop_vk_object_failed;
             return nullptr;
         }
 
@@ -696,6 +699,7 @@ namespace sogen
                                                entry.vs_module) != 0 ||
             entry.vs_module == 0)
         {
+            ++this->stats_.drop_vk_object_failed;
             return nullptr;
         }
         if (this->vulkan_.create_shader_module(device, spirv.pixel_spirv.data(), spirv.pixel_spirv.size() * sizeof(uint32_t),
@@ -703,6 +707,7 @@ namespace sogen
             entry.fs_module == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
+            ++this->stats_.drop_vk_object_failed;
             return nullptr;
         }
 
@@ -778,6 +783,7 @@ namespace sogen
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
+            ++this->stats_.drop_vk_object_failed;
             return nullptr;
         }
         if (this->vulkan_.create_descriptor_set_layout(device, ps_bindings, entry.ps_set_layout) != 0 || entry.ps_set_layout == 0)
@@ -785,6 +791,7 @@ namespace sogen
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
             this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
+            ++this->stats_.drop_vk_object_failed;
             return nullptr;
         }
 
@@ -795,6 +802,7 @@ namespace sogen
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
             this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
             this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
+            ++this->stats_.drop_vk_object_failed;
             return nullptr;
         }
 
@@ -884,11 +892,44 @@ namespace sogen
             /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
         {
+            // EMULATOR_D3D9_PIPEDIAG dumps the full description of a pipeline the driver refused. Without
+            // it the failure is completely silent -- ensure_programmable_pipeline returns nullptr,
+            // execute_draw drops the draw with a D3D_OK, and the only symptom is geometry that never
+            // appears, indistinguishable from geometry the app never submitted. Nothing else recovers the
+            // rejected configuration: it is assembled from live render state and thrown away on failure.
+            // Same fprintf-to-stderr shape d3d9_shader_translator.cpp uses for its vkd3d diagnostics, and
+            // capped, because a failing pipeline is retried on every single draw (failures are not cached).
+            static int pipe_diag_left = getenv("EMULATOR_D3D9_PIPEDIAG") != nullptr ? 24 : 0;
+            if (pipe_diag_left > 0)
+            {
+                --pipe_diag_left;
+                fprintf(stderr,
+                        "[d3d9-pipediag] create_graphics_pipeline rc=%d vs=%llu ps=%llu %ux%u depth_fmt=%u depth{test=%u write=%u op=%u} "
+                        "clip=%u colors=%zu bindings=%zu attrs=%zu\n",
+                        result, static_cast<unsigned long long>(this->state_.vertex_shader),
+                        static_cast<unsigned long long>(this->state_.pixel_shader), width, height, depth_format, key.depth.test_enable,
+                        key.depth.write_enable, key.depth.compare_op, key.depth_clip_enable, color_formats.size(), bindings.size(),
+                        attributes.size());
+                for (size_t i = 0; i < color_formats.size(); ++i)
+                {
+                    fprintf(stderr, "[d3d9-pipediag]   color[%zu] fmt=%u\n", i, color_formats[i]);
+                }
+                for (const auto& b : bindings)
+                {
+                    fprintf(stderr, "[d3d9-pipediag]   binding %u stride=%u rate=%u\n", b.binding, b.stride, b.input_rate);
+                }
+                for (const auto& a : attributes)
+                {
+                    fprintf(stderr, "[d3d9-pipediag]   attr loc=%u binding=%u fmt=%u offset=%u\n", a.location, a.binding, a.format,
+                            a.offset);
+                }
+            }
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             this->vulkan_.destroy_shader_module(device, entry.fs_module);
             this->vulkan_.destroy_pipeline_layout(device, entry.pipeline_layout);
             this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
             this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
+            ++this->stats_.drop_vk_object_failed;
             return nullptr;
         }
 
@@ -1053,6 +1094,24 @@ namespace sogen
                 return {VK_IMAGE_VIEW_TYPE_3D, 1};
             }
             return {VK_IMAGE_VIEW_TYPE_2D, 1};
+        }
+
+        // True for a colour render target that a draw may legally sample as a texture. D3D9 lets an app
+        // SetTexture() a surface it previously rendered into (render-to-texture), which is how every
+        // shader-era title composites its scene: the world is drawn into one or more off-screen targets
+        // and a later full-screen pass samples them onto the back buffer. Such a resource is
+        // render-target-kind, so it has real GPU backing but NO CPU-side pixels to upload -- the exact
+        // case ensure_texture_uploaded is documented to refuse.
+        //
+        // Depth-stencil-usage resources are deliberately excluded (a shadow-map fetch needs a
+        // single-aspect sampled view, while this host's cached per-resource view for a combined D24S8
+        // depth attachment necessarily carries both aspects -- see ensure_depth_stencil_view -- so the
+        // one cached view cannot serve both roles). Those stages stay unbound, as before.
+        // Takes the two resource_entry fields it needs rather than the entry itself: resource_entry is a
+        // private nested type of d3d9_host and cannot be named from this anonymous namespace.
+        bool is_samplable_render_target(const uint64_t vk_image_id, const uint32_t usage)
+        {
+            return vk_image_id != 0 && (usage & d3dusage_rendertarget) != 0 && (usage & d3dusage_depthstencil) == 0;
         }
 
         // Converts an IEEE-754 single-precision float to a half-precision (binary16) bit pattern, with
@@ -1311,6 +1370,38 @@ namespace sogen
         return true;
     }
 
+    void d3d9_host::clear_depth_stencil(const uint64_t device, resource_entry& ds_entry, const uint32_t depth_format,
+                                        const uint32_t clear_aspects, const float depth, const uint32_t stencil)
+    {
+        const uint32_t full_aspect = depth_aspect_mask(depth_format);
+        const uint32_t aspects = clear_aspects & full_aspect;
+        if (aspects == 0)
+        {
+            return; // e.g. D3DCLEAR_STENCIL against a depth-only format -- nothing this image can clear
+        }
+        const vulkan_host::subresource_range barrier_range{
+            .aspect_mask = full_aspect, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        const vulkan_host::subresource_range clear_range{
+            .aspect_mask = aspects, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        this->vulkan_.reset_fence(device, this->fence_);
+        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, ds_entry.vk_image_id,
+                                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, barrier_range);
+        this->vulkan_.cmd_clear_depth_stencil_image(this->command_buffer_, ds_entry.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                                    depth, stencil, clear_range);
+        this->vulkan_.cmd_pipeline_barrier(
+            this->command_buffer_, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, barrier_range);
+        this->vulkan_.end_command_buffer(this->command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
+    }
+
     // The single alignment used for every arena slice (vertex/index/UBO), because it is simultaneously
     // >= every per-usage requirement this one buffer serves: >= the real minUniformBufferOffsetAlignment
     // reported by every target device (so a UBO slice is a legal VkDescriptorBufferInfo offset), >= any
@@ -1387,6 +1478,7 @@ namespace sogen
         const auto rt_it = this->resources_.find(this->state_.render_targets[0]);
         if (rt_it == this->resources_.end() || rt_it->second.vk_image_id == 0)
         {
+            ++this->stats_.drop_no_render_target;
             return d3d_ok; // no bound render target with GPU backing -- nothing to draw into yet
         }
         auto& rt = rt_it->second;
@@ -1474,6 +1566,7 @@ namespace sogen
                 (vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
                  vb_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
             {
+                ++this->stats_.drop_no_vertex_data;
                 return d3d_ok; // no real vertex data bound
             }
         }
@@ -1496,6 +1589,7 @@ namespace sogen
                     (ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) &&
                      ib_it->second.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer)))
                 {
+                    ++this->stats_.drop_no_vertex_data;
                     return d3d_ok; // no real index data bound
                 }
                 ib_entry = &ib_it->second;
@@ -1515,11 +1609,13 @@ namespace sogen
             programmable = this->ensure_programmable_pipeline(color_formats, rt.width, rt.height, depth_vk_format);
             if (programmable == nullptr)
             {
+                ++this->stats_.drop_no_pipeline;
                 return d3d_ok; // translation/pipeline failure; degrade silently
             }
         }
         else if (!this->ensure_pipeline(color_formats, rt.width, rt.height, depth_vk_format))
         {
+            ++this->stats_.drop_no_pipeline;
             return d3d_ok;
         }
 
@@ -1794,6 +1890,11 @@ namespace sogen
         std::array<uint64_t, max_vs_sampler_stages> vs_tex_samplers{};
         std::array<uint64_t, max_vs_sampler_stages> vs_tex_image_views{};
         std::array<uint64_t, 2> descriptor_sets{};
+        // Colour render targets this draw samples as textures (render-to-texture). They rest in
+        // TRANSFER_SRC_OPTIMAL like every other render target here, so each needs a barrier into
+        // SHADER_READ_ONLY_OPTIMAL before the render pass and back out after it -- the read-side mirror
+        // of the write-side round trip the colour attachments themselves already do below.
+        std::vector<resource_entry*> sampled_render_targets;
         if (use_programmable)
         {
             // Upload the six constant buffers into their reserved arena slices. Contents genuinely change
@@ -1813,7 +1914,7 @@ namespace sogen
             for (uint32_t stage = 0; stage < max_ps_sampler_stages; ++stage)
             {
                 const auto tex_it = this->state_.bound_textures.find(stage);
-                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0 || !this->ensure_texture_uploaded(tex_it->second))
+                if (tex_it == this->state_.bound_textures.end() || tex_it->second == 0)
                 {
                     continue;
                 }
@@ -1823,6 +1924,30 @@ namespace sogen
                     continue;
                 }
                 resource_entry& tex = tex_res_it->second;
+                // Render-to-texture: a colour render target bound as a texture. There is nothing to
+                // upload -- its GPU image already holds the pixels a previous draw rendered into it --
+                // so ensure_texture_uploaded (which refuses render-target-usage resources outright) must
+                // NOT gate it. What it does need is a layout round trip, because a render target rests
+                // in TRANSFER_SRC_OPTIMAL; it is collected into sampled_render_targets for that below.
+                const bool rt_as_texture = is_samplable_render_target(tex.vk_image_id, tex.usage);
+                if (rt_as_texture)
+                {
+                    // Sampling an image this same draw also renders into is a feedback loop -- undefined
+                    // in D3D9 as much as in Vulkan. Skip the stage rather than record an illegal draw.
+                    bool is_own_attachment = false;
+                    for (const auto& brt : bound_rts)
+                    {
+                        is_own_attachment = is_own_attachment || brt.entry == &tex;
+                    }
+                    if (is_own_attachment)
+                    {
+                        continue;
+                    }
+                }
+                else if (!this->ensure_texture_uploaded(tex_it->second))
+                {
+                    continue;
+                }
                 if (tex.vk_image_view_id == 0)
                 {
                     uint32_t tex_vk_format = 0;
@@ -1831,17 +1956,26 @@ namespace sogen
                         // Sampling view spans the texture's full mip chain (levelCount = mip_levels) so the
                         // sampler can select any level; single-mip textures still get levelCount 1. View
                         // type/layer-count follow the resource kind (cube/volume/2D) via the shared helper.
-                        const uint32_t view_levels = std::max(1u, tex.mip_levels);
-                        const sampled_view_shape view_shape = sampled_view_shape_for_kind(tex.kind);
+                        // A render target's image is always created single-mip, single-layer, plain 2D by
+                        // vulkan_host::create_render_target no matter what the D3D9 resource claims, so its
+                        // view must describe that image, not the D3D9 declaration.
+                        const uint32_t view_levels = rt_as_texture ? 1u : std::max(1u, tex.mip_levels);
+                        const sampled_view_shape view_shape =
+                            rt_as_texture ? sampled_view_shape{VK_IMAGE_VIEW_TYPE_2D, 1} : sampled_view_shape_for_kind(tex.kind);
                         const auto swizzle = d3d9_format_to_vulkan_swizzle(tex.format);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                         view_shape.view_type, 0, view_levels, 0, view_shape.layer_count, swizzle.r,
                                                         swizzle.g, swizzle.b, swizzle.a, tex.vk_image_view_id);
                     }
                 }
-                if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, std::max(1u, tex.mip_levels), tex_samplers[stage]))
+                const uint32_t sampler_mips = rt_as_texture ? 1u : std::max(1u, tex.mip_levels);
+                if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, sampler_mips, tex_samplers[stage]))
                 {
                     tex_image_views[stage] = tex.vk_image_view_id;
+                    if (rt_as_texture)
+                    {
+                        sampled_render_targets.push_back(&tex);
+                    }
                 }
             }
 
@@ -2028,6 +2162,13 @@ namespace sogen
                                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
         }
+        for (resource_entry* srt : sampled_render_targets)
+        {
+            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, srt->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                               VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, color_range);
+        }
 
         std::vector<vulkan_host::rendering_attachment> color_attachments;
         color_attachments.reserve(bound_rts.size());
@@ -2128,6 +2269,14 @@ namespace sogen
 
         this->vulkan_.cmd_end_rendering(this->batch_command_buffer_);
 
+        // Counted here, past every early return, so these are draws that genuinely reached the GPU.
+        ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
+        ++this->stats_.draws_per_render_target[target_rt];
+        if (build_depth_state(this->state_.render_state, depth_vk_format).test_enable != 0)
+        {
+            ++this->stats_.recorded_depth_tested;
+        }
+
         for (const auto& brt : bound_rts)
         {
             if (brt.entry == nullptr)
@@ -2138,6 +2287,14 @@ namespace sogen
                                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+        }
+        // Restore every sampled render target to the TRANSFER_SRC_OPTIMAL resting layout the rest of this
+        // host (readback, clear, blt, the next draw's own barriers) relies on.
+        for (resource_entry* srt : sampled_render_targets)
+        {
+            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, srt->vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
         }
 
         // The batch is NOT submitted here -- it stays open, accumulating subsequent same-render-target
@@ -3186,7 +3343,14 @@ namespace sogen
             // D3DCLEAR_TARGET clears ALL currently-bound render targets (D3D9's SetRenderTarget slots
             // 0-3) to the single supplied color, not just slot 0 -- same slot resolution as
             // execute_draw's rt_slots loop, just without needing a Vulkan format for a pipeline.
-            if ((req.flags & 1) != 0 /* D3DCLEAR_TARGET */)
+            constexpr uint32_t d3dclear_target = 0x1;
+            constexpr uint32_t d3dclear_zbuffer = 0x2;
+            constexpr uint32_t d3dclear_stencil = 0x4;
+            this->stats_.clear_target += (req.flags & d3dclear_target) != 0 ? 1 : 0;
+            this->stats_.clear_zbuffer += (req.flags & d3dclear_zbuffer) != 0 ? 1 : 0;
+            this->stats_.clear_stencil += (req.flags & d3dclear_stencil) != 0 ? 1 : 0;
+
+            if ((req.flags & d3dclear_target) != 0)
             {
                 // D3DCOLOR is 0xAARRGGBB.
                 const std::array<float, 4> color{
@@ -3205,6 +3369,31 @@ namespace sogen
                     this->vulkan_.submit_clear(it->second.vk_image_id, color.data());
 
                     it->second.backing_dirty = true;
+                }
+            }
+
+            // D3DCLEAR_ZBUFFER/D3DCLEAR_STENCIL against the currently-bound depth-stencil. Before this,
+            // both bits were silently dropped and the depth buffer was only ever cleared ONCE, by
+            // ensure_depth_stencil_view's first-use initialization -- so every frame after the first
+            // depth-tested one ran against the accumulated minimum depth of every frame before it. With a
+            // moving camera that stale buffer rejects essentially every world fragment (the classic
+            // symptom: a correct HUD, drawn with D3DRS_ZENABLE off, over a completely black 3D scene),
+            // while a purely 2D app never notices because it never binds a depth-stencil at all.
+            if ((req.flags & (d3dclear_zbuffer | d3dclear_stencil)) != 0 && this->state_.depth_stencil != 0)
+            {
+                const auto ds_it = this->resources_.find(this->state_.depth_stencil);
+                uint32_t depth_vk_format = 0;
+                const uint64_t device = this->ensure_vk_device();
+                if (device != 0 && this->ensure_draw_infra() && ds_it != this->resources_.end() && ds_it->second.vk_image_id != 0 &&
+                    d3d9_format_to_vulkan(ds_it->second.format, depth_vk_format) &&
+                    // Establishes the DEPTH_STENCIL_ATTACHMENT_OPTIMAL resting layout clear_depth_stencil
+                    // transitions out of; on a resource whose view already exists this is a no-op.
+                    this->ensure_depth_stencil_view(device, ds_it->second, depth_vk_format))
+                {
+                    uint32_t aspects = 0;
+                    aspects |= (req.flags & d3dclear_zbuffer) != 0 ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u;
+                    aspects |= (req.flags & d3dclear_stencil) != 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u;
+                    this->clear_depth_stencil(device, ds_it->second, depth_vk_format, aspects, req.z, req.stencil);
                 }
             }
             return d3d_ok;

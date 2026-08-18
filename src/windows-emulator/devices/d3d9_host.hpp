@@ -169,6 +169,36 @@ namespace sogen
         {
             return this->batch_submit_count_;
         }
+
+        // Per-outcome classification of every draw and clear this host has processed -- see stats_'s own
+        // comment (below, with the members) for why the raw draw/submit totals aren't enough.
+        struct draw_stats
+        {
+            uint64_t drop_no_render_target{}; // execute_draw returned early: slot-0 RT missing/unbacked
+            uint64_t drop_no_vertex_data{};   // ... no usable stream-0 vertex (or index) source bound
+            uint64_t drop_no_pipeline{};      // ... shader translation or pipeline creation failed
+            // drop_no_pipeline broken down by which stage of ensure_programmable_pipeline gave up.
+            uint64_t drop_shader_missing{};   // the bound VS or PS id isn't in shaders_ at all
+            uint64_t drop_translate_failed{}; // vkd3d-shader could not translate the pair to SPIR-V
+            uint64_t drop_vk_object_failed{}; // a Vulkan module/layout/pipeline object failed to create
+            uint64_t recorded_fixed{};        // draw recorded against the fixed-function pipeline
+            uint64_t recorded_programmable{}; // draw recorded against a translated VS+PS pipeline
+            uint64_t recorded_depth_tested{}; // subset of the two above whose pipeline has depth test on
+            uint64_t clear_target{};          // pfnClear calls carrying D3DCLEAR_TARGET
+            uint64_t clear_zbuffer{};         // ... D3DCLEAR_ZBUFFER
+            uint64_t clear_stencil{};         // ... D3DCLEAR_STENCIL
+            // Recorded draws bucketed by the slot-0 render target they targeted. A title that renders its
+            // 3D scene into an off-screen target and composites it separately shows up here as a second,
+            // heavily-drawn resource id that is NOT the one pfnPresent hands back -- the one shape of
+            // "everything works but nothing is visible" that no other counter can distinguish.
+            std::map<uint64_t, uint64_t> draws_per_render_target{};
+        };
+
+        const draw_stats& stats() const
+        {
+            return this->stats_;
+        }
+
         // True if `resource` is a render-target-kind resource -- the frame-output image whose pixels a
         // Lock/Present reads back. Lets gpu_bridge fire its draw/submit summary only at a real frame
         // completion (a render-target Lock), not on every vertex/index-buffer Lock.
@@ -335,6 +365,15 @@ namespace sogen
         uint64_t draw_count_{};
         uint64_t batch_submit_count_{};
 
+        // Same never-reset, process-lifetime convention as the two counters above, but classifying WHAT
+        // each draw/clear actually did rather than just how many there were. draw_count_ alone cannot
+        // distinguish "2856 draws produced pixels" from "2856 draws were all dropped before recording" or
+        // "all recorded but every fragment failed its depth test" -- three states that look identical in
+        // the frame line and are the first fork any black-output investigation has to take. Incremented
+        // unconditionally (a predictable-branch increment per draw, immaterial next to the Vulkan work in
+        // the same function); only the logging of them is env-gated, in gpu_bridge.
+        draw_stats stats_{};
+
         // The one hardcoded fixed-function shader pair (see execute_draw's comment), its shader modules
         // and pipeline layout -- shape-invariant (FF always uses the same hardcoded XYZRHW+DIFFUSE vertex
         // layout), so these are lazily created once and reused for every FF pipeline variant.
@@ -478,6 +517,7 @@ namespace sogen
             float max_lod{};
             auto operator<=>(const sampler_cache_key&) const = default;
         };
+
         std::map<sampler_cache_key, uint64_t> sampler_cache_{};
 
         // Single per-device-lifetime GPU buffer backing every vertex/index/uniform range a draw needs.
@@ -590,6 +630,16 @@ namespace sogen
         // No-op (returns true) if ds_entry already has a view. depth_format is ds_entry's own VkFormat.
         bool ensure_depth_stencil_view(uint64_t device, resource_entry& ds_entry, uint32_t depth_format);
 
+        // Real per-call D3DCLEAR_ZBUFFER/D3DCLEAR_STENCIL: clears the requested aspects of an already
+        // initialized depth-stencil resource (callers must have run ensure_depth_stencil_view first, so
+        // the image is in DEPTH_STENCIL_ATTACHMENT_OPTIMAL and the untouched aspect's contents survive
+        // the transition). clear_aspects selects which of depth/stencil are written; the surrounding
+        // barriers always cover the format's FULL aspect mask, because a combined depth/stencil image
+        // may only be transitioned per-aspect with separateDepthStencilLayouts, which this host does not
+        // require. Blocking, on the shared non-batch command buffer, like every other one-off submit here.
+        void clear_depth_stencil(uint64_t device, resource_entry& ds_entry, uint32_t depth_format, uint32_t clear_aspects, float depth,
+                                 uint32_t stencil);
+
         // If this color RT has GPU-side pixels not yet mirrored into `backing`, copy them now (blocking)
         // and clear the flag -- the sole place this readback happens; pfnClear/pfnDrawPrimitive only
         // mark dirty, they no longer read back eagerly. No-op for buffers/plain textures (backing_dirty
@@ -632,6 +682,7 @@ namespace sogen
             uint32_t first_index;
             int32_t base_vertex_index;
         };
+
         int32_t execute_draw(uint32_t vertex_count, uint32_t first_vertex, const indexed_draw* indexed = nullptr);
     };
 } // namespace sogen
