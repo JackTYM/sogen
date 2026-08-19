@@ -4,6 +4,8 @@
 #include "../devices/named_pipe.hpp"
 
 #include <utils/finally.hpp>
+#include <utils/io.hpp>
+#include <utils/buffer_accessor.hpp>
 
 namespace sogen
 {
@@ -59,6 +61,33 @@ namespace sogen
 
                 return result;
             }
+
+            // wow64.dll's own NtCreateUserProcess thunk queries ProcessWow64Information on the handle
+            // to the process it just created, to decide how to finish narrowing the syscall's output
+            // (see handle_NtQueryInformationProcess's ProcessWow64Information case for a child handle).
+            // Real Windows answers this from the kernel's own view of the child; here it is
+            // reconstructed from the child's own image, since a spawned child runs as an independent
+            // host OS process this codebase has no live introspection into.
+            std::optional<bool> is_native_64bit_image(const windows_emulator& win_emu, const windows_path& image_path)
+            {
+                std::vector<std::byte> file{};
+                if (!utils::io::read_file(win_emu.file_sys.translate(image_path), &file))
+                {
+                    return std::nullopt;
+                }
+
+                try
+                {
+                    const utils::safe_buffer_accessor<const std::byte> buffer{file};
+                    const auto dos_header = buffer.as<PEDosHeader_t>(0).get();
+                    const auto nt_headers = buffer.as<PENTHeaders_t<uint64_t>>(static_cast<size_t>(dos_header.e_lfanew)).get();
+                    return nt_headers.FileHeader.Machine == PEMachineType::AMD64;
+                }
+                catch (const std::exception&)
+                {
+                    return std::nullopt;
+                }
+            }
         }
 
         NTSTATUS handle_NtQueryInformationProcess(const syscall_context& c, const handle process_handle, const uint32_t info_class,
@@ -98,6 +127,22 @@ namespace sogen
                                                                                 });
                     default:
                         return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+                }
+
+                if (info_class == ProcessWow64Information && process_handle.value.type == handle_types::process &&
+                    process_handle.value.is_pseudo)
+                {
+                    const auto child = c.proc.child_processes.find(process_handle.value.id);
+                    if (child != c.proc.child_processes.end())
+                    {
+                        const auto is_native_64bit = is_native_64bit_image(c.win_emu, child->second.image_path);
+                        if (is_native_64bit.value_or(false))
+                        {
+                            return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
+                                c.emu, process_information, process_information_length, return_length,
+                                [](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = 0; });
+                        }
                     }
                 }
 
