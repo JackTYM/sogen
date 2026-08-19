@@ -13,6 +13,13 @@ namespace sogen
                 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x04, 0x00, 0x00, 0x00,
             };
 
+            // S-1-5-5-0-1000: a synthetic logon-session SID (SECURITY_LOGON_IDS_RID); real Windows
+            // derives the trailing two sub-authorities from the token's actual logon LUID, which sogen
+            // does not track, so a fixed, stable value is used instead.
+            constexpr std::array<uint8_t, 20> logon_sid = {
+                0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00,
+            };
+
             bool sid_matches(const memory_manager& memory, const uint64_t address, const std::span<const uint8_t> expected)
             {
                 std::array<uint8_t, 8> header{};
@@ -91,6 +98,16 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        NTSTATUS handle_NtFilterToken(const syscall_context&, const handle existing_token_handle, ULONG /*flags*/,
+                                      uint64_t /*sids_to_disable*/, uint64_t /*privileges_to_delete*/, uint64_t /*restricted_sids*/,
+                                      const emulator_object<handle> new_token_handle)
+        {
+            // sogen doesn't model per-handle SID/privilege restrictions, so the filtered token is
+            // just the same recognized identity as the source token.
+            new_token_handle.write(existing_token_handle);
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS handle_NtQueryInformationToken(const syscall_context& c, const handle token_handle,
                                                 const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t token_information,
                                                 const ULONG token_information_length, const emulator_object<ULONG> return_length)
@@ -150,6 +167,26 @@ namespace sogen
                 c.emu.write_memory(token_information + sizeof(TOKEN_GROUPS64), interactive_group);
                 c.emu.write_memory(groups.Groups[0].Sid, sid.data(), sid.size());
                 c.emu.write_memory(interactive_group.Sid, interactive_sid);
+                return STATUS_SUCCESS;
+            }
+
+            if (token_information_class == TokenLogonSid)
+            {
+                const auto required_size = sizeof(TOKEN_GROUPS64) + logon_sid.size();
+                return_length.write(static_cast<ULONG>(required_size));
+
+                if (required_size > token_information_length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                TOKEN_GROUPS64 groups{};
+                groups.GroupCount = 1;
+                groups.Groups[0].Attributes = 0xC0000004; // SE_GROUP_LOGON_ID | SE_GROUP_ENABLED
+                groups.Groups[0].Sid = token_information + sizeof(TOKEN_GROUPS64);
+
+                emulator_object<TOKEN_GROUPS64>{c.emu, token_information}.write(groups);
+                c.emu.write_memory(groups.Groups[0].Sid, logon_sid);
                 return STATUS_SUCCESS;
             }
 

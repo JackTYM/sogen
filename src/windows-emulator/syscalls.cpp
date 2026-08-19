@@ -459,6 +459,9 @@ namespace sogen
                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
                                 /*object_attributes*/,
                                 BOOLEAN /*effective_only*/, TOKEN_TYPE type, emulator_object<handle> new_token_handle);
+        NTSTATUS handle_NtFilterToken(const syscall_context&, handle existing_token_handle, ULONG /*flags*/, uint64_t /*sids_to_disable*/,
+                                      uint64_t /*privileges_to_delete*/, uint64_t /*restricted_sids*/,
+                                      emulator_object<handle> new_token_handle);
         NTSTATUS handle_NtQueryInformationToken(const syscall_context& c, handle token_handle,
                                                 TOKEN_INFORMATION_CLASS token_information_class, uint64_t token_information,
                                                 ULONG token_information_length, emulator_object<ULONG> return_length);
@@ -1505,6 +1508,7 @@ namespace sogen
         add_handler(NtOpenPrivateNamespace);
         add_handler(NtDeletePrivateNamespace);
         add_handler(NtDuplicateToken);
+        add_handler(NtFilterToken);
         add_handler(NtQueryTimerResolution);
         add_handler(NtSetInformationKey);
         add_handler(NtUserGetKeyboardLayout);
