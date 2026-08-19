@@ -7,12 +7,11 @@
 namespace sogen
 {
 
-    namespace syscalls
+    namespace
     {
-        NTSTATUS handle_NtOpenKey(const syscall_context& c, const emulator_object<handle> key_handle, const ACCESS_MASK /*desired_access*/,
-                                  const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
+        std::optional<std::u16string> resolve_registry_key_path(const syscall_context& c,
+                                                                const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes)
         {
-            const auto attributes = object_attributes.read();
             auto key = read_unicode_string(c.emu, attributes.ObjectName);
 
             if (attributes.RootDirectory)
@@ -20,16 +19,32 @@ namespace sogen
                 const auto* parent_handle = c.proc.registry_keys.get(attributes.RootDirectory);
                 if (!parent_handle)
                 {
-                    return STATUS_INVALID_HANDLE;
+                    return std::nullopt;
                 }
 
                 const std::filesystem::path full_path = parent_handle->hive.get() / parent_handle->path.get() / key;
                 key = full_path.u16string();
             }
 
-            c.win_emu.callbacks.on_generic_access("Registry key", key);
+            return key;
+        }
+    } // namespace
 
-            auto entry = c.win_emu.registry.get_key({key});
+    namespace syscalls
+    {
+        NTSTATUS handle_NtOpenKey(const syscall_context& c, const emulator_object<handle> key_handle, const ACCESS_MASK /*desired_access*/,
+                                  const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
+        {
+            const auto attributes = object_attributes.read();
+            const auto key = resolve_registry_key_path(c, attributes);
+            if (!key.has_value())
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            c.win_emu.callbacks.on_generic_access("Registry key", *key);
+
+            auto entry = c.win_emu.registry.get_key({*key});
             if (!entry.has_value())
             {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -387,12 +402,25 @@ namespace sogen
         {
             const auto result = handle_NtOpenKey(c, key_handle, desired_access, object_attributes);
 
-            if (result == STATUS_OBJECT_NAME_NOT_FOUND)
+            if (result != STATUS_OBJECT_NAME_NOT_FOUND)
             {
-                return STATUS_NOT_SUPPORTED;
+                return result;
             }
 
-            return result;
+            const auto attributes = object_attributes.read();
+            const auto key = resolve_registry_key_path(c, attributes);
+            if (!key.has_value())
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            c.win_emu.callbacks.on_generic_access("Registry key", *key);
+
+            auto entry = c.win_emu.registry.create_key({*key});
+            const auto handle = c.proc.registry_keys.store(std::move(entry));
+            key_handle.write(handle);
+
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtSetValueKey(const syscall_context& c, const handle key_handle,
