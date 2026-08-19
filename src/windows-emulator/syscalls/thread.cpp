@@ -142,7 +142,7 @@ namespace sogen
             if (info_class == ThreadSchedulerSharedDataSlot || info_class == ThreadBasePriority || info_class == ThreadAffinityMask ||
                 info_class == ThreadPriorityBoost || info_class == ThreadEnableAlignmentFaultFixup ||
                 info_class == ThreadActualBasePriority || info_class == ThreadPagePriority || info_class == ThreadIoPriority ||
-                info_class == ThreadPowerThrottlingState)
+                info_class == ThreadPowerThrottlingState || info_class == ThreadDynamicCodePolicyInfo)
             {
                 return STATUS_SUCCESS;
             }
