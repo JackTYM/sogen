@@ -29,9 +29,9 @@
 //      essentially zero after the first draw of a given shape). Printing the loop time before (pre-fix
 //      host) and after (fixed host) gives a real, measured before/after for that per-round-trip cost.
 //
-// Vulkan-unflipped viewport convention (NDC y=-1 at the top row, y=+1 at the bottom -- see
-// d3d9_texcoord_test.cpp / d3d9_texture_test.cpp) means readback row maps linearly to NDC y with no
-// flip, so each cell's screen rect and its center-pixel readback location are computed the same way.
+// D3D9's viewport convention (NDC y=+1 at the top row, y=-1 at the bottom -- see
+// d3d9_texcoord_test.cpp / d3d9_texture_test.cpp) is what to_ndc_y converts for, so each cell's screen
+// rect and its center-pixel readback location are both expressed in plain top-left-origin screen rows.
 //
 // Proven shape reuse: same D3DFVF_XYZ|D3DFVF_DIFFUSE vertex layout and PS-reads-c0 pattern as
 // d3d9_const_test.cpp, driven through DrawIndexedPrimitive (4-vertex quad + 6-index buffer) so the
@@ -96,7 +96,7 @@ float4 main(PSInput input) : COLOR0
     }
     float to_ndc_y(const int screen_y)
     {
-        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+        return 1.0f - static_cast<float>(screen_y) / (kCanvasHeight / 2);
     }
 
     // Deterministic, index-derived color for cell (gx, gy). Adjacent cells differ by well more than the

@@ -116,11 +116,11 @@ namespace sogen
         // implementation for this one case; general FVF/render-state shader synthesis is the separate,
         // future M4 milestone.
         // clang-format off
-        constexpr std::array<uint32_t, 351> k_ff_vertex_shader_spirv = {
-            0x07230203u, 0x00010000u, 0x0008000bu, 0x00000030u, 0x00000000u, 0x00020011u, 0x00000001u, 0x0006000bu,
+        constexpr std::array<uint32_t, 367> k_ff_vertex_shader_spirv = {
+            0x07230203u, 0x00010000u, 0x0008000bu, 0x00000034u, 0x00000000u, 0x00020011u, 0x00000001u, 0x0006000bu,
             0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u,
-            0x0009000fu, 0x00000000u, 0x00000004u, 0x6e69616du, 0x00000000u, 0x0000000cu, 0x00000022u, 0x0000002du,
-            0x0000002eu, 0x00030003u, 0x00000002u, 0x000001c2u, 0x00040005u, 0x00000004u, 0x6e69616du, 0x00000000u,
+            0x0009000fu, 0x00000000u, 0x00000004u, 0x6e69616du, 0x00000000u, 0x0000000cu, 0x00000022u, 0x00000031u,
+            0x00000032u, 0x00030003u, 0x00000002u, 0x000001c2u, 0x00040005u, 0x00000004u, 0x6e69616du, 0x00000000u,
             0x00030005u, 0x00000009u, 0x0063646eu, 0x00060005u, 0x0000000cu, 0x6f506e69u, 0x69746973u, 0x68526e6fu,
             0x00000077u, 0x00060005u, 0x0000000fu, 0x68737550u, 0x736e6f43u, 0x746e6174u, 0x00000073u, 0x00070006u,
             0x0000000fu, 0x00000000u, 0x77656976u, 0x74726f70u, 0x657a6953u, 0x00000000u, 0x00030005u, 0x00000011u,
@@ -128,13 +128,13 @@ namespace sogen
             0x00000020u, 0x00000000u, 0x505f6c67u, 0x7469736fu, 0x006e6f69u, 0x00070006u, 0x00000020u, 0x00000001u,
             0x505f6c67u, 0x746e696fu, 0x657a6953u, 0x00000000u, 0x00070006u, 0x00000020u, 0x00000002u, 0x435f6c67u,
             0x4470696cu, 0x61747369u, 0x0065636eu, 0x00070006u, 0x00000020u, 0x00000003u, 0x435f6c67u, 0x446c6c75u,
-            0x61747369u, 0x0065636eu, 0x00030005u, 0x00000022u, 0x00000000u, 0x00050005u, 0x0000002du, 0x67617266u,
-            0x6f6c6f43u, 0x00000072u, 0x00040005u, 0x0000002eu, 0x6f436e69u, 0x00726f6cu, 0x00040047u, 0x0000000cu,
+            0x61747369u, 0x0065636eu, 0x00030005u, 0x00000022u, 0x00000000u, 0x00050005u, 0x00000031u, 0x67617266u,
+            0x6f6c6f43u, 0x00000072u, 0x00040005u, 0x00000032u, 0x6f436e69u, 0x00726f6cu, 0x00040047u, 0x0000000cu,
             0x0000001eu, 0x00000000u, 0x00030047u, 0x0000000fu, 0x00000002u, 0x00050048u, 0x0000000fu, 0x00000000u,
             0x00000023u, 0x00000000u, 0x00030047u, 0x00000020u, 0x00000002u, 0x00050048u, 0x00000020u, 0x00000000u,
             0x0000000bu, 0x00000000u, 0x00050048u, 0x00000020u, 0x00000001u, 0x0000000bu, 0x00000001u, 0x00050048u,
             0x00000020u, 0x00000002u, 0x0000000bu, 0x00000003u, 0x00050048u, 0x00000020u, 0x00000003u, 0x0000000bu,
-            0x00000004u, 0x00040047u, 0x0000002du, 0x0000001eu, 0x00000000u, 0x00040047u, 0x0000002eu, 0x0000001eu,
+            0x00000004u, 0x00040047u, 0x00000031u, 0x0000001eu, 0x00000000u, 0x00040047u, 0x00000032u, 0x0000001eu,
             0x00000001u, 0x00020013u, 0x00000002u, 0x00030021u, 0x00000003u, 0x00000002u, 0x00030016u, 0x00000006u,
             0x00000020u, 0x00040017u, 0x00000007u, 0x00000006u, 0x00000002u, 0x00040020u, 0x00000008u, 0x00000007u,
             0x00000007u, 0x00040017u, 0x0000000au, 0x00000006u, 0x00000004u, 0x00040020u, 0x0000000bu, 0x00000001u,
@@ -146,21 +146,23 @@ namespace sogen
             0x0004002bu, 0x0000001du, 0x0000001eu, 0x00000001u, 0x0004001cu, 0x0000001fu, 0x00000006u, 0x0000001eu,
             0x0006001eu, 0x00000020u, 0x0000000au, 0x00000006u, 0x0000001fu, 0x0000001fu, 0x00040020u, 0x00000021u,
             0x00000003u, 0x00000020u, 0x0004003bu, 0x00000021u, 0x00000022u, 0x00000003u, 0x0004002bu, 0x0000001du,
-            0x00000024u, 0x00000002u, 0x00040020u, 0x00000025u, 0x00000001u, 0x00000006u, 0x00040020u, 0x0000002bu,
-            0x00000003u, 0x0000000au, 0x0004003bu, 0x0000002bu, 0x0000002du, 0x00000003u, 0x0004003bu, 0x0000000bu,
-            0x0000002eu, 0x00000001u, 0x00050036u, 0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u,
+            0x00000023u, 0x00000000u, 0x00040020u, 0x00000024u, 0x00000007u, 0x00000006u, 0x0004002bu, 0x0000001du,
+            0x0000002au, 0x00000002u, 0x00040020u, 0x0000002bu, 0x00000001u, 0x00000006u, 0x00040020u, 0x0000002fu,
+            0x00000003u, 0x0000000au, 0x0004003bu, 0x0000002fu, 0x00000031u, 0x00000003u, 0x0004003bu, 0x0000000bu,
+            0x00000032u, 0x00000001u, 0x00050036u, 0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u,
             0x00000005u, 0x0004003bu, 0x00000008u, 0x00000009u, 0x00000007u, 0x0004003du, 0x0000000au, 0x0000000du,
             0x0000000cu, 0x0007004fu, 0x00000007u, 0x0000000eu, 0x0000000du, 0x0000000du, 0x00000000u, 0x00000001u,
             0x00050041u, 0x00000014u, 0x00000015u, 0x00000011u, 0x00000013u, 0x0004003du, 0x00000007u, 0x00000016u,
             0x00000015u, 0x00050088u, 0x00000007u, 0x00000017u, 0x0000000eu, 0x00000016u, 0x0005008eu, 0x00000007u,
             0x00000019u, 0x00000017u, 0x00000018u, 0x00050050u, 0x00000007u, 0x0000001bu, 0x0000001au, 0x0000001au,
             0x00050083u, 0x00000007u, 0x0000001cu, 0x00000019u, 0x0000001bu, 0x0003003eu, 0x00000009u, 0x0000001cu,
-            0x0004003du, 0x00000007u, 0x00000023u, 0x00000009u, 0x00050041u, 0x00000025u, 0x00000026u, 0x0000000cu,
-            0x00000024u, 0x0004003du, 0x00000006u, 0x00000027u, 0x00000026u, 0x00050051u, 0x00000006u, 0x00000028u,
-            0x00000023u, 0x00000000u, 0x00050051u, 0x00000006u, 0x00000029u, 0x00000023u, 0x00000001u, 0x00070050u,
-            0x0000000au, 0x0000002au, 0x00000028u, 0x00000029u, 0x00000027u, 0x0000001au, 0x00050041u, 0x0000002bu,
-            0x0000002cu, 0x00000022u, 0x00000013u, 0x0003003eu, 0x0000002cu, 0x0000002au, 0x0004003du, 0x0000000au,
-            0x0000002fu, 0x0000002eu, 0x0003003eu, 0x0000002du, 0x0000002fu, 0x000100fdu, 0x00010038u,
+            0x00050041u, 0x00000024u, 0x00000025u, 0x00000009u, 0x00000023u, 0x0004003du, 0x00000006u, 0x00000026u,
+            0x00000025u, 0x00050041u, 0x00000024u, 0x00000027u, 0x00000009u, 0x0000001eu, 0x0004003du, 0x00000006u,
+            0x00000028u, 0x00000027u, 0x0004007fu, 0x00000006u, 0x00000029u, 0x00000028u, 0x00050041u, 0x0000002bu,
+            0x0000002cu, 0x0000000cu, 0x0000002au, 0x0004003du, 0x00000006u, 0x0000002du, 0x0000002cu, 0x00070050u,
+            0x0000000au, 0x0000002eu, 0x00000026u, 0x00000029u, 0x0000002du, 0x0000001au, 0x00050041u, 0x0000002fu,
+            0x00000030u, 0x00000022u, 0x00000013u, 0x0003003eu, 0x00000030u, 0x0000002eu, 0x0004003du, 0x0000000au,
+            0x00000033u, 0x00000032u, 0x0003003eu, 0x00000031u, 0x00000033u, 0x000100fdu, 0x00010038u,
         };
 
         constexpr std::array<uint32_t, 95> k_ff_fragment_shader_spirv = {
@@ -2278,10 +2280,22 @@ namespace sogen
                                                    VK_PIPELINE_BIND_POINT_GRAPHICS, {});
         }
 
+        // Negative height (VK_KHR_maintenance1, core since Vulkan 1.1): D3D9 puts clip-space y = +1 at the
+        // TOP of the screen, Vulkan puts y = -1 there. vkd3d-shader translates a D3D9 vertex shader's oPos
+        // to gl_Position verbatim, in D3D9 clip space, so a plain {y = 0, height = +H} viewport rasterizes
+        // every translated draw upside down. Flipping the viewport transform (y = H, height = -H) instead
+        // of rewriting each shader also realigns D3D9 screen space with Vulkan framebuffer space, which is
+        // what the scissor rect below is expressed in. The fixed-function shader's input is already in
+        // D3D9 screen space rather than clip space and compensates for this itself (ff_triangle.vert).
+        //
+        // Winding order: a negative-height viewport reverses the effective face orientation the rasterizer
+        // sees, which would normally have to be paid back by flipping VkPipelineRasterizationStateCreateInfo
+        // ::frontFace. It does not here -- create_graphics_pipeline builds every pipeline with cullMode
+        // VK_CULL_MODE_NONE and this path never sets the cull-mode dynamic state, so no face test runs.
         const std::array<vulkan_host::viewport_entry, 1> viewports{{{.x = 0,
-                                                                     .y = 0,
+                                                                     .y = static_cast<float>(rt.height),
                                                                      .width = static_cast<float>(rt.width),
-                                                                     .height = static_cast<float>(rt.height),
+                                                                     .height = -static_cast<float>(rt.height),
                                                                      .min_depth = 0.0f,
                                                                      .max_depth = 1.0f}}};
         this->vulkan_.cmd_set_viewport(this->batch_command_buffer_, 0, false, viewports);

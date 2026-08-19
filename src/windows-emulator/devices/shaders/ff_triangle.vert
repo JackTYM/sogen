@@ -15,7 +15,12 @@ layout(push_constant) uniform PushConstants
 
 void main()
 {
+    // execute_draw binds a negative-height VkViewport so that clip-space y = +1 lands on the
+    // framebuffer's TOP row, matching D3D9's convention (vkd3d-shader translates a D3D9 vertex shader's
+    // oPos straight to gl_Position, in D3D9 clip space, with no y compensation of its own). This
+    // fixed-function path's input is already in D3D9 SCREEN space -- y = 0 is the top row -- so it must
+    // target that same convention: y = 0 has to become clip y = +1, hence the negation.
     vec2 ndc = (inPositionRhw.xy / pc.viewportSize) * 2.0 - 1.0;
-    gl_Position = vec4(ndc, inPositionRhw.z, 1.0);
+    gl_Position = vec4(ndc.x, -ndc.y, inPositionRhw.z, 1.0);
     fragColor = inColor;
 }

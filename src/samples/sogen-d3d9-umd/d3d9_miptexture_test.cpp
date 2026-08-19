@@ -70,7 +70,7 @@ float4 main(PSInput input) : COLOR0
 
     float to_ndc_y(const int screen_y)
     {
-        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+        return 1.0f - static_cast<float>(screen_y) / (kCanvasHeight / 2);
     }
 
     void fill_quad(Vertex* out, const int left, const int top, const int right, const int bottom, const float z)

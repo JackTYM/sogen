@@ -76,15 +76,16 @@ float4 main(PSInput input) : COLOR0
         return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f;
     }
 
-    // NDC Y: this pipeline's viewport uses Vulkan's own (unflipped) convention -- NDC y=-1 at the top
-    // of the screen, y=+1 at the bottom (screenY = (ndcY+1)/2 * height) -- confirmed live 2026-07-04:
-    // an earlier version of this function assumed D3D9's own opposite screen-space convention
-    // (NDC y=+1 at the top) and every asymmetric (non-center-row) pixel check read a totally
-    // different, wrong quad's rendered pixel as a result (none of the three prior guest tests this
-    // session ever exercised an asymmetric row, so this was never caught before).
+    // NDC Y: D3D9's convention -- y=+1 at the TOP of the screen, y=-1 at the bottom, i.e.
+    // screenY = (1 - ndcY)/2 * height. Between 2026-07-04 and 2026-08-19 this function used the
+    // OPPOSITE (plain Vulkan) convention, because the host's execute_draw bound a plain
+    // {y=0, height=+H} viewport and so rasterized every translated D3D9 shader upside down; these
+    // expectations were tuned to that bug, which is exactly why it survived so long (every check that
+    // could have caught it was on the symmetric center row). The host now binds a negative-height
+    // viewport, so D3D9's real convention holds and this converts for it.
     float to_ndc_y(const int screen_y)
     {
-        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+        return 1.0f - static_cast<float>(screen_y) / (kCanvasHeight / 2);
     }
 
     // One quad = 4 vertices at the given screen-space rectangle (converted to NDC), all at the given

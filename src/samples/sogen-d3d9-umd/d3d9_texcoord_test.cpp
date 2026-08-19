@@ -70,12 +70,11 @@ float4 main(PSInput input) : COLOR0
         return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f;
     }
 
-    // NDC Y: this pipeline's viewport uses Vulkan's own (unflipped) convention -- NDC y=-1 at the top of
-    // the screen, y=+1 at the bottom (see d3d9_texture_test.cpp's to_ndc_y comment for the live-confirmed
-    // finding this mirrors).
+    // NDC Y: D3D9's convention -- y=+1 at the top of the screen, y=-1 at the bottom (see
+    // d3d9_texture_test.cpp's to_ndc_y comment for why this briefly used the opposite one).
     float to_ndc_y(const int screen_y)
     {
-        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+        return 1.0f - static_cast<float>(screen_y) / (kCanvasHeight / 2);
     }
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)

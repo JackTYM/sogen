@@ -120,7 +120,7 @@ float4 main(PSInput input) : COLOR0
     }
     float to_ndc_y(const int screen_y)
     {
-        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+        return 1.0f - static_cast<float>(screen_y) / (kCanvasHeight / 2);
     }
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)

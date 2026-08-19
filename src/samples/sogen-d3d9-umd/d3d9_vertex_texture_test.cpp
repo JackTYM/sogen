@@ -7,8 +7,8 @@
 // Discriminator design (a genuine proof the VERTEX shader consumed real texel data, not fakeable by a
 // pixel shader): one triangle with two fixed base vertices and one "apex" vertex. Each vertex carries
 // its own TEXCOORD0, and the vs_3_0 samples a tiny 2x2 A16B16G16R16F "heightmap" with tex2Dlod at that
-// per-vertex UV, then subtracts height*scale from the vertex's NDC Y (moving it toward the top of the
-// screen). The two base vertices sample a texel whose height is 0.0 (they stay put); the apex samples a
+// per-vertex UV, then adds height*scale to the vertex's NDC Y (moving it toward the top of the screen,
+// D3D9's y=+1 end). The two base vertices sample a texel whose height is 0.0 (they stay put); the apex samples a
 // DIFFERENT texel whose height is 1.0, so ONLY the apex is displaced -- from baseline screen y=300 up to
 // screen y=100. Because only the vertex whose UV points at the high texel moves, a correct result cannot
 // be produced by any constant offset or by a pixel shader: it requires the vertex stage to fetch the
@@ -48,7 +48,7 @@ VSOutput main(VSInput input)
     VSOutput output;
     float h = tex2Dlod(heightmap, float4(input.uv, 0.0, 0.0)).r;
     float3 p = input.pos;
-    p.y = p.y - h * 0.8333333;
+    p.y = p.y + h * 0.8333333;
     output.pos = float4(p, 1.0);
     output.color = float4(1.0, 0.5, 0.0, 1.0);
     return output;
@@ -83,12 +83,12 @@ float4 main(PSInput input) : COLOR0
         return static_cast<float>(screen_x) / (kCanvasWidth / 2) - 1.0f;
     }
 
-    // NDC Y uses this pipeline's unflipped Vulkan convention: y=-1 at the TOP of the screen, y=+1 at the
-    // bottom (see d3d9_texture_test.cpp / d3d9_texcoord_test.cpp for the live-confirmed finding). So a
-    // smaller screen Y is a more-negative NDC Y, and the VS subtracting from Y moves the apex UP.
+    // NDC Y uses D3D9's convention: y=+1 at the TOP of the screen, y=-1 at the bottom (see
+    // d3d9_texture_test.cpp's to_ndc_y comment for why this briefly used the opposite one). So a smaller
+    // screen Y is a more-POSITIVE NDC Y, and the VS adding to Y moves the apex UP.
     float to_ndc_y(const int screen_y)
     {
-        return static_cast<float>(screen_y) / (kCanvasHeight / 2) - 1.0f;
+        return 1.0f - static_cast<float>(screen_y) / (kCanvasHeight / 2);
     }
 
     bool channel_close(const unsigned char actual, const int expected, const int tolerance)
