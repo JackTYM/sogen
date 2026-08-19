@@ -465,6 +465,47 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
+        NTSTATUS handle_NtSetInformationToken(const syscall_context& c, const handle token_handle,
+                                              const TOKEN_INFORMATION_CLASS token_information_class, const uint64_t /*token_information*/,
+                                              const ULONG /*token_information_length*/)
+        {
+            if (!is_recognized_token_handle(c.proc, token_handle))
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            switch (token_information_class)
+            {
+            case TokenOwner:
+            case TokenPrimaryGroup:
+            case TokenDefaultDacl:
+            case TokenSessionId:
+            case TokenSessionReference:
+            case TokenAuditPolicy:
+            case TokenOrigin:
+            case TokenLinkedToken:
+            case TokenVirtualizationAllowed:
+            case TokenVirtualizationEnabled:
+            case TokenIntegrityLevel:
+            case TokenUIAccess:
+            case TokenMandatoryPolicy:
+            case TokenSecurityAttributes:
+            case TokenPrivateNameSpace:
+            case TokenChildProcessFlags:
+                // sogen models a single synthetic token identity with no per-token mutable security
+                // state consulted elsewhere (NtAccessCheck etc. do not read these back) - accepting
+                // the write without persisting it matches every other settable class this emulator
+                // exposes as a fixed/default value on the query side.
+                return STATUS_SUCCESS;
+            default:
+                break;
+            }
+
+            c.win_emu.log.error("Unsupported token set info class: %X\n", token_information_class);
+            c.emu.stop();
+            return STATUS_NOT_SUPPORTED;
+        }
+
         NTSTATUS handle_NtAccessCheck(const syscall_context& c, const uint64_t security_descriptor, const handle client_token,
                                       const ACCESS_MASK desired_access, const emulator_object<EMU_GENERIC_MAPPING> generic_mapping,
                                       const uint64_t /*privilege_set*/, const emulator_object<ULONG> privilege_set_length,

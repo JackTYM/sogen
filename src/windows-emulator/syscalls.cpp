@@ -462,6 +462,9 @@ namespace sogen
         NTSTATUS handle_NtQueryInformationToken(const syscall_context& c, handle token_handle,
                                                 TOKEN_INFORMATION_CLASS token_information_class, uint64_t token_information,
                                                 ULONG token_information_length, emulator_object<ULONG> return_length);
+        NTSTATUS handle_NtSetInformationToken(const syscall_context& c, handle token_handle,
+                                              TOKEN_INFORMATION_CLASS token_information_class, uint64_t token_information,
+                                              ULONG token_information_length);
         NTSTATUS handle_NtQuerySecurityAttributesToken(const syscall_context& c, handle token_handle,
                                                        emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> attributes,
                                                        ULONG number_of_attributes, uint64_t buffer, ULONG buffer_length,
@@ -1365,6 +1368,7 @@ namespace sogen
         add_handler(NtReadVirtualMemory);
         add_handler(NtWriteVirtualMemory);
         add_handler(NtQueryInformationToken);
+        add_handler(NtSetInformationToken);
         add_handler(NtDxgkIsFeatureEnabled);
         add_handler(NtAddAtomEx);
         add_handler(NtAddAtom);
