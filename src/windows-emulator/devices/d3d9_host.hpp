@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -201,6 +202,11 @@ namespace sogen
             // misses pays a full vkd3d translate + VkShaderModule + vkCreateGraphicsPipelines.
             uint64_t pipeline_cache_hit{};
             uint64_t pipeline_cache_miss{};
+            // Draws short-circuited by failed_pipelines_ -- a build this key already proved unbuildable,
+            // skipped without re-running translation/module/pipeline creation. Counted separately from
+            // pipeline_cache_miss so a "misses collapsed to zero" claim can be checked against the drops
+            // that replaced them (this counter and drop_no_pipeline should climb together).
+            uint64_t pipeline_negative_hit{};
             // Recorded draws bucketed by the slot-0 render target they targeted. A title that renders its
             // 3D scene into an off-screen target and composites it separately shows up here as a second,
             // heavily-drawn resource id that is NOT the one pfnPresent hands back -- the one shape of
@@ -525,6 +531,26 @@ namespace sogen
         // bound, since SM1-3 requires the VS/PS pair together to build the inter-stage varying map (see
         // d3d9_shader_translator.hpp).
         std::map<pipeline_cache_key, programmable_pipeline_entry> programmable_pipelines_{};
+
+        // Negative half of programmable_pipelines_: keys whose pipeline the driver already refused to
+        // build. Without it a permanently-unbuildable pipeline is retried on EVERY draw that wants it,
+        // and the retry is not cheap -- it is the full vkd3d-shader SM3->SPIR-V translation of the VS/PS
+        // pair, two fresh VkShaderModules (which is where MoltenVK does its SPIRV-Cross->MSL conversion
+        // and Metal compile), two descriptor-set layouts, a pipeline layout, then the rejected
+        // vkCreateGraphicsPipelines, then destroying all of it again. MW2 in "The Pit" hit this ~848
+        // times per frame against a handful of distinct shader pairs.
+        //
+        // Sound because every input to the build is fixed by the key: the VS/PS token blobs are
+        // immutable once created (no update DDI) and their ids are never reused, the vertex shape and
+        // attachment formats are in the key, and the resolved depth/blend state is in the key. Nothing
+        // outside the key can turn a refusal into an acceptance. The one exception is driver resource
+        // exhaustion, which is transient rather than a property of the key -- see remember_pipeline_
+        // failure() for how those are excluded so they keep retrying.
+        std::set<pipeline_cache_key> failed_pipelines_{};
+
+        // Records `key` as unbuildable (unless the failure was transient) and returns nullptr, so
+        // ensure_programmable_pipeline's failure paths can `return this->remember_pipeline_failure(...)`.
+        const programmable_pipeline_entry* remember_pipeline_failure(const pipeline_cache_key& key, int32_t vk_result);
 
         // Content-addressed VkSampler cache. Unlike the VB/IB/UBO arena (one buffer whose per-draw
         // slices are re-sub-allocated and rewritten every draw), a VkSampler is immutable once created --

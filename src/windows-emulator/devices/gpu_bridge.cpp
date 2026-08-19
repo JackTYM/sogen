@@ -2925,11 +2925,12 @@ namespace sogen
                         static_cast<unsigned long long>(s.drop_no_vertex_data), static_cast<unsigned long long>(s.drop_no_pipeline),
                         static_cast<unsigned long long>(s.clear_target), static_cast<unsigned long long>(s.clear_zbuffer),
                         static_cast<unsigned long long>(s.clear_stencil));
-                    win_emu.log.warn("[d3d9-drawdiag] tex_upload: done=%llu skipped=%llu | pipeline_cache: hit=%llu miss=%llu (live=%zu)\n",
-                                     static_cast<unsigned long long>(s.texture_upload_done),
-                                     static_cast<unsigned long long>(s.texture_upload_skipped),
-                                     static_cast<unsigned long long>(s.pipeline_cache_hit),
-                                     static_cast<unsigned long long>(s.pipeline_cache_miss), this->d3d9_.programmable_pipeline_count());
+                    win_emu.log.warn(
+                        "[d3d9-drawdiag] tex_upload: done=%llu skipped=%llu | pipeline_cache: hit=%llu miss=%llu neg_hit=%llu "
+                        "(live=%zu)\n",
+                        static_cast<unsigned long long>(s.texture_upload_done), static_cast<unsigned long long>(s.texture_upload_skipped),
+                        static_cast<unsigned long long>(s.pipeline_cache_hit), static_cast<unsigned long long>(s.pipeline_cache_miss),
+                        static_cast<unsigned long long>(s.pipeline_negative_hit), this->d3d9_.programmable_pipeline_count());
                     win_emu.log.warn("[d3d9-drawdiag] pipe_fail: shader_missing=%llu translate=%llu vk_object=%llu\n",
                                      static_cast<unsigned long long>(s.drop_shader_missing),
                                      static_cast<unsigned long long>(s.drop_translate_failed),

@@ -644,6 +644,24 @@ namespace sogen
         return result;
     }
 
+    const d3d9_host::programmable_pipeline_entry* d3d9_host::remember_pipeline_failure(const pipeline_cache_key& key,
+                                                                                       const int32_t vk_result)
+    {
+        // Out-of-memory is the one failure that is a property of the moment, not of the key: the exact
+        // same build can succeed once the driver has room again (a texture/pipeline freed, a smaller
+        // scene). Blacklisting it would turn a temporary shortage into geometry that never comes back for
+        // the rest of the process. Everything else -- a SPIR-V construct MoltenVK cannot express in MSL,
+        // an unsupported vertex format, an invalid state combination -- is fully determined by the key
+        // and will fail identically forever, so it is worth remembering. Failures with no VkResult to
+        // inspect (module/layout creation, which report only success/failure) pass vk_result 0 and are
+        // remembered, matching the "determined by the key" reasoning above.
+        if (vk_result != VK_ERROR_OUT_OF_HOST_MEMORY && vk_result != VK_ERROR_OUT_OF_DEVICE_MEMORY)
+        {
+            this->failed_pipelines_.insert(key);
+        }
+        return nullptr;
+    }
+
     const d3d9_host::programmable_pipeline_entry* d3d9_host::ensure_programmable_pipeline(const std::span<const uint32_t> color_formats,
                                                                                           const uint32_t width, const uint32_t height,
                                                                                           const uint32_t depth_format)
@@ -671,12 +689,21 @@ namespace sogen
             ++this->stats_.pipeline_cache_hit;
             return &cached->second;
         }
+        // Already known unbuildable: bail before paying for the translation and Vulkan objects that are
+        // only going to be thrown away again. See failed_pipelines_ (d3d9_host.hpp).
+        if (this->failed_pipelines_.contains(key))
+        {
+            ++this->stats_.pipeline_negative_hit;
+            return nullptr;
+        }
         ++this->stats_.pipeline_cache_miss;
 
         const auto vs_it = this->shaders_.find(this->state_.vertex_shader);
         const auto ps_it = this->shaders_.find(this->state_.pixel_shader);
         if (vs_it == this->shaders_.end() || ps_it == this->shaders_.end())
         {
+            // Deliberately NOT remembered: unlike every other failure here this one is about live state
+            // (which ids state_ currently holds), not about the key's buildability.
             ++this->stats_.drop_shader_missing;
             return nullptr;
         }
@@ -686,7 +713,7 @@ namespace sogen
                                         ps_it->second.tokens.data(), ps_it->second.tokens.size() * sizeof(uint32_t), spirv))
         {
             ++this->stats_.drop_translate_failed;
-            return nullptr;
+            return this->remember_pipeline_failure(key, 0);
         }
 
         const uint64_t device = this->ensure_vk_device();
@@ -697,20 +724,20 @@ namespace sogen
         }
 
         programmable_pipeline_entry entry{};
-        if (this->vulkan_.create_shader_module(device, spirv.vertex_spirv.data(), spirv.vertex_spirv.size() * sizeof(uint32_t),
-                                               entry.vs_module) != 0 ||
-            entry.vs_module == 0)
+        const int32_t vs_module_result = this->vulkan_.create_shader_module(device, spirv.vertex_spirv.data(),
+                                                                            spirv.vertex_spirv.size() * sizeof(uint32_t), entry.vs_module);
+        if (vs_module_result != 0 || entry.vs_module == 0)
         {
             ++this->stats_.drop_vk_object_failed;
-            return nullptr;
+            return this->remember_pipeline_failure(key, vs_module_result);
         }
-        if (this->vulkan_.create_shader_module(device, spirv.pixel_spirv.data(), spirv.pixel_spirv.size() * sizeof(uint32_t),
-                                               entry.fs_module) != 0 ||
-            entry.fs_module == 0)
+        const int32_t ps_module_result = this->vulkan_.create_shader_module(device, spirv.pixel_spirv.data(),
+                                                                            spirv.pixel_spirv.size() * sizeof(uint32_t), entry.fs_module);
+        if (ps_module_result != 0 || entry.fs_module == 0)
         {
             this->vulkan_.destroy_shader_module(device, entry.vs_module);
             ++this->stats_.drop_vk_object_failed;
-            return nullptr;
+            return this->remember_pipeline_failure(key, ps_module_result);
         }
 
         // Matches the CBV bindings d3d9_shader_translator.cpp pins into the SPIR-V: VS float-const UBO
@@ -900,7 +927,9 @@ namespace sogen
             // appears, indistinguishable from geometry the app never submitted. Nothing else recovers the
             // rejected configuration: it is assembled from live render state and thrown away on failure.
             // Same fprintf-to-stderr shape d3d9_shader_translator.cpp uses for its vkd3d diagnostics, and
-            // capped, because a failing pipeline is retried on every single draw (failures are not cached).
+            // capped, because a title with many distinct unbuildable pipelines would otherwise flood
+            // stderr on the first frame that draws them all (failed_pipelines_ means each one is only
+            // attempted, and so only reported, once).
             static int pipe_diag_left = getenv("EMULATOR_D3D9_PIPEDIAG") != nullptr ? 24 : 0;
             if (pipe_diag_left > 0)
             {
@@ -932,7 +961,7 @@ namespace sogen
             this->vulkan_.destroy_descriptor_set_layout(device, entry.vs_set_layout);
             this->vulkan_.destroy_descriptor_set_layout(device, entry.ps_set_layout);
             ++this->stats_.drop_vk_object_failed;
-            return nullptr;
+            return this->remember_pipeline_failure(key, result);
         }
 
         // The set layouts and pipeline layout survive here (unlike the old destroy-after-use pattern) so
