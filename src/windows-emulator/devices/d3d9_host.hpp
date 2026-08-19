@@ -118,8 +118,9 @@ namespace sogen
         // MANAGED texture's sysmem "master" copy (what LockRect/UnlockRect write) into its lazily
         // created vidmem copy (what SetTexture binds) on first use. Both resources must already exist
         // and share the same format/dimensions (guaranteed here: both were created from the exact same
-        // CreateTexture() call). ensure_texture_uploaded already re-uploads a texture's `backing` to its
-        // GPU image unconditionally on every draw, so this only needs to update the CPU-side shadow.
+        // CreateTexture() call). This only needs to update the CPU-side shadow and flag it: it marks dst
+        // resource_entry::upload_dirty, and ensure_texture_uploaded re-uploads `backing` to dst's GPU
+        // image on the next draw that samples it.
         int32_t tex_blt(uint64_t dst_resource, uint64_t src_resource);
 
         // Copies up to out_capacity bytes of the resource's host-side shadow copy into out.
@@ -165,6 +166,7 @@ namespace sogen
         {
             return this->draw_count_;
         }
+
         uint64_t batch_submit_count() const
         {
             return this->batch_submit_count_;
@@ -187,6 +189,18 @@ namespace sogen
             uint64_t clear_target{};          // pfnClear calls carrying D3DCLEAR_TARGET
             uint64_t clear_zbuffer{};         // ... D3DCLEAR_ZBUFFER
             uint64_t clear_stencil{};         // ... D3DCLEAR_STENCIL
+            // Sampled-texture staging uploads actually run vs. skipped by the resource_entry::upload_dirty
+            // check. A title whose textures are written once and sampled forever should show `skipped`
+            // climbing per draw and `done` flat after load; `done` still climbing per frame means
+            // something is re-writing texture backings every frame and the dirty check cannot help.
+            uint64_t texture_upload_done{};
+            uint64_t texture_upload_skipped{};
+            // programmable_pipelines_ lookups. A steady-state frame should be all hits: the cache is never
+            // evicted, so a per-frame `miss` count means the key is genuinely varying (new shader pair,
+            // new RT format, new vertex shape, or new depth/blend combination) and every one of those
+            // misses pays a full vkd3d translate + VkShaderModule + vkCreateGraphicsPipelines.
+            uint64_t pipeline_cache_hit{};
+            uint64_t pipeline_cache_miss{};
             // Recorded draws bucketed by the slot-0 render target they targeted. A title that renders its
             // 3D scene into an off-screen target and composites it separately shows up here as a second,
             // heavily-drawn resource id that is NOT the one pfnPresent hands back -- the one shape of
@@ -197,6 +211,14 @@ namespace sogen
         const draw_stats& stats() const
         {
             return this->stats_;
+        }
+
+        // How many distinct programmable pipelines are live. Read alongside pipeline_cache_miss: if the
+        // two climb together the app keeps producing genuinely new state combinations; if misses climb
+        // while this stays flat, something is evicting or re-keying entries that already exist.
+        size_t programmable_pipeline_count() const
+        {
+            return this->programmable_pipelines_.size();
         }
 
         // True if `resource` is a render-target-kind resource -- the frame-output image whose pixels a
@@ -228,6 +250,17 @@ namespace sogen
             uint64_t vk_image_id{};      // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{}; // 0 until first drawn to; lazily created, cached per resource
             bool backing_dirty{};        // color RT: GPU image has drawn/cleared pixels not yet copied to backing
+
+            // Sampled texture: the CPU-side backing has bytes the GPU image does not have yet, so the next
+            // ensure_texture_uploaded must do a real staging upload. The inverse of backing_dirty above,
+            // which tracks the render-target direction (GPU -> CPU). Defaults to true so a texture that
+            // was never uploaded still gets its first upload; cleared only by a fully successful upload,
+            // so a failed/refused upload can never leave a stale image marked clean. Set by every writer
+            // of a sampled texture's backing store -- unlock() (the Lock/Unlock DDI write-back) and
+            // tex_blt() (UpdateTexture's whole-surface copy). One flag covers all subresources because
+            // ensure_texture_uploaded is all-or-nothing: it re-uploads every mip level/cube face in a
+            // single staging buffer, so per-subresource granularity would buy nothing.
+            bool upload_dirty{true};
 
             // Selects subresource `index`'s backing store (index 0 == `backing`; higher == a mip level).
             // Callers must bounds-check index against extra_mips.size() + 1 before calling.

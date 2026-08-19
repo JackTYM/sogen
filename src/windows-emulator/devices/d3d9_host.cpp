@@ -668,8 +668,10 @@ namespace sogen
         const auto cached = this->programmable_pipelines_.find(key);
         if (cached != this->programmable_pipelines_.end())
         {
+            ++this->stats_.pipeline_cache_hit;
             return &cached->second;
         }
+        ++this->stats_.pipeline_cache_miss;
 
         const auto vs_it = this->shaders_.find(this->state_.vertex_shader);
         const auto ps_it = this->shaders_.find(this->state_.pixel_shader);
@@ -2505,6 +2507,21 @@ namespace sogen
             return false; // not a sampled texture with real GPU backing
         }
 
+        // Dirty check. upload_dirty == false means a previous call already ran the full upload below to
+        // completion AND nothing has written this texture's backing store since (see resource_entry's
+        // comment for the complete writer list), so the GPU image is bit-identical to what re-uploading
+        // would produce. Short-circuiting here is what makes a repeatedly-sampled texture cost nothing
+        // after its first use, instead of a staging allocate + copy + submit + fence-wait + free per
+        // draw. Placed after the guards above (not before) so a "clean" verdict can only ever be reached
+        // by a resource that really is an uploadable sampled texture -- upload_dirty is cleared solely at
+        // the successful end of this function, so a refused or failed upload always stays dirty and gets
+        // retried, never silently reported as uploaded.
+        if (!tex.upload_dirty)
+        {
+            ++this->stats_.texture_upload_skipped;
+            return true;
+        }
+
         uint32_t vk_format = 0;
         if (!d3d9_format_to_vulkan(tex.format, vk_format))
         {
@@ -2558,12 +2575,11 @@ namespace sogen
             return false;
         }
 
-        // No dirty tracking: this always re-uploads the full image, even if nothing changed since the
-        // last call. Tracking staleness would mean setting a flag from unlock() (touching the
-        // already-correct, resource-kind-agnostic Lock/Unlock path this task must leave alone), so this
-        // is the deliberately simpler alternative -- correct in every case, just not the cheapest one.
-        // execute_draw (the only caller so far) can add its own caching if re-uploading every draw turns
-        // out to matter.
+        // Past the dirty check, so this really is a needed upload: always the FULL image, every
+        // subresource. Uploading only the subresources unlock() actually touched would need per-mip
+        // tracking for no real gain -- an app that writes one level of a texture almost always writes
+        // the whole chain in one Lock/Unlock burst, and this whole path now runs once per change rather
+        // than once per draw.
         uint64_t staging_buffer = 0;
         if (this->vulkan_.create_buffer(device, total_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 || staging_buffer == 0)
         {
@@ -2638,6 +2654,10 @@ namespace sogen
 
         this->vulkan_.destroy_buffer(device, staging_buffer);
         this->vulkan_.free_memory(device, staging_memory);
+
+        // Only here, after the fence proved every copy landed, is the GPU image known to match `backing`.
+        tex.upload_dirty = false;
+        ++this->stats_.texture_upload_done;
         return true;
     }
 
@@ -2666,6 +2686,7 @@ namespace sogen
         // finally executes, not what it sampled at record time.
         this->flush_batch();
         dst_it->second.backing = src_it->second.backing;
+        dst_it->second.upload_dirty = true; // dst's GPU image no longer matches its (just replaced) backing
         return d3d_ok;
     }
 
@@ -2992,6 +3013,12 @@ namespace sogen
             backing.resize(required_size);
         }
         std::memcpy(backing.data() + offset, data, data_size);
+        // The one write-back path for a sampled texture's pixels, so this is where staleness originates:
+        // the GPU image (if this resource has one) is now out of date and ensure_texture_uploaded must
+        // re-upload before the next draw samples it. Unconditional -- cheap, and deliberately not
+        // narrowed to "is this a texture kind", since a mislabelled resource that later turns out to be
+        // sampled would then silently render stale pixels.
+        it->second.upload_dirty = true;
         return d3d_ok;
     }
 
