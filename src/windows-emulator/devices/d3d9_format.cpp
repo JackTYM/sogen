@@ -28,14 +28,37 @@ namespace sogen
         constexpr uint32_t d3ddecltype_float3 = 2;
         constexpr uint32_t d3ddecltype_float4 = 3;
         constexpr uint32_t d3ddecltype_d3dcolor = 4;
+        constexpr uint32_t d3ddecltype_ubyte4 = 5;
+        constexpr uint32_t d3ddecltype_short2 = 6;
+        constexpr uint32_t d3ddecltype_short4 = 7;
+        constexpr uint32_t d3ddecltype_ubyte4n = 8;
+        constexpr uint32_t d3ddecltype_short2n = 9;
+        constexpr uint32_t d3ddecltype_short4n = 10;
+        constexpr uint32_t d3ddecltype_ushort2n = 11;
+        constexpr uint32_t d3ddecltype_ushort4n = 12;
+        constexpr uint32_t d3ddecltype_udec3 = 13;
+        constexpr uint32_t d3ddecltype_dec3n = 14;
+        constexpr uint32_t d3ddecltype_float16_2 = 15;
+        constexpr uint32_t d3ddecltype_float16_4 = 16;
 
         // VkFormat values, verified against deps/Vulkan-Headers/include/vulkan/vulkan_core.h.
         constexpr uint32_t vk_format_r5g6b5_unorm_pack16 = 4;
         constexpr uint32_t vk_format_r8_unorm = 9;
         constexpr uint32_t vk_format_r8g8_unorm = 16;
         constexpr uint32_t vk_format_r8g8_snorm = 17;
+        constexpr uint32_t vk_format_r8g8b8a8_unorm = 37;
         constexpr uint32_t vk_format_r8g8b8a8_snorm = 38;
+        constexpr uint32_t vk_format_r8g8b8a8_uscaled = 39;
         constexpr uint32_t vk_format_b8g8r8a8_unorm = 44;
+        constexpr uint32_t vk_format_a2b10g10r10_snorm_pack32 = 65;
+        constexpr uint32_t vk_format_a2b10g10r10_uscaled_pack32 = 66;
+        constexpr uint32_t vk_format_r16g16_unorm = 77;
+        constexpr uint32_t vk_format_r16g16_snorm = 78;
+        constexpr uint32_t vk_format_r16g16_sscaled = 80;
+        constexpr uint32_t vk_format_r16g16_sfloat = 83;
+        constexpr uint32_t vk_format_r16g16b16a16_unorm = 91;
+        constexpr uint32_t vk_format_r16g16b16a16_snorm = 92;
+        constexpr uint32_t vk_format_r16g16b16a16_sscaled = 94;
         constexpr uint32_t vk_format_r16g16b16a16_sfloat = 97;
         constexpr uint32_t vk_format_r32_sfloat = 100;
         constexpr uint32_t vk_format_r32g32_sfloat = 103;
@@ -193,6 +216,58 @@ namespace sogen
             // Matches the fixed-function path's existing D3DCOLOR-attribute convention (see
             // ensure_pipeline's attributes array in d3d9_host.cpp).
             out_vk_format = vk_format_b8g8r8a8_unorm;
+            return true;
+        // The packed/compressed types below are what real content (as opposed to this repo's own
+        // float-only guest tests) overwhelmingly uses for anything but POSITION -- normals, tangents,
+        // bone weights/indices and texcoords are near-universally stored compressed. Leaving them
+        // unmapped is not a harmless omission: parse_vertex_decl skips an element it cannot map while
+        // keeping every later element's location (an element's location IS its ordinal in the
+        // D3DVERTEXELEMENT9 array), so an unmapped type punches a *hole* in the pipeline's vertex-input
+        // locations. A shader input with no matching VkVertexInputAttributeDescription is invalid usage
+        // that desktop drivers silently tolerate but Metal rejects outright -- MoltenVK fails the whole
+        // vkCreateGraphicsPipelines with "Vertex attribute vN(N) is missing from the vertex descriptor",
+        // and every draw using that shader is then dropped. Each mapping below is D3D9's documented
+        // memory layout for the type (d3d9types.h), component-for-component:
+        //   * UBYTE4/UBYTE4N are byte-order x,y,z,w -> R8G8B8A8 (not the BGRA swap D3DCOLOR needs).
+        //   * The unnormalized integer types (UBYTE4, SHORT2, SHORT4) expand to float by value, which is
+        //     Vulkan's USCALED/SSCALED, not UINT/SINT (those would feed an int shader input).
+        //   * UDEC3/DEC3N pack x into bits 0-9, y into 10-19 and z into 20-29, exactly Vulkan's
+        //     A2B10G10R10_*_PACK32 R/G/B placement.
+        case d3ddecltype_ubyte4:
+            out_vk_format = vk_format_r8g8b8a8_uscaled;
+            return true;
+        case d3ddecltype_ubyte4n:
+            out_vk_format = vk_format_r8g8b8a8_unorm;
+            return true;
+        case d3ddecltype_short2:
+            out_vk_format = vk_format_r16g16_sscaled;
+            return true;
+        case d3ddecltype_short4:
+            out_vk_format = vk_format_r16g16b16a16_sscaled;
+            return true;
+        case d3ddecltype_short2n:
+            out_vk_format = vk_format_r16g16_snorm;
+            return true;
+        case d3ddecltype_short4n:
+            out_vk_format = vk_format_r16g16b16a16_snorm;
+            return true;
+        case d3ddecltype_ushort2n:
+            out_vk_format = vk_format_r16g16_unorm;
+            return true;
+        case d3ddecltype_ushort4n:
+            out_vk_format = vk_format_r16g16b16a16_unorm;
+            return true;
+        case d3ddecltype_udec3:
+            out_vk_format = vk_format_a2b10g10r10_uscaled_pack32;
+            return true;
+        case d3ddecltype_dec3n:
+            out_vk_format = vk_format_a2b10g10r10_snorm_pack32;
+            return true;
+        case d3ddecltype_float16_2:
+            out_vk_format = vk_format_r16g16_sfloat;
+            return true;
+        case d3ddecltype_float16_4:
+            out_vk_format = vk_format_r16g16b16a16_sfloat;
             return true;
         default:
             return false;

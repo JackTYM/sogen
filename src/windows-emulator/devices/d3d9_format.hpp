@@ -18,9 +18,11 @@ namespace sogen
     uint32_t vk_format_bytes_per_texel(uint32_t vk_format);
 
     // Maps a D3DDECLTYPE value (a D3DVERTEXELEMENT9::Type field, see d3d9_cmd::vertex_element) to the
-    // matching VkFormat constant. Minimal, YAGNI set -- only the types this project's own vertex
-    // declarations currently use; extend as new declaration shapes are needed. Returns false for any
-    // other D3DDECLTYPE, leaving out_vk_format untouched, mirroring d3d9_format_to_vulkan above.
+    // matching VkFormat constant. Covers every D3DDECLTYPE except the D3DDECLTYPE_UNUSED terminator;
+    // returning false for a type a real declaration uses is not a graceful degradation but a hard
+    // failure, because parse_vertex_decl's skip leaves a gap in the vertex-input locations that
+    // MoltenVK rejects the entire pipeline over (see the mapping's own comment in the .cpp). Returns
+    // false for any other D3DDECLTYPE, leaving out_vk_format untouched, mirroring d3d9_format_to_vulkan.
     bool d3d9_decl_type_to_vulkan(uint32_t d3ddecltype, uint32_t& out_vk_format);
 
     // Component swizzle (VkComponentSwizzle values) an image view needs so a texture sampled through
