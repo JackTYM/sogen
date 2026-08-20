@@ -2997,7 +2997,7 @@ namespace sogen
                     {
                         pairs.emplace_back(count, key);
                     }
-                    std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                    std::ranges::sort(pairs, [](const auto& a, const auto& b) { return a.first > b.first; });
                     std::string top;
                     for (size_t i = 0; i < pairs.size() && i < 12; ++i)
                     {
@@ -3010,8 +3010,8 @@ namespace sogen
                     std::string blend_srgb_pairs;
                     for (const auto& [key, count] : s.blend_srgb_mismatch_shader_pair)
                     {
-                        blend_srgb_pairs += " rt" + std::to_string(key[0]) + "/vs" + std::to_string(key[1]) + "/ps" + std::to_string(key[2]) +
-                                            "=" + std::to_string(count);
+                        blend_srgb_pairs += " rt" + std::to_string(key[0]) + "/vs" + std::to_string(key[1]) + "/ps" +
+                                            std::to_string(key[2]) + "=" + std::to_string(count);
                     }
                     win_emu.log.warn("[d3d9-drawdiag] blend_srgb_mismatch=%llu:%s\n",
                                      static_cast<unsigned long long>(s.blend_srgb_mismatch), blend_srgb_pairs.c_str());

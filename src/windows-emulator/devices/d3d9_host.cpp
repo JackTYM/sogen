@@ -1616,7 +1616,7 @@ namespace sogen
             // keeps its linear format, matching real D3D9 ignoring the render state for those.
             uint32_t srgb_vk_format = 0;
             const bool use_srgb = srgb_write && d3d9_format_to_vulkan_srgb(bound_it->second.format, srgb_vk_format);
-            rt_slots[slot] = {&bound_it->second, use_srgb ? srgb_vk_format : bound_vk_format, use_srgb};
+            rt_slots[slot] = {.entry = &bound_it->second, .vk_format = use_srgb ? srgb_vk_format : bound_vk_format, .srgb = use_srgb};
             bound_rt_count = slot + 1;
         }
         const std::span<const slot_render_target> bound_rts(rt_slots.data(), bound_rt_count);
@@ -1862,7 +1862,7 @@ namespace sogen
             }
             else
             {
-                std::fill(staging.begin(), staging.end(), std::byte{0});
+                std::ranges::fill(staging, std::byte{0});
             }
             const size_t bytes = std::min(consts.size() * sizeof(*consts.data()), size);
             if (bytes > 0)
@@ -2922,12 +2922,12 @@ namespace sogen
             uint32_t vk_format = 0;
             d3d9_format_to_vulkan(entry.format, vk_format);
             const auto draws_it = this->stats_.draws_per_render_target.find(id);
-            char header[192];
-            std::snprintf(header, sizeof(header), "rt=%llu d3dfmt=%u vkfmt=%u %ux%u usage=0x%X draws=%llu",
+            std::array<char, 192> header{};
+            std::snprintf(header.data(), header.size(), "rt=%llu d3dfmt=%u vkfmt=%u %ux%u usage=0x%X draws=%llu",
                           static_cast<unsigned long long>(id), static_cast<unsigned>(entry.format), static_cast<unsigned>(vk_format),
                           static_cast<unsigned>(entry.width), static_cast<unsigned>(entry.height), static_cast<unsigned>(entry.usage),
                           static_cast<unsigned long long>(draws_it == this->stats_.draws_per_render_target.end() ? 0 : draws_it->second));
-            std::string line = header;
+            std::string line = header.data();
 
             // A depth-stencil image's readback path (colour aspect, colour layouts) does not apply, and
             // nothing ever populates its `backing`; report the declaration alone rather than a fake zero.
@@ -3004,11 +3004,11 @@ namespace sogen
                 histogram[static_cast<size_t>(std::min(15.0f, clamped * 16.0f))] += 1;
             }
             const size_t finite = texels - nan_count;
-            char summary[320];
-            std::snprintf(summary, sizeof(summary), " texels=%zu min=%g max=%g mean=%g nan=%zu zero=%zu", texels,
+            std::array<char, 320> summary{};
+            std::snprintf(summary.data(), summary.size(), " texels=%zu min=%g max=%g mean=%g nan=%zu zero=%zu", texels,
                           finite != 0 ? min_value : 0.0f, finite != 0 ? max_value : 0.0f,
                           finite != 0 ? sum / static_cast<double>(finite) : 0.0, nan_count, zero_count);
-            line += summary;
+            line += summary.data();
             line += " hist=";
             for (const size_t bucket : histogram)
             {
@@ -3022,9 +3022,9 @@ namespace sogen
             // between "these numbers look odd" and a diagnosis.
             if (const char* dump_dir = getenv("EMULATOR_D3D9_RTDUMPDIR"))
             {
-                char path[512];
-                std::snprintf(path, sizeof(path), "%s/rt_%llu.bin", dump_dir, static_cast<unsigned long long>(id));
-                if (FILE* file = std::fopen(path, "wb"))
+                std::array<char, 512> path{};
+                std::snprintf(path.data(), path.size(), "%s/rt_%llu.bin", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path.data(), "wb"))
                 {
                     std::fwrite(entry.backing.data(), 1, entry.backing.size(), file);
                     std::fclose(file);
@@ -3069,10 +3069,10 @@ namespace sogen
         const auto c0 = reg(0);
         const auto c32 = reg(32);
         const auto c34 = reg(34);
-        char buf[256];
-        std::snprintf(buf, sizeof(buf), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1], c0[2],
-                      c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
-        return std::string(buf);
+        std::array<char, 256> buf{};
+        std::snprintf(buf.data(), buf.size(), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1],
+                      c0[2], c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
+        return {buf.data()};
     }
 
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
@@ -3401,9 +3401,9 @@ namespace sogen
             std::string text;
             if (disassemble_d3d9_shader(tokens, token_size_bytes, text))
             {
-                char path[512];
-                std::snprintf(path, sizeof(path), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
-                if (FILE* file = std::fopen(path, "wb"))
+                std::array<char, 512> path{};
+                std::snprintf(path.data(), path.size(), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path.data(), "wb"))
                 {
                     std::fwrite(text.data(), 1, text.size(), file);
                     std::fclose(file);
