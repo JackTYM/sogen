@@ -1628,12 +1628,18 @@ namespace sogen
                 if (address < 0x1000)
                 {
                     const auto sp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsp));
+                    const auto ip = acting.read_instruction_pointer();
+                    const auto* ip_mod = this->mod_manager.find_by_address(ip);
                     uint32_t return_address = 0;
                     if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
                     {
                         const auto* mod = this->mod_manager.find_by_address(return_address);
-                        this->log.error("Null-pointer call to 0x%llx; caller return address 0x%x (%s+0x%llx)\n",
-                                        static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
+                        this->log.error("Null-pointer access to 0x%llx at 0x%llx (%s+0x%llx); caller return address 0x%x "
+                                        "(%s+0x%llx)\n",
+                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(ip),
+                                        ip_mod ? ip_mod->name.c_str() : "?",
+                                        ip_mod ? static_cast<unsigned long long>(ip - ip_mod->image_base) : ip, return_address,
+                                        mod ? mod->name.c_str() : "?",
                                         mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
                     }
 
