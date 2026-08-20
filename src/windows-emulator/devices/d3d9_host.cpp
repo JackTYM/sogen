@@ -13,8 +13,12 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <limits>
 #include <span>
+#include <string>
 
 namespace sogen
 {
@@ -72,6 +76,7 @@ namespace sogen
 
         // Public D3DRENDERSTATETYPE value (d3d9types.h) needed for real scissor-test wiring.
         constexpr uint32_t d3drs_scissortestenable = 174;
+        constexpr uint32_t d3drs_srgbwriteenable = 194;
 
         // Public D3DRENDERSTATETYPE value (d3d9types.h). Default TRUE (clipping on); FALSE tells the driver
         // the geometry is inside the guard band and skips clipping, incl. near/far depth clipping -- which
@@ -1538,7 +1543,16 @@ namespace sogen
         {
             resource_entry* entry{}; // nullptr = this D3D9 RT slot isn't bound/resolvable (a gap)
             uint32_t vk_format{};    // 0 (VK_FORMAT_UNDEFINED) when entry == nullptr
+            bool srgb{};             // attach through the format's _SRGB view (D3DRS_SRGBWRITEENABLE)
         };
+
+        // D3DRS_SRGBWRITEENABLE: the pixel shader's linear output is encoded to sRGB on the way into the
+        // render target. A title that does its own gamma decode in the shader (squaring every sampled
+        // albedo, which is what makes its lighting maths linear) relies on this render state alone to
+        // get back to display space -- ignoring it leaves the whole 3D scene stored at roughly the
+        // square of its intended brightness, i.e. near-black everywhere but the brightest highlights,
+        // while 2D/HUD draws (which set the state to 0) come out perfectly correct.
+        const bool srgb_write = render_state_or(this->state_.render_state, d3drs_srgbwriteenable, 0) != 0;
 
         // Matches device_state::render_targets's own std::array<uint64_t, 4> size (d3d9_host.hpp).
         std::array<slot_render_target, 4> rt_slots{};
@@ -1557,7 +1571,11 @@ namespace sogen
             {
                 continue;
             }
-            rt_slots[slot] = {&bound_it->second, bound_vk_format};
+            // An sRGB counterpart only exists for the 8-bit RGB(A) formats; every other render target
+            // keeps its linear format, matching real D3D9 ignoring the render state for those.
+            uint32_t srgb_vk_format = 0;
+            const bool use_srgb = srgb_write && d3d9_format_to_vulkan_srgb(bound_it->second.format, srgb_vk_format);
+            rt_slots[slot] = {&bound_it->second, use_srgb ? srgb_vk_format : bound_vk_format, use_srgb};
             bound_rt_count = slot + 1;
         }
         const std::span<const slot_render_target> bound_rts(rt_slots.data(), bound_rt_count);
@@ -1658,17 +1676,22 @@ namespace sogen
             return d3d_ok;
         }
 
-        for (const auto& brt : bound_rts)
+        // The attachment view for a slot: the resource's linear view normally, its sRGB view while
+        // D3DRS_SRGBWRITEENABLE is on. Both are cached on the resource and created on first use.
+        const auto attachment_view = [](const slot_render_target& brt) -> uint64_t& {
+            return brt.srgb ? brt.entry->vk_image_view_srgb_id : brt.entry->vk_image_view_id;
+        };
+        for (auto& brt : rt_slots)
         {
-            if (brt.entry == nullptr || brt.entry->vk_image_view_id != 0)
+            if (brt.entry == nullptr || attachment_view(brt) != 0)
             {
                 continue;
             }
             if (this->vulkan_.create_image_view(device, brt.entry->vk_image_id, brt.vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                 VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
                                                 VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                brt.entry->vk_image_view_id) != 0 ||
-                brt.entry->vk_image_view_id == 0)
+                                                attachment_view(brt)) != 0 ||
+                attachment_view(brt) == 0)
             {
                 return d3d_ok;
             }
@@ -1978,6 +2001,7 @@ namespace sogen
                 {
                     ++this->stats_.sampler_skip_depth_stencil;
                     this->stats_.sampler_skip_formats[tex.format] += 1;
+                    this->stats_.depth_stencil_skip_at_stage[stage] += 1;
                     continue;
                 }
                 // Render-to-texture: a colour render target bound as a texture. There is nothing to
@@ -2038,6 +2062,7 @@ namespace sogen
                     if (rt_as_texture)
                     {
                         sampled_render_targets.push_back(&tex);
+                        this->stats_.rt_sampled_by_shader[{stage, tex_it->second, this->state_.pixel_shader}] += 1;
                     }
                 }
             }
@@ -2246,7 +2271,7 @@ namespace sogen
                 continue;
             }
             color_attachments.push_back({
-                .image_view = brt.entry->vk_image_view_id,
+                .image_view = brt.srgb ? brt.entry->vk_image_view_srgb_id : brt.entry->vk_image_view_id,
                 .resolve_image_view = 0,
                 .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 .resolve_image_layout = 0,
@@ -2371,6 +2396,7 @@ namespace sogen
         // Counted here, past every early return, so these are draws that genuinely reached the GPU.
         ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
         ++this->stats_.draws_per_render_target[target_rt];
+        ++this->stats_.draws_per_shader_pair[{target_rt, this->state_.vertex_shader, this->state_.pixel_shader}];
         if (build_depth_state(this->state_.render_state, depth_vk_format).test_enable != 0)
         {
             ++this->stats_.recorded_depth_tested;
@@ -2785,6 +2811,177 @@ namespace sogen
                (it->second.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
     }
 
+    std::vector<std::string> d3d9_host::describe_render_targets()
+    {
+        // Decodes an IEEE-754 binary16 bit pattern (the inverse of float_to_half above), so a
+        // A16B16G16R16F target's texels can be summarized on the same scale as every other format.
+        const auto half_to_float = [](const uint16_t h) {
+            const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+            const uint32_t exponent = (h >> 10) & 0x1Fu;
+            const uint32_t mantissa = h & 0x3FFu;
+            uint32_t bits = 0;
+            if (exponent == 0)
+            {
+                bits = sign; // zero/subnormal -- summarized as zero, which is all this diagnostic needs
+            }
+            else if (exponent == 0x1F)
+            {
+                bits = sign | 0x7F800000u | (mantissa << 13);
+            }
+            else
+            {
+                bits = sign | ((exponent - 15 + 127) << 23) | (mantissa << 13);
+            }
+            float value = 0.0f;
+            std::memcpy(&value, &bits, sizeof(value));
+            return value;
+        };
+
+        std::vector<std::string> lines;
+        for (auto& [id, entry] : this->resources_)
+        {
+            if (entry.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) ||
+                (entry.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) == 0 || entry.vk_image_id == 0)
+            {
+                continue;
+            }
+
+            uint32_t vk_format = 0;
+            d3d9_format_to_vulkan(entry.format, vk_format);
+            const auto draws_it = this->stats_.draws_per_render_target.find(id);
+            char header[192];
+            std::snprintf(header, sizeof(header), "rt=%llu d3dfmt=%u vkfmt=%u %ux%u usage=0x%X draws=%llu",
+                          static_cast<unsigned long long>(id), static_cast<unsigned>(entry.format), static_cast<unsigned>(vk_format),
+                          static_cast<unsigned>(entry.width), static_cast<unsigned>(entry.height), static_cast<unsigned>(entry.usage),
+                          static_cast<unsigned long long>(draws_it == this->stats_.draws_per_render_target.end() ? 0 : draws_it->second));
+            std::string line = header;
+
+            // A depth-stencil image's readback path (colour aspect, colour layouts) does not apply, and
+            // nothing ever populates its `backing`; report the declaration alone rather than a fake zero.
+            if ((entry.usage & d3dusage_depthstencil) != 0)
+            {
+                lines.push_back(line + " contents=<depth-stencil, not read back>");
+                continue;
+            }
+
+            this->sync_backing_from_gpu(entry);
+            const uint32_t bytes_per_texel = vk_format_bytes_per_texel(vk_format);
+            const size_t texels = bytes_per_texel != 0 ? entry.backing.size() / bytes_per_texel : 0;
+            if (texels == 0)
+            {
+                lines.push_back(line + " contents=<no backing>");
+                continue;
+            }
+
+            // One representative scalar per texel, on a comparable scale across formats: the stored value
+            // for a single-channel float target (a shadow map / depth prepass, where the value IS the
+            // datum), and the brightest colour channel otherwise.
+            const auto texel_value = [&](const size_t index) -> float {
+                const std::byte* texel = entry.backing.data() + index * bytes_per_texel;
+                switch (vk_format)
+                {
+                case VK_FORMAT_R32_SFLOAT: {
+                    float value = 0.0f;
+                    std::memcpy(&value, texel, sizeof(value));
+                    return value;
+                }
+                case VK_FORMAT_R16G16B16A16_SFLOAT: {
+                    uint16_t bits = 0;
+                    std::memcpy(&bits, texel, sizeof(bits));
+                    return half_to_float(bits);
+                }
+                case VK_FORMAT_R5G6B5_UNORM_PACK16: {
+                    uint16_t bits = 0;
+                    std::memcpy(&bits, texel, sizeof(bits));
+                    return static_cast<float>(std::max({(bits >> 11) & 0x1F, (bits >> 5) & 0x3F, bits & 0x1F})) / 63.0f;
+                }
+                default: {
+                    uint32_t brightest = 0;
+                    for (uint32_t byte = 0; byte < std::min(bytes_per_texel, 3u); ++byte)
+                    {
+                        brightest = std::max(brightest, static_cast<uint32_t>(texel[byte]));
+                    }
+                    return static_cast<float>(brightest) / 255.0f;
+                }
+                }
+            };
+
+            float min_value = std::numeric_limits<float>::infinity();
+            float max_value = -std::numeric_limits<float>::infinity();
+            double sum = 0.0;
+            size_t nan_count = 0;
+            size_t zero_count = 0;
+            // Fraction of texels equal to the most common value, computed over a coarse bucketing: the
+            // single number that separates "this target holds a real, varying image" from "this target
+            // holds one constant everywhere", which is the whole question a degenerate pass raises.
+            std::array<size_t, 16> histogram{};
+            for (size_t i = 0; i < texels; ++i)
+            {
+                const float value = texel_value(i);
+                if (std::isnan(value))
+                {
+                    ++nan_count;
+                    continue;
+                }
+                min_value = std::min(min_value, value);
+                max_value = std::max(max_value, value);
+                sum += value;
+                zero_count += value == 0.0f ? 1 : 0;
+                const float clamped = std::clamp(value, 0.0f, 1.0f);
+                histogram[static_cast<size_t>(std::min(15.0f, clamped * 16.0f))] += 1;
+            }
+            const size_t finite = texels - nan_count;
+            char summary[320];
+            std::snprintf(summary, sizeof(summary), " texels=%zu min=%g max=%g mean=%g nan=%zu zero=%zu", texels,
+                          finite != 0 ? min_value : 0.0f, finite != 0 ? max_value : 0.0f,
+                          finite != 0 ? sum / static_cast<double>(finite) : 0.0, nan_count, zero_count);
+            line += summary;
+            line += " hist=";
+            for (const size_t bucket : histogram)
+            {
+                line += std::to_string(finite != 0 ? bucket * 100 / finite : 0) + ",";
+            }
+            lines.push_back(line);
+
+            // EMULATOR_D3D9_RTDUMPDIR=<dir> additionally writes the raw texels to <dir>/rt_<id>.bin.
+            // Summary statistics say whether a target's contents are plausible; only the image itself
+            // says whether the *structure* in it is the scene it should be, which is the difference
+            // between "these numbers look odd" and a diagnosis.
+            if (const char* dump_dir = getenv("EMULATOR_D3D9_RTDUMPDIR"))
+            {
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/rt_%llu.bin", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path, "wb"))
+                {
+                    std::fwrite(entry.backing.data(), 1, entry.backing.size(), file);
+                    std::fclose(file);
+                }
+            }
+        }
+        return lines;
+    }
+
+    std::string d3d9_host::describe_pipeline_state(const std::map<uint32_t, std::map<uint32_t, uint64_t>>& render_state_values) const
+    {
+        std::string out = "rs:";
+        for (const auto& [state, values] : render_state_values)
+        {
+            out += " " + std::to_string(state) + "={";
+            for (const auto& [value, count] : values)
+            {
+                out += std::to_string(value) + "x" + std::to_string(count) + ",";
+            }
+            out += "}";
+        }
+        out += " | samp:";
+        std::map<uint64_t, uint32_t> ordered_ss(this->state_.sampler_state.begin(), this->state_.sampler_state.end());
+        for (const auto& [key, value] : ordered_ss)
+        {
+            out += " s" + std::to_string(key >> 32) + "." + std::to_string(key & 0xFFFFFFFF) + "=" + std::to_string(value);
+        }
+        return out;
+    }
+
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
     {
         // Flush any open batch so its draws have executed (and left the render target in
@@ -3101,6 +3298,26 @@ namespace sogen
         std::memcpy(entry.tokens.data(), tokens, token_size_bytes);
 
         const uint64_t id = this->allocate_id();
+
+        // EMULATOR_D3D9_SHADERDUMP=<dir> writes every shader the guest creates, as D3D assembly, to
+        // <dir>/sh_<id>.asm. Read alongside the draws_per_shader_pair counter (which names the ids that
+        // actually matter) this turns "the pixels are wrong and every counter is clean" into a readable
+        // program. Files are named by the same resource id the counters print, so the two join directly.
+        if (const char* dump_dir = getenv("EMULATOR_D3D9_SHADERDUMP"))
+        {
+            std::string text;
+            if (disassemble_d3d9_shader(tokens, token_size_bytes, text))
+            {
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path, "wb"))
+                {
+                    std::fwrite(text.data(), 1, text.size(), file);
+                    std::fclose(file);
+                }
+            }
+        }
+
         this->shaders_.emplace(id, std::move(entry));
         out_shader = id;
         return d3d_ok;
@@ -3236,6 +3453,7 @@ namespace sogen
                 return d3derr_invalidcall;
             }
             this->state_.render_state[req.state] = req.value;
+            this->stats_.render_state_values[req.state][req.value] += 1;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_texture_stage_state: {

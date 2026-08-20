@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace sogen
@@ -71,4 +72,11 @@ namespace sogen
     // unsupported bytecode, or a scan/link/compile failure); out is left empty in that case.
     bool translate_d3d9_shader_pair(const void* vs_tokens, size_t vs_token_size_bytes, const void* ps_tokens, size_t ps_token_size_bytes,
                                     shader_pair_spirv& out);
+
+    // Disassembles one SM1-3 token blob back to D3D shader assembly text (vkd3d-shader's own D3D_ASM
+    // target). A guest ships shaders as opaque bytecode, so when a title renders the wrong pixels with
+    // every counter clean -- no dropped draws, no unbound samplers, no truncated constant file -- the
+    // shader's own arithmetic is the only remaining place the answer can be, and this is the only way
+    // to read it. Returns false if vkd3d-shader cannot parse the blob.
+    bool disassemble_d3d9_shader(const void* tokens, size_t token_size_bytes, std::string& out_text);
 } // namespace sogen

@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -227,6 +228,26 @@ namespace sogen
             // The D3D9 format of every skipped binding above, so an unhandled fourcc can be named rather
             // than guessed at.
             std::map<uint32_t, uint64_t> sampler_skip_formats{};
+            // The sampler_skip_depth_stencil total above, split by the stage whose descriptor was left
+            // unwritten: a shadow-map sampler register is identifiable this way, an aggregate count is not.
+            std::map<uint32_t, uint64_t> depth_stencil_skip_at_stage{};
+            // Recorded draws keyed by {slot-0 render target, vertex shader, pixel shader}. draws_per_
+            // render_target says a target got N draws; this says which *program* produced them, which is
+            // what identifies the one shader pair responsible for a title's dominant surface -- the only
+            // way to know which of a hundred dumped shaders is worth reading.
+            std::map<std::array<uint64_t, 3>, uint64_t> draws_per_shader_pair{};
+            // Render-to-texture bindings that DID succeed: {pixel-sampler stage, render target, pixel
+            // shader} -> draws. draws_per_render_target says which target a draw WROTE; this says which
+            // previously-rendered target a draw READ, at which sampler register, and by which program.
+            // Together they reconstruct a title's real multi-pass frame graph, which is what tells a
+            // broken intermediate target apart from a broken consumer of one -- and names the shader
+            // whose disassembly answers which of the two it is.
+            std::map<std::array<uint64_t, 3>, uint64_t> rt_sampled_by_shader{};
+            // Every distinct value the guest has ever set each D3D9 render state to, with a count.
+            // describe_pipeline_state prints only the CURRENT value, which is whatever the last draw of
+            // the frame (typically 2D HUD) left behind -- a state the title toggles per draw, which is
+            // most of them, is therefore invisible there. This says what the state's full value set is.
+            std::map<uint32_t, std::map<uint32_t, uint64_t>> render_state_values{};
         };
 
         const draw_stats& stats() const
@@ -246,6 +267,30 @@ namespace sogen
         // Lock/Present reads back. Lets gpu_bridge fire its draw/submit summary only at a real frame
         // completion (a render-target Lock), not on every vertex/index-buffer Lock.
         bool is_render_target(uint64_t resource) const;
+
+        // Diagnostic (EMULATOR_D3D9_RTDIAG): one human-readable line per render-target resource,
+        // describing its declaration AND a format-aware summary of the pixels currently in it, read
+        // back from the GPU. Every other counter this host exposes says how many draws reached a
+        // target; none says whether what landed there is usable data. An intermediate render target
+        // (shadow map, depth prepass, downsampled bloom chain) that is fully drawn but holds a
+        // degenerate constant -- all far-plane, all zero, all NaN -- looks identical to a correct one
+        // in draws_per_render_target, and produces a plausible-but-wrong final image rather than an
+        // obviously broken one. This is the only way to tell those apart.
+        //
+        // Deliberately expensive: it forces a full GPU->host readback of every render target, so it is
+        // called only under the env var, never on a normal frame.
+        std::vector<std::string> describe_render_targets();
+
+        // Diagnostic: the full census of D3D9 pipeline state the guest has set -- every value each
+        // render state has ever been given (from draw_stats::render_state_values, passed in) plus the
+        // current value of every sampler state. The counters above can only report what this host DID;
+        // a title rendering wrong pixels with every one of them clean is usually asking for a piece of
+        // pipeline state this host silently drops on the floor, and a state this host never reads is
+        // invisible everywhere else. Printing the value SET rather than the current value matters: most
+        // states are toggled per draw, so the current value is just whatever the frame's last (usually
+        // 2D/HUD) draw left behind, and a state a title turns on for exactly its 3D geometry -- which is
+        // the interesting case -- reads as permanently off there.
+        std::string describe_pipeline_state(const std::map<uint32_t, std::map<uint32_t, uint64_t>>& render_state_values) const;
 
       private:
         struct resource_entry
@@ -270,7 +315,14 @@ namespace sogen
             std::vector<std::vector<std::byte>> extra_mips;
             uint64_t vk_image_id{};      // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{}; // 0 until first drawn to; lazily created, cached per resource
-            bool backing_dirty{};        // color RT: GPU image has drawn/cleared pixels not yet copied to backing
+            // Second colour-attachment view of the SAME image, through the format's _SRGB counterpart,
+            // used only while D3DRS_SRGBWRITEENABLE is set (see execute_draw). Vulkan performs the
+            // linear->sRGB encode on writes through an sRGB-formatted attachment view, so this one extra
+            // view is the whole mechanism. Stays 0 for formats with no sRGB counterpart, and is never
+            // used for SAMPLING -- a render target's stored bytes are read back exactly as they were
+            // written, which is what the guest's own later passes expect.
+            uint64_t vk_image_view_srgb_id{};
+            bool backing_dirty{}; // color RT: GPU image has drawn/cleared pixels not yet copied to backing
 
             // Sampled texture: the CPU-side backing has bytes the GPU image does not have yet, so the next
             // ensure_texture_uploaded must do a real staging upload. The inverse of backing_dirty above,

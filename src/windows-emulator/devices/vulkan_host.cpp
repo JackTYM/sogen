@@ -6298,6 +6298,17 @@ namespace sogen
                    VK_IMAGE_USAGE_SAMPLED_BIT);
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // D3DRS_SRGBWRITEENABLE is a per-draw render state, not a property of the surface: the same
+        // render target is written linearly by some draws and sRGB-encoded by others. Vulkan applies
+        // that conversion per colour-attachment VIEW, so the image has to be viewable through both its
+        // linear format and the matching _SRGB one -- which requires MUTABLE_FORMAT at creation, the one
+        // decision that cannot be deferred to the first draw that needs it. Only requested for formats
+        // that actually have an sRGB counterpart, so no other render target pays for it.
+        uint32_t srgb_vk_format = 0;
+        if (d3d9_format_to_vulkan_srgb(format, srgb_vk_format))
+        {
+            image_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+        }
         if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)
         {
             return fail();

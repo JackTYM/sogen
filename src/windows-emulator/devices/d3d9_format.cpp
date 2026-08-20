@@ -50,6 +50,7 @@ namespace sogen
         constexpr uint32_t vk_format_r8g8b8a8_snorm = 38;
         constexpr uint32_t vk_format_r8g8b8a8_uscaled = 39;
         constexpr uint32_t vk_format_b8g8r8a8_unorm = 44;
+        constexpr uint32_t vk_format_b8g8r8a8_srgb = 50;
         constexpr uint32_t vk_format_a2b10g10r10_snorm_pack32 = 65;
         constexpr uint32_t vk_format_a2b10g10r10_uscaled_pack32 = 66;
         constexpr uint32_t vk_format_r16g16_unorm = 77;
@@ -137,6 +138,24 @@ namespace sogen
             return true;
         case d3dfmt_dxt5:
             out_vk_format = vk_format_bc3_unorm_block;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool d3d9_format_to_vulkan_srgb(const uint32_t d3dfmt, uint32_t& out_vk_format)
+    {
+        switch (d3dfmt)
+        {
+        // The only D3D9 render-target formats real D3D9 hardware defines an sRGB write conversion for
+        // are the 8-bit-per-channel RGB(A) ones; D3DRS_SRGBWRITEENABLE is documented to be ignored for
+        // every other format, which is exactly what returning false here produces (the caller keeps the
+        // linear VkFormat/view). Deliberately NOT extended to the float/16-bit formats: those hold
+        // linear data by design and converting them would be wrong, not merely unsupported.
+        case d3dfmt_a8r8g8b8:
+        case d3dfmt_x8r8g8b8:
+            out_vk_format = vk_format_b8g8r8a8_srgb;
             return true;
         default:
             return false;

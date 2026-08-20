@@ -9,6 +9,14 @@ namespace sogen
     // so callers can fail cleanly instead of silently falling back to some default format.
     bool d3d9_format_to_vulkan(uint32_t d3dfmt, uint32_t& out_vk_format);
 
+    // The sRGB-encoding VkFormat that shares `d3dfmt`'s memory layout, for the formats real D3D9
+    // hardware applies D3DRS_SRGBWRITEENABLE's linear->sRGB conversion to. A colour attachment viewed
+    // through this format gets that conversion from Vulkan itself on every write, which is what makes
+    // D3DRS_SRGBWRITEENABLE implementable without touching a single shader. Returns false (leaving
+    // out_vk_format untouched) for every format that has no sRGB counterpart -- the same set real D3D9
+    // documents the render state as being ignored for -- so callers keep the linear format for those.
+    bool d3d9_format_to_vulkan_srgb(uint32_t d3dfmt, uint32_t& out_vk_format);
+
     // Bytes occupied by a single texel of `vk_format`, for the non-block-compressed VkFormat constants
     // d3d9_format_to_vulkan can produce. Shared across translation units (d3d9_host.cpp and
     // vulkan_host.cpp) so render-target sizing/readback paths agree on per-format stride instead of

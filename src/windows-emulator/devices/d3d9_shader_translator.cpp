@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace sogen
 {
@@ -253,6 +254,39 @@ namespace sogen
             out.vertex_spirv.clear();
             return false;
         }
+        return true;
+    }
+
+    bool disassemble_d3d9_shader(const void* tokens, const size_t token_size_bytes, std::string& out_text)
+    {
+        out_text.clear();
+        if (tokens == nullptr || token_size_bytes == 0)
+        {
+            return false;
+        }
+
+        vkd3d_shader_compile_info compile_info{};
+        compile_info.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;
+        compile_info.source.code = tokens;
+        compile_info.source.size = token_size_bytes;
+        compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
+        compile_info.target_type = VKD3D_SHADER_TARGET_D3D_ASM;
+        compile_info.log_level = VKD3D_SHADER_LOG_NONE;
+
+        vkd3d_shader_code out{};
+        char* messages = nullptr;
+        const int result = vkd3d_shader_compile(&compile_info, &out, &messages);
+        if (messages != nullptr)
+        {
+            vkd3d_shader_free_messages(messages);
+        }
+        if (result < 0)
+        {
+            return false;
+        }
+
+        out_text.assign(static_cast<const char*>(out.code), out.size);
+        vkd3d_shader_free_shader_code(&out);
         return true;
     }
 } // namespace sogen

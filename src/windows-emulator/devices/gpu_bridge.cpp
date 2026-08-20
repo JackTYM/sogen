@@ -2965,6 +2965,62 @@ namespace sogen
                                      static_cast<unsigned long long>(s.sampler_skip_depth_stencil),
                                      static_cast<unsigned long long>(s.sampler_skip_upload_refused),
                                      static_cast<unsigned long long>(s.sampler_skip_no_view), skip_formats.c_str());
+                    // Which off-screen render target each pixel-sampler register actually read (and by
+                    // which pixel shader), and which registers got an unwritten descriptor because a
+                    // depth-stencil surface was bound there. draws_per_rt above is the write side of the
+                    // frame graph; this is the read side, and only the two together identify a bad
+                    // intermediate pass -- and name the shader that would settle which end is at fault.
+                    std::string sampled;
+                    for (const auto& [key, count] : s.rt_sampled_by_shader)
+                    {
+                        sampled += " s" + std::to_string(key[0]) + "<-rt" + std::to_string(key[1]) + "/ps" + std::to_string(key[2]) + "=" +
+                                   std::to_string(count);
+                    }
+                    std::string ds_stages;
+                    for (const auto& [stage, count] : s.depth_stencil_skip_at_stage)
+                    {
+                        ds_stages += " s" + std::to_string(stage) + "=" + std::to_string(count);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] rt_sampled:%s | ds_skip_stages:%s\n", sampled.c_str(), ds_stages.c_str());
+
+                    // The dozen busiest {render target, vertex shader, pixel shader} triples. A title
+                    // runs hundreds of shader pairs per frame but only a handful cover most of the
+                    // screen; this names them, so EMULATOR_D3D9_SHADERDUMP's output can be read
+                    // selectively instead of exhaustively.
+                    std::vector<std::pair<uint64_t, std::array<uint64_t, 3>>> pairs;
+                    pairs.reserve(s.draws_per_shader_pair.size());
+                    for (const auto& [key, count] : s.draws_per_shader_pair)
+                    {
+                        pairs.emplace_back(count, key);
+                    }
+                    std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                    std::string top;
+                    for (size_t i = 0; i < pairs.size() && i < 12; ++i)
+                    {
+                        top += " rt" + std::to_string(pairs[i].second[0]) + "/vs" + std::to_string(pairs[i].second[1]) + "/ps" +
+                               std::to_string(pairs[i].second[2]) + "=" + std::to_string(pairs[i].first);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] top_shader_pairs (of %zu):%s\n", s.draws_per_shader_pair.size(), top.c_str());
+                    win_emu.log.warn("[d3d9-drawdiag] %s\n", this->d3d9_.describe_pipeline_state(s.render_state_values).c_str());
+                }
+
+                // EMULATOR_D3D9_RTDIAG reads every render target back from the GPU and prints what is
+                // actually in it (see d3d9_host::describe_render_targets). Rate-limited to one dump per N
+                // frames -- the readbacks are full GPU stalls, so an unthrottled dump would change the
+                // very frame timing an investigation is trying to observe. N comes from the env var's
+                // value (default 200), so a slow title can be sampled sparsely and a short repro densely.
+                if (const char* rt_diag = getenv("EMULATOR_D3D9_RTDIAG"))
+                {
+                    const int period = std::max(1, atoi(rt_diag));
+                    static int frames_until_dump = 1;
+                    if (--frames_until_dump <= 0)
+                    {
+                        frames_until_dump = period;
+                        for (const auto& rt_line : this->d3d9_.describe_render_targets())
+                        {
+                            win_emu.log.warn("[d3d9-rtdiag] %s\n", rt_line.c_str());
+                        }
+                    }
                 }
             }
 
