@@ -78,6 +78,14 @@ namespace sogen
         constexpr uint32_t d3drs_scissortestenable = 174;
         constexpr uint32_t d3drs_srgbwriteenable = 194;
 
+        // Public D3DRENDERSTATETYPE value (d3d9types.h) needed for real backface-cull wiring.
+        constexpr uint32_t d3drs_cullmode = 22;
+
+        // Public D3DCULL values (d3d9types.h), D3DRS_CULLMODE's value space.
+        constexpr uint32_t d3dcull_none = 1;
+        constexpr uint32_t d3dcull_cw = 2;
+        constexpr uint32_t d3dcull_ccw = 3;
+
         // Public D3DRENDERSTATETYPE value (d3d9types.h). Default TRUE (clipping on); FALSE tells the driver
         // the geometry is inside the guard band and skips clipping, incl. near/far depth clipping -- which
         // maps to VkPipelineRasterizationStateCreateInfo::depthClampEnable (clamp instead of clip in Z).
@@ -311,6 +319,35 @@ namespace sogen
             }
         }
 
+        // Every pipeline this UMD builds bakes frontFace to this fixed value regardless of D3DRS_CULLMODE.
+        // execute_draw's viewport is {y = H, height = -H} (commit 7215d2d2) to match D3D9's clip-space Y
+        // convention; a negative-height viewport is a pure Y-reflection, and reflecting one axis negates
+        // the signed area every triangle's winding is computed from, universally. That un-mirroring is
+        // exactly what makes Vulkan's window-space coordinates now equal D3D9's own screen-space
+        // coordinates for the same draw, so "visually clockwise" means the same thing to both rasterizers
+        // with no further correction -- D3D9's documented default (D3DCULL_CCW) culls back faces with CCW
+        // vertices, i.e. its front faces are CW, hence CLOCKWISE here.
+        constexpr uint32_t k_umd_front_face = VK_FRONT_FACE_CLOCKWISE;
+
+        // D3DCULL -> VkCullModeFlags, paired with the fixed frontFace above. D3DCULL_CW/CCW name which
+        // winding D3D9 treats as the back face to cull, not which winding Vulkan should cull directly --
+        // CCW (the default, also this function's fallback) is back under CLOCKWISE-front, so it maps to
+        // BACK_BIT; CW inverts that, so it culls the front-designated winding instead (FRONT_BIT).
+        uint32_t d3dcull_to_vk_cull_mode(const uint32_t d3dcull)
+        {
+            switch (d3dcull)
+            {
+            case d3dcull_none:
+                return VK_CULL_MODE_NONE;
+            case d3dcull_cw:
+                return VK_CULL_MODE_FRONT_BIT;
+            case d3dcull_ccw:
+                return VK_CULL_MODE_BACK_BIT;
+            default:
+                return VK_CULL_MODE_BACK_BIT; // D3D9's own documented default for D3DRS_CULLMODE
+            }
+        }
+
         // Builds the pipeline's color-blend state from the app's accumulated render state.
         // D3DRS_ALPHABLENDENABLE unset/0 always yields the pre-blending all-zero state (blend_enable=0,
         // every factor/op 0), matching this function's pre-blending behavior exactly for every draw that
@@ -463,6 +500,7 @@ namespace sogen
         // D3DRS_CLIPPING (default TRUE) drives depthClampEnable in the built pipeline, so it is part of the
         // pipeline identity -- normalized to 0/1 so distinct truthy values don't fragment the cache.
         key.depth_clip_enable = render_state_or(this->state_.render_state, d3drs_clipping, 1) != 0 ? 1u : 0u;
+        key.cull_mode = d3dcull_to_vk_cull_mode(render_state_or(this->state_.render_state, d3drs_cullmode, d3dcull_ccw));
 
         const auto cached = this->ff_pipelines_.find(key);
         if (cached != this->ff_pipelines_.end())
@@ -524,7 +562,8 @@ namespace sogen
         const int32_t result = this->vulkan_.create_graphics_pipeline(
             device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings, attributes,
             key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, pipeline);
+            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, key.cull_mode,
+            k_umd_front_face, pipeline);
         if (result != 0 || pipeline == 0)
         {
             return false;
@@ -689,6 +728,7 @@ namespace sogen
         // D3DRS_CLIPPING (default TRUE) drives depthClampEnable in the built pipeline, so it is part of the
         // pipeline identity -- normalized to 0/1 so distinct truthy values don't fragment the cache.
         key.depth_clip_enable = render_state_or(this->state_.render_state, d3drs_clipping, 1) != 0 ? 1u : 0u;
+        key.cull_mode = d3dcull_to_vk_cull_mode(render_state_or(this->state_.render_state, d3drs_cullmode, d3dcull_ccw));
 
         const auto cached = this->programmable_pipelines_.find(key);
         if (cached != this->programmable_pipelines_.end())
@@ -925,7 +965,8 @@ namespace sogen
         const int32_t result = this->vulkan_.create_graphics_pipeline(
             device, /*render_pass=*/0, entry.pipeline_layout, entry.vs_module, entry.fs_module, width, height, bindings, attributes,
             key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, entry.pipeline);
+            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, key.cull_mode,
+            k_umd_front_face, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
         {
             // EMULATOR_D3D9_PIPEDIAG dumps the full description of a pipeline the driver refused. Without
@@ -2337,9 +2378,8 @@ namespace sogen
         // D3D9 screen space rather than clip space and compensates for this itself (ff_triangle.vert).
         //
         // Winding order: a negative-height viewport reverses the effective face orientation the rasterizer
-        // sees, which would normally have to be paid back by flipping VkPipelineRasterizationStateCreateInfo
-        // ::frontFace. It does not here -- create_graphics_pipeline builds every pipeline with cullMode
-        // VK_CULL_MODE_NONE and this path never sets the cull-mode dynamic state, so no face test runs.
+        // sees. Paid back once, permanently, in the pipeline's baked frontFace rather than here -- see
+        // d3dcull_to_vk_cull_mode's comment for the reasoning.
         const std::array<vulkan_host::viewport_entry, 1> viewports{{{.x = 0,
                                                                      .y = static_cast<float>(rt.height),
                                                                      .width = static_cast<float>(rt.width),

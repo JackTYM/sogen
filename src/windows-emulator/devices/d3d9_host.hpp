@@ -590,6 +590,7 @@ namespace sogen
             vulkan_host::depth_state depth{};            // resolved static depth test/write/compare (build_depth_state)
             vulkan_host::color_blend_attachment blend{}; // resolved static blend enable/factors/write-mask (build_blend_state)
             uint32_t depth_clip_enable{1};               // D3DRS_CLIPPING, baked into depthClampEnable (default TRUE = clip on)
+            uint32_t cull_mode{2};                       // D3DRS_CULLMODE, resolved VkCullModeFlags (default: BACK_BIT)
             auto operator<=>(const pipeline_cache_key&) const = default;
         };
 

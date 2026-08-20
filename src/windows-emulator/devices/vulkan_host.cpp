@@ -5196,7 +5196,7 @@ namespace sogen
                                                   uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                                   const specialization& vs_spec, const specialization& fs_spec,
                                                   std::span<const color_blend_attachment> blend_attachments_in, uint32_t depth_clip_enable,
-                                                  uint64_t& out_pipeline)
+                                                  uint32_t cull_mode, uint32_t front_face, uint64_t& out_pipeline)
     {
         out_pipeline = 0;
         const auto dev = this->impl_->devices.find(device);
@@ -5347,8 +5347,8 @@ namespace sogen
         // usage, so fall back to VK_FALSE (clip), which is also the default whenever clipping stays enabled.
         rasterization.depthClampEnable = (depth_clip_enable == 0 && dev->second.depth_clamp_enabled) ? VK_TRUE : VK_FALSE;
         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterization.cullMode = VK_CULL_MODE_NONE;
-        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.cullMode = static_cast<VkCullModeFlags>(cull_mode);
+        rasterization.frontFace = static_cast<VkFrontFace>(front_face);
         rasterization.lineWidth = 1.0f;
 
         VkPipelineMultisampleStateCreateInfo multisample{};

@@ -2351,11 +2351,15 @@ namespace sogen
                     rasterization_samples = 1;
                 }
                 uint64_t pipeline = gpu_bridge::null_object;
+                // cull_mode/front_face: DXVK's own request carries no cull state (it declares CULL_MODE and
+                // FRONT_FACE as dynamic state -- see dynamic_states above -- and drives them per-draw through
+                // cmd_set_dynamic_u32 instead), so these baked defaults only matter as a fallback and simply
+                // preserve this path's pre-existing behavior (VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE).
                 const int32_t result = this->vulkan_.create_graphics_pipeline(
                     request.device, request.render_pass, request.pipeline_layout, request.vertex_shader, request.fragment_shader,
                     request.width, request.height, bindings, attributes, depth, color_formats, request.depth_format, request.stencil_format,
                     rasterization_samples, request.primitive_topology, request.primitive_restart_enable, dynamic_states, vs_spec, fs_spec,
-                    blend_attachments, /*depth_clip_enable=*/1, pipeline);
+                    blend_attachments, /*depth_clip_enable=*/1, /*cull_mode=*/0, /*front_face=*/0, pipeline);
                 if (result != 0)
                 {
                     win_emu.log.error(
