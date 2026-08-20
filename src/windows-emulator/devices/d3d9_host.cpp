@@ -1671,6 +1671,9 @@ namespace sogen
 
         const resource_entry* ib_entry = nullptr;
         const std::vector<std::byte>* ib_um_bytes = nullptr;
+        // 0 = not resource-backed (DrawIndexedPrimitiveUP's inline ib_um_bytes) -- never cacheable, same
+        // sentinel convention as reserved_range::resource_id below.
+        uint64_t ib_resource_id = 0;
         if (indexed != nullptr)
         {
             if (!this->state_.index_um_data.empty())
@@ -1691,6 +1694,7 @@ namespace sogen
                     return d3d_ok; // no real index data bound
                 }
                 ib_entry = &ib_it->second;
+                ib_resource_id = indexed->index_buffer;
             }
         }
 
@@ -1777,6 +1781,11 @@ namespace sogen
             uint32_t stream;
             const std::vector<std::byte>* bytes;
             size_t offset;
+            // 0 = not resource-backed (DrawPrimitiveUP's inline stream_um_data) -- never cacheable, same
+            // sentinel convention as ib_resource_id above (real ids from allocate_id() start at 0x10000).
+            uint64_t resource_id{};
+            uint64_t content_version{};
+            bool cache_hit{false};
         };
 
         std::vector<reserved_range> reserved_streams;
@@ -1790,6 +1799,8 @@ namespace sogen
             // the resource-id-backed vertex buffer exactly as before. The two are mutually exclusive per
             // stream (each bind path clears the other -- see the set_stream_source[_um] handlers).
             const std::vector<std::byte>* src_bytes = nullptr;
+            uint64_t src_resource_id = 0;
+            uint64_t src_content_version = 0;
             const auto um_it = this->state_.stream_um_data.find(stream);
             if (um_it != this->state_.stream_um_data.end() && !um_it->second.empty())
             {
@@ -1810,15 +1821,19 @@ namespace sogen
                     continue;
                 }
                 src_bytes = &res_it->second.backing;
+                src_resource_id = src_it->second;
+                src_content_version = res_it->second.content_version;
             }
-            reserved_streams.push_back({stream, src_bytes, 0});
+            reserved_streams.push_back({stream, src_bytes, 0, src_resource_id, src_content_version, false});
         }
 
         // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
         // index buffer; both upload identically into the arena.
         const std::vector<std::byte>* ib_bytes =
             ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr ? &ib_entry->backing : nullptr);
+        const uint64_t ib_content_version = ib_entry != nullptr ? ib_entry->content_version : 0;
         size_t ib_arena_offset = 0;
+        bool ib_cache_hit = false;
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
@@ -1951,21 +1966,52 @@ namespace sogen
             this->batch_open_ = true;
             this->batch_rt_ = target_rt;
             this->batch_ds_ = target_ds;
+            // Invalidates every vertex/index upload cache entry against this new batch (see
+            // batch_generation_'s own comment) -- covers both a plain flush+reopen and the flush+grow_arena
+            // path above, which destroys and recreates arena.buffer/memory entirely.
+            ++this->batch_generation_;
         }
 
         // Reserve every arena slice now that the batch is open and the arena is guaranteed large enough
         // (either it already fit, or the overflow path above flushed and grew it while the GPU was idle).
         // A freshly-opened batch is empty, so any growth arena_suballoc still performs here is safe.
+        //
+        // Cache check (Task #161) happens here, not in the precount above: whether this draw's reservations
+        // land in a continuing batch or a freshly (re)opened one -- and therefore what batch_generation_ is
+        // -- is only settled by the flush/grow decisions just above. A cache hit reuses the exact offset the
+        // matching resource was already uploaded to earlier in this same batch_generation_, so it neither
+        // consumes new arena space nor performs a new arena_suballoc call.
         for (auto& rs : reserved_streams)
         {
+            if (rs.resource_id != 0)
+            {
+                const upload_cache_entry& cached = this->stream_upload_cache_[rs.stream];
+                if (cached.valid && cached.resource_id == rs.resource_id && cached.content_version == rs.content_version &&
+                    cached.batch_generation == this->batch_generation_)
+                {
+                    rs.offset = cached.arena_offset;
+                    rs.cache_hit = true;
+                    continue;
+                }
+            }
             if (!this->arena_suballoc(arena, rs.bytes->size(), rs.offset))
             {
                 return d3d_ok;
             }
         }
-        if (ib_bytes != nullptr && !this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
+        if (ib_bytes != nullptr)
         {
-            return d3d_ok;
+            if (ib_resource_id != 0 && this->index_upload_cache_.valid && this->index_upload_cache_.resource_id == ib_resource_id &&
+                this->index_upload_cache_.content_version == ib_content_version &&
+                this->index_upload_cache_.batch_generation == this->batch_generation_)
+            {
+                ib_arena_offset = this->index_upload_cache_.arena_offset;
+                ib_cache_hit = true;
+            }
+            else if (!this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
+            {
+                return d3d_ok;
+            }
         }
         if (use_programmable)
         {
@@ -1986,7 +2032,23 @@ namespace sogen
         std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
         for (const auto& rs : reserved_streams)
         {
-            this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+            if (rs.cache_hit)
+            {
+                ++this->stats_.vertex_upload_skipped;
+            }
+            else
+            {
+                this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+                ++this->stats_.vertex_upload_done;
+                if (rs.resource_id != 0)
+                {
+                    this->stream_upload_cache_[rs.stream] = {.resource_id = rs.resource_id,
+                                                             .content_version = rs.content_version,
+                                                             .batch_generation = this->batch_generation_,
+                                                             .arena_offset = rs.offset,
+                                                             .valid = true};
+                }
+            }
             stream_buffers[rs.stream] = arena.buffer;
             const auto off_it = this->state_.stream_offsets.find(rs.stream);
             const uint32_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
@@ -1996,7 +2058,23 @@ namespace sogen
         uint64_t index_buffer_vk = 0;
         if (ib_bytes != nullptr)
         {
-            this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
+            if (ib_cache_hit)
+            {
+                ++this->stats_.index_upload_skipped;
+            }
+            else
+            {
+                this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
+                ++this->stats_.index_upload_done;
+                if (ib_resource_id != 0)
+                {
+                    this->index_upload_cache_ = {.resource_id = ib_resource_id,
+                                                 .content_version = ib_content_version,
+                                                 .batch_generation = this->batch_generation_,
+                                                 .arena_offset = ib_arena_offset,
+                                                 .valid = true};
+                }
+            }
             index_buffer_vk = arena.buffer;
         }
 
@@ -3375,6 +3453,12 @@ namespace sogen
         // narrowed to "is this a texture kind", since a mislabelled resource that later turns out to be
         // sampled would then silently render stale pixels.
         it->second.upload_dirty = true;
+        // Same unconditional treatment for execute_draw's vertex/index upload cache (Task #161) -- this is
+        // the one site that mutates `backing` without the batch already having been flushed first (every
+        // other writer -- tex_blt, sync_backing_from_gpu -- calls flush_batch() before touching backing),
+        // so it is the one site that needs the version bumped rather than just relying on a flush having
+        // already invalidated any in-flight cached offset.
+        ++it->second.content_version;
         return d3d_ok;
     }
 

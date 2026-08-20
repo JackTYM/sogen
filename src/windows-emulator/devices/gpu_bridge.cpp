@@ -2935,6 +2935,13 @@ namespace sogen
                         static_cast<unsigned long long>(s.texture_upload_done), static_cast<unsigned long long>(s.texture_upload_skipped),
                         static_cast<unsigned long long>(s.pipeline_cache_hit), static_cast<unsigned long long>(s.pipeline_cache_miss),
                         static_cast<unsigned long long>(s.pipeline_negative_hit), this->d3d9_.programmable_pipeline_count());
+                    // Same idea, for execute_draw's per-draw vertex-stream/index-buffer arena upload cache
+                    // (Task #161). `skipped` climbing alongside a flat/slow-growing `done` is the signature
+                    // of the cache actually hitting on repeated draws of the same resource content.
+                    win_emu.log.warn(
+                        "[d3d9-drawdiag] vtx_upload: done=%llu skipped=%llu | idx_upload: done=%llu skipped=%llu\n",
+                        static_cast<unsigned long long>(s.vertex_upload_done), static_cast<unsigned long long>(s.vertex_upload_skipped),
+                        static_cast<unsigned long long>(s.index_upload_done), static_cast<unsigned long long>(s.index_upload_skipped));
                     win_emu.log.warn("[d3d9-drawdiag] pipe_fail: shader_missing=%llu translate=%llu vk_object=%llu\n",
                                      static_cast<unsigned long long>(s.drop_shader_missing),
                                      static_cast<unsigned long long>(s.drop_translate_failed),

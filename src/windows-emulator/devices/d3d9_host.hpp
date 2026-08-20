@@ -197,6 +197,14 @@ namespace sogen
             // something is re-writing texture backings every frame and the dirty check cannot help.
             uint64_t texture_upload_done{};
             uint64_t texture_upload_skipped{};
+            // Same idea as the texture pair above, but for execute_draw's per-draw vertex-stream and
+            // index-buffer arena uploads (Task #161) -- `skipped` means a resource's content_version and
+            // the open batch's batch_generation both matched a still-valid cache entry, so the prior
+            // upload's arena offset was reused as-is with no new memcpy.
+            uint64_t vertex_upload_done{};
+            uint64_t vertex_upload_skipped{};
+            uint64_t index_upload_done{};
+            uint64_t index_upload_skipped{};
             // programmable_pipelines_ lookups. A steady-state frame should be all hits: the cache is never
             // evicted, so a per-frame `miss` count means the key is genuinely varying (new shader pair,
             // new RT format, new vertex shape, or new depth/blend combination) and every one of those
@@ -355,6 +363,15 @@ namespace sogen
             // single staging buffer, so per-subresource granularity would buy nothing.
             bool upload_dirty{true};
 
+            // Monotonic counter bumped every time this resource's backing bytes are mutated (currently the
+            // sole site is unlock()'s write-back memcpy -- see its own comment). execute_draw's vertex/index
+            // upload cache keys on {resource id, content_version, batch_generation} so a cached arena offset
+            // is only ever reused when the bytes it was uploaded from are still exactly what `backing` holds
+            // now. Starts at 0 and is never reset, including across destroy_resource -- irrelevant, since
+            // resource ids (allocate_id()) are never reused either, so a stale cache entry can never alias a
+            // different, newer resource.
+            uint64_t content_version{};
+
             // Selects subresource `index`'s backing store (index 0 == `backing`; higher == a mip level).
             // Callers must bounds-check index against extra_mips.size() + 1 before calling.
             std::vector<std::byte>& subresource_backing(const uint32_t index)
@@ -496,6 +513,41 @@ namespace sogen
         // draws). Reset to 0 on batch open; when the next draw would exceed frame_desc_capacity_draws_ the
         // batch is flushed first so the pool can be reset (see execute_draw's overflow guard).
         uint32_t batch_draw_count_{};
+
+        // Bumped once every time a new batch opens (execute_draw's "if (!this->batch_open_)" block) --
+        // i.e. after every real flush_batch() (RT/depth-stencil change, descriptor-pool exhaustion, or
+        // arena growth) as well as the very first batch. arena_.offset resets to 0 whenever a batch
+        // (re)opens, so an arena offset cached from a previous batch generation would otherwise alias
+        // whatever a later batch has since written at that same offset -- the vertex/index upload cache
+        // below (see upload_cache_entry) includes this counter in its match key specifically to rule that
+        // out, on top of the {resource id, content_version} check that already covers content changes
+        // within the SAME still-open batch (e.g. a Lock/Unlock of a dynamic vertex buffer between draws).
+        uint64_t batch_generation_{0};
+
+        // One entry: {resource id, content_version, batch_generation} -> arena_ offset the resource's
+        // bytes were last uploaded to. A hit on all three fields means the bytes currently in
+        // resource_entry::backing are bit-identical to what's already sitting at arena_offset in the
+        // still-open batch's arena, so execute_draw can bind that offset directly and skip the
+        // upload_memory memcpy entirely (Task #161: this upload was measured at 19% of all wall-clock
+        // time in a live MW2 profile, with zero dirty-tracking -- every draw re-uploaded every bound
+        // vertex stream and the index buffer even when byte-identical to the prior draw's). resource_id
+        // == 0 is the "never populated" / "not cacheable" sentinel -- real resource ids from allocate_id()
+        // start at 0x10000, and a DrawPrimitiveUP/DrawIndexedPrimitiveUP's inline UM-backed bytes have no
+        // resource id at all, so those are always cache misses (a fresh reservation + upload every draw,
+        // exactly like today).
+        struct upload_cache_entry
+        {
+            uint64_t resource_id{};
+            uint64_t content_version{};
+            uint64_t batch_generation{};
+            size_t arena_offset{};
+            bool valid{false};
+        };
+
+        // Indexed directly by D3D9 stream number (execute_draw's `used_binding_mask` is a 32-bit mask, so
+        // every stream index it ever iterates is < 32).
+        std::array<upload_cache_entry, 32> stream_upload_cache_{};
+        upload_cache_entry index_upload_cache_{};
 
         // Process-lifetime instrumentation, never reset: draw_count_ increments once per execute_draw
         // call, batch_submit_count_ once per real flush_batch() submit (an open batch actually
