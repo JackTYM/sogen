@@ -422,6 +422,16 @@ namespace sogen
             int32_t scissor_top{};
             int32_t scissor_right{};
             int32_t scissor_bottom{};
+            // Last SetViewport/SetZRange values (D3DVIEWPORT9 semantics: X/Y/Width/Height in the same
+            // top-left-origin screen space as the scissor rect above). width/height default to 0, which
+            // execute_draw reads as "no explicit viewport yet" and falls back to the full render-target
+            // extent -- see its viewport-transform derivation.
+            float viewport_x{};
+            float viewport_y{};
+            float viewport_width{};
+            float viewport_height{};
+            float viewport_min_z{0.0f};
+            float viewport_max_z{1.0f};
         };
 
         // Starts far above any value the real d3d9.dll runtime's own internal handle spaces (vertex/

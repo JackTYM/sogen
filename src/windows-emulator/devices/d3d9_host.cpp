@@ -2371,21 +2371,32 @@ namespace sogen
 
         // Negative height (VK_KHR_maintenance1, core since Vulkan 1.1): D3D9 puts clip-space y = +1 at the
         // TOP of the screen, Vulkan puts y = -1 there. vkd3d-shader translates a D3D9 vertex shader's oPos
-        // to gl_Position verbatim, in D3D9 clip space, so a plain {y = 0, height = +H} viewport rasterizes
-        // every translated draw upside down. Flipping the viewport transform (y = H, height = -H) instead
-        // of rewriting each shader also realigns D3D9 screen space with Vulkan framebuffer space, which is
-        // what the scissor rect below is expressed in. The fixed-function shader's input is already in
-        // D3D9 screen space rather than clip space and compensates for this itself (ff_triangle.vert).
+        // to gl_Position verbatim, in D3D9 clip space, so a plain {y = Y, height = +H} viewport rasterizes
+        // every translated draw upside down. Flipping the viewport transform instead of rewriting each
+        // shader also realigns D3D9 screen space with Vulkan framebuffer space, which is what the scissor
+        // rect below is expressed in. The fixed-function shader's input is already in D3D9 screen space
+        // rather than clip space and compensates for this itself (ff_triangle.vert).
+        //
+        // General case: D3D9's viewport transform is Px = X + (ndcX+1)*Width/2, Py = Y + (1-ndcY)*Height/2
+        // (D3D9 docs); Vulkan's is framebufferX = x + (ndcX+1)*width/2, framebufferY = y + (ndcY+1)*height/2
+        // (VkViewport spec). X/width need no correction -- matching coefficients gives x = X, width = Width
+        // directly. For Y, matching the ndcY coefficient forces height = -Height, and matching the constant
+        // term then forces y = Y + Height. This reduces to commit 7215d2d2's original hardcoded
+        // {y = H, height = -H} exactly when X = Y = 0 and Width/Height equal the render target's extent --
+        // the only case exercised before SetViewport's parsed state was wired up here.
         //
         // Winding order: a negative-height viewport reverses the effective face orientation the rasterizer
         // sees. Paid back once, permanently, in the pipeline's baked frontFace rather than here -- see
         // d3dcull_to_vk_cull_mode's comment for the reasoning.
-        const std::array<vulkan_host::viewport_entry, 1> viewports{{{.x = 0,
-                                                                     .y = static_cast<float>(rt.height),
-                                                                     .width = static_cast<float>(rt.width),
-                                                                     .height = -static_cast<float>(rt.height),
-                                                                     .min_depth = 0.0f,
-                                                                     .max_depth = 1.0f}}};
+        const bool has_explicit_viewport = this->state_.viewport_width > 0.0f && this->state_.viewport_height > 0.0f;
+        const float vp_x = has_explicit_viewport ? this->state_.viewport_x : 0.0f;
+        const float vp_y = has_explicit_viewport ? this->state_.viewport_y : 0.0f;
+        const float vp_width = has_explicit_viewport ? this->state_.viewport_width : static_cast<float>(rt.width);
+        const float vp_height = has_explicit_viewport ? this->state_.viewport_height : static_cast<float>(rt.height);
+        const float vp_min_z = has_explicit_viewport ? this->state_.viewport_min_z : 0.0f;
+        const float vp_max_z = has_explicit_viewport ? this->state_.viewport_max_z : 1.0f;
+        const std::array<vulkan_host::viewport_entry, 1> viewports{
+            {{.x = vp_x, .y = vp_y + vp_height, .width = vp_width, .height = -vp_height, .min_depth = vp_min_z, .max_depth = vp_max_z}}};
         this->vulkan_.cmd_set_viewport(this->batch_command_buffer_, 0, false, viewports);
         vulkan_host::scissor_entry scissor{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height};
         if (render_state_or(this->state_.render_state, d3drs_scissortestenable, 0) != 0)
@@ -3051,7 +3062,7 @@ namespace sogen
         const auto c34 = reg(34);
         char buf[256];
         std::snprintf(buf, sizeof(buf), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1], c0[2],
-                     c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
+                      c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
         return std::string(buf);
     }
 
@@ -3724,13 +3735,19 @@ namespace sogen
             this->state_.depth_stencil = req.surface;
             return d3d_ok;
         }
-        // set_viewport still parse-validates (catching wire-format bugs early) and no-ops until
-        // execute_draw's hardcoded full-render-target-extent viewport is replaced with real viewport
-        // state; clear/draw are fully implemented (see class comment), and set_scissor below now feeds
-        // execute_draw's D3DRS_SCISSORTESTENABLE-gated scissor.
         case gpu_bridge::command::d3d9_set_viewport: {
             d3d9_cmd::set_viewport_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            this->state_.viewport_x = req.x;
+            this->state_.viewport_y = req.y;
+            this->state_.viewport_width = req.width;
+            this->state_.viewport_height = req.height;
+            this->state_.viewport_min_z = req.min_z;
+            this->state_.viewport_max_z = req.max_z;
+            return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_scissor: {
             d3d9_cmd::set_scissor_record req{};
