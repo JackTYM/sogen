@@ -879,6 +879,38 @@ namespace sogen
                     continue;
                 }
 
+                if (action.type == input_action::kind::wait_window)
+                {
+                    const auto* wait_target = find_input_target_window(proc);
+                    const bool matched =
+                        wait_target && u16_to_u8(wait_target->class_name).find(action.text) != std::string::npos;
+
+                    if (matched)
+                    {
+                        c.win_emu->log.info("Input script: window class now contains '%s', continuing\n", action.text.c_str());
+                        c.input_wait_window_started.reset();
+                        ++c.input_script_pos;
+                        continue;
+                    }
+
+                    if (!c.input_wait_window_started)
+                    {
+                        c.input_wait_window_started = now;
+                    }
+
+                    if (now - *c.input_wait_window_started < std::chrono::milliseconds(action.delay_ms))
+                    {
+                        return;
+                    }
+
+                    c.win_emu->log.warn("Input script: waiting for window class containing '%s' timed out after %u ms, "
+                                        "continuing anyway\n",
+                                        action.text.c_str(), action.delay_ms);
+                    c.input_wait_window_started.reset();
+                    ++c.input_script_pos;
+                    continue;
+                }
+
                 auto* target = find_input_target_window(proc);
                 if (!target)
                 {
@@ -887,6 +919,9 @@ namespace sogen
 
                 if (c.input_target_window != target->handle)
                 {
+                    c.win_emu->log.info("Input script: target window changed to %llx ('%s', class '%s')\n",
+                                        static_cast<unsigned long long>(target->handle), u16_to_u8(target->name).c_str(),
+                                        u16_to_u8(target->class_name).c_str());
                     send_synthetic_ui_event(c, target->handle, WM_SETFOCUS, 0, 0);
                     send_synthetic_ui_event(c, target->handle, WM_ACTIVATE, WA_ACTIVE, 0);
                     c.input_target_window = target->handle;
@@ -933,6 +968,7 @@ namespace sogen
                     c.win_emu->log.info("Input script: text '%s'\n", action.text.c_str());
                     break;
                 case input_action::kind::wait:
+                case input_action::kind::wait_window:
                     break;
                 }
 
@@ -1190,6 +1226,13 @@ namespace sogen
             {
                 action.type = input_action::kind::wait;
                 action.delay_ms = parse_delay(fields[1]);
+                actions.push_back(action);
+            }
+            else if (op == "waitclass" && fields.size() == 3)
+            {
+                action.type = input_action::kind::wait_window;
+                action.text = fields[1];
+                action.delay_ms = parse_delay(fields[2]);
                 actions.push_back(action);
             }
             else if (op == "move" && fields.size() == 3)
