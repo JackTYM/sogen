@@ -1758,7 +1758,12 @@ namespace sogen
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
-        constexpr size_t ps_ubo_size = 32 * 4 * sizeof(float);
+        // The pixel stage has no D3DCAPS9 field of its own -- its float-constant count follows
+        // PixelShaderVersion, which fill_d3d9caps reports as ps_3_0. ps_3_0 has 224 float constant
+        // registers (c0..c223); 32 is the ps_2_0 number and would silently truncate everything above c31
+        // in build_ubo_staging while also binding a descriptor range smaller than the block vkd3d-shader
+        // declares for such a shader, so the out-of-range reads land in the neighbouring arena slices.
+        constexpr size_t ps_ubo_size = 224 * 4 * sizeof(float);
         // D3D9 SM3 int/bool constant-register caps (16 registers each, both stages -- fill_d3d9caps),
         // each register expanded to a 16-byte slot (see vs/ps_const_i/b's own comments in d3d9_host.hpp).
         constexpr size_t int_bool_ubo_size = 16 * 4 * sizeof(uint32_t);
@@ -1964,6 +1969,17 @@ namespace sogen
                     continue;
                 }
                 resource_entry& tex = tex_res_it->second;
+                // A depth-stencil surface bound as a texture -- a shadow map. Neither of the two paths
+                // below can service it (is_samplable_render_target excludes DEPTHSTENCIL usage, and
+                // ensure_texture_uploaded refuses it too), so it is counted here rather than being lost
+                // in the generic upload-refused bucket: a shader that samples one gets an unwritten
+                // descriptor, and every surface it lights comes out unlit.
+                if ((tex.usage & d3dusage_depthstencil) != 0)
+                {
+                    ++this->stats_.sampler_skip_depth_stencil;
+                    this->stats_.sampler_skip_formats[tex.format] += 1;
+                    continue;
+                }
                 // Render-to-texture: a colour render target bound as a texture. There is nothing to
                 // upload -- its GPU image already holds the pixels a previous draw rendered into it --
                 // so ensure_texture_uploaded (which refuses render-target-usage resources outright) must
@@ -1986,6 +2002,8 @@ namespace sogen
                 }
                 else if (!this->ensure_texture_uploaded(tex_it->second))
                 {
+                    ++this->stats_.sampler_skip_upload_refused;
+                    this->stats_.sampler_skip_formats[tex.format] += 1;
                     continue;
                 }
                 if (tex.vk_image_view_id == 0)
@@ -2009,6 +2027,11 @@ namespace sogen
                     }
                 }
                 const uint32_t sampler_mips = rt_as_texture ? 1u : std::max(1u, tex.mip_levels);
+                if (tex.vk_image_view_id == 0)
+                {
+                    ++this->stats_.sampler_skip_no_view;
+                    this->stats_.sampler_skip_formats[tex.format] += 1;
+                }
                 if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, sampler_mips, tex_samplers[stage]))
                 {
                     tex_image_views[stage] = tex.vk_image_view_id;
@@ -3314,8 +3337,13 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_f ? this->state_.vs_const_f
-                                                                                                                : this->state_.ps_const_f;
+            const bool is_vs = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_f;
+            auto& target = is_vs ? this->state_.vs_const_f : this->state_.ps_const_f;
+            if (req.vector4_count > 0)
+            {
+                auto& high = is_vs ? this->stats_.max_vs_const_f_register : this->stats_.max_ps_const_f_register;
+                high = std::max(high, req.start_register + req.vector4_count - 1);
+            }
             const size_t required = static_cast<size_t>(req.start_register) * 4 + float_count;
             if (target.size() < required)
             {

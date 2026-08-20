@@ -212,6 +212,21 @@ namespace sogen
             // heavily-drawn resource id that is NOT the one pfnPresent hands back -- the one shape of
             // "everything works but nothing is visible" that no other counter can distinguish.
             std::map<uint64_t, uint64_t> draws_per_render_target{};
+            // Highest float constant register (c#) the guest has ever written, per stage. Compared against
+            // the UBO caps in execute_draw: anything above them is silently truncated by build_ubo_staging
+            // and reads back as zero in the shader, which is invisible in every other counter here.
+            uint32_t max_vs_const_f_register{};
+            uint32_t max_ps_const_f_register{};
+            // Pixel-stage texture bindings the guest asked for that this host could not service, bucketed
+            // by why. Every one of these leaves its combined-image-sampler descriptor unwritten, which is
+            // only legal if the bound PS never samples that stage -- so a nonzero count here is the one
+            // signal that a draw is reading an undefined sampler and silently rendering wrong.
+            uint64_t sampler_skip_depth_stencil{};  // a depth-stencil surface bound as a texture (shadow map)
+            uint64_t sampler_skip_upload_refused{}; // ensure_texture_uploaded declined (kind/format/backing)
+            uint64_t sampler_skip_no_view{};        // no image view, i.e. d3d9_format_to_vulkan had no mapping
+            // The D3D9 format of every skipped binding above, so an unhandled fourcc can be named rather
+            // than guessed at.
+            std::map<uint32_t, uint64_t> sampler_skip_formats{};
         };
 
         const draw_stats& stats() const

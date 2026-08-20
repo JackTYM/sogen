@@ -2941,6 +2941,30 @@ namespace sogen
                         rts += " " + std::to_string(rt) + "=" + std::to_string(count);
                     }
                     win_emu.log.warn("[d3d9-drawdiag] draws_per_rt:%s\n", rts.c_str());
+                    win_emu.log.warn("[d3d9-drawdiag] const_f high-water: vs=c%u ps=c%u\n",
+                                     static_cast<unsigned>(s.max_vs_const_f_register), static_cast<unsigned>(s.max_ps_const_f_register));
+                    std::string skip_formats;
+                    for (const auto& [fmt, count] : s.sampler_skip_formats)
+                    {
+                        // D3DFORMAT is either a small enum value or a packed fourcc; render the fourcc
+                        // spelling too when all four bytes are printable so an unhandled one can be named.
+                        std::string name = std::to_string(fmt);
+                        std::string fourcc;
+                        for (int shift = 0; shift < 32; shift += 8)
+                        {
+                            const auto c = static_cast<char>((fmt >> shift) & 0xFF);
+                            fourcc += (c >= 0x20 && c < 0x7F) ? c : '.';
+                        }
+                        if (fmt > 0xFFFF)
+                        {
+                            name += "(" + fourcc + ")";
+                        }
+                        skip_formats += " " + name + "=" + std::to_string(count);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] sampler_skip: depth_stencil=%llu upload_refused=%llu no_view=%llu | fmts:%s\n",
+                                     static_cast<unsigned long long>(s.sampler_skip_depth_stencil),
+                                     static_cast<unsigned long long>(s.sampler_skip_upload_refused),
+                                     static_cast<unsigned long long>(s.sampler_skip_no_view), skip_formats.c_str());
                 }
             }
 
