@@ -67,6 +67,18 @@ namespace sogen
                        token_handle == CURRENT_THREAD_EFFECTIVE_TOKEN || token_handle == DUMMY_IMPERSONATION_TOKEN ||
                        proc.tokens.get(token_handle) != nullptr;
             }
+
+            // The caller believes the returned handle is distinct from existing_token_handle and will
+            // close both independently; since it reuses the same numeric value here, its object needs
+            // an extra reference or the first CloseHandle erases it out from under the second.
+            void retain_existing_token(process_context& proc, const handle existing_token_handle)
+            {
+                auto* token = proc.tokens.get(existing_token_handle);
+                if (token)
+                {
+                    ++token->ref_count;
+                }
+            }
         }
 
         TOKEN_TYPE get_token_type(const handle token_handle)
@@ -76,7 +88,7 @@ namespace sogen
                        : TokenPrimary;
         }
 
-        NTSTATUS handle_NtDuplicateToken(const syscall_context&, const handle existing_token_handle, ACCESS_MASK /*desired_access*/,
+        NTSTATUS handle_NtDuplicateToken(const syscall_context& c, const handle existing_token_handle, ACCESS_MASK /*desired_access*/,
                                          const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>>
                                          /*object_attributes*/,
                                          const BOOLEAN /*effective_only*/, const TOKEN_TYPE type,
@@ -84,6 +96,7 @@ namespace sogen
         {
             if (get_token_type(existing_token_handle) == type)
             {
+                retain_existing_token(c.proc, existing_token_handle);
                 new_token_handle.write(existing_token_handle);
             }
             else if (type == TokenPrimary)
@@ -98,12 +111,13 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtFilterToken(const syscall_context&, const handle existing_token_handle, ULONG /*flags*/,
+        NTSTATUS handle_NtFilterToken(const syscall_context& c, const handle existing_token_handle, ULONG /*flags*/,
                                       uint64_t /*sids_to_disable*/, uint64_t /*privileges_to_delete*/, uint64_t /*restricted_sids*/,
                                       const emulator_object<handle> new_token_handle)
         {
             // sogen doesn't model per-handle SID/privilege restrictions, so the filtered token is
             // just the same recognized identity as the source token.
+            retain_existing_token(c.proc, existing_token_handle);
             new_token_handle.write(existing_token_handle);
             return STATUS_SUCCESS;
         }
