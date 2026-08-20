@@ -51,6 +51,7 @@ namespace sogen
         enum class kind
         {
             wait,
+            wait_window,
             mouse_move,
             button_down,
             button_up,
@@ -98,6 +99,7 @@ namespace sogen
         std::vector<input_action> input_script{};
         size_t input_script_pos{};
         std::optional<std::chrono::steady_clock::time_point> input_script_deadline{};
+        std::optional<std::chrono::steady_clock::time_point> input_wait_window_started{};
         uint64_t input_target_window{};
 
         mutable std::pair<uint64_t, uint64_t> mapping_violation{0, 0};

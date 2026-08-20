@@ -2351,11 +2351,15 @@ namespace sogen
                     rasterization_samples = 1;
                 }
                 uint64_t pipeline = gpu_bridge::null_object;
+                // cull_mode/front_face: DXVK's own request carries no cull state (it declares CULL_MODE and
+                // FRONT_FACE as dynamic state -- see dynamic_states above -- and drives them per-draw through
+                // cmd_set_dynamic_u32 instead), so these baked defaults only matter as a fallback and simply
+                // preserve this path's pre-existing behavior (VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE).
                 const int32_t result = this->vulkan_.create_graphics_pipeline(
                     request.device, request.render_pass, request.pipeline_layout, request.vertex_shader, request.fragment_shader,
                     request.width, request.height, bindings, attributes, depth, color_formats, request.depth_format, request.stencil_format,
                     rasterization_samples, request.primitive_topology, request.primitive_restart_enable, dynamic_states, vs_spec, fs_spec,
-                    blend_attachments, /*depth_clip_enable=*/1, pipeline);
+                    blend_attachments, /*depth_clip_enable=*/1, /*cull_mode=*/0, /*front_face=*/0, pipeline);
                 if (result != 0)
                 {
                     win_emu.log.error(
@@ -2931,6 +2935,13 @@ namespace sogen
                         static_cast<unsigned long long>(s.texture_upload_done), static_cast<unsigned long long>(s.texture_upload_skipped),
                         static_cast<unsigned long long>(s.pipeline_cache_hit), static_cast<unsigned long long>(s.pipeline_cache_miss),
                         static_cast<unsigned long long>(s.pipeline_negative_hit), this->d3d9_.programmable_pipeline_count());
+                    // Same idea, for execute_draw's per-draw vertex-stream/index-buffer arena upload cache
+                    // (Task #161). `skipped` climbing alongside a flat/slow-growing `done` is the signature
+                    // of the cache actually hitting on repeated draws of the same resource content.
+                    win_emu.log.warn(
+                        "[d3d9-drawdiag] vtx_upload: done=%llu skipped=%llu | idx_upload: done=%llu skipped=%llu\n",
+                        static_cast<unsigned long long>(s.vertex_upload_done), static_cast<unsigned long long>(s.vertex_upload_skipped),
+                        static_cast<unsigned long long>(s.index_upload_done), static_cast<unsigned long long>(s.index_upload_skipped));
                     win_emu.log.warn("[d3d9-drawdiag] pipe_fail: shader_missing=%llu translate=%llu vk_object=%llu\n",
                                      static_cast<unsigned long long>(s.drop_shader_missing),
                                      static_cast<unsigned long long>(s.drop_translate_failed),
@@ -2965,6 +2976,72 @@ namespace sogen
                                      static_cast<unsigned long long>(s.sampler_skip_depth_stencil),
                                      static_cast<unsigned long long>(s.sampler_skip_upload_refused),
                                      static_cast<unsigned long long>(s.sampler_skip_no_view), skip_formats.c_str());
+                    // Which off-screen render target each pixel-sampler register actually read (and by
+                    // which pixel shader), and which registers got an unwritten descriptor because a
+                    // depth-stencil surface was bound there. draws_per_rt above is the write side of the
+                    // frame graph; this is the read side, and only the two together identify a bad
+                    // intermediate pass -- and name the shader that would settle which end is at fault.
+                    std::string sampled;
+                    for (const auto& [key, count] : s.rt_sampled_by_shader)
+                    {
+                        sampled += " s" + std::to_string(key[0]) + "<-rt" + std::to_string(key[1]) + "/ps" + std::to_string(key[2]) + "=" +
+                                   std::to_string(count);
+                    }
+                    std::string ds_stages;
+                    for (const auto& [stage, count] : s.depth_stencil_skip_at_stage)
+                    {
+                        ds_stages += " s" + std::to_string(stage) + "=" + std::to_string(count);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] rt_sampled:%s | ds_skip_stages:%s\n", sampled.c_str(), ds_stages.c_str());
+
+                    // The dozen busiest {render target, vertex shader, pixel shader} triples. A title
+                    // runs hundreds of shader pairs per frame but only a handful cover most of the
+                    // screen; this names them, so EMULATOR_D3D9_SHADERDUMP's output can be read
+                    // selectively instead of exhaustively.
+                    std::vector<std::pair<uint64_t, std::array<uint64_t, 3>>> pairs;
+                    pairs.reserve(s.draws_per_shader_pair.size());
+                    for (const auto& [key, count] : s.draws_per_shader_pair)
+                    {
+                        pairs.emplace_back(count, key);
+                    }
+                    std::ranges::sort(pairs, [](const auto& a, const auto& b) { return a.first > b.first; });
+                    std::string top;
+                    for (size_t i = 0; i < pairs.size() && i < 12; ++i)
+                    {
+                        top += " rt" + std::to_string(pairs[i].second[0]) + "/vs" + std::to_string(pairs[i].second[1]) + "/ps" +
+                               std::to_string(pairs[i].second[2]) + "=" + std::to_string(pairs[i].first);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] top_shader_pairs (of %zu):%s\n", s.draws_per_shader_pair.size(), top.c_str());
+                    win_emu.log.warn("[d3d9-drawdiag] %s\n", this->d3d9_.describe_pipeline_state(s.render_state_values).c_str());
+
+                    std::string blend_srgb_pairs;
+                    for (const auto& [key, count] : s.blend_srgb_mismatch_shader_pair)
+                    {
+                        blend_srgb_pairs += " rt" + std::to_string(key[0]) + "/vs" + std::to_string(key[1]) + "/ps" +
+                                            std::to_string(key[2]) + "=" + std::to_string(count);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] blend_srgb_mismatch=%llu:%s\n",
+                                     static_cast<unsigned long long>(s.blend_srgb_mismatch), blend_srgb_pairs.c_str());
+                    win_emu.log.warn("[d3d9-drawdiag] %s\n", this->d3d9_.describe_ps_fog_constants().c_str());
+                }
+
+                // EMULATOR_D3D9_RTDIAG reads every render target back from the GPU and prints what is
+                // actually in it (see d3d9_host::describe_render_targets). Rate-limited to one dump per N
+                // frames -- the readbacks are full GPU stalls, so an unthrottled dump would change the
+                // very frame timing an investigation is trying to observe. N comes from the env var's
+                // value (default 200), so a slow title can be sampled sparsely and a short repro densely.
+                if (const char* rt_diag = getenv("EMULATOR_D3D9_RTDIAG"))
+                {
+                    const int period = std::max(1, atoi(rt_diag));
+                    static int frames_until_dump = 1;
+                    if (--frames_until_dump <= 0)
+                    {
+                        frames_until_dump = period;
+                        for (const auto& rt_line : this->d3d9_.describe_render_targets())
+                        {
+                            win_emu.log.warn("[d3d9-rtdiag] %s\n", rt_line.c_str());
+                        }
+                    }
                 }
             }
 

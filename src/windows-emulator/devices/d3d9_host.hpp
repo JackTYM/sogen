@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -196,6 +197,14 @@ namespace sogen
             // something is re-writing texture backings every frame and the dirty check cannot help.
             uint64_t texture_upload_done{};
             uint64_t texture_upload_skipped{};
+            // Same idea as the texture pair above, but for execute_draw's per-draw vertex-stream and
+            // index-buffer arena uploads (Task #161) -- `skipped` means a resource's content_version and
+            // the open batch's batch_generation both matched a still-valid cache entry, so the prior
+            // upload's arena offset was reused as-is with no new memcpy.
+            uint64_t vertex_upload_done{};
+            uint64_t vertex_upload_skipped{};
+            uint64_t index_upload_done{};
+            uint64_t index_upload_skipped{};
             // programmable_pipelines_ lookups. A steady-state frame should be all hits: the cache is never
             // evicted, so a per-frame `miss` count means the key is genuinely varying (new shader pair,
             // new RT format, new vertex shape, or new depth/blend combination) and every one of those
@@ -227,6 +236,38 @@ namespace sogen
             // The D3D9 format of every skipped binding above, so an unhandled fourcc can be named rather
             // than guessed at.
             std::map<uint32_t, uint64_t> sampler_skip_formats{};
+            // The sampler_skip_depth_stencil total above, split by the stage whose descriptor was left
+            // unwritten: a shadow-map sampler register is identifiable this way, an aggregate count is not.
+            std::map<uint32_t, uint64_t> depth_stencil_skip_at_stage{};
+            // Recorded draws keyed by {slot-0 render target, vertex shader, pixel shader}. draws_per_
+            // render_target says a target got N draws; this says which *program* produced them, which is
+            // what identifies the one shader pair responsible for a title's dominant surface -- the only
+            // way to know which of a hundred dumped shaders is worth reading.
+            std::map<std::array<uint64_t, 3>, uint64_t> draws_per_shader_pair{};
+            // Render-to-texture bindings that DID succeed: {pixel-sampler stage, render target, pixel
+            // shader} -> draws. draws_per_render_target says which target a draw WROTE; this says which
+            // previously-rendered target a draw READ, at which sampler register, and by which program.
+            // Together they reconstruct a title's real multi-pass frame graph, which is what tells a
+            // broken intermediate target apart from a broken consumer of one -- and names the shader
+            // whose disassembly answers which of the two it is.
+            std::map<std::array<uint64_t, 3>, uint64_t> rt_sampled_by_shader{};
+            // Every distinct value the guest has ever set each D3D9 render state to, with a count.
+            // describe_pipeline_state prints only the CURRENT value, which is whatever the last draw of
+            // the frame (typically 2D HUD) left behind -- a state the title toggles per draw, which is
+            // most of them, is therefore invisible there. This says what the state's full value set is.
+            std::map<uint32_t, std::map<uint32_t, uint64_t>> render_state_values{};
+            // Diagnostic (Task #144, sRGB-haze investigation): draws with D3DRS_ALPHABLENDENABLE set
+            // while D3DRS_SRGBWRITEENABLE is OFF, targeting a render target whose format DOES have an
+            // sRGB counterpart (d3d9_format_to_vulkan_srgb). Such a draw blends through the target's
+            // LINEAR view -- reading whatever bytes are currently stored as-is, with no sRGB decode --
+            // even though other draws (typically the opaque 3D scene) may have written real sRGB-encoded
+            // bytes into that same target through its _SRGB view. If so, this draw's blend treats
+            // gamma-bright stored bytes as linear, which is a genuine colour-space corruption distinct
+            // from the D3DRS_SRGBWRITEENABLE gap already fixed. A nonzero count here does not by itself
+            // prove a visible bug (the target might not yet hold real sRGB-encoded bytes at this point),
+            // but it identifies exactly which shader pair to inspect via blend_srgb_mismatch_shader_pair.
+            uint64_t blend_srgb_mismatch{};
+            std::map<std::array<uint64_t, 3>, uint64_t> blend_srgb_mismatch_shader_pair{};
         };
 
         const draw_stats& stats() const
@@ -246,6 +287,38 @@ namespace sogen
         // Lock/Present reads back. Lets gpu_bridge fire its draw/submit summary only at a real frame
         // completion (a render-target Lock), not on every vertex/index-buffer Lock.
         bool is_render_target(uint64_t resource) const;
+
+        // Diagnostic (EMULATOR_D3D9_RTDIAG): one human-readable line per render-target resource,
+        // describing its declaration AND a format-aware summary of the pixels currently in it, read
+        // back from the GPU. Every other counter this host exposes says how many draws reached a
+        // target; none says whether what landed there is usable data. An intermediate render target
+        // (shadow map, depth prepass, downsampled bloom chain) that is fully drawn but holds a
+        // degenerate constant -- all far-plane, all zero, all NaN -- looks identical to a correct one
+        // in draws_per_render_target, and produces a plausible-but-wrong final image rather than an
+        // obviously broken one. This is the only way to tell those apart.
+        //
+        // Deliberately expensive: it forces a full GPU->host readback of every render target, so it is
+        // called only under the env var, never on a normal frame.
+        std::vector<std::string> describe_render_targets();
+
+        // Diagnostic: the full census of D3D9 pipeline state the guest has set -- every value each
+        // render state has ever been given (from draw_stats::render_state_values, passed in) plus the
+        // current value of every sampler state. The counters above can only report what this host DID;
+        // a title rendering wrong pixels with every one of them clean is usually asking for a piece of
+        // pipeline state this host silently drops on the floor, and a state this host never reads is
+        // invisible everywhere else. Printing the value SET rather than the current value matters: most
+        // states are toggled per draw, so the current value is just whatever the frame's last (usually
+        // 2D/HUD) draw left behind, and a state a title turns on for exactly its 3D geometry -- which is
+        // the interesting case -- reads as permanently off there.
+        std::string describe_pipeline_state(const std::map<uint32_t, std::map<uint32_t, uint64_t>>& render_state_values) const;
+
+        // Diagnostic (Task #144, sRGB-haze investigation): the CURRENT value of PS float constant
+        // registers c0 and c34 -- MW2's dominant world-material shader (ps68508) reads these as a fog
+        // colour pair (see the shader dump), and the open question is whether the game uploads them
+        // already linear (consistent with its own manual sRGB-decode-via-squaring of every sampled
+        // texture) or in raw display/gamma space (which would blend wrong against the shader's linear
+        // lighting math). Values only, no interpretation -- read the actual numbers to tell.
+        std::string describe_ps_fog_constants() const;
 
       private:
         struct resource_entry
@@ -270,7 +343,14 @@ namespace sogen
             std::vector<std::vector<std::byte>> extra_mips;
             uint64_t vk_image_id{};      // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{}; // 0 until first drawn to; lazily created, cached per resource
-            bool backing_dirty{};        // color RT: GPU image has drawn/cleared pixels not yet copied to backing
+            // Second colour-attachment view of the SAME image, through the format's _SRGB counterpart,
+            // used only while D3DRS_SRGBWRITEENABLE is set (see execute_draw). Vulkan performs the
+            // linear->sRGB encode on writes through an sRGB-formatted attachment view, so this one extra
+            // view is the whole mechanism. Stays 0 for formats with no sRGB counterpart, and is never
+            // used for SAMPLING -- a render target's stored bytes are read back exactly as they were
+            // written, which is what the guest's own later passes expect.
+            uint64_t vk_image_view_srgb_id{};
+            bool backing_dirty{}; // color RT: GPU image has drawn/cleared pixels not yet copied to backing
 
             // Sampled texture: the CPU-side backing has bytes the GPU image does not have yet, so the next
             // ensure_texture_uploaded must do a real staging upload. The inverse of backing_dirty above,
@@ -282,6 +362,15 @@ namespace sogen
             // ensure_texture_uploaded is all-or-nothing: it re-uploads every mip level/cube face in a
             // single staging buffer, so per-subresource granularity would buy nothing.
             bool upload_dirty{true};
+
+            // Monotonic counter bumped every time this resource's backing bytes are mutated (currently the
+            // sole site is unlock()'s write-back memcpy -- see its own comment). execute_draw's vertex/index
+            // upload cache keys on {resource id, content_version, batch_generation} so a cached arena offset
+            // is only ever reused when the bytes it was uploaded from are still exactly what `backing` holds
+            // now. Starts at 0 and is never reset, including across destroy_resource -- irrelevant, since
+            // resource ids (allocate_id()) are never reused either, so a stale cache entry can never alias a
+            // different, newer resource.
+            uint64_t content_version{};
 
             // Selects subresource `index`'s backing store (index 0 == `backing`; higher == a mip level).
             // Callers must bounds-check index against extra_mips.size() + 1 before calling.
@@ -350,6 +439,16 @@ namespace sogen
             int32_t scissor_top{};
             int32_t scissor_right{};
             int32_t scissor_bottom{};
+            // Last SetViewport/SetZRange values (D3DVIEWPORT9 semantics: X/Y/Width/Height in the same
+            // top-left-origin screen space as the scissor rect above). width/height default to 0, which
+            // execute_draw reads as "no explicit viewport yet" and falls back to the full render-target
+            // extent -- see its viewport-transform derivation.
+            float viewport_x{};
+            float viewport_y{};
+            float viewport_width{};
+            float viewport_height{};
+            float viewport_min_z{0.0f};
+            float viewport_max_z{1.0f};
         };
 
         // Starts far above any value the real d3d9.dll runtime's own internal handle spaces (vertex/
@@ -414,6 +513,41 @@ namespace sogen
         // draws). Reset to 0 on batch open; when the next draw would exceed frame_desc_capacity_draws_ the
         // batch is flushed first so the pool can be reset (see execute_draw's overflow guard).
         uint32_t batch_draw_count_{};
+
+        // Bumped once every time a new batch opens (execute_draw's "if (!this->batch_open_)" block) --
+        // i.e. after every real flush_batch() (RT/depth-stencil change, descriptor-pool exhaustion, or
+        // arena growth) as well as the very first batch. arena_.offset resets to 0 whenever a batch
+        // (re)opens, so an arena offset cached from a previous batch generation would otherwise alias
+        // whatever a later batch has since written at that same offset -- the vertex/index upload cache
+        // below (see upload_cache_entry) includes this counter in its match key specifically to rule that
+        // out, on top of the {resource id, content_version} check that already covers content changes
+        // within the SAME still-open batch (e.g. a Lock/Unlock of a dynamic vertex buffer between draws).
+        uint64_t batch_generation_{0};
+
+        // One entry: {resource id, content_version, batch_generation} -> arena_ offset the resource's
+        // bytes were last uploaded to. A hit on all three fields means the bytes currently in
+        // resource_entry::backing are bit-identical to what's already sitting at arena_offset in the
+        // still-open batch's arena, so execute_draw can bind that offset directly and skip the
+        // upload_memory memcpy entirely (Task #161: this upload was measured at 19% of all wall-clock
+        // time in a live MW2 profile, with zero dirty-tracking -- every draw re-uploaded every bound
+        // vertex stream and the index buffer even when byte-identical to the prior draw's). resource_id
+        // == 0 is the "never populated" / "not cacheable" sentinel -- real resource ids from allocate_id()
+        // start at 0x10000, and a DrawPrimitiveUP/DrawIndexedPrimitiveUP's inline UM-backed bytes have no
+        // resource id at all, so those are always cache misses (a fresh reservation + upload every draw,
+        // exactly like today).
+        struct upload_cache_entry
+        {
+            uint64_t resource_id{};
+            uint64_t content_version{};
+            uint64_t batch_generation{};
+            size_t arena_offset{};
+            bool valid{false};
+        };
+
+        // Indexed directly by D3D9 stream number (execute_draw's `used_binding_mask` is a 32-bit mask, so
+        // every stream index it ever iterates is < 32).
+        std::array<upload_cache_entry, 32> stream_upload_cache_{};
+        upload_cache_entry index_upload_cache_{};
 
         // Process-lifetime instrumentation, never reset: draw_count_ increments once per execute_draw
         // call, batch_submit_count_ once per real flush_batch() submit (an open batch actually
@@ -518,6 +652,7 @@ namespace sogen
             vulkan_host::depth_state depth{};            // resolved static depth test/write/compare (build_depth_state)
             vulkan_host::color_blend_attachment blend{}; // resolved static blend enable/factors/write-mask (build_blend_state)
             uint32_t depth_clip_enable{1};               // D3DRS_CLIPPING, baked into depthClampEnable (default TRUE = clip on)
+            uint32_t cull_mode{2};                       // D3DRS_CULLMODE, resolved VkCullModeFlags (default: BACK_BIT)
             auto operator<=>(const pipeline_cache_key&) const = default;
         };
 
@@ -620,6 +755,15 @@ namespace sogen
         // ample headroom -- the growth path in ensure_frame_descriptor_pool exists for correctness, not
         // because a single draw is expected to exceed it.
         static constexpr uint32_t frame_desc_initial_draws = 256;
+
+        // Reused scratch buffers for the six per-draw constant-register UBOs execute_draw stages into the
+        // arena (vs/ps float, vs/ps int, vs/ps bool). Each has a fixed, draw-independent size (the D3D9
+        // constant-register caps), so a fresh std::vector per draw bought nothing but allocator churn --
+        // these are resized once (on first use) and then just overwritten in place every draw. Safe for the
+        // same reason the arena and descriptor pool are: execute_draw submits and blocks on a fence before
+        // returning, so a prior draw's GPU read of the staged bytes (copied into arena.memory well before
+        // that fence) has completed before the next draw overwrites this buffer.
+        std::array<std::vector<std::byte>, 6> ubo_staging_{};
 
         uint64_t allocate_id();
         // Hands out a 256-byte-aligned `size`-byte slice of `arena`, returning its byte offset in

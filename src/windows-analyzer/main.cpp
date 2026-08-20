@@ -1006,11 +1006,15 @@ namespace sogen
             std::vector<std::string> send_input_args{};
             app.add_option("--send-input", send_input_args,
                            "Scripted synthetic input for the main window, starting once it exists. Semicolon-separated "
-                           "actions: wait:MS, move:X:Y, click:X:Y, key:NAME, keydown:NAME, keyup:NAME, text:STRING. "
-                           "Coordinates containing a decimal point are normalized (0..1) against the client area, "
-                           "integers are client pixels. NAME is e.g. enter, esc, space, up, f5, a, 3, grave, or a raw "
-                           "0xNN virtual-key code. text: sends WM_CHAR per character. "
-                           "(repeatable, e.g. --send-input \"wait:90000; click:0.5:0.6; wait:2000; key:enter\")")
+                           "actions: wait:MS, waitclass:SUBSTRING:MAXMS, move:X:Y, click:X:Y, key:NAME, keydown:NAME, "
+                           "keyup:NAME, text:STRING. waitclass blocks until the window class of the current input "
+                           "target contains SUBSTRING, or MAXMS elapses, whichever comes first -- use it in place of a "
+                           "guessed wait: for anything gated on a specific window (e.g. a splash screen giving way to "
+                           "the real game window) rather than a fixed boot time, since boot speed varies with host "
+                           "load. Coordinates containing a decimal point are normalized (0..1) against the client "
+                           "area, integers are client pixels. NAME is e.g. enter, esc, space, up, f5, a, 3, grave, or "
+                           "a raw 0xNN virtual-key code. text: sends WM_CHAR per character. "
+                           "(repeatable, e.g. --send-input \"waitclass:IW4:200000; wait:2000; key:enter\")")
                 ->allow_extra_args(false);
 
             CLI11_PARSE(app, argc, argv);

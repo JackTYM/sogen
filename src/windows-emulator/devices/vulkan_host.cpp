@@ -5196,7 +5196,7 @@ namespace sogen
                                                   uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                                   const specialization& vs_spec, const specialization& fs_spec,
                                                   std::span<const color_blend_attachment> blend_attachments_in, uint32_t depth_clip_enable,
-                                                  uint64_t& out_pipeline)
+                                                  uint32_t cull_mode, uint32_t front_face, uint64_t& out_pipeline)
     {
         out_pipeline = 0;
         const auto dev = this->impl_->devices.find(device);
@@ -5347,8 +5347,8 @@ namespace sogen
         // usage, so fall back to VK_FALSE (clip), which is also the default whenever clipping stays enabled.
         rasterization.depthClampEnable = (depth_clip_enable == 0 && dev->second.depth_clamp_enabled) ? VK_TRUE : VK_FALSE;
         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterization.cullMode = VK_CULL_MODE_NONE;
-        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.cullMode = static_cast<VkCullModeFlags>(cull_mode);
+        rasterization.frontFace = static_cast<VkFrontFace>(front_face);
         rasterization.lineWidth = 1.0f;
 
         VkPipelineMultisampleStateCreateInfo multisample{};
@@ -6298,6 +6298,17 @@ namespace sogen
                    VK_IMAGE_USAGE_SAMPLED_BIT);
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // D3DRS_SRGBWRITEENABLE is a per-draw render state, not a property of the surface: the same
+        // render target is written linearly by some draws and sRGB-encoded by others. Vulkan applies
+        // that conversion per colour-attachment VIEW, so the image has to be viewable through both its
+        // linear format and the matching _SRGB one -- which requires MUTABLE_FORMAT at creation, the one
+        // decision that cannot be deferred to the first draw that needs it. Only requested for formats
+        // that actually have an sRGB counterpart, so no other render target pays for it.
+        uint32_t srgb_vk_format = 0;
+        if (d3d9_format_to_vulkan_srgb(format, srgb_vk_format))
+        {
+            image_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+        }
         if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)
         {
             return fail();

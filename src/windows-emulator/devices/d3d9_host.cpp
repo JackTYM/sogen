@@ -13,8 +13,12 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <limits>
 #include <span>
+#include <string>
 
 namespace sogen
 {
@@ -72,6 +76,15 @@ namespace sogen
 
         // Public D3DRENDERSTATETYPE value (d3d9types.h) needed for real scissor-test wiring.
         constexpr uint32_t d3drs_scissortestenable = 174;
+        constexpr uint32_t d3drs_srgbwriteenable = 194;
+
+        // Public D3DRENDERSTATETYPE value (d3d9types.h) needed for real backface-cull wiring.
+        constexpr uint32_t d3drs_cullmode = 22;
+
+        // Public D3DCULL values (d3d9types.h), D3DRS_CULLMODE's value space.
+        constexpr uint32_t d3dcull_none = 1;
+        constexpr uint32_t d3dcull_cw = 2;
+        constexpr uint32_t d3dcull_ccw = 3;
 
         // Public D3DRENDERSTATETYPE value (d3d9types.h). Default TRUE (clipping on); FALSE tells the driver
         // the geometry is inside the guard band and skips clipping, incl. near/far depth clipping -- which
@@ -306,6 +319,35 @@ namespace sogen
             }
         }
 
+        // Every pipeline this UMD builds bakes frontFace to this fixed value regardless of D3DRS_CULLMODE.
+        // execute_draw's viewport is {y = H, height = -H} (commit 7215d2d2) to match D3D9's clip-space Y
+        // convention; a negative-height viewport is a pure Y-reflection, and reflecting one axis negates
+        // the signed area every triangle's winding is computed from, universally. That un-mirroring is
+        // exactly what makes Vulkan's window-space coordinates now equal D3D9's own screen-space
+        // coordinates for the same draw, so "visually clockwise" means the same thing to both rasterizers
+        // with no further correction -- D3D9's documented default (D3DCULL_CCW) culls back faces with CCW
+        // vertices, i.e. its front faces are CW, hence CLOCKWISE here.
+        constexpr uint32_t k_umd_front_face = VK_FRONT_FACE_CLOCKWISE;
+
+        // D3DCULL -> VkCullModeFlags, paired with the fixed frontFace above. D3DCULL_CW/CCW name which
+        // winding D3D9 treats as the back face to cull, not which winding Vulkan should cull directly --
+        // CCW (the default, also this function's fallback) is back under CLOCKWISE-front, so it maps to
+        // BACK_BIT; CW inverts that, so it culls the front-designated winding instead (FRONT_BIT).
+        uint32_t d3dcull_to_vk_cull_mode(const uint32_t d3dcull)
+        {
+            switch (d3dcull)
+            {
+            case d3dcull_none:
+                return VK_CULL_MODE_NONE;
+            case d3dcull_cw:
+                return VK_CULL_MODE_FRONT_BIT;
+            case d3dcull_ccw:
+                return VK_CULL_MODE_BACK_BIT;
+            default:
+                return VK_CULL_MODE_BACK_BIT; // D3D9's own documented default for D3DRS_CULLMODE
+            }
+        }
+
         // Builds the pipeline's color-blend state from the app's accumulated render state.
         // D3DRS_ALPHABLENDENABLE unset/0 always yields the pre-blending all-zero state (blend_enable=0,
         // every factor/op 0), matching this function's pre-blending behavior exactly for every draw that
@@ -458,6 +500,7 @@ namespace sogen
         // D3DRS_CLIPPING (default TRUE) drives depthClampEnable in the built pipeline, so it is part of the
         // pipeline identity -- normalized to 0/1 so distinct truthy values don't fragment the cache.
         key.depth_clip_enable = render_state_or(this->state_.render_state, d3drs_clipping, 1) != 0 ? 1u : 0u;
+        key.cull_mode = d3dcull_to_vk_cull_mode(render_state_or(this->state_.render_state, d3drs_cullmode, d3dcull_ccw));
 
         const auto cached = this->ff_pipelines_.find(key);
         if (cached != this->ff_pipelines_.end())
@@ -519,7 +562,8 @@ namespace sogen
         const int32_t result = this->vulkan_.create_graphics_pipeline(
             device, /*render_pass=*/0, this->pipeline_layout_, this->vs_module_, this->fs_module_, width, height, bindings, attributes,
             key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, pipeline);
+            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, key.cull_mode,
+            k_umd_front_face, pipeline);
         if (result != 0 || pipeline == 0)
         {
             return false;
@@ -684,6 +728,7 @@ namespace sogen
         // D3DRS_CLIPPING (default TRUE) drives depthClampEnable in the built pipeline, so it is part of the
         // pipeline identity -- normalized to 0/1 so distinct truthy values don't fragment the cache.
         key.depth_clip_enable = render_state_or(this->state_.render_state, d3drs_clipping, 1) != 0 ? 1u : 0u;
+        key.cull_mode = d3dcull_to_vk_cull_mode(render_state_or(this->state_.render_state, d3drs_cullmode, d3dcull_ccw));
 
         const auto cached = this->programmable_pipelines_.find(key);
         if (cached != this->programmable_pipelines_.end())
@@ -920,7 +965,8 @@ namespace sogen
         const int32_t result = this->vulkan_.create_graphics_pipeline(
             device, /*render_pass=*/0, entry.pipeline_layout, entry.vs_module, entry.fs_module, width, height, bindings, attributes,
             key.depth, color_formats, depth_format, /*stencil_format=*/0, /*rasterization_samples=*/1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, entry.pipeline);
+            /*primitive_restart_enable=*/0, dynamic_states, empty_spec, empty_spec, blend, key.depth_clip_enable, key.cull_mode,
+            k_umd_front_face, entry.pipeline);
         if (result != 0 || entry.pipeline == 0)
         {
             // EMULATOR_D3D9_PIPEDIAG dumps the full description of a pipeline the driver refused. Without
@@ -1538,7 +1584,16 @@ namespace sogen
         {
             resource_entry* entry{}; // nullptr = this D3D9 RT slot isn't bound/resolvable (a gap)
             uint32_t vk_format{};    // 0 (VK_FORMAT_UNDEFINED) when entry == nullptr
+            bool srgb{};             // attach through the format's _SRGB view (D3DRS_SRGBWRITEENABLE)
         };
+
+        // D3DRS_SRGBWRITEENABLE: the pixel shader's linear output is encoded to sRGB on the way into the
+        // render target. A title that does its own gamma decode in the shader (squaring every sampled
+        // albedo, which is what makes its lighting maths linear) relies on this render state alone to
+        // get back to display space -- ignoring it leaves the whole 3D scene stored at roughly the
+        // square of its intended brightness, i.e. near-black everywhere but the brightest highlights,
+        // while 2D/HUD draws (which set the state to 0) come out perfectly correct.
+        const bool srgb_write = render_state_or(this->state_.render_state, d3drs_srgbwriteenable, 0) != 0;
 
         // Matches device_state::render_targets's own std::array<uint64_t, 4> size (d3d9_host.hpp).
         std::array<slot_render_target, 4> rt_slots{};
@@ -1557,7 +1612,11 @@ namespace sogen
             {
                 continue;
             }
-            rt_slots[slot] = {&bound_it->second, bound_vk_format};
+            // An sRGB counterpart only exists for the 8-bit RGB(A) formats; every other render target
+            // keeps its linear format, matching real D3D9 ignoring the render state for those.
+            uint32_t srgb_vk_format = 0;
+            const bool use_srgb = srgb_write && d3d9_format_to_vulkan_srgb(bound_it->second.format, srgb_vk_format);
+            rt_slots[slot] = {.entry = &bound_it->second, .vk_format = use_srgb ? srgb_vk_format : bound_vk_format, .srgb = use_srgb};
             bound_rt_count = slot + 1;
         }
         const std::span<const slot_render_target> bound_rts(rt_slots.data(), bound_rt_count);
@@ -1612,6 +1671,9 @@ namespace sogen
 
         const resource_entry* ib_entry = nullptr;
         const std::vector<std::byte>* ib_um_bytes = nullptr;
+        // 0 = not resource-backed (DrawIndexedPrimitiveUP's inline ib_um_bytes) -- never cacheable, same
+        // sentinel convention as reserved_range::resource_id below.
+        uint64_t ib_resource_id = 0;
         if (indexed != nullptr)
         {
             if (!this->state_.index_um_data.empty())
@@ -1632,6 +1694,7 @@ namespace sogen
                     return d3d_ok; // no real index data bound
                 }
                 ib_entry = &ib_it->second;
+                ib_resource_id = indexed->index_buffer;
             }
         }
 
@@ -1658,17 +1721,22 @@ namespace sogen
             return d3d_ok;
         }
 
-        for (const auto& brt : bound_rts)
+        // The attachment view for a slot: the resource's linear view normally, its sRGB view while
+        // D3DRS_SRGBWRITEENABLE is on. Both are cached on the resource and created on first use.
+        const auto attachment_view = [](const slot_render_target& brt) -> uint64_t& {
+            return brt.srgb ? brt.entry->vk_image_view_srgb_id : brt.entry->vk_image_view_id;
+        };
+        for (auto& brt : rt_slots)
         {
-            if (brt.entry == nullptr || brt.entry->vk_image_view_id != 0)
+            if (brt.entry == nullptr || attachment_view(brt) != 0)
             {
                 continue;
             }
             if (this->vulkan_.create_image_view(device, brt.entry->vk_image_id, brt.vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                 VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_COMPONENT_SWIZZLE_IDENTITY,
                                                 VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                brt.entry->vk_image_view_id) != 0 ||
-                brt.entry->vk_image_view_id == 0)
+                                                attachment_view(brt)) != 0 ||
+                attachment_view(brt) == 0)
             {
                 return d3d_ok;
             }
@@ -1713,6 +1781,11 @@ namespace sogen
             uint32_t stream;
             const std::vector<std::byte>* bytes;
             size_t offset;
+            // 0 = not resource-backed (DrawPrimitiveUP's inline stream_um_data) -- never cacheable, same
+            // sentinel convention as ib_resource_id above (real ids from allocate_id() start at 0x10000).
+            uint64_t resource_id{};
+            uint64_t content_version{};
+            bool cache_hit{false};
         };
 
         std::vector<reserved_range> reserved_streams;
@@ -1726,6 +1799,8 @@ namespace sogen
             // the resource-id-backed vertex buffer exactly as before. The two are mutually exclusive per
             // stream (each bind path clears the other -- see the set_stream_source[_um] handlers).
             const std::vector<std::byte>* src_bytes = nullptr;
+            uint64_t src_resource_id = 0;
+            uint64_t src_content_version = 0;
             const auto um_it = this->state_.stream_um_data.find(stream);
             if (um_it != this->state_.stream_um_data.end() && !um_it->second.empty())
             {
@@ -1746,15 +1821,19 @@ namespace sogen
                     continue;
                 }
                 src_bytes = &res_it->second.backing;
+                src_resource_id = src_it->second;
+                src_content_version = res_it->second.content_version;
             }
-            reserved_streams.push_back({stream, src_bytes, 0});
+            reserved_streams.push_back({stream, src_bytes, 0, src_resource_id, src_content_version, false});
         }
 
         // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
         // index buffer; both upload identically into the arena.
         const std::vector<std::byte>* ib_bytes =
             ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr ? &ib_entry->backing : nullptr);
+        const uint64_t ib_content_version = ib_entry != nullptr ? ib_entry->content_version : 0;
         size_t ib_arena_offset = 0;
+        bool ib_cache_hit = false;
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
@@ -1783,28 +1862,37 @@ namespace sogen
         const std::array<size_t, 6> ubo_sizes{vs_ubo_size,       ps_ubo_size,       int_bool_ubo_size,
                                               int_bool_ubo_size, int_bool_ubo_size, int_bool_ubo_size};
         std::array<size_t, 6> ubo_offsets{};
-        std::array<std::vector<std::byte>, 6> ubo_staging{};
+        // Reused across draws (ubo_staging_ on the host object) rather than freshly allocated here -- each
+        // of the six sizes above is a fixed D3D9 constant-register cap, never varying per draw or per
+        // shader, so a fresh std::vector would never actually need a different size from call to call.
+        std::array<std::vector<std::byte>, 6>& ubo_staging = this->ubo_staging_;
         // Zero-pads each constant file to its full fixed cap (unset D3D9 registers read as 0) into a
         // staging blob -- the full zero-padded buffer is what gets uploaded, so no stale tail can survive
         // across draws. Split into build-now / upload-in-phase-B
         // like the streams above so the arena buffer is final before any upload.
-        auto build_ubo_staging = [](const size_t size, const auto& consts) {
-            std::vector<std::byte> staging(size, std::byte{0});
+        auto build_ubo_staging = [](std::vector<std::byte>& staging, const size_t size, const auto& consts) {
+            if (staging.size() != size)
+            {
+                staging.assign(size, std::byte{0});
+            }
+            else
+            {
+                std::ranges::fill(staging, std::byte{0});
+            }
             const size_t bytes = std::min(consts.size() * sizeof(*consts.data()), size);
             if (bytes > 0)
             {
                 std::memcpy(staging.data(), consts.data(), bytes);
             }
-            return staging;
         };
         if (use_programmable)
         {
-            ubo_staging[ubo_vs_f] = build_ubo_staging(vs_ubo_size, this->state_.vs_const_f);
-            ubo_staging[ubo_ps_f] = build_ubo_staging(ps_ubo_size, this->state_.ps_const_f);
-            ubo_staging[ubo_vs_i] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_i);
-            ubo_staging[ubo_ps_i] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_i);
-            ubo_staging[ubo_vs_b] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_b);
-            ubo_staging[ubo_ps_b] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_b);
+            build_ubo_staging(ubo_staging[ubo_vs_f], vs_ubo_size, this->state_.vs_const_f);
+            build_ubo_staging(ubo_staging[ubo_ps_f], ps_ubo_size, this->state_.ps_const_f);
+            build_ubo_staging(ubo_staging[ubo_vs_i], int_bool_ubo_size, this->state_.vs_const_i);
+            build_ubo_staging(ubo_staging[ubo_ps_i], int_bool_ubo_size, this->state_.ps_const_i);
+            build_ubo_staging(ubo_staging[ubo_vs_b], int_bool_ubo_size, this->state_.vs_const_b);
+            build_ubo_staging(ubo_staging[ubo_ps_b], int_bool_ubo_size, this->state_.ps_const_b);
         }
 
         // Total arena bytes this draw's reservations will consume, rounded per slice with the exact same
@@ -1878,21 +1966,52 @@ namespace sogen
             this->batch_open_ = true;
             this->batch_rt_ = target_rt;
             this->batch_ds_ = target_ds;
+            // Invalidates every vertex/index upload cache entry against this new batch (see
+            // batch_generation_'s own comment) -- covers both a plain flush+reopen and the flush+grow_arena
+            // path above, which destroys and recreates arena.buffer/memory entirely.
+            ++this->batch_generation_;
         }
 
         // Reserve every arena slice now that the batch is open and the arena is guaranteed large enough
         // (either it already fit, or the overflow path above flushed and grew it while the GPU was idle).
         // A freshly-opened batch is empty, so any growth arena_suballoc still performs here is safe.
+        //
+        // Cache check (Task #161) happens here, not in the precount above: whether this draw's reservations
+        // land in a continuing batch or a freshly (re)opened one -- and therefore what batch_generation_ is
+        // -- is only settled by the flush/grow decisions just above. A cache hit reuses the exact offset the
+        // matching resource was already uploaded to earlier in this same batch_generation_, so it neither
+        // consumes new arena space nor performs a new arena_suballoc call.
         for (auto& rs : reserved_streams)
         {
+            if (rs.resource_id != 0)
+            {
+                const upload_cache_entry& cached = this->stream_upload_cache_[rs.stream];
+                if (cached.valid && cached.resource_id == rs.resource_id && cached.content_version == rs.content_version &&
+                    cached.batch_generation == this->batch_generation_)
+                {
+                    rs.offset = cached.arena_offset;
+                    rs.cache_hit = true;
+                    continue;
+                }
+            }
             if (!this->arena_suballoc(arena, rs.bytes->size(), rs.offset))
             {
                 return d3d_ok;
             }
         }
-        if (ib_bytes != nullptr && !this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
+        if (ib_bytes != nullptr)
         {
-            return d3d_ok;
+            if (ib_resource_id != 0 && this->index_upload_cache_.valid && this->index_upload_cache_.resource_id == ib_resource_id &&
+                this->index_upload_cache_.content_version == ib_content_version &&
+                this->index_upload_cache_.batch_generation == this->batch_generation_)
+            {
+                ib_arena_offset = this->index_upload_cache_.arena_offset;
+                ib_cache_hit = true;
+            }
+            else if (!this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
+            {
+                return d3d_ok;
+            }
         }
         if (use_programmable)
         {
@@ -1913,7 +2032,23 @@ namespace sogen
         std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
         for (const auto& rs : reserved_streams)
         {
-            this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+            if (rs.cache_hit)
+            {
+                ++this->stats_.vertex_upload_skipped;
+            }
+            else
+            {
+                this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+                ++this->stats_.vertex_upload_done;
+                if (rs.resource_id != 0)
+                {
+                    this->stream_upload_cache_[rs.stream] = {.resource_id = rs.resource_id,
+                                                             .content_version = rs.content_version,
+                                                             .batch_generation = this->batch_generation_,
+                                                             .arena_offset = rs.offset,
+                                                             .valid = true};
+                }
+            }
             stream_buffers[rs.stream] = arena.buffer;
             const auto off_it = this->state_.stream_offsets.find(rs.stream);
             const uint32_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
@@ -1923,7 +2058,23 @@ namespace sogen
         uint64_t index_buffer_vk = 0;
         if (ib_bytes != nullptr)
         {
-            this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
+            if (ib_cache_hit)
+            {
+                ++this->stats_.index_upload_skipped;
+            }
+            else
+            {
+                this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
+                ++this->stats_.index_upload_done;
+                if (ib_resource_id != 0)
+                {
+                    this->index_upload_cache_ = {.resource_id = ib_resource_id,
+                                                 .content_version = ib_content_version,
+                                                 .batch_generation = this->batch_generation_,
+                                                 .arena_offset = ib_arena_offset,
+                                                 .valid = true};
+                }
+            }
             index_buffer_vk = arena.buffer;
         }
 
@@ -1978,6 +2129,7 @@ namespace sogen
                 {
                     ++this->stats_.sampler_skip_depth_stencil;
                     this->stats_.sampler_skip_formats[tex.format] += 1;
+                    this->stats_.depth_stencil_skip_at_stage[stage] += 1;
                     continue;
                 }
                 // Render-to-texture: a colour render target bound as a texture. There is nothing to
@@ -2038,6 +2190,7 @@ namespace sogen
                     if (rt_as_texture)
                     {
                         sampled_render_targets.push_back(&tex);
+                        this->stats_.rt_sampled_by_shader[{stage, tex_it->second, this->state_.pixel_shader}] += 1;
                     }
                 }
             }
@@ -2246,7 +2399,7 @@ namespace sogen
                 continue;
             }
             color_attachments.push_back({
-                .image_view = brt.entry->vk_image_view_id,
+                .image_view = brt.srgb ? brt.entry->vk_image_view_srgb_id : brt.entry->vk_image_view_id,
                 .resolve_image_view = 0,
                 .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 .resolve_image_layout = 0,
@@ -2305,22 +2458,32 @@ namespace sogen
 
         // Negative height (VK_KHR_maintenance1, core since Vulkan 1.1): D3D9 puts clip-space y = +1 at the
         // TOP of the screen, Vulkan puts y = -1 there. vkd3d-shader translates a D3D9 vertex shader's oPos
-        // to gl_Position verbatim, in D3D9 clip space, so a plain {y = 0, height = +H} viewport rasterizes
-        // every translated draw upside down. Flipping the viewport transform (y = H, height = -H) instead
-        // of rewriting each shader also realigns D3D9 screen space with Vulkan framebuffer space, which is
-        // what the scissor rect below is expressed in. The fixed-function shader's input is already in
-        // D3D9 screen space rather than clip space and compensates for this itself (ff_triangle.vert).
+        // to gl_Position verbatim, in D3D9 clip space, so a plain {y = Y, height = +H} viewport rasterizes
+        // every translated draw upside down. Flipping the viewport transform instead of rewriting each
+        // shader also realigns D3D9 screen space with Vulkan framebuffer space, which is what the scissor
+        // rect below is expressed in. The fixed-function shader's input is already in D3D9 screen space
+        // rather than clip space and compensates for this itself (ff_triangle.vert).
+        //
+        // General case: D3D9's viewport transform is Px = X + (ndcX+1)*Width/2, Py = Y + (1-ndcY)*Height/2
+        // (D3D9 docs); Vulkan's is framebufferX = x + (ndcX+1)*width/2, framebufferY = y + (ndcY+1)*height/2
+        // (VkViewport spec). X/width need no correction -- matching coefficients gives x = X, width = Width
+        // directly. For Y, matching the ndcY coefficient forces height = -Height, and matching the constant
+        // term then forces y = Y + Height. This reduces to commit 7215d2d2's original hardcoded
+        // {y = H, height = -H} exactly when X = Y = 0 and Width/Height equal the render target's extent --
+        // the only case exercised before SetViewport's parsed state was wired up here.
         //
         // Winding order: a negative-height viewport reverses the effective face orientation the rasterizer
-        // sees, which would normally have to be paid back by flipping VkPipelineRasterizationStateCreateInfo
-        // ::frontFace. It does not here -- create_graphics_pipeline builds every pipeline with cullMode
-        // VK_CULL_MODE_NONE and this path never sets the cull-mode dynamic state, so no face test runs.
-        const std::array<vulkan_host::viewport_entry, 1> viewports{{{.x = 0,
-                                                                     .y = static_cast<float>(rt.height),
-                                                                     .width = static_cast<float>(rt.width),
-                                                                     .height = -static_cast<float>(rt.height),
-                                                                     .min_depth = 0.0f,
-                                                                     .max_depth = 1.0f}}};
+        // sees. Paid back once, permanently, in the pipeline's baked frontFace rather than here -- see
+        // d3dcull_to_vk_cull_mode's comment for the reasoning.
+        const bool has_explicit_viewport = this->state_.viewport_width > 0.0f && this->state_.viewport_height > 0.0f;
+        const float vp_x = has_explicit_viewport ? this->state_.viewport_x : 0.0f;
+        const float vp_y = has_explicit_viewport ? this->state_.viewport_y : 0.0f;
+        const float vp_width = has_explicit_viewport ? this->state_.viewport_width : static_cast<float>(rt.width);
+        const float vp_height = has_explicit_viewport ? this->state_.viewport_height : static_cast<float>(rt.height);
+        const float vp_min_z = has_explicit_viewport ? this->state_.viewport_min_z : 0.0f;
+        const float vp_max_z = has_explicit_viewport ? this->state_.viewport_max_z : 1.0f;
+        const std::array<vulkan_host::viewport_entry, 1> viewports{
+            {{.x = vp_x, .y = vp_y + vp_height, .width = vp_width, .height = -vp_height, .min_depth = vp_min_z, .max_depth = vp_max_z}}};
         this->vulkan_.cmd_set_viewport(this->batch_command_buffer_, 0, false, viewports);
         vulkan_host::scissor_entry scissor{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height};
         if (render_state_or(this->state_.render_state, d3drs_scissortestenable, 0) != 0)
@@ -2371,6 +2534,20 @@ namespace sogen
         // Counted here, past every early return, so these are draws that genuinely reached the GPU.
         ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
         ++this->stats_.draws_per_render_target[target_rt];
+        ++this->stats_.draws_per_shader_pair[{target_rt, this->state_.vertex_shader, this->state_.pixel_shader}];
+        if (!srgb_write && render_state_or(this->state_.render_state, d3drs_alphablendenable, 0) != 0)
+        {
+            for (const auto& brt : bound_rts)
+            {
+                uint32_t probe_srgb_format = 0;
+                if (brt.entry != nullptr && d3d9_format_to_vulkan_srgb(brt.entry->format, probe_srgb_format))
+                {
+                    ++this->stats_.blend_srgb_mismatch;
+                    ++this->stats_.blend_srgb_mismatch_shader_pair[{target_rt, this->state_.vertex_shader, this->state_.pixel_shader}];
+                    break;
+                }
+            }
+        }
         if (build_depth_state(this->state_.render_state, depth_vk_format).test_enable != 0)
         {
             ++this->stats_.recorded_depth_tested;
@@ -2785,6 +2962,197 @@ namespace sogen
                (it->second.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
     }
 
+    std::vector<std::string> d3d9_host::describe_render_targets()
+    {
+        // Decodes an IEEE-754 binary16 bit pattern (the inverse of float_to_half above), so a
+        // A16B16G16R16F target's texels can be summarized on the same scale as every other format.
+        const auto half_to_float = [](const uint16_t h) {
+            const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+            const uint32_t exponent = (h >> 10) & 0x1Fu;
+            const uint32_t mantissa = h & 0x3FFu;
+            uint32_t bits = 0;
+            if (exponent == 0)
+            {
+                bits = sign; // zero/subnormal -- summarized as zero, which is all this diagnostic needs
+            }
+            else if (exponent == 0x1F)
+            {
+                bits = sign | 0x7F800000u | (mantissa << 13);
+            }
+            else
+            {
+                bits = sign | ((exponent - 15 + 127) << 23) | (mantissa << 13);
+            }
+            float value = 0.0f;
+            std::memcpy(&value, &bits, sizeof(value));
+            return value;
+        };
+
+        std::vector<std::string> lines;
+        for (auto& [id, entry] : this->resources_)
+        {
+            if (entry.kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_2d) ||
+                (entry.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) == 0 || entry.vk_image_id == 0)
+            {
+                continue;
+            }
+
+            uint32_t vk_format = 0;
+            d3d9_format_to_vulkan(entry.format, vk_format);
+            const auto draws_it = this->stats_.draws_per_render_target.find(id);
+            std::array<char, 192> header{};
+            std::snprintf(header.data(), header.size(), "rt=%llu d3dfmt=%u vkfmt=%u %ux%u usage=0x%X draws=%llu",
+                          static_cast<unsigned long long>(id), static_cast<unsigned>(entry.format), static_cast<unsigned>(vk_format),
+                          static_cast<unsigned>(entry.width), static_cast<unsigned>(entry.height), static_cast<unsigned>(entry.usage),
+                          static_cast<unsigned long long>(draws_it == this->stats_.draws_per_render_target.end() ? 0 : draws_it->second));
+            std::string line = header.data();
+
+            // A depth-stencil image's readback path (colour aspect, colour layouts) does not apply, and
+            // nothing ever populates its `backing`; report the declaration alone rather than a fake zero.
+            if ((entry.usage & d3dusage_depthstencil) != 0)
+            {
+                lines.push_back(line + " contents=<depth-stencil, not read back>");
+                continue;
+            }
+
+            this->sync_backing_from_gpu(entry);
+            const uint32_t bytes_per_texel = vk_format_bytes_per_texel(vk_format);
+            const size_t texels = bytes_per_texel != 0 ? entry.backing.size() / bytes_per_texel : 0;
+            if (texels == 0)
+            {
+                lines.push_back(line + " contents=<no backing>");
+                continue;
+            }
+
+            // One representative scalar per texel, on a comparable scale across formats: the stored value
+            // for a single-channel float target (a shadow map / depth prepass, where the value IS the
+            // datum), and the brightest colour channel otherwise.
+            const auto texel_value = [&](const size_t index) -> float {
+                const std::byte* texel = entry.backing.data() + index * bytes_per_texel;
+                switch (vk_format)
+                {
+                case VK_FORMAT_R32_SFLOAT: {
+                    float value = 0.0f;
+                    std::memcpy(&value, texel, sizeof(value));
+                    return value;
+                }
+                case VK_FORMAT_R16G16B16A16_SFLOAT: {
+                    uint16_t bits = 0;
+                    std::memcpy(&bits, texel, sizeof(bits));
+                    return half_to_float(bits);
+                }
+                case VK_FORMAT_R5G6B5_UNORM_PACK16: {
+                    uint16_t bits = 0;
+                    std::memcpy(&bits, texel, sizeof(bits));
+                    return static_cast<float>(std::max({(bits >> 11) & 0x1F, (bits >> 5) & 0x3F, bits & 0x1F})) / 63.0f;
+                }
+                default: {
+                    uint32_t brightest = 0;
+                    for (uint32_t byte = 0; byte < std::min(bytes_per_texel, 3u); ++byte)
+                    {
+                        brightest = std::max(brightest, static_cast<uint32_t>(texel[byte]));
+                    }
+                    return static_cast<float>(brightest) / 255.0f;
+                }
+                }
+            };
+
+            float min_value = std::numeric_limits<float>::infinity();
+            float max_value = -std::numeric_limits<float>::infinity();
+            double sum = 0.0;
+            size_t nan_count = 0;
+            size_t zero_count = 0;
+            // Fraction of texels equal to the most common value, computed over a coarse bucketing: the
+            // single number that separates "this target holds a real, varying image" from "this target
+            // holds one constant everywhere", which is the whole question a degenerate pass raises.
+            std::array<size_t, 16> histogram{};
+            for (size_t i = 0; i < texels; ++i)
+            {
+                const float value = texel_value(i);
+                if (std::isnan(value))
+                {
+                    ++nan_count;
+                    continue;
+                }
+                min_value = std::min(min_value, value);
+                max_value = std::max(max_value, value);
+                sum += value;
+                zero_count += value == 0.0f ? 1 : 0;
+                const float clamped = std::clamp(value, 0.0f, 1.0f);
+                histogram[static_cast<size_t>(std::min(15.0f, clamped * 16.0f))] += 1;
+            }
+            const size_t finite = texels - nan_count;
+            std::array<char, 320> summary{};
+            std::snprintf(summary.data(), summary.size(), " texels=%zu min=%g max=%g mean=%g nan=%zu zero=%zu", texels,
+                          finite != 0 ? min_value : 0.0f, finite != 0 ? max_value : 0.0f,
+                          finite != 0 ? sum / static_cast<double>(finite) : 0.0, nan_count, zero_count);
+            line += summary.data();
+            line += " hist=";
+            for (const size_t bucket : histogram)
+            {
+                line += std::to_string(finite != 0 ? bucket * 100 / finite : 0) + ",";
+            }
+            lines.push_back(line);
+
+            // EMULATOR_D3D9_RTDUMPDIR=<dir> additionally writes the raw texels to <dir>/rt_<id>.bin.
+            // Summary statistics say whether a target's contents are plausible; only the image itself
+            // says whether the *structure* in it is the scene it should be, which is the difference
+            // between "these numbers look odd" and a diagnosis.
+            if (const char* dump_dir = getenv("EMULATOR_D3D9_RTDUMPDIR"))
+            {
+                std::array<char, 512> path{};
+                std::snprintf(path.data(), path.size(), "%s/rt_%llu.bin", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path.data(), "wb"))
+                {
+                    std::fwrite(entry.backing.data(), 1, entry.backing.size(), file);
+                    std::fclose(file);
+                }
+            }
+        }
+        return lines;
+    }
+
+    std::string d3d9_host::describe_pipeline_state(const std::map<uint32_t, std::map<uint32_t, uint64_t>>& render_state_values) const
+    {
+        std::string out = "rs:";
+        for (const auto& [state, values] : render_state_values)
+        {
+            out += " " + std::to_string(state) + "={";
+            for (const auto& [value, count] : values)
+            {
+                out += std::to_string(value) + "x" + std::to_string(count) + ",";
+            }
+            out += "}";
+        }
+        out += " | samp:";
+        std::map<uint64_t, uint32_t> ordered_ss(this->state_.sampler_state.begin(), this->state_.sampler_state.end());
+        for (const auto& [key, value] : ordered_ss)
+        {
+            out += " s" + std::to_string(key >> 32) + "." + std::to_string(key & 0xFFFFFFFF) + "=" + std::to_string(value);
+        }
+        return out;
+    }
+
+    std::string d3d9_host::describe_ps_fog_constants() const
+    {
+        const auto& cf = this->state_.ps_const_f;
+        auto reg = [&cf](const uint32_t r) -> std::array<float, 4> {
+            const size_t base = static_cast<size_t>(r) * 4;
+            if (cf.size() < base + 4)
+            {
+                return {0.0f, 0.0f, 0.0f, 0.0f};
+            }
+            return {cf[base], cf[base + 1], cf[base + 2], cf[base + 3]};
+        };
+        const auto c0 = reg(0);
+        const auto c32 = reg(32);
+        const auto c34 = reg(34);
+        std::array<char, 256> buf{};
+        std::snprintf(buf.data(), buf.size(), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1],
+                      c0[2], c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
+        return {buf.data()};
+    }
+
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
     {
         // Flush any open batch so its draws have executed (and left the render target in
@@ -3085,6 +3453,12 @@ namespace sogen
         // narrowed to "is this a texture kind", since a mislabelled resource that later turns out to be
         // sampled would then silently render stale pixels.
         it->second.upload_dirty = true;
+        // Same unconditional treatment for execute_draw's vertex/index upload cache (Task #161) -- this is
+        // the one site that mutates `backing` without the batch already having been flushed first (every
+        // other writer -- tex_blt, sync_backing_from_gpu -- calls flush_batch() before touching backing),
+        // so it is the one site that needs the version bumped rather than just relying on a flush having
+        // already invalidated any in-flight cached offset.
+        ++it->second.content_version;
         return d3d_ok;
     }
 
@@ -3101,6 +3475,26 @@ namespace sogen
         std::memcpy(entry.tokens.data(), tokens, token_size_bytes);
 
         const uint64_t id = this->allocate_id();
+
+        // EMULATOR_D3D9_SHADERDUMP=<dir> writes every shader the guest creates, as D3D assembly, to
+        // <dir>/sh_<id>.asm. Read alongside the draws_per_shader_pair counter (which names the ids that
+        // actually matter) this turns "the pixels are wrong and every counter is clean" into a readable
+        // program. Files are named by the same resource id the counters print, so the two join directly.
+        if (const char* dump_dir = getenv("EMULATOR_D3D9_SHADERDUMP"))
+        {
+            std::string text;
+            if (disassemble_d3d9_shader(tokens, token_size_bytes, text))
+            {
+                std::array<char, 512> path{};
+                std::snprintf(path.data(), path.size(), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path.data(), "wb"))
+                {
+                    std::fwrite(text.data(), 1, text.size(), file);
+                    std::fclose(file);
+                }
+            }
+        }
+
         this->shaders_.emplace(id, std::move(entry));
         out_shader = id;
         return d3d_ok;
@@ -3236,6 +3630,7 @@ namespace sogen
                 return d3derr_invalidcall;
             }
             this->state_.render_state[req.state] = req.value;
+            this->stats_.render_state_values[req.state][req.value] += 1;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_texture_stage_state: {
@@ -3433,13 +3828,19 @@ namespace sogen
             this->state_.depth_stencil = req.surface;
             return d3d_ok;
         }
-        // set_viewport still parse-validates (catching wire-format bugs early) and no-ops until
-        // execute_draw's hardcoded full-render-target-extent viewport is replaced with real viewport
-        // state; clear/draw are fully implemented (see class comment), and set_scissor below now feeds
-        // execute_draw's D3DRS_SCISSORTESTENABLE-gated scissor.
         case gpu_bridge::command::d3d9_set_viewport: {
             d3d9_cmd::set_viewport_record req{};
-            return read_record(payload, size, req) ? d3d_ok : d3derr_invalidcall;
+            if (!read_record(payload, size, req))
+            {
+                return d3derr_invalidcall;
+            }
+            this->state_.viewport_x = req.x;
+            this->state_.viewport_y = req.y;
+            this->state_.viewport_width = req.width;
+            this->state_.viewport_height = req.height;
+            this->state_.viewport_min_z = req.min_z;
+            this->state_.viewport_max_z = req.max_z;
+            return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_scissor: {
             d3d9_cmd::set_scissor_record req{};

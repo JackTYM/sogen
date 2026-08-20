@@ -458,6 +458,7 @@ namespace sogen
 
         std::map<uint64_t, std::vector<emulator_hook*>> section_first_execution_hooks_{};
         std::map<uint64_t, emulator_hook*> d3d9_caps_hooks_{};
+        uint64_t d3d9_flip_null_target_fault_address_{};
 
         void setup_hooks();
         void install_d3d9_caps_patch_hook(const mapped_module& mod);

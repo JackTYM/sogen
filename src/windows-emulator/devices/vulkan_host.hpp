@@ -548,6 +548,8 @@ namespace sogen
         // color_formats/depth_format/stencil_format, with viewport and scissor as dynamic state.
         // depth_clip_enable != 0 (the D3D9 default, D3DRS_CLIPPING = TRUE) leaves depthClampEnable = VK_FALSE
         // (near/far depth clipping on); 0 clamps instead of clips, but only if the device enabled depthClamp.
+        // cull_mode/front_face are real VkCullModeFlags/VkFrontFace values, kept plain-integer like the rest
+        // of this API surface.
         int32_t create_graphics_pipeline(uint64_t device, uint64_t render_pass, uint64_t pipeline_layout, uint64_t vertex_shader,
                                          uint64_t fragment_shader, uint32_t width, uint32_t height,
                                          std::span<const vertex_binding> bindings, std::span<const vertex_attribute> attributes,
@@ -556,7 +558,7 @@ namespace sogen
                                          uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                          const specialization& vs_spec, const specialization& fs_spec,
                                          std::span<const color_blend_attachment> blend_attachments, uint32_t depth_clip_enable,
-                                         uint64_t& out_pipeline);
+                                         uint32_t cull_mode, uint32_t front_face, uint64_t& out_pipeline);
         int32_t create_compute_pipeline(uint64_t device, uint64_t pipeline_layout, uint64_t shader_module, uint64_t& out_pipeline);
         void destroy_pipeline(uint64_t device, uint64_t pipeline);
 
