@@ -383,6 +383,23 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (token_information_class == TokenPrivileges)
+            {
+                // sogen doesn't track per-token privilege sets; an empty TOKEN_PRIVILEGES (its leading
+                // PrivilegeCount field is 0) is a valid, honest answer real Windows itself returns for a
+                // token that has had all its privileges stripped, e.g. via CreateRestrictedToken.
+                constexpr auto required_size = sizeof(ULONG);
+                return_length.write(required_size);
+
+                if (required_size > token_information_length)
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                emulator_object<ULONG>{c.emu, token_information}.write(0);
+                return STATUS_SUCCESS;
+            }
+
             if (token_information_class == TokenIsAppContainer || token_information_class == TokenIsAppSilo)
             {
                 constexpr auto required_size = sizeof(ULONG);
