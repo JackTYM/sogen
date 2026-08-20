@@ -3002,6 +3002,16 @@ namespace sogen
                     }
                     win_emu.log.warn("[d3d9-drawdiag] top_shader_pairs (of %zu):%s\n", s.draws_per_shader_pair.size(), top.c_str());
                     win_emu.log.warn("[d3d9-drawdiag] %s\n", this->d3d9_.describe_pipeline_state(s.render_state_values).c_str());
+
+                    std::string blend_srgb_pairs;
+                    for (const auto& [key, count] : s.blend_srgb_mismatch_shader_pair)
+                    {
+                        blend_srgb_pairs += " rt" + std::to_string(key[0]) + "/vs" + std::to_string(key[1]) + "/ps" + std::to_string(key[2]) +
+                                            "=" + std::to_string(count);
+                    }
+                    win_emu.log.warn("[d3d9-drawdiag] blend_srgb_mismatch=%llu:%s\n",
+                                     static_cast<unsigned long long>(s.blend_srgb_mismatch), blend_srgb_pairs.c_str());
+                    win_emu.log.warn("[d3d9-drawdiag] %s\n", this->d3d9_.describe_ps_fog_constants().c_str());
                 }
 
                 // EMULATOR_D3D9_RTDIAG reads every render target back from the GPU and prints what is

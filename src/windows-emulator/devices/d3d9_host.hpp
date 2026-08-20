@@ -248,6 +248,18 @@ namespace sogen
             // the frame (typically 2D HUD) left behind -- a state the title toggles per draw, which is
             // most of them, is therefore invisible there. This says what the state's full value set is.
             std::map<uint32_t, std::map<uint32_t, uint64_t>> render_state_values{};
+            // Diagnostic (Task #144, sRGB-haze investigation): draws with D3DRS_ALPHABLENDENABLE set
+            // while D3DRS_SRGBWRITEENABLE is OFF, targeting a render target whose format DOES have an
+            // sRGB counterpart (d3d9_format_to_vulkan_srgb). Such a draw blends through the target's
+            // LINEAR view -- reading whatever bytes are currently stored as-is, with no sRGB decode --
+            // even though other draws (typically the opaque 3D scene) may have written real sRGB-encoded
+            // bytes into that same target through its _SRGB view. If so, this draw's blend treats
+            // gamma-bright stored bytes as linear, which is a genuine colour-space corruption distinct
+            // from the D3DRS_SRGBWRITEENABLE gap already fixed. A nonzero count here does not by itself
+            // prove a visible bug (the target might not yet hold real sRGB-encoded bytes at this point),
+            // but it identifies exactly which shader pair to inspect via blend_srgb_mismatch_shader_pair.
+            uint64_t blend_srgb_mismatch{};
+            std::map<std::array<uint64_t, 3>, uint64_t> blend_srgb_mismatch_shader_pair{};
         };
 
         const draw_stats& stats() const
@@ -291,6 +303,14 @@ namespace sogen
         // 2D/HUD) draw left behind, and a state a title turns on for exactly its 3D geometry -- which is
         // the interesting case -- reads as permanently off there.
         std::string describe_pipeline_state(const std::map<uint32_t, std::map<uint32_t, uint64_t>>& render_state_values) const;
+
+        // Diagnostic (Task #144, sRGB-haze investigation): the CURRENT value of PS float constant
+        // registers c0 and c34 -- MW2's dominant world-material shader (ps68508) reads these as a fog
+        // colour pair (see the shader dump), and the open question is whether the game uploads them
+        // already linear (consistent with its own manual sRGB-decode-via-squaring of every sampled
+        // texture) or in raw display/gamma space (which would blend wrong against the shader's linear
+        // lighting math). Values only, no interpretation -- read the actual numbers to tell.
+        std::string describe_ps_fog_constants() const;
 
       private:
         struct resource_entry

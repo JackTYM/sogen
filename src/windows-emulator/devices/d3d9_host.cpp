@@ -2397,6 +2397,19 @@ namespace sogen
         ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
         ++this->stats_.draws_per_render_target[target_rt];
         ++this->stats_.draws_per_shader_pair[{target_rt, this->state_.vertex_shader, this->state_.pixel_shader}];
+        if (!srgb_write && render_state_or(this->state_.render_state, d3drs_alphablendenable, 0) != 0)
+        {
+            for (const auto& brt : bound_rts)
+            {
+                uint32_t probe_srgb_format = 0;
+                if (brt.entry != nullptr && d3d9_format_to_vulkan_srgb(brt.entry->format, probe_srgb_format))
+                {
+                    ++this->stats_.blend_srgb_mismatch;
+                    ++this->stats_.blend_srgb_mismatch_shader_pair[{target_rt, this->state_.vertex_shader, this->state_.pixel_shader}];
+                    break;
+                }
+            }
+        }
         if (build_depth_state(this->state_.render_state, depth_vk_format).test_enable != 0)
         {
             ++this->stats_.recorded_depth_tested;
@@ -2980,6 +2993,26 @@ namespace sogen
             out += " s" + std::to_string(key >> 32) + "." + std::to_string(key & 0xFFFFFFFF) + "=" + std::to_string(value);
         }
         return out;
+    }
+
+    std::string d3d9_host::describe_ps_fog_constants() const
+    {
+        const auto& cf = this->state_.ps_const_f;
+        auto reg = [&cf](const uint32_t r) -> std::array<float, 4> {
+            const size_t base = static_cast<size_t>(r) * 4;
+            if (cf.size() < base + 4)
+            {
+                return {0.0f, 0.0f, 0.0f, 0.0f};
+            }
+            return {cf[base], cf[base + 1], cf[base + 2], cf[base + 3]};
+        };
+        const auto c0 = reg(0);
+        const auto c32 = reg(32);
+        const auto c34 = reg(34);
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1], c0[2],
+                     c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
+        return std::string(buf);
     }
 
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
