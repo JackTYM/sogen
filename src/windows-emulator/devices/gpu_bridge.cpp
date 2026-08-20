@@ -2935,6 +2935,13 @@ namespace sogen
                         static_cast<unsigned long long>(s.texture_upload_done), static_cast<unsigned long long>(s.texture_upload_skipped),
                         static_cast<unsigned long long>(s.pipeline_cache_hit), static_cast<unsigned long long>(s.pipeline_cache_miss),
                         static_cast<unsigned long long>(s.pipeline_negative_hit), this->d3d9_.programmable_pipeline_count());
+                    // Same idea, for execute_draw's per-draw vertex-stream/index-buffer arena upload cache
+                    // (Task #161). `skipped` climbing alongside a flat/slow-growing `done` is the signature
+                    // of the cache actually hitting on repeated draws of the same resource content.
+                    win_emu.log.warn(
+                        "[d3d9-drawdiag] vtx_upload: done=%llu skipped=%llu | idx_upload: done=%llu skipped=%llu\n",
+                        static_cast<unsigned long long>(s.vertex_upload_done), static_cast<unsigned long long>(s.vertex_upload_skipped),
+                        static_cast<unsigned long long>(s.index_upload_done), static_cast<unsigned long long>(s.index_upload_skipped));
                     win_emu.log.warn("[d3d9-drawdiag] pipe_fail: shader_missing=%llu translate=%llu vk_object=%llu\n",
                                      static_cast<unsigned long long>(s.drop_shader_missing),
                                      static_cast<unsigned long long>(s.drop_translate_failed),
@@ -2997,7 +3004,7 @@ namespace sogen
                     {
                         pairs.emplace_back(count, key);
                     }
-                    std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                    std::ranges::sort(pairs, [](const auto& a, const auto& b) { return a.first > b.first; });
                     std::string top;
                     for (size_t i = 0; i < pairs.size() && i < 12; ++i)
                     {
@@ -3010,8 +3017,8 @@ namespace sogen
                     std::string blend_srgb_pairs;
                     for (const auto& [key, count] : s.blend_srgb_mismatch_shader_pair)
                     {
-                        blend_srgb_pairs += " rt" + std::to_string(key[0]) + "/vs" + std::to_string(key[1]) + "/ps" + std::to_string(key[2]) +
-                                            "=" + std::to_string(count);
+                        blend_srgb_pairs += " rt" + std::to_string(key[0]) + "/vs" + std::to_string(key[1]) + "/ps" +
+                                            std::to_string(key[2]) + "=" + std::to_string(count);
                     }
                     win_emu.log.warn("[d3d9-drawdiag] blend_srgb_mismatch=%llu:%s\n",
                                      static_cast<unsigned long long>(s.blend_srgb_mismatch), blend_srgb_pairs.c_str());

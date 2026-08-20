@@ -1616,7 +1616,7 @@ namespace sogen
             // keeps its linear format, matching real D3D9 ignoring the render state for those.
             uint32_t srgb_vk_format = 0;
             const bool use_srgb = srgb_write && d3d9_format_to_vulkan_srgb(bound_it->second.format, srgb_vk_format);
-            rt_slots[slot] = {&bound_it->second, use_srgb ? srgb_vk_format : bound_vk_format, use_srgb};
+            rt_slots[slot] = {.entry = &bound_it->second, .vk_format = use_srgb ? srgb_vk_format : bound_vk_format, .srgb = use_srgb};
             bound_rt_count = slot + 1;
         }
         const std::span<const slot_render_target> bound_rts(rt_slots.data(), bound_rt_count);
@@ -1671,6 +1671,9 @@ namespace sogen
 
         const resource_entry* ib_entry = nullptr;
         const std::vector<std::byte>* ib_um_bytes = nullptr;
+        // 0 = not resource-backed (DrawIndexedPrimitiveUP's inline ib_um_bytes) -- never cacheable, same
+        // sentinel convention as reserved_range::resource_id below.
+        uint64_t ib_resource_id = 0;
         if (indexed != nullptr)
         {
             if (!this->state_.index_um_data.empty())
@@ -1691,6 +1694,7 @@ namespace sogen
                     return d3d_ok; // no real index data bound
                 }
                 ib_entry = &ib_it->second;
+                ib_resource_id = indexed->index_buffer;
             }
         }
 
@@ -1777,6 +1781,11 @@ namespace sogen
             uint32_t stream;
             const std::vector<std::byte>* bytes;
             size_t offset;
+            // 0 = not resource-backed (DrawPrimitiveUP's inline stream_um_data) -- never cacheable, same
+            // sentinel convention as ib_resource_id above (real ids from allocate_id() start at 0x10000).
+            uint64_t resource_id{};
+            uint64_t content_version{};
+            bool cache_hit{false};
         };
 
         std::vector<reserved_range> reserved_streams;
@@ -1790,6 +1799,8 @@ namespace sogen
             // the resource-id-backed vertex buffer exactly as before. The two are mutually exclusive per
             // stream (each bind path clears the other -- see the set_stream_source[_um] handlers).
             const std::vector<std::byte>* src_bytes = nullptr;
+            uint64_t src_resource_id = 0;
+            uint64_t src_content_version = 0;
             const auto um_it = this->state_.stream_um_data.find(stream);
             if (um_it != this->state_.stream_um_data.end() && !um_it->second.empty())
             {
@@ -1810,15 +1821,19 @@ namespace sogen
                     continue;
                 }
                 src_bytes = &res_it->second.backing;
+                src_resource_id = src_it->second;
+                src_content_version = res_it->second.content_version;
             }
-            reserved_streams.push_back({stream, src_bytes, 0});
+            reserved_streams.push_back({stream, src_bytes, 0, src_resource_id, src_content_version, false});
         }
 
         // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
         // index buffer; both upload identically into the arena.
         const std::vector<std::byte>* ib_bytes =
             ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr ? &ib_entry->backing : nullptr);
+        const uint64_t ib_content_version = ib_entry != nullptr ? ib_entry->content_version : 0;
         size_t ib_arena_offset = 0;
+        bool ib_cache_hit = false;
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
@@ -1847,28 +1862,37 @@ namespace sogen
         const std::array<size_t, 6> ubo_sizes{vs_ubo_size,       ps_ubo_size,       int_bool_ubo_size,
                                               int_bool_ubo_size, int_bool_ubo_size, int_bool_ubo_size};
         std::array<size_t, 6> ubo_offsets{};
-        std::array<std::vector<std::byte>, 6> ubo_staging{};
+        // Reused across draws (ubo_staging_ on the host object) rather than freshly allocated here -- each
+        // of the six sizes above is a fixed D3D9 constant-register cap, never varying per draw or per
+        // shader, so a fresh std::vector would never actually need a different size from call to call.
+        std::array<std::vector<std::byte>, 6>& ubo_staging = this->ubo_staging_;
         // Zero-pads each constant file to its full fixed cap (unset D3D9 registers read as 0) into a
         // staging blob -- the full zero-padded buffer is what gets uploaded, so no stale tail can survive
         // across draws. Split into build-now / upload-in-phase-B
         // like the streams above so the arena buffer is final before any upload.
-        auto build_ubo_staging = [](const size_t size, const auto& consts) {
-            std::vector<std::byte> staging(size, std::byte{0});
+        auto build_ubo_staging = [](std::vector<std::byte>& staging, const size_t size, const auto& consts) {
+            if (staging.size() != size)
+            {
+                staging.assign(size, std::byte{0});
+            }
+            else
+            {
+                std::ranges::fill(staging, std::byte{0});
+            }
             const size_t bytes = std::min(consts.size() * sizeof(*consts.data()), size);
             if (bytes > 0)
             {
                 std::memcpy(staging.data(), consts.data(), bytes);
             }
-            return staging;
         };
         if (use_programmable)
         {
-            ubo_staging[ubo_vs_f] = build_ubo_staging(vs_ubo_size, this->state_.vs_const_f);
-            ubo_staging[ubo_ps_f] = build_ubo_staging(ps_ubo_size, this->state_.ps_const_f);
-            ubo_staging[ubo_vs_i] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_i);
-            ubo_staging[ubo_ps_i] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_i);
-            ubo_staging[ubo_vs_b] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_b);
-            ubo_staging[ubo_ps_b] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_b);
+            build_ubo_staging(ubo_staging[ubo_vs_f], vs_ubo_size, this->state_.vs_const_f);
+            build_ubo_staging(ubo_staging[ubo_ps_f], ps_ubo_size, this->state_.ps_const_f);
+            build_ubo_staging(ubo_staging[ubo_vs_i], int_bool_ubo_size, this->state_.vs_const_i);
+            build_ubo_staging(ubo_staging[ubo_ps_i], int_bool_ubo_size, this->state_.ps_const_i);
+            build_ubo_staging(ubo_staging[ubo_vs_b], int_bool_ubo_size, this->state_.vs_const_b);
+            build_ubo_staging(ubo_staging[ubo_ps_b], int_bool_ubo_size, this->state_.ps_const_b);
         }
 
         // Total arena bytes this draw's reservations will consume, rounded per slice with the exact same
@@ -1942,21 +1966,52 @@ namespace sogen
             this->batch_open_ = true;
             this->batch_rt_ = target_rt;
             this->batch_ds_ = target_ds;
+            // Invalidates every vertex/index upload cache entry against this new batch (see
+            // batch_generation_'s own comment) -- covers both a plain flush+reopen and the flush+grow_arena
+            // path above, which destroys and recreates arena.buffer/memory entirely.
+            ++this->batch_generation_;
         }
 
         // Reserve every arena slice now that the batch is open and the arena is guaranteed large enough
         // (either it already fit, or the overflow path above flushed and grew it while the GPU was idle).
         // A freshly-opened batch is empty, so any growth arena_suballoc still performs here is safe.
+        //
+        // Cache check (Task #161) happens here, not in the precount above: whether this draw's reservations
+        // land in a continuing batch or a freshly (re)opened one -- and therefore what batch_generation_ is
+        // -- is only settled by the flush/grow decisions just above. A cache hit reuses the exact offset the
+        // matching resource was already uploaded to earlier in this same batch_generation_, so it neither
+        // consumes new arena space nor performs a new arena_suballoc call.
         for (auto& rs : reserved_streams)
         {
+            if (rs.resource_id != 0)
+            {
+                const upload_cache_entry& cached = this->stream_upload_cache_[rs.stream];
+                if (cached.valid && cached.resource_id == rs.resource_id && cached.content_version == rs.content_version &&
+                    cached.batch_generation == this->batch_generation_)
+                {
+                    rs.offset = cached.arena_offset;
+                    rs.cache_hit = true;
+                    continue;
+                }
+            }
             if (!this->arena_suballoc(arena, rs.bytes->size(), rs.offset))
             {
                 return d3d_ok;
             }
         }
-        if (ib_bytes != nullptr && !this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
+        if (ib_bytes != nullptr)
         {
-            return d3d_ok;
+            if (ib_resource_id != 0 && this->index_upload_cache_.valid && this->index_upload_cache_.resource_id == ib_resource_id &&
+                this->index_upload_cache_.content_version == ib_content_version &&
+                this->index_upload_cache_.batch_generation == this->batch_generation_)
+            {
+                ib_arena_offset = this->index_upload_cache_.arena_offset;
+                ib_cache_hit = true;
+            }
+            else if (!this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
+            {
+                return d3d_ok;
+            }
         }
         if (use_programmable)
         {
@@ -1977,7 +2032,23 @@ namespace sogen
         std::vector<uint64_t> stream_bind_offsets(highest_binding + 1, 0);
         for (const auto& rs : reserved_streams)
         {
-            this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+            if (rs.cache_hit)
+            {
+                ++this->stats_.vertex_upload_skipped;
+            }
+            else
+            {
+                this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+                ++this->stats_.vertex_upload_done;
+                if (rs.resource_id != 0)
+                {
+                    this->stream_upload_cache_[rs.stream] = {.resource_id = rs.resource_id,
+                                                             .content_version = rs.content_version,
+                                                             .batch_generation = this->batch_generation_,
+                                                             .arena_offset = rs.offset,
+                                                             .valid = true};
+                }
+            }
             stream_buffers[rs.stream] = arena.buffer;
             const auto off_it = this->state_.stream_offsets.find(rs.stream);
             const uint32_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
@@ -1987,7 +2058,23 @@ namespace sogen
         uint64_t index_buffer_vk = 0;
         if (ib_bytes != nullptr)
         {
-            this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
+            if (ib_cache_hit)
+            {
+                ++this->stats_.index_upload_skipped;
+            }
+            else
+            {
+                this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
+                ++this->stats_.index_upload_done;
+                if (ib_resource_id != 0)
+                {
+                    this->index_upload_cache_ = {.resource_id = ib_resource_id,
+                                                 .content_version = ib_content_version,
+                                                 .batch_generation = this->batch_generation_,
+                                                 .arena_offset = ib_arena_offset,
+                                                 .valid = true};
+                }
+            }
             index_buffer_vk = arena.buffer;
         }
 
@@ -2913,12 +3000,12 @@ namespace sogen
             uint32_t vk_format = 0;
             d3d9_format_to_vulkan(entry.format, vk_format);
             const auto draws_it = this->stats_.draws_per_render_target.find(id);
-            char header[192];
-            std::snprintf(header, sizeof(header), "rt=%llu d3dfmt=%u vkfmt=%u %ux%u usage=0x%X draws=%llu",
+            std::array<char, 192> header{};
+            std::snprintf(header.data(), header.size(), "rt=%llu d3dfmt=%u vkfmt=%u %ux%u usage=0x%X draws=%llu",
                           static_cast<unsigned long long>(id), static_cast<unsigned>(entry.format), static_cast<unsigned>(vk_format),
                           static_cast<unsigned>(entry.width), static_cast<unsigned>(entry.height), static_cast<unsigned>(entry.usage),
                           static_cast<unsigned long long>(draws_it == this->stats_.draws_per_render_target.end() ? 0 : draws_it->second));
-            std::string line = header;
+            std::string line = header.data();
 
             // A depth-stencil image's readback path (colour aspect, colour layouts) does not apply, and
             // nothing ever populates its `backing`; report the declaration alone rather than a fake zero.
@@ -2995,11 +3082,11 @@ namespace sogen
                 histogram[static_cast<size_t>(std::min(15.0f, clamped * 16.0f))] += 1;
             }
             const size_t finite = texels - nan_count;
-            char summary[320];
-            std::snprintf(summary, sizeof(summary), " texels=%zu min=%g max=%g mean=%g nan=%zu zero=%zu", texels,
+            std::array<char, 320> summary{};
+            std::snprintf(summary.data(), summary.size(), " texels=%zu min=%g max=%g mean=%g nan=%zu zero=%zu", texels,
                           finite != 0 ? min_value : 0.0f, finite != 0 ? max_value : 0.0f,
                           finite != 0 ? sum / static_cast<double>(finite) : 0.0, nan_count, zero_count);
-            line += summary;
+            line += summary.data();
             line += " hist=";
             for (const size_t bucket : histogram)
             {
@@ -3013,9 +3100,9 @@ namespace sogen
             // between "these numbers look odd" and a diagnosis.
             if (const char* dump_dir = getenv("EMULATOR_D3D9_RTDUMPDIR"))
             {
-                char path[512];
-                std::snprintf(path, sizeof(path), "%s/rt_%llu.bin", dump_dir, static_cast<unsigned long long>(id));
-                if (FILE* file = std::fopen(path, "wb"))
+                std::array<char, 512> path{};
+                std::snprintf(path.data(), path.size(), "%s/rt_%llu.bin", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path.data(), "wb"))
                 {
                     std::fwrite(entry.backing.data(), 1, entry.backing.size(), file);
                     std::fclose(file);
@@ -3060,10 +3147,10 @@ namespace sogen
         const auto c0 = reg(0);
         const auto c32 = reg(32);
         const auto c34 = reg(34);
-        char buf[256];
-        std::snprintf(buf, sizeof(buf), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1], c0[2],
-                      c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
-        return std::string(buf);
+        std::array<char, 256> buf{};
+        std::snprintf(buf.data(), buf.size(), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1],
+                      c0[2], c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
+        return {buf.data()};
     }
 
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
@@ -3366,6 +3453,12 @@ namespace sogen
         // narrowed to "is this a texture kind", since a mislabelled resource that later turns out to be
         // sampled would then silently render stale pixels.
         it->second.upload_dirty = true;
+        // Same unconditional treatment for execute_draw's vertex/index upload cache (Task #161) -- this is
+        // the one site that mutates `backing` without the batch already having been flushed first (every
+        // other writer -- tex_blt, sync_backing_from_gpu -- calls flush_batch() before touching backing),
+        // so it is the one site that needs the version bumped rather than just relying on a flush having
+        // already invalidated any in-flight cached offset.
+        ++it->second.content_version;
         return d3d_ok;
     }
 
@@ -3392,9 +3485,9 @@ namespace sogen
             std::string text;
             if (disassemble_d3d9_shader(tokens, token_size_bytes, text))
             {
-                char path[512];
-                std::snprintf(path, sizeof(path), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
-                if (FILE* file = std::fopen(path, "wb"))
+                std::array<char, 512> path{};
+                std::snprintf(path.data(), path.size(), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
+                if (FILE* file = std::fopen(path.data(), "wb"))
                 {
                     std::fwrite(text.data(), 1, text.size(), file);
                     std::fclose(file);

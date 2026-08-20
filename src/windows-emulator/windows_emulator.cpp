@@ -1324,6 +1324,17 @@ namespace sogen
             return;
         }
 
+        // `hook_memory_execution` is only observed by backends that single-step or otherwise trap
+        // guest execution -- the FEX and KVM backends run the guest natively and never invoke it at
+        // all (see install_d3d9_caps_patch_hook's comment above, which hit the identical gap). On
+        // those backends the guard below silently never fires and DdFlipLH's third dereference of
+        // lpSurfTarg -- `mov esi, [ebx+0x44]` at RVA 0xbebfa -- still faults on a null ebx. Record
+        // that exact instruction's address so hook_memory_violation (which does fire on every
+        // backend, since it is how sogen's own exception dispatch works) can apply the same
+        // lpSurfCurr substitution reactively, from inside the fault, on backends the guard misses.
+        constexpr uint64_t flip_null_deref_rva = 0xbebfa;
+        this->d3d9_flip_null_target_fault_address_ = mod.image_base + flip_null_deref_rva;
+
         auto* hook = this->emu().hook_memory_execution(mod.image_base + flip_rva, [this](cpu_interface& cpu, const uint64_t) {
             auto& c = this->vcpu(cpu.index()).cpu;
             uint32_t flip_data = 0;
@@ -1477,6 +1488,7 @@ namespace sogen
             if (d3d9_hook && d3d9_hook.mapped())
             {
                 this->emu().delete_hook(d3d9_hook.mapped());
+                this->d3d9_flip_null_target_fault_address_ = 0;
             }
         });
 
@@ -1613,6 +1625,23 @@ namespace sogen
                 }
             }
 
+            if (this->d3d9_flip_null_target_fault_address_ != 0 &&
+                acting.read_instruction_pointer() == this->d3d9_flip_null_target_fault_address_ &&
+                acting.reg<uint32_t>(x86_register::ebx) == 0)
+            {
+                // edi still holds DdFlipLH's flipData argument here (loaded once at entry, never
+                // clobbered before this point) -- read lpSurfCurr (flipData+0x4) and substitute it
+                // for the null lpSurfTarg that made ebx null, same fix the execution-hook guard
+                // above applies proactively, just reactively from inside the fault.
+                const auto flip_data = acting.reg<uint32_t>(x86_register::edi);
+                uint32_t surf_curr = 0;
+                if (flip_data != 0 && acting.try_read_memory(flip_data + 0x4, &surf_curr, sizeof(surf_curr)) && surf_curr != 0)
+                {
+                    acting.reg<uint32_t>(x86_register::ebx, surf_curr);
+                    return memory_violation_continuation::restart;
+                }
+            }
+
             auto region = this->memory.get_region_info(address);
             if (region.permissions.is_guarded())
             {
@@ -1628,12 +1657,18 @@ namespace sogen
                 if (address < 0x1000)
                 {
                     const auto sp = static_cast<uint32_t>(acting.reg<uint64_t>(x86_register::rsp));
+                    const auto ip = acting.read_instruction_pointer();
+                    const auto* ip_mod = this->mod_manager.find_by_address(ip);
                     uint32_t return_address = 0;
                     if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
                     {
                         const auto* mod = this->mod_manager.find_by_address(return_address);
-                        this->log.error("Null-pointer call to 0x%llx; caller return address 0x%x (%s+0x%llx)\n",
-                                        static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
+                        this->log.error("Null-pointer access to 0x%llx at 0x%llx (%s+0x%llx); caller return address 0x%x "
+                                        "(%s+0x%llx)\n",
+                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(ip),
+                                        ip_mod ? ip_mod->name.c_str() : "?",
+                                        ip_mod ? static_cast<unsigned long long>(ip - ip_mod->image_base) : ip, return_address,
+                                        mod ? mod->name.c_str() : "?",
                                         mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
                     }
 
