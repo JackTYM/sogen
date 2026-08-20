@@ -704,6 +704,15 @@ namespace sogen
         // because a single draw is expected to exceed it.
         static constexpr uint32_t frame_desc_initial_draws = 256;
 
+        // Reused scratch buffers for the six per-draw constant-register UBOs execute_draw stages into the
+        // arena (vs/ps float, vs/ps int, vs/ps bool). Each has a fixed, draw-independent size (the D3D9
+        // constant-register caps), so a fresh std::vector per draw bought nothing but allocator churn --
+        // these are resized once (on first use) and then just overwritten in place every draw. Safe for the
+        // same reason the arena and descriptor pool are: execute_draw submits and blocks on a fence before
+        // returning, so a prior draw's GPU read of the staged bytes (copied into arena.memory well before
+        // that fence) has completed before the next draw overwrites this buffer.
+        std::array<std::vector<std::byte>, 6> ubo_staging_{};
+
         uint64_t allocate_id();
         // Hands out a 256-byte-aligned `size`-byte slice of `arena`, returning its byte offset in
         // out_offset and advancing the arena's bump cursor. The single place any arena offset is

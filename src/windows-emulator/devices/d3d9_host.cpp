@@ -1847,28 +1847,37 @@ namespace sogen
         const std::array<size_t, 6> ubo_sizes{vs_ubo_size,       ps_ubo_size,       int_bool_ubo_size,
                                               int_bool_ubo_size, int_bool_ubo_size, int_bool_ubo_size};
         std::array<size_t, 6> ubo_offsets{};
-        std::array<std::vector<std::byte>, 6> ubo_staging{};
+        // Reused across draws (ubo_staging_ on the host object) rather than freshly allocated here -- each
+        // of the six sizes above is a fixed D3D9 constant-register cap, never varying per draw or per
+        // shader, so a fresh std::vector would never actually need a different size from call to call.
+        std::array<std::vector<std::byte>, 6>& ubo_staging = this->ubo_staging_;
         // Zero-pads each constant file to its full fixed cap (unset D3D9 registers read as 0) into a
         // staging blob -- the full zero-padded buffer is what gets uploaded, so no stale tail can survive
         // across draws. Split into build-now / upload-in-phase-B
         // like the streams above so the arena buffer is final before any upload.
-        auto build_ubo_staging = [](const size_t size, const auto& consts) {
-            std::vector<std::byte> staging(size, std::byte{0});
+        auto build_ubo_staging = [](std::vector<std::byte>& staging, const size_t size, const auto& consts) {
+            if (staging.size() != size)
+            {
+                staging.assign(size, std::byte{0});
+            }
+            else
+            {
+                std::fill(staging.begin(), staging.end(), std::byte{0});
+            }
             const size_t bytes = std::min(consts.size() * sizeof(*consts.data()), size);
             if (bytes > 0)
             {
                 std::memcpy(staging.data(), consts.data(), bytes);
             }
-            return staging;
         };
         if (use_programmable)
         {
-            ubo_staging[ubo_vs_f] = build_ubo_staging(vs_ubo_size, this->state_.vs_const_f);
-            ubo_staging[ubo_ps_f] = build_ubo_staging(ps_ubo_size, this->state_.ps_const_f);
-            ubo_staging[ubo_vs_i] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_i);
-            ubo_staging[ubo_ps_i] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_i);
-            ubo_staging[ubo_vs_b] = build_ubo_staging(int_bool_ubo_size, this->state_.vs_const_b);
-            ubo_staging[ubo_ps_b] = build_ubo_staging(int_bool_ubo_size, this->state_.ps_const_b);
+            build_ubo_staging(ubo_staging[ubo_vs_f], vs_ubo_size, this->state_.vs_const_f);
+            build_ubo_staging(ubo_staging[ubo_ps_f], ps_ubo_size, this->state_.ps_const_f);
+            build_ubo_staging(ubo_staging[ubo_vs_i], int_bool_ubo_size, this->state_.vs_const_i);
+            build_ubo_staging(ubo_staging[ubo_ps_i], int_bool_ubo_size, this->state_.ps_const_i);
+            build_ubo_staging(ubo_staging[ubo_vs_b], int_bool_ubo_size, this->state_.vs_const_b);
+            build_ubo_staging(ubo_staging[ubo_ps_b], int_bool_ubo_size, this->state_.ps_const_b);
         }
 
         // Total arena bytes this draw's reservations will consume, rounded per slice with the exact same
