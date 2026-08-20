@@ -1324,6 +1324,17 @@ namespace sogen
             return;
         }
 
+        // `hook_memory_execution` is only observed by backends that single-step or otherwise trap
+        // guest execution -- the FEX and KVM backends run the guest natively and never invoke it at
+        // all (see install_d3d9_caps_patch_hook's comment above, which hit the identical gap). On
+        // those backends the guard below silently never fires and DdFlipLH's third dereference of
+        // lpSurfTarg -- `mov esi, [ebx+0x44]` at RVA 0xbebfa -- still faults on a null ebx. Record
+        // that exact instruction's address so hook_memory_violation (which does fire on every
+        // backend, since it is how sogen's own exception dispatch works) can apply the same
+        // lpSurfCurr substitution reactively, from inside the fault, on backends the guard misses.
+        constexpr uint64_t flip_null_deref_rva = 0xbebfa;
+        this->d3d9_flip_null_target_fault_address_ = mod.image_base + flip_null_deref_rva;
+
         auto* hook = this->emu().hook_memory_execution(mod.image_base + flip_rva, [this](cpu_interface& cpu, const uint64_t) {
             auto& c = this->vcpu(cpu.index()).cpu;
             uint32_t flip_data = 0;
@@ -1477,6 +1488,7 @@ namespace sogen
             if (d3d9_hook && d3d9_hook.mapped())
             {
                 this->emu().delete_hook(d3d9_hook.mapped());
+                this->d3d9_flip_null_target_fault_address_ = 0;
             }
         });
 
@@ -1609,6 +1621,23 @@ namespace sogen
                 if (actual_gs_base != required_gs_base)
                 {
                     acting.set_segment_base(x86_register::gs, required_gs_base);
+                    return memory_violation_continuation::restart;
+                }
+            }
+
+            if (this->d3d9_flip_null_target_fault_address_ != 0 &&
+                acting.read_instruction_pointer() == this->d3d9_flip_null_target_fault_address_ &&
+                acting.reg<uint32_t>(x86_register::ebx) == 0)
+            {
+                // edi still holds DdFlipLH's flipData argument here (loaded once at entry, never
+                // clobbered before this point) -- read lpSurfCurr (flipData+0x4) and substitute it
+                // for the null lpSurfTarg that made ebx null, same fix the execution-hook guard
+                // above applies proactively, just reactively from inside the fault.
+                const auto flip_data = acting.reg<uint32_t>(x86_register::edi);
+                uint32_t surf_curr = 0;
+                if (flip_data != 0 && acting.try_read_memory(flip_data + 0x4, &surf_curr, sizeof(surf_curr)) && surf_curr != 0)
+                {
+                    acting.reg<uint32_t>(x86_register::ebx, surf_curr);
                     return memory_violation_continuation::restart;
                 }
             }
