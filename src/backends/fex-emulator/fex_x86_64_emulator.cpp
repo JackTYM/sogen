@@ -3931,11 +3931,6 @@ namespace sogen::fex
         this->thread_ = this->emulator_.context_->CreateThread(this->staged_state_.rip, this->staged_state_.gregs[detail::greg_rsp],
                                                                &this->staged_state_);
         this->active_context_ = this->emulator_.context_.get();
-        this->active_thread_ = this->thread_;
-
-        // FEXCore's core does not set up the "call-ret stack" (its own dedicated shadow stack for
-        // x86 CALL/RET emulation, SRA-mapped to callret_sp) - replicate the embedder glue here.
-        this->ensure_callret_stack(this->thread_->CurrentFrame->State);
 
 #ifdef __APPLE__
         if (g_hvf != nullptr)
@@ -3955,6 +3950,19 @@ namespace sogen::fex
             this->thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
         }
 #endif
+
+        // Only publish the new thread once it is actually usable from another thread's point of
+        // view: request_thread_stop() (the quantum timer, running concurrently on its own thread)
+        // reads active_thread_ and immediately calls g_hvf->protect() on its InterruptFaultPage.
+        // Publishing the pointer before the g_hvf->map() above completes lets that race
+        // hvf_vm::protect_locked into "protect of unmapped page" on a page this thread hasn't
+        // registered with HVF's stage-2 table yet.
+        this->active_thread_ = this->thread_;
+
+        // FEXCore's core does not set up the "call-ret stack" (its own dedicated shadow stack for
+        // x86 CALL/RET emulation, SRA-mapped to callret_sp) - replicate the embedder glue here.
+        // Needs active_thread_ set above (writes CallRetStackBase through it).
+        this->ensure_callret_stack(this->thread_->CurrentFrame->State);
 
         // Build thread32_ here too, in this ordinary call context, rather than leaving it to be
         // lazily created on the process's first gate crossing (unsafe from a signal handler).
