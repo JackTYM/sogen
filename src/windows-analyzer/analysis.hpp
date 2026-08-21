@@ -63,8 +63,8 @@ namespace sogen
         std::optional<uint64_t> auto_break_before_call{};
         std::optional<uint64_t> syscall_to_resume_after_break{};
 
-        std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
-        std::set<std::pair<uint64_t, uint32_t>> clicked_dialogs{};
+        std::vector<std::pair<std::string, std::string>> click_dialog_rules{};
+        std::set<std::pair<uint64_t, std::string>> clicked_dialogs{};
 
         mutable std::pair<uint64_t, uint64_t> mapping_violation{0, 0};
         mutable uint64_t next_event_sequence{1};

@@ -18,7 +18,7 @@ namespace sogen
         std::vector<std::pair<windows_path, std::filesystem::path>> path_mappings{};
         uint32_t vcpu_count{1};
         std::optional<backend_type> backend{};
-        std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
+        std::vector<std::pair<std::string, std::string>> click_dialog_rules{};
         bool silent{};
         bool verbose_logging{};
         bool buffer_stdout{};

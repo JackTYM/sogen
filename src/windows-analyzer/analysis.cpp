@@ -716,6 +716,21 @@ namespace sogen
             return instruction_hook_continuation::run_instruction;
         }
 
+        bool dialog_click_trace_enabled()
+        {
+            static const bool enabled = std::getenv("SOGEN_TRACE_WINDOWS") != nullptr;
+            return enabled;
+        }
+
+        // Strips the '&' mnemonic marker Win32 resource compilers put in front of a control's
+        // access key (e.g. "&Unzip" -> "Unzip") so a rule written against the label the user
+        // actually sees matches regardless of which letter the dialog happens to underline.
+        std::string strip_mnemonic(std::string text)
+        {
+            text.erase(std::ranges::remove(text, '&').begin(), text.end());
+            return text;
+        }
+
         void handle_event_pump(analysis_context& c)
         {
             if (c.click_dialog_rules.empty())
@@ -731,6 +746,9 @@ namespace sogen
             std::erase_if(c.clicked_dialogs,
                           [&](const auto& entry) { return proc.windows.get(static_cast<hwnd>(entry.first)) == nullptr; });
 
+            const bool trace = dialog_click_trace_enabled();
+            static std::unordered_map<uint64_t, std::string> last_traced_titles;
+
             for (auto& win : proc.windows | std::views::values)
             {
                 if (!win.is_dialog())
@@ -739,6 +757,17 @@ namespace sogen
                 }
 
                 const auto title = u16_to_u8(win.name);
+
+                if (trace)
+                {
+                    auto& last = last_traced_titles[static_cast<uint64_t>(win.handle)];
+                    if (last != title)
+                    {
+                        last = title;
+                        c.win_emu->log.error("[dialog-click-trace] hwnd=0x%llx title='%s'\n", static_cast<unsigned long long>(win.handle),
+                                             title.c_str());
+                    }
+                }
 
                 // A dialog can have several matching rules (e.g. checking a checkbox before
                 // clicking OK); click the first one not yet applied to this dialog instance and
@@ -756,7 +785,8 @@ namespace sogen
                     continue;
                 }
 
-                const auto wanted = rule->second;
+                const auto& wanted_text = rule->second;
+                const auto wanted_normalized = strip_mnemonic(wanted_text);
 
                 // The WM_COMMAND below is posted (queued), so the owning thread need not already
                 // be blocked in a message wait - a plain PeekMessage pump will still pick it up;
@@ -764,10 +794,24 @@ namespace sogen
                 const emulator_thread* owner = proc.find_thread_by_id(win.thread_id);
                 if (!owner)
                 {
+                    if (trace)
+                    {
+                        c.win_emu->log.error("[dialog-click-trace] hwnd=0x%llx rule matched (wanted='%s') but owner thread %u not found\n",
+                                             static_cast<unsigned long long>(win.handle), wanted_text.c_str(), win.thread_id);
+                    }
                     continue;
                 }
 
+                // Matching by the control's own visible text (rather than a caller-guessed resource
+                // ID) is what a real UI-automation tool does, and is the only reliable option here:
+                // a dialog's control IDs are private to the binary that built it, so a CLI-supplied
+                // guess is fragile - it silently never matches if wrong, and this project's own
+                // USER_WINDOW.wID storage is reused by other, build-specific per-window bookkeeping
+                // (see the "Control id offset is build-specific" note in handle_NtUserCreateWindowEx),
+                // so even a correct initial guess can stop matching once that field is later
+                // overwritten for an unrelated purpose. Text has neither problem.
                 hwnd child_handle = 0;
+                uint32_t child_control_id = 0;
                 for (auto& child : proc.windows | std::views::values)
                 {
                     if (child.parent_handle != win.handle)
@@ -775,18 +819,32 @@ namespace sogen
                         continue;
                     }
 
-                    uint32_t control_id = 0;
-                    child.guest.access([&](const USER_WINDOW& gw) { control_id = static_cast<uint32_t>(gw.wID); });
-                    if (control_id == wanted)
+                    if (strip_mnemonic(u16_to_u8(child.name)) != wanted_normalized)
                     {
-                        child_handle = child.handle;
-                        break;
+                        continue;
                     }
+
+                    child_handle = child.handle;
+                    child.guest.access([&](const USER_WINDOW& gw) { child_control_id = static_cast<uint32_t>(gw.wID); });
+                    break;
                 }
 
                 if (child_handle == 0)
                 {
+                    if (trace)
+                    {
+                        c.win_emu->log.error(
+                            "[dialog-click-trace] hwnd=0x%llx rule matched (wanted='%s') but no child control with that text\n",
+                            static_cast<unsigned long long>(win.handle), wanted_text.c_str());
+                    }
                     continue;
+                }
+
+                if (trace)
+                {
+                    c.win_emu->log.error("[dialog-click-trace] hwnd=0x%llx clicking child hwnd=0x%llx (text='%s', id=%u)\n",
+                                         static_cast<unsigned long long>(win.handle), static_cast<unsigned long long>(child_handle),
+                                         wanted_text.c_str(), child_control_id);
                 }
 
                 // A checkable button's internal checked state is toggled by its own window procedure
@@ -804,11 +862,11 @@ namespace sogen
                 ui_event event{};
                 event.window = win.handle;
                 event.message = WM_COMMAND;
-                event.wParam = wanted & 0xFFFF;
+                event.wParam = child_control_id & 0xFFFF;
                 event.lParam = child_handle;
 
                 c.win_emu->handle_ui_event(event);
-                c.clicked_dialogs.insert({win.handle, wanted});
+                c.clicked_dialogs.insert({win.handle, wanted_text});
                 return;
             }
         }

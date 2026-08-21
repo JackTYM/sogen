@@ -66,7 +66,7 @@ namespace sogen
             bool pause_before_start{false};
 #endif
             std::optional<uint64_t> break_call{};
-            std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
+            std::vector<std::pair<std::string, std::string>> click_dialog_rules{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
@@ -503,35 +503,6 @@ namespace sogen
             }
 
             throw std::runtime_error("WHP memory execution hook mode must be auto or int3");
-        }
-
-        uint32_t parse_dialog_control_id(const std::string_view token)
-        {
-            if (token.empty())
-            {
-                throw std::runtime_error("Control id must not be empty");
-            }
-
-            for (const auto c : token)
-            {
-                if (c < '0' || c > '9')
-                {
-                    throw std::runtime_error("Control id must be a non-negative integer");
-                }
-            }
-
-            if (token.size() > 5)
-            {
-                throw std::runtime_error("Control id should be in range 0-65535");
-            }
-
-            const auto control_id = std::stoul(std::string(token));
-            if (control_id > 0xFFFF)
-            {
-                throw std::runtime_error("Control id should be in range 0-65535");
-            }
-
-            return static_cast<uint32_t>(control_id);
         }
 
         std::unique_ptr<x86_64_emulator> create_configured_backend(const analysis_options& options)
@@ -1076,10 +1047,11 @@ namespace sogen
 
             std::vector<std::pair<std::string, std::string>> click_dialog_button_args{};
             app.add_option("--click-dialog-button", click_dialog_button_args,
-                           "Auto-dismiss a modal dialog whose title contains TITLE by clicking control ID "
-                           "(repeatable, e.g. --click-dialog-button \"Safe Mode\" 7). A dialog whose title "
-                           "matches no rule is left alone rather than guessed at. Requires --vcpus 1")
-                ->type_name("TITLE ID")
+                           "Auto-dismiss a modal dialog whose title equals TITLE by clicking the control whose "
+                           "visible text (mnemonic '&' ignored) equals TEXT (repeatable, e.g. "
+                           "--click-dialog-button \"Safe Mode\" \"&Yes\"). A dialog whose title matches no rule is "
+                           "left alone rather than guessed at. Requires --vcpus 1")
+                ->type_name("TITLE TEXT")
                 ->allow_extra_args(false);
 
             app.add_option("--child-ipc-fd", options.child_ipc_fd,
@@ -1116,9 +1088,14 @@ namespace sogen
                     options.backend = backends.at(backend_name);
                 }
 
-                for (const auto& [title, id] : click_dialog_button_args)
+                for (const auto& [title, text] : click_dialog_button_args)
                 {
-                    options.click_dialog_rules.emplace_back(title, parse_dialog_control_id(id));
+                    if (text.empty())
+                    {
+                        throw std::runtime_error("--click-dialog-button control text must not be empty");
+                    }
+
+                    options.click_dialog_rules.emplace_back(title, text);
                 }
 
                 for (auto& module_name : tracked_modules)

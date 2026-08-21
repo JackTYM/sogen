@@ -196,11 +196,11 @@ namespace sogen
                 argv.push_back(backend_names.at(*config.backend));
             }
 
-            for (const auto& [title, id] : config.click_dialog_rules)
+            for (const auto& [title, text] : config.click_dialog_rules)
             {
                 argv.emplace_back("--click-dialog-button");
                 argv.push_back(title);
-                argv.push_back(std::to_string(id));
+                argv.push_back(text);
             }
 
             if (config.silent)
