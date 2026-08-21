@@ -417,26 +417,22 @@ namespace sogen
                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                     };
 
-                const auto backing = win_emu.memory.allocate_memory(static_cast<size_t>(render_section_size), memory_permission::read_write,
-                                                                    false, 0, memory_region_kind::pagefile_section_view);
-                if (backing)
-                {
-                    win_emu.emu().write_memory(backing, render_control_header.data(), render_control_header.size());
-                    render_section.object->backing_address = backing;
+                render_section.object->backing_storage.resize(static_cast<size_t>(render_section_size));
+                std::memcpy(render_section.object->backing_storage.data(), render_control_header.data(), render_control_header.size());
 
-                    // Register the render section so the per-context-switch audio-engine tick can advance its
-                    // read cursor (see process_context::audio_render_stream). Dedupe by backing and keep only a
-                    // few recent streams -- MW2 churns stream creation until playback stabilizes, and advancing a
-                    // stale (still-allocated) backing is harmless.
-                    auto& streams = win_emu.process.audio_render_streams;
-                    if (std::none_of(streams.begin(), streams.end(), [&](const auto& s) { return s.control_base == backing; }))
+                // Register the render section so the per-context-switch audio-engine tick can advance its
+                // read cursor (see process_context::audio_render_stream) - reading/writing the backing buffer
+                // directly, host-side, works whether or not the guest currently has a view mapped. Dedupe by
+                // section identity and keep only a few recent streams -- MW2 churns stream creation until
+                // playback stabilizes, and advancing a stale (still-tracked) section is harmless.
+                auto& streams = win_emu.process.audio_render_streams;
+                if (std::none_of(streams.begin(), streams.end(), [&](const auto& s) { return s.section.lock() == render_section.object; }))
+                {
+                    streams.push_back({render_section.object, 0});
+                    constexpr size_t max_tracked_streams = 4;
+                    if (streams.size() > max_tracked_streams)
                     {
-                        streams.push_back({backing, 0});
-                        constexpr size_t max_tracked_streams = 4;
-                        if (streams.size() > max_tracked_streams)
-                        {
-                            streams.erase(streams.begin(), streams.end() - max_tracked_streams);
-                        }
+                        streams.erase(streams.begin(), streams.end() - max_tracked_streams);
                     }
                 }
 

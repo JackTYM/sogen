@@ -738,10 +738,18 @@ namespace sogen
         uint64_t maximum_size{};
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
-        // Shared backing for a pagefile-backed section: allocated once (lazily, on first map) and reused by
-        // every view, so all views of the section see the same memory and section offsets resolve correctly.
-        // 0 until allocated. Freed when the last handle referencing this object is closed.
-        uint64_t backing_address{};
+        // Shared backing for a pagefile-backed section: a host-owned buffer, allocated once (lazily, on
+        // first successful map, sized to maximum_size) and reused by every view. Real Windows hands a
+        // distinct guest VA to every NtMapViewOfSection call while keeping the underlying pages shared -
+        // handle_NtMapViewOfSection aliases a fresh guest address onto this same buffer per view instead
+        // of reusing one address, so independently-live C++-level mappings of the same section never
+        // collide. This object's own lifetime (and therefore this buffer's) is governed by ordinary
+        // shared_ptr refcounting: a reference is held by every open handle (section::object) and every
+        // currently-mapped view (process_context::section_views), matching real Windows' documented
+        // view/handle lifetime independence. Not serialized, like other host-aliased memory in this
+        // codebase (see memory_manager::allocate_host_memory) - content is best-effort-only across a
+        // serialize/deserialize round trip.
+        std::vector<std::byte> backing_storage{};
         std::optional<winpe::pe_image_basic_info> cached_image_info{};
 
         bool is_image() const
@@ -790,7 +798,6 @@ namespace sogen
             buffer.write(this->maximum_size);
             buffer.write(this->section_page_protection);
             buffer.write(this->allocation_attributes);
-            buffer.write(this->backing_address);
             buffer.write_optional<winpe::pe_image_basic_info>(this->cached_image_info);
         }
 
@@ -801,7 +808,6 @@ namespace sogen
             buffer.read(this->maximum_size);
             buffer.read(this->section_page_protection);
             buffer.read(this->allocation_attributes);
-            buffer.read(this->backing_address);
             buffer.read_optional(this->cached_image_info);
         }
     };

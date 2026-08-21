@@ -18,7 +18,6 @@
 #include "child_process_spawn.hpp"
 
 #include <devices/named_pipe.hpp>
-#include <memory_utils.hpp>
 
 #include <utils/finally.hpp>
 #include <utils/interupt_handler.hpp>
@@ -678,22 +677,7 @@ namespace sogen
             s.object->section_page_protection = inherited.section_page_protection;
             s.object->allocation_attributes = inherited.allocation_attributes;
             s.granted_access = inherited.granted_access;
-
-            if (!inherited.content.empty())
-            {
-                const auto protection = map_nt_to_emulator_protection(s.object->section_page_protection);
-                const auto reserve_only = s.object->allocation_attributes == SEC_RESERVE;
-                const auto backing = win_emu.memory.allocate_memory(inherited.content.size(), protection, reserve_only, 0,
-                                                                    memory_region_kind::pagefile_section_view);
-                if (backing)
-                {
-                    s.object->backing_address = backing;
-                    if (!reserve_only)
-                    {
-                        win_emu.emu().write_memory(backing, inherited.content.data(), inherited.content.size());
-                    }
-                }
-            }
+            s.object->backing_storage = inherited.content;
 
             if (!win_emu.process.sections.store_at(inherited.target_handle, std::move(s)))
             {

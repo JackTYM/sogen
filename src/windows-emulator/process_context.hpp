@@ -638,6 +638,15 @@ namespace sogen
         handle_store<handle_types::file, file> files{};
         utils::insensitive_u16string_map<file_lock_ranges> file_locks{};
         handle_store<handle_types::section, section, 2> sections{};
+        // Keeps a pagefile-backed section's section_object alive for as long as a guest-visible view of
+        // it is mapped, independent of the handle-table entry above (see handle_NtMapViewOfSection /
+        // handle_NtUnmapViewOfSection). Real Windows' documented view/handle lifetime independence (MSDN:
+        // "the file mapping object may be used until all references to it, including the memory-mapped
+        // view, are released") falls out for free from this being an ordinary shared_ptr: the object is
+        // only ever actually destroyed (freeing section_object::backing_storage) once neither this map
+        // nor any `sections` entry references it anymore. Keyed by the view's own guest VA. Not
+        // serialized - runtime-only, like the host aliasing it tracks.
+        std::unordered_map<uint64_t, std::shared_ptr<section_object>> section_views{};
         handle_store<handle_types::device, io_device_container> devices{};
         handle console_handle{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
@@ -692,7 +701,12 @@ namespace sogen
         // DirectSound play cursor moves and MSS's "non-moving playback cursor" watchdog stops resetting.
         struct audio_render_stream
         {
-            uint64_t control_base{};  // guest backing address of the "DCPE" render-section control header
+            // The render section's own backing buffer, read/written directly (host-side, no guest VA
+            // needed) so the tick works whether or not the guest currently has a view mapped. weak_ptr,
+            // not shared_ptr: this must not itself keep the section alive - dsound churns stream setup,
+            // and a stream whose section_object has genuinely been destroyed (last handle and view both
+            // gone) is exactly the "no longer accessible" signal drive_audio_render_engine prunes on.
+            std::weak_ptr<section_object> section;
             uint64_t start_time_ns{}; // steady-clock ns anchor for the read cursor (0 = anchor on first tick)
         };
 

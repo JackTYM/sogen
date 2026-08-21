@@ -855,12 +855,7 @@ namespace sogen
                         continue;
                     }
 
-                    std::vector<std::byte> content{};
-                    if (section->object->backing_address != 0)
-                    {
-                        content.resize(static_cast<size_t>(section->object->maximum_size));
-                        c.emu.read_memory(section->object->backing_address, content.data(), content.size());
-                    }
+                    std::vector<std::byte> content = section->object->backing_storage;
 
                     inherited_sections.push_back({
                         .target_handle = src_handle,

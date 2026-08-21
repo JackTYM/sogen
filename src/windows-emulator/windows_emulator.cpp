@@ -397,15 +397,21 @@ namespace sogen
             const auto now_ns = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(win_emu.clock().steady_now().time_since_epoch()).count());
 
-            // The guest maps and later unmaps each render section (dsound churns stream setup until playback
-            // stabilizes), so a tracked section's backing can become unmapped. Probe with try_read and prune
-            // any stream whose control block is no longer accessible rather than faulting the emulator.
+            // dsound churns stream setup until playback stabilizes, so a tracked stream's section_object can
+            // genuinely go away (last handle and view both closed) between ticks. The stream's own weak_ptr
+            // is exactly that liveness signal - prune once it stops resolving rather than faulting the
+            // emulator on a stale address.
             std::erase_if(process.audio_render_streams, [&](auto& stream) {
-                uint64_t write_cursor = 0;
-                if (!win_emu.emu().try_read_memory(stream.control_base + write_cursor_offset, &write_cursor, sizeof(write_cursor)))
+                const auto section = stream.section.lock();
+                if (!section || write_cursor_offset + sizeof(uint64_t) > section->backing_storage.size())
                 {
-                    return true; // section unmapped -> stop tracking it
+                    return true; // section gone or never committed -> stop tracking it
                 }
+
+                auto& backing = section->backing_storage;
+
+                uint64_t write_cursor = 0;
+                std::memcpy(&write_cursor, backing.data() + write_cursor_offset, sizeof(write_cursor));
 
                 if (write_cursor == 0)
                 {
@@ -421,12 +427,16 @@ namespace sogen
                 const auto consumed = std::min<uint64_t>(elapsed_ns * bytes_per_second / 1'000'000'000ULL, write_cursor);
 
                 uint64_t read_cursor = 0;
-                if (win_emu.emu().try_read_memory(stream.control_base + read_cursor_offset, &read_cursor, sizeof(read_cursor)) &&
-                    consumed > read_cursor)
+                if (read_cursor_offset + sizeof(uint64_t) <= backing.size())
+                {
+                    std::memcpy(&read_cursor, backing.data() + read_cursor_offset, sizeof(read_cursor));
+                }
+
+                if (consumed > read_cursor && clock_position_offset + sizeof(uint64_t) <= backing.size())
                 {
                     const uint64_t clock = consumed / block_align;
-                    win_emu.emu().try_write_memory(stream.control_base + read_cursor_offset, &consumed, sizeof(consumed));
-                    win_emu.emu().try_write_memory(stream.control_base + clock_position_offset, &clock, sizeof(clock));
+                    std::memcpy(backing.data() + read_cursor_offset, &consumed, sizeof(consumed));
+                    std::memcpy(backing.data() + clock_position_offset, &clock, sizeof(clock));
                 }
                 return false;
             });

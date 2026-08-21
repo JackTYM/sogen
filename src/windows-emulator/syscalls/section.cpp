@@ -456,10 +456,14 @@ namespace sogen
 
             const auto protection = map_nt_to_emulator_protection(section_entry->object->section_page_protection);
 
-            // Pagefile-backed section: keep ONE persistent backing per section and hand out views into it
-            // (view = backing + offset). Real Windows shares the section's pages across every view; allocating
-            // a fresh region per map (the old behavior) broke view coherency and exhausted the 32-bit address
-            // space for callers like DXVK's D3D9 memory allocator, which maps one large section at many offsets.
+            // Pagefile-backed section: one persistent, host-owned backing buffer per section (see
+            // section_object::backing_storage), but a FRESH guest VA aliased onto it for every single
+            // NtMapViewOfSection call - matching real Windows, which always hands back a distinct VA per
+            // view even for the same section/offset while still sharing the underlying pages across every
+            // view. Handing out the SAME address for every view (the old behavior) broke real callers that
+            // legitimately map a section more than once concurrently (e.g. Chromium's SharedMemoryMapping,
+            // which tracks each live mapping by its own address) by collapsing two independently-live
+            // mappings onto one identical guest address.
             if (section_entry->object->file_name.empty())
             {
                 const auto backing_size = static_cast<size_t>(page_align_up(section_entry->object->maximum_size));
@@ -468,30 +472,44 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                if (section_entry->object->backing_address == 0)
-                {
-                    const auto reserve_only = section_entry->object->allocation_attributes == SEC_RESERVE;
-                    const auto backing = c.win_emu.memory.allocate_memory(backing_size, protection, reserve_only, 0,
-                                                                          memory_region_kind::pagefile_section_view);
-                    if (!backing)
-                    {
-                        return STATUS_NO_MEMORY;
-                    }
-                    section_entry->object->backing_address = backing;
-                }
-
                 const auto aligned_offset = page_align_down(static_cast<uint64_t>(offset));
                 if (aligned_offset >= backing_size)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                const auto view_length = backing_size - aligned_offset;
+                const auto reserve_only = section_entry->object->allocation_attributes == SEC_RESERVE;
+
+                auto& backing_storage = section_entry->object->backing_storage;
+                if (!reserve_only && backing_storage.empty())
+                {
+                    backing_storage.resize(backing_size);
+                }
+
+                const auto view_address = c.win_emu.memory.find_free_allocation_base(view_length);
+                if (!view_address)
+                {
+                    return STATUS_NO_MEMORY;
+                }
+
+                const auto mapped =
+                    reserve_only ? c.win_emu.memory.allocate_memory(view_address, view_length, protection, true,
+                                                                    memory_region_kind::pagefile_section_view)
+                                 : c.win_emu.memory.allocate_host_memory(view_address, view_length, backing_storage.data() + aligned_offset,
+                                                                         protection, memory_region_kind::pagefile_section_view);
+                if (!mapped)
+                {
+                    return STATUS_NO_MEMORY;
+                }
+
+                c.proc.section_views[view_address] = section_entry->object;
+
                 if (view_size)
                 {
-                    view_size.write(backing_size - aligned_offset);
+                    view_size.write(view_length);
                 }
-                base_address.write(section_entry->object->backing_address + aligned_offset);
-                c.win_emu.memory.retain_section_view(section_entry->object->backing_address);
+                base_address.write(view_address);
                 return STATUS_SUCCESS;
             }
 
@@ -685,18 +703,14 @@ namespace sogen
             const auto region_info = c.win_emu.memory.get_region_info(base_address);
             if (region_info.is_reserved && memory_region_policy::is_section_kind(region_info.kind))
             {
-                // A pagefile section keeps one persistent backing shared by every view, so unmapping a view
-                // must not unconditionally free it - other views, or a still-open section handle, may still
-                // reference it. release_section_view only actually releases once the last view is gone and
-                // every section handle has already been closed.
-                if (region_info.kind == memory_region_kind::pagefile_section_view)
-                {
-                    c.win_emu.memory.release_section_view(region_info.allocation_base);
-                    return STATUS_SUCCESS;
-                }
-
                 if (c.win_emu.memory.release_memory(region_info.allocation_base, 0))
                 {
+                    // No-op for kinds other than pagefile_section_view, which never appear as keys here.
+                    // A pagefile section's backing buffer (section_object::backing_storage) is kept alive by
+                    // ordinary shared_ptr refcounting, not by this region existing - erasing this view's own
+                    // reference is what may allow the section to actually be destroyed, if no handle or other
+                    // view references it anymore.
+                    c.proc.section_views.erase(region_info.allocation_base);
                     return STATUS_SUCCESS;
                 }
             }
