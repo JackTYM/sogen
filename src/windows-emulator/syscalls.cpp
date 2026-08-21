@@ -123,6 +123,8 @@ namespace sogen
                                         ULONG output_buffer_length);
         NTSTATUS handle_NtFlushBuffersFile(const syscall_context& c, handle file_handle,
                                            emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> /*io_status_block*/);
+        NTSTATUS handle_NtCancelIoFile(const syscall_context& c, handle file_handle,
+                                       emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block);
 
         // syscalls/locale.cpp:
         NTSTATUS handle_NtInitializeNlsFiles(const syscall_context& c, emulator_object<uint64_t> base_address,
@@ -1590,6 +1592,7 @@ namespace sogen
         add_handler(NtFsControlFile);
         add_handler(NtQueryFullAttributesFile);
         add_handler(NtFlushBuffersFile);
+        add_handler(NtCancelIoFile);
         add_handler(NtAreMappedFilesTheSame);
         add_handler(NtUserGetProcessWindowStation);
         add_handler(NtUserCallHwndParam);

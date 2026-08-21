@@ -2478,6 +2478,24 @@ namespace sogen
             (void)fflush(f->handle);
             return STATUS_SUCCESS;
         }
+
+        NTSTATUS handle_NtCancelIoFile(const syscall_context& c, const handle file_handle,
+                                       const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            const auto* f = c.proc.files.get(file_handle);
+            if (!f)
+            {
+                const auto* device = c.proc.devices.get(file_handle);
+                if (!device)
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+            }
+
+            constexpr auto status = STATUS_NOT_FOUND;
+            write_lock_io_status(io_status_block, status);
+            return status;
+        }
     }
 
 } // namespace sogen
