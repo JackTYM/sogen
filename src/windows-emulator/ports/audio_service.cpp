@@ -29,8 +29,12 @@ namespace sogen
         constexpr uint32_t k_audio_opnum_open_stream = 4;              // {D574D111} (Initialize prep)
         constexpr uint32_t k_audio_opnum_get_audio_session = 6;        // {D574D111} AudioServerGetAudioSession
         constexpr uint32_t k_audio_opnum_create_stream = 7;            // {D574D111} CreateRemoteStream
-        constexpr uint32_t k_audio_opnum_get_session_state = 27;       // {D574D111} AudioSessionGetState
-        constexpr uint32_t k_audio_opnum_destroy_session = 55;         // {D574D111} AudioSessionDestroy
+        // Both opnums below are 26 and 54, not 27 and 55: confirmed against this exact audioses.dll build by
+        // reading the NDR proc-header byte (offset 6 of the per-method format string, the same offset that holds
+        // 2 for AudioServerGetDevicePeriod_RPC and 7 for CAudioClient::CreateRemoteStream) at
+        // CAudioSessionControl::AudioServerGetState's and ::DestroyAudioSession's own NdrClientCall4 sites.
+        constexpr uint32_t k_audio_opnum_get_session_state = 26;       // {D574D111} AudioSessionGetState
+        constexpr uint32_t k_audio_opnum_destroy_session = 54;         // {D574D111} AudioSessionDestroy
         constexpr uint32_t k_audio_opnum_destroy_stream = 13;          // {D574D111} AudioServerDestroyStream
         constexpr uint32_t k_audio_opnum_start_stream = 8;             // {D574D111} StartStream (IAudioClient::Start)
         constexpr uint32_t k_audio_opnum_stop_stream = 9;              // {D574D111} StopStream (IAudioClient::Stop)
@@ -44,7 +48,7 @@ namespace sogen
                                                                    0x69, 0x6f, 0x53, 0x74, 0x72, 0x6d, 0x00, 0x01};
 
         // The audio-session context handle handed back by AudioServerGetAudioSession (opnum 6) and round-tripped
-        // by the AudioSession* opnums (e.g. AudioSessionGetState, opnum 27). Opaque to the client, which only
+        // by the AudioSession* opnums (e.g. AudioSessionGetState, opnum 26). Opaque to the client, which only
         // binds follow-on session RPCs to it.
         constexpr std::array<uint8_t, 16> k_session_context_uuid = {0x53, 0x6f, 0x67, 0x65, 0x6e, 0x41, 0x75, 0x64,
                                                                     0x69, 0x6f, 0x53, 0x65, 0x73, 0x73, 0x00, 0x01};
@@ -334,58 +338,70 @@ namespace sogen
                 const auto is_audio_client =
                     iface == k_iface_audio_client || (iface != k_iface_mmdevice_enum && this->name_hints_audio_client_);
 
-                if (getenv("EMULATOR_AUDIO_RPC_DIAG"))
+                const bool diag = getenv("EMULATOR_AUDIO_RPC_DIAG") != nullptr;
+                static std::atomic<uint64_t> call_count{0};
+                const auto call_index = diag ? ++call_count : 0;
+                if (diag)
                 {
-                    static std::atomic<uint64_t> call_count{0};
                     win_emu.log.warn("[audio-rpc-diag] #%llu thread_id=%u iface=%s procedure_id=%u\n",
-                                     static_cast<unsigned long long>(++call_count), win_emu.current_thread().id,
+                                     static_cast<unsigned long long>(call_index), win_emu.current_thread().id,
                                      is_audio_client ? "audioclient" : "mmdevice", procedure_id);
                 }
+
+                const auto log_result = [&](const NTSTATUS status) {
+                    if (diag)
+                    {
+                        win_emu.log.warn("[audio-rpc-diag] #%llu procedure_id=%u -> status=0x%X\n",
+                                         static_cast<unsigned long long>(call_index), procedure_id,
+                                         static_cast<uint32_t>(status));
+                    }
+                    return status;
+                };
 
                 if (is_audio_client)
                 {
                     switch (procedure_id)
                     {
                     case k_audio_opnum_get_mix_format:
-                        return handle_get_mix_format(writer);
+                        return log_result(handle_get_mix_format(writer));
                     case k_audio_opnum_is_format_supported:
-                        return handle_is_format_supported(writer);
+                        return log_result(handle_is_format_supported(writer));
                     case k_audio_opnum_get_device_period:
-                        return handle_get_device_period(writer);
+                        return log_result(handle_get_device_period(writer));
                     case k_audio_opnum_destroy_stream:
                         this->render_stream_.reset();
-                        return handle_post_create(writer);
+                        return log_result(handle_post_create(writer));
                     case k_audio_opnum_open_stream:
-                        return handle_open_stream(writer);
+                        return log_result(handle_open_stream(writer));
                     case k_audio_opnum_get_audio_session:
-                        return handle_get_audio_session(writer);
+                        return log_result(handle_get_audio_session(writer));
                     case k_audio_opnum_get_session_state:
-                        return handle_get_session_state(writer);
+                        return log_result(handle_get_session_state(writer));
                     case k_audio_opnum_destroy_session:
-                        return handle_destroy_session(writer);
+                        return log_result(handle_destroy_session(writer));
                     case k_audio_opnum_create_stream:
-                        return handle_create_stream(win_emu, c, writer, reply_handles);
+                        return log_result(handle_create_stream(win_emu, c, writer, reply_handles));
                     case k_audio_opnum_start_stream:
-                        return handle_post_create(writer);
+                        return log_result(handle_post_create(writer));
                     case k_audio_opnum_stop_stream:
-                        return handle_post_create(writer);
+                        return log_result(handle_post_create(writer));
                     case k_audio_opnum_derive_stream_category:
-                        return handle_derive_stream_category(win_emu, c, writer);
+                        return log_result(handle_derive_stream_category(win_emu, c, writer));
                     case 5:
-                        return handle_post_create(writer);
+                        return log_result(handle_post_create(writer));
                     default:
-                        return STATUS_NOT_SUPPORTED;
+                        return log_result(STATUS_NOT_SUPPORTED);
                     }
                 }
 
                 switch (procedure_id)
                 {
                 case k_audio_opnum_mmdev_get_blob:
-                    return handle_mmdev_get_blob(writer);
+                    return log_result(handle_mmdev_get_blob(writer));
                 case k_audio_opnum_get_default_endpoint:
-                    return handle_get_default_endpoint(win_emu, c, writer);
+                    return log_result(handle_get_default_endpoint(win_emu, c, writer));
                 default:
-                    return STATUS_NOT_SUPPORTED;
+                    return log_result(STATUS_NOT_SUPPORTED);
                 }
             }
 
@@ -694,7 +710,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            // {D574D111} opnum 27: AudioSessionGetState([in, out] session ctx, [out] short* state). Per the IDL
+            // {D574D111} opnum 26: AudioSessionGetState([in, out] session ctx, [out] short* state). Per the IDL
             // the [in,out] session context handle is marshalled back (4-byte attributes + 16-byte UUID) followed
             // by the [out] short state, then the NDR64 return HRESULT. Report AudioSessionStateInactive (0).
             static NTSTATUS handle_get_session_state(utils::aligned_binary_writer& writer)
@@ -725,7 +741,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            // {D574D111} opnum 55: AudioSessionDestroy([in, out] session ctx). The 32-bit DirectSound session
+            // {D574D111} opnum 54: AudioSessionDestroy([in, out] session ctx). The 32-bit DirectSound session
             // setup releases the session control it fetched via GetAudioSession/GetSessionState; leaving this
             // opnum unimplemented returns STATUS_NOT_SUPPORTED (-> HRESULT_FROM_WIN32 NOT_SUPPORTED) and aborts
             // Initialize. Marshal the [in,out] context handle back and report success.
