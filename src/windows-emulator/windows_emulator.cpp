@@ -1295,6 +1295,7 @@ namespace sogen
 
             this->install_d3d9_flip_target_hook(mod);
             this->install_d3d9_stretchrect_null_source_hook(mod);
+            this->install_d3d9_set_render_target_null_desc_hook(mod);
             return;
         }
     }
@@ -1433,6 +1434,68 @@ namespace sogen
                        static_cast<unsigned long long>(this->d3d9_stretchrect_null_source_fault_address_));
     }
 
+    void windows_emulator::install_d3d9_set_render_target_null_desc_hook(const mapped_module& mod)
+    {
+        // The internal helper at 32-bit d3d9.dll RVA 0x3cdb0 marshals IDirect3DDevice9::SetRenderTarget
+        // (and SetDepthStencil, same helper) into the driver's pfnSetRenderTarget DDI (slot 62, confirmed
+        // the same way as install_d3d9_stretchrect_null_source_hook's slot 55: the helper reads the
+        // device's DDI table via [this+0x3ec], then the target function pointer via [table+0xf8], and
+        // 0xf8/4 == 62, matching sogen_d3d9_umd.cpp's own `slots[62] = umd_SetRenderTarget` comment).
+        //
+        // Given a non-null target surface object (the helper's second argument, EBX), it calls that
+        // surface's OWN vtable slot 0x48 method TWICE -- once per local -- to obtain a pointer to the
+        // surface's internal descriptor, reading offset 0 (RVA 0x3ce19, `mov eax,[eax]`) from the first
+        // call's result and offset 4 (RVA 0x3ce2f, `mov eax,[eax+4]`) from the second call's (fresh, but
+        // structurally identical -- same object, same vtable slot) result, into the two locals it then
+        // hands to pfnSetRenderTarget. When the target surface is null, the SAME helper explicitly zeroes
+        // both locals instead (`and dword ptr [ebp-0xc], ebx` / `[ebp-8], ebx` at RVA 0x3cdca/0x3cdcd,
+        // since ebx==0 there) -- i.e. "no descriptor" already has a defined, zero-filled meaning in this
+        // function.
+        //
+        // MW2's mission-start path binds a render target whose internal per-surface descriptor pointer
+        // was never populated by sogen's UMD/host for that surface-creation path, so the first read at
+        // RVA 0x3ce19 dereferences null -- the same "real-driver-only structure a real driver always
+        // backs, sogen's headless UMD leaves unfilled for this one surface" shape as
+        // install_d3d9_flip_target_hook's DdFlipLH bug and install_d3d9_stretchrect_null_source_hook's
+        // StretchRect bug. Since the second call targets the exact same object/method and the descriptor
+        // is per-surface (not per-call) state, RVA 0x3ce2f is guarded proactively too -- it is the
+        // deterministic next fault the same missing state would otherwise produce one instruction later.
+        //
+        // Fix: when either read faults with a null eax, redirect eax to a zeroed scratch DWORD (offset by
+        // -4 for the second site, since it reads [eax+4]) below esp and restart, so the instruction
+        // re-reads a real zero -- reproducing the helper's own null-surface fallback (zero descriptor)
+        // instead of crashing. Reactive only (hook_memory_violation): FEX and KVM never invoke
+        // hook_memory_execution (see install_d3d9_flip_target_hook's comment), and those are the only
+        // backends this crash has ever been observed under.
+        constexpr uint16_t machine_i386 = 0x014c;
+        if (mod.machine != machine_i386)
+        {
+            return;
+        }
+
+        // Guard on the helper's prologue (`mov edi,edi; push ebp; mov ebp,esp; sub esp,0x10`) so a
+        // differently-compiled d3d9 is not silently patched at the wrong address.
+        constexpr uint64_t helper_rva = 0x3cdb0;
+        constexpr std::array<uint8_t, 8> expected_prologue = {0x8b, 0xff, 0x55, 0x8b, 0xec, 0x83, 0xec, 0x10};
+        std::array<uint8_t, 8> actual_prologue{};
+        if (!this->emu().try_read_memory(mod.image_base + helper_rva, actual_prologue.data(), actual_prologue.size()) ||
+            actual_prologue != expected_prologue)
+        {
+            this->log.warn("d3d9.dll SetRenderTarget-helper prologue mismatch at image_base+0x%llx -- null-descriptor "
+                           "guard disabled for this build\n",
+                           static_cast<unsigned long long>(helper_rva));
+            return;
+        }
+
+        constexpr uint64_t null_desc_deref_rva = 0x3ce19;
+        constexpr uint64_t null_desc_deref_rva2 = 0x3ce2f;
+        this->d3d9_set_render_target_null_desc_fault_address_ = mod.image_base + null_desc_deref_rva;
+        this->d3d9_set_render_target_null_desc_fault_address2_ = mod.image_base + null_desc_deref_rva2;
+        this->log.info("d3d9.dll SetRenderTarget null-descriptor guard installed at 0x%llx/0x%llx (x86/WoW64)\n",
+                       static_cast<unsigned long long>(this->d3d9_set_render_target_null_desc_fault_address_),
+                       static_cast<unsigned long long>(this->d3d9_set_render_target_null_desc_fault_address2_));
+    }
+
     void windows_emulator::install_ddraw_vidmem_hook(const mapped_module& mod)
     {
         // MW2's legacy DirectDraw-compatibility probe calls IDirectDraw7::GetAvailableVidMem (vtbl
@@ -1564,6 +1627,8 @@ namespace sogen
                 this->emu().delete_hook(d3d9_hook.mapped());
                 this->d3d9_flip_null_target_fault_address_ = 0;
                 this->d3d9_stretchrect_null_source_fault_address_ = 0;
+                this->d3d9_set_render_target_null_desc_fault_address_ = 0;
+                this->d3d9_set_render_target_null_desc_fault_address2_ = 0;
             }
         });
 
@@ -1731,6 +1796,35 @@ namespace sogen
                 acting.write_memory<uint32_t>(scratch_address, 0);
                 acting.write_memory<uint32_t>(scratch_address + 4, 0);
                 acting.reg<uint32_t>(x86_register::ecx, scratch_address);
+                return memory_violation_continuation::restart;
+            }
+
+            if (this->d3d9_set_render_target_null_desc_fault_address_ != 0 &&
+                acting.read_instruction_pointer() == this->d3d9_set_render_target_null_desc_fault_address_ &&
+                acting.reg<uint32_t>(x86_register::eax) == 0)
+            {
+                // See install_d3d9_set_render_target_null_desc_hook's comment: the SetRenderTarget
+                // helper's target surface returned a null descriptor pointer. Point eax at a zeroed
+                // scratch DWORD below esp so the instruction restarts and reads a real zero -- the
+                // same fallback the helper itself already uses when no target surface is given at all.
+                constexpr uint32_t scratch_offset = 0x10;
+                const auto scratch_address = acting.reg<uint32_t>(x86_register::esp) - scratch_offset;
+                acting.write_memory<uint32_t>(scratch_address, 0);
+                acting.reg<uint32_t>(x86_register::eax, scratch_address);
+                return memory_violation_continuation::restart;
+            }
+
+            if (this->d3d9_set_render_target_null_desc_fault_address2_ != 0 &&
+                acting.read_instruction_pointer() == this->d3d9_set_render_target_null_desc_fault_address2_ &&
+                acting.reg<uint32_t>(x86_register::eax) == 0)
+            {
+                // Same bug, the helper's second (offset+4) read of the same null descriptor pointer --
+                // see install_d3d9_set_render_target_null_desc_hook's comment. This site reads
+                // [eax+4], so the scratch DWORD is placed 4 bytes before the substituted address.
+                constexpr uint32_t scratch_offset = 0x14;
+                const auto scratch_address = acting.reg<uint32_t>(x86_register::esp) - scratch_offset;
+                acting.write_memory<uint32_t>(scratch_address + 4, 0);
+                acting.reg<uint32_t>(x86_register::eax, scratch_address);
                 return memory_violation_continuation::restart;
             }
 
