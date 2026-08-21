@@ -1040,6 +1040,9 @@ namespace sogen
                         t.teb64->access([&](TEB64& teb64_obj) { teb64_obj.NlsCache = context.kernelbase_nls_process_local_cache; });
                     }
                 }
+
+                context.kernelbase_entry_point = mod.entry_point;
+                context.kernelbase_get_user_default_lcid = mod.find_export("GetUserDefaultLCID");
             });
         }
 
@@ -1058,6 +1061,10 @@ namespace sogen
         // callback above fires again gets the placeholder instead of a stale/invalid address.
         const auto* kernelbase = this->find_by_name("kernelbase.dll");
         context.kernelbase_nls_process_local_cache = kernelbase ? resolve_kernelbase_nls_cache_address(*this->memory_, *kernelbase) : 0;
+        context.kernelbase_entry_point = kernelbase ? kernelbase->entry_point : 0;
+        context.kernelbase_get_user_default_lcid = kernelbase ? kernelbase->find_export("GetUserDefaultLCID") : 0;
+        context.kernelbase_dllmain_return_address = 0;
+        context.kernelbase_nls_cache_warmed = false;
     }
 
     std::optional<uint64_t> module_manager::get_module_load_count_by_path(const windows_path& path)

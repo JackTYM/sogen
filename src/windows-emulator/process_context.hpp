@@ -520,6 +520,27 @@ namespace sogen
         // whenever it still points here. 0 if kernelbase.dll wasn't found (emulator_thread falls back
         // to a zeroed placeholder in that case - see nls_cache_placeholder's doc comment).
         uint64_t kernelbase_nls_process_local_cache{};
+        // Set once kernelbase.dll's real GetUserDefaultLCID export has been run synchronously via
+        // guest_function_call.hpp, so its own real code populates kernelbase_nls_process_local_cache
+        // the same way real Windows does. Deliberately not serialized and always re-derived to false
+        // alongside kernelbase_nls_process_local_cache (module_manager.cpp's
+        // ensure_kernelbase_nls_cache_hook) - this only matters again after restoring a snapshot
+        // taken before kernelbase.dll loaded, where it must be false to let the real mapping event
+        // warm the cache again.
+        bool kernelbase_nls_cache_warmed{false};
+        // kernelbase_entry_point/kernelbase_get_user_default_lcid: resolved alongside
+        // kernelbase_nls_process_local_cache above. GetUserDefaultLCID must not be invoked until
+        // kernelbase.dll's own DllMain (DLL_PROCESS_ATTACH) has actually finished - it depends on
+        // internal state DllMain itself sets up (confirmed directly: invoking it right when
+        // kernelbase.dll maps, before DllMain runs, reliably crashes inside kernelbase's own code).
+        // kernelbase_dllmain_return_address captures the loader's own real return address the first
+        // time kernelbase_entry_point is observed to execute (read directly off the stack at that
+        // exact moment - see windows_emulator::on_instruction_execution); once execution naturally
+        // reaches that address again, DllMain has genuinely completed and it is safe to warm the
+        // cache. Also not serialized, for the same reason as kernelbase_nls_cache_warmed.
+        uint64_t kernelbase_entry_point{};
+        uint64_t kernelbase_get_user_default_lcid{};
+        uint64_t kernelbase_dllmain_return_address{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};

@@ -237,6 +237,15 @@ namespace sogen
         void deserialize(utils::buffer_deserializer& buffer);
     };
 
+    // Host-side bookkeeping for a single in-flight guest_function_call.hpp call: the full register
+    // state to restore once it completes, and the fabricated return address that signals
+    // completion. See guest_function_call.hpp.
+    struct pending_guest_function_call
+    {
+        uint64_t sentinel_address{};
+        callback_frame saved_state;
+    };
+
     class emulator_process : public ref_counted_object
     {
         void serialize_object(utils::buffer_serializer&) const override
@@ -313,6 +322,11 @@ namespace sogen
         // instead of blocking the single VP. Polled by is_thread_ready and completed via
         // mark_as_ready(STATUS_SUCCESS). Not serialized: the only user (GPU bridge) is not snapshotable.
         std::function<bool()> await_host_condition{};
+
+        // Set while a guest_function_call.hpp call is in flight on this thread. Not serialized, for
+        // the same reason as await_host_condition above: the call starts and completes within a
+        // handful of guest instructions and is never expected to straddle a snapshot boundary.
+        std::optional<pending_guest_function_call> pending_guest_call{};
 
         bool apc_alertable{false};
         std::vector<pending_apc> pending_apcs{};

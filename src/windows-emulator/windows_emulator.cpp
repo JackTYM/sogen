@@ -11,6 +11,7 @@
 #include "exception_dispatch.hpp"
 #include "apiset/apiset.hpp"
 #include "syscall_dispatcher.hpp"
+#include "guest_function_call.hpp"
 
 #include "network/static_socket_factory.hpp"
 #include "memory_permission_ext.hpp"
@@ -1007,6 +1008,16 @@ namespace sogen
     {
         auto& thread = vcpu.thread();
 
+        if (try_complete_guest_function(vcpu, address))
+        {
+            return;
+        }
+
+        if (!this->process.kernelbase_nls_cache_warmed)
+        {
+            this->try_warm_kernelbase_nls_cache(vcpu, address);
+        }
+
         if (!thread.callback_stack.empty() && address == this->process.zw_callback_return)
         {
             thread.callback_return_rax = vcpu.cpu.reg<uint64_t>(x86_register::rax);
@@ -1028,6 +1039,42 @@ namespace sogen
         }
 
         this->callbacks.on_instruction(address);
+    }
+
+    void windows_emulator::try_warm_kernelbase_nls_cache(vcpu_context& vcpu, const uint64_t address)
+    {
+        if (this->process.kernelbase_dllmain_return_address != 0)
+        {
+            if (address != this->process.kernelbase_dllmain_return_address)
+            {
+                return;
+            }
+
+            this->process.kernelbase_nls_cache_warmed = true;
+            this->process.kernelbase_dllmain_return_address = 0;
+
+            if (this->process.kernelbase_get_user_default_lcid != 0)
+            {
+                invoke_guest_function(vcpu.thread(), vcpu.cpu, this->process.zw_callback_return,
+                                      this->process.kernelbase_get_user_default_lcid);
+            }
+
+            return;
+        }
+
+        if (this->process.kernelbase_entry_point == 0 || address != this->process.kernelbase_entry_point)
+        {
+            return;
+        }
+
+        uint64_t real_return_address = 0;
+        if (vcpu.cpu.try_read_memory(vcpu.cpu.read_stack_pointer(), &real_return_address, sizeof(real_return_address)) &&
+            real_return_address != 0)
+        {
+            this->process.kernelbase_dllmain_return_address = real_return_address;
+        }
+
+        this->process.kernelbase_entry_point = 0;
     }
 
     bool windows_emulator::uses_section_first_execution_hooks() const
