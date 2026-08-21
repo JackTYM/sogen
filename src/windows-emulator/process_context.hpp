@@ -528,6 +528,23 @@ namespace sogen
         // taken before kernelbase.dll loaded, where it must be false to let the real mapping event
         // warm the cache again.
         bool kernelbase_nls_cache_warmed{false};
+        // True while the GetUserDefaultLCID call above is in flight. kernelbase.dll's own real code
+        // (GetUserDefaultLCID -> an internal per-thread-cache resolver) only actually reaches the
+        // registry-backed population path it's being invoked to run if the calling thread's own
+        // TEB.NlsCache does not already equal kernelbase_nls_process_local_cache - real Windows
+        // threads only ever reach that state after ntdll's own LdrpInitializeProcess has performed a
+        // real per-thread heap allocation there, which sogen does not implement; emulator_thread.cpp's
+        // placeholder (pointing every thread's TEB.NlsCache at kernelbase_nls_process_local_cache
+        // itself, added for a different, narrower null-deref/BaseNlsThreadCleanup-safety reason) makes
+        // kernelbase's own code believe every thread has already been through this exactly once,
+        // permanently skipping the real population logic. Zeroing TEB.NlsCache for the warming
+        // thread right before this call - see try_warm_kernelbase_nls_cache - lets kernelbase's real
+        // code take its own genuine allocate-and-populate path instead, exactly as it would for an
+        // actually-fresh real Windows thread. If the call completes without kernelbase itself writing
+        // a new, non-zero value there (see on_instruction_execution), this flag's own completion
+        // handler restores the placeholder, preserving the original null-deref/heap-corruption
+        // safety net this mechanism was built for.
+        bool kernelbase_nls_cache_warming{false};
         // kernelbase_entry_point/kernelbase_get_user_default_lcid: resolved alongside
         // kernelbase_nls_process_local_cache above. GetUserDefaultLCID must not be invoked until
         // kernelbase.dll's own DllMain (DLL_PROCESS_ATTACH) has actually finished - it depends on

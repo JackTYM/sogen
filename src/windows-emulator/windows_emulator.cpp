@@ -1010,6 +1010,21 @@ namespace sogen
 
         if (try_complete_guest_function(vcpu, address))
         {
+            if (this->process.kernelbase_nls_cache_warming)
+            {
+                this->process.kernelbase_nls_cache_warming = false;
+
+                if (thread.teb64.has_value())
+                {
+                    thread.teb64->access([&](TEB64& teb) {
+                        if (teb.NlsCache == 0)
+                        {
+                            teb.NlsCache = this->process.kernelbase_nls_process_local_cache;
+                        }
+                    });
+                }
+            }
+
             return;
         }
 
@@ -1055,8 +1070,14 @@ namespace sogen
 
             if (this->process.kernelbase_get_user_default_lcid != 0)
             {
-                invoke_guest_function(vcpu.thread(), vcpu.cpu, this->process.zw_callback_return,
-                                      this->process.kernelbase_get_user_default_lcid);
+                auto& thread = vcpu.thread();
+                if (thread.teb64.has_value())
+                {
+                    thread.teb64->access([](TEB64& teb) { teb.NlsCache = 0; });
+                }
+
+                this->process.kernelbase_nls_cache_warming = true;
+                invoke_guest_function(thread, vcpu.cpu, this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
             }
 
             return;
