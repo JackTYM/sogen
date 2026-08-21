@@ -530,6 +530,14 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                if (getenv("EMULATOR_AUDIO_RPC_DIAG"))
+                {
+                    c.win_emu.log.warn("[section-map-diag] thread_id=%u backing=0x%" PRIx64 " raw_offset=0x%" PRIx64
+                                       " aligned_offset=0x%" PRIx64 " backing_size=0x%zx\n",
+                                       c.thread().id, section_entry->backing_address, static_cast<uint64_t>(offset), aligned_offset,
+                                       backing_size);
+                }
+
                 if (view_size)
                 {
                     view_size.write(backing_size - aligned_offset);
