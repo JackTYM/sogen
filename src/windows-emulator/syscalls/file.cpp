@@ -178,7 +178,7 @@ namespace sogen
 
                 if (!info.ReplaceIfExists && file_exists)
                 {
-                    return STATUS_OBJECT_NAME_EXISTS;
+                    return STATUS_OBJECT_NAME_COLLISION;
                 }
 
                 f->handle.defer_rename(c.win_emu.file_sys.translate(f->name), c.win_emu.file_sys.translate(new_name));
