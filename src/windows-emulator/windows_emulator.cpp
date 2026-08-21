@@ -19,6 +19,8 @@
 #include "memory_permission_ext.hpp"
 #include "devices/gpu_bridge.hpp"
 
+#include <platform/unicode.hpp>
+
 namespace sogen
 {
     constexpr auto MAX_INSTRUCTIONS_PER_TIME_SLICE = 0x20000;
@@ -207,6 +209,22 @@ namespace sogen
         bool is_keyboard_message(const uint32_t message)
         {
             return is_key_down_message(message) || is_key_up_message(message);
+        }
+
+        // EMULATOR_INPUT_DIAG diagnostic: lists every window sogen currently tracks, to catch a hidden
+        // dialog/modal or an unexpected extra top-level window silently stealing input routing.
+        void dump_window_diagnostics(const windows_emulator& win_emu)
+        {
+            win_emu.log.warn("[input-diag] window list (foreground=0x%llx):\n",
+                             static_cast<unsigned long long>(win_emu.process.foreground_window));
+            for (const auto& w : win_emu.process.windows | std::views::values)
+            {
+                win_emu.log.warn("[input-diag]   handle=0x%llx class='%s' thread_id=%u visible=%d dialog=%d "
+                                 "%dx%d parent=0x%llx\n",
+                                 static_cast<unsigned long long>(w.handle), u16_to_u8(w.class_name).c_str(), w.thread_id,
+                                 (w.style & WS_VISIBLE) != 0, w.is_dialog(), w.client_width(), w.client_height(),
+                                 static_cast<unsigned long long>(w.parent_handle));
+            }
         }
 
         // Window button message -> RAWMOUSE usButtonFlags transition bit (winuser.h RI_MOUSE_* values).
@@ -1276,6 +1294,7 @@ namespace sogen
             patch_strip(0x51c91, expected, patch, "99840c2a6b9b75011dfbb3456644e90fa7c2728b10480db1b87f7fd2e8897302", " (x86/WoW64)");
 
             this->install_d3d9_flip_target_hook(mod);
+            this->install_d3d9_stretchrect_null_source_hook(mod);
             return;
         }
     }
@@ -1357,6 +1376,61 @@ namespace sogen
         this->d3d9_caps_hooks_[mod.image_base + flip_rva] = hook;
         this->log.info("d3d9.dll fullscreen-flip null-target guard installed at 0x%llx (x86/WoW64)\n",
                        static_cast<unsigned long long>(mod.image_base + flip_rva));
+    }
+
+    void windows_emulator::install_d3d9_stretchrect_null_source_hook(const mapped_module& mod)
+    {
+        // IDirect3DDevice9::StretchRect marshals its two surface arguments through an internal helper
+        // (32-bit d3d9.dll RVA 0x62c90) that builds the D3DDDIARG_BLT the driver's pfnBlt (StretchRect,
+        // DDI slot 55) receives. The helper's first stack argument is a pointer to the SOURCE surface's
+        // internal per-subresource descriptor (real d3d9.dll allocates one of these for every surface a
+        // real driver ever creates); its first two DWORDs -- read at RVA 0x62cc5 (`mov eax,[ecx]`) and
+        // 0x62cc9 (`mov eax,[ecx+4]`) -- become the D3DDDIARG_BLT's hSrcResource and subresource index.
+        //
+        // MW2 reaches a mission-start code path (still not pinned to a specific app-level surface --
+        // the leading suspect is compositing a decoded briefing-video frame, a separately-tracked gap)
+        // whose source surface never got that descriptor populated, so this pointer is null and the read
+        // faults -- the same "real d3d9.dll trusts a per-surface driver structure a real driver always
+        // fills in, but sogen's headless UMD leaves unfilled for this one surface-creation path" shape as
+        // install_d3d9_flip_target_hook's DdFlipLH bug, just for StretchRect's source instead of the
+        // flip's target.
+        //
+        // Fix: when this exact read faults with a null ecx, point ecx at two always-zero scratch DWORDs
+        // inside the helper's own already-reserved (`sub esp, 0x40`) stack frame -- safely below every
+        // offset the helper itself ever touches (all of which are non-negative from whatever esp was
+        // current at the time) -- so the instruction restarts and reads hSrcResource=0. That reaches
+        // sogen's own umd_Blt DDI with a null hSrcResource, which the host Blt/StretchRect handler
+        // already treats as "no such resource" and no-ops -- a faithful "the source is gone, skip this
+        // blit" outcome instead of a crash, mirroring the flip-target guard's own "make the broken call
+        // succeed as a harmless no-op" philosophy.
+        //
+        // Reactive only (hook_memory_violation), like the flip-target guard's own reactive half: FEX and
+        // KVM never invoke hook_memory_execution at all (see install_d3d9_flip_target_hook's comment), and
+        // those are the only backends this crash has ever been observed under.
+        constexpr uint16_t machine_i386 = 0x014c;
+        if (mod.machine != machine_i386)
+        {
+            return;
+        }
+
+        // Guard on the helper's prologue (`mov edi,edi; push ebp; mov ebp,esp; and esp,-8`) so a
+        // differently-compiled d3d9 is not silently patched at the wrong address.
+        constexpr uint64_t helper_rva = 0x62c90;
+        constexpr std::array<uint8_t, 8> expected_prologue = {0x8b, 0xff, 0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8};
+        std::array<uint8_t, 8> actual_prologue{};
+        if (!this->emu().try_read_memory(mod.image_base + helper_rva, actual_prologue.data(), actual_prologue.size()) ||
+            actual_prologue != expected_prologue)
+        {
+            this->log.warn("d3d9.dll StretchRect-Blt-helper prologue mismatch at image_base+0x%llx -- null-source-surface "
+                           "guard disabled for this build\n",
+                           static_cast<unsigned long long>(helper_rva));
+            return;
+        }
+
+        constexpr uint64_t null_src_deref_rva = 0x62cc5;
+        this->d3d9_stretchrect_null_source_fault_address_ = mod.image_base + null_src_deref_rva;
+        this->log.info("d3d9.dll StretchRect null-source-surface guard installed at 0x%llx (x86/WoW64)\n",
+                       static_cast<unsigned long long>(this->d3d9_stretchrect_null_source_fault_address_));
     }
 
     void windows_emulator::install_ddraw_vidmem_hook(const mapped_module& mod)
@@ -1489,6 +1563,7 @@ namespace sogen
             {
                 this->emu().delete_hook(d3d9_hook.mapped());
                 this->d3d9_flip_null_target_fault_address_ = 0;
+                this->d3d9_stretchrect_null_source_fault_address_ = 0;
             }
         });
 
@@ -1640,6 +1715,23 @@ namespace sogen
                     acting.reg<uint32_t>(x86_register::ebx, surf_curr);
                     return memory_violation_continuation::restart;
                 }
+            }
+
+            if (this->d3d9_stretchrect_null_source_fault_address_ != 0 &&
+                acting.read_instruction_pointer() == this->d3d9_stretchrect_null_source_fault_address_ &&
+                acting.reg<uint32_t>(x86_register::ecx) == 0)
+            {
+                // See install_d3d9_stretchrect_null_source_hook's comment: the StretchRect-Blt helper's
+                // source-surface descriptor pointer is null. Point it at two always-zero scratch DWORDs
+                // inside the helper's own stack reservation (well below every offset the helper itself
+                // touches) so the instruction restarts and the eventual D3DDDIARG_BLT carries
+                // hSrcResource=0 -- a harmless no-op Blt instead of a crash.
+                constexpr uint32_t scratch_offset = 0x10;
+                const auto scratch_address = acting.reg<uint32_t>(x86_register::esp) - scratch_offset;
+                acting.write_memory<uint32_t>(scratch_address, 0);
+                acting.write_memory<uint32_t>(scratch_address + 4, 0);
+                acting.reg<uint32_t>(x86_register::ecx, scratch_address);
+                return memory_violation_continuation::restart;
             }
 
             auto region = this->memory.get_region_info(address);
@@ -2028,13 +2120,33 @@ namespace sogen
         const auto* win = this->process.windows.get(event.window);
         if (!win)
         {
+            if (is_keyboard_message(event.message) && std::getenv("EMULATOR_INPUT_DIAG"))
+            {
+                this->log.warn("[input-diag] message=0x%x target window=0x%llx does not exist; event dropped\n", event.message,
+                               static_cast<unsigned long long>(event.window));
+                dump_window_diagnostics(*this);
+            }
             return;
         }
 
         auto* thread = get_thread_by_id(this->process, win->thread_id);
         if (!thread)
         {
+            if (is_keyboard_message(event.message) && std::getenv("EMULATOR_INPUT_DIAG"))
+            {
+                this->log.warn("[input-diag] message=0x%x window=0x%llx ('%s') thread_id=%u has no live thread; event dropped\n",
+                               event.message, static_cast<unsigned long long>(event.window), u16_to_u8(win->class_name).c_str(),
+                               win->thread_id);
+                dump_window_diagnostics(*this);
+            }
             return;
+        }
+
+        if (is_keyboard_message(event.message) && std::getenv("EMULATOR_INPUT_DIAG"))
+        {
+            this->log.warn("[input-diag] message=0x%x wparam=0x%llx routed to window=0x%llx ('%s') class='%s' thread_id=%u\n",
+                           event.message, static_cast<unsigned long long>(event.wParam), static_cast<unsigned long long>(win->handle),
+                           u16_to_u8(win->name).c_str(), u16_to_u8(win->class_name).c_str(), win->thread_id);
         }
 
         msg m{};
@@ -2163,6 +2275,12 @@ namespace sogen
         }
 
         thread->post_message(*this, m, true);
+
+        if (is_keyboard_message(event.message) && std::getenv("EMULATOR_INPUT_DIAG"))
+        {
+            this->log.warn("[input-diag] message=0x%x posted to thread_id=%u queue_size=%zu\n", event.message, win->thread_id,
+                           thread->message_queue.size());
+        }
 
         // The 32-bit ButtonWndProc tracks BST_PUSHED via direct memory access into tagWND at
         // 32-bit offsets that don't match our 64-bit USER_WINDOW layout, so it never reads the
