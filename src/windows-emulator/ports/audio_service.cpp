@@ -603,6 +603,21 @@ namespace sogen
                         hex += buf;
                     }
                     win_emu.log.warn("[audio-header-diag] size=%zu bytes[0xB0..0x1A0)=%s\n", render_control_header.size(), hex.c_str());
+
+                    // CCrossProcessBaseEndpoint::IsValidQueueIndex (audioses.dll, this build, 0x10038A68-0x10038AA1)
+                    // gates two `index < count` checks on [this-304+0x2C] (a pointer to the format-block copy
+                    // Initialize made of header[0xC8..0xC8+cbSize+0xC8)) dereferenced at +0x84, i.e. header[0x14C]
+                    // (duration_hns). index = header[0x00] (version) for the first check, header[0x04]
+                    // (buffer_extent) for the second. Both must be < duration_hns.
+                    uint32_t version = 0;
+                    uint32_t buf_extent_le = 0;
+                    std::memcpy(&version, &render_control_header[0], sizeof(version));
+                    std::memcpy(&buf_extent_le, &render_control_header[0x04], sizeof(buf_extent_le));
+                    win_emu.log.warn(
+                        "[queue-index-diag] version(header[0])=%u buffer_extent(header[4])=%u duration_hns(header[0x14C])=%llu -> "
+                        "check1(version<duration)=%d check2(buffer_extent<duration)=%d\n",
+                        version, buf_extent_le, static_cast<unsigned long long>(duration_hns),
+                        version < duration_hns, buf_extent_le < duration_hns);
                 }
 
                 // Back the render section with a host-owned buffer aliased into the guest and drained by a host
