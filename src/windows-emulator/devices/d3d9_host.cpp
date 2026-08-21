@@ -3809,9 +3809,14 @@ namespace sogen
             }
             // Flush any open batch before changing the bound render targets. execute_draw's own slot-0
             // batch_rt_ guard already prevents cross-render-target batching; this is a defensive
-            // belt-and-suspenders that also covers a change to a non-slot-0 MRT slot.
-            this->flush_batch();
-            this->state_.render_targets[req.render_target_index] = req.surface;
+            // belt-and-suspenders that also covers a change to a non-slot-0 MRT slot. Skipped when the
+            // app rebinds the same surface it already has bound (a real, observed pattern), since there's
+            // nothing to flush against in that case.
+            if (this->state_.render_targets[req.render_target_index] != req.surface)
+            {
+                this->flush_batch();
+                this->state_.render_targets[req.render_target_index] = req.surface;
+            }
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_depth_stencil: {
@@ -3823,9 +3828,12 @@ namespace sogen
             // Flush any open batch before changing the bound depth-stencil, mirroring set_render_target
             // above. execute_draw's own batch_ds_ guard already prevents a batch from mixing depth-stencil
             // resources (its per-draw depth barrier only covers the one image the batch accumulates into);
-            // this is the same defensive belt-and-suspenders.
-            this->flush_batch();
-            this->state_.depth_stencil = req.surface;
+            // this is the same defensive belt-and-suspenders, and the same same-surface skip applies.
+            if (this->state_.depth_stencil != req.surface)
+            {
+                this->flush_batch();
+                this->state_.depth_stencil = req.surface;
+            }
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_viewport: {
