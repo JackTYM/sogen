@@ -121,13 +121,25 @@ namespace sogen
 
         // Layout of the WASAPI shared-buffer control header the guest maps. The client writes interleaved PCM
         // into the sample area at k_render_data_offset (past the DCPE control header) and advances the write
-        // cursor (bytes queued) at +0x18; the audio engine (this emulator) advances the play cursor (bytes
-        // consumed) at +0x20. CCrossProcessBaseClientEndpoint::GetCurrentPadding reports (write - play) /
+        // cursor (bytes queued) at +0x10; the audio engine (this emulator) advances the play cursor (bytes
+        // consumed) at +0x18. CCrossProcessBaseClientEndpoint::GetCurrentPadding reports (write - play) /
         // block_align frames, so a streaming client blocks until the engine drains the buffer by advancing the
-        // play cursor. Offsets confirmed against a live capture and audioses!GetCurrentPadding.
+        // play cursor. The previous +0x18/+0x20 pairing was never actually exercised by a live client (the RPC
+        // opnum bug fixed in a66fabc8 meant StartStream never fired before this), and was off by 8 bytes each:
+        // re-disassembled this round directly, not trusted from an old capture --
+        // CCrossProcessClientOutputEndpoint::GetOutputDataPointer (audioses.dll, this build, 0x100342F0) computes
+        // its own ring offset from an 8-byte read at [base+0x10] (its write position) modulo the ring size, and
+        // bounds it against an 8-byte read at [base+0x18] (the engine's reported read/play position) -- the
+        // "CpGlitchEvent::CLIENT_OUTPUT_SERVER_OVERREAD" check fires when the write position (+0x10) is behind
+        // the read position (+0x18). CCrossProcessBaseClientEndpoint::GetCurrentPadding (0x10034790) confirms the
+        // same pair independently: padding = [base+0x10] - [base+0x18]. With the old +0x18/+0x20 offsets, the
+        // engine's play-cursor writes landed on a header field the client's GetCurrentPadding never reads, and
+        // the client's own write-cursor updates (at the real +0x10) landed on a field this drain thread never
+        // read -- so the guest saw permanently zero padding available update and this thread saw a permanently
+        // zero write cursor, matching the "play: 0 write: 0" DirectSound watchdog reset exactly.
         constexpr uint32_t k_render_data_offset = 0x400;
-        constexpr uint32_t k_write_cursor_offset = 0x18;
-        constexpr uint32_t k_play_cursor_offset = 0x20;
+        constexpr uint32_t k_write_cursor_offset = 0x10;
+        constexpr uint32_t k_play_cursor_offset = 0x18;
 
         // The shared-mode mix format reported by handle_get_mix_format: 44.1 kHz, 2 channels, 32-bit float.
         constexpr uint32_t k_sample_rate = 44100;
