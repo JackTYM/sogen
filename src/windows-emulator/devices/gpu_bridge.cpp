@@ -49,7 +49,8 @@ namespace sogen
                     if (draws != last_draws)
                     {
                         last_draws = draws;
-                        win_emu.log.warn("[d3d9-drawdiag] draws=%llu submits=%llu\n", static_cast<unsigned long long>(draws),
+                        win_emu.log.warn("[d3d9-drawdiag] thread_id=%u draws=%llu submits=%llu\n", win_emu.current_thread().id,
+                                         static_cast<unsigned long long>(draws),
                                          static_cast<unsigned long long>(this->d3d9_.batch_submit_count()));
                     }
                 }

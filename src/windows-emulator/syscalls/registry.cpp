@@ -29,6 +29,19 @@ namespace sogen
 
             c.win_emu.callbacks.on_generic_access("Registry key", key);
 
+            if (getenv("EMULATOR_REGISTRY_ACTIVATION_DIAG"))
+            {
+                auto key_8 = u16_to_u8(key);
+                utils::string::to_lower_inplace(key_8);
+                if (key_8.find("bcde0395-e52f-467c-8e3d-c4579291692e") != std::string::npos)
+                {
+                    static std::atomic<uint64_t> hit_count{0};
+                    const auto n = ++hit_count;
+                    c.win_emu.log.warn("[regact-diag] #%llu thread_id=%u key=%s\n", static_cast<unsigned long long>(n), c.thread().id,
+                                       u16_to_u8(key).c_str());
+                }
+            }
+
             auto entry = c.win_emu.registry.get_key({key});
             if (!entry.has_value())
             {
