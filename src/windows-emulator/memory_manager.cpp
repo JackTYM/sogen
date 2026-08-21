@@ -1199,6 +1199,58 @@ namespace sogen
         return entry;
     }
 
+    void memory_manager::retain_section_view(const uint64_t backing_address)
+    {
+        const auto entry = this->find_reserved_region(backing_address);
+        if (entry == this->reserved_regions_.end())
+        {
+            return;
+        }
+
+        ++entry->second.section_view_refs;
+    }
+
+    bool memory_manager::release_section_view(const uint64_t backing_address)
+    {
+        const auto entry = this->find_reserved_region(backing_address);
+        if (entry == this->reserved_regions_.end())
+        {
+            return false;
+        }
+
+        auto& region = entry->second;
+        if (region.section_view_refs > 0)
+        {
+            --region.section_view_refs;
+        }
+
+        if (region.section_view_refs != 0 || !region.section_handle_closed)
+        {
+            return false;
+        }
+
+        return this->release_memory(backing_address, 0);
+    }
+
+    bool memory_manager::close_section_handle_reference(const uint64_t backing_address)
+    {
+        const auto entry = this->find_reserved_region(backing_address);
+        if (entry == this->reserved_regions_.end())
+        {
+            return false;
+        }
+
+        auto& region = entry->second;
+        region.section_handle_closed = true;
+
+        if (region.section_view_refs != 0)
+        {
+            return false;
+        }
+
+        return this->release_memory(backing_address, 0);
+    }
+
     bool memory_manager::overlaps_reserved_region(const uint64_t address, const size_t size, const bool ignore_host_reserved) const
     {
         // reserved_regions_ maintains a pairwise-non-overlapping invariant (every insertion path

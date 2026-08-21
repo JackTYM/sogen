@@ -491,6 +491,7 @@ namespace sogen
                     view_size.write(backing_size - aligned_offset);
                 }
                 base_address.write(section_entry->object->backing_address + aligned_offset);
+                c.win_emu.memory.retain_section_view(section_entry->object->backing_address);
                 return STATUS_SUCCESS;
             }
 
@@ -685,10 +686,12 @@ namespace sogen
             if (region_info.is_reserved && memory_region_policy::is_section_kind(region_info.kind))
             {
                 // A pagefile section keeps one persistent backing shared by every view, so unmapping a view
-                // must not free it (other views and open section handles may still reference it); it is released
-                // when the last section handle is closed.
+                // must not unconditionally free it - other views, or a still-open section handle, may still
+                // reference it. release_section_view only actually releases once the last view is gone and
+                // every section handle has already been closed.
                 if (region_info.kind == memory_region_kind::pagefile_section_view)
                 {
+                    c.win_emu.memory.release_section_view(region_info.allocation_base);
                     return STATUS_SUCCESS;
                 }
 

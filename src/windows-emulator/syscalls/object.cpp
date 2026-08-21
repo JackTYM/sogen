@@ -83,7 +83,7 @@ namespace sogen
             {
                 if (section_backing_address != 0)
                 {
-                    c.win_emu.memory.release_memory(section_backing_address, 0);
+                    c.win_emu.memory.close_section_handle_reference(section_backing_address);
                 }
                 return STATUS_SUCCESS;
             }

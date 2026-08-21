@@ -77,6 +77,15 @@ namespace sogen
             committed_region_map committed_regions{};
             memory_region_kind kind{memory_region_kind::private_allocation};
             std::u16string mapped_filename{};
+
+            // For memory_region_kind::pagefile_section_view: real Windows keeps a section's backing
+            // pages alive as long as ANY mapped view of it still exists, independent of whether every
+            // handle to the section object has been closed (MSDN: "the file mapping object may be used
+            // until all references to it, including the memory-mapped view, are released"). These two
+            // fields let NtMapViewOfSection/NtUnmapViewOfSection/NtClose release the backing only once
+            // both conditions are actually true, instead of tying it to handle closure alone.
+            uint32_t section_view_refs{};
+            bool section_handle_closed{};
         };
 
         using reserved_region_map = std::map<uint64_t, reserved_region>;
@@ -165,6 +174,21 @@ namespace sogen
         void set_region_mapped_filename(uint64_t address, std::u16string filename);
 
         reserved_region_map::iterator find_reserved_region(uint64_t address);
+
+        // A pagefile-backed section's view/handle lifetimes are independent on real Windows (MSDN: "the
+        // file mapping object may be used until all references to it, including the memory-mapped view,
+        // are released") - a section handle closing while a view of it is still mapped must not free the
+        // backing pages out from under that live view. These let NtMapViewOfSection/NtUnmapViewOfSection/
+        // NtClose release the backing only once both the last view is unmapped AND the last handle is
+        // closed, whichever happens last. No-ops if backing_address has no reserved region.
+        void retain_section_view(uint64_t backing_address);
+
+        // Returns true if this call actually released the backing memory (last view gone and the
+        // handles were already closed).
+        bool release_section_view(uint64_t backing_address);
+
+        // Returns true if this call actually released the backing memory (no views were outstanding).
+        bool close_section_handle_reference(uint64_t backing_address);
 
         // ignore_host_reserved skips conflicts against memory_region_kind::host_reserved entries (see
         // reserve_host_memory_ranges) - used by allocate_mmio, since an MMIO region is trapped via
