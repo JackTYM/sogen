@@ -44,6 +44,17 @@ namespace sogen
         constexpr uint32_t k_color_btnface = 15;
         constexpr auto k_user_timer_minimum = std::chrono::milliseconds{10};
 
+        // Diagnostic aid for tracing window-management syscalls (class registration/window creation)
+        // independent of the CLI silent/report settings; see SOGEN_TRACE_EXCEPTIONS for the same pattern.
+        bool window_trace_enabled()
+        {
+            static const bool enabled = [] {
+                const auto* value = std::getenv("SOGEN_TRACE_WINDOWS");
+                return value != nullptr && value[0] == '1';
+            }();
+            return enabled;
+        }
+
         struct send_message_callback_info
         {
             uint64_t callback{};
@@ -2634,6 +2645,12 @@ namespace sogen
                                                         std::to_string(index));
             }
 
+            if (window_trace_enabled())
+            {
+                c.win_emu.log.error("[window-trace] RegisterClassEx name='%s' atom=#%u tid=%u\n", u16_to_u8(class_name_str).c_str(), index,
+                                    c.thread().id);
+            }
+
             c.proc.classes.insert_or_assign(class_name_str, entry);
             c.proc.classes.insert_or_assign(make_atom_class_name(index), entry);
 
@@ -2810,6 +2827,12 @@ namespace sogen
                 c.win_emu.callbacks.on_generic_activity("CreateWindowEx class='" + u16_to_u8(cls_name) + "' style=0x" + style_string);
             }
 
+            if (window_trace_enabled())
+            {
+                c.win_emu.log.error("[window-trace] CreateWindowEx class='%s' style=0x%08x parent=0x%llx tid=%u\n",
+                                    u16_to_u8(cls_name).c_str(), style, static_cast<unsigned long long>(parent), c.thread().id);
+            }
+
             auto cls_it = c.proc.classes.find(cls_name);
 
             if (cls_it == c.proc.classes.end())
@@ -2826,6 +2849,11 @@ namespace sogen
                 if (c.win_emu.callbacks.on_generic_activity)
                 {
                     c.win_emu.callbacks.on_generic_activity("CreateWindowEx missing class '" + u16_to_u8(cls_name) + "'");
+                }
+
+                if (window_trace_enabled())
+                {
+                    c.win_emu.log.error("[window-trace] CreateWindowEx missing class '%s'\n", u16_to_u8(cls_name).c_str());
                 }
 
                 set_guest_last_error(c, 1407); // ERROR_CANNOT_FIND_WND_CLASS
@@ -3025,6 +3053,13 @@ namespace sogen
                     .enabled = (style & WS_DISABLED) == 0,
                     .top_level = !has_child_parent,
                 });
+
+                if (window_trace_enabled())
+                {
+                    c.win_emu.log.error("[window-trace] CreateWindowEx OK hwnd=0x%llx class='%s' top_level=%d visible=%d tid=%u\n",
+                                        static_cast<unsigned long long>(handle.bits), u16_to_u8(cls_name).c_str(), !has_child_parent,
+                                        (style & WS_VISIBLE) != 0, c.thread().id);
+                }
 
                 if (has_child_parent && parent_win && (style & WS_VISIBLE) != 0)
                 {
@@ -3348,6 +3383,13 @@ namespace sogen
             wp.cy = win->height;
             wp.flags = want_visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
             state.window_pos_alloc = c.emu.push_stack(wp);
+
+            if (window_trace_enabled())
+            {
+                c.win_emu.log.error("[window-trace] ShowWindow hwnd=0x%llx class='%s' cmd_show=%d host_surface=%d tid=%u\n",
+                                    static_cast<unsigned long long>(hwnd), u16_to_u8(win->class_name).c_str(), cmd_show,
+                                    win->host_surface_window, c.thread().id);
+            }
 
             if (win->host_surface_window)
             {

@@ -910,6 +910,7 @@ namespace sogen
                 auto* window = SDL_CreateWindow(title.c_str(), static_cast<int>(width), static_cast<int>(height), flags);
                 if (!window)
                 {
+                    std::fprintf(stderr, "sogen: SDL_CreateWindow failed: %s\n", SDL_GetError());
                     return;
                 }
 
@@ -920,6 +921,7 @@ namespace sogen
                 auto* renderer = SDL_CreateRenderer(window, nullptr);
                 if (!renderer)
                 {
+                    std::fprintf(stderr, "sogen: SDL_CreateRenderer failed: %s\n", SDL_GetError());
                     SDL_DestroyWindow(window);
                     return;
                 }
