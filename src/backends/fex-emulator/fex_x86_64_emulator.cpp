@@ -2456,12 +2456,39 @@ namespace sogen::fex
             const uint64_t start = host_page_align_up_apple(address);
             const uint64_t end = host_page_align_down_apple(address + size);
 
+            const auto is_placeholder_page = [this](const uint64_t host_page) {
+                return this->wow64_host_window_reserved_ && rebase_for(this->is_wow64_process_, host_page) != 0;
+            };
+
             auto it = this->mapped_host_pages_apple_.lower_bound(start);
             while (it != this->mapped_host_pages_apple_.end() && *it + host_page_size_apple <= end)
             {
-                const auto rebase = rebase_for(this->is_wow64_process_, *it);
-                void* const host_ptr = reinterpret_cast<void*>(*it + rebase);
-                if (rebase != 0 && this->wow64_host_window_reserved_)
+                // Coalesce the longest contiguous run of pages sharing the same handling (placeholder
+                // re-arm vs. real release) into one host mmap/munmap call instead of one per 16KB page
+                // -- mirrors unmap_host_pages_covering_apple's batching for the same reason: a single
+                // large VirtualFree can otherwise cost hundreds of individual host syscalls.
+                const uint64_t run_start = *it;
+                const bool placeholder = is_placeholder_page(run_start);
+                uint64_t run_end = run_start + host_page_size_apple;
+                auto run_it = it;
+                ++run_it;
+                while (run_it != this->mapped_host_pages_apple_.end() && *run_it == run_end && run_end < end &&
+                       is_placeholder_page(*run_it) == placeholder)
+                {
+                    run_end += host_page_size_apple;
+                    ++run_it;
+                }
+
+                const auto rebase = rebase_for(this->is_wow64_process_, run_start);
+                void* const host_ptr = reinterpret_cast<void*>(run_start + rebase);
+                const size_t run_size = run_end - run_start;
+
+                if (g_hvf != nullptr)
+                {
+                    g_hvf->unmap(reinterpret_cast<uint64_t>(host_ptr), run_size);
+                }
+
+                if (placeholder)
                 {
                     // A page inside the up-front-reserved wow64 window is never actually released at
                     // the host level - it's re-armed as our own PROT_NONE placeholder, exactly as
@@ -2471,21 +2498,13 @@ namespace sogen::fex
                     // this placeholder), so a later claim attempt for it would incorrectly believe it
                     // needs a fresh mach_vm_allocate, which then correctly (but uselessly) fails since
                     // the page really is still ours, throwing a false-positive host_memory_collision.
-                    if (g_hvf != nullptr)
-                    {
-                        g_hvf->sync_page(reinterpret_cast<uint64_t>(host_ptr), PROT_NONE);
-                    }
-                    ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                    ++it;
+                    ::mmap(host_ptr, run_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    it = run_it;
                 }
                 else
                 {
-                    if (g_hvf != nullptr)
-                    {
-                        g_hvf->sync_page(reinterpret_cast<uint64_t>(host_ptr), PROT_NONE);
-                    }
-                    ::munmap(host_ptr, host_page_size_apple);
-                    it = this->mapped_host_pages_apple_.erase(it);
+                    ::munmap(host_ptr, run_size);
+                    it = this->mapped_host_pages_apple_.erase(it, run_it);
                 }
             }
         }
