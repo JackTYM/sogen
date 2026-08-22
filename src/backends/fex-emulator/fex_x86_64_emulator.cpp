@@ -2378,7 +2378,7 @@ namespace sogen::fex
 
 #ifdef __APPLE__
             this->set_shadow_range_apple(address, size, permissions);
-            this->sync_host_pages_covering_apple(address, size);
+            this->sync_host_pages_covering_apple(address, size, permissions);
 #else
             void* result = ::mmap(reinterpret_cast<void*>(address), size, to_prot(permissions),
                                   MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -2668,7 +2668,7 @@ namespace sogen::fex
 
 #ifdef __APPLE__
                 this->set_shadow_range_apple(address, size, permissions);
-                this->sync_host_pages_covering_apple(address, size);
+                this->sync_host_pages_covering_apple(address, size, permissions);
 #else
                 if (::mprotect(reinterpret_cast<void*>(address), size, to_prot(permissions)) != 0)
                 {
@@ -2973,13 +2973,100 @@ namespace sogen::fex
             }
         }
 
-        void sync_host_pages_covering_apple(uint64_t address, size_t size)
+        // map_memory's and apply_memory_protection's own fast path. Both callers already called
+        // set_shadow_range_apple(address, size, permissions) with this exact same permissions value
+        // immediately before this function runs, so every host page that lies entirely inside
+        // [address, address + size) is guaranteed to have effective == permissions and
+        // any_slot_present == true in sync_host_page_apple - there is no need to recompute that
+        // union per host page one at a time. Only the (at most two) host pages straddling
+        // address/address + size can still carry a live, unrelated neighboring guest sub-page and
+        // need the exact per-page handling in sync_host_page_apple. Mirrors
+        // unmap_host_pages_covering_apple's own interior/boundary split for the same reason:
+        // profiling MW2 found this function (via map_memory) among the largest remaining costs,
+        // one mprotect/mach_vm_allocate/hv_trap per 16KB host page instead of one per contiguous run.
+        void sync_host_pages_covering_apple(uint64_t address, size_t size, memory_permission permissions)
         {
-            const uint64_t start = host_page_align_down_apple(address);
-            const uint64_t end = host_page_align_up_apple(address + size);
-            for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
+            const uint64_t range_start = address;
+            const uint64_t range_end = address + size;
+            const uint64_t start = host_page_align_down_apple(range_start);
+            const uint64_t end = host_page_align_up_apple(range_end);
+
+            const int hvf_prot = to_prot_apple(permissions);
+            const int host_prot = to_host_prot_hvf(hvf_prot);
+
+            uint64_t cursor = start;
+            while (cursor < end)
             {
-                this->sync_host_page_apple(host_page);
+                const bool interior = cursor >= range_start && cursor + host_page_size_apple <= range_end;
+                if (!interior)
+                {
+                    this->sync_host_page_apple(cursor);
+                    cursor += host_page_size_apple;
+                    continue;
+                }
+
+                const bool currently_mapped = this->mapped_host_pages_apple_.contains(cursor);
+                const auto rebase = rebase_for(this->is_wow64_process_, cursor);
+
+                // Coalesce the longest contiguous run of interior pages sharing both the same
+                // currently_mapped state and the same rebase into one host call instead of one per
+                // 16KB page - rebase only changes at the (host-page-aligned) wow64 guest/host address
+                // space boundary, so a run must stop there exactly like reserve_guest_address_range's
+                // own run-coalescing does.
+                uint64_t run_end = cursor + host_page_size_apple;
+                while (run_end < end && run_end + host_page_size_apple <= range_end &&
+                       this->mapped_host_pages_apple_.contains(run_end) == currently_mapped &&
+                       rebase_for(this->is_wow64_process_, run_end) == rebase)
+                {
+                    run_end += host_page_size_apple;
+                }
+
+                const size_t run_size = run_end - cursor;
+                void* const host_ptr = reinterpret_cast<void*>(cursor + rebase);
+
+                if (currently_mapped)
+                {
+                    if (::mprotect(host_ptr, run_size, host_prot) != 0)
+                    {
+                        throw std::runtime_error("FEX backend failed to change memory protection");
+                    }
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->map(cursor + rebase, run_size, hvf_prot);
+                    }
+                }
+                else
+                {
+                    // Bug 4 fix pattern, identical to sync_host_page_apple's own fresh-claim branch
+                    // and reserve_guest_address_range's batched claim: mach_vm_allocate(VM_FLAGS_FIXED)
+                    // without VM_FLAGS_OVERWRITE first, so a foreign mapping placed here by another
+                    // vCPU's concurrent syscall is detected (host_memory_collision) instead of silently
+                    // destroyed. A single allocate over the whole run is still atomic (all-or-nothing),
+                    // so batching doesn't weaken this collision detection.
+                    mach_vm_address_t target = cursor + rebase;
+                    const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, run_size, VM_FLAGS_FIXED);
+                    if (result != KERN_SUCCESS)
+                    {
+                        throw host_memory_collision{};
+                    }
+                    ::munmap(host_ptr, run_size);
+                    void* map_result =
+                        ::mmap(host_ptr, run_size, host_prot, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    if (map_result == MAP_FAILED || map_result != host_ptr)
+                    {
+                        throw std::runtime_error("FEX backend failed to map guest memory at requested address");
+                    }
+                    for (uint64_t host_page = cursor; host_page < run_end; host_page += host_page_size_apple)
+                    {
+                        this->mapped_host_pages_apple_.insert(host_page);
+                    }
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->map(cursor + rebase, run_size, hvf_prot);
+                    }
+                }
+
+                cursor = run_end;
             }
         }
 
