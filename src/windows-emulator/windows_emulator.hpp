@@ -16,6 +16,7 @@
 #include "network/dns_lookup.hpp"
 #include "network/socket_factory.hpp"
 #include "version/windows_version_manager.hpp"
+#include "pipe_ipc_channel.hpp"
 #include <platform/ui_backend.hpp>
 
 namespace sogen
@@ -119,6 +120,12 @@ namespace sogen
         std::string failure_detail{};
         uint64_t peb_address{};
         uint64_t process_parameters_address{};
+
+        // Still-open end of the same socketpair used for the bootstrap handshake, kept alive (rather
+        // than closed once the handshake completes) so it can be registered as a pipe_ipc_channel
+        // transport - see windows_emulator::register_pipe_ipc_peer. Only meaningful when success is
+        // true; -1 if this platform doesn't support child process spawning at all.
+        int ipc_fd{-1};
     };
 
     struct emulator_callbacks : module_manager::callbacks, process_context::callbacks
@@ -270,6 +277,12 @@ namespace sogen
         std::unique_ptr<ui_backend> ui_backend_{};
         bool setup_completed_{false};
 
+        // One entry per sibling OS process this process is directly connected to (its parent, if it was
+        // itself spawned as a child, plus one per child it has spawned) - see child_process_spawn.hpp.
+        // Named-pipe writes/connects are broadcast to every entry; pump_pipe_ipc() applies whatever comes
+        // back the other way to this process's own named_pipe device instances.
+        std::vector<std::unique_ptr<pipe_ipc_channel>> pipe_ipc_peers_{};
+
       public:
         const std::filesystem::path emulation_root{};
         const fake_environment_config fake_env{};
@@ -329,6 +342,23 @@ namespace sogen
         {
             return *this->socket_factory_;
         }
+
+        // Registers a sibling OS process's IPC transport (see child_process_outcome::ipc_fd and the
+        // --child-ipc-fd bootstrap channel) as a named-pipe forwarding peer. The embedder (analyzer's
+        // main.cpp) owns the actual fd/socketpair and constructs the concrete channel; windows_emulator
+        // only ever talks to it through the pipe_ipc_channel interface.
+        void register_pipe_ipc_peer(std::unique_ptr<pipe_ipc_channel> peer);
+
+        // Broadcasts a named-pipe write/connect to every registered peer, so a same-named pipe instance
+        // in a sibling OS process observes it exactly like a same-process peer instance would (see
+        // deliver_bytes_to_named_pipe/mark_named_pipe_connected in devices/named_pipe.hpp).
+        void broadcast_named_pipe_write(std::u16string_view name, std::string_view data);
+        void broadcast_named_pipe_connect(std::u16string_view name);
+
+        // Applies whatever named-pipe traffic has arrived from registered peers since the last call.
+        // Called once per scheduler tick (perform_context_switch_work), the same cadence as io_device's
+        // own work() pump.
+        void pump_pipe_ipc();
 
         const network::socket_factory& socket_factory() const
         {

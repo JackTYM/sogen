@@ -59,4 +59,10 @@ namespace sogen
     void send_child_ready(int fd, uint64_t peb_address, uint64_t process_parameters_address);
     void send_child_failed(int fd, const std::string& detail);
 
+    // Wraps an already-connected fd (child_process_outcome::ipc_fd on the parent side, or
+    // options.child_ipc_fd on the child side, both ends of the same socketpair the bootstrap
+    // handshake used) as a pipe_ipc_channel, for windows_emulator::register_pipe_ipc_peer. Takes
+    // ownership of fd - it is closed when the returned channel is destroyed.
+    std::unique_ptr<pipe_ipc_channel> create_fd_pipe_ipc_channel(int fd);
+
 } // namespace sogen

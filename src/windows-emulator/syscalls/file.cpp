@@ -1415,26 +1415,16 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
-                    if (!pipe->write_queue.empty())
-                    {
-                        std::string_view data = pipe->write_queue.front();
-                        const size_t to_copy = std::min<size_t>(data.size(), length);
+                    io_device_context ctx{c.emu};
+                    ctx.event = handle{.bits = event};
+                    ctx.apc_routine = apc_routine;
+                    ctx.apc_context = apc_context;
+                    ctx.io_status_block = io_status_block;
+                    ctx.output_buffer = buffer;
+                    ctx.output_buffer_length = length;
+                    ctx.vcpu = &c.vcpu;
 
-                        commit_file_data(data.substr(0, to_copy), c.emu, io_status_block, buffer);
-
-                        if (to_copy == data.size())
-                        {
-                            pipe->write_queue.pop_front();
-                        }
-                        else
-                        {
-                            pipe->write_queue.front().erase(0, to_copy);
-                        }
-
-                        return STATUS_SUCCESS;
-                    }
-
-                    return STATUS_PIPE_EMPTY;
+                    return pipe->try_deliver_read(c.win_emu, ctx);
                 }
             }
 
@@ -1527,10 +1517,8 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
-                    (void)pipe; // For future use: suppressing compiler issues
-                    // TODO c.win_emu.callbacks.on_named_pipe_write(pipe->name, temp_buffer);
-
-                    // TODO pipe->write_queue.push_back(temp_buffer);
+                    deliver_bytes_to_named_pipe(c.proc, pipe->name, temp_buffer, pipe);
+                    c.win_emu.broadcast_named_pipe_write(pipe->name, temp_buffer);
 
                     if (io_status_block)
                     {
@@ -1846,15 +1834,8 @@ namespace sogen
 
             c.win_emu.callbacks.on_generic_access("Creating/opening named pipe", filename);
 
-            for (auto& entry : c.proc.devices)
-            {
-                auto* existing_pipe = entry.second.get_internal_device<named_pipe>();
-                if (existing_pipe && existing_pipe->name == filename)
-                {
-                    existing_pipe->client_connected = true;
-                    break;
-                }
-            }
+            mark_named_pipe_connected(c.win_emu, c.proc, filename);
+            c.win_emu.broadcast_named_pipe_connect(filename);
 
             io_device_creation_data data{};
 

@@ -15,6 +15,7 @@
 
 #include "network/static_socket_factory.hpp"
 #include "memory_permission_ext.hpp"
+#include "devices/named_pipe.hpp"
 
 namespace sogen
 {
@@ -477,6 +478,8 @@ namespace sogen
                 }
             }
 
+            win_emu.pump_pipe_ipc();
+
             auto& devices = win_emu.process.devices;
 
             // Crappy mechanism to prevent mutation while iterating.
@@ -905,6 +908,64 @@ namespace sogen
         vcpu.switch_thread = true;
         vcpu.thread().apc_alertable = alertable;
         vcpu.cpu.stop();
+    }
+
+    void windows_emulator::register_pipe_ipc_peer(std::unique_ptr<pipe_ipc_channel> peer)
+    {
+        this->pipe_ipc_peers_.push_back(std::move(peer));
+    }
+
+    void windows_emulator::broadcast_named_pipe_write(const std::u16string_view name, const std::string_view data)
+    {
+        if (this->pipe_ipc_peers_.empty())
+        {
+            return;
+        }
+
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::write;
+        message.pipe_name = name;
+        message.data = data;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
+    void windows_emulator::broadcast_named_pipe_connect(const std::u16string_view name)
+    {
+        if (this->pipe_ipc_peers_.empty())
+        {
+            return;
+        }
+
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::connect;
+        message.pipe_name = name;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
+    void windows_emulator::pump_pipe_ipc()
+    {
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            while (const auto message = peer->try_receive())
+            {
+                if (message->type == pipe_ipc_message_type::write)
+                {
+                    deliver_bytes_to_named_pipe(this->process, message->pipe_name, message->data, nullptr);
+                }
+                else if (message->type == pipe_ipc_message_type::connect)
+                {
+                    mark_named_pipe_connected(*this, this->process, message->pipe_name);
+                }
+            }
+        }
     }
 
     bool windows_emulator::perform_thread_switch(vcpu_context& vcpu)

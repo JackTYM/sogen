@@ -239,6 +239,60 @@ namespace sogen
         }
 #endif
 
+#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        class fd_pipe_ipc_channel final : public pipe_ipc_channel
+        {
+          public:
+            explicit fd_pipe_ipc_channel(const int fd)
+                : fd_(fd)
+            {
+            }
+
+            fd_pipe_ipc_channel(const fd_pipe_ipc_channel&) = delete;
+            fd_pipe_ipc_channel& operator=(const fd_pipe_ipc_channel&) = delete;
+
+            ~fd_pipe_ipc_channel() override
+            {
+                if (this->fd_ >= 0)
+                {
+                    ::close(this->fd_);
+                }
+            }
+
+            void send(const pipe_ipc_message& message) override
+            {
+                utils::buffer_serializer buffer{};
+                buffer.write(static_cast<uint8_t>(message.type));
+                buffer.write(message.pipe_name);
+                buffer.write(message.data);
+                send_framed(this->fd_, buffer.get_buffer());
+            }
+
+            std::optional<pipe_ipc_message> try_receive() override
+            {
+                auto raw = recv_framed(this->fd_, 0);
+                if (!raw)
+                {
+                    return std::nullopt;
+                }
+
+                utils::buffer_deserializer deserializer{*raw};
+
+                pipe_ipc_message message{};
+                uint8_t type{};
+                deserializer.read(type);
+                message.type = static_cast<pipe_ipc_message_type>(type);
+                deserializer.read(message.pipe_name);
+                deserializer.read(message.data);
+
+                return message;
+            }
+
+          private:
+            int fd_{-1};
+        };
+#endif
+
         child_process_outcome parse_response(const std::vector<std::byte>& raw)
         {
             utils::buffer_deserializer buffer{raw};
@@ -360,16 +414,26 @@ namespace sogen
 
         constexpr int ready_timeout_ms = 30000;
         auto response = recv_framed(parent_fd, ready_timeout_ms);
-        ::close(parent_fd);
 
         if (!response)
         {
+            ::close(parent_fd);
             return {.success = false,
                     .failure_detail = "Child did not report readiness within " + std::to_string(ready_timeout_ms) +
                                       "ms (or exited/closed the IPC channel early)"};
         }
 
-        return parse_response(*response);
+        auto outcome = parse_response(*response);
+        if (outcome.success)
+        {
+            outcome.ipc_fd = parent_fd;
+        }
+        else
+        {
+            ::close(parent_fd);
+        }
+
+        return outcome;
 #endif
     }
 
@@ -406,6 +470,16 @@ namespace sogen
         buffer.write(false);
         buffer.write_string(std::string_view(detail));
         send_framed(fd, buffer.get_buffer());
+    }
+
+    std::unique_ptr<pipe_ipc_channel> create_fd_pipe_ipc_channel(const int fd)
+    {
+#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        return std::make_unique<fd_pipe_ipc_channel>(fd);
+#else
+        (void)fd;
+        return nullptr;
+#endif
     }
 
 } // namespace sogen
