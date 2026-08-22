@@ -2731,6 +2731,14 @@ namespace sogen
         const uint64_t id = this->allocate_id();
         this->resources_.emplace(id, std::move(entry));
         out_resource = id;
+
+        if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
+        {
+            fprintf(stderr,
+                    "[d3d9-rescreate-diag] resource=%llu kind=%u format=%u %ux%ux%u mips=%u usage=%u pool=%u "
+                    "backing_size=%zu\n",
+                    static_cast<unsigned long long>(id), kind, format, width, height, depth, mip_levels, usage, pool, backing_size);
+        }
         return d3d_ok;
     }
 
@@ -2934,6 +2942,12 @@ namespace sogen
         const auto src_it = this->resources_.find(src_resource);
         if (dst_it == this->resources_.end() || src_it == this->resources_.end())
         {
+            if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
+            {
+                fprintf(stderr, "[d3d9-texblt-diag] dst=%llu(found=%d) src=%llu(found=%d) -> invalidcall\n",
+                        static_cast<unsigned long long>(dst_resource), dst_it != this->resources_.end(),
+                        static_cast<unsigned long long>(src_resource), src_it != this->resources_.end());
+            }
             return d3derr_invalidcall;
         }
 
@@ -2942,6 +2956,25 @@ namespace sogen
         // batched draw that samples dst would otherwise see THIS write's contents once the batch
         // finally executes, not what it sampled at record time.
         this->flush_batch();
+        if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
+        {
+            const auto hash_of = [](const std::vector<std::byte>& bytes) {
+                uint64_t hash = 14695981039346656037ull;
+                for (const auto byte : bytes)
+                {
+                    hash ^= static_cast<uint8_t>(byte);
+                    hash *= 1099511628211ull;
+                }
+                return hash;
+            };
+            fprintf(stderr,
+                    "[d3d9-texblt-diag] dst=%llu %ux%u fmt=%u bytes=%zu src=%llu %ux%u fmt=%u bytes=%zu "
+                    "src_hash_before=0x%llx\n",
+                    static_cast<unsigned long long>(dst_resource), dst_it->second.width, dst_it->second.height, dst_it->second.format,
+                    dst_it->second.backing.size(), static_cast<unsigned long long>(src_resource), src_it->second.width,
+                    src_it->second.height, src_it->second.format, src_it->second.backing.size(),
+                    static_cast<unsigned long long>(hash_of(src_it->second.backing)));
+        }
         dst_it->second.backing = src_it->second.backing;
         dst_it->second.upload_dirty = true; // dst's GPU image no longer matches its (just replaced) backing
         return d3d_ok;
@@ -3461,6 +3494,17 @@ namespace sogen
             backing.resize(required_size);
         }
         std::memcpy(backing.data() + offset, data, data_size);
+        if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
+        {
+            uint64_t hash = 14695981039346656037ull;
+            for (size_t i = 0; i < data_size; ++i)
+            {
+                hash ^= static_cast<const uint8_t*>(data)[i];
+                hash *= 1099511628211ull;
+            }
+            fprintf(stderr, "[d3d9-unlock-diag] resource=%llu subresource=%u offset=%u data_size=%zu data_hash=0x%llx\n",
+                    static_cast<unsigned long long>(resource), subresource, offset, data_size, static_cast<unsigned long long>(hash));
+        }
         // The one write-back path for a sampled texture's pixels, so this is where staleness originates:
         // the GPU image (if this resource has one) is now out of date and ensure_texture_uploaded must
         // re-upload before the next draw samples it. Unconditional -- cheap, and deliberately not
