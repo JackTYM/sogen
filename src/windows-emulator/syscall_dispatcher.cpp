@@ -169,6 +169,46 @@ namespace sogen
         const auto entry = this->handlers_.find(syscall_id);
         const auto* syscall_name = (entry != this->handlers_.end()) ? entry->second.name.c_str() : "<unknown>";
 
+        if (getenv("EMULATOR_BINK_CONTROL_DIAG"))
+        {
+            constexpr uint64_t bink_ptr_addr = 0x1C87BD4;
+            constexpr uint64_t caller_pause_state_addr = 0x1C87CC0; // iw4sp.exe's own sub_508FB0 pause flag
+            constexpr uint64_t caller_video_flags_addr = 0x1C879B0; // iw4sp.exe's own render-mode flags (bits 2/4 tested)
+
+            uint32_t bink_ptr = 0;
+            uint32_t caller_pause_state = 0;
+            uint32_t caller_video_flags = 0;
+            const bool have_bink_ptr = emu.try_read_memory(bink_ptr_addr, &bink_ptr, sizeof(bink_ptr)) && bink_ptr != 0;
+            emu.try_read_memory(caller_pause_state_addr, &caller_pause_state, sizeof(caller_pause_state));
+            emu.try_read_memory(caller_video_flags_addr, &caller_video_flags, sizeof(caller_video_flags));
+
+            if (have_bink_ptr)
+            {
+                uint32_t stopped = 0;       // +28
+                uint32_t timer_gate = 0;    // +20  (0 = timer disabled, gate C auto-passes)
+                uint32_t mode_flag = 0;     // +220 (must be 0 for gate A to pass)
+                uint32_t track_count = 0;   // +744 (0 = no audio track, gate B auto-passes)
+                uint32_t sound_on = 0;      // +648 (per-track "sound on" latch, gate B)
+                uint32_t last_time = 0;     // +616 (v2, compared against target_time)
+                uint32_t total_frames = 0;  // +8   (constant; caller's sub_508FB0 compares this against +12)
+                uint32_t current_frame = 0; // +12  (advances as Bink decodes; caller only swaps the displayed
+                                            // frame and calls BinkGetRects/blits when this differs from +8)
+                emu.try_read_memory(bink_ptr + 28, &stopped, sizeof(stopped));
+                emu.try_read_memory(bink_ptr + 20, &timer_gate, sizeof(timer_gate));
+                emu.try_read_memory(bink_ptr + 220, &mode_flag, sizeof(mode_flag));
+                emu.try_read_memory(bink_ptr + 744, &track_count, sizeof(track_count));
+                emu.try_read_memory(bink_ptr + 648, &sound_on, sizeof(sound_on));
+                emu.try_read_memory(bink_ptr + 616, &last_time, sizeof(last_time));
+                emu.try_read_memory(bink_ptr + 8, &total_frames, sizeof(total_frames));
+                emu.try_read_memory(bink_ptr + 12, &current_frame, sizeof(current_frame));
+                win_emu.log.warn("[bink-control-diag] bink=0x%X caller_pause(+1C87CC0)=%u caller_flags(+1C879B0)=0x%X stopped(+28)=%u "
+                                 "timer(+20)=%u mode(+220)=%u tracks(+744)=%u sound_on(+648)=%u last_time(+616)=%u total_frames(+8)=%u "
+                                 "current_frame(+12)=%u\n",
+                                 bink_ptr, caller_pause_state, caller_video_flags, stopped, timer_gate, mode_flag, track_count, sound_on,
+                                 last_time, total_frames, current_frame);
+            }
+        }
+
         const syscall_context c{
             .win_emu = win_emu,
             .emu = emu,
