@@ -910,8 +910,32 @@ namespace sogen
             return emulation_result;
         }
 
+#ifdef __APPLE__
+        // AudioToolbox loads its spatial-audio HRTF presets lazily, guarded by a process-wide dispatch_once,
+        // the first time any AudioQueue starts. On this host, that first-ever load has repeatedly aborted the
+        // process with a libmalloc free-list corruption report inside AudioToolbox's own code (crash site,
+        // not necessarily cause: the same AudioQueue sequence never reproduces it in a freestanding program,
+        // so it is most likely surfacing corruption from elsewhere in the process rather than an Apple bug in
+        // isolation). Since the dispatch_once means this code path only ever runs once per process, forcing
+        // it here - before anything else in the process has run - guarantees it sees a pristine heap, so the
+        // guest's own first real audio playback later on never re-enters it.
+        void warm_up_host_audio()
+        {
+            const auto backend = create_sdl_audio_backend();
+            if (backend->start({.sample_rate = 44100, .channels = 2, .bits_per_sample = 32, .is_float = true}))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            backend->stop();
+        }
+#endif
+
         int run_main(int argc, char** argv)
         {
+#ifdef __APPLE__
+            warm_up_host_audio();
+#endif
+
 #ifndef _WIN32
             signal(SIGPIPE, SIG_IGN);
 #endif
