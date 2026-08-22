@@ -153,6 +153,16 @@ namespace sogen
         constexpr uint64_t k_host_queue_cushion_ms = 60;
         constexpr uint64_t k_host_queue_cushion = k_sample_rate * k_block_align * k_host_queue_cushion_ms / 1000;
 
+        // The most real PCM the client can legitimately have queued between two 5 ms polls, generously
+        // bounded at several seconds' worth: 44.1 kHz stereo float tops out around 350 KB/s, so anything
+        // claiming orders of magnitude more in one poll is not real throughput. Guards against a client
+        // write to the cursor field that lands far outside byte-position range (observed live: a jump to
+        // ~3.1e9, which made queued_bytes() saturate host_ptr_-side SDL accounting at INT32_MAX and pinned
+        // the play cursor there indefinitely) -- replaying such a jump verbatim would flood the host sink
+        // with hundreds of thousands of redundant submit() calls and then report the guest's own buffer as
+        // permanently full, deadlocking its writer instead of ever recovering.
+        constexpr uint64_t k_max_poll_advance = static_cast<uint64_t>(k_sample_rate) * k_block_align * 4;
+
         // The engine period reported by handle_get_device_period, and the same span expressed in bytes. An
         // event-driven client is woken once per period consumed, so this also paces how often we signal it.
         constexpr int64_t k_device_period_hns = 100000; // 10 ms
@@ -190,6 +200,13 @@ namespace sogen
                     return;
                 }
 
+                if (getenv("EMULATOR_AUDIO_CURSOR_DIAG"))
+                {
+                    win_emu.log.warn("[audio-cursor-diag] stream created guest_address=0x%llx buffer_bytes=%u section_size=%llu\n",
+                                     static_cast<unsigned long long>(this->guest_address_), buffer_bytes,
+                                     static_cast<unsigned long long>(section_size));
+                }
+
                 this->thread_ = std::thread(&render_stream::run, this);
             }
 
@@ -203,6 +220,12 @@ namespace sogen
 
                 if (this->guest_address_)
                 {
+                    if (getenv("EMULATOR_AUDIO_CURSOR_DIAG"))
+                    {
+                        this->win_emu_.log.warn("[audio-cursor-diag] stream destroyed guest_address=0x%llx\n",
+                                                static_cast<unsigned long long>(this->guest_address_));
+                    }
+
                     this->win_emu_.audio().stop();
                     this->win_emu_.memory.release_memory(this->guest_address_, static_cast<size_t>(this->section_size_));
                 }
@@ -241,11 +264,30 @@ namespace sogen
                 std::chrono::steady_clock::time_point anchor{};
                 std::chrono::steady_clock::time_point last_signal{};
 
+                const bool cursor_diag = getenv("EMULATOR_AUDIO_CURSOR_DIAG") != nullptr;
+                std::chrono::steady_clock::time_point last_cursor_log{};
+                uint64_t last_logged_play = 0;
+
                 while (!this->stop_)
                 {
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
                     const auto write = this->read_cursor(k_write_cursor_offset);
+
+                    if (cursor_diag)
+                    {
+                        const auto poll_now = std::chrono::steady_clock::now();
+                        if (poll_now - last_cursor_log >= std::chrono::seconds(1))
+                        {
+                            const auto play_now = this->read_cursor(k_play_cursor_offset);
+                            this->win_emu_.log.warn("[audio-cursor-diag] write=%llu play=%llu delta_play=%lld has_device=%d\n",
+                                                    static_cast<unsigned long long>(write), static_cast<unsigned long long>(play_now),
+                                                    static_cast<long long>(play_now - last_logged_play), has_device ? 1 : 0);
+                            last_logged_play = play_now;
+                            last_cursor_log = poll_now;
+                        }
+                    }
+
                     if (write == 0)
                     {
                         continue;
@@ -259,6 +301,19 @@ namespace sogen
                     }
 
                     uint64_t play{};
+
+                    if (write < submitted || write - submitted > k_max_poll_advance)
+                    {
+                        if (cursor_diag)
+                        {
+                            this->win_emu_.log.warn("[audio-cursor-diag] implausible cursor jump: submitted=%llu write=%llu, resyncing\n",
+                                                    static_cast<unsigned long long>(submitted), static_cast<unsigned long long>(write));
+                        }
+                        submitted = write;
+                        play = write;
+                        this->write_play_cursor(play);
+                        continue;
+                    }
 
                     if (has_device)
                     {
@@ -307,6 +362,7 @@ namespace sogen
                     // the play cursor moved: the cursor never passes the write cursor, so a client that wakes
                     // without writing would stall it and never be woken again.
                     const auto now = std::chrono::steady_clock::now();
+
                     const auto render_event = this->win_emu_.process.audio_render_event.load(std::memory_order_relaxed);
                     if (render_event && now - last_signal >= k_device_period &&
                         this->win_emu_.try_signal_guest_event(make_handle(render_event)))
