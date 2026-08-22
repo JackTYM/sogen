@@ -1857,6 +1857,17 @@ namespace sogen::fex
 
         bool try_read_memory(uint64_t address, void* data, size_t size) const override
         {
+            // is_range_mapped reads regions_ (a plain std::map, not itself synchronized) under the
+            // assumption its caller already holds tables_mutex_ - true for try_write_memory_impl but,
+            // until this fix, not for this function. Without the lock, this could race a concurrent
+            // writer (e.g. another vCPU's NtAllocateVirtualMemory/NtFreeVirtualMemory/mprotect call)
+            // rebalancing the same std::map mid-traversal: at best a stale/incorrect mapped-range
+            // answer, at worst a real crash or heap corruption from walking a tree node that's being
+            // relinked or freed concurrently. A shared_lock (not tables_write_lock) matches the
+            // reader/writer discipline used elsewhere for pure reads (see find_gate_crossing) - it
+            // excludes writers while still allowing concurrent readers.
+            const std::shared_lock lock(this->tables_mutex_);
+
             if (!this->is_range_mapped(address, size))
             {
                 return false;
