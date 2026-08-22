@@ -756,6 +756,18 @@ namespace sogen
                     continue;
                 }
 
+                // A dialog's controls (and their final text, e.g. an SFX's completion message) can
+                // exist before ShowWindow ever runs - WM_INITDIALOG builds the whole child tree first.
+                // Clicking that early queues the notification before the dialog's own modal message
+                // loop has started pumping, which - unlike a real user or UI-automation tool, neither
+                // of which can interact with a window still hidden - leaves the dialog to progress
+                // through its normal show/paint sequence without ever having "seen" the click. Wait
+                // for the dialog to actually be shown before matching any rule against it.
+                if ((win.style & WS_VISIBLE) == 0)
+                {
+                    continue;
+                }
+
                 const auto title = u16_to_u8(win.name);
 
                 if (trace)
