@@ -1381,6 +1381,12 @@ namespace sogen
 
             const auto bytes_read = fread(temp_buffer.data(), 1, temp_buffer.size(), f->handle);
 
+            if (getenv("EMULATOR_BINK_IO_DIAG") && f->name.find(u".bik") != std::u16string::npos)
+            {
+                c.win_emu.log.warn("[bink-io-diag] NtReadFile name=%s requested=%u read=%zu\n", u16_to_u8(f->name).c_str(), length,
+                                   bytes_read);
+            }
+
             if (bytes_read > 0)
             {
                 commit_file_data(std::string_view(temp_buffer.data(), bytes_read), c.emu, io_status_block, buffer);
