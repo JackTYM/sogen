@@ -2606,7 +2606,7 @@ namespace sogen::fex
 
 #ifdef __APPLE__
                 this->set_shadow_range_apple(address, size, std::nullopt);
-                this->sync_host_pages_covering_apple(address, size);
+                this->unmap_host_pages_covering_apple(address, size);
 #else
                 ::munmap(reinterpret_cast<void*>(address), size);
 #endif
@@ -2936,6 +2936,69 @@ namespace sogen::fex
             for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
             {
                 this->sync_host_page_apple(host_page);
+            }
+        }
+
+        // unmap_memory's own fast path. The caller already cleared page_shadow_apple_ for the exact
+        // [address, address + size) range, so every host page that lies entirely inside it is
+        // guaranteed to have any_slot_present == false in sync_host_page_apple - there is no need to
+        // recompute that per host page one at a time. Only the (at most two) host pages straddling
+        // address/address + size can still carry a live, unrelated guest sub-page and need the exact
+        // per-page handling in sync_host_page_apple. Batching the guaranteed-interior run into one
+        // Hypervisor.framework unmap + one mmap(PROT_NONE) instead of one pair per 16KB host page
+        // matters a lot in practice: profiling MW2 (task #196/#197) found NtFreeVirtualMemory alone
+        // costing ~20-23% of a vCPU worker thread's total CPU time, almost all of it inside exactly
+        // this one-hv_vm_unmap-per-host-page loop.
+        void unmap_host_pages_covering_apple(uint64_t address, size_t size)
+        {
+            const uint64_t range_start = address;
+            const uint64_t range_end = address + size;
+            const uint64_t start = host_page_align_down_apple(range_start);
+            const uint64_t end = host_page_align_up_apple(range_end);
+
+            uint64_t cursor = start;
+            while (cursor < end)
+            {
+                const bool interior = cursor >= range_start && cursor + host_page_size_apple <= range_end;
+                if (!interior)
+                {
+                    this->sync_host_page_apple(cursor);
+                    cursor += host_page_size_apple;
+                    continue;
+                }
+
+                if (!this->mapped_host_pages_apple_.contains(cursor))
+                {
+                    cursor += host_page_size_apple;
+                    continue;
+                }
+
+                uint64_t run_end = cursor + host_page_size_apple;
+                while (run_end < end && run_end + host_page_size_apple <= range_end && this->mapped_host_pages_apple_.contains(run_end))
+                {
+                    run_end += host_page_size_apple;
+                }
+
+                const size_t run_size = run_end - cursor;
+                const auto rebase = rebase_for(this->is_wow64_process_, cursor);
+                void* host_ptr = reinterpret_cast<void*>(cursor + rebase);
+
+                // mapped_host_pages_apple_ tracks which host pages have ever been claimed from the
+                // OS, not whether they currently carry real content - sync_host_page_apple's own
+                // !any_slot_present branch leaves it untouched too (a PROT_NONE mmap still owns the
+                // address; only page_shadow_apple_ says whether it's backed), so this batched path
+                // must leave it alone the same way.
+                if (g_hvf != nullptr)
+                {
+                    g_hvf->unmap(cursor + rebase, run_size);
+                }
+                void* result = ::mmap(host_ptr, run_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                if (result != host_ptr)
+                {
+                    throw std::runtime_error("FEX backend failed to re-reserve decommitted guest memory");
+                }
+
+                cursor = run_end;
             }
         }
 #endif
