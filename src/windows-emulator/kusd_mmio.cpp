@@ -104,7 +104,13 @@ namespace sogen
             }
             kusd.XState.Size = 0x000003c0;
             kusd.QpcData.QpcData = 0x0083;
-            kusd.QpcData.QpcBypassEnabled = 0x83;
+            // Bypass enabled makes guest ntdll's RtlQueryPerformanceCounter fast path trust the
+            // raw RDTSC value as already being in QpcFrequency units. Under FEX on Apple Silicon,
+            // RDTSC is virtualized as the raw ARM generic timer (CNTVCT_EL0, tens of MHz), which
+            // does not match the ~1GHz QpcFrequency below - guest code using the bypass path would
+            // see QueryPerformanceCounter advance roughly 40x too slowly. Disabling bypass routes
+            // every call through NtQueryPerformanceCounter, which is backed by the real host clock.
+            kusd.QpcData.QpcBypassEnabled = 0;
             kusd.QpcBias = 0x000000159530c4af;
             kusd.QpcFrequency = utils::clock::steady_duration::period::den;
             kusd.Reserved1 = 0x7ffeffff;
