@@ -193,6 +193,11 @@ namespace sogen
                 uint32_t total_frames = 0;  // +8   (constant; caller's sub_508FB0 compares this against +12)
                 uint32_t current_frame = 0; // +12  (advances as Bink decodes; caller only swaps the displayed
                                             // frame and calls BinkGetRects/blits when this differs from +8)
+                int32_t rect_sentinel = 0;  // +180 (BinkGetRects' cached-rect-count/-1-means-recompute state;
+                                            // BinkGetRects only rebuilds rects and returns >0 when this is -1,
+                                            // and only BinkDoFrame's per-frame tail resets it back to -1)
+                uint32_t stop_trigger = 0;  // +272 (nonzero here latches +28/"stopped", which makes BinkDoFrame
+                                            // take its early-return path and skip the +180 reset entirely)
                 emu.try_read_memory(bink_ptr + 28, &stopped, sizeof(stopped));
                 emu.try_read_memory(bink_ptr + 20, &timer_gate, sizeof(timer_gate));
                 emu.try_read_memory(bink_ptr + 220, &mode_flag, sizeof(mode_flag));
@@ -201,11 +206,13 @@ namespace sogen
                 emu.try_read_memory(bink_ptr + 616, &last_time, sizeof(last_time));
                 emu.try_read_memory(bink_ptr + 8, &total_frames, sizeof(total_frames));
                 emu.try_read_memory(bink_ptr + 12, &current_frame, sizeof(current_frame));
+                emu.try_read_memory(bink_ptr + 180, &rect_sentinel, sizeof(rect_sentinel));
+                emu.try_read_memory(bink_ptr + 272, &stop_trigger, sizeof(stop_trigger));
                 win_emu.log.warn("[bink-control-diag] bink=0x%X caller_pause(+1C87CC0)=%u caller_flags(+1C879B0)=0x%X stopped(+28)=%u "
                                  "timer(+20)=%u mode(+220)=%u tracks(+744)=%u sound_on(+648)=%u last_time(+616)=%u total_frames(+8)=%u "
-                                 "current_frame(+12)=%u\n",
+                                 "current_frame(+12)=%u rects(+180)=%d stop_trigger(+272)=%u\n",
                                  bink_ptr, caller_pause_state, caller_video_flags, stopped, timer_gate, mode_flag, track_count, sound_on,
-                                 last_time, total_frames, current_frame);
+                                 last_time, total_frames, current_frame, rect_sentinel, stop_trigger);
             }
         }
 
