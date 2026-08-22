@@ -2401,21 +2401,40 @@ namespace sogen::fex
             const uint64_t start = host_page_align_down_apple(address);
             const uint64_t end = host_page_align_up_apple(address + size);
             std::vector<uint64_t> claimed_this_call;
-            for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
+
+            uint64_t cursor = start;
+            while (cursor < end)
             {
-                if (this->mapped_host_pages_apple_.contains(host_page))
+                if (this->mapped_host_pages_apple_.contains(cursor))
                 {
+                    cursor += host_page_size_apple;
                     continue;
                 }
 
-                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
+                const auto rebase = rebase_for(this->is_wow64_process_, cursor);
+
+                // Coalesce the longest contiguous run of not-yet-claimed pages sharing the same
+                // rebase into one host mach_vm_allocate/map call instead of one per 16KB page -
+                // mirrors release_guest_address_range's own run-coalescing for the same reason.
+                // rebase_for only changes at the (host-page-aligned) wow64 guest/host address
+                // space boundary, so a run must stop there exactly like release_guest_address_range
+                // stops at its placeholder/real-release boundary.
+                uint64_t run_end = cursor + host_page_size_apple;
+                while (run_end < end && !this->mapped_host_pages_apple_.contains(run_end) &&
+                       rebase_for(this->is_wow64_process_, run_end) == rebase)
+                {
+                    run_end += host_page_size_apple;
+                }
+                const size_t run_size = run_end - cursor;
 
                 // Bug 4 fix: claim via mach_vm_allocate(VM_FLAGS_FIXED) WITHOUT VM_FLAGS_OVERWRITE -
                 // the kernel refuses (KERN_NO_SPACE) instead of silently overwriting an intervening
                 // foreign mapping another vCPU's concurrent syscall placed here between an earlier
-                // free-space probe and this claim.
-                mach_vm_address_t target = host_page + rebase;
-                const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, host_page_size_apple, VM_FLAGS_FIXED);
+                // free-space probe and this claim. A single allocate over the whole run is still
+                // atomic (all-or-nothing), so batching doesn't weaken this collision detection - it
+                // just performs the same check over a bigger range at once.
+                mach_vm_address_t target = cursor + rebase;
+                const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, run_size, VM_FLAGS_FIXED);
                 if (result != KERN_SUCCESS)
                 {
                     // Roll back every page claimed earlier in this same multi-page call so a partial
@@ -2436,15 +2455,21 @@ namespace sogen::fex
                     }
                     return false;
                 }
-                this->mapped_host_pages_apple_.insert(host_page);
-                claimed_this_call.push_back(host_page);
+
+                for (uint64_t host_page = cursor; host_page < run_end; host_page += host_page_size_apple)
+                {
+                    this->mapped_host_pages_apple_.insert(host_page);
+                    claimed_this_call.push_back(host_page);
+                }
                 if (g_hvf != nullptr)
                 {
                     // mach_vm_allocate hands back VM_PROT_DEFAULT (rw) memory; mirror that so the
-                    // page behaves identically inside the vCPU until a shadow sync assigns real
+                    // pages behave identically inside the vCPU until a shadow sync assigns real
                     // guest permissions.
-                    g_hvf->sync_page(host_page + rebase, PROT_READ | PROT_WRITE);
+                    g_hvf->map(cursor + rebase, run_size, PROT_READ | PROT_WRITE);
                 }
+
+                cursor = run_end;
             }
             return true;
         }
@@ -2975,12 +3000,16 @@ namespace sogen::fex
             const uint64_t start = host_page_align_down_apple(range_start);
             const uint64_t end = host_page_align_up_apple(range_end);
 
+            size_t interior_pages = 0;
+            size_t boundary_pages = 0;
+
             uint64_t cursor = start;
             while (cursor < end)
             {
                 const bool interior = cursor >= range_start && cursor + host_page_size_apple <= range_end;
                 if (!interior)
                 {
+                    ++boundary_pages;
                     this->sync_host_page_apple(cursor);
                     cursor += host_page_size_apple;
                     continue;
@@ -2988,6 +3017,7 @@ namespace sogen::fex
 
                 if (!this->mapped_host_pages_apple_.contains(cursor))
                 {
+                    ++interior_pages;
                     cursor += host_page_size_apple;
                     continue;
                 }
@@ -2999,6 +3029,7 @@ namespace sogen::fex
                 }
 
                 const size_t run_size = run_end - cursor;
+                interior_pages += run_size / host_page_size_apple;
                 const auto rebase = rebase_for(this->is_wow64_process_, cursor);
                 void* host_ptr = reinterpret_cast<void*>(cursor + rebase);
 
@@ -3018,6 +3049,12 @@ namespace sogen::fex
                 }
 
                 cursor = run_end;
+            }
+
+            if (getenv("EMULATOR_FREE_SIZE_DIAG"))
+            {
+                fprintf(stderr, "[free-size-diag] address=0x%llx size=%zu interior_pages=%zu boundary_pages=%zu\n",
+                        static_cast<unsigned long long>(address), size, interior_pages, boundary_pages);
             }
         }
 #endif
