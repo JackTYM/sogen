@@ -3202,13 +3202,14 @@ namespace sogen
 
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
     {
-        // Flush any open batch so its draws have executed (and left the render target in
-        // TRANSFER_SRC_OPTIMAL) before the readback reads the image. Covers both pfnLock and Present.
-        this->flush_batch();
         if (!rt.backing_dirty || rt.vk_image_id == 0)
         {
             return;
         }
+
+        // Flush any open batch so its draws have executed (and left the render target in
+        // TRANSFER_SRC_OPTIMAL) before the readback reads the image. Covers both pfnLock and Present.
+        this->flush_batch();
 
         std::vector<std::byte> pixels;
         uint32_t readback_width = 0;

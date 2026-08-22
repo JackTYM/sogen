@@ -168,8 +168,10 @@ namespace sogen
 
                 c.win_emu.log.warn("--> File rename requested: %s --> %s\n", u16_to_u8(f->name).c_str(), u16_to_u8(new_name).c_str());
 
+                const auto new_host_path = c.win_emu.file_sys.translate(new_name);
+
                 std::error_code ec{};
-                bool file_exists = std::filesystem::exists(c.win_emu.file_sys.translate(new_name), ec);
+                bool file_exists = std::filesystem::exists(new_host_path, ec);
 
                 if (ec)
                 {
@@ -181,7 +183,12 @@ namespace sogen
                     return STATUS_OBJECT_NAME_COLLISION;
                 }
 
-                f->handle.defer_rename(c.win_emu.file_sys.translate(f->name), c.win_emu.file_sys.translate(new_name));
+                if (!std::filesystem::is_directory(new_host_path.parent_path(), ec))
+                {
+                    return STATUS_OBJECT_PATH_NOT_FOUND;
+                }
+
+                f->handle.defer_rename(c.win_emu.file_sys.translate(f->name), new_host_path);
 
                 return STATUS_SUCCESS;
             }
