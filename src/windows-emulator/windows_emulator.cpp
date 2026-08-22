@@ -1796,6 +1796,7 @@ namespace sogen
                 acting.write_memory<uint32_t>(scratch_address, 0);
                 acting.write_memory<uint32_t>(scratch_address + 4, 0);
                 acting.reg<uint32_t>(x86_register::ecx, scratch_address);
+                ++this->d3d9_stretchrect_null_source_hits_;
                 return memory_violation_continuation::restart;
             }
 

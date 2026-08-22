@@ -2901,6 +2901,20 @@ namespace sogen
         // Only here, after the fence proved every copy landed, is the GPU image known to match `backing`.
         tex.upload_dirty = false;
         ++this->stats_.texture_upload_done;
+
+        if (getenv("EMULATOR_D3D9_TEXUPLOAD_DIAG"))
+        {
+            uint64_t hash = 14695981039346656037ull; // FNV-1a, offset basis
+            for (const auto byte : tex.backing)
+            {
+                hash ^= static_cast<uint8_t>(byte);
+                hash *= 1099511628211ull; // FNV-1a prime
+            }
+            fprintf(stderr, "[d3d9-texupload-diag] resource=%llu %ux%u format=%u usage=0x%x backing_hash=0x%llx\n",
+                    static_cast<unsigned long long>(resource), tex.width, tex.height, tex.format, tex.usage,
+                    static_cast<unsigned long long>(hash));
+        }
+
         return true;
     }
 

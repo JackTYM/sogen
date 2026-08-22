@@ -423,6 +423,11 @@ namespace sogen
             }
         }
 
+        uint64_t d3d9_stretchrect_null_source_hits() const
+        {
+            return this->d3d9_stretchrect_null_source_hits_;
+        }
+
         void yield_thread(vcpu_context& vcpu, bool alertable = false);
         bool perform_thread_switch(vcpu_context& vcpu, std::unique_lock<kernel_lock>& lock);
         bool perform_thread_switch(vcpu_context& vcpu);
@@ -462,6 +467,7 @@ namespace sogen
         uint64_t d3d9_stretchrect_null_source_fault_address_{};
         uint64_t d3d9_set_render_target_null_desc_fault_address_{};
         uint64_t d3d9_set_render_target_null_desc_fault_address2_{};
+        uint64_t d3d9_stretchrect_null_source_hits_{};
 
         void setup_hooks();
         void install_d3d9_caps_patch_hook(const mapped_module& mod);

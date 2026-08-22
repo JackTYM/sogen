@@ -2947,6 +2947,8 @@ namespace sogen
                                      static_cast<unsigned long long>(s.drop_shader_missing),
                                      static_cast<unsigned long long>(s.drop_translate_failed),
                                      static_cast<unsigned long long>(s.drop_vk_object_failed));
+                    win_emu.log.warn("[d3d9-drawdiag] stretchrect_null_source_hits=%llu\n",
+                                     static_cast<unsigned long long>(win_emu.d3d9_stretchrect_null_source_hits()));
                     std::string rts;
                     for (const auto& [rt, count] : s.draws_per_render_target)
                     {
