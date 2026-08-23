@@ -457,31 +457,53 @@ namespace sogen
         {
             return false;
         }
-        if (this->vulkan_.allocate_command_buffer(device, this->command_pool_, 0, this->batch_command_buffer_) != 0 ||
-            this->batch_command_buffer_ == 0)
+        for (uint32_t slot = 0; slot < batch_slot_count; ++slot)
         {
-            return false;
-        }
-        if (this->vulkan_.create_fence(device, 0, this->batch_fence_) != 0 || this->batch_fence_ == 0)
-        {
-            return false;
+            if (this->vulkan_.allocate_command_buffer(device, this->command_pool_, 0, this->batch_command_buffer_[slot]) != 0 ||
+                this->batch_command_buffer_[slot] == 0)
+            {
+                return false;
+            }
+            if (this->vulkan_.create_fence(device, 0, this->batch_fence_[slot]) != 0 || this->batch_fence_[slot] == 0)
+            {
+                return false;
+            }
         }
 
         this->draw_infra_ready_ = true;
         return true;
     }
 
-    void d3d9_host::flush_batch()
+    void d3d9_host::submit_batch_async()
     {
         if (!this->batch_open_)
         {
             return;
         }
-        this->vulkan_.end_command_buffer(this->batch_command_buffer_);
-        this->vulkan_.queue_submit(this->queue_, this->batch_command_buffer_, this->batch_fence_);
-        this->vulkan_.wait_for_fence(this->batch_fence_, UINT64_MAX);
+        this->vulkan_.end_command_buffer(this->batch_command_buffer_[this->batch_slot_]);
+        this->vulkan_.queue_submit(this->queue_, this->batch_command_buffer_[this->batch_slot_], this->batch_fence_[this->batch_slot_]);
+        this->batch_slot_pending_[this->batch_slot_] = true;
         this->batch_open_ = false;
         ++this->batch_submit_count_;
+    }
+
+    void d3d9_host::wait_for_batch_slot(const uint32_t slot)
+    {
+        if (!this->batch_slot_pending_[slot])
+        {
+            return;
+        }
+        this->vulkan_.wait_for_fence(this->batch_fence_[slot], UINT64_MAX);
+        this->batch_slot_pending_[slot] = false;
+    }
+
+    void d3d9_host::flush_batch()
+    {
+        this->submit_batch_async();
+        for (uint32_t slot = 0; slot < batch_slot_count; ++slot)
+        {
+            this->wait_for_batch_slot(slot);
+        }
     }
 
     bool d3d9_host::ensure_pipeline(const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height,
@@ -1018,26 +1040,29 @@ namespace sogen
         return &this->programmable_pipelines_.emplace(key, entry).first->second;
     }
 
-    bool d3d9_host::ensure_frame_descriptor_pool(const uint64_t device, const uint32_t needed_draws)
+    bool d3d9_host::ensure_frame_descriptor_pool(const uint64_t device, const uint32_t slot, const uint32_t needed_draws)
     {
-        if (this->frame_descriptor_pool_ != 0 && this->frame_desc_capacity_draws_ >= needed_draws)
+        if (this->frame_descriptor_pool_[slot] != 0 && this->frame_desc_capacity_draws_[slot] >= needed_draws)
         {
             return true;
         }
 
-        uint32_t new_capacity = this->frame_desc_capacity_draws_ != 0 ? this->frame_desc_capacity_draws_ : frame_desc_initial_draws;
+        uint32_t new_capacity =
+            this->frame_desc_capacity_draws_[slot] != 0 ? this->frame_desc_capacity_draws_[slot] : frame_desc_initial_draws;
         while (new_capacity < needed_draws)
         {
             new_capacity *= 2;
         }
 
-        // Drop the undersized pool before creating the larger one -- every draw that ever allocated from it
-        // has already fenced (see the header comment on frame_descriptor_pool_), so nothing is in flight.
-        if (this->frame_descriptor_pool_ != 0)
+        // Drop the undersized pool before creating the larger one -- this is only ever reached on the slot
+        // execute_draw has already settled on for THIS draw (see the header comment on
+        // ensure_frame_descriptor_pool), so every EARLIER draw that allocated from this same slot's pool
+        // has already fenced.
+        if (this->frame_descriptor_pool_[slot] != 0)
         {
-            this->vulkan_.destroy_descriptor_pool(device, this->frame_descriptor_pool_);
-            this->frame_descriptor_pool_ = 0;
-            this->frame_desc_capacity_draws_ = 0;
+            this->vulkan_.destroy_descriptor_pool(device, this->frame_descriptor_pool_[slot]);
+            this->frame_descriptor_pool_[slot] = 0;
+            this->frame_desc_capacity_draws_[slot] = 0;
         }
 
         // Same per-draw accounting as the removed per-pipeline pool (maxSets=2, 6 UBOs, max_vs_sampler_stages
@@ -1052,8 +1077,8 @@ namespace sogen
         {
             return false;
         }
-        this->frame_descriptor_pool_ = pool;
-        this->frame_desc_capacity_draws_ = new_capacity;
+        this->frame_descriptor_pool_[slot] = pool;
+        this->frame_desc_capacity_draws_[slot] = new_capacity;
         return true;
     }
 
@@ -1774,7 +1799,9 @@ namespace sogen
         // doesn't reference, or that lack a real stride (both already filtered out of used_binding_mask
         // above), or a referenced+usable stream the app never called SetStreamSource for, are left at
         // buffer id 0 -- cmd_bind_vertex_buffers already maps that to VK_NULL_HANDLE.
-        frame_arena& arena = this->vertex_index_uniform_arena_;
+        //
+        // `arena` itself is bound further down, once the batch-management step below has settled which
+        // slot (see batch_slot_count's header comment) this draw's batch is (re)opened on.
 
         struct reserved_range
         {
@@ -1918,59 +1945,91 @@ namespace sogen
             }
         }
 
-        // Batch management -- decide whether to keep accumulating into the currently-open batch or flush
+        // Batch management -- decide whether to keep accumulating into the currently-open batch or close
         // it first, then (re)open a batch this draw records into. Depth-stencil draws batch on exactly the
         // same terms as colour ones; the only extra requirement they carry is the inter-draw depth
         // dependency the recording step below emits (see its comment).
-        //   * A draw whose slot-0 render target differs from the open batch's flushes first, so a batch
-        //     never mixes render targets (the SetRenderTarget handler also flushes defensively).
-        //   * A draw whose bound depth-stencil differs from the open batch's flushes first, for the same
+        //   * A draw whose slot-0 render target differs from the open batch's closes it first, so a batch
+        //     never mixes render targets. In practice the d3d9_set_render_target DDI handler has ALREADY
+        //     closed (and fully drained -- see flush_batch's own comment) the batch by the time a real RT
+        //     change reaches here, since it flushes unconditionally on any render-target-slot change; this
+        //     check only exists as defensive belt-and-suspenders, same as before this file gained
+        //     multiple batch slots. When it DOES fire, the reopen below round-robins to the other slot
+        //     (see batch_slot_count's header comment) exactly like the descriptor-pool trigger below.
+        //   * A draw whose bound depth-stencil differs from the open batch's closes it first, for the same
         //     reason: the recording step's depth barrier only synchronizes the ONE depth image the batch
-        //     accumulates into (the SetDepthStencil handler also flushes defensively).
-        //   * A programmable draw that would exceed the descriptor pool's per-batch capacity flushes
-        //     first, so the pool can be reset (reset only happens on batch open, when it is idle).
-        //   * A draw whose arena slices would overflow the current arena capacity flushes first, then --
-        //     with the GPU now idle -- grows the arena (amortized doubling) before reopening; growing
-        //     while a batch still holds recorded commands referencing the old buffer would be a
-        //     use-after-free.
+        //     accumulates into. Same "normally already closed by d3d9_set_depth_stencil" caveat and
+        //     round-robin-on-reopen behavior as the render-target check above.
+        //   * A programmable draw that would exceed the descriptor pool's per-batch capacity closes it
+        //     first, so the pool can be reset (reset only happens on batch open, when it is idle). This is
+        //     the trigger that actually fires in ordinary gameplay -- once every frame_desc_initial_draws
+        //     draws into the same render target -- so it's the one the round-robin buys real CPU/GPU
+        //     overlap for; see batch_slot_count's header comment for the full reasoning.
+        //   * A draw whose arena slices would overflow the current arena capacity closes it first, then
+        //     grows THIS SLOT's arena (amortized doubling) before reopening on the SAME slot rather than
+        //     rotating. Growing destroys and recreates the buffer, which is only safe once this slot's own
+        //     submission is provably complete -- so unlike the two triggers above, this one waits for that
+        //     slot's own fence right here instead of deferring the wait to a later reopen.
         const uint64_t target_rt = this->state_.render_targets[0];
         const uint64_t target_ds = ds_entry != nullptr ? this->state_.depth_stencil : 0;
+        bool rotate_batch_slot = false;
         if (this->batch_open_ && (target_rt != this->batch_rt_ || target_ds != this->batch_ds_))
         {
-            this->flush_batch();
+            this->submit_batch_async();
+            rotate_batch_slot = true;
         }
-        if (this->batch_open_ && use_programmable && this->frame_desc_capacity_draws_ != 0 &&
-            this->batch_draw_count_ + 1 > this->frame_desc_capacity_draws_)
+        if (this->batch_open_ && use_programmable && this->frame_desc_capacity_draws_[this->batch_slot_] != 0 &&
+            this->batch_draw_count_ + 1 > this->frame_desc_capacity_draws_[this->batch_slot_])
         {
-            this->flush_batch();
+            this->submit_batch_async();
+            rotate_batch_slot = true;
         }
-        if (this->batch_open_ && arena.offset + draw_arena_bytes > arena.capacity)
+        if (this->batch_open_ && this->vertex_index_uniform_arena_[this->batch_slot_].offset + draw_arena_bytes >
+                                     this->vertex_index_uniform_arena_[this->batch_slot_].capacity)
         {
-            this->flush_batch();
-            if (!this->grow_arena(arena, std::max(draw_arena_bytes, arena.capacity * 2)))
+            this->submit_batch_async();
+            this->wait_for_batch_slot(this->batch_slot_);
+            frame_arena& growing_arena = this->vertex_index_uniform_arena_[this->batch_slot_];
+            if (!this->grow_arena(growing_arena, std::max(draw_arena_bytes, growing_arena.capacity * 2)))
             {
                 return d3d_ok;
             }
-            arena.offset = 0;
+            growing_arena.offset = 0;
         }
         if (!this->batch_open_)
         {
-            arena.offset = 0;
-            if (this->frame_descriptor_pool_ != 0)
+            if (rotate_batch_slot)
             {
-                this->vulkan_.reset_descriptor_pool(device, this->frame_descriptor_pool_, 0);
+                this->batch_slot_ = (this->batch_slot_ + 1) % batch_slot_count;
+                // Deferred wait: whatever this slot was last used for may still be finishing on the GPU --
+                // wait it out now, before this call reuses its command buffer/descriptor pool/arena.
+                // Usually already signaled by the time control gets back here, which is the entire point
+                // of the round-robin (see batch_slot_count's header comment).
+                this->wait_for_batch_slot(this->batch_slot_);
+            }
+            this->vertex_index_uniform_arena_[this->batch_slot_].offset = 0;
+            if (this->frame_descriptor_pool_[this->batch_slot_] != 0)
+            {
+                this->vulkan_.reset_descriptor_pool(device, this->frame_descriptor_pool_[this->batch_slot_], 0);
             }
             this->batch_draw_count_ = 0;
-            this->vulkan_.reset_fence(device, this->batch_fence_);
-            this->vulkan_.begin_command_buffer(this->batch_command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+            this->vulkan_.reset_fence(device, this->batch_fence_[this->batch_slot_]);
+            this->vulkan_.begin_command_buffer(this->batch_command_buffer_[this->batch_slot_], 0, false, 0, {}, 0, 0, 1, 0);
             this->batch_open_ = true;
             this->batch_rt_ = target_rt;
             this->batch_ds_ = target_ds;
             // Invalidates every vertex/index upload cache entry against this new batch (see
-            // batch_generation_'s own comment) -- covers both a plain flush+reopen and the flush+grow_arena
-            // path above, which destroys and recreates arena.buffer/memory entirely.
+            // batch_generation_'s own comment) -- covers a plain close+reopen, a close+reopen that rotated
+            // slots, and the close+grow_arena path above, which destroys and recreates
+            // vertex_index_uniform_arena_[slot].buffer/memory entirely.
             ++this->batch_generation_;
         }
+
+        // Bound here, now that batch_slot_ is settled for this draw -- every arena_suballoc/upload_memory
+        // call below (phase A/B) and every batch_command_buffer_ use in the recording step further down
+        // goes through these two, never the raw slot-indexed members.
+        frame_arena& arena = this->vertex_index_uniform_arena_[this->batch_slot_];
+        const uint64_t batch_cmd = this->batch_command_buffer_[this->batch_slot_];
 
         // Reserve every arena slice now that the batch is open and the arena is guaranteed large enough
         // (either it already fit, or the overflow path above flushed and grew it while the GPU was idle).
@@ -2242,14 +2301,14 @@ namespace sogen
             // flushed (closing it, so the next draw reopens and resets the pool) before batch_draw_count_
             // could exceed frame_desc_capacity_draws_ -- see the batch-management overflow guard above --
             // so allocation here always fits and ensure_frame_descriptor_pool's growth path stays dormant.
-            if (!this->ensure_frame_descriptor_pool(device, 1))
+            if (!this->ensure_frame_descriptor_pool(device, this->batch_slot_, 1))
             {
                 return d3d_ok; // GPU allocation failure; degrade silently like the rest of this host does
             }
             const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
             uint32_t set_count = 0;
-            if (this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_, set_layouts, descriptor_sets, set_count) !=
-                    0 ||
+            if (this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_], set_layouts,
+                                                       descriptor_sets, set_count) != 0 ||
                 set_count != descriptor_sets.size())
             {
                 return d3d_ok;
@@ -2373,14 +2432,14 @@ namespace sogen
             {
                 continue; // gap slot -- no real image to transition
             }
-            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, brt.entry->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            this->vulkan_.cmd_pipeline_barrier(batch_cmd, brt.entry->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
         }
         for (resource_entry* srt : sampled_render_targets)
         {
-            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, srt->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            this->vulkan_.cmd_pipeline_barrier(batch_cmd, srt->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, color_range);
@@ -2427,13 +2486,12 @@ namespace sogen
                                                              .level_count = 1,
                                                              .base_array_layer = 0,
                                                              .layer_count = 1};
-            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, ds_entry->vk_image_id,
-                                               VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                               VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
+            this->vulkan_.cmd_pipeline_barrier(
+                batch_cmd, ds_entry->vk_image_id, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
         }
         const vulkan_host::rendering_attachment depth_attachment{
             .image_view = ds_entry != nullptr ? ds_entry->vk_image_view_id : 0,
@@ -2444,15 +2502,15 @@ namespace sogen
             .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
             .store_op = VK_ATTACHMENT_STORE_OP_STORE,
         };
-        this->vulkan_.cmd_begin_rendering(this->batch_command_buffer_, 0, 0, rt.width, rt.height, 1, 0, 0, color_attachments,
+        this->vulkan_.cmd_begin_rendering(batch_cmd, 0, 0, rt.width, rt.height, 1, 0, 0, color_attachments,
                                           ds_entry != nullptr ? &depth_attachment : nullptr, nullptr);
 
-        this->vulkan_.cmd_bind_pipeline(this->batch_command_buffer_, use_programmable ? programmable->pipeline : this->pipeline_,
+        this->vulkan_.cmd_bind_pipeline(batch_cmd, use_programmable ? programmable->pipeline : this->pipeline_,
                                         VK_PIPELINE_BIND_POINT_GRAPHICS);
 
         if (use_programmable)
         {
-            this->vulkan_.cmd_bind_descriptor_sets(this->batch_command_buffer_, programmable->pipeline_layout, 0, descriptor_sets,
+            this->vulkan_.cmd_bind_descriptor_sets(batch_cmd, programmable->pipeline_layout, 0, descriptor_sets,
                                                    VK_PIPELINE_BIND_POINT_GRAPHICS, {});
         }
 
@@ -2484,7 +2542,7 @@ namespace sogen
         const float vp_max_z = has_explicit_viewport ? this->state_.viewport_max_z : 1.0f;
         const std::array<vulkan_host::viewport_entry, 1> viewports{
             {{.x = vp_x, .y = vp_y + vp_height, .width = vp_width, .height = -vp_height, .min_depth = vp_min_z, .max_depth = vp_max_z}}};
-        this->vulkan_.cmd_set_viewport(this->batch_command_buffer_, 0, false, viewports);
+        this->vulkan_.cmd_set_viewport(batch_cmd, 0, false, viewports);
         vulkan_host::scissor_entry scissor{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height};
         if (render_state_or(this->state_.render_state, d3drs_scissortestenable, 0) != 0)
         {
@@ -2498,17 +2556,17 @@ namespace sogen
                        .height = static_cast<uint32_t>(clamped_bottom - clamped_top)};
         }
         const std::array<vulkan_host::scissor_entry, 1> scissors{scissor};
-        this->vulkan_.cmd_set_scissor(this->batch_command_buffer_, 0, false, scissors);
+        this->vulkan_.cmd_set_scissor(batch_cmd, 0, false, scissors);
 
         if (!use_programmable)
         {
             const std::array<float, 2> viewport_size{static_cast<float>(rt.width), static_cast<float>(rt.height)};
-            this->vulkan_.cmd_push_constants(this->batch_command_buffer_, this->pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                                             sizeof(viewport_size), viewport_size.data());
+            this->vulkan_.cmd_push_constants(batch_cmd, this->pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(viewport_size),
+                                             viewport_size.data());
         }
 
-        this->vulkan_.cmd_bind_vertex_buffers(this->batch_command_buffer_, 0, static_cast<uint32_t>(stream_buffers.size()),
-                                              stream_buffers.data(), stream_bind_offsets.data());
+        this->vulkan_.cmd_bind_vertex_buffers(batch_cmd, 0, static_cast<uint32_t>(stream_buffers.size()), stream_buffers.data(),
+                                              stream_bind_offsets.data());
         // D3D9 hardware instancing carries no explicit instance-count draw parameter: the count is the low
         // 30 bits of the D3DSTREAMSOURCE_INDEXEDDATA stream's SetStreamSourceFreq divider (default 1, i.e.
         // an ordinary single-instance draw). Same helper the pipeline's per-binding inputRate was built
@@ -2517,19 +2575,18 @@ namespace sogen
         if (indexed != nullptr)
         {
             const uint32_t index_type = indexed->index_format != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-            this->vulkan_.cmd_bind_index_buffer(this->batch_command_buffer_, index_buffer_vk, ib_arena_offset, index_type);
-            this->vulkan_.cmd_draw_indexed(this->batch_command_buffer_, vertex_count, instance_count, indexed->first_index,
-                                           indexed->base_vertex_index, 0);
+            this->vulkan_.cmd_bind_index_buffer(batch_cmd, index_buffer_vk, ib_arena_offset, index_type);
+            this->vulkan_.cmd_draw_indexed(batch_cmd, vertex_count, instance_count, indexed->first_index, indexed->base_vertex_index, 0);
         }
         else
         {
             // Real D3D9 hardware instancing requires an indexed draw (see the comment above), so
             // instance_count is 1 here in every valid usage; passed through anyway for uniformity rather
             // than special-casing the non-indexed path back to a literal 1.
-            this->vulkan_.cmd_draw(this->batch_command_buffer_, vertex_count, instance_count, first_vertex, 0);
+            this->vulkan_.cmd_draw(batch_cmd, vertex_count, instance_count, first_vertex, 0);
         }
 
-        this->vulkan_.cmd_end_rendering(this->batch_command_buffer_);
+        this->vulkan_.cmd_end_rendering(batch_cmd);
 
         // Counted here, past every early return, so these are draws that genuinely reached the GPU.
         ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
@@ -2559,27 +2616,29 @@ namespace sogen
             {
                 continue; // gap slot -- no real image to transition
             }
-            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, brt.entry->vk_image_id,
-                                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+            this->vulkan_.cmd_pipeline_barrier(batch_cmd, brt.entry->vk_image_id, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                               VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
         }
         // Restore every sampled render target to the TRANSFER_SRC_OPTIMAL resting layout the rest of this
         // host (readback, clear, blt, the next draw's own barriers) relies on.
         for (resource_entry* srt : sampled_render_targets)
         {
-            this->vulkan_.cmd_pipeline_barrier(this->batch_command_buffer_, srt->vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            this->vulkan_.cmd_pipeline_barrier(batch_cmd, srt->vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
         }
 
         // The batch is NOT submitted here -- it stays open, accumulating subsequent same-render-target
-        // color draws, and is submitted by flush_batch at the next boundary (readback, clear, blt,
-        // color_fill, resource teardown, render-target change, or an arena/descriptor-pool overflow).
-        // Nothing to free here: vertex/index/constant buffers are all sub-allocated slices of the single
-        // per-frame arena (vertex_index_uniform_arena_), reset to offset 0 when a batch opens, and
-        // samplers are content-cached in sampler_cache_ (an immutable VkSampler reused by any later draw
-        // with the same state), both retained for the device's lifetime.
+        // color draws, and is submitted at the next boundary: flush_batch (readback, clear, blt,
+        // color_fill, resource teardown, render-target/depth-stencil change) or, for the descriptor-pool/
+        // arena-overflow triggers in the batch-management step above, submit_batch_async, which does not
+        // wait -- see batch_slot_count's header comment.
+        // Nothing to free here: vertex/index/constant buffers are all sub-allocated slices of this batch
+        // slot's own arena (vertex_index_uniform_arena_[batch_slot_]), reset to offset 0 when a batch opens
+        // on that slot, and samplers are content-cached in sampler_cache_ (an immutable VkSampler reused by
+        // any later draw with the same state), both retained for the device's lifetime.
 
         // Mark each bound render target's backing store stale; sync_backing_from_gpu reads it back
         // lazily on the next pfnLock/Present that actually needs the pixels (flushing the batch first).

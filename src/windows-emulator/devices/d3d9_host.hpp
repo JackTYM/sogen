@@ -495,11 +495,53 @@ namespace sogen
         uint64_t fence_{};
         bool draw_infra_ready_{false};
 
-        // A separate, dedicated command buffer/fence for the batched-draw recording, so it never
-        // collides with the shared command_buffer_/fence_ that the prep helpers, color_fill, and blt
-        // submit+wait on synchronously above.
-        uint64_t batch_command_buffer_{};
-        uint64_t batch_fence_{};
+        // batch_command_buffer_/batch_fence_/frame_descriptor_pool_ (below) and vertex_index_uniform_arena_
+        // (further below) are each double-buffered, batch_slot_count-wide, rather than a single reused
+        // object. The old single-object design forced flush_batch() to submit AND block on
+        // vkWaitForFences before the next batch could safely reopen -- CPU-writing new vertex/index/UBO
+        // bytes into vertex_index_uniform_arena_.memory, or vkBeginCommandBuffer-ing
+        // batch_command_buffer_ again, while the GPU might still be reading the PREVIOUS batch's use of
+        // that exact same buffer/command-buffer/descriptor-pool is a real WAW/use-after-free hazard, not
+        // just a validation nicety -- so the wait could never be skipped. With batch_slot_count copies,
+        // reopening a batch can round-robin to the OTHER slot and defer that wait until this slot is
+        // about to be reused again (wait_for_batch_slot, called from execute_draw's batch-management
+        // step) -- by then the GPU has typically already finished it, so the wait is usually free. Live
+        // profiling (2026-08-22 session) found the batch's descriptor-pool-exhaustion reopen (every
+        // frame_desc_initial_draws draws into the same render target -- the common case for a single
+        // scene render) as the dominant real-world trigger of this reopen path; render-target/depth-
+        // stencil changes are already flushed synchronously and unconditionally by the
+        // d3d9_set_render_target/d3d9_set_depth_stencil DDI handlers before execute_draw ever sees a
+        // mismatch, so that guard in execute_draw is normally dead code (kept as defensive belt-and-
+        // suspenders, same as before).
+        //
+        // Every OTHER caller of flush_batch() (destroy_resource, tex_blt, sync_backing_from_gpu,
+        // color_fill, blt, the DDI clear/render-target/depth-stencil handlers, ...) needs the batch's GPU
+        // work OBSERVABLY FINISHED before it proceeds -- it reads back pixels, destroys the Vulkan objects
+        // the batch referenced, or must be ordered relative to a batch that might still be sitting
+        // unsubmitted. flush_batch() stays a full barrier for them: it still submits whatever is
+        // currently open, then waits on EVERY slot with a pending (submitted-but-unwaited) fence, not just
+        // the current one -- because by the time flush_batch() runs, an EARLIER draw's batch-management
+        // step may have already async-submitted a DIFFERENT slot's batch without waiting for it (that is
+        // the whole point of the round-robin). Only execute_draw's own internal reopen decision is allowed
+        // to defer a wait; every external call site keeps its original "GPU is fully idle after this call"
+        // contract.
+        static constexpr uint32_t batch_slot_count = 2;
+
+        // A separate, dedicated command buffer/fence pair per slot for the batched-draw recording, so
+        // neither collides with the shared command_buffer_/fence_ that the prep helpers, color_fill, and
+        // blt submit+wait on synchronously above.
+        std::array<uint64_t, batch_slot_count> batch_command_buffer_{};
+        std::array<uint64_t, batch_slot_count> batch_fence_{};
+        // Set by submit_batch_async() right after it submits slot i's batch (before any wait), cleared by
+        // wait_for_batch_slot(i) right after that wait completes. A slot with this false has no
+        // outstanding GPU work referencing its command buffer/descriptor pool/arena -- either it was never
+        // used, or a prior wait already drained it -- so it's immediately safe to reset/rewrite.
+        std::array<bool, batch_slot_count> batch_slot_pending_{};
+        // Which slot the CURRENTLY open batch (if any) is recording into; also the last slot used when no
+        // batch is open. Advanced (round-robin) only by execute_draw's batch-management step, and only for
+        // the reopen reasons that don't themselves require this exact slot back immediately (see that
+        // function's own comment).
+        uint32_t batch_slot_{0};
         bool batch_open_{false};
         // Render target (slot-0 handle) the currently-open batch records into; 0 = none. A draw whose
         // slot-0 render target differs flushes the batch first (execute_draw), so a batch never mixes
@@ -733,24 +775,28 @@ namespace sogen
 
         std::map<sampler_cache_key, uint64_t> sampler_cache_{};
 
-        // Single per-device-lifetime GPU buffer backing every vertex/index/uniform range a draw needs.
-        // Each range is a distinct 256-byte-aligned slice handed out by arena_suballoc; the buffer is
-        // created lazily and grown grow-only across draws. execute_draw resets its offset to 0 at the
-        // start of every draw -- reuse is safe because execute_draw submits and blocks on a fence before
-        // returning, so a prior draw's GPU read of the arena has completed before a later draw rewrites
-        // it. Combined VERTEX|INDEX|UNIFORM usage so one buffer serves all three binding points.
-        frame_arena vertex_index_uniform_arena_{};
+        // One GPU buffer per batch slot (see batch_slot_count's comment above), each backing every
+        // vertex/index/uniform range a draw in THAT slot's batch needs. Each range is a distinct
+        // 256-byte-aligned slice handed out by arena_suballoc; a slot's buffer is created lazily and grown
+        // grow-only across draws, independently of the other slot's. execute_draw resets a slot's offset
+        // to 0 only when (re)opening a batch on it, after wait_for_batch_slot has proven that slot's prior
+        // GPU work is done -- so a later draw rewriting it can never race a still-in-flight read of the
+        // same bytes by an earlier batch on the same slot. Combined VERTEX|INDEX|UNIFORM usage so one
+        // buffer serves all three binding points.
+        std::array<frame_arena, batch_slot_count> vertex_index_uniform_arena_{};
 
-        // Shared descriptor pool that every programmable draw allocates its per-draw VS/PS descriptor-set
-        // pair from, replacing the old per-pipeline pool that pre-allocated exactly two reused sets. Sized
-        // for frame_desc_capacity_draws_ draws (2 sets each), created lazily and grown grow-only. Like the
-        // arena, execute_draw resets it (reset_descriptor_pool) at the start of every draw -- safe because
-        // every draw submits and blocks on a fence before returning, so a prior draw's GPU read of a set
-        // has completed before reset frees it. Per-draw descriptor-type counts (6 UBOs + max_vs_sampler_stages
-        // + max_ps_sampler_stages combined-image-samplers) are scaled by the capacity; see
+        // One shared descriptor pool per batch slot that every programmable draw in that slot's batch
+        // allocates its per-draw VS/PS descriptor-set pair from, replacing the old per-pipeline pool that
+        // pre-allocated exactly two reused sets. Sized for frame_desc_capacity_draws_[slot] draws (2 sets
+        // each), created lazily per slot and grown grow-only. Like the arena, execute_draw resets a slot's
+        // pool (reset_descriptor_pool) only when (re)opening a batch on it, after wait_for_batch_slot has
+        // proven that slot's prior GPU work is done -- so a reset can never free a set an in-flight draw on
+        // the SAME slot is still reading. Per-draw descriptor-type counts (6 UBOs + max_vs_sampler_stages +
+        // max_ps_sampler_stages combined-image-samplers) are scaled by the capacity; see
         // ensure_frame_descriptor_pool.
-        uint64_t frame_descriptor_pool_{};
-        uint32_t frame_desc_capacity_draws_{}; // how many draws' worth of sets the pool is currently sized for
+        std::array<uint64_t, batch_slot_count> frame_descriptor_pool_{};
+        // How many draws' worth of sets each slot's pool is currently sized for.
+        std::array<uint32_t, batch_slot_count> frame_desc_capacity_draws_{};
         // Initial per-frame descriptor-pool capacity, in draws. One draw needs only 2 sets, so 256 is
         // ample headroom -- the growth path in ensure_frame_descriptor_pool exists for correctness, not
         // because a single draw is expected to exceed it.
@@ -759,10 +805,11 @@ namespace sogen
         // Reused scratch buffers for the six per-draw constant-register UBOs execute_draw stages into the
         // arena (vs/ps float, vs/ps int, vs/ps bool). Each has a fixed, draw-independent size (the D3D9
         // constant-register caps), so a fresh std::vector per draw bought nothing but allocator churn --
-        // these are resized once (on first use) and then just overwritten in place every draw. Safe for the
-        // same reason the arena and descriptor pool are: execute_draw submits and blocks on a fence before
-        // returning, so a prior draw's GPU read of the staged bytes (copied into arena.memory well before
-        // that fence) has completed before the next draw overwrites this buffer.
+        // these are resized once (on first use) and then just overwritten in place every draw. Plain CPU
+        // scratch memory, never touched by the GPU directly: each execute_draw call fills it, then
+        // synchronously upload_memory()s it into that call's arena slot before returning, so there is
+        // nothing here for a later draw to race -- unlike the arena/descriptor pool below, this one is not
+        // slot-indexed.
         std::array<std::vector<std::byte>, 6> ubo_staging_{};
 
         uint64_t allocate_id();
@@ -778,19 +825,37 @@ namespace sogen
         // recorded-but-unsubmitted command references it, so callers must flush any open batch first.
         // Returns false only on a Vulkan allocation failure.
         bool grow_arena(frame_arena& arena, size_t new_capacity);
-        // Ensures frame_descriptor_pool_ exists and is sized for at least needed_draws draws' worth of
-        // descriptor sets (2 per draw). Creates it lazily at frame_desc_initial_draws capacity, or doubles
-        // and recreates it (dropping the old pool -- every prior draw already fenced) when needed_draws
-        // exceeds the current capacity. Returns false only on a Vulkan allocation failure.
-        bool ensure_frame_descriptor_pool(uint64_t device, uint32_t needed_draws);
+        // Ensures frame_descriptor_pool_[slot] exists and is sized for at least needed_draws draws' worth
+        // of descriptor sets (2 per draw). Creates it lazily at frame_desc_initial_draws capacity, or
+        // doubles and recreates it (dropping the old pool) when needed_draws exceeds the current capacity.
+        // Only called (with needed_draws == 1) on the batch slot execute_draw has already settled on for
+        // THIS draw, past the point a reopen would have waited for that slot's own pending fence -- so
+        // dropping the old pool here is safe on the same grounds as the reopen path's own reset. Returns
+        // false only on a Vulkan allocation failure.
+        bool ensure_frame_descriptor_pool(uint64_t device, uint32_t slot, uint32_t needed_draws);
         // Lazily creates a bare Vulkan instance/device on vulkan_ (first render-target-kind resource).
         // Returns 0 on failure.
         uint64_t ensure_vk_device();
         bool ensure_draw_infra();
-        // Ends, submits and waits on the open batch command buffer, closing the batch (batch_open_ =
-        // false). A no-op when no batch is open. Called at every boundary that must observe the batch's
-        // GPU work before proceeding (readback, clear, color_fill, blt, resource teardown, render-target
-        // change) and at each batching scope boundary inside execute_draw.
+        // Ends and submits the currently open batch's command buffer (batch_open_ = false), WITHOUT
+        // waiting for it -- marks batch_slot_pending_[batch_slot_] so a later reuse of this exact slot
+        // knows to wait first (see wait_for_batch_slot). A no-op when no batch is open. The only caller
+        // that may skip the immediate wait a real flush needs is execute_draw's own batch-management step,
+        // which deliberately defers it to get CPU/GPU overlap across the round-robin slots (see
+        // batch_slot_count's comment) -- every other caller must use flush_batch() below instead.
+        void submit_batch_async();
+        // Blocks until batch slot `slot`'s most recently submitted batch (if any) has completed, then
+        // clears batch_slot_pending_[slot]. A no-op when that slot has no outstanding submission -- either
+        // it was never used, or an earlier wait already drained it.
+        void wait_for_batch_slot(uint32_t slot);
+        // Full barrier: submits whatever batch is currently open (submit_batch_async), then waits on EVERY
+        // slot that still has a pending (submitted-but-unwaited) fence, not just the current one -- an
+        // earlier draw's batch-management step may have async-submitted a DIFFERENT slot without waiting
+        // for it, so "current slot only" would not actually guarantee this host's GPU work is done. Called
+        // at every boundary that must observe ALL of this host's outstanding GPU work before proceeding
+        // (readback, clear, color_fill, blt, resource teardown, render-target/depth-stencil change) --
+        // every one of those needs this full-barrier contract, unlike execute_draw's own internal reopen
+        // decision (see submit_batch_async).
         void flush_batch();
         // depth_format is a VkFormat (0 = no depth attachment), matching create_graphics_pipeline's own
         // dynamic-rendering depth_format parameter. color_formats holds one VkFormat per currently-bound
