@@ -5,6 +5,7 @@
 #include "process_context.hpp"
 #include "io_completion_wait.hpp"
 #include "syscall_utils.hpp"
+#include "windows_emulator.hpp"
 
 namespace sogen
 {
@@ -919,6 +920,15 @@ namespace sogen
             }
 
             auto msg = *it;
+
+            if ((msg.message == WM_KEYDOWN || msg.message == WM_KEYUP || msg.message == WM_SYSKEYDOWN || msg.message == WM_SYSKEYUP) &&
+                std::getenv("EMULATOR_INPUT_DIAG"))
+            {
+                win_emu.log.warn("[input-diag] thread_id=%u %s message=0x%x window=0x%llx wparam=0x%llx\n", this->id,
+                                 remove ? "dequeued" : "peeked", msg.message, static_cast<unsigned long long>(msg.window),
+                                 static_cast<unsigned long long>(msg.wParam));
+            }
+
             if (remove)
             {
                 const auto removed_bits = get_message_queue_status_bits(msg);

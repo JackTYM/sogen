@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -1989,6 +1990,17 @@ namespace
 
     HRESULT APIENTRY umd_Present(HANDLE /*hDevice*/, CONST D3DDDIARG_PRESENT* pArgs)
     {
+        // EMULATOR_D3D9_PRESENTTRACE settles whether the guest engine calls this DDI at all, as
+        // opposed to calling it but failing somewhere downstream (host_bridge/gpu_bridge/decoder).
+        // Uses stdout, not log_line/OutputDebugStringA -- confirmed live (both x86 and x64 guests)
+        // that the DBWIN_BUFFER debug-string path never reaches the host's console_reporter, while
+        // guest stdout does (every process gets StandardOutput wired to STDOUT_HANDLE regardless of
+        // subsystem, see process_context.cpp).
+        if (getenv("EMULATOR_D3D9_PRESENTTRACE"))
+        {
+            fputs("[sogen-d3d9-umd] Present reached\n", stdout);
+            fflush(stdout);
+        }
         if (pArgs == nullptr)
         {
             return S_OK;

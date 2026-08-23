@@ -619,7 +619,9 @@ namespace sogen
 
                 // The WASAPI shared-buffer control header audioses validates during Initialize. Captured from a
                 // live audio service (tools/alpc_capture.py) for a 1-second buffer; the buffer-size fields (+0x04,
-                // +0x16C, +0x170) and the buffer duration (+0x14C) are patched below to match this stream.
+                // +0x16C, +0x170) and the buffer duration (+0x14C) are patched below to match this stream. +0x04
+                // and +0x170 hold the full section extent (control header + sample area); +0x16C holds the
+                // sample-area size alone -- see the patch32(0x16C, ...) call below for why the two must differ.
                 //
                 // CCrossProcessBaseClientEndpoint::Initialize (audioses.dll, this build) validates this header
                 // field-by-field against the mapped section base; re-disassembled this round rather than trusted
@@ -673,7 +675,21 @@ namespace sogen
                     std::memcpy(&render_control_header[offset], &value, sizeof(value));
                 };
                 patch32(0x04, buffer_extent);
-                patch32(0x16C, buffer_extent);
+                // +0x16C is NOT another copy of buffer_extent. CCrossProcessBaseClientEndpoint::Initialize
+                // (0x100385C0, this build) copies header[0xC8..] into a scratch buffer and later offsets are
+                // read relative to that copy; CCrossProcessBaseClientEndpoint::GetBufferSize (0x1003DC20) reads
+                // that copy at +160/+164 -- i.e. header[0x168]/[0x16C] -- as `(header[0x16C] - header[0x168]) /
+                // block_align` and returns that as the client's IAudioClient::GetBufferSize() frame count
+                // (confirmed via CAudioClient::GetBufferSize at 0x1003D9C0 calling straight through to it). With
+                // +0x16C set to buffer_extent (control header + sample area), the client believes it has
+                // k_render_data_offset bytes (1024) more room than the sample area actually holds, and
+                // CAudioRenderClient::GetBuffer (0x10033FC0) admits writes against that inflated count --
+                // eventually overrunning the mapped section entirely once the client (Miles, via
+                // CreateStream->GetAudioSession->GetSessionState->StartStream->StopStream) starts writing PCM on
+                // its own worker thread. +0x16C must be the sample-area size alone; +0x170 (the "upper bound" the
+                // same Initialize validates via header[0x168] < header[0x16C] <= header[0x170]) legitimately
+                // stays at buffer_extent.
+                patch32(0x16C, buffer_bytes);
                 patch32(0x170, buffer_extent);
                 std::memcpy(&render_control_header[0x14C], &duration_hns, sizeof(duration_hns));
 

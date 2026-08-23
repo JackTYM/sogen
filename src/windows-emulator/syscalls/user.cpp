@@ -3938,6 +3938,14 @@ namespace sogen
                 return 0;
             }
 
+            if ((m.message == WM_KEYDOWN || m.message == WM_KEYUP || m.message == WM_SYSKEYDOWN || m.message == WM_SYSKEYUP) &&
+                std::getenv("EMULATOR_INPUT_DIAG"))
+            {
+                c.win_emu.log.warn("[input-diag] thread_id=%u dispatched message=0x%x window=0x%llx wparam=0x%llx to WndProc\n",
+                                   c.vcpu.active_thread->id, m.message, static_cast<unsigned long long>(m.window),
+                                   static_cast<unsigned long long>(m.wParam));
+            }
+
             message_call_state state{};
             state.window = m.window;
             state.message = m.message;

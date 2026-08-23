@@ -323,6 +323,11 @@ namespace sogen
                 env_map[u"EMULATOR_ICICLE"] = u"1";
             }
 
+            if (getenv("EMULATOR_D3D9_PRESENTTRACE"))
+            {
+                env_map[u"EMULATOR_D3D9_PRESENTTRACE"] = u"1";
+            }
+
             const auto system_root = version.get_system_root().u16string();
 
             std::u16string system_drive = u"C:";
