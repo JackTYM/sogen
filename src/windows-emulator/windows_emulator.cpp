@@ -645,47 +645,71 @@ namespace sogen
         {
             perform_context_switch_work(win_emu, vcpu);
 
-            auto& context = win_emu.process;
+            auto& threads = win_emu.process.threads;
 
             static const bool wait_storm_diag_enabled = wait_storm_diag::enabled();
             if (wait_storm_diag_enabled)
             {
-                wait_storm_diag::note_switch_to_next_thread(context.threads.size());
+                wait_storm_diag::note_switch_to_next_thread(threads.size());
             }
 
-            bool next_thread = false;
+            const auto begin = threads.begin();
+            const auto end = threads.end();
 
-            for (auto& t : context.threads | std::views::values)
+            auto active_it = end;
+            for (auto it = begin; it != end; ++it)
             {
                 if (wait_storm_diag_enabled)
                 {
                     wait_storm_diag::note_switch_scan_iteration();
                 }
 
-                if (next_thread)
+                if (&it->second == vcpu.active_thread)
                 {
-                    if (switch_to_thread(win_emu, vcpu, t))
+                    active_it = it;
+                    break;
+                }
+            }
+
+            if (active_it == end)
+            {
+                for (auto it = begin; it != end; ++it)
+                {
+                    if (wait_storm_diag_enabled)
+                    {
+                        wait_storm_diag::note_switch_scan_iteration();
+                    }
+
+                    if (switch_to_thread(win_emu, vcpu, it->second))
                     {
                         return true;
                     }
-
-                    continue;
                 }
 
-                if (&t == vcpu.active_thread)
-                {
-                    next_thread = true;
-                }
+                return false;
             }
 
-            for (auto& t : context.threads | std::views::values)
+            for (auto it = std::next(active_it); it != end; ++it)
             {
                 if (wait_storm_diag_enabled)
                 {
                     wait_storm_diag::note_switch_scan_iteration();
                 }
 
-                if (switch_to_thread(win_emu, vcpu, t))
+                if (switch_to_thread(win_emu, vcpu, it->second))
+                {
+                    return true;
+                }
+            }
+
+            for (auto it = begin; it != std::next(active_it); ++it)
+            {
+                if (wait_storm_diag_enabled)
+                {
+                    wait_storm_diag::note_switch_scan_iteration();
+                }
+
+                if (switch_to_thread(win_emu, vcpu, it->second))
                 {
                     return true;
                 }
