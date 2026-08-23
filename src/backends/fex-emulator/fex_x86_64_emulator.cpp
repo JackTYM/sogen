@@ -672,7 +672,8 @@ namespace sogen::fex
 
         struct tables_write_lock
         {
-            explicit tables_write_lock(std::shared_mutex& mutex) : lock_(mutex)
+            explicit tables_write_lock(std::shared_mutex& mutex)
+                : lock_(mutex)
             {
                 t_tables_write_locked = true;
             }
@@ -2710,31 +2711,126 @@ namespace sogen::fex
             return true;
         }
 
+        // Computes a host page's effective declared permission the same way sync_host_page_apple
+        // does, without performing any host call - shared by both branches below so a run of
+        // consecutive pages that happen to compute the same result can be merged into one host
+        // call instead of paying one per 16KB page.
+        memory_permission compute_effective_shadow_permission_apple(uint64_t host_page_addr, bool& any_slot_present)
+        {
+            memory_permission effective = memory_permission::none;
+            any_slot_present = false;
+            for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
+            {
+                const auto it = this->page_shadow_apple_.find(page);
+                if (it != this->page_shadow_apple_.end())
+                {
+                    any_slot_present = true;
+                    effective = effective | it->second;
+                }
+            }
+            return effective;
+        }
+
         void set_temporary_write_access(uint64_t address, size_t size, bool enable)
         {
 #ifdef __APPLE__
             const uint64_t start = host_page_align_down_apple(address);
             const uint64_t end = host_page_align_up_apple(address + size);
-            for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
+
+            if (!enable)
             {
-                if (!enable)
+                // Unlike sync_host_pages_covering_apple's own fast path, this call site has no
+                // preceding set_shadow_range_apple with a single uniform permission - the range
+                // can genuinely straddle pages with different declared permissions (that's the
+                // whole reason a temporary write bump was needed here in the first place), so
+                // every page's effective permission must still be independently computed. Only
+                // pages that happen to compute the same result, are already mapped, and share
+                // the same wow64 rebase get merged into one mprotect/g_hvf->map call; anything
+                // else (no shadow slot present, or not currently mapped - both effectively never
+                // hit here in practice, since this always follows a write that just succeeded
+                // into these exact pages, but must stay correct if they ever do) falls back to
+                // sync_host_page_apple's full per-page handling unchanged.
+                uint64_t cursor = start;
+                while (cursor < end)
                 {
-                    this->sync_host_page_apple(host_page);
-                    continue;
+                    bool any_slot_present = false;
+                    const memory_permission effective = this->compute_effective_shadow_permission_apple(cursor, any_slot_present);
+                    const bool currently_mapped = this->mapped_host_pages_apple_.contains(cursor);
+
+                    if (!any_slot_present || !currently_mapped)
+                    {
+                        this->sync_host_page_apple(cursor);
+                        cursor += host_page_size_apple;
+                        continue;
+                    }
+
+                    const auto rebase = rebase_for(this->is_wow64_process_, cursor);
+
+                    uint64_t run_end = cursor + host_page_size_apple;
+                    while (run_end < end)
+                    {
+                        bool next_any_slot_present = false;
+                        const memory_permission next_effective =
+                            this->compute_effective_shadow_permission_apple(run_end, next_any_slot_present);
+
+                        if (!next_any_slot_present || next_effective != effective ||
+                            this->mapped_host_pages_apple_.contains(run_end) != currently_mapped ||
+                            rebase_for(this->is_wow64_process_, run_end) != rebase)
+                        {
+                            break;
+                        }
+
+                        run_end += host_page_size_apple;
+                    }
+
+                    const size_t run_size = run_end - cursor;
+                    void* const host_ptr = reinterpret_cast<void*>(cursor + rebase);
+                    const int hvf_prot = to_prot_apple(effective);
+
+                    if (::mprotect(host_ptr, run_size, to_host_prot_hvf(hvf_prot)) != 0)
+                    {
+                        throw std::runtime_error("FEX backend failed to change memory protection");
+                    }
+                    if (g_hvf != nullptr)
+                    {
+                        g_hvf->map(cursor + rebase, run_size, hvf_prot);
+                    }
+
+                    cursor = run_end;
+                }
+                return;
+            }
+
+            // The write-access bump itself: unconditionally makes every touched page writable
+            // regardless of shadow presence (a page with no declared permission yet, e.g. one
+            // caught only by alignment rounding, still needs to become writable for the memmove
+            // about to happen through it), so no currently_mapped/any_slot_present branching is
+            // needed here - only merging runs of pages that compute the same effective permission.
+            uint64_t cursor = start;
+            while (cursor < end)
+            {
+                bool unused_any_slot_present = false;
+                const memory_permission effective = this->compute_effective_shadow_permission_apple(cursor, unused_any_slot_present);
+
+                const auto rebase = rebase_for(this->is_wow64_process_, cursor);
+
+                uint64_t run_end = cursor + host_page_size_apple;
+                while (run_end < end)
+                {
+                    bool next_unused_any_slot_present = false;
+                    const memory_permission next_effective =
+                        this->compute_effective_shadow_permission_apple(run_end, next_unused_any_slot_present);
+
+                    if (next_effective != effective || rebase_for(this->is_wow64_process_, run_end) != rebase)
+                    {
+                        break;
+                    }
+
+                    run_end += host_page_size_apple;
                 }
 
-                memory_permission effective = memory_permission::none;
-                for (uint64_t page = host_page; page < host_page + host_page_size_apple; page += page_size)
-                {
-                    const auto it = this->page_shadow_apple_.find(page);
-                    if (it != this->page_shadow_apple_.end())
-                    {
-                        effective = effective | it->second;
-                    }
-                }
-                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
-                ::mprotect(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple,
-                           to_prot_apple(effective | memory_permission::write));
+                ::mprotect(reinterpret_cast<void*>(cursor + rebase), run_end - cursor, to_prot_apple(effective | memory_permission::write));
+                cursor = run_end;
             }
 #else
             const uint64_t end = address + size;
@@ -4573,21 +4669,19 @@ namespace sogen::fex
         const bool active_is_32 = (active == this->thread32_);
         const auto& state = active->CurrentFrame->State;
 
-        fprintf(stderr,
-                "[FEX_AVDIAG] site=%s vcpu=%zu fault=0x%llx rip=0x%llx active_is_32=%d active=%p"
-                " eax=0x%llx ecx=0x%llx edx=0x%llx ebx=0x%llx esp=0x%llx ebp=0x%llx esi=0x%llx edi=0x%llx"
-                " fs_base=0x%llx pad1=0x%llx callret_sp=0x%llx gdt=%p\n",
-                site, this->index(), static_cast<unsigned long long>(fault_addr), static_cast<unsigned long long>(recon_rip),
-                active_is_32, static_cast<void*>(active), static_cast<unsigned long long>(state.gregs[detail::greg_rax]),
-                static_cast<unsigned long long>(state.gregs[detail::greg_rcx]),
-                static_cast<unsigned long long>(state.gregs[detail::greg_rdx]),
-                static_cast<unsigned long long>(state.gregs[detail::greg_rbx]),
-                static_cast<unsigned long long>(state.gregs[detail::greg_rsp]),
-                static_cast<unsigned long long>(state.gregs[detail::greg_rbp]),
-                static_cast<unsigned long long>(state.gregs[detail::greg_rsi]),
-                static_cast<unsigned long long>(state.gregs[detail::greg_rdi]), static_cast<unsigned long long>(state.fs_cached),
-                static_cast<unsigned long long>(state._pad1), static_cast<unsigned long long>(state.callret_sp),
-                static_cast<void*>(state.segment_arrays[0]));
+        fprintf(
+            stderr,
+            "[FEX_AVDIAG] site=%s vcpu=%zu fault=0x%llx rip=0x%llx active_is_32=%d active=%p"
+            " eax=0x%llx ecx=0x%llx edx=0x%llx ebx=0x%llx esp=0x%llx ebp=0x%llx esi=0x%llx edi=0x%llx"
+            " fs_base=0x%llx pad1=0x%llx callret_sp=0x%llx gdt=%p\n",
+            site, this->index(), static_cast<unsigned long long>(fault_addr), static_cast<unsigned long long>(recon_rip), active_is_32,
+            static_cast<void*>(active), static_cast<unsigned long long>(state.gregs[detail::greg_rax]),
+            static_cast<unsigned long long>(state.gregs[detail::greg_rcx]), static_cast<unsigned long long>(state.gregs[detail::greg_rdx]),
+            static_cast<unsigned long long>(state.gregs[detail::greg_rbx]), static_cast<unsigned long long>(state.gregs[detail::greg_rsp]),
+            static_cast<unsigned long long>(state.gregs[detail::greg_rbp]), static_cast<unsigned long long>(state.gregs[detail::greg_rsi]),
+            static_cast<unsigned long long>(state.gregs[detail::greg_rdi]), static_cast<unsigned long long>(state.fs_cached),
+            static_cast<unsigned long long>(state._pad1), static_cast<unsigned long long>(state.callret_sp),
+            static_cast<void*>(state.segment_arrays[0]));
 
         for (const auto& other : this->emulator_.vcpus_)
         {
