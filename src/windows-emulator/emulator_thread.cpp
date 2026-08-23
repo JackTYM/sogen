@@ -5,6 +5,7 @@
 #include "process_context.hpp"
 #include "io_completion_wait.hpp"
 #include "syscall_utils.hpp"
+#include "wait_storm_diag.hpp"
 
 namespace sogen
 {
@@ -708,6 +709,8 @@ namespace sogen
 
     void emulator_thread::mark_as_ready(const NTSTATUS status)
     {
+        wait_storm_diag::record_wait_resolved(this->id);
+
         this->pending_status = status;
         this->await_time = {};
         this->await_objects = {};

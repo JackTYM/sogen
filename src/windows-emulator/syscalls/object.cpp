@@ -2,6 +2,7 @@
 #include "../emulator_utils.hpp"
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
+#include "../wait_storm_diag.hpp"
 
 #include <utils/string.hpp>
 
@@ -765,6 +766,7 @@ namespace sogen
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
             }
 
+            wait_storm_diag::record_wait_enter(t.id, wait_storm_diag::wait_kind::multi_object);
             c.win_emu.yield_thread(c.vcpu, alertable);
             return STATUS_SUCCESS;
         }
@@ -788,6 +790,7 @@ namespace sogen
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
             }
 
+            wait_storm_diag::record_wait_enter(t.id, wait_storm_diag::wait_kind::single_object);
             c.win_emu.yield_thread(c.vcpu, alertable);
             return STATUS_SUCCESS;
         }

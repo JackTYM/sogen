@@ -2,6 +2,7 @@
 #include "../cpu_context.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../wait_storm_diag.hpp"
 
 #include <algorithm>
 #include <utils/finally.hpp>
@@ -650,6 +651,7 @@ namespace sogen
             {
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), delay_interval.read());
             }
+            wait_storm_diag::record_wait_enter(t.id, wait_storm_diag::wait_kind::delay);
             c.win_emu.yield_thread(c.vcpu, alertable);
 
             return STATUS_SUCCESS;
@@ -690,10 +692,13 @@ namespace sogen
         {
             auto& t = c.thread();
 
+            wait_storm_diag::record_wait_enter(t.id, wait_storm_diag::wait_kind::alert);
+
             if (t.alerted)
             {
                 // A pending alert was delivered before we started waiting; consume it without blocking.
                 t.alerted = false;
+                wait_storm_diag::record_wait_resolved(t.id);
                 return STATUS_ALERTED;
             }
 

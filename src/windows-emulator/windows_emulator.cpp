@@ -18,6 +18,7 @@
 #include "network/static_socket_factory.hpp"
 #include "memory_permission_ext.hpp"
 #include "devices/gpu_bridge.hpp"
+#include "wait_storm_diag.hpp"
 
 #include <platform/unicode.hpp>
 
@@ -646,10 +647,21 @@ namespace sogen
 
             auto& context = win_emu.process;
 
+            static const bool wait_storm_diag_enabled = wait_storm_diag::enabled();
+            if (wait_storm_diag_enabled)
+            {
+                wait_storm_diag::note_switch_to_next_thread(context.threads.size());
+            }
+
             bool next_thread = false;
 
             for (auto& t : context.threads | std::views::values)
             {
+                if (wait_storm_diag_enabled)
+                {
+                    wait_storm_diag::note_switch_scan_iteration();
+                }
+
                 if (next_thread)
                 {
                     if (switch_to_thread(win_emu, vcpu, t))
@@ -668,6 +680,11 @@ namespace sogen
 
             for (auto& t : context.threads | std::views::values)
             {
+                if (wait_storm_diag_enabled)
+                {
+                    wait_storm_diag::note_switch_scan_iteration();
+                }
+
                 if (switch_to_thread(win_emu, vcpu, t))
                 {
                     return true;
