@@ -1973,20 +1973,24 @@ namespace sogen
         const uint64_t target_rt = this->state_.render_targets[0];
         const uint64_t target_ds = ds_entry != nullptr ? this->state_.depth_stencil : 0;
         bool rotate_batch_slot = false;
+        static const bool trig_diag = getenv("EMULATOR_D3D9_TRIGDIAG") != nullptr;
         if (this->batch_open_ && (target_rt != this->batch_rt_ || target_ds != this->batch_ds_))
         {
+            if (trig_diag) fprintf(stderr, "[d3d9-trigdiag] rt_ds_mismatch\n");
             this->submit_batch_async();
             rotate_batch_slot = true;
         }
         if (this->batch_open_ && use_programmable && this->frame_desc_capacity_draws_[this->batch_slot_] != 0 &&
             this->batch_draw_count_ + 1 > this->frame_desc_capacity_draws_[this->batch_slot_])
         {
+            if (trig_diag) fprintf(stderr, "[d3d9-trigdiag] desc_pool_exhaustion\n");
             this->submit_batch_async();
             rotate_batch_slot = true;
         }
         if (this->batch_open_ && this->vertex_index_uniform_arena_[this->batch_slot_].offset + draw_arena_bytes >
                                      this->vertex_index_uniform_arena_[this->batch_slot_].capacity)
         {
+            if (trig_diag) fprintf(stderr, "[d3d9-trigdiag] arena_overflow\n");
             this->submit_batch_async();
             this->wait_for_batch_slot(this->batch_slot_);
             frame_arena& growing_arena = this->vertex_index_uniform_arena_[this->batch_slot_];
@@ -3268,6 +3272,7 @@ namespace sogen
 
         // Flush any open batch so its draws have executed (and left the render target in
         // TRANSFER_SRC_OPTIMAL) before the readback reads the image. Covers both pfnLock and Present.
+        if (getenv("EMULATOR_D3D9_TRIGDIAG")) fprintf(stderr, "[d3d9-trigdiag] EXT_sync_backing_from_gpu\n");
         this->flush_batch();
 
         std::vector<std::byte> pixels;
@@ -3286,6 +3291,7 @@ namespace sogen
         // Flush any open batch first: ColorFill overwrites the resource on the GPU, and any batched draw
         // targeting it must have executed before that overwrite (and the resource must rest in
         // TRANSFER_SRC_OPTIMAL, which the batch's closing barrier guarantees).
+        if (getenv("EMULATOR_D3D9_TRIGDIAG")) fprintf(stderr, "[d3d9-trigdiag] EXT_color_fill\n");
         this->flush_batch();
         const auto it = this->resources_.find(resource);
         if (it == this->resources_.end() || it->second.vk_image_id == 0)
@@ -3932,6 +3938,7 @@ namespace sogen
             // nothing to flush against in that case.
             if (this->state_.render_targets[req.render_target_index] != req.surface)
             {
+                if (getenv("EMULATOR_D3D9_TRIGDIAG")) fprintf(stderr, "[d3d9-trigdiag] EXT_set_render_target\n");
                 this->flush_batch();
                 this->state_.render_targets[req.render_target_index] = req.surface;
             }
@@ -3949,6 +3956,7 @@ namespace sogen
             // this is the same defensive belt-and-suspenders, and the same same-surface skip applies.
             if (this->state_.depth_stencil != req.surface)
             {
+                if (getenv("EMULATOR_D3D9_TRIGDIAG")) fprintf(stderr, "[d3d9-trigdiag] EXT_set_depth_stencil\n");
                 this->flush_batch();
                 this->state_.depth_stencil = req.surface;
             }
@@ -3990,6 +3998,7 @@ namespace sogen
             // Flush any open batch first: a Clear after batched draws must land after them on the GPU
             // (D3D9 command order), and submit_clear expects the render target resting in
             // TRANSFER_SRC_OPTIMAL, which the batch's closing barrier leaves it in.
+            if (getenv("EMULATOR_D3D9_TRIGDIAG")) fprintf(stderr, "[d3d9-trigdiag] EXT_clear\n");
             this->flush_batch();
 
             // Real GPU clear, marking every bound render target's backing store stale; sync_backing_from_gpu
