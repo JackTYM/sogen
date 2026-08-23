@@ -10,6 +10,8 @@ namespace sogen
     constexpr ULONG FSCTL_PIPE_DISCONNECT = 0x110004;
     // FSCTL_PIPE_LISTEN = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
     constexpr ULONG FSCTL_PIPE_LISTEN = 0x110008;
+    // FSCTL_PIPE_WAIT = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    constexpr ULONG FSCTL_PIPE_WAIT = 0x110000;
     constexpr ULONG FILE_PIPE_CONNECTED_STATE = 3;
 
     // Header of FILE_PIPE_PEEK_BUFFER; the peeked data follows immediately after.
@@ -141,6 +143,17 @@ namespace sogen
             {
                 // DisconnectNamedPipe is synchronous on real Windows -- it never waits for a peer, it just
                 // tears down whatever connection state exists (none, here) immediately.
+                return STATUS_SUCCESS;
+            }
+
+            if (c.io_control_code == FSCTL_PIPE_WAIT)
+            {
+                // Backs WaitNamedPipeW, issued against a handle to the NamedPipe filesystem's root
+                // (\Device\NamedPipe\), not a specific instance -- the input buffer names the pipe to wait
+                // for (FILE_PIPE_WAIT_FOR_BUFFER), which this device doesn't need to inspect: a client's
+                // own NtCreateFile connect (handle_named_pipe_create) already always succeeds regardless of
+                // whether a server is actually listening, so reporting an instance as available here too
+                // just keeps this answer consistent with that.
                 return STATUS_SUCCESS;
             }
 
