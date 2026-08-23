@@ -5,6 +5,7 @@
 
 #include <stop_reason.hpp>
 #include <utils/function.hpp>
+#include <utils/container.hpp>
 
 #include "syscall_dispatcher.hpp"
 #include "process_context.hpp"
@@ -283,6 +284,16 @@ namespace sogen
         // back the other way to this process's own named_pipe device instances.
         std::vector<std::unique_ptr<pipe_ipc_channel>> pipe_ipc_peers_{};
 
+        // Short names (see devices/named_pipe.hpp's pipe_short_name) of every named pipe server
+        // instance known to exist, whether created in this process (NtCreateNamedPipeFile) or
+        // learned about from a sibling OS process (pipe_ipc_message_type::server_created). Backs
+        // FSCTL_PIPE_WAIT (WaitNamedPipeW) -- see is_named_pipe_server_known.
+        std::set<std::u16string, utils::insensitive_u16string_less> known_named_pipe_servers_{};
+
+        // Events of threads currently parked in FSCTL_PIPE_WAIT (devices/named_pipe.hpp's wait()),
+        // keyed by the short pipe name they're waiting for. Woken by register_named_pipe_server.
+        std::multimap<std::u16string, handle, utils::insensitive_u16string_less> pending_pipe_waits_{};
+
       public:
         const std::filesystem::path emulation_root{};
         const fake_environment_config fake_env{};
@@ -354,11 +365,26 @@ namespace sogen
         // deliver_bytes_to_named_pipe/mark_named_pipe_connected in devices/named_pipe.hpp).
         void broadcast_named_pipe_write(std::u16string_view name, std::string_view data);
         void broadcast_named_pipe_connect(std::u16string_view name);
+        void broadcast_named_pipe_server_created(std::u16string_view name);
 
         // Applies whatever named-pipe traffic has arrived from registered peers since the last call.
         // Called once per scheduler tick (perform_context_switch_work), the same cadence as io_device's
         // own work() pump.
         void pump_pipe_ipc();
+
+        // Records short_name (see devices/named_pipe.hpp's pipe_short_name) as a known-existing named
+        // pipe server instance and wakes every thread currently parked in FSCTL_PIPE_WAIT for it (see
+        // devices/named_pipe.hpp's wait()). Called both for a local NtCreateNamedPipeFile and for a
+        // server_created notification forwarded from a sibling OS process.
+        void register_named_pipe_server(std::u16string_view short_name);
+
+        // True once a named pipe server instance with this short name is known to exist, whether
+        // created in this process or a sibling one (see register_named_pipe_server).
+        bool is_named_pipe_server_known(std::u16string_view short_name) const;
+
+        // Registers event as a wake target for register_named_pipe_server(short_name), for a thread
+        // parked in FSCTL_PIPE_WAIT that found no known server yet.
+        void register_pipe_wait(std::u16string_view short_name, handle event);
 
         const network::socket_factory& socket_factory() const
         {

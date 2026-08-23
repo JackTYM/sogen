@@ -1,6 +1,7 @@
 #pragma once
 #include "../io_device.hpp"
 #include "../process_context.hpp"
+#include <utils/string.hpp>
 
 namespace sogen
 {
@@ -23,6 +24,23 @@ namespace sogen
         ULONG message_length;
     };
 
+    // Strips the \Device\NamedPipe\ or \??\Pipe\ prefix a pipe's full NT path is stored under
+    // (see is_named_pipe_path, syscall_utils.hpp), leaving the bare name a client passes to
+    // WaitNamedPipeW/CreateFile via \\.\pipe\<name>. Returns the input unchanged if neither
+    // prefix matches, so it is safe to call on an already-short name too.
+    inline std::u16string_view pipe_short_name(const std::u16string_view full_name)
+    {
+        for (const std::u16string_view prefix : {std::u16string_view(u"\\Device\\NamedPipe\\"), std::u16string_view(u"\\??\\Pipe\\")})
+        {
+            if (utils::string::starts_with_ignore_case(full_name, prefix))
+            {
+                return full_name.substr(prefix.size());
+            }
+        }
+
+        return full_name;
+    }
+
     class named_pipe : public io_device
     {
       public:
@@ -36,6 +54,17 @@ namespace sogen
         ULONG inbound_quota;
         ULONG outbound_quota;
         LARGE_INTEGER default_timeout;
+
+        // True only for an instance created by the server side (NtCreateNamedPipeFile). A client's own
+        // NtCreateFile connect (handle_named_pipe_create) creates a named_pipe object too, but it isn't a
+        // server instance -- see windows_emulator::register_named_pipe_server, which this flag gates.
+        bool is_server_instance{false};
+
+        // Backs a pended FSCTL_PIPE_WAIT (see wait()): parks the calling thread on an event that is
+        // signaled once a server instance with the awaited name is registered (see
+        // windows_emulator::register_named_pipe_server), whether that happened in this same process or
+        // was forwarded from a sibling OS process over a pipe_ipc_channel.
+        handle wait_event{};
 
         // Set by a client's NtCreateFile on this same pipe name (see handle_named_pipe_create) when that
         // open happens before this server instance calls FSCTL_PIPE_LISTEN -- the common case for
@@ -148,13 +177,7 @@ namespace sogen
 
             if (c.io_control_code == FSCTL_PIPE_WAIT)
             {
-                // Backs WaitNamedPipeW, issued against a handle to the NamedPipe filesystem's root
-                // (\Device\NamedPipe\), not a specific instance -- the input buffer names the pipe to wait
-                // for (FILE_PIPE_WAIT_FOR_BUFFER), which this device doesn't need to inspect: a client's
-                // own NtCreateFile connect (handle_named_pipe_create) already always succeeds regardless of
-                // whether a server is actually listening, so reporting an instance as available here too
-                // just keeps this answer consistent with that.
-                return STATUS_SUCCESS;
+                return this->wait(win_emu, c);
             }
 
             win_emu.log.warn("Unsupported named pipe FSCTL: 0x%X\n", static_cast<uint32_t>(c.io_control_code));
@@ -188,6 +211,55 @@ namespace sogen
 
             auto& t = c.thread();
             t.await_objects = {this->listen_event};
+            t.await_any = false;
+            t.await_time = {};
+            win_emu.yield_thread(*c.vcpu, false);
+
+            return STATUS_PENDING;
+        }
+
+        // Backs WaitNamedPipeW, issued against a handle to the NamedPipe filesystem's root
+        // (\Device\NamedPipe\), not a specific pipe instance -- the input buffer (FILE_PIPE_WAIT_FOR_BUFFER:
+        // LARGE_INTEGER Timeout; ULONG NameLength; BOOLEAN TimeoutSpecified; WCHAR Name[1];, Name at offset
+        // 14) names the pipe to wait for. A server instance might not exist yet at this point -- e.g. the
+        // client racing ahead of the server's own NtCreateNamedPipeFile call -- so this parks the same way
+        // listen() does, rather than answering STATUS_SUCCESS unconditionally, matching real Windows
+        // WaitNamedPipeW blocking until a server instance is actually created.
+        NTSTATUS wait(windows_emulator& win_emu, const io_device_context& c)
+        {
+            constexpr size_t name_offset = 14;
+            if (!c.input_buffer || c.input_buffer_length < name_offset)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            auto& emu = win_emu.emu();
+            const auto name_length = emu.read_memory<uint32_t>(c.input_buffer + 8);
+            const auto name_bytes = std::min<size_t>(name_length, c.input_buffer_length - name_offset);
+
+            std::u16string target_name(name_bytes / sizeof(char16_t), u'\0');
+            if (!target_name.empty())
+            {
+                emu.read_memory(c.input_buffer + name_offset, target_name.data(), target_name.size() * sizeof(char16_t));
+            }
+
+            if (target_name.empty() || win_emu.is_named_pipe_server_known(target_name))
+            {
+                return STATUS_SUCCESS;
+            }
+
+            if (!this->wait_event.bits)
+            {
+                event e{};
+                e.type = NotificationEvent;
+                e.signaled = false;
+                this->wait_event = win_emu.process.events.store(std::move(e));
+            }
+
+            win_emu.register_pipe_wait(target_name, this->wait_event);
+
+            auto& t = c.thread();
+            t.await_objects = {this->wait_event};
             t.await_any = false;
             t.await_time = {};
             win_emu.yield_thread(*c.vcpu, false);

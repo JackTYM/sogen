@@ -10,12 +10,14 @@ namespace sogen
     {
         write = 0,
         connect = 1,
+        server_created = 2,
     };
 
-    // A single forwarded named-pipe event: either bytes written on the sender's end (delivered
-    // verbatim to any same-named pipe instance on the receiving end) or a client-connect
-    // notification (mirrors the same-process client_connected/listen_event handshake across the
-    // process boundary).
+    // A single forwarded named-pipe event: bytes written on the sender's end (delivered verbatim
+    // to any same-named pipe instance on the receiving end), a client-connect notification
+    // (mirrors the same-process client_connected/listen_event handshake across the process
+    // boundary), or a server instance being created (mirrors the same-process
+    // known-server/wait_event handshake -- see windows_emulator::register_named_pipe_server).
     struct pipe_ipc_message
     {
         pipe_ipc_message_type type{};

@@ -950,6 +950,23 @@ namespace sogen
         }
     }
 
+    void windows_emulator::broadcast_named_pipe_server_created(const std::u16string_view name)
+    {
+        if (this->pipe_ipc_peers_.empty())
+        {
+            return;
+        }
+
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::server_created;
+        message.pipe_name = name;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
     void windows_emulator::pump_pipe_ipc()
     {
         for (auto& peer : this->pipe_ipc_peers_)
@@ -964,8 +981,38 @@ namespace sogen
                 {
                     mark_named_pipe_connected(*this, this->process, message->pipe_name);
                 }
+                else if (message->type == pipe_ipc_message_type::server_created)
+                {
+                    this->register_named_pipe_server(pipe_short_name(message->pipe_name));
+                }
             }
         }
+    }
+
+    void windows_emulator::register_named_pipe_server(const std::u16string_view short_name)
+    {
+        this->known_named_pipe_servers_.emplace(short_name);
+
+        auto [begin, end] = this->pending_pipe_waits_.equal_range(short_name);
+        for (auto it = begin; it != end; ++it)
+        {
+            if (auto* e = this->process.events.get(it->second))
+            {
+                e->signaled = true;
+            }
+        }
+
+        this->pending_pipe_waits_.erase(begin, end);
+    }
+
+    bool windows_emulator::is_named_pipe_server_known(const std::u16string_view short_name) const
+    {
+        return this->known_named_pipe_servers_.contains(short_name);
+    }
+
+    void windows_emulator::register_pipe_wait(const std::u16string_view short_name, const handle event)
+    {
+        this->pending_pipe_waits_.emplace(short_name, event);
     }
 
     bool windows_emulator::perform_thread_switch(vcpu_context& vcpu)

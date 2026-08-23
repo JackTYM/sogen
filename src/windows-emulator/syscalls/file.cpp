@@ -2376,6 +2376,7 @@ namespace sogen
             if (auto* pipe_device = container.get_internal_device<named_pipe>())
             {
                 pipe_device->name = filename;
+                pipe_device->is_server_instance = true;
                 pipe_device->pipe_type = named_pipe_type;
                 pipe_device->read_mode = read_mode;
                 pipe_device->completion_mode = completion_mode;
@@ -2391,6 +2392,9 @@ namespace sogen
 
             handle pipe_handle = c.proc.devices.store(std::move(container));
             file_handle.write(pipe_handle);
+
+            c.win_emu.register_named_pipe_server(pipe_short_name(filename));
+            c.win_emu.broadcast_named_pipe_server_created(filename);
 
             IO_STATUS_BLOCK<EmulatorTraits<Emu64>> iosb{};
             iosb.Status = STATUS_SUCCESS;
