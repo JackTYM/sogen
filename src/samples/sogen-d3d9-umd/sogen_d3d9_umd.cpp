@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -56,6 +57,7 @@ namespace
         uint32_t private_data_size;
         uint32_t h_context;
     };
+
 #pragma pack(pop)
 
     using pfn_d3dkmt = LONG(WINAPI*)(void*);
@@ -136,13 +138,19 @@ namespace
 
     // Carries one D3D9 command to the host over the D3DKMT Escape channel:
     // [escape_command_header][in][out]. Mirrors vulkan_shim.cpp's bridge_call.
-    bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len)
+    //
+    // needs_flush=false lets a caller that has already proven (via g_batch_touched_resources) that
+    // this specific call cannot observe any effect of the pending batch skip the drain. Every
+    // pre-existing call site keeps the default true (unconditional flush, byte-identical to the old
+    // behavior); only umd_Lock's probe call passes false when safe. See that call site's own comment
+    // for why the check has to happen there and not generically in this function.
+    bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len, bool needs_flush = true)
     {
         // Every other bridge call may make the host observe D3D9 state (draw, clear, lock, present,
         // create a resource, ...), so drain any pending batched commands first to keep host-observed
         // ordering identical to the un-batched path. The `!=` guard also prevents flush_d3d9_batch's
         // own record_commands call from recursing back into itself.
-        if (code != gb::ioctl_record_commands)
+        if (code != gb::ioctl_record_commands && needs_flush)
         {
             flush_d3d9_batch();
         }
@@ -178,6 +186,90 @@ namespace
     // drains the batch, right before the host needs to observe its effects.
     std::vector<uint8_t> g_d3d9_command_batch;
 
+    // Resolved resource ids (same numeric space resolve_resource_id/resolve_buffer_resource_id/
+    // resolve_depth_stencil_resource_id all share for an already-registered resource) referenced by
+    // a ColorFill/Blt command currently sitting in g_d3d9_command_batch, cleared whenever the batch
+    // is flushed. Only ColorFill/Blt use this flat, batch-scoped set -- they carry their resource id
+    // directly in their own one-shot record, so once that record is flushed and executed there's
+    // nothing left for a later batch to depend on. Binding-establishing commands (SetTexture,
+    // SetStreamSource, SetIndices, SetRenderTarget, SetDepthStencil) do NOT use this set: their
+    // effect is device state that outlives their own record being flushed away (a later draw, even
+    // in a brand new batch, can still depend on a binding made before an intervening flush) -- they
+    // use the persistent g_bound_* slots below instead. Draw/Clear commands need no entry of their
+    // own in either scheme: they only ever act on whatever's currently bound, which the g_bound_*
+    // slots already track independent of batch/flush boundaries.
+    std::unordered_set<uint64_t> g_batch_touched_resources;
+
+    // Sentinel for "a resource id this lookup couldn't resolve without risking a side-effecting
+    // create-resource round trip" (see lookup_resource_id_no_create). Never a real resource id (the
+    // host hands those out as small sequential integers), so storing/checking it unconditionally
+    // alongside a specific resource id is a safe, conservative "assume touched" fallback.
+    constexpr uint64_t k_batch_unknown_resource = ~uint64_t{0};
+
+    void mark_batch_touched(uint64_t resource)
+    {
+        if (resource != 0)
+        {
+            g_batch_touched_resources.insert(resource);
+        }
+    }
+
+    // Persistent binding-slot state for the flush-cascade fix's dependency check (resource_currently_
+    // referenced below): tracks what's CURRENTLY bound to each device slot, independent of
+    // g_d3d9_command_batch/g_batch_touched_resources -- a binding set up by an earlier, already-
+    // flushed SetStreamSource/SetTexture/etc. is still real, live device state a later draw depends
+    // on, even once that particular Set* record itself is long gone from the batch. Never cleared by
+    // flush_d3d9_batch; only ever overwritten by the next Set* call to the same slot (0 = unbound).
+    constexpr size_t k_max_stream_sources = 16;
+    constexpr size_t k_max_texture_stages = 16;
+    constexpr size_t k_max_render_targets = 4;
+    uint64_t g_bound_stream_source[k_max_stream_sources]{};
+    uint64_t g_bound_indices = 0;
+    uint64_t g_bound_texture[k_max_texture_stages]{};
+    uint64_t g_bound_render_target[k_max_render_targets]{};
+    uint64_t g_bound_depth_stencil = 0;
+
+    // True if `resource` (or an unresolvable slot -- see k_batch_unknown_resource) is either
+    // currently bound to any device slot, or referenced by a still-pending ColorFill/Blt in the
+    // batch. umd_Lock's flush-skip decision is safe only when this is false: no currently bound
+    // resource and nothing batch-local references it, so nothing pending could possibly need to
+    // observe a change to it.
+    bool resource_currently_referenced(uint64_t resource)
+    {
+        auto slot_matches = [resource](uint64_t bound) { return bound != 0 && (bound == resource || bound == k_batch_unknown_resource); };
+        for (uint64_t id : g_bound_stream_source)
+        {
+            if (slot_matches(id))
+            {
+                return true;
+            }
+        }
+        if (slot_matches(g_bound_indices))
+        {
+            return true;
+        }
+        for (uint64_t id : g_bound_texture)
+        {
+            if (slot_matches(id))
+            {
+                return true;
+            }
+        }
+        for (uint64_t id : g_bound_render_target)
+        {
+            if (slot_matches(id))
+            {
+                return true;
+            }
+        }
+        if (slot_matches(g_bound_depth_stencil))
+        {
+            return true;
+        }
+        return g_batch_touched_resources.find(resource) != g_batch_touched_resources.end() ||
+               g_batch_touched_resources.find(k_batch_unknown_resource) != g_batch_touched_resources.end();
+    }
+
     // Backstop only: every frame ends in Present, which flushes via bridge_call's guard, so this
     // should never trigger in practice. Guards against unbounded growth if an unusually long run of
     // Group-A calls happens with no Group-B call in between.
@@ -192,6 +284,7 @@ namespace
 
         std::vector<uint8_t> batch;
         batch.swap(g_d3d9_command_batch);
+        g_batch_touched_resources.clear();
 
         gb::result_response resp{};
         bridge_call(gb::ioctl_record_commands, batch.data(), static_cast<DWORD>(batch.size()), &resp, sizeof(resp));
@@ -839,6 +932,36 @@ namespace
         return resp.resource;
     }
 
+    // Read-only counterpart to resolve_resource_id/resolve_buffer_resource_id/
+    // resolve_depth_stencil_resource_id, for callers (the g_batch_touched_resources tracking below)
+    // that must never trigger those functions' create-resource fallback as a side effect -- that
+    // fallback itself calls bridge_call(ioctl_d3d9_create_resource, ...), which would flush the very
+    // batch this lookup exists to reason about, defeating the whole optimization it feeds. Checks the
+    // same two tables in the same precedence, so it returns the identical id any of the three real
+    // resolvers would for an already-registered resource (the common case for every real texture/
+    // render-target/depth-stencil surface and every buffer that's been Locked or bound at least once).
+    // A genuine miss (never seen by any resolver yet) returns k_batch_unknown_resource rather than 0,
+    // so the caller can conservatively treat "don't know" as "assume touched" instead of "no resource".
+    uint64_t lookup_resource_id_no_create(void* handle)
+    {
+        const auto raw = reinterpret_cast<uint64_t>(handle);
+        if (raw == 0)
+        {
+            return 0;
+        }
+        const auto created_it = g_created_resource_ids.find(raw);
+        if (created_it != g_created_resource_ids.end())
+        {
+            return created_it->second;
+        }
+        const auto it = g_resource_ids.find(raw);
+        if (it != g_resource_ids.end())
+        {
+            return it->second;
+        }
+        return k_batch_unknown_resource;
+    }
+
     void fill_d3d9caps(D3DCAPS9* caps)
     {
         std::memset(caps, 0, sizeof(*caps));
@@ -1405,6 +1528,7 @@ namespace
                                            .top = pArgs->DstRect.top,
                                            .right = pArgs->DstRect.right,
                                            .bottom = pArgs->DstRect.bottom};
+        mark_batch_touched(lookup_resource_id_no_create(pArgs->hResource));
         record_d3d9(gb::command::d3d9_color_fill, &req, sizeof(req));
         return S_OK;
     }
@@ -1433,6 +1557,8 @@ namespace
                                     .src_bottom = pArgs->SrcRect.bottom,
                                     .filter = pArgs->Flags,
                                     .reserved = 0};
+        mark_batch_touched(lookup_resource_id_no_create(pArgs->hDstResource));
+        mark_batch_touched(lookup_resource_id_no_create(pArgs->hSrcResource));
         record_d3d9(gb::command::d3d9_blt, &req, sizeof(req));
         return S_OK;
     }
@@ -1443,6 +1569,10 @@ namespace
         // pointer to D3DDDIARG_SETTEXTURE -- a struct-pointer read crashed with the small Stage
         // integer (e.g. 0x1) dereferenced as an address. 0 for hTexture means unbind.
         d3d9c::set_texture_record req{.stage = Stage, .reserved = 0, .texture = reinterpret_cast<uint64_t>(hTexture)};
+        if (Stage < k_max_texture_stages)
+        {
+            g_bound_texture[Stage] = lookup_resource_id_no_create(hTexture);
+        }
         record_d3d9(gb::command::d3d9_set_texture, &req, sizeof(req));
         return S_OK;
     }
@@ -1694,12 +1824,14 @@ namespace
         uint32_t stride = 0;
         const void* data = nullptr;
     };
+
     struct pending_um_indices
     {
         bool active = false;
         uint32_t element_size = 0;
         const void* data = nullptr;
     };
+
     pending_um_stream g_um_stream;
     pending_um_indices g_um_indices;
 
@@ -1808,6 +1940,10 @@ namespace
                                             .stride_bytes = pArgs->Stride,
                                             .reserved = 0,
                                             .vertex_buffer = resolve_buffer_resource_id(pArgs->hVertexBuffer, 0)};
+        if (pArgs->StreamNumber < k_max_stream_sources)
+        {
+            g_bound_stream_source[pArgs->StreamNumber] = req.vertex_buffer;
+        }
         record_d3d9(gb::command::d3d9_set_stream_source, &req, sizeof(req));
         return S_OK;
     }
@@ -1834,6 +1970,7 @@ namespace
         // Same buffer lazy-bind reasoning as umd_SetStreamSource.
         d3d9c::set_indices_record req{
             .index_buffer = resolve_buffer_resource_id(pArgs->hIndexBuffer, 0), .format = pArgs->Stride == 4 ? 1u : 0u, .reserved = 0};
+        g_bound_indices = req.index_buffer;
         record_d3d9(gb::command::d3d9_set_indices, &req, sizeof(req));
         return S_OK;
     }
@@ -1846,6 +1983,10 @@ namespace
         }
         d3d9c::set_render_target_record req{
             .render_target_index = pArgs->RenderTargetIndex, .reserved = 0, .surface = resolve_resource_id(pArgs->hRenderTarget)};
+        if (pArgs->RenderTargetIndex < k_max_render_targets)
+        {
+            g_bound_render_target[pArgs->RenderTargetIndex] = req.surface;
+        }
         record_d3d9(gb::command::d3d9_set_render_target, &req, sizeof(req));
         return S_OK;
     }
@@ -1857,6 +1998,7 @@ namespace
             return S_OK;
         }
         d3d9c::set_depth_stencil_record req{.surface = resolve_depth_stencil_resource_id(pArgs->hZBuffer)};
+        g_bound_depth_stencil = req.surface;
         record_d3d9(gb::command::d3d9_set_depth_stencil, &req, sizeof(req));
         return S_OK;
     }
@@ -2010,6 +2152,16 @@ namespace
     std::map<locked_key, std::vector<uint8_t>> g_locked_buffers;
     std::map<locked_key, uint32_t> g_locked_offsets;
 
+    // Total resource size (bytes from offset 0 to the end of the subresource), cached the first time
+    // any Lock() on this (resource, subresource) learns it via a real probe round trip. A D3D9
+    // resource's size is fixed for its entire lifetime (a vertex/index buffer's byte count and a
+    // texture subresource's mip dimensions never change after creation), so this cache entry is valid
+    // forever once populated -- every subsequent Lock() on the same key can derive data_size locally
+    // (full_size - offset) and skip the probe round trip entirely. This is the same class of win DXVK
+    // gets for free from its own client-side buffer pool (it never asks the "GPU" for a size it
+    // already tracks itself); the DDI's per-call design means this UMD has to earn it explicitly.
+    std::map<locked_key, uint32_t> g_resource_full_size;
+
     HRESULT APIENTRY umd_Lock(HANDLE /*hDevice*/, D3DDDIARG_LOCK* pArgs)
     {
         if (pArgs == nullptr)
@@ -2048,21 +2200,87 @@ namespace
         const locked_key key{resource, subresource};
         d3d9c::lock_request req{.resource = resource, .subresource = subresource, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
 
-        // First call with no output buffer just to learn the true backing size via lock_response
-        // (lock_response::data_size is "bytes available from `offset` to the end of the subresource").
-        d3d9c::lock_response probe{};
-        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe));
+        // Skip the pre-flush only when there's genuinely nothing pending that could depend on this
+        // resource: the batch must be non-empty (otherwise there's nothing to protect regardless of
+        // any binding) AND the resource must not be currently bound to any device slot nor
+        // referenced by a still-pending ColorFill/Blt (resource_currently_referenced, which also
+        // conservatively treats any unresolvable slot as a match -- see k_batch_unknown_resource).
+        const bool resource_needs_flush = !g_d3d9_command_batch.empty() && resource_currently_referenced(resource);
+
+        // Learn the true backing size, either from the immutable-for-the-resource's-lifetime cache
+        // (skips the probe round trip entirely -- see g_resource_full_size's own comment) or, on a
+        // genuine first touch of this (resource, subresource), via a real probe round trip whose
+        // result then seeds the cache for every future Lock() on the same key.
+        uint32_t data_size = 0;
+        bool probe_hr_nonzero = false;
+        const auto cached_size_it = g_resource_full_size.find(key);
+        if (cached_size_it != g_resource_full_size.end())
+        {
+            data_size = offset <= cached_size_it->second ? cached_size_it->second - offset : 0;
+        }
+        else
+        {
+            d3d9c::lock_response probe{};
+            bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe), resource_needs_flush);
+            probe_hr_nonzero = probe.hr != 0;
+            data_size = probe.data_size;
+            if (!probe_hr_nonzero)
+            {
+                g_resource_full_size[key] = offset + probe.data_size;
+            }
+        }
 
         auto& buffer = g_locked_buffers[key];
 
+#ifndef _WIN64
+        // D3DDDIARG_LOCK::Flags (x86 only, offset 44 -- RE-verified live 2026-08-23 by diffing the raw
+        // struct bytes of matched Lock() calls on the same buffer with known D3D9-level flags: DISCARD
+        // -> 0x18, NOOVERWRITE -> 0x14, READONLY -> 0x11. bit0=ReadOnly, bit2=NoOverwrite, bit3=Discard,
+        // bit4=NoSysLock (present in all three samples -- always set for driver-routed D3DPOOL_DEFAULT
+        // dynamic buffers, not itself meaningful here). x64's D3DDDIARG_LOCK is a genuinely different,
+        // larger struct (see d3d9_ddi.hpp's own note on the x86/x64 layout divergence) -- this offset has
+        // NOT been verified there, so this optimization stays x86-only until it is.
+        if (is_buffer)
+        {
+            const uint32_t raw_flags = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pArgs) + 44);
+            constexpr uint32_t k_ddi_discard = 0x08;
+            constexpr uint32_t k_ddi_nooverwrite = 0x04;
+            if ((raw_flags & (k_ddi_discard | k_ddi_nooverwrite)) != 0)
+            {
+                // The app is about to overwrite this range without reading it first, so the current
+                // host-side content is irrelevant -- size the buffer from the already-known size
+                // (cached or freshly probed above) but skip the second round trip (and its data
+                // payload) that would otherwise fetch bytes the app is going to discard anyway.
+                // umd_Unlock always ships whatever the app wrote into `buffer` regardless of how it
+                // got sized, so this is safe.
+                if (probe_hr_nonzero)
+                {
+                    g_locked_buffers.erase(key);
+                    pArgs->pData = nullptr;
+                    return E_FAIL;
+                }
+                buffer.resize(data_size);
+                pArgs->pData = buffer.data();
+                g_locked_offsets[key] = offset;
+                return S_OK;
+            }
+        }
+#endif
+
         // The host fills the whole [lock_response][data] output region (handle_d3d9_lock writes
         // lock_response + min(capacity, data_size) bytes, and this real call's data_size equals the
-        // probe's since the request is identical), so out_buf needs no zero-init. The data payload is
-        // then copied once, directly into the persistent app-facing buffer via range-assign -- no
-        // separate zero-fill of `buffer` (the old buffer.assign(N, 0) was fully overwritten here).
-        const size_t out_buf_size = sizeof(d3d9c::lock_response) + probe.data_size;
+        // already-known size from above, cached or freshly probed), so out_buf needs no zero-init.
+        // The data payload is then copied once, directly into the persistent app-facing buffer via
+        // range-assign -- no separate zero-fill of `buffer` (the old buffer.assign(N, 0) was fully
+        // overwritten here).
+        const size_t out_buf_size = sizeof(d3d9c::lock_response) + data_size;
         auto out_buf = std::make_unique_for_overwrite<uint8_t[]>(out_buf_size);
-        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), out_buf.get(), static_cast<DWORD>(out_buf_size));
+        // Batch state is unchanged since the size lookup above (straight-line code, no other D3D9 API
+        // calls in between), so resource_needs_flush is still valid: if a fresh probe already proved
+        // (or needed) a flush, this real fetch's own flush-gate reaches the same, correct answer; on a
+        // cache hit (no probe this call), the batch is exactly as it was when resource_needs_flush was
+        // computed just above, so it's equally valid there too.
+        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), out_buf.get(), static_cast<DWORD>(out_buf_size), resource_needs_flush);
         const auto* resp = reinterpret_cast<const d3d9c::lock_response*>(out_buf.get());
         if (resp->hr != 0)
         {
@@ -2071,7 +2289,7 @@ namespace
             return E_FAIL;
         }
         const uint8_t* data_ptr = out_buf.get() + sizeof(d3d9c::lock_response);
-        buffer.assign(data_ptr, data_ptr + probe.data_size);
+        buffer.assign(data_ptr, data_ptr + data_size);
         pArgs->pData = buffer.data();
         g_locked_offsets[key] = offset;
         return S_OK;
@@ -2115,9 +2333,17 @@ namespace
         std::memcpy(buf + header_size, &req, sizeof(req));
         std::memcpy(buf + header_size + sizeof(req), it->second.data(), it->second.size());
 
-        // unlock makes the host observe resource state, so drain the batch first -- the same
-        // ordering guarantee bridge_call's flush-on-every-other-call guard provides.
-        flush_d3d9_batch();
+        // Unlock makes the host observe new resource content, so anything still batched that
+        // references this exact resource must be drained first -- the same ordering guarantee
+        // bridge_call's flush gate provides for Lock (resource_currently_referenced, see its own
+        // comment). Skipping the flush is safe whenever the resource genuinely isn't touched by
+        // anything pending: unlike Lock's probe/fetch, this path bypasses bridge_call entirely (see
+        // this function's own comment on why), so it needs the identical check applied explicitly
+        // here rather than inherited for free.
+        if (!g_d3d9_command_batch.empty() && resource_currently_referenced(resource))
+        {
+            flush_d3d9_batch();
+        }
         send_escape(buf, total);
 
         g_locked_buffers.erase(it);
