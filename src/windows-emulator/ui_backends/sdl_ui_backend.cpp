@@ -6,6 +6,9 @@
 #include <windows.h>
 #endif
 
+#include <chrono>
+#include <cstdio>
+
 namespace sogen
 {
     namespace
@@ -1047,8 +1050,30 @@ namespace sogen
                     const bool presented = state != nullptr && state->renderer != nullptr;
                     if (presented)
                     {
-                        update_surface_texture(*state, copy);
-                        render_window(*state);
+                        // Temporary diagnostic (EMULATOR_UI_PRESENT_DIAG=1): checks whether SDL's own
+                        // present call is where real per-frame wall-clock time goes (e.g. an implicit
+                        // vsync/frame-pacing wait), since D3D9-host-side per-draw cost reductions this
+                        // session haven't moved measured FPS at all.
+                        if (getenv("EMULATOR_UI_PRESENT_DIAG"))
+                        {
+                            const auto t0 = std::chrono::steady_clock::now();
+                            update_surface_texture(*state, copy);
+                            const auto t1 = std::chrono::steady_clock::now();
+                            render_window(*state);
+                            const auto t2 = std::chrono::steady_clock::now();
+                            static int counter = 0;
+                            if (++counter % 30 == 0)
+                            {
+                                fprintf(stderr, "[ui-present-diag] update_surface_texture=%.2fms render_window=%.2fms\n",
+                                        std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                                        std::chrono::duration<double, std::milli>(t2 - t1).count());
+                            }
+                        }
+                        else
+                        {
+                            update_surface_texture(*state, copy);
+                            render_window(*state);
+                        }
                     }
                     else
                     {
