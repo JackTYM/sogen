@@ -844,8 +844,40 @@ namespace sogen
 
             std::vector<inherited_pipe_handle> inherited_pipes{};
             std::vector<inherited_section_handle> inherited_sections{};
+            std::vector<inherited_event_handle> inherited_events{};
             for (const auto& src_handle : inherited_handles)
             {
+                if (src_handle.value.type == handle_types::process || src_handle.value.type == handle_types::file)
+                {
+                    // Both of these only ever reach here as one of a handful of fixed pseudo/well-known
+                    // constants (GUEST_PROCESS_HANDLE, STDOUT_HANDLE, NUL_HANDLE, ...): every process's
+                    // syscall handlers already recognize the same bit pattern directly, without any
+                    // per-process handle_store entry backing it, so the child resolves them correctly on
+                    // its own the moment the same numeric handle value shows up in guest code. Nothing to
+                    // forward.
+                    continue;
+                }
+
+                if (src_handle.value.type == handle_types::event)
+                {
+                    auto* event_object = c.proc.events.get(src_handle);
+                    if (!event_object)
+                    {
+                        // A well-known pseudo event (WER_PORT_READY, DBWIN_DATA_READY, ...) - same
+                        // reasoning as the process/file case above, resolved by fixed bit pattern rather
+                        // than a stored object.
+                        continue;
+                    }
+
+                    inherited_events.push_back({
+                        .target_handle = src_handle,
+                        .type = event_object->type,
+                        .signaled = event_object->signaled,
+                        .name = event_object->name,
+                    });
+                    continue;
+                }
+
                 if (src_handle.value.type == handle_types::section)
                 {
                     auto* section = c.proc.sections.get(src_handle);
@@ -906,7 +938,7 @@ namespace sogen
             try
             {
                 outcome = c.win_emu.callbacks.create_child_process(std::move(child_settings), std::move(inherited_pipes),
-                                                                   std::move(inherited_sections));
+                                                                   std::move(inherited_sections), std::move(inherited_events));
             }
             catch (const std::exception& e)
             {

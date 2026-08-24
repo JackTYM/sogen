@@ -656,6 +656,19 @@ namespace sogen
             }
         }
 
+        void recreate_inherited_event(windows_emulator& win_emu, const inherited_event_handle& inherited)
+        {
+            event e{};
+            e.type = inherited.type;
+            e.signaled = inherited.signaled;
+            e.name = inherited.name;
+
+            if (!win_emu.process.events.store_at(inherited.target_handle, std::move(e)))
+            {
+                win_emu.log.error("Failed to inherit event handle 0x%" PRIx64 "\n", static_cast<uint64_t>(inherited.target_handle.bits));
+            }
+        }
+
         bool run(const analysis_options& options, const std::span<const std::string_view> args)
         {
             std::optional<child_bootstrap_data> child_bootstrap{};
@@ -701,6 +714,11 @@ namespace sogen
                         recreate_inherited_section(*win_emu, inherited);
                     }
 
+                    for (const auto& inherited : child_bootstrap->inherited_events)
+                    {
+                        recreate_inherited_event(*win_emu, inherited);
+                    }
+
                     win_emu->setup_process_if_necessary();
                 }
             }
@@ -719,16 +737,18 @@ namespace sogen
             if (supports_child_process_spawning())
             {
                 spawn_config = build_child_process_spawn_config(options);
-                win_emu->callbacks.create_child_process =
-                    [&spawn_config, win_emu_ptr = win_emu.get()](application_settings settings, std::vector<inherited_pipe_handle> pipes,
-                                                                 std::vector<inherited_section_handle> sections) {
-                        auto outcome = spawn_child_process(spawn_config, std::move(settings), std::move(pipes), std::move(sections));
-                        if (outcome.success && outcome.ipc_fd >= 0)
-                        {
-                            win_emu_ptr->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
-                        }
-                        return outcome;
-                    };
+                win_emu->callbacks.create_child_process = [&spawn_config, win_emu_ptr = win_emu.get()](
+                                                              application_settings settings, std::vector<inherited_pipe_handle> pipes,
+                                                              std::vector<inherited_section_handle> sections,
+                                                              std::vector<inherited_event_handle> events) {
+                    auto outcome =
+                        spawn_child_process(spawn_config, std::move(settings), std::move(pipes), std::move(sections), std::move(events));
+                    if (outcome.success && outcome.ipc_fd >= 0)
+                    {
+                        win_emu_ptr->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
+                    }
+                    return outcome;
+                };
             }
 
             if (child_bootstrap)

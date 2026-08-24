@@ -109,6 +109,37 @@ namespace sogen
         }
     };
 
+    // Describes one PsAttributeHandleList event handle the child must inherit, sent across the real
+    // process boundary so the child can reconstruct an equivalent event object (with the same
+    // signaled state) in its own process_context before its guest code starts running. Only events
+    // actually present in the parent's real handle_store need this - the well-known pseudo events
+    // (WER_PORT_READY, DBWIN_DATA_READY, ...) are fixed constants that every process's syscall
+    // handlers already recognize by bit pattern alone, so they resolve correctly in the child without
+    // being forwarded at all (see handle_NtCreateUserProcess).
+    struct inherited_event_handle
+    {
+        handle target_handle{};
+        EVENT_TYPE type{};
+        bool signaled{};
+        std::u16string name{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->target_handle);
+            buffer.write(this->type);
+            buffer.write(this->signaled);
+            buffer.write_string(std::u16string_view(this->name));
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->target_handle);
+            buffer.read(this->type);
+            buffer.read(this->signaled);
+            buffer.read_string(this->name);
+        }
+    };
+
     // Result of spawning a child process (NtCreateUserProcess) as a genuinely separate host OS
     // process. success reports whether the child got far enough through its own startup
     // (setup_process_if_necessary) to hand back real guest addresses for PS_CREATE_INFO -
@@ -144,7 +175,8 @@ namespace sogen
         // only the embedder (e.g. the analyzer's main.cpp) knows how to re-invoke itself as a
         // child, so this can't happen inside windows_emulator itself. Unset means the embedder
         // doesn't support child processes; the handler reports STATUS_NOT_SUPPORTED in that case.
-        opt_func<child_process_outcome(application_settings, std::vector<inherited_pipe_handle>, std::vector<inherited_section_handle>)>
+        opt_func<child_process_outcome(application_settings, std::vector<inherited_pipe_handle>, std::vector<inherited_section_handle>,
+                                       std::vector<inherited_event_handle>)>
             create_child_process{};
 
         opt_func<void(uint64_t address, uint64_t length, memory_permission)> on_memory_protect{};

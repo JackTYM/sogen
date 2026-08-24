@@ -33,6 +33,7 @@ namespace sogen
         application_settings settings{};
         std::vector<inherited_pipe_handle> inherited_pipes{};
         std::vector<inherited_section_handle> inherited_sections{};
+        std::vector<inherited_event_handle> inherited_events{};
     };
 
     // True on platforms where a child can genuinely be spawned as a separate host OS process
@@ -47,7 +48,8 @@ namespace sogen
     // wait for the child to exit - once it answers, it keeps running independently.
     child_process_outcome spawn_child_process(const child_process_spawn_config& config, application_settings settings,
                                               std::vector<inherited_pipe_handle> inherited_pipes,
-                                              std::vector<inherited_section_handle> inherited_sections);
+                                              std::vector<inherited_section_handle> inherited_sections,
+                                              std::vector<inherited_event_handle> inherited_events);
 
     // Used by a process running in --child-ipc-fd mode: reads the settings/inherited_pipes/
     // inherited_sections its parent sent right after spawning it.
