@@ -1492,9 +1492,25 @@ namespace sogen
             auto region = this->memory.get_region_info(address);
             if (region.permissions.is_guarded())
             {
-                // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION
-                this->memory.protect_memory(region.allocation_base, region.length, region.permissions & ~memory_permission_ext::guard);
-                dispatch_guard_page_violation(*this, vcpu, address, operation);
+                const auto is_stack_guard = region.permissions.is_stack_guard();
+
+                // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION, matching real
+                // Windows for a guest-requested PAGE_GUARD page. A thread's own stack-reservation guard
+                // buffer is different: sogen pre-commits the whole reservation upfront, so there is no
+                // "still room to grow" case left to handle transparently - every hit here is the
+                // terminal one, matching real Windows' MiCheckForUserStackOverflow once the fault lands
+                // within one page of DeallocationStack, which substitutes STATUS_STACK_OVERFLOW instead.
+                this->memory.protect_memory(region.allocation_base, region.length,
+                                            region.permissions & ~(memory_permission_ext::guard | memory_permission_ext::stack_guard));
+
+                if (is_stack_guard)
+                {
+                    dispatch_stack_overflow(*this, vcpu, address, operation);
+                }
+                else
+                {
+                    dispatch_guard_page_violation(*this, vcpu, address, operation);
+                }
             }
             else
             {

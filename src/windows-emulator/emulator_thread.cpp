@@ -431,8 +431,13 @@ namespace sogen
             // deliberately over-probes the stack to check available headroom (e.g. crypt32.dll's
             // InternalVerifyStackAvailable) reliably gets a guard-page/stack-overflow exception it can
             // catch via SEH, instead of possibly landing on a neighboring module's real mapped memory.
-            memory.protect_memory(stack_region_base, static_cast<size_t>(this->stack_guard_size),
-                                  nt_memory_permission{memory_permission::read_write, memory_permission_ext::guard});
+            // Tagged stack_guard (distinct from an ordinary guest-requested PAGE_GUARD page) so
+            // hook_memory_violation reports STATUS_STACK_OVERFLOW here, matching real Windows'
+            // MiCheckForUserStackOverflow, which substitutes that status once the fault lands within
+            // one page of DeallocationStack instead of the ordinary STATUS_GUARD_PAGE_VIOLATION.
+            memory.protect_memory(
+                stack_region_base, static_cast<size_t>(this->stack_guard_size),
+                nt_memory_permission{memory_permission::read_write, memory_permission_ext::guard | memory_permission_ext::stack_guard});
 
             this->gs_segment = emulator_allocator{
                 memory,

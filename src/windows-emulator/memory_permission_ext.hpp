@@ -8,6 +8,7 @@ namespace sogen
     {
         none = 0,
         guard = 1 << 0,
+        stack_guard = 1 << 1,
     };
 
     /*****************************************************************************
@@ -103,6 +104,11 @@ namespace sogen
         constexpr bool is_guarded() const
         {
             return (this->extended & memory_permission_ext::guard) == memory_permission_ext::guard;
+        }
+
+        constexpr bool is_stack_guard() const
+        {
+            return (this->extended & memory_permission_ext::stack_guard) == memory_permission_ext::stack_guard;
         }
     };
 
