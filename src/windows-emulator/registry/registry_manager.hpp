@@ -174,6 +174,7 @@ namespace sogen
         std::map<utils::path_key, utils::path_key> path_mapping_{};
         std::map<utils::path_key, overlay_bucket> overlay_values_{};
         std::set<utils::path_key> overlay_keys_{};
+        mutable std::unordered_map<utils::path_key, utils::path_key> normalize_path_cache_{};
 
         utils::path_key normalize_path(utils::path_key path) const;
         static utils::path_key get_full_key_path(const registry_key& key);

@@ -425,6 +425,14 @@ namespace sogen
 
     utils::path_key registry_manager::normalize_path(utils::path_key path) const
     {
+        const auto cached = this->normalize_path_cache_.find(path);
+        if (cached != this->normalize_path_cache_.end())
+        {
+            return cached->second;
+        }
+
+        const auto original = path;
+
         for (size_t i = 0; i < 10; ++i)
         {
             auto [new_path, changed] = perform_path_substitution(this->path_mapping_, std::move(path));
@@ -436,6 +444,7 @@ namespace sogen
             }
         }
 
+        this->normalize_path_cache_.emplace(std::move(original), path);
         return path;
     }
 
