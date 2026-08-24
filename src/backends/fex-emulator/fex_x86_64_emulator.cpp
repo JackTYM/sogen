@@ -42,6 +42,7 @@
 // ---------------------------------------------------------------------------------------------------
 
 #include <cstdlib>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -1561,6 +1562,27 @@ namespace sogen::fex
         // load_gdt() last determines every vCPU's segment table.
         uint64_t gdt_base_ = 0;
         uint32_t gdt_limit_ = 0;
+
+        // EMULATOR_FEX_RIP_SAMPLE=1: records the guest RIP at every quantum-preemption InterruptFaultPage
+        // hit (fex_vcpu.cpp's handle_fault_signal already computes this via RestoreRIPFromHostPC to
+        // resume execution correctly - this just also logs it). Unlike the HVF backend's per-VM-exit
+        // rip_sample_capture (hvf_vcpu_executor.cpp, called from ordinary post-vCPU-run code), this fires
+        // from an actual POSIX SIGSEGV/SIGBUS handler (handle_fault_signal) - capture() below must stay
+        // strictly async-signal-safe (fixed-size array + atomic index, no malloc, no stdio). flush() does
+        // the real write() and is only ever called from start()'s ordinary (non-signal) loop.
+        struct rip_sample
+        {
+            uint64_t t_ns;
+            uint64_t rip;
+        };
+        static constexpr size_t rip_sample_capacity_ = 4096;
+        bool rip_sample_enabled_ = false;
+        int rip_sample_fd_ = -1;
+        rip_sample rip_samples_[rip_sample_capacity_]{};
+        std::atomic<size_t> rip_sample_write_idx_{0};
+        void rip_sample_init_from_env();
+        void rip_sample_capture(uint64_t guest_rip);
+        void rip_sample_flush();
     };
 
     // -----------------------------------------------------------------------------------------------
@@ -2495,14 +2517,34 @@ namespace sogen::fex
                 // large VirtualFree can otherwise cost hundreds of individual host syscalls.
                 const uint64_t run_start = *it;
                 const bool placeholder = is_placeholder_page(run_start);
-                uint64_t run_end = run_start + host_page_size_apple;
-                auto run_it = it;
-                ++run_it;
-                while (run_it != this->mapped_host_pages_apple_.end() && *run_it == run_end && run_end < end &&
-                       is_placeholder_page(*run_it) == placeholder)
+                uint64_t run_end;
+                typename decltype(this->mapped_host_pages_apple_)::iterator run_it;
+
+                if (placeholder)
                 {
-                    run_end += host_page_size_apple;
+                    // is_placeholder_page depends only on the address (wow64_host_window_reserved_ and
+                    // whether it's below wow64_guest_address_space_size), not on any per-page state, and
+                    // reserve_wow64_host_window pre-registers every page of that window up front and
+                    // never erases a placeholder entry (see the erase() call below, gated on
+                    // !placeholder) - so a placeholder run is always dense and contiguous out to the end
+                    // of the wow64 window or `end`, whichever comes first. No need to walk
+                    // mapped_host_pages_apple_ one 16KB entry at a time to discover that: a churn-heavy
+                    // free of a small region inside a mostly-unclaimed 4GB window otherwise pays for a
+                    // multi-thousand-entry std::set walk just to re-derive a bound known in closed form.
+                    run_end = std::min<uint64_t>(end, wow64_guest_address_space_size);
+                    run_it = this->mapped_host_pages_apple_.lower_bound(run_end);
+                }
+                else
+                {
+                    run_end = run_start + host_page_size_apple;
+                    run_it = it;
                     ++run_it;
+                    while (run_it != this->mapped_host_pages_apple_.end() && *run_it == run_end && run_end < end &&
+                           !is_placeholder_page(*run_it))
+                    {
+                        run_end += host_page_size_apple;
+                        ++run_it;
+                    }
                 }
 
                 const auto rebase = rebase_for(this->is_wow64_process_, run_start);
@@ -3314,7 +3356,9 @@ namespace sogen::fex
             // Performance experiments (see docs/fex-backend.md perf section): each of FEXCore's
             // software TSO-emulation-cost levers, gated behind its own env var so it can be A/B
             // tested independently against the EMULATOR_FPS_COUNTER instrumentation. All default to
-            // FEXCore's own conservative defaults (unset = untouched) until validated.
+            // FEXCore's own conservative defaults (unset = untouched) until validated, except
+            // X87REDUCEDPRECISION below, which is validated and defaults on (EMULATOR_FEX_X87_FULL_PRECISION
+            // opts back out to full 80-bit precision).
             if (std::getenv("EMULATOR_FEX_VECTOR_TSO"))
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
@@ -3323,10 +3367,8 @@ namespace sogen::fex
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
             }
-            if (std::getenv("EMULATOR_FEX_X87_REDUCED_PRECISION"))
-            {
-                FEXCore::Config::Set(FEXCore::Config::CONFIG_X87REDUCEDPRECISION, "1");
-            }
+            FEXCore::Config::Set(FEXCore::Config::CONFIG_X87REDUCEDPRECISION,
+                                  std::getenv("EMULATOR_FEX_X87_FULL_PRECISION") ? "0" : "1");
             if (std::getenv("EMULATOR_FEX_NO_TSO"))
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, "0");
@@ -3342,6 +3384,10 @@ namespace sogen::fex
             if (std::getenv("EMULATOR_FEX_LRCPC2"))
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_HOSTFEATURES, "enablelrcpc2");
+            }
+            if (std::getenv("EMULATOR_FEX_L2_CACHE"))
+            {
+                FEXCore::Config::Set(FEXCore::Config::CONFIG_DISABLEL2CACHE, "0");
             }
 
 #ifdef __APPLE__
@@ -3629,7 +3675,53 @@ namespace sogen::fex
     // fex_vcpu method bodies (fex_x86_64_emulator is now complete).
     // -----------------------------------------------------------------------------------------------
 
-    fex_vcpu::~fex_vcpu() = default;
+    fex_vcpu::~fex_vcpu()
+    {
+        this->rip_sample_flush();
+        if (this->rip_sample_fd_ >= 0)
+        {
+            ::close(this->rip_sample_fd_);
+        }
+    }
+
+    void fex_vcpu::rip_sample_init_from_env()
+    {
+        if (const char* sample = std::getenv("EMULATOR_FEX_RIP_SAMPLE"); sample != nullptr && sample[0] != '0')
+        {
+            const char* log_path = std::getenv("EMULATOR_FEX_RIP_SAMPLE_LOG");
+            // Opened once here (ordinary start()-time code, never signal context) so capture()/flush()
+            // never need fopen/fclose. O_APPEND: multiple vCPUs (or this vCPU's own repeated opens across
+            // a hypothetical restart) share one file safely without needing a cross-instance lock.
+            this->rip_sample_fd_ =
+                ::open(log_path != nullptr ? log_path : "/tmp/fex_rip_sample.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            this->rip_sample_enabled_ = this->rip_sample_fd_ >= 0;
+        }
+    }
+
+    // Async-signal-safe: called from handle_fault_signal (a real SIGSEGV/SIGBUS handler). Only touches a
+    // fixed-size array via an atomic fetch-add - no malloc, no libc I/O. Samples beyond capacity between
+    // flushes are silently dropped (flush() runs once per quantum from start()'s loop, so this is a
+    // generous margin, not a real limit in practice).
+    void fex_vcpu::rip_sample_capture(const uint64_t guest_rip)
+    {
+        const size_t idx = this->rip_sample_write_idx_.fetch_add(1, std::memory_order_relaxed);
+        if (idx < rip_sample_capacity_)
+        {
+            this->rip_samples_[idx] = {clock_gettime_nsec_np(CLOCK_UPTIME_RAW), guest_rip};
+        }
+    }
+
+    // NOT signal-safe (fine - only ever called from start()'s ordinary loop, never from within
+    // handle_fault_signal). Writes raw binary {t_ns, rip} pairs; a small offline script converts to text.
+    void fex_vcpu::rip_sample_flush()
+    {
+        const size_t count = std::min(this->rip_sample_write_idx_.exchange(0, std::memory_order_relaxed), rip_sample_capacity_);
+        if (count == 0 || this->rip_sample_fd_ < 0)
+        {
+            return;
+        }
+        ::write(this->rip_sample_fd_, this->rip_samples_, count * sizeof(rip_sample));
+    }
 
     memory_interface& fex_vcpu::memory()
     {
@@ -3696,6 +3788,8 @@ namespace sogen::fex
             ss.ss_flags = 0;
             ::sigaltstack(&ss, nullptr);
             sigaltstack_registered = true;
+
+            this->rip_sample_init_from_env();
         }
 
         // Routes this host thread's faults to this vCPU's state for the duration of guest execution.
@@ -3723,6 +3817,11 @@ namespace sogen::fex
         for (;;)
         {
             this->active_context_->ExecuteThread(this->active_thread_.load());
+
+            if (this->rip_sample_enabled_)
+            {
+                this->rip_sample_flush();
+            }
 
             const bool hook_dispatched = this->dispatch_pending_hook_if_any();
             const bool interrupt_page_unwind = std::exchange(this->interrupt_page_unwind_, false);
@@ -5641,6 +5740,10 @@ namespace sogen::fex
                 if (is_dispatch_code && !is_strb_epilogue_write)
                 {
                     active_thread->CurrentFrame->State.rip = this->active_context_->RestoreRIPFromHostPC(active_thread, fault_pc);
+                    if (this->rip_sample_enabled_)
+                    {
+                        this->rip_sample_capture(active_thread->CurrentFrame->State.rip);
+                    }
                     this->interrupt_page_unwind_ = true;
                     const auto& stop_cfg = this->emulator_.signal_delegator_->GetConfig();
                     arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss,
