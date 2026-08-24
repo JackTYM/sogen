@@ -173,10 +173,13 @@ namespace sogen
                         },
                         [&](const function_execution_event& e) {
                             const auto prefix = this->make_call_prefix(e.call_count);
+                            static const bool trace_tid = std::getenv("SOGEN_TRACE_TID") != nullptr;
+                            const auto tid_suffix = trace_tid ? (" tid=" + std::to_string(e.execution.thread_id)) : std::string{};
                             this->log_.print(e.interesting ? color::yellow : color::dark_gray,
-                                             "%sExecuting function: %s (%s) (0x%" PRIx64 ") via 0x%" PRIx64 " (%s)\n", prefix.c_str(),
+                                             "%sExecuting function: %s (%s) (0x%" PRIx64 ") via 0x%" PRIx64 " (%s)%s\n", prefix.c_str(),
                                              e.function_name.c_str(), e.execution.rip_module.c_str(), e.execution.rip,
-                                             e.execution.previous_ip.value_or(0), e.execution.previous_ip_module.value_or("<N/A>").c_str());
+                                             e.execution.previous_ip.value_or(0), e.execution.previous_ip_module.value_or("<N/A>").c_str(),
+                                             tid_suffix.c_str());
                             for (const auto& detail : e.details)
                             {
                                 if (detail.label.empty())
@@ -194,10 +197,13 @@ namespace sogen
                                              e.execution.rip_module.c_str(), e.execution.rip);
                         },
                         [&](const foreign_code_transition_event& e) {
+                            static const bool trace_tid = std::getenv("SOGEN_TRACE_TID") != nullptr;
+                            const auto tid_suffix = trace_tid ? (" tid=" + std::to_string(e.execution.thread_id)) : std::string{};
                             this->log_.print(e.interesting ? color::yellow : color::dark_gray,
-                                             "Transition to foreign code: %s+0x%" PRIx64 " (%s) (0x%" PRIx64 ") via 0x%" PRIx64 " (%s)\n",
+                                             "Transition to foreign code: %s+0x%" PRIx64 " (%s) (0x%" PRIx64 ") via 0x%" PRIx64 " (%s)%s\n",
                                              e.function_name.c_str(), e.function_offset, e.execution.rip_module.c_str(), e.execution.rip,
-                                             e.execution.previous_ip.value_or(0), e.execution.previous_ip_module.value_or("<N/A>").c_str());
+                                             e.execution.previous_ip.value_or(0), e.execution.previous_ip_module.value_or("<N/A>").c_str(),
+                                             tid_suffix.c_str());
                         },
                         [&](const section_first_execute_event& e) {
                             this->log_.print(
@@ -218,25 +224,29 @@ namespace sogen
                         },
                         [&](const syscall_event& e) {
                             const auto prefix = this->make_call_prefix(e.call_count);
+                            static const bool trace_tid = std::getenv("SOGEN_TRACE_TID") != nullptr;
+                            const auto tid_suffix = trace_tid ? (" tid=" + std::to_string(e.execution.thread_id)) : std::string{};
                             switch (e.classification)
                             {
                             case syscall_classification::inline_syscall:
-                                this->log_.print(color::blue, "%sExecuting inline syscall: %s (0x%X) at 0x%" PRIx64 " (%s)\n",
+                                this->log_.print(color::blue, "%sExecuting inline syscall: %s (0x%X) at 0x%" PRIx64 " (%s)%s\n",
                                                  prefix.c_str(), e.syscall_name.c_str(), e.syscall_id, e.execution.rip,
-                                                 e.execution.rip_module.c_str());
+                                                 e.execution.rip_module.c_str(), tid_suffix.c_str());
                                 break;
                             case syscall_classification::crafted_out_of_line:
-                                this->log_.print(
-                                    color::blue, "%sCrafted out-of-line syscall: %s (0x%X) at 0x%" PRIx64 " (%s) via 0x%" PRIx64 " (%s)\n",
-                                    prefix.c_str(), e.syscall_name.c_str(), e.syscall_id, e.execution.rip, e.execution.rip_module.c_str(),
-                                    e.execution.previous_ip.value_or(0), e.execution.previous_ip_module.value_or("<N/A>").c_str());
+                                this->log_.print(color::blue,
+                                                 "%sCrafted out-of-line syscall: %s (0x%X) at 0x%" PRIx64 " (%s) via 0x%" PRIx64
+                                                 " (%s)%s\n",
+                                                 prefix.c_str(), e.syscall_name.c_str(), e.syscall_id, e.execution.rip,
+                                                 e.execution.rip_module.c_str(), e.execution.previous_ip.value_or(0),
+                                                 e.execution.previous_ip_module.value_or("<N/A>").c_str(), tid_suffix.c_str());
                                 break;
                             case syscall_classification::regular:
                             default:
                                 this->log_.print(color::dark_gray,
-                                                 "%sExecuting syscall: %s (0x%X) at 0x%" PRIx64 " via 0x%" PRIx64 " (%s)\n", prefix.c_str(),
-                                                 e.syscall_name.c_str(), e.syscall_id, e.execution.rip, e.caller_rip.value_or(0),
-                                                 e.caller_module.value_or("<N/A>").c_str());
+                                                 "%sExecuting syscall: %s (0x%X) at 0x%" PRIx64 " via 0x%" PRIx64 " (%s)%s\n",
+                                                 prefix.c_str(), e.syscall_name.c_str(), e.syscall_id, e.execution.rip,
+                                                 e.caller_rip.value_or(0), e.caller_module.value_or("<N/A>").c_str(), tid_suffix.c_str());
                                 break;
                             }
                         },
