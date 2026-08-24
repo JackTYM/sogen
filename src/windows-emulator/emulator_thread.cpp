@@ -421,7 +421,18 @@ namespace sogen
         if (!context.is_wow64_process)
         {
             this->stack_size = page_align_up(std::max(stack_size, static_cast<uint64_t>(STACK_SIZE)));
-            this->stack_base = memory.allocate_memory(static_cast<size_t>(this->stack_size), memory_permission::read_write);
+            this->stack_guard_size = ALLOCATION_GRANULARITY;
+
+            const auto stack_region_base =
+                memory.allocate_memory(static_cast<size_t>(this->stack_size + this->stack_guard_size), memory_permission::read_write);
+            this->stack_base = stack_region_base + this->stack_guard_size;
+
+            // Real Windows keeps a guard region below every thread stack's reservation, so code that
+            // deliberately over-probes the stack to check available headroom (e.g. crypt32.dll's
+            // InternalVerifyStackAvailable) reliably gets a guard-page/stack-overflow exception it can
+            // catch via SEH, instead of possibly landing on a neighboring module's real mapped memory.
+            memory.protect_memory(stack_region_base, static_cast<size_t>(this->stack_guard_size),
+                                  nt_memory_permission{memory_permission::read_write, memory_permission_ext::guard});
 
             this->gs_segment = emulator_allocator{
                 memory,
