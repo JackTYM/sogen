@@ -21,6 +21,12 @@ namespace sogen
     {
         namespace
         {
+            bool pipe_io_trace_enabled()
+            {
+                static const bool value = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
+                return value;
+            }
+
             bool has_valid_filename_characters(const std::u16string_view path)
             {
                 constexpr std::u16string_view invalid_characters = u"\"<>|*?";
@@ -1415,6 +1421,12 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
+                    if (pipe_io_trace_enabled())
+                    {
+                        c.win_emu.log.info("[pipe-io-trace] NtReadFile pipe='%s' length=%u queued=%zu tid=%u\n",
+                                           u16_to_u8(pipe->name).c_str(), length, pipe->write_queue.size(), c.thread().id);
+                    }
+
                     io_device_context ctx{c.emu};
                     ctx.event = handle{.bits = event};
                     ctx.apc_routine = apc_routine;
@@ -1517,6 +1529,12 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
+                    if (pipe_io_trace_enabled())
+                    {
+                        c.win_emu.log.info("[pipe-io-trace] NtWriteFile pipe='%s' length=%zu tid=%u\n", u16_to_u8(pipe->name).c_str(),
+                                           temp_buffer.size(), c.thread().id);
+                    }
+
                     deliver_bytes_to_named_pipe(c.proc, pipe->name, temp_buffer, pipe);
                     c.win_emu.broadcast_named_pipe_write(pipe->name, temp_buffer);
 
