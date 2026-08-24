@@ -158,6 +158,13 @@ namespace sogen
 
         NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override
         {
+            static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
+            if (trace_pipe_io)
+            {
+                win_emu.log.info("[pipe-io-trace] FSCTL pipe='%s' code=0x%X tid=%u\n", u16_to_u8(this->name).c_str(),
+                                 static_cast<uint32_t>(c.io_control_code), c.thread().id);
+            }
+
             if (c.io_control_code == FSCTL_PIPE_PEEK)
             {
                 return this->peek(win_emu, c);
