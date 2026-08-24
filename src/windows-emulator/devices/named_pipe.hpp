@@ -11,8 +11,8 @@ namespace sogen
     constexpr ULONG FSCTL_PIPE_DISCONNECT = 0x110004;
     // FSCTL_PIPE_LISTEN = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
     constexpr ULONG FSCTL_PIPE_LISTEN = 0x110008;
-    // FSCTL_PIPE_WAIT = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    constexpr ULONG FSCTL_PIPE_WAIT = 0x110000;
+    // FSCTL_PIPE_WAIT = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 6, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    constexpr ULONG FSCTL_PIPE_WAIT = 0x110018;
     constexpr ULONG FILE_PIPE_CONNECTED_STATE = 3;
 
     // Header of FILE_PIPE_PEEK_BUFFER; the peeked data follows immediately after.
@@ -24,13 +24,14 @@ namespace sogen
         ULONG message_length;
     };
 
-    // Strips the \Device\NamedPipe\ or \??\Pipe\ prefix a pipe's full NT path is stored under
-    // (see is_named_pipe_path, syscall_utils.hpp), leaving the bare name a client passes to
-    // WaitNamedPipeW/CreateFile via \\.\pipe\<name>. Returns the input unchanged if neither
-    // prefix matches, so it is safe to call on an already-short name too.
+    // Strips the \Device\NamedPipe\, \??\Pipe\, or \DosDevices\Pipe\ prefix a pipe's full NT
+    // path is stored under (see is_named_pipe_path, syscall_utils.hpp), leaving the bare name a
+    // client passes to WaitNamedPipeW/CreateFile via \\.\pipe\<name>. Returns the input unchanged
+    // if none of the prefixes match, so it is safe to call on an already-short name too.
     inline std::u16string_view pipe_short_name(const std::u16string_view full_name)
     {
-        for (const std::u16string_view prefix : {std::u16string_view(u"\\Device\\NamedPipe\\"), std::u16string_view(u"\\??\\Pipe\\")})
+        for (const std::u16string_view prefix : {std::u16string_view(u"\\Device\\NamedPipe\\"), std::u16string_view(u"\\??\\Pipe\\"),
+                                                 std::u16string_view(u"\\DosDevices\\Pipe\\")})
         {
             if (utils::string::starts_with_ignore_case(full_name, prefix))
             {
