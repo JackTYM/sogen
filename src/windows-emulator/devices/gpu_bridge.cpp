@@ -2797,10 +2797,17 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                // request.data_address points at the guest's own persistent Lock buffer (see
+                // umd_Unlock's own comment), not at anything inside this escape call's own input
+                // buffer -- read it directly rather than via read_trailing_array, which only knows
+                // how to read from within the escape payload itself. This is the whole point of the
+                // new wire shape: the guest never has to copy its data into the escape payload at
+                // all, so this single read_memory is the only copy on the way into `backing`.
                 std::vector<std::byte> data;
-                if (!read_trailing_array(win_emu, context, sizeof(request), request.data_size, data))
+                if (request.data_size != 0 && request.data_address != 0)
                 {
-                    return STATUS_INVALID_PARAMETER;
+                    data.resize(request.data_size);
+                    win_emu.emu().read_memory(request.data_address, data.data(), data.size());
                 }
 
                 const int32_t hr = this->d3d9_.unlock(request.resource, request.subresource, request.offset, data.data(), data.size());

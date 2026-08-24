@@ -2316,35 +2316,21 @@ namespace
         const auto offset_it = g_locked_offsets.find(key);
         const uint32_t offset = offset_it != g_locked_offsets.end() ? offset_it->second : 0;
 
-        // Build the escape buffer in place -- [escape_command_header][unlock_request][data] -- and send
-        // it directly. Going through bridge_call would first pack [unlock_request][data] into a local
-        // buffer and then have bridge_call copy that whole (data-sized) buffer again into its own
-        // [header][in][out] staging; the locked data is instead copied exactly once, straight into the
-        // wire buffer's payload region. The header and request regions are fully written below, so the
-        // buffer needs no zero-init (the value-initialized `req` carries zeroed struct padding).
-        const uint32_t header_size = sizeof(gb::escape_command_header);
+        // The request carries only `it->second`'s guest address, not its bytes: the host reads them
+        // directly via a single read_memory straight into the resource's backing store, instead of
+        // this call copying them into the escape payload for the host to copy a second time (see
+        // handle_d3d9_unlock/d3d9_host::unlock's own comments). `buffer` (below) stays valid and
+        // unchanged for the whole synchronous duration of this escape call, so there's no window for
+        // the host to read stale or torn bytes.
         const uint32_t data_size = static_cast<uint32_t>(it->second.size());
-        const uint32_t in_len = sizeof(d3d9c::unlock_request) + data_size;
-        const size_t total = static_cast<size_t>(header_size) + in_len;
-        auto storage = std::make_unique_for_overwrite<uint8_t[]>(total);
-        uint8_t* buf = storage.get();
-        fill_escape_header(buf, gb::ioctl_d3d9_unlock, in_len, 0);
-        const d3d9c::unlock_request req{.resource = resource, .subresource = subresource, .offset = offset, .data_size = data_size};
-        std::memcpy(buf + header_size, &req, sizeof(req));
-        std::memcpy(buf + header_size + sizeof(req), it->second.data(), it->second.size());
+        const d3d9c::unlock_request req{.resource = resource,
+                                        .subresource = subresource,
+                                        .offset = offset,
+                                        .data_size = data_size,
+                                        .data_address = reinterpret_cast<uint64_t>(it->second.data())};
 
-        // Unlock makes the host observe new resource content, so anything still batched that
-        // references this exact resource must be drained first -- the same ordering guarantee
-        // bridge_call's flush gate provides for Lock (resource_currently_referenced, see its own
-        // comment). Skipping the flush is safe whenever the resource genuinely isn't touched by
-        // anything pending: unlike Lock's probe/fetch, this path bypasses bridge_call entirely (see
-        // this function's own comment on why), so it needs the identical check applied explicitly
-        // here rather than inherited for free.
-        if (!g_d3d9_command_batch.empty() && resource_currently_referenced(resource))
-        {
-            flush_d3d9_batch();
-        }
-        send_escape(buf, total);
+        const bool resource_needs_flush = !g_d3d9_command_batch.empty() && resource_currently_referenced(resource);
+        bridge_call(gb::ioctl_d3d9_unlock, &req, sizeof(req), nullptr, 0, resource_needs_flush);
 
         g_locked_buffers.erase(it);
         g_locked_offsets.erase(key);

@@ -104,15 +104,18 @@ namespace sogen::d3d9_cmd
         // uint8_t data[data_size];
     };
 
-    // ioctl_d3d9_unlock: in header immediately followed by data_size bytes to write back. data_size
-    // is 0 for a resource that was locked read-only and never written.
+    // ioctl_d3d9_unlock: a fixed-size request only, no trailing data. data_address is the guest
+    // virtual address of the data_size bytes to write back -- the host reads them directly from
+    // guest memory (a single copy straight into the resource's backing store) instead of the guest
+    // packing them into the escape payload for the host to copy a second time. data_size/data_address
+    // are 0 for a resource that was locked read-only and never written.
     struct unlock_request
     {
         resource_id resource;
         uint32_t subresource;
         uint32_t offset;
         uint32_t data_size;
-        // uint8_t data[data_size];
+        uint64_t data_address;
     };
 
     // ioctl_d3d9_create_vertex_shader / ioctl_d3d9_create_pixel_shader: in header immediately
@@ -408,7 +411,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");
     static_assert(sizeof(lock_response) == 8, "wire layout drift");
-    static_assert(sizeof(unlock_request) == 24, "wire layout drift");
+    static_assert(sizeof(unlock_request) == 32, "wire layout drift");
     static_assert(sizeof(create_shader_request) == 8, "wire layout drift");
     static_assert(sizeof(create_shader_response) == 16, "wire layout drift");
     static_assert(sizeof(create_vertex_decl_request) == 8, "wire layout drift");
