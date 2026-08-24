@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -474,12 +475,38 @@ namespace sogen
         return true;
     }
 
+    void d3d9_host::close_render_pass(const uint32_t slot)
+    {
+        open_render_pass_state& rp = this->open_render_pass_[slot];
+        if (!rp.open)
+        {
+            return;
+        }
+        const uint64_t cmd = this->batch_command_buffer_[slot];
+        this->vulkan_.cmd_end_rendering(cmd);
+        const vulkan_host::subresource_range color_range{
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        for (size_t i = 0; i < rp.color_count; ++i)
+        {
+            if (rp.color_image_ids[i] == 0)
+            {
+                continue;
+            }
+            this->vulkan_.cmd_pipeline_barrier(cmd, rp.color_image_ids[i], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                               VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+        }
+        rp = {};
+    }
+
     void d3d9_host::submit_batch_async()
     {
         if (!this->batch_open_)
         {
             return;
         }
+        this->close_render_pass(this->batch_slot_);
         this->vulkan_.end_command_buffer(this->batch_command_buffer_[this->batch_slot_]);
         this->vulkan_.queue_submit(this->queue_, this->batch_command_buffer_[this->batch_slot_], this->batch_fence_[this->batch_slot_]);
         this->batch_slot_pending_[this->batch_slot_] = true;
@@ -1569,14 +1596,31 @@ namespace sogen
             return false;
         }
         this->vulkan_.bind_buffer_memory(this->vk_device_, new_buffer, new_memory, 0);
+
+        // Host-coherent memory is mapped once, persistently, instead of via upload_memory's
+        // per-call vkMapMemory/vkUnmapMemory round trip -- that round trip (not the memcpy itself)
+        // dominated execute_draw's vertex/index/UBO upload cost in live profiling. No explicit
+        // flush is needed on unmap/write since HOST_COHERENT guarantees visibility to the GPU as
+        // of the next queue submission, and every upload here happens-before submit_batch_async().
+        void* mapped_ptr = nullptr;
+        uint64_t mapped_size = 0;
+        if (this->vulkan_.map_memory(this->vk_device_, new_memory, mapped_ptr, mapped_size) != 0 || !mapped_ptr)
+        {
+            this->vulkan_.destroy_buffer(this->vk_device_, new_buffer);
+            this->vulkan_.free_memory(this->vk_device_, new_memory);
+            return false;
+        }
+
         if (arena.buffer != 0)
         {
+            this->vulkan_.unmap_memory(this->vk_device_, arena.memory);
             this->vulkan_.destroy_buffer(this->vk_device_, arena.buffer);
             this->vulkan_.free_memory(this->vk_device_, arena.memory);
         }
         arena.buffer = new_buffer;
         arena.memory = new_memory;
         arena.capacity = new_capacity;
+        arena.mapped = mapped_ptr;
         return true;
     }
 
@@ -1813,6 +1857,49 @@ namespace sogen
             uint64_t resource_id{};
             uint64_t content_version{};
             bool cache_hit{false};
+            // Byte sub-range of *bytes this draw actually needs (see upload_cache_entry's comment) --
+            // defaults to the whole buffer; narrowed below for resource-backed streams where the app's
+            // declared vertex range is known, so a draw referencing a handful of vertices out of a large
+            // shared buffer doesn't pay to upload the whole thing.
+            size_t range_start{};
+            size_t range_end{};
+        };
+
+        // Live MW2 profiling found resource-backed vertex/index uploads routinely copying tens of MB per
+        // draw while the draw itself only ever reads a few hundred vertices out of it (a large shared
+        // buffer with many small sub-range draws) -- up to ~600x more bytes than needed. Bounding the
+        // copy (and the cache-hit check) to the app's own declared vertex range fixes this without
+        // touching bind offsets or the draw call itself: the arena reservation still starts logically at
+        // resource byte 0, we simply don't bother writing (or reserving arena space for) bytes the GPU
+        // will never fetch for this draw.
+        const auto vertex_byte_range = [&](const uint32_t stream, const size_t total_bytes) -> std::pair<size_t, size_t> {
+            const auto stride_it = this->state_.stream_strides.find(stream);
+            const uint32_t stride = stride_it != this->state_.stream_strides.end() ? stride_it->second : 0;
+            if (stride == 0)
+            {
+                return {0, total_bytes}; // unknown stride -- can't bound safely, upload everything
+            }
+            uint64_t vtx_lo = 0;
+            uint64_t vtx_hi = 0;
+            if (indexed != nullptr)
+            {
+                const int64_t base = static_cast<int64_t>(indexed->base_vertex_index) + indexed->min_vertex_index;
+                vtx_lo = base > 0 ? static_cast<uint64_t>(base) : 0;
+                vtx_hi = vtx_lo + indexed->num_vertices;
+            }
+            else
+            {
+                vtx_lo = first_vertex;
+                vtx_hi = static_cast<uint64_t>(first_vertex) + vertex_count;
+            }
+            // The GPU fetches at bind_offset + i*stride, and bind_offset already folds in this stream's
+            // own SetStreamSource byte offset (see stream_bind_offsets below) -- the actual resource-byte
+            // range read is offset by that same amount, not just the vertex-index math above.
+            const auto off_it = this->state_.stream_offsets.find(stream);
+            const uint64_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
+            const size_t start = std::min(static_cast<size_t>(d3d9_stream_offset + vtx_lo * stride), total_bytes);
+            const size_t end = std::min(static_cast<size_t>(d3d9_stream_offset + vtx_hi * stride), total_bytes);
+            return {start, std::max(start, end)};
         };
 
         std::vector<reserved_range> reserved_streams;
@@ -1851,7 +1938,9 @@ namespace sogen
                 src_resource_id = src_it->second;
                 src_content_version = res_it->second.content_version;
             }
-            reserved_streams.push_back({stream, src_bytes, 0, src_resource_id, src_content_version, false});
+            const auto [range_start, range_end] =
+                src_resource_id != 0 ? vertex_byte_range(stream, src_bytes->size()) : std::pair<size_t, size_t>{0, src_bytes->size()};
+            reserved_streams.push_back({stream, src_bytes, 0, src_resource_id, src_content_version, false, range_start, range_end});
         }
 
         // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
@@ -1861,6 +1950,21 @@ namespace sogen
         const uint64_t ib_content_version = ib_entry != nullptr ? ib_entry->content_version : 0;
         size_t ib_arena_offset = 0;
         bool ib_cache_hit = false;
+        // Same range-bounding as vertex streams above, but along the index axis: this draw only ever
+        // reads indices [first_index, first_index+index_count) (index_count is `vertex_count` here --
+        // see this function's indexed-draw call site, which passes the index count through that
+        // parameter). Only meaningful for a resource-backed index buffer (ib_resource_id != 0); UM-backed
+        // inline index bytes are already exactly sized for this one draw.
+        size_t ib_range_start = 0;
+        size_t ib_range_end = ib_bytes != nullptr ? ib_bytes->size() : 0;
+        if (ib_bytes != nullptr && ib_resource_id != 0 && indexed != nullptr)
+        {
+            const size_t index_size = indexed->index_format != 0 ? 4 : 2;
+            const size_t start = std::min(static_cast<size_t>(indexed->first_index) * index_size, ib_bytes->size());
+            const size_t end = std::min((static_cast<size_t>(indexed->first_index) + vertex_count) * index_size, ib_bytes->size());
+            ib_range_start = start;
+            ib_range_end = std::max(start, end);
+        }
 
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
@@ -1893,33 +1997,56 @@ namespace sogen
         // of the six sizes above is a fixed D3D9 constant-register cap, never varying per draw or per
         // shader, so a fresh std::vector would never actually need a different size from call to call.
         std::array<std::vector<std::byte>, 6>& ubo_staging = this->ubo_staging_;
-        // Zero-pads each constant file to its full fixed cap (unset D3D9 registers read as 0) into a
-        // staging blob -- the full zero-padded buffer is what gets uploaded, so no stale tail can survive
-        // across draws. Split into build-now / upload-in-phase-B
-        // like the streams above so the arena buffer is final before any upload.
-        auto build_ubo_staging = [](std::vector<std::byte>& staging, const size_t size, const auto& consts) {
-            if (staging.size() != size)
+        // ubo_staging_[slot] holds the LAST-UPLOADED content for that slot, not necessarily this draw's
+        // content: the candidate is built into ubo_scratch_[slot] first, and only copied over ubo_staging_
+        // (replacing the last-uploaded snapshot) when it's actually different. A live MW2 profile found the
+        // int/bool constant UBOs byte-identical across ~100% of consecutive draws and the pixel-shader float
+        // UBO ~95% identical, so most draws can skip the arena reservation + upload_memory + descriptor
+        // write below entirely and just reuse the previous draw's binding (see ubo_upload_cache_ and its
+        // batch_generation_-gated reuse check in phase A) -- same shape of win as Task #161's vertex/index
+        // upload cache, just keyed on content equality instead of a resource's content_version.
+        //
+        // Returns true if the content changed (staging was updated, so phase A must reserve a fresh arena
+        // slice and phase B must re-upload), false if byte-identical to what's already at the cached offset.
+        auto build_ubo_staging = [](std::vector<std::byte>& staging, std::vector<std::byte>& scratch, const size_t size,
+                                    const auto& consts) {
+            if (scratch.size() != size)
             {
-                staging.assign(size, std::byte{0});
+                scratch.assign(size, std::byte{0});
             }
             else
             {
-                std::ranges::fill(staging, std::byte{0});
+                std::ranges::fill(scratch, std::byte{0});
             }
             const size_t bytes = std::min(consts.size() * sizeof(*consts.data()), size);
             if (bytes > 0)
             {
-                std::memcpy(staging.data(), consts.data(), bytes);
+                std::memcpy(scratch.data(), consts.data(), bytes);
             }
+            if (staging.size() == size && staging == scratch)
+            {
+                return false;
+            }
+            staging.swap(scratch);
+            return true;
         };
+        std::array<std::vector<std::byte>, 6>& ubo_scratch = this->ubo_scratch_;
+        // True for a slot this draw actually changed (build_ubo_staging updated ubo_staging_[slot]) -- see
+        // the cache-hit check in phase A below, which reuses the previous draw's arena offset/upload for any
+        // slot that's both unchanged AND still within the same batch_generation_.
+        std::array<bool, 6> ubo_changed{};
         if (use_programmable)
         {
-            build_ubo_staging(ubo_staging[ubo_vs_f], vs_ubo_size, this->state_.vs_const_f);
-            build_ubo_staging(ubo_staging[ubo_ps_f], ps_ubo_size, this->state_.ps_const_f);
-            build_ubo_staging(ubo_staging[ubo_vs_i], int_bool_ubo_size, this->state_.vs_const_i);
-            build_ubo_staging(ubo_staging[ubo_ps_i], int_bool_ubo_size, this->state_.ps_const_i);
-            build_ubo_staging(ubo_staging[ubo_vs_b], int_bool_ubo_size, this->state_.vs_const_b);
-            build_ubo_staging(ubo_staging[ubo_ps_b], int_bool_ubo_size, this->state_.ps_const_b);
+            ubo_changed[ubo_vs_f] = build_ubo_staging(ubo_staging[ubo_vs_f], ubo_scratch[ubo_vs_f], vs_ubo_size, this->state_.vs_const_f);
+            ubo_changed[ubo_ps_f] = build_ubo_staging(ubo_staging[ubo_ps_f], ubo_scratch[ubo_ps_f], ps_ubo_size, this->state_.ps_const_f);
+            ubo_changed[ubo_vs_i] =
+                build_ubo_staging(ubo_staging[ubo_vs_i], ubo_scratch[ubo_vs_i], int_bool_ubo_size, this->state_.vs_const_i);
+            ubo_changed[ubo_ps_i] =
+                build_ubo_staging(ubo_staging[ubo_ps_i], ubo_scratch[ubo_ps_i], int_bool_ubo_size, this->state_.ps_const_i);
+            ubo_changed[ubo_vs_b] =
+                build_ubo_staging(ubo_staging[ubo_vs_b], ubo_scratch[ubo_vs_b], int_bool_ubo_size, this->state_.vs_const_b);
+            ubo_changed[ubo_ps_b] =
+                build_ubo_staging(ubo_staging[ubo_ps_b], ubo_scratch[ubo_ps_b], int_bool_ubo_size, this->state_.ps_const_b);
         }
 
         // Total arena bytes this draw's reservations will consume, rounded per slice with the exact same
@@ -2013,6 +2140,11 @@ namespace sogen
                 this->vulkan_.reset_descriptor_pool(device, this->frame_descriptor_pool_[this->batch_slot_], 0);
             }
             this->batch_draw_count_ = 0;
+            // Whatever render-pass instance this slot last had open was already closed by
+            // submit_batch_async (close_render_pass) before its batch could be submitted, or never existed
+            // (first use) -- reasserted here defensively rather than trusted, same belt-and-suspenders
+            // convention as the RT/depth-stencil mismatch check above.
+            this->open_render_pass_[this->batch_slot_] = {};
             this->vulkan_.reset_fence(device, this->batch_fence_[this->batch_slot_]);
             this->vulkan_.begin_command_buffer(this->batch_command_buffer_[this->batch_slot_], 0, false, 0, {}, 0, 0, 1, 0);
             this->batch_open_ = true;
@@ -2046,14 +2178,15 @@ namespace sogen
             {
                 const upload_cache_entry& cached = this->stream_upload_cache_[rs.stream];
                 if (cached.valid && cached.resource_id == rs.resource_id && cached.content_version == rs.content_version &&
-                    cached.batch_generation == this->batch_generation_)
+                    cached.batch_generation == this->batch_generation_ && cached.range_start <= rs.range_start &&
+                    cached.range_end >= rs.range_end)
                 {
                     rs.offset = cached.arena_offset;
                     rs.cache_hit = true;
                     continue;
                 }
             }
-            if (!this->arena_suballoc(arena, rs.bytes->size(), rs.offset))
+            if (!this->arena_suballoc(arena, rs.range_end, rs.offset))
             {
                 return d3d_ok;
             }
@@ -2062,20 +2195,29 @@ namespace sogen
         {
             if (ib_resource_id != 0 && this->index_upload_cache_.valid && this->index_upload_cache_.resource_id == ib_resource_id &&
                 this->index_upload_cache_.content_version == ib_content_version &&
-                this->index_upload_cache_.batch_generation == this->batch_generation_)
+                this->index_upload_cache_.batch_generation == this->batch_generation_ &&
+                this->index_upload_cache_.range_start <= ib_range_start && this->index_upload_cache_.range_end >= ib_range_end)
             {
                 ib_arena_offset = this->index_upload_cache_.arena_offset;
                 ib_cache_hit = true;
             }
-            else if (!this->arena_suballoc(arena, ib_bytes->size(), ib_arena_offset))
+            else if (!this->arena_suballoc(arena, ib_range_end, ib_arena_offset))
             {
                 return d3d_ok;
             }
         }
+        std::array<bool, 6> ubo_cache_hit{};
         if (use_programmable)
         {
             for (size_t i = 0; i < ubo_offsets.size(); ++i)
             {
+                const ubo_upload_cache_entry& cached = this->ubo_upload_cache_[i];
+                if (!ubo_changed[i] && cached.valid && cached.batch_generation == this->batch_generation_)
+                {
+                    ubo_offsets[i] = cached.arena_offset;
+                    ubo_cache_hit[i] = true;
+                    continue;
+                }
                 if (!this->arena_suballoc(arena, ubo_sizes[i], ubo_offsets[i]))
                 {
                     return d3d_ok;
@@ -2097,14 +2239,22 @@ namespace sogen
             }
             else
             {
-                this->vulkan_.upload_memory(device, arena.memory, rs.offset, rs.bytes->size(), rs.bytes->data(), rs.bytes->size());
+                std::memcpy(static_cast<std::byte*>(arena.mapped) + rs.offset + rs.range_start, rs.bytes->data() + rs.range_start,
+                            rs.range_end - rs.range_start);
                 ++this->stats_.vertex_upload_done;
+                if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
+                {
+                    fprintf(stderr, "[d3d9-uploadvol-diag] kind=vertex bytes=%zu referenced_verts=%u\n",
+                            rs.range_end - rs.range_start, vertex_count);
+                }
                 if (rs.resource_id != 0)
                 {
                     this->stream_upload_cache_[rs.stream] = {.resource_id = rs.resource_id,
                                                              .content_version = rs.content_version,
                                                              .batch_generation = this->batch_generation_,
                                                              .arena_offset = rs.offset,
+                                                             .range_start = rs.range_start,
+                                                             .range_end = rs.range_end,
                                                              .valid = true};
                 }
             }
@@ -2123,14 +2273,21 @@ namespace sogen
             }
             else
             {
-                this->vulkan_.upload_memory(device, arena.memory, ib_arena_offset, ib_bytes->size(), ib_bytes->data(), ib_bytes->size());
+                std::memcpy(static_cast<std::byte*>(arena.mapped) + ib_arena_offset + ib_range_start,
+                            ib_bytes->data() + ib_range_start, ib_range_end - ib_range_start);
                 ++this->stats_.index_upload_done;
+                if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
+                {
+                    fprintf(stderr, "[d3d9-uploadvol-diag] kind=index bytes=%zu\n", ib_range_end - ib_range_start);
+                }
                 if (ib_resource_id != 0)
                 {
                     this->index_upload_cache_ = {.resource_id = ib_resource_id,
                                                  .content_version = ib_content_version,
                                                  .batch_generation = this->batch_generation_,
                                                  .arena_offset = ib_arena_offset,
+                                                 .range_start = ib_range_start,
+                                                 .range_end = ib_range_end,
                                                  .valid = true};
                 }
             }
@@ -2152,11 +2309,22 @@ namespace sogen
         std::vector<resource_entry*> sampled_render_targets;
         if (use_programmable)
         {
-            // Upload the six constant buffers into their reserved arena slices. Contents genuinely change
-            // per draw; the slices were reserved (and the arena grown if needed) in phase A above.
+            // Upload the six constant buffers into their reserved arena slices -- skipped for any slot
+            // phase A found unchanged-and-cached (ubo_cache_hit), which already points ubo_offsets[i] at
+            // the still-valid arena slice from an earlier draw in this same batch_generation_.
             for (size_t i = 0; i < ubo_offsets.size(); ++i)
             {
-                this->vulkan_.upload_memory(device, arena.memory, ubo_offsets[i], ubo_sizes[i], ubo_staging[i].data(), ubo_sizes[i]);
+                if (ubo_cache_hit[i])
+                {
+                    continue;
+                }
+                std::memcpy(static_cast<std::byte*>(arena.mapped) + ubo_offsets[i], ubo_staging[i].data(), ubo_sizes[i]);
+                if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
+                {
+                    fprintf(stderr, "[d3d9-uploadvol-diag] kind=ubo slot=%zu bytes=%zu\n", i, ubo_sizes[i]);
+                }
+                this->ubo_upload_cache_[i] = {
+                    .batch_generation = this->batch_generation_, .arena_offset = ubo_offsets[i], .valid = true};
             }
 
             // Combined-image-sampler bindings for texture stages s0..s3 (see ensure_programmable_pipeline's
@@ -2417,25 +2585,53 @@ namespace sogen
         }
 
         // Record into the open batch command buffer (begun in batch management above); the batch stays
-        // open across draws and is submitted only by flush_batch. Each draw's color-attachment barrier
-        // round trip below (TRANSFER_SRC <-> COLOR_ATTACHMENT) serializes it against prior same-render-
-        // target draws already recorded into this batch.
+        // open across draws and is submitted only by flush_batch.
         //
         // Assumes Clear always runs before the first Draw (true for this test's flow), which leaves
         // the image in TRANSFER_SRC_OPTIMAL (submit_clear's own documented post-state) -- transition to
         // COLOR_ATTACHMENT_OPTIMAL for rendering, then back for the readback below.
         const vulkan_host::subresource_range color_range{
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
-        for (const auto& brt : bound_rts)
+
+        // Consecutive draws into the exact same color attachments (same images AND same views -- an
+        // sRGB-vs-linear view swap on an otherwise-unchanged image counts as a change) share ONE dynamic-
+        // rendering instance instead of paying their own cmd_begin_rendering/cmd_end_rendering plus the
+        // TRANSFER_SRC<->COLOR_ATTACHMENT round trip each. On a tile-based GPU (Apple Silicon) ending a
+        // rendering instance forces its attachments' tile memory to be stored to VRAM, and beginning one
+        // with LOAD_OP_LOAD forces a reload from VRAM -- paying that full-attachment round trip on every
+        // single draw, as opposed to once per run of same-target draws, is the same shape of cost Task
+        // #161's vertex/index upload cache eliminated for CPU-side uploads (see stream_upload_cache_'s
+        // comment), just on the GPU side and per render-pass-instance rather than per byte range.
+        //
+        // A render-to-texture draw (sampled_render_targets non-empty) always closes any open instance
+        // first and never leaves one open itself -- see the call below and its mirror after the draw --
+        // so this merge never has to reason about a sampled render target's own layout round trip; that
+        // rare, previously fragile path (shadow maps) keeps its exact pre-merging, fully self-contained
+        // per-draw shape.
+        open_render_pass_state& rp = this->open_render_pass_[this->batch_slot_];
+        bool can_continue_pass = rp.open && sampled_render_targets.empty() && rp.color_count == bound_rts.size() &&
+                                 rp.depth_image_id == (ds_entry != nullptr ? ds_entry->vk_image_id : 0);
+        for (size_t i = 0; can_continue_pass && i < bound_rts.size(); ++i)
         {
-            if (brt.entry == nullptr)
+            const uint64_t want_image = bound_rts[i].entry != nullptr ? bound_rts[i].entry->vk_image_id : 0;
+            const uint64_t want_view = bound_rts[i].entry != nullptr ? attachment_view(bound_rts[i]) : 0;
+            can_continue_pass = rp.color_image_ids[i] == want_image && rp.color_view_ids[i] == want_view;
+        }
+
+        if (!can_continue_pass)
+        {
+            this->close_render_pass(this->batch_slot_);
+            for (const auto& brt : bound_rts)
             {
-                continue; // gap slot -- no real image to transition
+                if (brt.entry == nullptr)
+                {
+                    continue; // gap slot -- no real image to transition
+                }
+                this->vulkan_.cmd_pipeline_barrier(batch_cmd, brt.entry->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
             }
-            this->vulkan_.cmd_pipeline_barrier(batch_cmd, brt.entry->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
         }
         for (resource_entry* srt : sampled_render_targets)
         {
@@ -2445,65 +2641,78 @@ namespace sogen
                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, color_range);
         }
 
-        std::vector<vulkan_host::rendering_attachment> color_attachments;
-        color_attachments.reserve(bound_rts.size());
-        for (const auto& brt : bound_rts)
+        if (!can_continue_pass)
         {
-            if (brt.entry == nullptr)
+            std::vector<vulkan_host::rendering_attachment> color_attachments;
+            color_attachments.reserve(bound_rts.size());
+            for (const auto& brt : bound_rts)
             {
-                // Gap slot: image_view == 0 (VK_NULL_HANDLE) marks this attachment index unused per
-                // VkRenderingAttachmentInfo's own documented semantics -- writes to this location are
-                // discarded, matching a PS that never writes this oC# in the first place.
-                color_attachments.push_back({});
-                continue;
+                if (brt.entry == nullptr)
+                {
+                    // Gap slot: image_view == 0 (VK_NULL_HANDLE) marks this attachment index unused per
+                    // VkRenderingAttachmentInfo's own documented semantics -- writes to this location are
+                    // discarded, matching a PS that never writes this oC# in the first place.
+                    color_attachments.push_back({});
+                    continue;
+                }
+                color_attachments.push_back({
+                    .image_view = brt.srgb ? brt.entry->vk_image_view_srgb_id : brt.entry->vk_image_view_id,
+                    .resolve_image_view = 0,
+                    .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    .resolve_image_layout = 0,
+                    .resolve_mode = 0,
+                    .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
+                    .store_op = VK_ATTACHMENT_STORE_OP_STORE,
+                });
             }
-            color_attachments.push_back({
-                .image_view = brt.srgb ? brt.entry->vk_image_view_srgb_id : brt.entry->vk_image_view_id,
+            // The one-time init above already left the depth image in DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            // and every later draw finds it already there (LOAD_OP_LOAD/STORE_OP_STORE keep it there
+            // across draws) -- so no LAYOUT transition is needed here, unlike the color attachment's
+            // transfer-src round trip. A pure execution+memory dependency still is, though, but only once
+            // per fresh rendering instance: two draws inside the SAME instance (the merge case above) are
+            // in the same subpass, where Vulkan's own implicit ordering already makes an earlier draw's
+            // depth writes visible to a later one's depth test -- exactly how every ordinary Vulkan
+            // renderer relies on it without an explicit barrier between draws. That guarantee does not
+            // reach across two separate instances, so opening a fresh one here still needs it, to make
+            // whatever a PRIOR instance (a previous batch, or a previous same-slot run before an
+            // attachment change) wrote visible to this one.
+            if (ds_entry != nullptr)
+            {
+                const vulkan_host::subresource_range depth_range{.aspect_mask = depth_aspect_mask(depth_vk_format),
+                                                                 .base_mip_level = 0,
+                                                                 .level_count = 1,
+                                                                 .base_array_layer = 0,
+                                                                 .layer_count = 1};
+                this->vulkan_.cmd_pipeline_barrier(batch_cmd, ds_entry->vk_image_id,
+                                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
+            }
+            const vulkan_host::rendering_attachment depth_attachment{
+                .image_view = ds_entry != nullptr ? ds_entry->vk_image_view_id : 0,
                 .resolve_image_view = 0,
-                .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .image_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 .resolve_image_layout = 0,
                 .resolve_mode = 0,
                 .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
                 .store_op = VK_ATTACHMENT_STORE_OP_STORE,
-            });
+            };
+            this->vulkan_.cmd_begin_rendering(batch_cmd, 0, 0, rt.width, rt.height, 1, 0, 0, color_attachments,
+                                              ds_entry != nullptr ? &depth_attachment : nullptr, nullptr);
+
+            rp.open = true;
+            rp.color_count = bound_rts.size();
+            for (size_t i = 0; i < bound_rts.size(); ++i)
+            {
+                rp.color_image_ids[i] = bound_rts[i].entry != nullptr ? bound_rts[i].entry->vk_image_id : 0;
+                rp.color_view_ids[i] = bound_rts[i].entry != nullptr ? attachment_view(bound_rts[i]) : 0;
+            }
+            rp.depth_image_id = ds_entry != nullptr ? ds_entry->vk_image_id : 0;
         }
-        // The one-time init above already left the depth image in DEPTH_STENCIL_ATTACHMENT_OPTIMAL, and
-        // every later draw finds it already there (LOAD_OP_LOAD/STORE_OP_STORE keep it there across
-        // draws) -- so no LAYOUT transition is needed here, unlike the color attachment's transfer-src
-        // round trip. A pure execution+memory dependency still is, though: every draw opens its OWN
-        // dynamic-rendering instance (cmd_begin_rendering/cmd_end_rendering below, once per draw), and
-        // Vulkan gives no ordering guarantee between two render pass instances in the same command buffer
-        // -- the "later draws in the same subpass see earlier depth writes" rule applies WITHIN a subpass,
-        // which consecutive batched draws here are not. Prior batched draws' depth writes must therefore
-        // be made visible to this draw's depth test/write explicitly, exactly as the color attachment's
-        // own per-draw barrier round trip above already does for color. Same layout on both sides, so this
-        // is a barrier and nothing more. Before batching this was implicit: every depth draw was its own
-        // submission, and queue-submission order supplied the dependency.
-        if (ds_entry != nullptr)
-        {
-            const vulkan_host::subresource_range depth_range{.aspect_mask = depth_aspect_mask(depth_vk_format),
-                                                             .base_mip_level = 0,
-                                                             .level_count = 1,
-                                                             .base_array_layer = 0,
-                                                             .layer_count = 1};
-            this->vulkan_.cmd_pipeline_barrier(
-                batch_cmd, ds_entry->vk_image_id, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
-        }
-        const vulkan_host::rendering_attachment depth_attachment{
-            .image_view = ds_entry != nullptr ? ds_entry->vk_image_view_id : 0,
-            .resolve_image_view = 0,
-            .image_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            .resolve_image_layout = 0,
-            .resolve_mode = 0,
-            .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .store_op = VK_ATTACHMENT_STORE_OP_STORE,
-        };
-        this->vulkan_.cmd_begin_rendering(batch_cmd, 0, 0, rt.width, rt.height, 1, 0, 0, color_attachments,
-                                          ds_entry != nullptr ? &depth_attachment : nullptr, nullptr);
 
         this->vulkan_.cmd_bind_pipeline(batch_cmd, use_programmable ? programmable->pipeline : this->pipeline_,
                                         VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -2586,7 +2795,16 @@ namespace sogen
             this->vulkan_.cmd_draw(batch_cmd, vertex_count, instance_count, first_vertex, 0);
         }
 
-        this->vulkan_.cmd_end_rendering(batch_cmd);
+        // A render-to-texture draw stays exactly as self-contained as before merging: close the instance
+        // it just opened above (can_continue_pass is always false for it -- sampled_render_targets is
+        // part of that check) right back down, restoring its color attachments to the TRANSFER_SRC_OPTIMAL
+        // resting layout immediately rather than leaving them open for a next draw to (never, since the
+        // check excludes it) merge with. An ordinary draw leaves its instance open instead, for the next
+        // draw's can_continue_pass check above to pick up.
+        if (!sampled_render_targets.empty())
+        {
+            this->close_render_pass(this->batch_slot_);
+        }
 
         // Counted here, past every early return, so these are draws that genuinely reached the GPU.
         ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
@@ -2610,19 +2828,10 @@ namespace sogen
             ++this->stats_.recorded_depth_tested;
         }
 
-        for (const auto& brt : bound_rts)
-        {
-            if (brt.entry == nullptr)
-            {
-                continue; // gap slot -- no real image to transition
-            }
-            this->vulkan_.cmd_pipeline_barrier(batch_cmd, brt.entry->vk_image_id, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                               VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
-        }
         // Restore every sampled render target to the TRANSFER_SRC_OPTIMAL resting layout the rest of this
-        // host (readback, clear, blt, the next draw's own barriers) relies on.
+        // host (readback, clear, blt, the next draw's own barriers) relies on. The color attachments
+        // themselves are restored by close_render_pass above (immediately for a render-to-texture draw,
+        // or later -- at the next attachment change or batch submit -- for an ordinary one).
         for (resource_entry* srt : sampled_render_targets)
         {
             this->vulkan_.cmd_pipeline_barrier(batch_cmd, srt->vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -4073,7 +4282,9 @@ namespace sogen
             const indexed_draw indexed{.index_buffer = this->state_.index_buffer,
                                        .index_format = this->state_.index_format,
                                        .first_index = req.start_index,
-                                       .base_vertex_index = req.base_vertex_index};
+                                       .base_vertex_index = req.base_vertex_index,
+                                       .min_vertex_index = req.min_vertex_index,
+                                       .num_vertices = req.num_vertices};
             return this->execute_draw(req.primitive_count * 3, 0, &indexed);
         }
         case gpu_bridge::command::d3d9_set_stream_source_um: {

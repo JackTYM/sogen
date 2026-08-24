@@ -48,6 +48,7 @@ namespace sogen
         uint64_t memory{};
         size_t capacity{};
         size_t offset{};
+        void* mapped{};
     };
 
     // Reinterprets blob as a back-to-back array of d3d9_cmd::vertex_element (8 bytes each; blob.size()
@@ -583,6 +584,11 @@ namespace sogen
             uint64_t content_version{};
             uint64_t batch_generation{};
             size_t arena_offset{};
+            // Byte range (relative to the resource's own backing, not the arena) that was actually
+            // uploaded -- a draw needing a range outside [range_start, range_end) is a miss even if the
+            // other fields match, since bytes outside that range were never written into the arena slice.
+            size_t range_start{};
+            size_t range_end{};
             bool valid{false};
         };
 
@@ -590,6 +596,46 @@ namespace sogen
         // every stream index it ever iterates is < 32).
         std::array<upload_cache_entry, 32> stream_upload_cache_{};
         upload_cache_entry index_upload_cache_{};
+
+        // Same idea as upload_cache_entry above, but for the six per-draw constant-register UBOs (see
+        // ubo_staging_ below): these have no D3D9 resource id/content_version to key off, so the cache key
+        // is instead "did build_ubo_staging detect a byte-for-byte content change since the value currently
+        // sitting in ubo_staging_ (which IS the last-uploaded content -- see its own comment), still within
+        // the same batch_generation_". A live MW2 profile found the int/bool constant UBOs are ~100% byte-
+        // identical across consecutive draws and the pixel-shader float UBO ~95% identical, so skipping the
+        // arena reservation + upload_memory + descriptor write for those is a real, common-case win.
+        struct ubo_upload_cache_entry
+        {
+            uint64_t batch_generation{};
+            size_t arena_offset{};
+            bool valid{false};
+        };
+        std::array<ubo_upload_cache_entry, 6> ubo_upload_cache_{};
+        // Scratch buffer build_ubo_staging fills the CANDIDATE content into before comparing against
+        // ubo_staging_'s current (= last-uploaded) content -- ubo_staging_ itself is only overwritten when
+        // the candidate actually differs, so it doubles as the "last known uploaded content" snapshot the
+        // cache-hit check compares fresh candidates against.
+        std::array<std::vector<std::byte>, 6> ubo_scratch_{};
+
+        // Identity of the dynamic-rendering instance (if any) currently left open on a slot's batch
+        // command buffer, spanning zero or more already-recorded draws. execute_draw reopens a fresh
+        // instance (its own cmd_begin_rendering/cmd_end_rendering pair, plus the color-attachment layout
+        // round trip) only when the next draw's own attachments don't match this exactly -- otherwise it
+        // just keeps recording into the same instance. Every render-to-texture draw (one that samples a
+        // render target as a texture) always closes any open instance first and never leaves one open
+        // itself, so this never has to reason about that case; see close_render_pass's caller in
+        // execute_draw for why. color_image_ids/color_view_ids are 0 for a gap slot (D3D9 RT slot with no
+        // resolvable resource), matching rt_slots' own "0 = unbound" convention; depth_image_id is 0 for
+        // a colour-only instance.
+        struct open_render_pass_state
+        {
+            bool open{false};
+            std::array<uint64_t, 4> color_image_ids{};
+            std::array<uint64_t, 4> color_view_ids{};
+            size_t color_count{0};
+            uint64_t depth_image_id{0};
+        };
+        std::array<open_render_pass_state, batch_slot_count> open_render_pass_{};
 
         // Process-lifetime instrumentation, never reset: draw_count_ increments once per execute_draw
         // call, batch_submit_count_ once per real flush_batch() submit (an open batch actually
@@ -844,6 +890,11 @@ namespace sogen
         // which deliberately defers it to get CPU/GPU overlap across the round-robin slots (see
         // batch_slot_count's comment) -- every other caller must use flush_batch() below instead.
         void submit_batch_async();
+        // Ends slot `slot`'s currently open dynamic-rendering instance (if any -- a no-op otherwise) and
+        // restores every colour attachment it used to the TRANSFER_SRC_OPTIMAL resting layout the rest of
+        // this host relies on between draws. Must run before that slot's command buffer is ended
+        // (submit_batch_async) and before execute_draw opens a differently-shaped instance on it.
+        void close_render_pass(uint32_t slot);
         // Blocks until batch slot `slot`'s most recently submitted batch (if any) has completed, then
         // clears batch_slot_pending_[slot]. A no-op when that slot has no outstanding submission -- either
         // it was never used, or an earlier wait already drained it.
@@ -968,6 +1019,12 @@ namespace sogen
             uint32_t index_format;
             uint32_t first_index;
             int32_t base_vertex_index;
+            // The app-declared vertex range this draw touches (D3D9's DrawIndexedPrimitive MinIndex/
+            // NumVertices) -- used to bound how much of a resource-backed vertex stream actually needs
+            // uploading, independent of the index buffer's own [first_index, first_index+index_count)
+            // bound above.
+            uint32_t min_vertex_index;
+            uint32_t num_vertices;
         };
 
         int32_t execute_draw(uint32_t vertex_count, uint32_t first_vertex, const indexed_draw* indexed = nullptr);
