@@ -29,6 +29,30 @@ namespace sogen
 
             c.win_emu.callbacks.on_generic_access("Registry key", key);
 
+            // Temporary diagnostic (EMULATOR_REGISTRY_PATH_FREQ_DIAG=1): registry-path frequency counts,
+            // printed every 50,000 opens. Live MW2 syscall-frequency profiling (EMULATOR_SYSCALL_FREQ_DIAG)
+            // found NtOpenKeyEx/NtQueryValueKey/NtQueryKey/NtQueryObject/NtSetInformationKey together
+            // accounting for ~60% of all syscalls, ~33,000/sec -- this finds WHICH specific key(s) are
+            // being hit this hard, to distinguish a legitimate repeated-poll pattern from a sogen-side
+            // registry-emulation quirk making the caller retry excessively.
+            if (getenv("EMULATOR_REGISTRY_PATH_FREQ_DIAG"))
+            {
+                static std::unordered_map<std::string, uint64_t> counts;
+                static uint64_t total = 0;
+                ++counts[u16_to_u8(key)];
+                if (++total % 50000 == 0)
+                {
+                    std::vector<std::pair<std::string, uint64_t>> sorted(counts.begin(), counts.end());
+                    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                    fprintf(stderr, "[regpath-freq-diag] total_opens=%llu top:\n", static_cast<unsigned long long>(total));
+                    for (size_t i = 0; i < sorted.size() && i < 10; ++i)
+                    {
+                        fprintf(stderr, "[regpath-freq-diag]   %s = %llu\n", sorted[i].first.c_str(),
+                                static_cast<unsigned long long>(sorted[i].second));
+                    }
+                }
+            }
+
             if (getenv("EMULATOR_REGISTRY_ACTIVATION_DIAG"))
             {
                 auto key_8 = u16_to_u8(key);

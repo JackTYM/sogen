@@ -169,6 +169,30 @@ namespace sogen
         const auto entry = this->handlers_.find(syscall_id);
         const auto* syscall_name = (entry != this->handlers_.end()) ? entry->second.name.c_str() : "<unknown>";
 
+        // Temporary diagnostic (EMULATOR_SYSCALL_FREQ_DIAG=1): syscall-name frequency counts, printed
+        // every 200,000 dispatches. With every D3D9-host-side and UI-present-side FPS lever this
+        // session investigated either fixed or measured and ruled out, and the RIP-sampler (see
+        // fex_x86_64_emulator.cpp's EMULATOR_FEX_RIP_SAMPLE) consistently finding ~98% of guest-
+        // execution samples in FEXCore's own syscall-dispatch/WoW64-gate-crossing trampoline, this
+        // checks what the guest is actually spending syscall volume on beyond D3D9's own Escape calls.
+        if (getenv("EMULATOR_SYSCALL_FREQ_DIAG"))
+        {
+            static std::unordered_map<std::string, uint64_t> counts;
+            static uint64_t total = 0;
+            ++counts[syscall_name];
+            if (++total % 200000 == 0)
+            {
+                std::vector<std::pair<std::string, uint64_t>> sorted(counts.begin(), counts.end());
+                std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                fprintf(stderr, "[syscall-freq-diag] total=%llu top:\n", static_cast<unsigned long long>(total));
+                for (size_t i = 0; i < sorted.size() && i < 15; ++i)
+                {
+                    fprintf(stderr, "[syscall-freq-diag]   %s = %llu (%.1f%%)\n", sorted[i].first.c_str(),
+                            static_cast<unsigned long long>(sorted[i].second), 100.0 * static_cast<double>(sorted[i].second) / static_cast<double>(total));
+                }
+            }
+        }
+
         if (getenv("EMULATOR_BINK_CONTROL_DIAG"))
         {
             constexpr uint64_t bink_ptr_addr = 0x1C87BD4;
