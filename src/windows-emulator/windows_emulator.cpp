@@ -912,6 +912,14 @@ namespace sogen
 
     void windows_emulator::register_pipe_ipc_peer(std::unique_ptr<pipe_ipc_channel> peer)
     {
+        for (const auto& short_name : this->known_named_pipe_servers_)
+        {
+            pipe_ipc_message message{};
+            message.type = pipe_ipc_message_type::server_created;
+            message.pipe_name = short_name;
+            peer->send(message);
+        }
+
         this->pipe_ipc_peers_.push_back(std::move(peer));
     }
 
