@@ -287,7 +287,7 @@ namespace sogen
             case ProcessBasicInformation: {
                 const auto init_basic_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
                     basic_info.PebBaseAddress = c.proc.peb64.value();
-                    basic_info.UniqueProcessId = process_context::process_id;
+                    basic_info.UniqueProcessId = c.proc.process_id;
                 };
 
                 switch (process_information_length)
@@ -652,7 +652,7 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtOpenProcess(const syscall_context& /*c*/, const emulator_object<handle> process_handle,
+        NTSTATUS handle_NtOpenProcess(const syscall_context& c, const emulator_object<handle> process_handle,
                                       const ACCESS_MASK /*desired_access*/,
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
                                       const emulator_object<CLIENT_ID64> client_id)
@@ -665,7 +665,7 @@ namespace sogen
             const auto id = client_id.read();
 
             // The guest opening its own pid resolves to the real guest process handle.
-            if (id.UniqueProcess == process_context::process_id)
+            if (id.UniqueProcess == c.proc.process_id)
             {
                 process_handle.write(GUEST_PROCESS_HANDLE);
                 return STATUS_SUCCESS;
@@ -828,6 +828,7 @@ namespace sogen
             }
 
             const auto record_id = c.proc.next_child_record_id++;
+            const uint32_t child_pid = 0x1000 + 4 * record_id;
 
             c.win_emu.log.log("NtCreateUserProcess: launching child %u: %s\n", record_id, u16_to_u8(image_path).c_str());
             c.win_emu.log.log("NtCreateUserProcess: child %u cmdline: %s\n", record_id, u16_to_u8(command_line).c_str());
@@ -838,6 +839,7 @@ namespace sogen
                 .environment = parse_environment_block(c.emu, params.Environment),
                 .command_line = std::move(command_line),
                 .image_path = image_path,
+                .process_id = child_pid,
             };
 
             std::vector<inherited_pipe_handle> inherited_pipes{};
@@ -920,7 +922,7 @@ namespace sogen
 
             process_context::child_process_record record{};
             record.image_path = image_windows_path;
-            record.pid = 0x1000 + 4 * record_id;
+            record.pid = child_pid;
             // The child now runs as an independent, real host OS process rather than being run to
             // completion synchronously before this syscall returns - its real exit status isn't known
             // yet, and nothing in this codebase queries it today (NtWaitForSingleObject/

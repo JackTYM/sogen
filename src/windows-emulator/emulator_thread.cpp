@@ -441,7 +441,7 @@ namespace sogen
                 // See nls_cache_placeholder's doc comment.
                 teb_obj.NlsCache = nls_cache_addr;
 
-                teb_obj.ClientId.UniqueProcess = process_context::process_id;
+                teb_obj.ClientId.UniqueProcess = context.process_id;
                 teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
                 teb_obj.DeallocationStack = this->stack_base;
                 // TODO: Proper GuaranteedStack implementation.
@@ -531,7 +531,7 @@ namespace sogen
             // See nls_cache_placeholder's doc comment.
             teb_obj.NlsCache = nls_cache_addr;
 
-            teb_obj.ClientId.UniqueProcess = process_context::process_id;
+            teb_obj.ClientId.UniqueProcess = context.process_id;
             teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
 
             // Native 64-bit stack
@@ -604,7 +604,7 @@ namespace sogen
             teb32_obj.NtTib.ArbitraryUserPointer = static_cast<uint32_t>(0x0);
 
             // Set ClientId for 32-bit TEB
-            teb32_obj.ClientId.UniqueProcess = process_context::process_id;
+            teb32_obj.ClientId.UniqueProcess = context.process_id;
             teb32_obj.ClientId.UniqueThread = this->id;
 
             // Set 32-bit PEB pointer

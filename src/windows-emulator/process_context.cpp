@@ -392,6 +392,11 @@ namespace sogen
         const auto& version = win_emu.version;
         const auto& fake_env = win_emu.fake_env;
 
+        if (app_settings.process_id)
+        {
+            this->process_id = *app_settings.process_id;
+        }
+
         io_device_container console{u"Console", win_emu, {}};
         this->console_handle = this->devices.store(std::move(console));
 
@@ -736,7 +741,7 @@ namespace sogen
             window.fnid = 0x29D;   // FNID_DESKTOP
             window.windowBand = 1; // ZBID_DESKTOP
             window.dpiContext = USER_DEFAULT_DPI_CONTEXT;
-            window.processId = process_context::process_id;
+            window.processId = this->process_id;
         });
 
         // Seed the shared foreground window with the desktop so the guest's client-side GetForegroundWindow
@@ -769,7 +774,7 @@ namespace sogen
                 window.rcClient = window.rcWindow;
                 window.windowBand = 1; // ZBID_DESKTOP
                 window.dpiContext = USER_DEFAULT_DPI_CONTEXT;
-                window.processId = process_context::process_id;
+                window.processId = this->process_id;
             });
             return handle;
         };
@@ -802,6 +807,7 @@ namespace sogen
 
     void process_context::serialize(utils::buffer_serializer& buffer, const emulator_thread* active_thread) const
     {
+        buffer.write(this->process_id);
         buffer.write_vector(this->sid);
         buffer.write(this->shared_section_address);
         buffer.write(this->shared_section_size);
@@ -904,6 +910,7 @@ namespace sogen
         // after any restore.
         this->nls_lead_byte_info_table_resolved.reset();
 
+        buffer.read(this->process_id);
         buffer.read_vector(this->sid);
         buffer.read(this->shared_section_address);
         buffer.read(this->shared_section_size);

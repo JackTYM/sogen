@@ -682,9 +682,17 @@ namespace sogen
         std::vector<std::byte> default_register_set{};
 
         // Process and thread ids mimic Windows' PspCidTable: a single space of distinct multiples of 4.
-        // The process keeps id 4; threads take 8, 12, 16, ... Real Windows never hands out tiny or
-        // non-4-aligned ids, and some code (e.g. CEG-style anti-tamper) relies on that.
-        static constexpr uint32_t process_id = 4;
+        // The root process (no parent) keeps id 4; threads take 8, 12, 16, ... Real Windows never
+        // hands out tiny or non-4-aligned ids, and some code (e.g. CEG-style anti-tamper) relies on
+        // that. A child spawned via NtCreateUserProcess now runs as its own independent host OS
+        // process (see windows_emulator's create_child_process callback) with its own process_context,
+        // so this can no longer be a single constant shared by every process: it would make every
+        // guest process - parent and child alike - report itself as pid 4, indistinguishable from one
+        // another to any code that opens another process by pid (e.g. NtOpenProcess). setup() assigns
+        // it from application_settings::process_id when the parent minted one for this child
+        // (matching child_process_record::pid, see handle_NtCreateUserProcess), otherwise it keeps the
+        // root process default below.
+        uint32_t process_id = 4;
         uint32_t spawned_thread_count{0};
         handle_store<handle_types::thread, emulator_thread> threads{};
 

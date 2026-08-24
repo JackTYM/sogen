@@ -182,6 +182,11 @@ namespace sogen
         // as a case-insensitive filesystem lookup key, but real Windows preserves the caller-supplied
         // casing in ImagePathName, which guest code can observe (e.g. via GetModuleFileName).
         std::optional<std::u16string> image_path{};
+        // Set for a child spawned via NtCreateUserProcess: the pid the parent's own process_context
+        // minted for it (child_process_record::pid) and already handed back to the parent as this
+        // child's CLIENT_ID. The child's process_context::setup uses this as its own process_id so
+        // both sides agree on this process's identity - see process_context::process_id's doc comment.
+        std::optional<uint32_t> process_id{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -191,6 +196,7 @@ namespace sogen
             buffer.write_map(this->environment);
             buffer.write_optional(this->command_line);
             buffer.write_optional(this->image_path);
+            buffer.write_optional(this->process_id);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -201,6 +207,7 @@ namespace sogen
             buffer.read_map(this->environment);
             buffer.read_optional(this->command_line);
             buffer.read_optional(this->image_path);
+            buffer.read_optional(this->process_id);
         }
     };
 
