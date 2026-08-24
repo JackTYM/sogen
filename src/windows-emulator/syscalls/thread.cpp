@@ -565,6 +565,26 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
+            if (info_class == ThreadPriorityBoost)
+            {
+                if (return_length)
+                {
+                    return_length.write(sizeof(ULONG));
+                }
+
+                if (thread_information_length < sizeof(ULONG))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                constexpr ULONG priority_boost_not_disabled = 0;
+
+                const emulator_object<ULONG> info{c.emu, thread_information};
+                info.write(priority_boost_not_disabled);
+
+                return STATUS_SUCCESS;
+            }
+
             c.win_emu.log.error("Unsupported thread query info class: %X\n", info_class);
             c.emu.stop();
 
