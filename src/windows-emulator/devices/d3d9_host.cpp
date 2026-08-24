@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1397,8 +1398,64 @@ namespace sogen
         }
     } // namespace
 
+    namespace
+    {
+        // Temporary diagnostic (EMULATOR_D3D9_DRAWPROFILE=1, shared with execute_draw's own profiling
+        // block below): self-contained wall-clock totals for build_sampler/ensure_texture_uploaded's
+        // own full bodies (cache-hit path included), to find which specific call inside execute_draw's
+        // texdesc phase is actually expensive rather than continuing to guess from code reading.
+        uint64_t g_build_sampler_ns{};
+        uint64_t g_ensure_texture_uploaded_ns{};
+        uint64_t g_ensure_texture_uploaded_max_ns{};
+        uint64_t g_texture_real_upload_count{};
+
+        bool drawprofile_enabled_flag()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_DRAWPROFILE") != nullptr;
+            return enabled;
+        }
+
+        // Accumulates elapsed wall-clock time into `target` on destruction regardless of which of a
+        // function's return statements actually fires -- avoids having to touch every exit path.
+        class scoped_ns_accumulator
+        {
+          public:
+            scoped_ns_accumulator(uint64_t& target, const bool active, uint64_t* max_target = nullptr)
+                : target_(target),
+                  max_target_(max_target),
+                  active_(active),
+                  start_(active ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{})
+            {
+            }
+
+            ~scoped_ns_accumulator()
+            {
+                if (this->active_)
+                {
+                    const auto elapsed = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - this->start_).count());
+                    this->target_ += elapsed;
+                    if (this->max_target_ != nullptr && elapsed > *this->max_target_)
+                    {
+                        *this->max_target_ = elapsed;
+                    }
+                }
+            }
+
+            scoped_ns_accumulator(const scoped_ns_accumulator&) = delete;
+            scoped_ns_accumulator& operator=(const scoped_ns_accumulator&) = delete;
+
+          private:
+            uint64_t& target_;
+            uint64_t* max_target_;
+            bool active_;
+            std::chrono::steady_clock::time_point start_;
+        };
+    } // namespace
+
     bool d3d9_host::build_sampler(const uint64_t device, const uint32_t sampler_index, const uint32_t mip_levels, uint64_t& out_sampler)
     {
+        const scoped_ns_accumulator _prof(g_build_sampler_ns, drawprofile_enabled_flag());
         out_sampler = 0;
         const auto& ss = this->state_.sampler_state;
         // Defaults match real D3D9's own documented per-D3DSAMPLERSTATETYPE defaults (D3DSAMP_MAGFILTER/
@@ -1624,8 +1681,53 @@ namespace sogen
         return true;
     }
 
+    namespace
+    {
+        // Temporary diagnostic (EMULATOR_D3D9_DRAWPROFILE=1): wall-clock breakdown of execute_draw's own
+        // phases, to measure where real per-draw CPU cost actually goes instead of reasoning about it
+        // from code reading -- five independent Lock/Unlock/flush round-trip-reduction fixes in a row
+        // measured zero FPS impact on real MW2 gameplay, so this profiles the other major candidate
+        // (execute_draw's own per-draw pipeline/descriptor-set/upload work) directly.
+        struct draw_profile_totals
+        {
+            uint64_t calls{};
+            uint64_t setup_ns{};      // entry through pipeline/RT/depth-stencil-view setup
+            uint64_t reserve_ns{};    // Phase A: resolve+reserve arena slices
+            uint64_t upload_ns{};     // Phase B: upload each reserved range
+            uint64_t texdesc_ns{};    // texture upload/view/sampler setup + descriptor set writes
+            uint64_t update_desc_ns{}; // subset of texdesc_ns: just the vulkan_.update_descriptor_sets call
+            uint64_t record_ns{};     // barriers, begin-rendering, binds, the draw call itself
+        };
+        draw_profile_totals g_draw_profile{};
+
+        bool draw_profile_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_DRAWPROFILE") != nullptr;
+            return enabled;
+        }
+
+        void draw_profile_maybe_report()
+        {
+            if (g_draw_profile.calls != 0 && g_draw_profile.calls % 2000 == 0)
+            {
+                fprintf(stderr,
+                        "[d3d9-drawprofile] calls=%llu setup=%.2fus reserve=%.2fus upload=%.2fus texdesc=%.2fus "
+                        "(update_desc=%.2fus) record=%.2fus (avg/draw)\n",
+                        static_cast<unsigned long long>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.setup_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.reserve_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.upload_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.texdesc_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.update_desc_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.record_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls));
+            }
+        }
+    } // namespace
+
     int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex, const indexed_draw* const indexed)
     {
+        const bool profile = draw_profile_enabled();
+        const auto t_entry = std::chrono::steady_clock::now();
         ++this->draw_count_;
 
         const auto rt_it = this->resources_.find(this->state_.render_targets[0]);
@@ -1832,6 +1934,8 @@ namespace sogen
                 highest_binding = bit;
             }
         }
+
+        const auto t_setup_done = profile ? std::chrono::steady_clock::now() : t_entry;
 
         // Phase A -- RESOLVE every arena slice this draw needs (vertex streams, index buffer, the six
         // UBOs), then (after the batch-management decision below) RESERVE them all WITHOUT uploading
@@ -2225,6 +2329,12 @@ namespace sogen
             }
         }
 
+        const auto t_reserve_done = profile ? std::chrono::steady_clock::now() : t_entry;
+        // Only advanced on the use_programmable path below; stays at t_reserve_done for fixed-function
+        // draws, which have no separate upload checkpoint (see the final report's own comment).
+        auto t_upload_done = t_reserve_done;
+        auto t_texdesc_done = t_reserve_done;
+
         // Phase B -- every slice is reserved, so arena.buffer/memory are final. Upload each range at its
         // recorded offset and bind against the single shared arena buffer. A vertex stream's bind offset
         // is its arena slice offset plus any D3D9-level SetStreamSource start offset (into the resource),
@@ -2325,6 +2435,13 @@ namespace sogen
                 }
                 this->ubo_upload_cache_[i] = {
                     .batch_generation = this->batch_generation_, .arena_offset = ubo_offsets[i], .valid = true};
+            }
+
+            if (profile)
+            {
+                t_upload_done = std::chrono::steady_clock::now();
+                g_draw_profile.upload_ns +=
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_upload_done - t_reserve_done).count());
             }
 
             // Combined-image-sampler bindings for texture stages s0..s3 (see ensure_programmable_pipeline's
@@ -2581,7 +2698,20 @@ namespace sogen
                                   .image_view = vs_tex_image_views[k],
                                   .image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
             }
+            const auto t_before_update_desc = profile ? std::chrono::steady_clock::now() : t_upload_done;
             this->vulkan_.update_descriptor_sets(device, writes);
+            if (profile)
+            {
+                g_draw_profile.update_desc_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t_before_update_desc).count());
+            }
+        }
+
+        if (profile)
+        {
+            t_texdesc_done = std::chrono::steady_clock::now();
+            g_draw_profile.texdesc_ns +=
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_texdesc_done - t_upload_done).count());
         }
 
         // Record into the open batch command buffer (begun in batch management above); the batch stays
@@ -2806,6 +2936,33 @@ namespace sogen
             this->close_render_pass(this->batch_slot_);
         }
 
+        if (profile)
+        {
+            const auto t_done = std::chrono::steady_clock::now();
+            const auto ns = [](const auto duration)
+            { return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count()); };
+            ++g_draw_profile.calls;
+            g_draw_profile.setup_ns += ns(t_setup_done - t_entry);
+            g_draw_profile.reserve_ns += ns(t_reserve_done - t_setup_done);
+            // t_upload_done/t_texdesc_done default to t_reserve_done for a fixed-function draw (no
+            // separate upload/texture-descriptor checkpoints on that path), so its whole reserve-to-done
+            // span is attributed to record_ns instead. Acceptable imprecision for a first-pass profile:
+            // MW2's real gameplay draws are overwhelmingly programmable-shader.
+            g_draw_profile.record_ns += ns(t_done - t_texdesc_done);
+            draw_profile_maybe_report();
+            if (g_draw_profile.calls % 2000 == 0)
+            {
+                fprintf(stderr,
+                        "[d3d9-drawprofile] texture_upload_skipped=%llu draw_count=%llu build_sampler_total=%.2fus "
+                        "ensure_texture_uploaded_total=%.2fus ensure_texture_uploaded_max=%.2fus real_upload_count=%llu\n",
+                        static_cast<unsigned long long>(this->stats_.texture_upload_skipped),
+                        static_cast<unsigned long long>(this->draw_count_), static_cast<double>(g_build_sampler_ns) / 1000.0,
+                        static_cast<double>(g_ensure_texture_uploaded_ns) / 1000.0,
+                        static_cast<double>(g_ensure_texture_uploaded_max_ns) / 1000.0,
+                        static_cast<unsigned long long>(g_texture_real_upload_count));
+            }
+        }
+
         // Counted here, past every early return, so these are draws that genuinely reached the GPU.
         ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
         ++this->stats_.draws_per_render_target[target_rt];
@@ -3012,6 +3169,8 @@ namespace sogen
 
     bool d3d9_host::ensure_texture_uploaded(const uint64_t resource)
     {
+        const scoped_ns_accumulator _prof(g_ensure_texture_uploaded_ns, drawprofile_enabled_flag(), &g_ensure_texture_uploaded_max_ns);
+
         const auto it = this->resources_.find(resource);
         if (it == this->resources_.end())
         {
@@ -3040,6 +3199,7 @@ namespace sogen
             ++this->stats_.texture_upload_skipped;
             return true;
         }
+        ++g_texture_real_upload_count;
 
         uint32_t vk_format = 0;
         if (!d3d9_format_to_vulkan(tex.format, vk_format))
