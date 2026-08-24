@@ -3200,6 +3200,11 @@ namespace sogen
             return true;
         }
         ++g_texture_real_upload_count;
+        if (getenv("EMULATOR_D3D9_UPLOADID_DIAG"))
+        {
+            fprintf(stderr, "[d3d9-uploadid-diag] resource=%llu width=%u height=%u\n", static_cast<unsigned long long>(resource), tex.width,
+                    tex.height);
+        }
 
         uint32_t vk_format = 0;
         if (!d3d9_format_to_vulkan(tex.format, vk_format))
@@ -3382,8 +3387,12 @@ namespace sogen
         // Flush any open batch first: ensure_texture_uploaded re-uploads dst's backing into one
         // persistent GPU image with no per-draw snapshot, so an already-recorded-but-unsubmitted
         // batched draw that samples dst would otherwise see THIS write's contents once the batch
-        // finally executes, not what it sampled at record time.
+        // finally executes, not what it sampled at record time. Also required for the GPU fast path
+        // below: it needs src's render-target content (if any) already resting in its
+        // TRANSFER_SRC_OPTIMAL layout, which only holds once every batched draw into it has executed.
         this->flush_batch();
+        resource_entry& dst = dst_it->second;
+        resource_entry& src = src_it->second;
         if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
         {
             const auto hash_of = [](const std::vector<std::byte>& bytes) {
@@ -3398,13 +3407,93 @@ namespace sogen
             fprintf(stderr,
                     "[d3d9-texblt-diag] dst=%llu %ux%u fmt=%u bytes=%zu src=%llu %ux%u fmt=%u bytes=%zu "
                     "src_hash_before=0x%llx\n",
-                    static_cast<unsigned long long>(dst_resource), dst_it->second.width, dst_it->second.height, dst_it->second.format,
-                    dst_it->second.backing.size(), static_cast<unsigned long long>(src_resource), src_it->second.width,
-                    src_it->second.height, src_it->second.format, src_it->second.backing.size(),
-                    static_cast<unsigned long long>(hash_of(src_it->second.backing)));
+                    static_cast<unsigned long long>(dst_resource), dst.width, dst.height, dst.format, dst.backing.size(),
+                    static_cast<unsigned long long>(src_resource), src.width, src.height, src.format, src.backing.size(),
+                    static_cast<unsigned long long>(hash_of(src.backing)));
         }
-        dst_it->second.backing = src_it->second.backing;
-        dst_it->second.upload_dirty = true; // dst's GPU image no longer matches its (just replaced) backing
+
+        // Fast path: sync directly on the GPU with a single cheap image copy instead of round-tripping
+        // the whole resource through CPU memory (a full backing-vector copy, then a full re-upload on
+        // the next sample) on every single call regardless of whether the content actually changed.
+        // Live MW2 profiling (EMULATOR_D3D9_DRAWPROFILE) found this exact CPU-mediated path costing
+        // 500us-2.8ms per call, hundreds of times in a single play session, dwarfing every other
+        // per-draw cost combined -- this is what real hardware (and DXVK) do as a near-free GPU-only
+        // operation instead. Two src cases, both left resting at their own steady-state layout by
+        // whatever produced them: a render target's GPU image is authoritative and (per flush_batch
+        // above) guaranteed resting in TRANSFER_SRC_OPTIMAL, the same invariant d3d9_host::blt already
+        // relies on for its own src parameter; a plain sampled texture (the D3DPOOL_MANAGED master/
+        // vidmem sync this function was originally written for -- live-confirmed as the case MW2
+        // itself actually exercises) rests in SHADER_READ_ONLY_OPTIMAL once ensure_texture_uploaded
+        // has it current, needing an extra pair of barriers around the copy to and from that layout.
+        const uint64_t device = this->ensure_vk_device();
+        const bool src_is_render_target = (src.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
+        const bool src_ready_as_texture = !src_is_render_target && this->ensure_texture_uploaded(src_resource);
+        if (device != 0 && (src_is_render_target || src_ready_as_texture) && dst.vk_image_id != 0 && src.vk_image_id != 0 &&
+            dst.width == src.width && dst.height == src.height && dst.format == src.format && this->ensure_draw_infra())
+        {
+            const uint32_t src_resting_layout =
+                src_is_render_target ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            this->vulkan_.reset_fence(device, this->fence_);
+            this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+
+            const vulkan_host::subresource_range color_range{
+                .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+            if (!src_is_render_target)
+            {
+                this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, src.vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                                   src_resting_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+            }
+            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
+
+            const vulkan_host::image_copy_region region{
+                .src_aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .src_mip_level = 0,
+                .src_base_array_layer = 0,
+                .src_layer_count = 1,
+                .src_offset_x = 0,
+                .src_offset_y = 0,
+                .src_offset_z = 0,
+                .dst_aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .dst_mip_level = 0,
+                .dst_base_array_layer = 0,
+                .dst_layer_count = 1,
+                .dst_offset_x = 0,
+                .dst_offset_y = 0,
+                .dst_offset_z = 0,
+                .width = dst.width,
+                .height = dst.height,
+                .depth = 1,
+            };
+            this->vulkan_.cmd_copy_image(this->command_buffer_, src.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.vk_image_id,
+                                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+
+            if (!src_is_render_target)
+            {
+                // Restore src to the layout every other sampler of it (a draw's descriptor set) expects.
+                this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, src.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                                   VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_resting_layout,
+                                                   color_range);
+            }
+            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+
+            this->vulkan_.end_command_buffer(this->command_buffer_);
+            this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+            this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
+
+            dst.backing_dirty = true; // CPU-side backing now stale relative to the GPU image
+            dst.upload_dirty = false; // ...but the GPU image itself already matches; no re-upload needed
+            return d3d_ok;
+        }
+
+        dst.backing = src.backing;
+        dst.upload_dirty = true; // dst's GPU image no longer matches its (just replaced) backing
         return d3d_ok;
     }
 
