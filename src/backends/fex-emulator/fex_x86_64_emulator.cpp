@@ -2401,7 +2401,7 @@ namespace sogen::fex
 
 #ifdef __APPLE__
             this->set_shadow_range_apple(address, size, permissions);
-            this->sync_host_pages_covering_apple(address, size, permissions);
+            this->sync_host_pages_covering_apple(address, size, permissions, /*is_new_commit=*/true);
 #else
             void* result = ::mmap(reinterpret_cast<void*>(address), size, to_prot(permissions),
                                   MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -2711,7 +2711,7 @@ namespace sogen::fex
 
 #ifdef __APPLE__
                 this->set_shadow_range_apple(address, size, permissions);
-                this->sync_host_pages_covering_apple(address, size, permissions);
+                this->sync_host_pages_covering_apple(address, size, permissions, /*is_new_commit=*/false);
 #else
                 if (::mprotect(reinterpret_cast<void*>(address), size, to_prot(permissions)) != 0)
                 {
@@ -3033,7 +3033,39 @@ namespace sogen::fex
             }
         }
 
-        void sync_host_page_apple(uint64_t host_page_addr)
+        // Real Windows/NT guarantees a freshly committed page (first commit, or a decommit/recommit
+        // cycle) reads back as all-zero until the guest writes to it. When a host 16KB page is shared
+        // with a still-live sibling guest sub-page, the shared-page branches below only mprotect the
+        // host page to the new permission - they never touch its content, so a guest sub-range that
+        // just became newly committed can read back whatever was physically there before (a prior
+        // occupant's real data, since a decommitted host page is never itself zeroed - only PROT_NONE'd
+        // - to avoid destroying a live sibling's content). This bumps exactly [guest_start, guest_end)
+        // writable and zeroes it; callers still apply the real target permission afterwards.
+        void zero_new_commit_range_apple(uint64_t guest_start, uint64_t guest_end, uint64_t rebase)
+        {
+            if (guest_start >= guest_end)
+            {
+                return;
+            }
+
+            // ::mprotect requires an address aligned to the real host page size (16KB on Apple
+            // Silicon), but guest_start/guest_end are only guaranteed 4KB-aligned - so the write-
+            // access bump must cover the enclosing host page(s), even though only the caller's
+            // exact [guest_start, guest_end) sub-range gets zeroed.
+            const uint64_t unlock_start = host_page_align_down_apple(guest_start);
+            const uint64_t unlock_end = host_page_align_up_apple(guest_end);
+            void* const unlock_ptr = reinterpret_cast<void*>(unlock_start + rebase);
+            const size_t unlock_size = unlock_end - unlock_start;
+
+            if (::mprotect(unlock_ptr, unlock_size, PROT_READ | PROT_WRITE) != 0)
+            {
+                throw std::runtime_error("FEX backend failed to unlock newly committed memory for zeroing");
+            }
+            std::memset(reinterpret_cast<void*>(guest_start + rebase), 0, guest_end - guest_start);
+        }
+
+        void sync_host_page_apple(uint64_t host_page_addr, bool is_new_commit = false, uint64_t commit_range_start = 0,
+                                  uint64_t commit_range_end = 0)
         {
             memory_permission effective = memory_permission::none;
             bool any_slot_present = false;
@@ -3101,6 +3133,13 @@ namespace sogen::fex
                 return;
             }
 
+            if (is_new_commit)
+            {
+                const uint64_t zero_start = std::max(host_page_addr, commit_range_start);
+                const uint64_t zero_end = std::min(host_page_addr + host_page_size_apple, commit_range_end);
+                this->zero_new_commit_range_apple(zero_start, zero_end, rebase);
+            }
+
             if (::mprotect(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective))) != 0)
             {
                 throw std::runtime_error("FEX backend failed to change memory protection");
@@ -3122,7 +3161,12 @@ namespace sogen::fex
         // unmap_host_pages_covering_apple's own interior/boundary split for the same reason:
         // profiling MW2 found this function (via map_memory) among the largest remaining costs,
         // one mprotect/mach_vm_allocate/hv_trap per 16KB host page instead of one per contiguous run.
-        void sync_host_pages_covering_apple(uint64_t address, size_t size, memory_permission permissions)
+        //
+        // is_new_commit distinguishes map_memory's callers (a genuine commit of a range that was not
+        // previously committed) from apply_memory_protection's (a permission-only change over already-
+        // committed memory): only the former must zero a shared host page's newly committed guest
+        // sub-range - see zero_new_commit_range_apple's doc comment for why.
+        void sync_host_pages_covering_apple(uint64_t address, size_t size, memory_permission permissions, bool is_new_commit)
         {
             const uint64_t range_start = address;
             const uint64_t range_end = address + size;
@@ -3138,7 +3182,7 @@ namespace sogen::fex
                 const bool interior = cursor >= range_start && cursor + host_page_size_apple <= range_end;
                 if (!interior)
                 {
-                    this->sync_host_page_apple(cursor);
+                    this->sync_host_page_apple(cursor, is_new_commit, range_start, range_end);
                     cursor += host_page_size_apple;
                     continue;
                 }
@@ -3164,6 +3208,11 @@ namespace sogen::fex
 
                 if (currently_mapped)
                 {
+                    if (is_new_commit)
+                    {
+                        this->zero_new_commit_range_apple(cursor, run_end, rebase);
+                    }
+
                     if (::mprotect(host_ptr, run_size, host_prot) != 0)
                     {
                         throw std::runtime_error("FEX backend failed to change memory protection");
