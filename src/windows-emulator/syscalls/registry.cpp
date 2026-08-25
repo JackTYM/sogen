@@ -66,6 +66,48 @@ namespace sogen
                 }
             }
 
+            // Temporary diagnostic (EMULATOR_REGISTRY_CALLER_DIAG=1): resolves the immediate guest
+            // caller (module+offset) of every registry open via [ESP], tallied by caller, printed every
+            // 50,000 opens. EMULATOR_REGISTRY_PATH_FREQ_DIAG above found WHICH keys dominate (the
+            // CLSID_MMDeviceEnumerator/audio-endpoint family); this finds WHO is calling NtOpenKey/
+            // NtOpenKeyEx this hard, confirmed via a 2026-08-24 DXVK-vs-native A/B (both paths show the
+            // same ~56-60% registry-syscall share) to be common to both D3D9 backends, so the caller is
+            // almost certainly generic MW2/CRT/COM code, not anything D3D9-host-side.
+            if (getenv("EMULATOR_REGISTRY_CALLER_DIAG"))
+            {
+                const auto sp = static_cast<uint32_t>(c.emu.read_stack_pointer());
+                uint32_t return_address = 0;
+                if (c.emu.try_read_memory(sp, &return_address, sizeof(return_address)))
+                {
+                    const auto* mod = c.win_emu.mod_manager.find_by_address(return_address);
+                    char buffer[256]{};
+                    if (mod)
+                    {
+                        snprintf(buffer, sizeof(buffer), "%s+0x%llx", mod->name.c_str(),
+                                 static_cast<unsigned long long>(return_address - mod->image_base));
+                    }
+                    else
+                    {
+                        snprintf(buffer, sizeof(buffer), "?+0x%llx", static_cast<unsigned long long>(return_address));
+                    }
+
+                    static std::unordered_map<std::string, uint64_t> caller_counts;
+                    static uint64_t caller_total = 0;
+                    ++caller_counts[buffer];
+                    if (++caller_total % 50000 == 0)
+                    {
+                        std::vector<std::pair<std::string, uint64_t>> sorted(caller_counts.begin(), caller_counts.end());
+                        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                        fprintf(stderr, "[regcaller-diag] total_opens=%llu top:\n", static_cast<unsigned long long>(caller_total));
+                        for (size_t i = 0; i < sorted.size() && i < 10; ++i)
+                        {
+                            fprintf(stderr, "[regcaller-diag]   %s = %llu\n", sorted[i].first.c_str(),
+                                    static_cast<unsigned long long>(sorted[i].second));
+                        }
+                    }
+                }
+            }
+
             auto entry = c.win_emu.registry.get_key({key});
             if (!entry.has_value())
             {

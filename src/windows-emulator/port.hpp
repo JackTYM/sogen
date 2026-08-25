@@ -366,6 +366,7 @@ namespace sogen
 
       private:
         lpc_request_result handle_handshake(windows_emulator& win_emu, const lpc_request_context& c);
+        lpc_request_result handle_rpc_ack(windows_emulator& win_emu, const lpc_request_context& c);
         lpc_request_result handle_rpc_call(windows_emulator& win_emu, const lpc_request_context& c);
     };
 

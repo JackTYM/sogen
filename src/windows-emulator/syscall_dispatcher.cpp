@@ -2,12 +2,71 @@
 #include "syscall_dispatcher.hpp"
 #include "syscall_utils.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #include <utils/string.hpp>
 
 // #define ENABLE_NTSTATUS_PROBE
 
 namespace sogen
 {
+    namespace
+    {
+        // Temporary diagnostic (EMULATOR_SYSCALL_TIME_DIAG=1): measures real wall-clock time spent
+        // inside syscall handlers, bucketed into "NtGdiDdDDIEscape" (the D3D9/GPU-bridge escape
+        // syscall) vs everything else, printed every 5 seconds. Built to settle whether D3D9 syscall
+        // handling dominates total syscall-dispatch TIME despite being a minority of syscall COUNT
+        // during real gameplay (registry/COM churn outnumbers it ~4:1 by count).
+        void syscall_time_diag_report(const std::string& name, std::chrono::nanoseconds elapsed)
+        {
+            if (!std::getenv("EMULATOR_SYSCALL_TIME_DIAG"))
+            {
+                return;
+            }
+
+            static std::atomic<uint64_t> escape_calls{};
+            static std::atomic<uint64_t> escape_ns{};
+            static std::atomic<uint64_t> other_calls{};
+            static std::atomic<uint64_t> other_ns{};
+            static auto window_start = std::chrono::steady_clock::now();
+
+            const bool is_escape = name == "NtGdiDdDDIEscape";
+            if (is_escape)
+            {
+                escape_calls.fetch_add(1, std::memory_order_relaxed);
+                escape_ns.fetch_add(static_cast<uint64_t>(elapsed.count()), std::memory_order_relaxed);
+            }
+            else
+            {
+                other_calls.fetch_add(1, std::memory_order_relaxed);
+                other_ns.fetch_add(static_cast<uint64_t>(elapsed.count()), std::memory_order_relaxed);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - window_start).count() >= 5.0)
+            {
+                window_start = now;
+                const auto ec = escape_calls.exchange(0);
+                const auto en = escape_ns.exchange(0);
+                const auto oc = other_calls.exchange(0);
+                const auto on = other_ns.exchange(0);
+                const double escape_ms = static_cast<double>(en) / 1e6;
+                const double other_ms = static_cast<double>(on) / 1e6;
+                const double total_ms = escape_ms + other_ms;
+                fprintf(stderr,
+                        "[syscall-time-diag] NtGdiDdDDIEscape calls=%llu time_ms=%.2f avg_us=%.2f | other calls=%llu "
+                        "time_ms=%.2f avg_us=%.2f | escape_share=%.1f%%\n",
+                        static_cast<unsigned long long>(ec), escape_ms, ec ? (escape_ms * 1000.0 / static_cast<double>(ec)) : 0.0,
+                        static_cast<unsigned long long>(oc), other_ms, oc ? (other_ms * 1000.0 / static_cast<double>(oc)) : 0.0,
+                        total_ms > 0.0 ? (escape_ms * 100.0 / total_ms) : 0.0);
+            }
+        }
+    }
+
 
     namespace
     {
@@ -274,7 +333,16 @@ namespace sogen
                 return;
             }
 
-            entry->second.handler(c);
+            if (std::getenv("EMULATOR_SYSCALL_TIME_DIAG"))
+            {
+                const auto handler_start = std::chrono::steady_clock::now();
+                entry->second.handler(c);
+                syscall_time_diag_report(entry->second.name, std::chrono::steady_clock::now() - handler_start);
+            }
+            else
+            {
+                entry->second.handler(c);
+            }
 
 #ifdef ENABLE_NTSTATUS_PROBE
             {

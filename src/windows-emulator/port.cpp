@@ -296,6 +296,8 @@ namespace sogen
             return handle_handshake(win_emu, c);
         case 0: // Call
             return handle_rpc_call(win_emu, c);
+        case 3: // Client-side acknowledgment of a reply carrying a system_handle
+            return handle_rpc_ack(win_emu, c);
         default: {
             // Naming the bound interface matters as much as the operation number: a bare "operation 0x3"
             // is indistinguishable from unrelated background noise, and this dispatcher is shared by every
@@ -307,6 +309,24 @@ namespace sogen
                               "send=%u)\n",
                               operation, bi[0], bi[1], bi[2], bi[3], bi[4], bi[5], bi[6], bi[7], bi[8], bi[9], bi[10], bi[11], bi[12],
                               bi[13], bi[14], bi[15], c.send_buffer_length);
+
+            if (getenv("EMULATOR_LOG_RPCALL"))
+            {
+                const auto dump_len = std::min<ULONG>(c.send_buffer_length, 256);
+                std::vector<uint8_t> raw(dump_len, 0);
+                win_emu.emu().read_memory(c.send_buffer, raw.data(), raw.size());
+
+                std::string hex;
+                hex.reserve(static_cast<size_t>(dump_len) * 3);
+                for (const auto b : raw)
+                {
+                    char buf[4];
+                    snprintf(buf, sizeof(buf), "%02x ", b);
+                    hex += buf;
+                }
+                win_emu.log.print(color::gray, "  raw: %s\n", hex.c_str());
+            }
+
             return STATUS_NOT_SUPPORTED;
         }
         }
@@ -342,6 +362,31 @@ namespace sogen
         }
 
         return {STATUS_SUCCESS, std::move(payload)};
+    }
+
+    lpc_request_result rpc_port::handle_rpc_ack(windows_emulator& win_emu, const lpc_request_context& c)
+    {
+        // Operation 3 is not a Call: it carries no opnum, only a call_id at the same offset (12) a Call uses.
+        // Live-captured on AudioClientRpc, its payload is a byte-for-byte echo of the SYSTEM_AUDIO_STREAM this
+        // port had just handed back from CreateRemoteStream (session GUID, server cookie, [system_handle]
+        // union selectors), down to the runtime buffer-size field -- i.e. the client mirroring a reply that
+        // carried a system_handle (the render section) back at the server, most likely rpcrt4's own
+        // confirmation that it finished importing that handle. Answering STATUS_NOT_SUPPORTED here (the
+        // previous behavior) made the client tear the stream down and retry CreateRemoteStream from scratch;
+        // acknowledging it with the same call_id-echoing header a Call reply uses stops that retry loop.
+        constexpr ULONG rpc_ack_call_id_offset = 12;
+        if (c.send_buffer_length < rpc_ack_call_id_offset + sizeof(uint32_t))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        const auto call_id = win_emu.emu().read_memory<uint32_t>(c.send_buffer + rpc_ack_call_id_offset);
+
+        std::array<uint8_t, 24> header = {0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        std::memcpy(header.data() + 12, &call_id, sizeof(call_id));
+
+        return {STATUS_SUCCESS, std::vector<uint8_t>(header.begin(), header.end())};
     }
 
     lpc_request_result rpc_port::handle_rpc_call(windows_emulator& win_emu, const lpc_request_context& c)
