@@ -1011,6 +1011,12 @@ namespace sogen
         LONG HighPart;
     } LUID, *PLUID;
 
+    typedef struct _LUID_AND_ATTRIBUTES
+    {
+        LUID Luid;
+        DWORD Attributes;
+    } LUID_AND_ATTRIBUTES, *PLUID_AND_ATTRIBUTES;
+
     typedef struct _TOKEN_STATISTICS
     {
         LUID TokenId;
@@ -1026,6 +1032,12 @@ namespace sogen
     } TOKEN_STATISTICS, *PTOKEN_STATISTICS;
 
 #endif
+
+    struct TOKEN_PRIVILEGES64
+    {
+        ULONG PrivilegeCount;
+        LUID_AND_ATTRIBUTES Privileges[1];
+    };
 
     typedef struct _TOKEN_SECURITY_ATTRIBUTES_INFORMATION
     {

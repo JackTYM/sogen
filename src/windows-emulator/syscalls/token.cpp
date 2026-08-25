@@ -385,18 +385,30 @@ namespace sogen
 
             if (token_information_class == TokenPrivileges)
             {
-                // sogen doesn't track per-token privilege sets; an empty TOKEN_PRIVILEGES (its leading
-                // PrivilegeCount field is 0) is a valid, honest answer real Windows itself returns for a
-                // token that has had all its privileges stripped, e.g. via CreateRestrictedToken.
-                constexpr auto required_size = sizeof(ULONG);
-                return_length.write(required_size);
+                // sogen doesn't track per-token privilege sets, so every token (the process's own
+                // primary token as well as any "restricted" token NtFilterToken hands back - see its
+                // own comment above) reports the one privilege real Windows practically never strips:
+                // SeChangeNotifyPrivilege. Chromium's own sandbox::RestrictedToken::DeleteAllPrivileges()
+                // keeps it by default even when stripping everything else, and
+                // base::win::AccessToken::Privileges() hard-CHECKs the returned buffer against
+                // sizeof(TOKEN_PRIVILEGES) regardless of PrivilegeCount - an honest, empty
+                // PrivilegeCount=0 answer undersizes that buffer below what any real token this API is
+                // ever actually called on has been observed to produce.
+                constexpr auto required_size = sizeof(TOKEN_PRIVILEGES64);
+                return_length.write(static_cast<ULONG>(required_size));
 
                 if (required_size > token_information_length)
                 {
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
-                emulator_object<ULONG>{c.emu, token_information}.write(0);
+                TOKEN_PRIVILEGES64 privileges{};
+                privileges.PrivilegeCount = 1;
+                privileges.Privileges[0].Luid.LowPart = 23; // SE_CHANGE_NOTIFY_PRIVILEGE
+                privileges.Privileges[0].Luid.HighPart = 0;
+                privileges.Privileges[0].Attributes = 0x3; // SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED
+
+                emulator_object<TOKEN_PRIVILEGES64>{c.emu, token_information}.write(privileges);
                 return STATUS_SUCCESS;
             }
 
