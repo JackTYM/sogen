@@ -47,6 +47,7 @@ namespace sogen
     using hdc = pointer;
     using hwnd = pointer;
     using hdesk = pointer;
+    using hwinsta = pointer;
     using hmenu = pointer;
     using hinstance = pointer;
     using hicon = pointer;

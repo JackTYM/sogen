@@ -658,6 +658,7 @@ namespace sogen
         handle_store<handle_types::private_namespace, private_namespace> private_namespaces{};
         handle default_desktop{};
         handle_store<handle_types::desktop, desktop> desktops{};
+        handle_store<handle_types::window_station, window_station> window_stations{};
         user_handle_store<handle_types::window, window> windows{user_handles};
         user_handle_store<handle_types::type::menu, menu> menus{user_handles};
         handle_store<handle_types::timer, timer> timers{};

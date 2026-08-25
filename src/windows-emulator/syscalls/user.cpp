@@ -2594,6 +2594,58 @@ namespace sogen
             return 1;
         }
 
+        hwinsta handle_NtUserCreateWindowStation(const syscall_context& c,
+                                                 const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                                 const ACCESS_MASK /*desired_access*/, const DWORD /*unknown2*/, const DWORD /*unknown3*/,
+                                                 const DWORD /*unknown4*/, const DWORD /*unknown5*/, const DWORD /*unknown6*/)
+        {
+            std::u16string name{};
+            if (object_attributes)
+            {
+                const auto attributes = object_attributes.read();
+                if (attributes.ObjectName)
+                {
+                    name = read_unicode_string(c.emu, attributes.ObjectName);
+                    c.win_emu.callbacks.on_generic_access("Creating window station", name);
+                }
+            }
+
+            if (!name.empty())
+            {
+                for (auto& entry : c.proc.window_stations)
+                {
+                    if (entry.second.name == name)
+                    {
+                        ++entry.second.ref_count;
+                        return c.proc.window_stations.make_handle(entry.first).bits;
+                    }
+                }
+            }
+
+            window_station station{};
+            station.name = std::move(name);
+
+            return c.proc.window_stations.store(std::move(station)).bits;
+        }
+
+        BOOL handle_NtUserCloseWindowStation(const syscall_context& c, const hwinsta win_sta)
+        {
+            if (win_sta == handle_NtUserGetProcessWindowStation())
+            {
+                return FALSE;
+            }
+
+            handle h{};
+            h.bits = win_sta;
+
+            if (h.value.type != handle_types::window_station)
+            {
+                return FALSE;
+            }
+
+            return c.proc.window_stations.erase(h) ? TRUE : FALSE;
+        }
+
         uint64_t handle_NtUserCallHwndParam(const syscall_context& c, const hwnd hwnd, const uint64_t param, const uint32_t code)
         {
             (void)hwnd;

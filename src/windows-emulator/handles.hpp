@@ -38,6 +38,7 @@ namespace sogen
             accelerator_table,
             cursor_icon,
             job,
+            window_station,
         };
     };
 

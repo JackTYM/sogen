@@ -562,6 +562,11 @@ namespace sogen
                                            emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> window_name);
         BOOL handle_NtUserMoveWindow(const syscall_context& c, hwnd hwnd, int x, int y, int width, int height, BOOL repaint);
         uint64_t handle_NtUserGetProcessWindowStation();
+        hwinsta handle_NtUserCreateWindowStation(const syscall_context& c,
+                                                 emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
+                                                 ACCESS_MASK desired_access, DWORD unknown2, DWORD unknown3, DWORD unknown4, DWORD unknown5,
+                                                 DWORD unknown6);
+        BOOL handle_NtUserCloseWindowStation(const syscall_context& c, hwinsta win_sta);
         uint64_t handle_NtUserCallHwndParam(const syscall_context& c, hwnd hwnd, uint64_t param, uint32_t code);
         uint16_t handle_NtUserRegisterClassExWOW(const syscall_context& c, emulator_object<EMU_WNDCLASSEX> wnd_class_ex,
                                                  emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name,
@@ -1595,6 +1600,8 @@ namespace sogen
         add_handler(NtCancelIoFile);
         add_handler(NtAreMappedFilesTheSame);
         add_handler(NtUserGetProcessWindowStation);
+        add_handler(NtUserCreateWindowStation);
+        add_handler(NtUserCloseWindowStation);
         add_handler(NtUserCallHwndParam);
         add_handler(NtUserRegisterClassExWOW);
         add_handler(NtUserUnregisterClass);
