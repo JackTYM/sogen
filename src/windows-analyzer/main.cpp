@@ -84,6 +84,9 @@ namespace sogen
             // real inherited socketpair fd it should read its application_settings/inherited pipes
             // from - not user-facing, hidden from --help (see its CLI registration below).
             int child_ipc_fd{-1};
+            // Set only on a process spawned by spawn_child_process: the inherited socketpair fd for
+            // its process_control_channel - not user-facing, hidden from --help (see below).
+            int child_control_fd{-1};
         };
 
         void split_and_insert(std::set<std::string, std::less<>>& container, const std::string_view str, const char splitter = ',')
@@ -1082,6 +1085,11 @@ namespace sogen
             app.add_option("--child-ipc-fd", options.child_ipc_fd,
                            "Internal use only: inherited socketpair fd to bootstrap this process as a "
                            "spawn_child_process (NtCreateUserProcess) child")
+                ->group("");
+
+            app.add_option("--child-control-fd", options.child_control_fd,
+                           "Internal use only: inherited socketpair fd for this process's "
+                           "process_control_channel, set alongside --child-ipc-fd")
                 ->group("");
 
             CLI11_PARSE(app, argc, argv);

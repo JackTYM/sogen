@@ -158,6 +158,13 @@ namespace sogen
         // transport - see windows_emulator::register_pipe_ipc_peer. Only meaningful when success is
         // true; -1 if this platform doesn't support child process spawning at all.
         int ipc_fd{-1};
+
+        // Parent's end of a second, separate socketpair dedicated to the synchronous
+        // process_control_channel request/response protocol - kept apart from ipc_fd so a blocking
+        // control round-trip can never stall or be reordered against the pipe_ipc_channel broadcast
+        // traffic. Only meaningful when success is true; -1 if this platform doesn't support child
+        // process spawning at all.
+        int control_fd{-1};
     };
 
     struct emulator_callbacks : module_manager::callbacks, process_context::callbacks

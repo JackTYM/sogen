@@ -159,7 +159,7 @@ namespace sogen
             });
         }
 
-        std::vector<std::string> build_child_argv(const child_process_spawn_config& config, const int ipc_fd)
+        std::vector<std::string> build_child_argv(const child_process_spawn_config& config, const int ipc_fd, const int control_fd)
         {
             std::vector<std::string> argv{};
             argv.push_back(config.executable_path.string());
@@ -235,6 +235,9 @@ namespace sogen
             argv.emplace_back("--child-ipc-fd");
             argv.push_back(std::to_string(ipc_fd));
 
+            argv.emplace_back("--child-control-fd");
+            argv.push_back(std::to_string(control_fd));
+
             return argv;
         }
 #endif
@@ -290,6 +293,178 @@ namespace sogen
 
           private:
             int fd_{-1};
+        };
+#endif
+
+        enum class process_control_frame_kind : uint8_t
+        {
+            request = 0,
+            response = 1,
+        };
+
+        void write_process_control_request_body(utils::buffer_serializer& buffer, const process_control_request& request)
+        {
+            buffer.write(static_cast<uint8_t>(request.op));
+            buffer.write(request.address);
+            buffer.write(request.size);
+            buffer.write(request.allocation_type);
+            buffer.write(request.protection);
+            buffer.write(request.free_type);
+            buffer.write(request.info_class);
+            buffer.write(request.exit_status);
+            buffer.write(request.maximum_size);
+            buffer.write(request.page_protection);
+            buffer.write(request.allocation_attributes);
+            buffer.write(request.granted_access);
+            buffer.write_vector(request.payload);
+        }
+
+        void read_process_control_request_body(utils::buffer_deserializer& buffer, process_control_request& request)
+        {
+            uint8_t op{};
+            buffer.read(op);
+            request.op = static_cast<process_control_op>(op);
+            buffer.read(request.address);
+            buffer.read(request.size);
+            buffer.read(request.allocation_type);
+            buffer.read(request.protection);
+            buffer.read(request.free_type);
+            buffer.read(request.info_class);
+            buffer.read(request.exit_status);
+            buffer.read(request.maximum_size);
+            buffer.read(request.page_protection);
+            buffer.read(request.allocation_attributes);
+            buffer.read(request.granted_access);
+            buffer.read_vector(request.payload);
+        }
+
+        void write_process_control_response_body(utils::buffer_serializer& buffer, const process_control_response& response)
+        {
+            buffer.write(response.status);
+            buffer.write(response.bytes_written);
+            buffer.write(response.base_address);
+            buffer.write(response.region_size);
+            buffer.write(response.old_protection);
+            buffer.write(response.previous_suspend_count);
+            buffer.write(response.minted_handle_bits);
+            buffer.write_vector(response.payload);
+        }
+
+        void read_process_control_response_body(utils::buffer_deserializer& buffer, process_control_response& response)
+        {
+            buffer.read(response.status);
+            buffer.read(response.bytes_written);
+            buffer.read(response.base_address);
+            buffer.read(response.region_size);
+            buffer.read(response.old_protection);
+            buffer.read(response.previous_suspend_count);
+            buffer.read(response.minted_handle_bits);
+            buffer.read_vector(response.payload);
+        }
+
+#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        class fd_process_control_channel final : public process_control_channel
+        {
+          public:
+            explicit fd_process_control_channel(const int fd)
+                : fd_(fd)
+            {
+            }
+
+            fd_process_control_channel(const fd_process_control_channel&) = delete;
+            fd_process_control_channel& operator=(const fd_process_control_channel&) = delete;
+
+            ~fd_process_control_channel() override
+            {
+                if (this->fd_ >= 0)
+                {
+                    ::close(this->fd_);
+                }
+            }
+
+            std::optional<process_control_response> request(const process_control_request& request, const int timeout_ms) override
+            {
+                if (this->dead_)
+                {
+                    return std::nullopt;
+                }
+
+                const auto request_id = this->next_request_id_++;
+
+                utils::buffer_serializer buffer{};
+                buffer.write(static_cast<uint8_t>(process_control_frame_kind::request));
+                buffer.write(request_id);
+                write_process_control_request_body(buffer, request);
+
+                if (!send_framed(this->fd_, buffer.get_buffer()))
+                {
+                    this->dead_ = true;
+                    return std::nullopt;
+                }
+
+                auto raw = recv_framed(this->fd_, timeout_ms);
+                if (!raw)
+                {
+                    this->dead_ = true;
+                    return std::nullopt;
+                }
+
+                utils::buffer_deserializer deserializer{*raw};
+
+                uint8_t kind{};
+                deserializer.read(kind);
+
+                uint64_t response_id{};
+                deserializer.read(response_id);
+
+                if (static_cast<process_control_frame_kind>(kind) != process_control_frame_kind::response || response_id != request_id)
+                {
+                    this->dead_ = true;
+                    return std::nullopt;
+                }
+
+                process_control_response response{};
+                response.request_id = response_id;
+                read_process_control_response_body(deserializer, response);
+
+                return response;
+            }
+
+            std::optional<process_control_request> try_receive() override
+            {
+                auto raw = recv_framed(this->fd_, 0);
+                if (!raw)
+                {
+                    return std::nullopt;
+                }
+
+                utils::buffer_deserializer deserializer{*raw};
+
+                uint8_t kind{};
+                deserializer.read(kind);
+                (void)kind;
+
+                process_control_request request{};
+                deserializer.read(request.request_id);
+                read_process_control_request_body(deserializer, request);
+
+                return request;
+            }
+
+            void respond(const process_control_response& response) override
+            {
+                utils::buffer_serializer buffer{};
+                buffer.write(static_cast<uint8_t>(process_control_frame_kind::response));
+                buffer.write(response.request_id);
+                write_process_control_response_body(buffer, response);
+
+                send_framed(this->fd_, buffer.get_buffer());
+            }
+
+          private:
+            int fd_{-1};
+            uint64_t next_request_id_{1};
+            bool dead_{false};
         };
 #endif
 
@@ -374,7 +549,19 @@ namespace sogen
         const auto parent_fd = fds[0];
         const auto child_fd = fds[1];
 
-        const auto argv_strings = build_child_argv(config, child_fd);
+        int control_fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, control_fds) != 0)
+        {
+            const auto error = std::string("socketpair() failed: ") + std::strerror(errno);
+            ::close(parent_fd);
+            ::close(child_fd);
+            return {.success = false, .failure_detail = error};
+        }
+
+        const auto parent_control_fd = control_fds[0];
+        const auto child_control_fd = control_fds[1];
+
+        const auto argv_strings = build_child_argv(config, child_fd, child_control_fd);
         std::vector<char*> argv{};
         argv.reserve(argv_strings.size() + 1);
         for (const auto& arg : argv_strings)
@@ -391,17 +578,21 @@ namespace sogen
             const auto error = std::string("fork() failed: ") + std::strerror(errno);
             ::close(parent_fd);
             ::close(child_fd);
+            ::close(parent_control_fd);
+            ::close(child_control_fd);
             return {.success = false, .failure_detail = error};
         }
 
         if (pid == 0)
         {
             ::close(parent_fd);
+            ::close(parent_control_fd);
             ::execv(executable_path.c_str(), argv.data());
             _exit(127);
         }
 
         ::close(child_fd);
+        ::close(child_control_fd);
 
         utils::buffer_serializer bootstrap{};
         bootstrap.write(settings);
@@ -412,6 +603,7 @@ namespace sogen
         if (!send_framed(parent_fd, bootstrap.get_buffer()))
         {
             ::close(parent_fd);
+            ::close(parent_control_fd);
             return {.success = false, .failure_detail = "Failed to send bootstrap data to child"};
         }
 
@@ -421,6 +613,7 @@ namespace sogen
         if (!response)
         {
             ::close(parent_fd);
+            ::close(parent_control_fd);
             return {.success = false,
                     .failure_detail = "Child did not report readiness within " + std::to_string(ready_timeout_ms) +
                                       "ms (or exited/closed the IPC channel early)"};
@@ -430,10 +623,12 @@ namespace sogen
         if (outcome.success)
         {
             outcome.ipc_fd = parent_fd;
+            outcome.control_fd = parent_control_fd;
         }
         else
         {
             ::close(parent_fd);
+            ::close(parent_control_fd);
         }
 
         return outcome;
@@ -480,6 +675,16 @@ namespace sogen
     {
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
         return std::make_unique<fd_pipe_ipc_channel>(fd);
+#else
+        (void)fd;
+        return nullptr;
+#endif
+    }
+
+    std::unique_ptr<process_control_channel> create_fd_process_control_channel(const int fd)
+    {
+#if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        return std::make_unique<fd_process_control_channel>(fd);
 #else
         (void)fd;
         return nullptr;

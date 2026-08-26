@@ -2,6 +2,7 @@
 
 #include <windows_emulator.hpp>
 #include <backend_selection.hpp>
+#include <process_control_channel.hpp>
 
 namespace sogen
 {
@@ -66,5 +67,12 @@ namespace sogen
     // handshake used) as a pipe_ipc_channel, for windows_emulator::register_pipe_ipc_peer. Takes
     // ownership of fd - it is closed when the returned channel is destroyed.
     std::unique_ptr<pipe_ipc_channel> create_fd_pipe_ipc_channel(int fd);
+
+    // Wraps an already-connected fd (child_process_outcome::control_fd on the parent side, or
+    // options.child_control_fd on the child side, both ends of the second socketpair
+    // spawn_child_process opens for the process_control_channel protocol) as a
+    // process_control_channel. Takes ownership of fd - it is closed when the returned channel is
+    // destroyed.
+    std::unique_ptr<process_control_channel> create_fd_process_control_channel(int fd);
 
 } // namespace sogen
