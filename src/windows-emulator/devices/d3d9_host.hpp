@@ -674,6 +674,14 @@ namespace sogen
             std::array<uint64_t, 4> color_view_ids{};
             size_t color_count{0};
             uint64_t depth_image_id{0};
+
+            // Colour render targets this instance transitioned out of the TRANSFER_SRC_OPTIMAL resting
+            // layout so its draws could sample them (render-to-texture), in the order execute_draw
+            // collected them. They stay in SHADER_READ_ONLY_OPTIMAL for as long as the instance lives, and
+            // close_render_pass restores them; a draw whose own sampled set differs from this one cannot
+            // share the instance, since the difference is exactly a set of layout transitions that Vulkan
+            // only allows outside a rendering instance.
+            std::vector<uint64_t> sampled_image_ids{};
         };
 
         std::array<open_render_pass_state, batch_slot_count> open_render_pass_{};

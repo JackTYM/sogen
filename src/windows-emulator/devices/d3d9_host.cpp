@@ -577,6 +577,15 @@ namespace sogen
                                                VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
         }
+        // Mirror of the transition execute_draw made when this instance opened: every render target its
+        // draws sampled goes back to the TRANSFER_SRC_OPTIMAL resting layout the rest of this host
+        // (readback, clear, blt, the next draw's own attachment barriers) relies on.
+        for (const uint64_t sampled_image : rp.sampled_image_ids)
+        {
+            this->vulkan_.cmd_pipeline_barrier(cmd, sampled_image, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+        }
         rp = {};
     }
 
@@ -1980,6 +1989,40 @@ namespace sogen
             return enabled;
         }
 
+        // Temporary diagnostic (EMULATOR_D3D9_PASSDIAG=1): how often execute_draw's recording step has to
+        // open a fresh dynamic-rendering instance, and which of the two reasons forced it -- a colour/depth
+        // attachment change, or a difference in the set of render targets the draw samples as textures.
+        // Each open costs a full tile store-and-reload of every attachment on a tile-based GPU, so the
+        // rate is what sizes any change to the instance-merging rule.
+        struct pass_diag_totals
+        {
+            uint64_t draws{};
+            uint64_t open_attachment{};
+            uint64_t open_sampled_rt{};
+            uint64_t reuse{};
+        };
+
+        pass_diag_totals g_pass_diag{};
+
+        bool pass_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_PASSDIAG") != nullptr;
+            return enabled;
+        }
+
+        void pass_diag_maybe_report()
+        {
+            if (g_pass_diag.draws == 0 || g_pass_diag.draws % 2000 != 0)
+            {
+                return;
+            }
+            const auto pct = [](const uint64_t part) { return 100.0 * static_cast<double>(part) / static_cast<double>(g_pass_diag.draws); };
+            fprintf(stderr, "[d3d9-passdiag] draws=%llu open_attachment=%llu (%.1f%%) open_sampled_rt=%llu (%.1f%%) reuse=%llu (%.1f%%)\n",
+                    static_cast<unsigned long long>(g_pass_diag.draws), static_cast<unsigned long long>(g_pass_diag.open_attachment),
+                    pct(g_pass_diag.open_attachment), static_cast<unsigned long long>(g_pass_diag.open_sampled_rt),
+                    pct(g_pass_diag.open_sampled_rt), static_cast<unsigned long long>(g_pass_diag.reuse), pct(g_pass_diag.reuse));
+        }
+
         void draw_profile_maybe_report()
         {
             if (g_draw_profile.calls != 0 && g_draw_profile.calls % 2000 == 0)
@@ -2001,6 +2044,7 @@ namespace sogen
     int32_t d3d9_host::execute_draw(const uint32_t vertex_count, const uint32_t first_vertex, const indexed_draw* const indexed)
     {
         const bool profile = draw_profile_enabled();
+        const bool pass_diag = pass_diag_enabled();
         const auto t_entry = std::chrono::steady_clock::now();
         ++this->draw_count_;
 
@@ -3079,19 +3123,45 @@ namespace sogen
         // #161's vertex/index upload cache eliminated for CPU-side uploads (see stream_upload_cache_'s
         // comment), just on the GPU side and per render-pass-instance rather than per byte range.
         //
-        // A render-to-texture draw (sampled_render_targets non-empty) always closes any open instance
-        // first and never leaves one open itself -- see the call below and its mirror after the draw --
-        // so this merge never has to reason about a sampled render target's own layout round trip; that
-        // rare, previously fragile path (shadow maps) keeps its exact pre-merging, fully self-contained
-        // per-draw shape.
+        // A render-to-texture draw (sampled_render_targets non-empty) can share an instance too, as long as
+        // the previous draw put exactly the same render targets into SHADER_READ_ONLY_OPTIMAL: the only
+        // extra work such a draw needs is that set of layout transitions, and Vulkan only allows them
+        // outside a rendering instance. MW2's gameplay draws are ~50% render-to-texture with the sampled
+        // set almost always unchanged from the immediately preceding draw (measured via
+        // EMULATOR_D3D9_PASSDIAG), so excluding them outright cost ~1070 instance close/reopen pairs per
+        // frame -- the tile store-and-reload round trip this merge exists to avoid, at its worst.
         open_render_pass_state& rp = this->open_render_pass_[this->batch_slot_];
-        bool can_continue_pass = rp.open && sampled_render_targets.empty() && rp.color_count == bound_rts.size() &&
-                                 rp.depth_image_id == (ds_entry != nullptr ? ds_entry->vk_image_id : 0);
-        for (size_t i = 0; can_continue_pass && i < bound_rts.size(); ++i)
+        std::vector<uint64_t> sampled_image_ids;
+        sampled_image_ids.reserve(sampled_render_targets.size());
+        for (const resource_entry* srt : sampled_render_targets)
+        {
+            sampled_image_ids.push_back(srt->vk_image_id);
+        }
+        bool attachments_match =
+            rp.open && rp.color_count == bound_rts.size() && rp.depth_image_id == (ds_entry != nullptr ? ds_entry->vk_image_id : 0);
+        for (size_t i = 0; attachments_match && i < bound_rts.size(); ++i)
         {
             const uint64_t want_image = bound_rts[i].entry != nullptr ? bound_rts[i].entry->vk_image_id : 0;
             const uint64_t want_view = bound_rts[i].entry != nullptr ? attachment_view(bound_rts[i]) : 0;
-            can_continue_pass = rp.color_image_ids[i] == want_image && rp.color_view_ids[i] == want_view;
+            attachments_match = rp.color_image_ids[i] == want_image && rp.color_view_ids[i] == want_view;
+        }
+        const bool can_continue_pass = attachments_match && rp.sampled_image_ids == sampled_image_ids;
+
+        if (pass_diag)
+        {
+            ++g_pass_diag.draws;
+            if (can_continue_pass)
+            {
+                ++g_pass_diag.reuse;
+            }
+            else if (!sampled_render_targets.empty())
+            {
+                ++g_pass_diag.open_sampled_rt;
+            }
+            else
+            {
+                ++g_pass_diag.open_attachment;
+            }
         }
 
         if (!can_continue_pass)
@@ -3109,12 +3179,15 @@ namespace sogen
                                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, color_range);
             }
         }
-        for (resource_entry* srt : sampled_render_targets)
+        if (!can_continue_pass)
         {
-            this->vulkan_.cmd_pipeline_barrier(batch_cmd, srt->vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                               VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, color_range);
+            for (const uint64_t sampled_image : sampled_image_ids)
+            {
+                this->vulkan_.cmd_pipeline_barrier(batch_cmd, sampled_image, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                                   VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, color_range);
+            }
         }
 
         if (!can_continue_pass)
@@ -3209,6 +3282,7 @@ namespace sogen
                 rp.color_view_ids[i] = bound_rts[i].entry != nullptr ? attachment_view(bound_rts[i]) : 0;
             }
             rp.depth_image_id = ds_entry != nullptr ? ds_entry->vk_image_id : 0;
+            rp.sampled_image_ids = std::move(sampled_image_ids);
             pending = {};
         }
 
@@ -3294,15 +3368,9 @@ namespace sogen
             this->vulkan_.cmd_draw(batch_cmd, vertex_count, instance_count, first_vertex, 0);
         }
 
-        // A render-to-texture draw stays exactly as self-contained as before merging: close the instance
-        // it just opened above (can_continue_pass is always false for it -- sampled_render_targets is
-        // part of that check) right back down, restoring its color attachments to the TRANSFER_SRC_OPTIMAL
-        // resting layout immediately rather than leaving them open for a next draw to (never, since the
-        // check excludes it) merge with. An ordinary draw leaves its instance open instead, for the next
-        // draw's can_continue_pass check above to pick up.
-        if (!sampled_render_targets.empty())
+        if (pass_diag)
         {
-            this->close_render_pass(this->batch_slot_);
+            pass_diag_maybe_report();
         }
 
         if (profile)
@@ -3353,17 +3421,6 @@ namespace sogen
         if (build_depth_state(this->state_.render_state, depth_vk_format).test_enable != 0)
         {
             ++this->stats_.recorded_depth_tested;
-        }
-
-        // Restore every sampled render target to the TRANSFER_SRC_OPTIMAL resting layout the rest of this
-        // host (readback, clear, blt, the next draw's own barriers) relies on. The color attachments
-        // themselves are restored by close_render_pass above (immediately for a render-to-texture draw,
-        // or later -- at the next attachment change or batch submit -- for an ordinary one).
-        for (resource_entry* srt : sampled_render_targets)
-        {
-            this->vulkan_.cmd_pipeline_barrier(batch_cmd, srt->vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
         }
 
         // The batch is NOT submitted here -- it stays open, accumulating subsequent same-render-target
