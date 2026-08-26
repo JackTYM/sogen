@@ -38,7 +38,11 @@ namespace sogen
 
         virtual void send(const pipe_ipc_message& message) = 0;
 
-        // Non-blocking: returns nullopt immediately if no complete message is available yet.
+        // Non-blocking: returns nullopt immediately if no complete message is available yet. Known
+        // gap: nullopt is also what a closed/EOF'd transport looks like, so a child currently has no
+        // way to notice its parent process has died via this channel - it keeps idling (and keeps
+        // servicing process_control_channel requests, see process_control_server.cpp) forever rather
+        // than exiting, whether or not its initial thread is suspended.
         virtual std::optional<pipe_ipc_message> try_receive() = 0;
     };
 
