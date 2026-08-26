@@ -32,6 +32,14 @@ namespace sogen
             response.status = transfer_status(transferred, request.payload.size());
         }
 
+        // Narrower than syscalls/memory.cpp's handle_NtAllocateVirtualMemoryEx in two ways, both
+        // deliberate scope cuts for this task: it never validates request.size == 0 or an
+        // unrecognized/empty allocation_type (the real handler rejects both with
+        // STATUS_INVALID_PARAMETER, memory.cpp:426-429/574-577), and it always calls
+        // memory_manager::allocate_memory - there is no commit-onto-an-existing-reservation path
+        // (commit && !reserve calls memory_manager::commit_memory instead, memory.cpp:579-583). Task 7
+        // adds both when this executor starts backing the real NtAllocateVirtualMemory{,Ex}
+        // cross-process path.
         void execute_allocate_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             const auto protection = try_map_nt_to_emulator_protection(request.protection);
