@@ -742,6 +742,7 @@ namespace sogen
         uint64_t handle_NtUserSetClipboardData();
         uint64_t handle_NtUserGetProcessDpiAwarenessContext();
         NTSTATUS handle_NtUserSetProcessDpiAwarenessContext();
+        BOOL handle_NtUserSetProcessLaunchForegroundPolicy();
         uint32_t handle_NtUserMapVirtualKeyEx(const syscall_context& c, uint32_t code, uint32_t map_type, uint32_t keyboard_id,
                                               uint64_t keyboard_layout);
         NTSTATUS handle_NtUserToUnicodeEx();
@@ -1623,6 +1624,7 @@ namespace sogen
         add_handler(NtUserMapVirtualKeyEx);
         add_handler(NtUserToUnicodeEx);
         add_handler(NtUserSetProcessDpiAwarenessContext);
+        add_handler(NtUserSetProcessLaunchForegroundPolicy);
         add_handler(NtUserGetRawInputDeviceList);
         add_handler(NtUserGetRawInputDeviceInfo);
         add_handler(NtUserGetKeyboardType);

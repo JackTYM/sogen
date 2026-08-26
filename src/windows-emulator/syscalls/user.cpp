@@ -5976,6 +5976,11 @@ namespace sogen
             return 0;
         }
 
+        BOOL handle_NtUserSetProcessLaunchForegroundPolicy()
+        {
+            return TRUE;
+        }
+
         uint32_t handle_NtUserMapVirtualKeyEx(const syscall_context& /*c*/, const uint32_t code, const uint32_t map_type,
                                               const uint32_t /*keyboard_id*/, const uint64_t /*keyboard_layout*/)
         {
