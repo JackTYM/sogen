@@ -352,6 +352,22 @@ namespace sogen
             response.status = STATUS_SUCCESS;
         }
 
+        // Answers ProcessWow64Information for this target from its own live process_context, the same
+        // ground truth real Windows' NtQueryInformationProcess reads from the target EPROCESS's own
+        // Wow64Process field: 0 for a native (non-WOW64) process, or the real address of the target's
+        // own 32-bit PEB for a WOW64 one. Unlike the caller's own PE-header-based heuristic (used when
+        // no live channel exists to ask), this is exact - it comes from process_context::peb32 itself,
+        // set up by process_context::setup before this target's own main loop ever starts pumping this
+        // channel.
+        void execute_query_wow64_info(windows_emulator& target, const process_control_request& /*request*/,
+                                      process_control_response& response)
+        {
+            response.base_address = (target.process.is_wow64_process && target.process.peb32.has_value()) //
+                                        ? target.process.peb32->value()
+                                        : 0;
+            response.status = STATUS_SUCCESS;
+        }
+
         void execute_adopt_section(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             auto s = section::from_pagefile_backing(request.maximum_size, request.page_protection, request.allocation_attributes,
@@ -398,6 +414,9 @@ namespace sogen
             break;
         case process_control_op::adopt_section:
             execute_adopt_section(target, request, response);
+            break;
+        case process_control_op::query_wow64_info:
+            execute_query_wow64_info(target, request, response);
             break;
         }
     }

@@ -16,6 +16,7 @@ namespace sogen
         namespace
         {
             constexpr ACCESS_MASK PROCESS_TERMINATE = 0x0001;
+            constexpr ACCESS_MASK PROCESS_QUERY_INFORMATION = 0x0400;
             constexpr ACCESS_MASK PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
             // The environment block real ntdll builds (see process_context::setup's construction of
@@ -189,6 +190,29 @@ namespace sogen
                             return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
                                 c.emu, process_information, process_information_length, return_length,
                                 [](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = 0; });
+                        }
+
+                        // Not positively confirmed native 64-bit from the file alone (a genuinely 32-bit
+                        // child, or an unreadable/corrupt image): ask the child itself for its real
+                        // PEB32 address, the same live ground truth real Windows answers this query
+                        // from (the target EPROCESS's own Wow64Process field) - see
+                        // execute_query_wow64_info. Falls through to STATUS_NOT_SUPPORTED below if no
+                        // live channel exists to ask (matching this branch's own pre-existing behavior
+                        // for every other unresolvable case).
+                        const auto target = resolve_child_target(c, process_handle, PROCESS_QUERY_INFORMATION);
+                        if (std::holds_alternative<child_target>(target))
+                        {
+                            process_control_request request{};
+                            request.op = process_control_op::query_wow64_info;
+
+                            const auto response =
+                                std::get<child_target>(target).channel->request(request, process_control_default_timeout_ms);
+                            if (response && response->status == STATUS_SUCCESS)
+                            {
+                                return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
+                                    c.emu, process_information, process_information_length, return_length,
+                                    [&](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = response->base_address; });
+                            }
                         }
                     }
                 }

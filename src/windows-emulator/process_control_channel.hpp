@@ -20,6 +20,7 @@ namespace sogen
         terminate = 6,
         resume_thread = 7,
         adopt_section = 8,
+        query_wow64_info = 9,
     };
 
     inline constexpr int process_control_default_timeout_ms = 10000;
