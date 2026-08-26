@@ -5,6 +5,8 @@
 #include <optional>
 #include <vector>
 
+#include "serialization.hpp"
+
 namespace sogen
 {
     enum class process_control_op : uint8_t
@@ -38,6 +40,44 @@ namespace sogen
         uint32_t allocation_attributes{};
         uint32_t granted_access{};
         std::vector<std::byte> payload{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->request_id);
+            buffer.write(static_cast<uint8_t>(this->op));
+            buffer.write(this->address);
+            buffer.write(this->size);
+            buffer.write(this->allocation_type);
+            buffer.write(this->protection);
+            buffer.write(this->free_type);
+            buffer.write(this->info_class);
+            buffer.write(this->exit_status);
+            buffer.write(this->maximum_size);
+            buffer.write(this->page_protection);
+            buffer.write(this->allocation_attributes);
+            buffer.write(this->granted_access);
+            buffer.write_vector(this->payload);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->request_id);
+            uint8_t op{};
+            buffer.read(op);
+            this->op = static_cast<process_control_op>(op);
+            buffer.read(this->address);
+            buffer.read(this->size);
+            buffer.read(this->allocation_type);
+            buffer.read(this->protection);
+            buffer.read(this->free_type);
+            buffer.read(this->info_class);
+            buffer.read(this->exit_status);
+            buffer.read(this->maximum_size);
+            buffer.read(this->page_protection);
+            buffer.read(this->allocation_attributes);
+            buffer.read(this->granted_access);
+            buffer.read_vector(this->payload);
+        }
     };
 
     struct process_control_response
@@ -51,6 +91,32 @@ namespace sogen
         uint32_t previous_suspend_count{};
         uint64_t minted_handle_bits{};
         std::vector<std::byte> payload{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write(this->request_id);
+            buffer.write(this->status);
+            buffer.write(this->bytes_written);
+            buffer.write(this->base_address);
+            buffer.write(this->region_size);
+            buffer.write(this->old_protection);
+            buffer.write(this->previous_suspend_count);
+            buffer.write(this->minted_handle_bits);
+            buffer.write_vector(this->payload);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read(this->request_id);
+            buffer.read(this->status);
+            buffer.read(this->bytes_written);
+            buffer.read(this->base_address);
+            buffer.read(this->region_size);
+            buffer.read(this->old_protection);
+            buffer.read(this->previous_suspend_count);
+            buffer.read(this->minted_handle_bits);
+            buffer.read_vector(this->payload);
+        }
     };
 
     // Abstracts the transport for the synchronous request/response control protocol that lets a

@@ -5,6 +5,7 @@
 #include "../syscall_utils.hpp"
 #include "../memory_manager.hpp"
 #include "../windows_path.hpp"
+#include "../cross_process_memory.hpp"
 
 namespace sogen
 {
@@ -723,42 +724,13 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            constexpr size_t page_size = 0x1000;
-            const auto bytes_until_page_boundary = [](const uint64_t address) {
-                const auto offset = address % page_size;
-                return static_cast<size_t>(offset == 0 ? page_size : page_size - offset);
-            };
+            std::vector<std::byte> data(number_of_bytes_to_read);
+            const auto bytes_read_from_source = copy_guest_range_out(c.emu, static_cast<uint64_t>(base_address), data);
+            const auto bytes_written_to_dest =
+                copy_guest_range_in(c.emu, static_cast<uint64_t>(buffer), std::span(data).first(bytes_read_from_source));
 
-            std::vector<uint8_t> memory(page_size, 0);
-            size_t bytes_read = 0;
-            while (bytes_read < number_of_bytes_to_read)
-            {
-                const auto current_base = static_cast<uint64_t>(base_address) + bytes_read;
-                const auto current_buffer = static_cast<uint64_t>(buffer) + bytes_read;
-                const auto bytes_remaining = static_cast<size_t>(number_of_bytes_to_read) - bytes_read;
-                const auto chunk_size =
-                    std::min({bytes_remaining, bytes_until_page_boundary(current_base), bytes_until_page_boundary(current_buffer)});
-
-                if (!c.emu.try_read_memory(current_base, memory.data(), chunk_size))
-                {
-                    break;
-                }
-
-                if (!c.emu.try_write_memory(current_buffer, memory.data(), chunk_size))
-                {
-                    break;
-                }
-
-                bytes_read += chunk_size;
-            }
-
-            number_of_bytes_read.try_write(static_cast<ULONG>(bytes_read));
-            if (bytes_read == number_of_bytes_to_read)
-            {
-                return STATUS_SUCCESS;
-            }
-
-            return bytes_read == 0 ? STATUS_INVALID_ADDRESS : STATUS_PARTIAL_COPY;
+            number_of_bytes_read.try_write(static_cast<ULONG>(bytes_written_to_dest));
+            return transfer_status(bytes_written_to_dest, number_of_bytes_to_read);
         }
 
         NTSTATUS handle_NtWriteVirtualMemory(const syscall_context& c, const handle process_handle, const emulator_pointer base_address,
@@ -777,42 +749,13 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            constexpr size_t page_size = 0x1000;
-            const auto bytes_until_page_boundary = [](const uint64_t address) {
-                const auto offset = address % page_size;
-                return static_cast<size_t>(offset == 0 ? page_size : page_size - offset);
-            };
+            std::vector<std::byte> data(number_of_bytes_to_write);
+            const auto bytes_read_from_source = copy_guest_range_out(c.emu, static_cast<uint64_t>(buffer), data);
+            const auto bytes_written_to_dest =
+                copy_guest_range_in(c.emu, static_cast<uint64_t>(base_address), std::span(data).first(bytes_read_from_source));
 
-            std::vector<uint8_t> memory(page_size, 0);
-            size_t bytes_written = 0;
-            while (bytes_written < number_of_bytes_to_write)
-            {
-                const auto current_buffer = static_cast<uint64_t>(buffer) + bytes_written;
-                const auto current_base = static_cast<uint64_t>(base_address) + bytes_written;
-                const auto bytes_remaining = static_cast<size_t>(number_of_bytes_to_write) - bytes_written;
-                const auto chunk_size =
-                    std::min({bytes_remaining, bytes_until_page_boundary(current_buffer), bytes_until_page_boundary(current_base)});
-
-                if (!c.emu.try_read_memory(current_buffer, memory.data(), chunk_size))
-                {
-                    break;
-                }
-
-                if (!c.emu.try_write_memory(current_base, memory.data(), chunk_size))
-                {
-                    break;
-                }
-
-                bytes_written += chunk_size;
-            }
-
-            number_of_bytes_write.try_write(static_cast<ULONG>(bytes_written));
-            if (bytes_written == number_of_bytes_to_write)
-            {
-                return STATUS_SUCCESS;
-            }
-
-            return bytes_written == 0 ? STATUS_INVALID_ADDRESS : STATUS_PARTIAL_COPY;
+            number_of_bytes_write.try_write(static_cast<ULONG>(bytes_written_to_dest));
+            return transfer_status(bytes_written_to_dest, number_of_bytes_to_write);
         }
 
         NTSTATUS handle_NtSetInformationVirtualMemory()

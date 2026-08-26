@@ -2,6 +2,11 @@
 
 #include <cross_process.hpp>
 #include <syscall_utils.hpp>
+#include <process_control_server.hpp>
+#include <memory_utils.hpp>
+
+#include <array>
+#include <cstring>
 
 namespace sogen::test
 {
@@ -33,6 +38,129 @@ namespace sogen::test
         {
             return syscall_context{emu, emu.vcpu(0).cpu, emu.vcpu(0), emu.process};
         }
+
+        // A real, reusable test double for process_control_channel: request() plays both transport
+        // roles synchronously in-process by invoking execute_process_control_request directly against
+        // peer, rather than mocking the executor itself. Mirrors the real fd_process_control_channel's
+        // own contract (child_process_spawn.cpp): it assigns its own monotonic request_id per call and
+        // poisons itself (permanently returning nullopt) the moment a response's request_id doesn't
+        // match what was just sent.
+        class loopback_process_control_channel final : public process_control_channel
+        {
+          public:
+            explicit loopback_process_control_channel(windows_emulator& peer)
+                : peer_(&peer)
+            {
+            }
+
+            std::optional<process_control_response> request(const process_control_request& request, int /*timeout_ms*/) override
+            {
+                if (this->dead_)
+                {
+                    return std::nullopt;
+                }
+
+                process_control_request sent = request;
+                sent.request_id = this->next_request_id_++;
+
+                process_control_response response{};
+                execute_process_control_request(*this->peer_, sent, response);
+
+                if (response.request_id != sent.request_id)
+                {
+                    this->dead_ = true;
+                    return std::nullopt;
+                }
+
+                return response;
+            }
+
+            std::optional<process_control_request> try_receive() override
+            {
+                return std::nullopt;
+            }
+
+            void respond(const process_control_response&) override
+            {
+            }
+
+          private:
+            windows_emulator* peer_{};
+            uint64_t next_request_id_{1};
+            bool dead_{false};
+        };
+
+        // A client-side channel whose response's request_id never matches what was sent - simulating a
+        // desynchronized transport (the real fd_process_control_channel's dead_ path, see
+        // child_process_spawn.cpp) even though the underlying operation executed against peer.
+        class desyncing_process_control_channel final : public process_control_channel
+        {
+          public:
+            explicit desyncing_process_control_channel(windows_emulator& peer)
+                : peer_(&peer)
+            {
+            }
+
+            std::optional<process_control_response> request(const process_control_request& request, int /*timeout_ms*/) override
+            {
+                process_control_request sent = request;
+                sent.request_id = 1;
+
+                process_control_response response{};
+                execute_process_control_request(*this->peer_, sent, response);
+                response.request_id = sent.request_id + 1;
+
+                if (response.request_id != sent.request_id)
+                {
+                    return std::nullopt;
+                }
+
+                return response;
+            }
+
+            std::optional<process_control_request> try_receive() override
+            {
+                return std::nullopt;
+            }
+
+            void respond(const process_control_response&) override
+            {
+            }
+
+          private:
+            windows_emulator* peer_{};
+        };
+
+        // A server-side channel double for pump_process_control: try_receive() drains a queue of
+        // canned requests, respond() records what was sent back.
+        class queued_process_control_channel final : public process_control_channel
+        {
+          public:
+            std::optional<process_control_response> request(const process_control_request&, int /*timeout_ms*/) override
+            {
+                return std::nullopt;
+            }
+
+            std::optional<process_control_request> try_receive() override
+            {
+                if (this->pending.empty())
+                {
+                    return std::nullopt;
+                }
+
+                auto next = this->pending.front();
+                this->pending.erase(this->pending.begin());
+                return next;
+            }
+
+            void respond(const process_control_response& response) override
+            {
+                this->responses.push_back(response);
+            }
+
+            std::vector<process_control_request> pending{};
+            std::vector<process_control_response> responses{};
+        };
     }
 
     TEST(CrossProcessTest, NonChildHandleFallsThrough)
@@ -144,5 +272,411 @@ namespace sogen::test
     TEST(CrossProcessTest, ResolveGrantedProcessAccessMapsGenericAllToAllAccess)
     {
         ASSERT_EQ(resolve_granted_process_access(GENERIC_ALL), PROCESS_ALL_ACCESS);
+    }
+
+    TEST(CrossProcessTest, ReadMemoryRoundTrips)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        const auto base = b.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base, 0u);
+
+        std::vector<std::byte> pattern(0x40);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            pattern[i] = static_cast<std::byte>(i);
+        }
+        ASSERT_TRUE(b.memory.try_write_memory(base, pattern.data(), pattern.size()));
+
+        process_control_request request{};
+        request.op = process_control_op::read_memory;
+        request.address = base;
+        request.size = pattern.size();
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(response->payload, pattern);
+    }
+
+    TEST(CrossProcessTest, WriteMemoryRoundTrips)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        const auto base = b.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base, 0u);
+
+        std::vector<std::byte> pattern(0x40);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            pattern[i] = static_cast<std::byte>(0x80 + i);
+        }
+
+        process_control_request request{};
+        request.op = process_control_op::write_memory;
+        request.address = base;
+        request.payload = pattern;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(response->bytes_written, pattern.size());
+
+        std::vector<std::byte> actual(pattern.size());
+        ASSERT_TRUE(b.memory.try_read_memory(base, actual.data(), actual.size()));
+        ASSERT_EQ(actual, pattern);
+    }
+
+    TEST(CrossProcessTest, ReadAcrossPageBoundary)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        constexpr size_t size = 0x3000;
+        const auto base = b.memory.allocate_memory(size, memory_permission::read_write);
+        ASSERT_NE(base, 0u);
+
+        std::vector<std::byte> pattern(size);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            pattern[i] = static_cast<std::byte>(i % 251);
+        }
+        ASSERT_TRUE(b.memory.try_write_memory(base, pattern.data(), pattern.size()));
+
+        process_control_request request{};
+        request.op = process_control_op::read_memory;
+        request.address = base;
+        request.size = pattern.size();
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(response->payload, pattern);
+    }
+
+    TEST(CrossProcessTest, ReadPartialAtUnmappedTail)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        const auto base = b.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base, 0u);
+
+        process_control_request request{};
+        request.op = process_control_op::read_memory;
+        request.address = base;
+        request.size = 0x2000;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_PARTIAL_COPY);
+        ASSERT_EQ(response->payload.size(), 0x1000u);
+    }
+
+    TEST(CrossProcessTest, ReadWhollyUnmappedReturnsInvalidAddress)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::read_memory;
+        request.address = 0x1000;
+        request.size = 0x10;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_INVALID_ADDRESS);
+        ASSERT_EQ(response->payload.size(), 0u);
+    }
+
+    TEST(CrossProcessTest, AllocateThenWriteThenRead)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        process_control_request allocate_request{};
+        allocate_request.op = process_control_op::allocate_memory;
+        allocate_request.address = 0;
+        allocate_request.size = 0x1000;
+        allocate_request.allocation_type = MEM_COMMIT;
+        allocate_request.protection = PAGE_READWRITE;
+
+        const auto allocate_response = channel.request(allocate_request, process_control_default_timeout_ms);
+        ASSERT_TRUE(allocate_response.has_value());
+        ASSERT_EQ(allocate_response->status, STATUS_SUCCESS);
+        ASSERT_NE(allocate_response->base_address, 0u);
+
+        const auto base = allocate_response->base_address;
+
+        std::vector<std::byte> pattern(0x20);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            pattern[i] = static_cast<std::byte>(0x40 + i);
+        }
+
+        process_control_request write_request{};
+        write_request.op = process_control_op::write_memory;
+        write_request.address = base;
+        write_request.payload = pattern;
+
+        const auto write_response = channel.request(write_request, process_control_default_timeout_ms);
+        ASSERT_TRUE(write_response.has_value());
+        ASSERT_EQ(write_response->status, STATUS_SUCCESS);
+        ASSERT_EQ(write_response->bytes_written, pattern.size());
+
+        process_control_request read_request{};
+        read_request.op = process_control_op::read_memory;
+        read_request.address = base;
+        read_request.size = pattern.size();
+
+        const auto read_response = channel.request(read_request, process_control_default_timeout_ms);
+        ASSERT_TRUE(read_response.has_value());
+        ASSERT_EQ(read_response->status, STATUS_SUCCESS);
+        ASSERT_EQ(read_response->payload, pattern);
+    }
+
+    TEST(CrossProcessTest, ProtectMemoryReportsOldProtection)
+    {
+        auto b = create_empty_emulator();
+        const auto base = b.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base, 0u);
+
+        loopback_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::protect_memory;
+        request.address = base;
+        request.size = 0x1000;
+        request.protection = PAGE_READONLY;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(response->old_protection, static_cast<uint32_t>(PAGE_READWRITE));
+
+        const auto region_info = b.memory.get_region_info(base);
+        ASSERT_EQ(map_emulator_to_nt_protection(region_info.permissions), static_cast<uint32_t>(PAGE_READONLY));
+    }
+
+    TEST(CrossProcessTest, FreeMemoryReleasesRegion)
+    {
+        auto b = create_empty_emulator();
+        const auto base = b.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base, 0u);
+
+        loopback_process_control_channel channel{b};
+
+        process_control_request free_request{};
+        free_request.op = process_control_op::free_memory;
+        free_request.address = base;
+        free_request.free_type = MEM_RELEASE;
+
+        const auto free_response = channel.request(free_request, process_control_default_timeout_ms);
+        ASSERT_TRUE(free_response.has_value());
+        ASSERT_EQ(free_response->status, STATUS_SUCCESS);
+
+        process_control_request read_request{};
+        read_request.op = process_control_op::read_memory;
+        read_request.address = base;
+        read_request.size = 0x10;
+
+        const auto read_response = channel.request(read_request, process_control_default_timeout_ms);
+        ASSERT_TRUE(read_response.has_value());
+        ASSERT_EQ(read_response->status, STATUS_INVALID_ADDRESS);
+    }
+
+    TEST(CrossProcessTest, QueryMemoryMatchesLocalQuery)
+    {
+        auto b = create_empty_emulator();
+        const auto base = b.memory.allocate_memory(0x2000, memory_permission::read_write);
+        ASSERT_NE(base, 0u);
+
+        loopback_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::query_memory;
+        request.address = base;
+        request.info_class = MemoryBasicInformation;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(response->payload.size(), sizeof(EMU_MEMORY_BASIC_INFORMATION64));
+
+        EMU_MEMORY_BASIC_INFORMATION64 actual{};
+        std::memcpy(&actual, response->payload.data(), sizeof(actual));
+
+        const auto region_info = b.memory.get_region_info(base);
+        EMU_MEMORY_BASIC_INFORMATION64 expected{};
+        expected.BaseAddress = region_info.start;
+        expected.AllocationBase = region_info.allocation_base;
+        expected.PartitionId = 0;
+        expected.RegionSize = static_cast<int64_t>(region_info.length);
+        expected.State = region_info.is_committed ? MEM_COMMIT : (region_info.is_reserved ? MEM_RESERVE : MEM_FREE);
+        expected.Protect = map_emulator_to_nt_protection(region_info.permissions);
+        expected.AllocationProtect = map_emulator_to_nt_protection(region_info.initial_permissions);
+        expected.Type = region_info.is_reserved ? memory_region_policy::to_memory_basic_information_type(region_info.kind) : 0;
+
+        ASSERT_EQ(0, std::memcmp(&actual, &expected, sizeof(actual)));
+    }
+
+    TEST(CrossProcessTest, TerminateStopsTarget)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::terminate;
+        request.exit_status = STATUS_SUCCESS;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+
+        ASSERT_TERMINATED_SUCCESSFULLY(b);
+    }
+
+    TEST(CrossProcessTest, AdoptSectionMintsUsableHandle)
+    {
+        auto b = create_empty_emulator();
+        loopback_process_control_channel channel{b};
+
+        const std::vector<std::byte> content = {std::byte{'h'}, std::byte{'i'}, std::byte{'!'}};
+
+        process_control_request request{};
+        request.op = process_control_op::adopt_section;
+        request.maximum_size = content.size();
+        request.page_protection = PAGE_READWRITE;
+        request.allocation_attributes = SEC_COMMIT;
+        request.granted_access = 0x000F001F;
+        request.payload = content;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_NE(response->minted_handle_bits, 0u);
+
+        handle minted{};
+        minted.bits = response->minted_handle_bits;
+
+        auto* const section_entry = b.process.sections.get(minted);
+        ASSERT_NE(section_entry, nullptr);
+        ASSERT_EQ(section_entry->object->backing_storage, content);
+        ASSERT_EQ(section_entry->object->maximum_size, content.size());
+        ASSERT_EQ(section_entry->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
+    }
+
+    TEST(CrossProcessTest, SerializationRoundTrip)
+    {
+        constexpr std::array all_ops = {
+            process_control_op::read_memory,    process_control_op::write_memory,  process_control_op::allocate_memory,
+            process_control_op::protect_memory, process_control_op::free_memory,   process_control_op::query_memory,
+            process_control_op::terminate,      process_control_op::resume_thread, process_control_op::adopt_section,
+        };
+
+        for (const auto op : all_ops)
+        {
+            process_control_request request{};
+            request.request_id = 0x1122334455667788ull;
+            request.op = op;
+            request.address = 0x10000;
+            request.size = 0x2000;
+            request.allocation_type = MEM_COMMIT;
+            request.protection = PAGE_READWRITE;
+            request.free_type = MEM_RELEASE;
+            request.info_class = MemoryBasicInformation;
+            request.exit_status = STATUS_SUCCESS;
+            request.maximum_size = 0x4000;
+            request.page_protection = PAGE_READONLY;
+            request.allocation_attributes = 1;
+            request.granted_access = 0x1F;
+            request.payload = {std::byte{1}, std::byte{2}, std::byte{3}};
+
+            utils::buffer_serializer request_buffer{};
+            request.serialize(request_buffer);
+
+            utils::buffer_deserializer request_deserializer{request_buffer};
+            process_control_request restored_request{};
+            restored_request.deserialize(request_deserializer);
+
+            ASSERT_EQ(restored_request.request_id, request.request_id);
+            ASSERT_EQ(restored_request.op, request.op);
+            ASSERT_EQ(restored_request.address, request.address);
+            ASSERT_EQ(restored_request.size, request.size);
+            ASSERT_EQ(restored_request.allocation_type, request.allocation_type);
+            ASSERT_EQ(restored_request.protection, request.protection);
+            ASSERT_EQ(restored_request.free_type, request.free_type);
+            ASSERT_EQ(restored_request.info_class, request.info_class);
+            ASSERT_EQ(restored_request.exit_status, request.exit_status);
+            ASSERT_EQ(restored_request.maximum_size, request.maximum_size);
+            ASSERT_EQ(restored_request.page_protection, request.page_protection);
+            ASSERT_EQ(restored_request.allocation_attributes, request.allocation_attributes);
+            ASSERT_EQ(restored_request.granted_access, request.granted_access);
+            ASSERT_EQ(restored_request.payload, request.payload);
+
+            process_control_response response{};
+            response.request_id = request.request_id;
+            response.status = STATUS_PARTIAL_COPY;
+            response.bytes_written = 0x30;
+            response.base_address = 0x20000;
+            response.region_size = 0x3000;
+            response.old_protection = PAGE_EXECUTE_READWRITE;
+            response.previous_suspend_count = 2;
+            response.minted_handle_bits = 0xAABBCCDDull;
+            response.payload = {std::byte{9}, std::byte{8}};
+
+            utils::buffer_serializer response_buffer{};
+            response.serialize(response_buffer);
+
+            utils::buffer_deserializer response_deserializer{response_buffer};
+            process_control_response restored_response{};
+            restored_response.deserialize(response_deserializer);
+
+            ASSERT_EQ(restored_response.request_id, response.request_id);
+            ASSERT_EQ(restored_response.status, response.status);
+            ASSERT_EQ(restored_response.bytes_written, response.bytes_written);
+            ASSERT_EQ(restored_response.base_address, response.base_address);
+            ASSERT_EQ(restored_response.region_size, response.region_size);
+            ASSERT_EQ(restored_response.old_protection, response.old_protection);
+            ASSERT_EQ(restored_response.previous_suspend_count, response.previous_suspend_count);
+            ASSERT_EQ(restored_response.minted_handle_bits, response.minted_handle_bits);
+            ASSERT_EQ(restored_response.payload, response.payload);
+        }
+    }
+
+    TEST(CrossProcessTest, MismatchedRequestIdIsTreatedAsTransportFailure)
+    {
+        auto b = create_empty_emulator();
+        desyncing_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::terminate;
+        request.exit_status = STATUS_SUCCESS;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+
+        ASSERT_FALSE(response.has_value());
+        ASSERT_TERMINATED_SUCCESSFULLY(b);
+    }
+
+    TEST(CrossProcessTest, PumpProcessControlDrainsAndResponds)
+    {
+        auto b = create_empty_emulator();
+        queued_process_control_channel channel{};
+
+        process_control_request request{};
+        request.request_id = 7;
+        request.op = process_control_op::terminate;
+        request.exit_status = STATUS_SUCCESS;
+        channel.pending.push_back(request);
+
+        pump_process_control(b, channel);
+
+        ASSERT_TERMINATED_SUCCESSFULLY(b);
+        ASSERT_EQ(channel.responses.size(), 1u);
+        ASSERT_EQ(channel.responses[0].request_id, 7u);
+        ASSERT_EQ(channel.responses[0].status, STATUS_SUCCESS);
     }
 } // namespace sogen::test
