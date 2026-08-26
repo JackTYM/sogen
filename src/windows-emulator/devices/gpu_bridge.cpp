@@ -73,6 +73,8 @@ namespace sogen
                                 return "d3d9_present";
                             case gpu_bridge::ioctl_d3d9_tex_blt:
                                 return "d3d9_tex_blt";
+                            case gpu_bridge::ioctl_d3d9_flush:
+                                return "d3d9_flush";
                             case gpu_bridge::ioctl_d3d9_create_vertex_shader:
                                 return "d3d9_create_vertex_shader";
                             case gpu_bridge::ioctl_d3d9_create_pixel_shader:
@@ -345,6 +347,9 @@ namespace sogen
                     return handle_d3d9_present(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_tex_blt:
                     return handle_d3d9_tex_blt(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_flush:
+                    this->d3d9_.flush_pending();
+                    return STATUS_SUCCESS;
 
                 case gpu_bridge::ioctl_d3d9_set_render_state:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_state);
@@ -2869,9 +2874,11 @@ namespace sogen
 
                 uint32_t direct_guest_va = 0;
                 uint32_t direct_size = 0;
+                uint32_t direct_slice_stride = 0;
+                uint32_t direct_slice_count = 0;
                 void* host_ptr = nullptr;
                 size_t host_size = 0;
-                if (hr == 0 && this->d3d9_.get_direct_mapping(resource, host_ptr, host_size))
+                if (hr == 0 && this->d3d9_.get_direct_mapping(resource, host_ptr, host_size, direct_slice_stride, direct_slice_count))
                 {
                     constexpr uint64_t page = 0x1000;
                     const uint64_t mapped_size = (host_size + page - 1) & ~(page - 1);
@@ -2884,7 +2891,7 @@ namespace sogen
                         {
                             this->resource_direct_va_[resource] = {va, static_cast<size_t>(mapped_size)};
                             direct_guest_va = static_cast<uint32_t>(va);
-                            direct_size = static_cast<uint32_t>(host_size);
+                            direct_size = request.width;
                         }
                     }
                     // A failed guest-VA alias is not fatal -- direct_guest_va stays 0 and the guest UMD
@@ -2892,10 +2899,14 @@ namespace sogen
                     // resource had never been direct-buffer-eligible on the host side either.
                 }
 
-                return write_output(
-                    win_emu, context,
-                    d3d9_cmd::create_resource_response{
-                        .hr = hr, .reserved = 0, .resource = resource, .direct_guest_va = direct_guest_va, .direct_size = direct_size});
+                return write_output(win_emu, context,
+                                    d3d9_cmd::create_resource_response{.hr = hr,
+                                                                       .reserved = 0,
+                                                                       .resource = resource,
+                                                                       .direct_guest_va = direct_guest_va,
+                                                                       .direct_size = direct_size,
+                                                                       .direct_slice_stride = direct_slice_stride,
+                                                                       .direct_slice_count = direct_slice_count});
             }
 
             NTSTATUS handle_d3d9_destroy_resource(windows_emulator& win_emu, const io_device_context& context)
@@ -3932,7 +3943,7 @@ namespace sogen
                     // d3d9_host entry point rather than getting one case each here -- see
                     // d3d9-command-protocol/d3d9_command_protocol.hpp for what each opcode's payload means.
                     if (command >= static_cast<uint32_t>(gpu_bridge::command::d3d9_marker) &&
-                        command <= static_cast<uint32_t>(gpu_bridge::command::d3d9_blt))
+                        command <= static_cast<uint32_t>(gpu_bridge::command::d3d9_set_direct_slice))
                     {
                         return this->d3d9_.execute_recorded(command, payload, size);
                     }

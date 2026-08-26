@@ -238,6 +238,8 @@ namespace sogen::gpu_bridge
         d3d9_set_indices_um = 0x938,
         d3d9_color_fill = 0x939,
         d3d9_blt = 0x93A,
+        d3d9_set_direct_slice = 0x93B,
+        d3d9_flush = 0x93C,
     };
 
     // Discriminator for cmd_set_dynamic_u32: the family of extended-dynamic-state setters that all take a
@@ -434,6 +436,7 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_d3d9_clear = make_ioctl(static_cast<uint32_t>(command::d3d9_clear));
     inline constexpr uint32_t ioctl_d3d9_draw_primitive = make_ioctl(static_cast<uint32_t>(command::d3d9_draw_primitive));
     inline constexpr uint32_t ioctl_d3d9_draw_indexed_primitive = make_ioctl(static_cast<uint32_t>(command::d3d9_draw_indexed_primitive));
+    inline constexpr uint32_t ioctl_d3d9_flush = make_ioctl(static_cast<uint32_t>(command::d3d9_flush));
 
     // Opaque identifier handed to the guest in place of a host Vulkan handle. The host keeps the
     // real VkInstance / VkPhysicalDevice / ... in a table and the guest only ever sees this id, so

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -599,43 +600,44 @@ namespace
     // creating its own correctly-sized one.
     std::unordered_map<uint64_t, uint64_t> g_created_resource_ids;
 
-    // Format-based usage classification. This is now a DEAD FALLBACK for real resources: every genuine
-    // CreateResource goes through resource_flags_to_usage(args->Flags) instead (see the call site and
-    // resource_flags_to_usage's own comment) -- this function is only ever reached for the internal-use
-    // synthetic buffer formats, whose Flags carry VertexBuffer/IndexBuffer intent, and none of those hit
-    // the color/depth branches below (they fall through to the plain-texture return). It is retained only
-    // as that fallback. The Format->usage guesses it still encodes are historical and NO LONGER a
-    // complete picture of what g_formats advertises: D3DFMT_D24S8/D24X8 (75/77) are the depth-stencil
-    // formats, and D3DFMT_X8R8G8B8 (22) is A render-target format -- but as of the FORMATOP expansion
-    // it is no longer the ONLY one (D3DFMT_A8R8G8B8, 21, now also carries offscreen-RT usage in
-    // g_formats, and would be misclassified as a plain texture here). Real render-target/texture routing
-    // for those formats comes from resource_flags_to_usage, not from this table, so the incompleteness is
-    // inert; do not extend the branches below to compensate.
-    uint32_t classify_resource_usage(uint32_t format)
+    // Buffers the host handed a direct mapping for (see create_resource_response's direct_* fields):
+    // their bytes live in real GPU memory aliased straight into this process's address space, so Lock
+    // hands the app a pointer into it and Unlock has nothing left to do. That is what this whole
+    // mechanism buys -- Unlock was measured at 43-85% of all D3D9 host crossings during real MW2
+    // gameplay, and a direct-mapped buffer's Unlock costs zero.
+    //
+    // The mapping is a ring of `slice_count` slices. D3DLOCK_DISCARD moves to the next one rather than
+    // overwriting the live one, mirroring DXVK's D3D9CommonBuffer::DiscardMapSlice: the previous slice's
+    // bytes stay intact for any already-recorded draw still reading them, so the discard needs neither a
+    // GPU wait nor a crossing. Keyed by wire resource id.
+    struct direct_buffer_state
     {
-        if (format == 75 || format == 77) // D3DFMT_D24S8 / D3DFMT_D24X8
-        {
-            return 0x2; // D3DUSAGE_DEPTHSTENCIL
-        }
-        if (format == 22) // D3DFMT_X8R8G8B8
-        {
-            return 0x1; // D3DUSAGE_RENDERTARGET
-        }
-        return 0; // plain texture, no RT/DS usage bit
-    }
+        uint32_t base_va;
+        uint32_t size; // one slice's usable extent, i.e. the resource's own byte size
+        uint32_t slice_stride;
+        uint32_t slice_count;
+        uint32_t slice_index;
+    };
+
+    std::unordered_map<uint64_t, direct_buffer_state> g_direct_buffers;
 
     // Translate D3DDDIARG_CREATERESOURCE::Flags (a D3DDDI_RESOURCEFLAGS bitfield) into the D3DUSAGE_* bits
-    // the host's create_resource actually tests. The host only inspects RENDERTARGET (0x1) and
-    // DEPTHSTENCIL (0x2); D3DDDI_RESOURCEFLAGS carries the matching intent in its RenderTarget (bit 0) and
-    // ZBuffer (bit 1) flags, which happen to sit at the same bit positions -- but map them explicitly
-    // rather than pass the raw flags word and rely on that coincidence (the two bitfields diverge above
-    // bit 1). This replaces the Format-based classify_resource_usage heuristic for real resources; that
-    // heuristic is kept only as the fallback for the internal-use synthetic buffer formats below, whose
-    // Flags carry VertexBuffer/IndexBuffer intent, not RT/DS.
+    // the host's create_resource actually tests. The two bitfields are unrelated numbering spaces that only
+    // coincide for the first two bits, so every bit is mapped explicitly rather than passing the raw flags
+    // word through. Bit positions are d3dukmdt.h's, with CubeMap/Volume (0x20000/0x40000, read by
+    // resource_flags_to_kind) independently live-confirmed against real d3d9.dll to anchor the layout.
+    //
+    // Dynamic/WriteOnly matter as much as RenderTarget/ZBuffer do: the host gates its direct-mapped
+    // buffer path on D3DUSAGE_DYNAMIC, and buffer creates used to reach it with usage hardcoded to 0
+    // (they went through a Format-based heuristic that never looked at Flags at all), which kept that
+    // gate permanently shut. Live tracing of real MW2 gameplay found Dynamic set on ~22 of ~34 buffer
+    // creates, so this is the majority of its vertex/index traffic, not an edge case.
     uint32_t resource_flags_to_usage(uint32_t flags)
     {
         constexpr uint32_t k_resflag_render_target = 0x1; // D3DDDI_RESOURCEFLAGS.RenderTarget
         constexpr uint32_t k_resflag_zbuffer = 0x2;       // D3DDDI_RESOURCEFLAGS.ZBuffer
+        constexpr uint32_t k_resflag_dynamic = 0x4;       // D3DDDI_RESOURCEFLAGS.Dynamic
+        constexpr uint32_t k_resflag_write_only = 0x40;   // D3DDDI_RESOURCEFLAGS.WriteOnly
         uint32_t usage = 0;
         if ((flags & k_resflag_render_target) != 0)
         {
@@ -645,7 +647,33 @@ namespace
         {
             usage |= 0x2; // D3DUSAGE_DEPTHSTENCIL
         }
+        if ((flags & k_resflag_dynamic) != 0)
+        {
+            usage |= 0x200; // D3DUSAGE_DYNAMIC
+        }
+        if ((flags & k_resflag_write_only) != 0)
+        {
+            usage |= 0x8; // D3DUSAGE_WRITEONLY
+        }
         return usage;
+    }
+
+    // D3DDDIARG_CREATERESOURCE::Pool is a D3DDDI_POOL, a different enum from the D3DPOOL the wire's
+    // `pool` field carries and the host compares against (D3DPOOL_DEFAULT is 0, a value D3DDDI_POOL has
+    // no member for at all). Passing the raw D3DDDI_POOL through made every host pool comparison
+    // structurally unsatisfiable: MW2 creates 100% of its buffers in D3DDDI_POOL_VIDEOMEMORY (2), which
+    // read as D3DPOOL_MANAGED on the host side.
+    uint32_t ddi_pool_to_d3dpool(uint32_t ddi_pool)
+    {
+        switch (ddi_pool)
+        {
+        case 1:       // D3DDDIPOOL_SYSTEMMEM
+            return 2; // D3DPOOL_SYSTEMMEM
+        case 5:       // D3DDDIPOOL_STAGINGMEM
+            return 3; // D3DPOOL_SCRATCH
+        default:      // VIDEOMEMORY / LOCALVIDMEM / NONLOCALVIDMEM
+            return 0; // D3DPOOL_DEFAULT
+        }
     }
 
     // Classify a genuine texture create into a 2D/cube/volume resource_kind from D3DDDIARG_CREATERESOURCE::Flags.
@@ -699,12 +727,11 @@ namespace
             depth = surf0.Depth != 0 ? surf0.Depth : 1;
         }
 
-        // Usage comes from the real Flags field for genuine resources (see resource_flags_to_usage); the
-        // internal-use synthetic buffer formats (100/101/102, D3DFMT_VERTEXDATA/INDEX16/INDEX32) do not
-        // carry meaningful RT/DS resource flags, so keep the Format heuristic (returns 0) for those. Their
-        // create is orphaned regardless (see the format!=100/101/102 guard on registration below).
+        // Usage comes from the real Flags field for every resource kind, buffers included -- their
+        // Dynamic/WriteOnly bits are exactly what the host's direct-mapped-buffer gate reads (see
+        // resource_flags_to_usage).
         const bool is_internal_buffer_format = format == 100 || format == 101 || format == 102;
-        const uint32_t usage = is_internal_buffer_format ? classify_resource_usage(format) : resource_flags_to_usage(args->Flags);
+        const uint32_t usage = resource_flags_to_usage(args->Flags);
 
         // Dimensionality (2D/cube/volume) comes from the real Flags field for genuine resources (see
         // resource_flags_to_kind). The internal-use synthetic buffer formats (100/101/102) do not carry
@@ -732,7 +759,7 @@ namespace
             .depth = depth,
             .mip_levels = args->MipLevels,
             .usage = usage,
-            .pool = args->Pool,
+            .pool = ddi_pool_to_d3dpool(args->Pool),
         };
         d3d9c::create_resource_response resp{};
         bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
@@ -798,6 +825,19 @@ namespace
                 // They stay OUT of g_created_resource_ids so umd_Lock keeps treating them as buffers
                 // (reading OffsetToLock), which textures/render targets must not do.
                 g_resource_ids[resp.resource] = resp.resource;
+
+                // A host that judged this buffer direct-mappable AND managed to alias it into this
+                // address space reports a nonzero VA; anything less leaves the resource on the ordinary
+                // Lock/Unlock round trip, which stays correct for it either way.
+                if (resp.direct_guest_va != 0 && resp.direct_size != 0 && resp.direct_slice_count != 0 &&
+                    resp.direct_slice_stride >= resp.direct_size)
+                {
+                    g_direct_buffers[resp.resource] = direct_buffer_state{.base_va = resp.direct_guest_va,
+                                                                          .size = resp.direct_size,
+                                                                          .slice_stride = resp.direct_slice_stride,
+                                                                          .slice_count = resp.direct_slice_count,
+                                                                          .slice_index = 0};
+                }
             }
         }
         return S_OK;
@@ -2183,6 +2223,72 @@ namespace
     // already tracks itself); the DDI's per-call design means this UMD has to earn it explicitly.
     std::map<locked_key, uint32_t> g_resource_full_size;
 
+    // Locks currently satisfied straight out of a direct mapping, so umd_Unlock knows there is nothing
+    // to ship back. Disjoint from g_locked_buffers by construction: the direct path returns before that
+    // map is ever touched.
+    std::set<locked_key> g_direct_locks;
+
+    // How the app promised to treat the bytes it is about to be handed. Only D3DLOCK_DISCARD and
+    // D3DLOCK_NOOVERWRITE carry a promise strong enough to skip synchronizing with the GPU; everything
+    // else (including a read) has to assume the current contents are both live and being read.
+    enum class lock_intent
+    {
+        discard,
+        no_overwrite,
+        synchronized,
+    };
+
+    lock_intent classify_lock_intent(const D3DDDIARG_LOCK* pArgs)
+    {
+#ifndef _WIN64
+        // D3DDDIARG_LOCK::Flags (x86 only, offset 44 -- RE-verified live 2026-08-23 by diffing the raw
+        // struct bytes of matched Lock() calls on the same buffer with known D3D9-level flags: DISCARD
+        // -> 0x18, NOOVERWRITE -> 0x14, READONLY -> 0x11. bit0=ReadOnly, bit2=NoOverwrite, bit3=Discard,
+        // bit4=NoSysLock (present in all three samples -- always set for driver-routed D3DPOOL_DEFAULT
+        // dynamic buffers, not itself meaningful here). x64's D3DDDIARG_LOCK is a genuinely different,
+        // larger struct (see d3d9_ddi.hpp's own note on the x86/x64 layout divergence) -- this offset has
+        // NOT been verified there, so x64 conservatively treats every lock as fully synchronized.
+        const uint32_t raw_flags = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pArgs) + 44);
+        constexpr uint32_t k_ddi_discard = 0x08;
+        constexpr uint32_t k_ddi_nooverwrite = 0x04;
+        if ((raw_flags & k_ddi_discard) != 0)
+        {
+            return lock_intent::discard;
+        }
+        if ((raw_flags & k_ddi_nooverwrite) != 0)
+        {
+            return lock_intent::no_overwrite;
+        }
+#else
+        (void)pArgs;
+#endif
+        return lock_intent::synchronized;
+    }
+
+    // Drains the batch and makes the host wait for the GPU to finish everything recorded so far. One
+    // crossing; the direct-buffer path spends it only where no weaker guarantee will do.
+    void sync_gpu()
+    {
+        bridge_call(gb::ioctl_d3d9_flush, nullptr, 0, nullptr, 0);
+    }
+
+    // The D3DLOCK_DISCARD rename: hand the app the next slice instead of the one draws may still be
+    // reading. The switch is recorded into the batch rather than sent, so it replays in stream order --
+    // draws recorded before it keep the slice they were recorded against, which is the entire reason
+    // this is safe without a GPU wait. Only a full lap around the ring, where the slice being reclaimed
+    // really could still be in flight, costs a real synchronization.
+    void advance_direct_slice(uint64_t resource, direct_buffer_state& state)
+    {
+        const uint32_t next = state.slice_index + 1 < state.slice_count ? state.slice_index + 1 : 0;
+        if (next == 0)
+        {
+            sync_gpu();
+        }
+        state.slice_index = next;
+        const d3d9c::set_direct_slice_record req{.resource = resource, .slice_offset = next * state.slice_stride, .reserved = 0};
+        record_d3d9(gb::command::d3d9_set_direct_slice, &req, sizeof(req));
+    }
+
     HRESULT APIENTRY umd_Lock(HANDLE /*hDevice*/, D3DDDIARG_LOCK* pArgs)
     {
         if (pArgs == nullptr)
@@ -2221,6 +2327,37 @@ namespace
         const locked_key key{resource, subresource};
         d3d9c::lock_request req{.resource = resource, .subresource = subresource, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
 
+        // Direct-mapped buffer: the app writes real GPU memory through the pointer handed back here, so
+        // there is no staging buffer to fill on the way in and nothing to ship back on the way out --
+        // both the Lock and the Unlock crossing disappear. What replaces them is a promise about the
+        // GPU, taken from the lock's own flags (see classify_lock_intent), and the ring that makes
+        // D3DLOCK_DISCARD able to keep that promise for free.
+        if (is_buffer && subresource == 0)
+        {
+            const auto direct_it = g_direct_buffers.find(resource);
+            if (direct_it != g_direct_buffers.end() && offset < direct_it->second.size)
+            {
+                direct_buffer_state& state = direct_it->second;
+                switch (classify_lock_intent(pArgs))
+                {
+                case lock_intent::discard:
+                    advance_direct_slice(resource, state);
+                    break;
+                case lock_intent::no_overwrite:
+                    // The app has promised not to touch anything a pending draw reads, which is exactly
+                    // the guarantee a GPU wait would have bought.
+                    break;
+                case lock_intent::synchronized:
+                    sync_gpu();
+                    break;
+                }
+                pArgs->pData =
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(state.base_va + state.slice_index * state.slice_stride + offset));
+                g_direct_locks.insert(key);
+                return S_OK;
+            }
+        }
+
         // Skip the pre-flush only when there's genuinely nothing pending that could depend on this
         // resource: the batch must be non-empty (otherwise there's nothing to protect regardless of
         // any binding) AND the resource must not be currently bound to any device slot nor
@@ -2253,40 +2390,25 @@ namespace
 
         auto& buffer = g_locked_buffers[key];
 
-#ifndef _WIN64
-        // D3DDDIARG_LOCK::Flags (x86 only, offset 44 -- RE-verified live 2026-08-23 by diffing the raw
-        // struct bytes of matched Lock() calls on the same buffer with known D3D9-level flags: DISCARD
-        // -> 0x18, NOOVERWRITE -> 0x14, READONLY -> 0x11. bit0=ReadOnly, bit2=NoOverwrite, bit3=Discard,
-        // bit4=NoSysLock (present in all three samples -- always set for driver-routed D3DPOOL_DEFAULT
-        // dynamic buffers, not itself meaningful here). x64's D3DDDIARG_LOCK is a genuinely different,
-        // larger struct (see d3d9_ddi.hpp's own note on the x86/x64 layout divergence) -- this offset has
-        // NOT been verified there, so this optimization stays x86-only until it is.
-        if (is_buffer)
+        if (is_buffer && classify_lock_intent(pArgs) != lock_intent::synchronized)
         {
-            const uint32_t raw_flags = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pArgs) + 44);
-            constexpr uint32_t k_ddi_discard = 0x08;
-            constexpr uint32_t k_ddi_nooverwrite = 0x04;
-            if ((raw_flags & (k_ddi_discard | k_ddi_nooverwrite)) != 0)
+            // The app is about to overwrite this range without reading it first, so the current
+            // host-side content is irrelevant -- size the buffer from the already-known size
+            // (cached or freshly probed above) but skip the second round trip (and its data
+            // payload) that would otherwise fetch bytes the app is going to discard anyway.
+            // umd_Unlock always ships whatever the app wrote into `buffer` regardless of how it
+            // got sized, so this is safe.
+            if (probe_hr_nonzero)
             {
-                // The app is about to overwrite this range without reading it first, so the current
-                // host-side content is irrelevant -- size the buffer from the already-known size
-                // (cached or freshly probed above) but skip the second round trip (and its data
-                // payload) that would otherwise fetch bytes the app is going to discard anyway.
-                // umd_Unlock always ships whatever the app wrote into `buffer` regardless of how it
-                // got sized, so this is safe.
-                if (probe_hr_nonzero)
-                {
-                    g_locked_buffers.erase(key);
-                    pArgs->pData = nullptr;
-                    return E_FAIL;
-                }
-                buffer.resize(data_size);
-                pArgs->pData = buffer.data();
-                g_locked_offsets[key] = offset;
-                return S_OK;
+                g_locked_buffers.erase(key);
+                pArgs->pData = nullptr;
+                return E_FAIL;
             }
+            buffer.resize(data_size);
+            pArgs->pData = buffer.data();
+            g_locked_offsets[key] = offset;
+            return S_OK;
         }
-#endif
 
         // The host fills the whole [lock_response][data] output region (handle_d3d9_lock writes
         // lock_response + min(capacity, data_size) bytes, and this real call's data_size equals the
@@ -2328,6 +2450,17 @@ namespace
         // slot whose high half is always 0 live).
         const uint32_t subresource = static_cast<uint32_t>(pArgs->SubResourceIndex);
         const locked_key key{resource, subresource};
+
+        // A direct-mapped lock wrote straight into the GPU's own memory, so there is nothing to write
+        // back and no crossing to spend -- DXVK's UnlockBuffer is a true no-op for its own directly
+        // mapped buffers for the same reason. This is where the bulk of the saving lands: Unlock was
+        // 43-85% of all measured D3D9 host crossings.
+        if (const auto direct_it = g_direct_locks.find(key); direct_it != g_direct_locks.end())
+        {
+            g_direct_locks.erase(direct_it);
+            return S_OK;
+        }
+
         const auto it = g_locked_buffers.find(key);
         if (it == g_locked_buffers.end())
         {
