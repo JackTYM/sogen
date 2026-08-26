@@ -62,6 +62,41 @@ namespace sogen
         // about whether that's sufficient rather than just less likely).
         constexpr bool depth_stencil_transient_enabled = false;
 
+        // Temporary diagnostic (EMULATOR_D3D9_PRESENT_TIMING=<frames-per-report>, default 60): the
+        // native-UMD Present path is a full synchronous GPU drain followed by a CPU readback of the
+        // whole backbuffer, where DXVK instead hands the backbuffer to a real asynchronous swapchain
+        // and only ever blocks the calling thread on a fence three frames old. This splits one
+        // Present into the three costs that model would remove -- draining the open batch, the
+        // readback submit plus its fence wait, and the backing-vector copy handed to the UI backend
+        // -- against the wall-clock interval between Presents, so the drain's real share of a frame
+        // is measured rather than assumed.
+        struct present_timing_totals
+        {
+            double flush_ms;
+            double readback_ms;
+            double copy_ms;
+            double interval_ms;
+            uint64_t frames;
+            std::chrono::steady_clock::time_point last_present;
+        };
+
+        bool present_timing_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_PRESENT_TIMING") != nullptr;
+            return enabled;
+        }
+
+        present_timing_totals& present_timing()
+        {
+            static present_timing_totals totals{};
+            return totals;
+        }
+
+        double elapsed_ms(const std::chrono::steady_clock::time_point from, const std::chrono::steady_clock::time_point to)
+        {
+            return std::chrono::duration<double, std::milli>(to - from).count();
+        }
+
         // Raw-bytes encoding rendering_attachment::clear_value expects (see vulkan_host::cmd_begin_
         // rendering's build() -- a memcpy straight into VkClearValue's union). Defined this early
         // because submit_batch_async (below) needs depth_stencil_clear_value for its pending-clear
@@ -3917,9 +3952,40 @@ namespace sogen
 
         this->sync_backing_from_gpu(it->second);
 
+        const bool timing = present_timing_enabled();
+        const auto t0 = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
         out_pixels = it->second.backing;
         out_width = it->second.width;
         out_height = it->second.height;
+
+        if (timing)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            present_timing_totals& totals = present_timing();
+            totals.copy_ms += elapsed_ms(t0, now);
+            if (totals.last_present.time_since_epoch().count() != 0)
+            {
+                totals.interval_ms += elapsed_ms(totals.last_present, now);
+            }
+            totals.last_present = now;
+
+            const int parsed = atoi(getenv("EMULATOR_D3D9_PRESENT_TIMING"));
+            const auto period = static_cast<uint64_t>(parsed > 0 ? parsed : 60);
+            if (++totals.frames >= period)
+            {
+                const auto n = static_cast<double>(totals.frames);
+                fprintf(stderr,
+                        "[d3d9-present-timing] %ux%u over %llu presents: interval=%.2fms (%.1f FPS) | flush=%.2fms "
+                        "readback=%.2fms copy=%.2fms | blocking=%.1f%% of frame\n",
+                        out_width, out_height, static_cast<unsigned long long>(totals.frames), totals.interval_ms / n,
+                        1000.0 * n / std::max(totals.interval_ms, 1e-9), totals.flush_ms / n, totals.readback_ms / n, totals.copy_ms / n,
+                        100.0 * (totals.flush_ms + totals.readback_ms + totals.copy_ms) / std::max(totals.interval_ms, 1e-9));
+                const auto last = totals.last_present;
+                totals = {};
+                totals.last_present = last;
+            }
+        }
         return true;
     }
 
@@ -4133,9 +4199,14 @@ namespace sogen
             return;
         }
 
+        const bool timing = present_timing_enabled();
+        const auto t0 = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
         // Flush any open batch so its draws have executed (and left the render target in
         // TRANSFER_SRC_OPTIMAL) before the readback reads the image. Covers both pfnLock and Present.
         this->flush_batch();
+
+        const auto t1 = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
         std::vector<std::byte> pixels;
         uint32_t readback_width = 0;
@@ -4144,6 +4215,13 @@ namespace sogen
         {
             rt.backing = std::move(pixels);
             rt.backing_dirty = false;
+        }
+
+        if (timing)
+        {
+            const auto t2 = std::chrono::steady_clock::now();
+            present_timing().flush_ms += elapsed_ms(t0, t1);
+            present_timing().readback_ms += elapsed_ms(t1, t2);
         }
     }
 
