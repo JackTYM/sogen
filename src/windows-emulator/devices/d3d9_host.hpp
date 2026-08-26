@@ -142,18 +142,9 @@ namespace sogen
 
         // Returns the resource's real, persistent HOST_VISIBLE|HOST_COHERENT buffer mapping (see
         // resource_entry::direct_mapped_ptr) for the caller to alias directly into the guest's address
-        // space, letting Lock/Unlock skip the host round-trip entirely for eligible resources. out_size is
-        // the whole ring's extent; out_slice_stride/out_slice_count describe how the guest carves it into
-        // renameable slices. Returns false (leaving the outputs untouched) for any resource without a
-        // direct buffer.
-        bool get_direct_mapping(uint64_t resource, void*& out_ptr, size_t& out_size, uint32_t& out_slice_stride,
-                                uint32_t& out_slice_count) const;
-
-        // Submits whatever the open batch has recorded and waits for the GPU to finish it, so nothing the
-        // guest wrote before this call can still be in flight afterwards. The guest UMD needs this before
-        // recycling a direct buffer's oldest ring slice, the one point where renaming alone can't prove
-        // the GPU is done with the bytes about to be overwritten.
-        void flush_pending();
+        // space, letting Lock/Unlock skip the host round-trip entirely for eligible resources. Returns
+        // false (leaving out_ptr/out_size untouched) for any resource without a direct buffer.
+        bool get_direct_mapping(uint64_t resource, void*& out_ptr, size_t& out_size) const;
 
         // Copies the resource's current host-side pixel backing (BGRA8) out for presentation. Lazily
         // syncs from the GPU image first via sync_backing_from_gpu if pfnClear/pfnDrawPrimitive left it
@@ -377,15 +368,6 @@ namespace sogen
             uint64_t vk_direct_buffer_id{};
             uint64_t vk_direct_memory_id{};
             void* direct_mapped_ptr{};
-            // The direct buffer is a ring of direct_slice_count slices of direct_slice_stride bytes each,
-            // of which direct_slice_offset names the live one. A guest D3DLOCK_DISCARD renames to the next
-            // slice (DXVK's D3D9CommonBuffer::DiscardMapSlice) instead of overwriting bytes an already-
-            // recorded draw may still read, and announces it with a batched d3d9_set_direct_slice so the
-            // switch replays in order between the draws around it. Stays 0/1/1 for a resource whose guest
-            // VA alias failed, where every access still funnels through the host Lock/Unlock path.
-            uint32_t direct_slice_stride{};
-            uint32_t direct_slice_count{};
-            uint32_t direct_slice_offset{};
             uint64_t vk_image_id{};      // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{}; // 0 until first drawn to; lazily created, cached per resource
             // Second colour-attachment view of the SAME image, through the format's _SRGB counterpart,

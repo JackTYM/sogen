@@ -73,19 +73,10 @@ namespace sogen::d3d9_cmd
         // resource isn't eligible for a direct buffer (see d3d9_host::create_resource's eligibility
         // check) -- the guest UMD must fall back to the ordinary Lock/Unlock IOCTL round-trip in that
         // case. When nonzero, the guest can read/write this resource's bytes directly at this address
-        // with no host crossing at all.
+        // with no host crossing at all; direct_size is the mapping's byte extent (>= the resource's own
+        // size, page-rounded -- callers must still bounds-check against the resource's real size).
         uint32_t direct_guest_va;
-        // The resource's own byte size, i.e. one slice's usable extent. Writes must stay inside
-        // [slice_base, slice_base + direct_size).
         uint32_t direct_size;
-        // The mapping is a ring of direct_slice_count slices, slice N based at
-        // direct_guest_va + N * direct_slice_stride. This is DXVK's buffer-renaming scheme
-        // (D3D9CommonBuffer::DiscardMapSlice): a D3DLOCK_DISCARD lock moves to the next slice instead
-        // of overwriting bytes the GPU may still be reading, so it needs neither a GPU wait nor a host
-        // crossing. The guest tells the host which slice is live with d3d9_set_direct_slice, recorded
-        // into the command batch so the switch lands in stream order relative to the draws around it.
-        uint32_t direct_slice_stride;
-        uint32_t direct_slice_count;
     };
 
     struct destroy_resource_request
@@ -252,17 +243,6 @@ namespace sogen::d3d9_cmd
     {
         resource_id index_buffer; // null_resource unbinds
         uint32_t format;          // 0 = 16-bit indices, 1 = 32-bit indices
-        uint32_t reserved;
-    };
-
-    // Moves a direct-mapped buffer (see create_resource_response's direct_* fields) to a different slice
-    // of its ring. Batched rather than sent as its own escape so the switch replays in stream order: draws
-    // already recorded before it keep reading the slice that was live when they were recorded, which is
-    // the entire point of renaming instead of overwriting.
-    struct set_direct_slice_record
-    {
-        resource_id resource;
-        uint32_t slice_offset; // byte offset of the new slice's base within the mapping
         uint32_t reserved;
     };
 
@@ -437,7 +417,7 @@ namespace sogen::d3d9_cmd
     // 32-bit WoW64 guest and a 64-bit host agree on layout byte-for-byte.
     static_assert(sizeof(marker_request) == 8, "wire layout drift");
     static_assert(sizeof(create_resource_request) == 32, "wire layout drift");
-    static_assert(sizeof(create_resource_response) == 32, "wire layout drift");
+    static_assert(sizeof(create_resource_response) == 24, "wire layout drift");
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");
     static_assert(sizeof(lock_response) == 8, "wire layout drift");
@@ -453,7 +433,6 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(set_stream_source_record) == 24, "wire layout drift");
     static_assert(sizeof(set_stream_source_freq_record) == 8, "wire layout drift");
     static_assert(sizeof(set_indices_record) == 16, "wire layout drift");
-    static_assert(sizeof(set_direct_slice_record) == 16, "wire layout drift");
     static_assert(sizeof(set_vertex_decl_record) == 8, "wire layout drift");
     static_assert(sizeof(set_vertex_shader_record) == 8, "wire layout drift");
     static_assert(sizeof(set_pixel_shader_record) == 8, "wire layout drift");

@@ -34,6 +34,7 @@ namespace sogen
         // Public, ABI-stable D3D9 API constants (d3d9types.h), not RE'd DDI internals.
         constexpr uint32_t d3dusage_rendertarget = 0x00000001;
         constexpr uint32_t d3dusage_depthstencil = 0x00000002;
+        constexpr uint32_t d3dusage_writeonly = 0x00000008;
         constexpr uint32_t d3dusage_dynamic = 0x00000200;
         constexpr uint32_t d3dpool_default = 0;
 
@@ -2323,7 +2324,7 @@ namespace sogen
                 {
                     const auto off_it = this->state_.stream_offsets.find(stream);
                     const uint64_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
-                    direct_streams[stream] = {res_it->second.vk_direct_buffer_id, res_it->second.direct_slice_offset + d3d9_stream_offset};
+                    direct_streams[stream] = {res_it->second.vk_direct_buffer_id, d3d9_stream_offset};
                     continue;
                 }
                 src_bytes = &res_it->second.backing;
@@ -2704,10 +2705,8 @@ namespace sogen
         if (ib_direct)
         {
             // D3D9's SetIndices carries only the resource handle, no byte offset of its own (unlike
-            // SetStreamSource) -- the whole resource is the index buffer, so the only offset that applies
-            // is which ring slice is currently live.
+            // SetStreamSource) -- the whole resource is the index buffer, so bind it at offset 0.
             index_buffer_vk = ib_entry->vk_direct_buffer_id;
-            index_buffer_bind_offset = ib_entry->direct_slice_offset;
         }
         else if (ib_bytes != nullptr)
         {
@@ -3461,32 +3460,21 @@ namespace sogen
             .extra_mips = std::move(extra_mips),
         };
 
-        // Real DXVK source (D3D9CommonBuffer::DetermineMapMode, doitsujin/dxvk) gates a persistently
-        // host-visible-mapped GPU buffer on exactly D3DPOOL_DEFAULT + D3DUSAGE_DYNAMIC. WriteOnly is
-        // deliberately NOT part of the condition there -- it only steers which memory type gets picked --
-        // and must not be part of it here either: a non-dynamic buffer has no renaming contract, so
-        // handing the guest a direct pointer to it would let a plain Lock overwrite bytes a recorded draw
-        // still reads. MW2's own vertex/index streaming buffers set Dynamic on ~22 of ~34 real buffer
-        // creates (live-traced), which is what this path exists to accelerate.
+        // Real DXVK source (D3D9CommonBuffer::DetermineMapMode, doitsujin/dxvk) uses this exact
+        // condition -- D3DPOOL_DEFAULT plus DYNAMIC or WRITEONLY -- to decide a buffer gets a real,
+        // persistently host-visible-mapped GPU buffer instead of a plain CPU-side copy. MW2's own
+        // vertex/index streaming buffers hit this case (confirmed via `sogen_d3d9_umd.cpp`'s own
+        // D3DLOCK_NOOVERWRITE handling comments). Live profiling this session found this specific gap
+        // (a CPU-side backing plus a separate arena upload memmove, vs. DXVK's zero-copy direct write)
+        // as the largest remaining per-draw cost after Phase 1's Unlock-copy fix.
         const bool eligible_for_direct_buffer =
-            is_buffer && pool == d3dpool_default && (usage & d3dusage_dynamic) != 0 && backing_size != 0;
+            is_buffer && pool == d3dpool_default && (usage & (d3dusage_dynamic | d3dusage_writeonly)) != 0 && backing_size != 0;
         if (eligible_for_direct_buffer)
         {
-            // The ring is what makes a D3DLOCK_DISCARD free: the guest moves to the next slice rather
-            // than waiting for the GPU to release the current one. Slices are page-aligned so each one's
-            // guest-visible base lands on a page boundary too, and the ring is capped by total bytes
-            // rather than a fixed count so a large buffer can't multiply into a huge 32-bit-guest VA
-            // reservation. Two slices is the floor at which renaming still means anything at all.
-            constexpr uint64_t slice_alignment = 0x1000;
-            constexpr uint64_t max_ring_bytes = 4u << 20;
-            const uint64_t slice_stride = (backing_size + slice_alignment - 1) & ~(slice_alignment - 1);
-            const uint64_t slice_count = std::clamp<uint64_t>(max_ring_bytes / slice_stride, 2, 8);
-            const uint64_t ring_size = slice_stride * slice_count;
-
             const uint64_t device = this->ensure_vk_device();
             uint64_t vk_buffer = 0;
             if (device != 0 &&
-                this->vulkan_.create_buffer(device, ring_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                this->vulkan_.create_buffer(device, backing_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                                             vk_buffer) == 0 &&
                 vk_buffer != 0)
             {
@@ -3509,8 +3497,6 @@ namespace sogen
                         entry.vk_direct_buffer_id = vk_buffer;
                         entry.vk_direct_memory_id = vk_memory;
                         entry.direct_mapped_ptr = mapped_ptr;
-                        entry.direct_slice_stride = static_cast<uint32_t>(slice_stride);
-                        entry.direct_slice_count = static_cast<uint32_t>(slice_count);
                     }
                     else
                     {
@@ -4477,7 +4463,7 @@ namespace sogen
         // Only ever set for subresource 0 (buffers have no mips), matching the check below.
         if (it->second.vk_direct_buffer_id != 0 && subresource == 0)
         {
-            const auto* mapped = static_cast<const std::byte*>(it->second.direct_mapped_ptr) + it->second.direct_slice_offset;
+            const auto* mapped = static_cast<const std::byte*>(it->second.direct_mapped_ptr);
             const size_t buffer_size = it->second.width;
             if (offset > buffer_size)
             {
@@ -4624,7 +4610,7 @@ namespace sogen
             {
                 return nullptr;
             }
-            return static_cast<std::byte*>(it->second.direct_mapped_ptr) + it->second.direct_slice_offset + offset;
+            return static_cast<std::byte*>(it->second.direct_mapped_ptr) + offset;
         }
 
         auto& backing = it->second.subresource_backing(subresource);
@@ -4654,8 +4640,7 @@ namespace sogen
         ++it->second.content_version;
     }
 
-    bool d3d9_host::get_direct_mapping(const uint64_t resource, void*& out_ptr, size_t& out_size, uint32_t& out_slice_stride,
-                                       uint32_t& out_slice_count) const
+    bool d3d9_host::get_direct_mapping(const uint64_t resource, void*& out_ptr, size_t& out_size) const
     {
         const auto it = this->resources_.find(resource);
         if (it == this->resources_.end() || it->second.vk_direct_buffer_id == 0)
@@ -4664,15 +4649,8 @@ namespace sogen
         }
 
         out_ptr = it->second.direct_mapped_ptr;
-        out_size = static_cast<size_t>(it->second.direct_slice_stride) * it->second.direct_slice_count;
-        out_slice_stride = it->second.direct_slice_stride;
-        out_slice_count = it->second.direct_slice_count;
+        out_size = it->second.backing.size();
         return true;
-    }
-
-    void d3d9_host::flush_pending()
-    {
-        this->flush_batch();
     }
 
     int32_t d3d9_host::create_vertex_shader(const void* tokens, const size_t token_size_bytes, uint64_t& out_shader)
@@ -5291,28 +5269,6 @@ namespace sogen
             this->state_.index_um_data.assign(bytes, bytes + req.index_data_size);
             this->state_.index_format = req.index_element_size == 4 ? 1u : 0u;
             this->state_.index_buffer = 0;
-            return d3d_ok;
-        }
-        case gpu_bridge::command::d3d9_set_direct_slice: {
-            d3d9_cmd::set_direct_slice_record req{};
-            if (!read_record(payload, size, req))
-            {
-                return d3derr_invalidcall;
-            }
-            const auto it = this->resources_.find(req.resource);
-            if (it == this->resources_.end() || it->second.vk_direct_buffer_id == 0)
-            {
-                return d3derr_invalidcall;
-            }
-            // Replaying in stream order is the whole mechanism: draws recorded before this record have
-            // already been through execute_draw with the previous slice baked into their bind offset, so
-            // moving the live slice here cannot retroactively change what they read.
-            const uint64_t ring_size = static_cast<uint64_t>(it->second.direct_slice_stride) * it->second.direct_slice_count;
-            if (req.slice_offset + static_cast<uint64_t>(it->second.width) > ring_size)
-            {
-                return d3derr_invalidcall;
-            }
-            it->second.direct_slice_offset = req.slice_offset;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_color_fill: {
