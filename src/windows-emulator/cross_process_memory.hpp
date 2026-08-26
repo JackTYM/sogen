@@ -2,12 +2,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string>
 
 #include <memory_interface.hpp>
 
 namespace sogen
 {
+    class windows_emulator;
+
     // Chunked, page-boundary-respecting guest memory copy: reads out.size() bytes from src starting
     // at address into the host-side buffer out, one page at a time, stopping at the first page that
     // fails to read. Returns the number of bytes actually transferred, which is less than out.size()
@@ -41,5 +45,13 @@ namespace sogen
     // pre-existing, deliberate divergence from real ntdll (which returns STATUS_PARTIAL_COPY even for
     // a zero-byte transfer) that this function preserves rather than "fixes".
     NTSTATUS transfer_status(size_t transferred, size_t requested);
+
+    // Resolves the windows path of whatever's mapped at base_address in emu's address space - a
+    // section view's backing file if any (memory_manager::get_region_mapped_filename), falling back
+    // to the module loaded there, if any. Shared by NtQueryVirtualMemory's same-process
+    // MemoryMappedFilenameInformation handler (syscalls/memory.cpp, where emu is the requester's own
+    // instance) and the cross-process query_memory executor (process_control_server.cpp, where emu is
+    // the child being queried).
+    std::optional<std::u16string> get_mapped_filename(windows_emulator& emu, uint64_t base_address);
 
 } // namespace sogen

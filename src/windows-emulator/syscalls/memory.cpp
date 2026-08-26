@@ -129,56 +129,6 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            std::optional<std::u16string> get_mapped_filename(const syscall_context& c, const uint64_t base_address)
-            {
-                if (const auto mapped_filename = c.win_emu.memory.get_region_mapped_filename(base_address))
-                {
-                    try
-                    {
-                        return windows_path(*mapped_filename).to_device_path();
-                    }
-                    catch (const std::exception&)
-                    {
-                        return windows_path(*mapped_filename).to_unc_path();
-                    }
-                }
-
-                const auto* mod = c.win_emu.mod_manager.find_by_address(base_address);
-                if (!mod || mod->module_path.empty())
-                {
-                    return std::nullopt;
-                }
-
-                try
-                {
-                    return mod->module_path.to_device_path();
-                }
-                catch (const std::exception&)
-                {
-                    return mod->module_path.to_unc_path();
-                }
-            }
-
-            uint32_t map_emulator_to_nt_allocation_protection(const memory_permission permission, const memory_region_kind kind)
-            {
-                const auto protection = map_emulator_to_nt_protection(permission);
-
-                if (kind != memory_region_kind::section_image)
-                {
-                    return protection;
-                }
-
-                switch (protection)
-                {
-                case PAGE_EXECUTE_READWRITE:
-                    return PAGE_EXECUTE_WRITECOPY;
-                case PAGE_READWRITE:
-                    return PAGE_WRITECOPY;
-                default:
-                    return protection;
-                }
-            }
-
             constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
             constexpr ACCESS_MASK PROCESS_VM_WRITE = 0x0020;
             constexpr ACCESS_MASK PROCESS_VM_OPERATION = 0x0008;
@@ -246,6 +196,35 @@ namespace sogen
 
                 const auto& target = std::get<child_target>(child);
 
+                // The required size for these two classes is a fixed constant, not target-dependent, so
+                // it's checked up front, before the round trip - matching the same-process handler's own
+                // order below (buffer-size rejection takes priority over an address-validity failure the
+                // target would otherwise report).
+                if (info_class == MemoryImageInformation)
+                {
+                    if (return_length)
+                    {
+                        return_length.write(sizeof(MEMORY_IMAGE_INFORMATION64));
+                    }
+
+                    if (memory_information_length != sizeof(MEMORY_IMAGE_INFORMATION64))
+                    {
+                        return STATUS_BUFFER_OVERFLOW;
+                    }
+                }
+                else if (info_class == MemoryRegionInformation || info_class == MemoryRegionInformationEx)
+                {
+                    if (return_length)
+                    {
+                        return_length.write(sizeof(MEMORY_REGION_INFORMATION64));
+                    }
+
+                    if (memory_information_length < sizeof(MEMORY_REGION_INFORMATION64))
+                    {
+                        return STATUS_BUFFER_OVERFLOW;
+                    }
+                }
+
                 process_control_request request{};
                 request.op = process_control_op::query_memory;
                 request.address = base_address;
@@ -261,6 +240,44 @@ namespace sogen
                 if (response->status != STATUS_SUCCESS)
                 {
                     return static_cast<NTSTATUS>(response->status);
+                }
+
+                if (info_class == MemoryImageInformation || info_class == MemoryRegionInformation ||
+                    info_class == MemoryRegionInformationEx)
+                {
+                    c.emu.write_memory(memory_information, response->payload.data(), response->payload.size());
+                    return STATUS_SUCCESS;
+                }
+
+                if (info_class == MemoryMappedFilenameInformation)
+                {
+                    const auto string_bytes = static_cast<uint32_t>(response->payload.size());
+                    const auto required_length =
+                        static_cast<uint32_t>(sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>) + string_bytes + sizeof(char16_t));
+
+                    if (return_length)
+                    {
+                        return_length.write(required_length);
+                    }
+
+                    if (memory_information_length < required_length)
+                    {
+                        return STATUS_BUFFER_OVERFLOW;
+                    }
+
+                    const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> info{c.emu, memory_information};
+                    info.access([&](UNICODE_STRING<EmulatorTraits<Emu64>>& filename) {
+                        const auto buffer_start = static_cast<uint64_t>(memory_information) + sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>);
+                        filename.Length = static_cast<USHORT>(string_bytes);
+                        filename.MaximumLength = static_cast<USHORT>(string_bytes + sizeof(char16_t));
+                        filename.Buffer = buffer_start;
+
+                        c.emu.write_memory(buffer_start, response->payload.data(), string_bytes);
+                        const char16_t terminator = u'\0';
+                        c.emu.write_memory(buffer_start + string_bytes, &terminator, sizeof(terminator));
+                    });
+
+                    return STATUS_SUCCESS;
                 }
 
                 if (return_length)
@@ -337,7 +354,7 @@ namespace sogen
 
             if (info_class == MemoryMappedFilenameInformation)
             {
-                const auto mapped_filename = get_mapped_filename(c, base_address);
+                const auto mapped_filename = get_mapped_filename(c.win_emu, base_address);
                 if (!mapped_filename)
                 {
                     return STATUS_INVALID_ADDRESS;
@@ -458,15 +475,6 @@ namespace sogen
                                                const emulator_object<uint32_t> bytes_to_protect, const uint32_t protection,
                                                const emulator_object<uint32_t> old_protection)
         {
-            const auto orig_start = base_address.read();
-            const auto orig_length = bytes_to_protect.read();
-
-            const auto aligned_start = page_align_down(orig_start);
-            const auto aligned_length = page_align_up(orig_start + orig_length) - aligned_start;
-
-            base_address.write(aligned_start);
-            bytes_to_protect.write(static_cast<uint32_t>(aligned_length));
-
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 const auto child = resolve_child_target(c, process_handle, PROCESS_VM_OPERATION);
@@ -476,6 +484,15 @@ namespace sogen
                 }
 
                 const auto& target = std::get<child_target>(child);
+
+                const auto orig_start = base_address.read();
+                const auto orig_length = bytes_to_protect.read();
+
+                const auto aligned_start = page_align_down(orig_start);
+                const auto aligned_length = page_align_up(orig_start + orig_length) - aligned_start;
+
+                base_address.write(aligned_start);
+                bytes_to_protect.write(static_cast<uint32_t>(aligned_length));
 
                 process_control_request request{};
                 request.op = process_control_op::protect_memory;
@@ -497,6 +514,15 @@ namespace sogen
 
                 return static_cast<NTSTATUS>(response->status);
             }
+
+            const auto orig_start = base_address.read();
+            const auto orig_length = bytes_to_protect.read();
+
+            const auto aligned_start = page_align_down(orig_start);
+            const auto aligned_length = page_align_up(orig_start + orig_length) - aligned_start;
+
+            base_address.write(aligned_start);
+            bytes_to_protect.write(static_cast<uint32_t>(aligned_length));
 
             const auto requested_protection = try_map_nt_to_emulator_protection(protection);
             if (!requested_protection.has_value())
@@ -544,10 +570,14 @@ namespace sogen
 
                 const auto& target = std::get<child_target>(child);
 
-                // Neither has a wire representation in process_control_request, and neither is a call
-                // shape the Chromium sandbox broker (this feature's target) ever makes against a child
-                // via VirtualAllocEx - MEM_RESET only applies to memory the caller already owns
-                // in-process, and extended address requirements are a same-process placement hint.
+                // extended_parameter_count: MEM_EXTENDED_PARAMETER64 has no wire representation in
+                // process_control_request, and this feature's target (the Chromium sandbox broker) only
+                // ever calls the plain VirtualAllocEx, never VirtualAlloc2Ex (the API that carries
+                // extended parameters), against a child.
+                // MEM_RESET: real Windows does support this cross-process - allocation_type already
+                // carries it fine over the wire (it's a plain field) - execute_allocate_memory simply has
+                // no discard-semantics path (process_control_server.cpp), so this is a genuine feature gap,
+                // not a protocol limitation.
                 if (extended_parameter_count != 0 || (allocation_type & MEM_RESET) != 0)
                 {
                     return STATUS_NOT_SUPPORTED;

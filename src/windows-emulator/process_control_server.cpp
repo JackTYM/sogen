@@ -34,16 +34,23 @@ namespace sogen
 
         void execute_allocate_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
-            const auto protection = try_map_nt_to_emulator_protection(request.protection);
-            if (!protection.has_value())
+            if (request.size == 0)
+            {
+                response.status = STATUS_INVALID_PARAMETER;
+                return;
+            }
+
+            const auto base_protection = request.protection & ~static_cast<uint32_t>(PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE);
+            if (base_protection == PAGE_WRITECOPY || base_protection == PAGE_EXECUTE_WRITECOPY)
             {
                 response.status = STATUS_INVALID_PAGE_PROTECTION;
                 return;
             }
 
-            if (request.size == 0)
+            const auto protection = try_map_nt_to_emulator_protection(request.protection);
+            if (!protection.has_value())
             {
-                response.status = STATUS_INVALID_PARAMETER;
+                response.status = STATUS_INVALID_PAGE_PROTECTION;
                 return;
             }
 
@@ -184,14 +191,9 @@ namespace sogen
             response.status = STATUS_INVALID_PARAMETER_4;
         }
 
-        void execute_query_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        void execute_query_memory_basic(windows_emulator& target, const process_control_request& request,
+                                        process_control_response& response)
         {
-            if (request.info_class != MemoryBasicInformation && request.info_class != MemoryPrivilegedBasicInformation)
-            {
-                response.status = STATUS_NOT_SUPPORTED;
-                return;
-            }
-
             const auto region_info = target.memory.get_region_info(request.address);
 
             EMU_MEMORY_BASIC_INFORMATION64 info{};
@@ -202,18 +204,108 @@ namespace sogen
             info.PartitionId = 0;
             info.RegionSize = static_cast<int64_t>(region_info.length);
             info.Protect = map_emulator_to_nt_protection(region_info.permissions);
-            // Deliberately narrower than syscalls/memory.cpp's map_emulator_to_nt_allocation_protection:
-            // this executor now backs the real cross-process NtQueryVirtualMemory path (memory.cpp), but
-            // its only caller is the Chromium sandbox broker's VirtualQueryEx over its own child's
-            // private allocations (VirtualAllocEx results, never a section-backed image mapped into a
-            // different process), for which both formulas agree - the section_image adjustment this
-            // simpler formula skips only ever changes the answer for memory_region_kind::section_image.
-            info.AllocationProtect = map_emulator_to_nt_protection(region_info.initial_permissions);
+            info.AllocationProtect = map_emulator_to_nt_allocation_protection(region_info.initial_permissions, region_info.kind);
             info.Type = region_info.is_reserved ? memory_region_policy::to_memory_basic_information_type(region_info.kind) : 0;
 
             response.payload.resize(sizeof(info));
             std::memcpy(response.payload.data(), &info, sizeof(info));
             response.status = STATUS_SUCCESS;
+        }
+
+        void execute_query_memory_mapped_filename(windows_emulator& target, const process_control_request& request,
+                                                  process_control_response& response)
+        {
+            const auto mapped_filename = get_mapped_filename(target, request.address);
+            if (!mapped_filename)
+            {
+                response.status = STATUS_INVALID_ADDRESS;
+                return;
+            }
+
+            response.payload.resize(mapped_filename->size() * sizeof(char16_t));
+            std::memcpy(response.payload.data(), mapped_filename->data(), response.payload.size());
+            response.status = STATUS_SUCCESS;
+        }
+
+        void execute_query_memory_image(windows_emulator& target, const process_control_request& request,
+                                        process_control_response& response)
+        {
+            const auto* mod = request.address == 0 ? target.mod_manager.executable : target.mod_manager.find_by_address(request.address);
+            if (!mod)
+            {
+                response.status = STATUS_INVALID_ADDRESS;
+                return;
+            }
+
+            MEMORY_IMAGE_INFORMATION64 info{};
+            info.ImageBase = mod->image_base;
+            info.SizeOfImage = static_cast<int64_t>(mod->size_of_image);
+            info.ImageFlags = 0;
+
+            response.payload.resize(sizeof(info));
+            std::memcpy(response.payload.data(), &info, sizeof(info));
+            response.status = STATUS_SUCCESS;
+        }
+
+        void execute_query_memory_region(windows_emulator& target, const process_control_request& request,
+                                         process_control_response& response)
+        {
+            const auto region_info = target.memory.get_region_info(request.address);
+            if (!region_info.is_reserved)
+            {
+                response.status = STATUS_INVALID_ADDRESS;
+                return;
+            }
+
+            MEMORY_REGION_INFORMATION64 info{};
+            memset(&info, 0, sizeof(info));
+            info.AllocationBase = region_info.allocation_base;
+            info.AllocationProtect = map_emulator_to_nt_allocation_protection(region_info.initial_permissions, region_info.kind);
+            info.RegionType = memory_region_policy::to_memory_region_information_type(region_info.kind);
+            info.RegionSize = static_cast<int64_t>(region_info.allocation_length);
+
+            const auto& reserved_regions = target.memory.get_reserved_regions();
+            const auto allocation = reserved_regions.find(region_info.allocation_base);
+            if (allocation != reserved_regions.end())
+            {
+                for (const auto& committed : allocation->second.committed_regions | std::views::values)
+                {
+                    info.CommitSize += static_cast<int64_t>(committed.length);
+                }
+            }
+
+            response.payload.resize(sizeof(info));
+            std::memcpy(response.payload.data(), &info, sizeof(info));
+            response.status = STATUS_SUCCESS;
+        }
+
+        void execute_query_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        {
+            if (request.info_class == MemoryBasicInformation || request.info_class == MemoryPrivilegedBasicInformation)
+            {
+                execute_query_memory_basic(target, request, response);
+                return;
+            }
+
+            if (request.info_class == MemoryMappedFilenameInformation)
+            {
+                execute_query_memory_mapped_filename(target, request, response);
+                return;
+            }
+
+            if (request.info_class == MemoryImageInformation)
+            {
+                execute_query_memory_image(target, request, response);
+                return;
+            }
+
+            if (request.info_class == MemoryRegionInformation || request.info_class == MemoryRegionInformationEx)
+            {
+                execute_query_memory_region(target, request, response);
+                return;
+            }
+
+            response.status = STATUS_NOT_SUPPORTED;
         }
 
         // The initial thread is always the one with the lowest id (process_context::create_thread

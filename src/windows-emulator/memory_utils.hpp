@@ -3,6 +3,7 @@
 #include <string>
 #include <emulator.hpp>
 #include "memory_permission_ext.hpp"
+#include "memory_manager.hpp"
 
 namespace sogen
 {
@@ -107,6 +108,26 @@ namespace sogen
         }
 
         return PAGE_READONLY;
+    }
+
+    inline uint32_t map_emulator_to_nt_allocation_protection(const memory_permission permission, const memory_region_kind kind)
+    {
+        const auto protection = map_emulator_to_nt_protection(permission);
+
+        if (kind != memory_region_kind::section_image)
+        {
+            return protection;
+        }
+
+        switch (protection)
+        {
+        case PAGE_EXECUTE_READWRITE:
+            return PAGE_EXECUTE_WRITECOPY;
+        case PAGE_READWRITE:
+            return PAGE_WRITECOPY;
+        default:
+            return protection;
+        }
     }
 
 } // namespace sogen

@@ -955,6 +955,12 @@ namespace sogen::test
         ASSERT_EQ(map_emulator_to_nt_protection(region_info.permissions), static_cast<uint32_t>(PAGE_READONLY));
     }
 
+    // Also pins down a deliberate decision: unlike the same-process path (which always writes the
+    // page-aligned base/size back before doing any further validation), the remote branch resolves
+    // access BEFORE reading/aligning/writing base_address/bytes_to_protect at all, so an
+    // access-denied call leaves both completely untouched - the same "touch nothing on early
+    // failure" contract the remote branch had before this op was wired up (when it was an
+    // unconditional STATUS_NOT_SUPPORTED).
     TEST(CrossProcessTest, NtProtectVirtualMemorySyscallDeniesAccessWithoutVmOperationRight)
     {
         auto parent = create_empty_emulator();
@@ -971,17 +977,19 @@ namespace sogen::test
         const auto base_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(base_out, 0u);
         const emulator_object<uint64_t> base_address{parent.memory, base_out};
-        base_address.write(0x1000);
+        base_address.write(0x1234); // deliberately unaligned, to prove it's untouched rather than aligned
 
         const auto size_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(size_out, 0u);
         const emulator_object<uint32_t> bytes_to_protect{parent.memory, size_out};
-        bytes_to_protect.write(0x1000);
+        bytes_to_protect.write(0xDEADBEEF);
 
         const auto status = syscalls::handle_NtProtectVirtualMemory(c, h, base_address, bytes_to_protect, PAGE_READONLY,
                                                                     emulator_object<uint32_t>{parent.memory, 0});
 
         ASSERT_EQ(status, STATUS_ACCESS_DENIED);
+        ASSERT_EQ(base_address.read(), 0x1234u);
+        ASSERT_EQ(bytes_to_protect.read(), 0xDEADBEEFu);
     }
 
     // Handler-level cross-instance proof: the release can only have taken effect if it reached CHILD's
@@ -1111,5 +1119,222 @@ namespace sogen::test
                                                   sizeof(EMU_MEMORY_BASIC_INFORMATION64), emulator_object<uint64_t>{parent.memory, 0});
 
         ASSERT_EQ(status, STATUS_ACCESS_DENIED);
+    }
+
+    // execute_allocate_memory rejects PAGE_WRITECOPY/PAGE_EXECUTE_WRITECOPY as an initial allocation
+    // protection, matching handle_NtAllocateVirtualMemoryEx's own base_protection check
+    // (memory.cpp) - try_map_nt_to_emulator_protection alone accepts both flags, so this check has to
+    // be explicit and separate, both locally and here.
+    TEST(CrossProcessTest, NtAllocateVirtualMemorySyscallRemoteRejectsWriteCopyProtection)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto base_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base_out, 0u);
+        const emulator_object<uint64_t> base_address{parent.memory, base_out};
+        base_address.write(0);
+
+        const auto size_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(size_out, 0u);
+        const emulator_object<uint64_t> bytes_to_allocate{parent.memory, size_out};
+        bytes_to_allocate.write(0x1000);
+
+        const auto status =
+            syscalls::handle_NtAllocateVirtualMemory(c, h, base_address, 0, bytes_to_allocate, MEM_RESERVE | MEM_COMMIT, PAGE_WRITECOPY);
+
+        ASSERT_EQ(status, STATUS_INVALID_PAGE_PROTECTION);
+    }
+
+    // A combined-invalid request (zero size AND a rejected protection) must report the same status the
+    // same-process path would: handle_NtAllocateVirtualMemoryEx checks request.size == 0 before it
+    // ever looks at the protection flags (memory.cpp), so execute_allocate_memory has to check size
+    // first too, or this exact case would return STATUS_INVALID_PAGE_PROTECTION instead.
+    TEST(CrossProcessTest, NtAllocateVirtualMemorySyscallRemoteChecksSizeBeforeProtection)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto base_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base_out, 0u);
+        const emulator_object<uint64_t> base_address{parent.memory, base_out};
+        base_address.write(0);
+
+        const auto size_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(size_out, 0u);
+        const emulator_object<uint64_t> bytes_to_allocate{parent.memory, size_out};
+        bytes_to_allocate.write(0); // zero size, deliberately combined with a rejected protection below
+
+        const auto status =
+            syscalls::handle_NtAllocateVirtualMemory(c, h, base_address, 0, bytes_to_allocate, MEM_RESERVE | MEM_COMMIT, PAGE_WRITECOPY);
+
+        ASSERT_EQ(status, STATUS_INVALID_PARAMETER);
+    }
+
+    // Proves MemoryMappedFilenameInformation is genuinely wired remotely (not the blanket
+    // STATUS_NOT_SUPPORTED every non-MemoryBasicInformation class used to get): the filename set on
+    // CHILD's region via set_region_mapped_filename round-trips through the control channel and lands
+    // as a real UNICODE_STRING in PARENT's own guest memory, matching what get_mapped_filename's
+    // to_device_path() transform (the same one the same-process handler uses) independently produces
+    // for the same input.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteReturnsMappedFilename)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto child_base = child.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(child_base, 0u);
+        child.memory.set_region_mapped_filename(child_base, u"C:\\Windows\\System32\\ntdll.dll");
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto expected_path = windows_path(u"C:\\Windows\\System32\\ntdll.dll").to_device_path();
+        const auto required_length = static_cast<uint32_t>(sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>) +
+                                                           expected_path.size() * sizeof(char16_t) + sizeof(char16_t));
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto return_length_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(return_length_out, 0u);
+        const emulator_object<uint64_t> return_length{parent.memory, return_length_out};
+
+        const auto status = syscalls::handle_NtQueryVirtualMemory(c, h, child_base, MemoryMappedFilenameInformation, info_address,
+                                                                  required_length, return_length);
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+        ASSERT_EQ(return_length.read(), required_length);
+
+        const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> info{parent.memory, info_address};
+        const auto info_value = info.read();
+
+        ASSERT_EQ(info_value.Length, static_cast<USHORT>(expected_path.size() * sizeof(char16_t)));
+
+        std::u16string actual(expected_path.size(), u'\0');
+        ASSERT_TRUE(parent.memory.try_read_memory(info_value.Buffer, actual.data(), actual.size() * sizeof(char16_t)));
+        ASSERT_EQ(actual, expected_path);
+    }
+
+    // Proves MemoryImageInformation is genuinely wired remotely rather than blanket-rejected: with no
+    // module mapped at the queried address in CHILD, the executor reports STATUS_INVALID_ADDRESS (the
+    // same status the same-process handler reports for the identical "no module here" case,
+    // memory.cpp), not STATUS_NOT_SUPPORTED.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteImageInformationReportsInvalidAddress)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto status =
+            syscalls::handle_NtQueryVirtualMemory(c, h, 0x10000, MemoryImageInformation, info_address, sizeof(MEMORY_IMAGE_INFORMATION64),
+                                                  emulator_object<uint64_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_INVALID_ADDRESS);
+    }
+
+    // Handler-level cross-instance proof for MemoryRegionInformation: AllocationBase/RegionSize/
+    // CommitSize can only have come from CHILD's own reservation - proving this class is genuinely
+    // wired (previously a blanket STATUS_NOT_SUPPORTED), not just MemoryBasicInformation.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteReturnsRegionInformation)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto child_base = child.memory.allocate_memory(0x2000, memory_permission::read_write);
+        ASSERT_NE(child_base, 0u);
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto status =
+            syscalls::handle_NtQueryVirtualMemory(c, h, child_base, MemoryRegionInformation, info_address,
+                                                  sizeof(MEMORY_REGION_INFORMATION64), emulator_object<uint64_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+
+        const emulator_object<MEMORY_REGION_INFORMATION64> info{parent.memory, info_address};
+        const auto info_value = info.read();
+
+        ASSERT_EQ(info_value.AllocationBase, child_base);
+        ASSERT_EQ(info_value.RegionSize, static_cast<int64_t>(0x2000));
+        ASSERT_EQ(info_value.CommitSize, static_cast<int64_t>(0x2000));
+    }
+
+    // Proves execute_query_memory now calls the real, section-image-aware
+    // map_emulator_to_nt_allocation_protection (shared from memory_utils.hpp) instead of the plain
+    // map_emulator_to_nt_protection it used before: a section_image region's read-write initial
+    // permission must come back as PAGE_WRITECOPY, not PAGE_READWRITE - the one case the two formulas
+    // disagree on.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteAllocationProtectIsSectionImageAware)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto candidate_base = child.memory.find_free_allocation_base(0x1000);
+        ASSERT_NE(candidate_base, 0u);
+        ASSERT_TRUE(
+            child.memory.allocate_memory(candidate_base, 0x1000, memory_permission::read_write, false, memory_region_kind::section_image));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto status =
+            syscalls::handle_NtQueryVirtualMemory(c, h, candidate_base, MemoryBasicInformation, info_address,
+                                                  sizeof(EMU_MEMORY_BASIC_INFORMATION64), emulator_object<uint64_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+
+        const emulator_object<EMU_MEMORY_BASIC_INFORMATION64> info{parent.memory, info_address};
+        const auto info_value = info.read();
+
+        ASSERT_EQ(info_value.AllocationProtect, static_cast<uint32_t>(PAGE_WRITECOPY));
     }
 } // namespace sogen::test

@@ -1,6 +1,9 @@
 #include "std_include.hpp"
 #include "cross_process_memory.hpp"
 
+#include "windows_emulator.hpp"
+#include "windows_path.hpp"
+
 #include <algorithm>
 
 namespace sogen
@@ -64,6 +67,36 @@ namespace sogen
         }
 
         return transferred == 0 ? STATUS_INVALID_ADDRESS : STATUS_PARTIAL_COPY;
+    }
+
+    std::optional<std::u16string> get_mapped_filename(windows_emulator& emu, const uint64_t base_address)
+    {
+        if (const auto mapped_filename = emu.memory.get_region_mapped_filename(base_address))
+        {
+            try
+            {
+                return windows_path(*mapped_filename).to_device_path();
+            }
+            catch (const std::exception&)
+            {
+                return windows_path(*mapped_filename).to_unc_path();
+            }
+        }
+
+        const auto* mod = emu.mod_manager.find_by_address(base_address);
+        if (!mod || mod->module_path.empty())
+        {
+            return std::nullopt;
+        }
+
+        try
+        {
+            return mod->module_path.to_device_path();
+        }
+        catch (const std::exception&)
+        {
+            return mod->module_path.to_unc_path();
+        }
     }
 
 } // namespace sogen
