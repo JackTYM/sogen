@@ -5,6 +5,22 @@
 
 namespace sogen
 {
+    namespace
+    {
+        constexpr ACCESS_MASK MAXIMUM_ALLOWED = 0x02000000;
+        constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
+    }
+
+    ACCESS_MASK resolve_granted_process_access(const ACCESS_MASK requested_access)
+    {
+        if (requested_access == MAXIMUM_ALLOWED || (requested_access & GENERIC_ALL) != 0)
+        {
+            return PROCESS_ALL_ACCESS;
+        }
+
+        return requested_access;
+    }
+
     std::variant<child_target, NTSTATUS> resolve_child_target(const syscall_context& c, const handle h, const ACCESS_MASK required_access)
     {
         const auto is_process_handle = h.value.is_pseudo && h.value.type == handle_types::process;

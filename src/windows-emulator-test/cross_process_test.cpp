@@ -27,6 +27,7 @@ namespace sogen::test
 
         constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
         constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
+        constexpr ACCESS_MASK MAXIMUM_ALLOWED = 0x02000000;
 
         syscall_context make_context(windows_emulator& emu)
         {
@@ -128,5 +129,20 @@ namespace sogen::test
         const auto& target = std::get<child_target>(result);
         ASSERT_EQ(target.record_id, 7u);
         ASSERT_EQ(target.channel, registered);
+    }
+
+    TEST(CrossProcessTest, ResolveGrantedProcessAccessPassesThroughSpecificMask)
+    {
+        ASSERT_EQ(resolve_granted_process_access(PROCESS_VM_READ), PROCESS_VM_READ);
+    }
+
+    TEST(CrossProcessTest, ResolveGrantedProcessAccessMapsMaximumAllowedToAllAccess)
+    {
+        ASSERT_EQ(resolve_granted_process_access(MAXIMUM_ALLOWED), PROCESS_ALL_ACCESS);
+    }
+
+    TEST(CrossProcessTest, ResolveGrantedProcessAccessMapsGenericAllToAllAccess)
+    {
+        ASSERT_EQ(resolve_granted_process_access(GENERIC_ALL), PROCESS_ALL_ACCESS);
     }
 } // namespace sogen::test

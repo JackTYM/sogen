@@ -15,6 +15,14 @@ namespace sogen
         process_control_channel* channel{};
     };
 
+    // NT's generic-rights translation for a process object, applied to NtCreateUserProcess's
+    // process_desired_access before it's stored as child_process_record::granted_access:
+    // MAXIMUM_ALLOWED and GENERIC_ALL both mean "grant everything a process object supports" and map
+    // to PROCESS_ALL_ACCESS; anything else is already a specific (or already-combined) mask and passes
+    // through unchanged. This is the sole place that mask is derived, so resolve_child_target's access
+    // check is only as correct as this mapping.
+    ACCESS_MASK resolve_granted_process_access(ACCESS_MASK requested_access);
+
     // Resolves a guest-supplied handle to the child process it names, for a syscall handler about to
     // perform a cross-process operation against it (NtReadVirtualMemory and friends, see
     // process_control_channel.hpp) - or the NTSTATUS to return to the guest instead.

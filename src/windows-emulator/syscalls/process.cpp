@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../cross_process.hpp"
 #include "../devices/named_pipe.hpp"
 
 #include <utils/finally.hpp>
@@ -727,9 +728,6 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        constexpr ACCESS_MASK MAXIMUM_ALLOWED = 0x02000000;
-        constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
-
         NTSTATUS handle_NtCreateUserProcess(const syscall_context& c, const emulator_object<handle> process_handle,
                                             const emulator_object<handle> thread_handle, const ACCESS_MASK process_desired_access,
                                             ACCESS_MASK /*thread_desired_access*/,
@@ -963,9 +961,7 @@ namespace sogen
             // yet, and nothing in this codebase queries it today (NtWaitForSingleObject/
             // NtQueryInformationProcess on the minted handle remain unimplemented, same as before).
             record.exit_status = STATUS_PENDING;
-            record.granted_access = (process_desired_access == MAXIMUM_ALLOWED || (process_desired_access & GENERIC_ALL) != 0)
-                                        ? PROCESS_ALL_ACCESS
-                                        : process_desired_access;
+            record.granted_access = resolve_granted_process_access(process_desired_access);
 
             c.win_emu.log.log("NtCreateUserProcess: child %u started\n", record_id);
 
