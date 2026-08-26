@@ -354,12 +354,8 @@ namespace sogen
 
         void execute_adopt_section(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
-            section s{};
-            s.object->maximum_size = request.maximum_size;
-            s.object->section_page_protection = request.page_protection;
-            s.object->allocation_attributes = request.allocation_attributes;
-            s.object->backing_storage = request.payload;
-            s.granted_access = request.granted_access;
+            auto s = section::from_pagefile_backing(request.maximum_size, request.page_protection, request.allocation_attributes,
+                                                    request.granted_access, request.payload);
 
             const auto h = target.process.sections.store(std::move(s));
 

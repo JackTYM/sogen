@@ -854,6 +854,24 @@ namespace sogen
             return copy;
         }
 
+        // Reconstructs an equivalent pagefile-backed section from a descriptor plus a content
+        // snapshot - the shape both a freshly-spawned child's inherited-handle bootstrap
+        // (recreate_inherited_section, main.cpp) and a cross-process adopt_section request
+        // (execute_adopt_section, process_control_server.cpp) receive over their respective process
+        // boundaries.
+        static section from_pagefile_backing(const uint64_t maximum_size, const uint32_t section_page_protection,
+                                             const uint32_t allocation_attributes, const ACCESS_MASK granted_access,
+                                             std::vector<std::byte> content)
+        {
+            section s{};
+            s.object->maximum_size = maximum_size;
+            s.object->section_page_protection = section_page_protection;
+            s.object->allocation_attributes = allocation_attributes;
+            s.object->backing_storage = std::move(content);
+            s.granted_access = granted_access;
+            return s;
+        }
+
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->granted_access);

@@ -216,12 +216,16 @@ namespace sogen
         };
 
         // A child process created via NtCreateUserProcess, running as a separate, independent host OS
-        // process (see windows_emulator's create_child_process callback) - exit_status is STATUS_PENDING
-        // for the lifetime of this record, since nothing observes a still-running child's real exit
-        // status yet (NtWaitForSingleObject/NtQueryInformationProcess support for the minted process
-        // handle remains unimplemented). granted_access is the caller's process_desired_access from
-        // NtCreateUserProcess (see handle_NtCreateUserProcess), checked by resolve_child_target
-        // (cross_process.hpp) against the required right for a given cross-process operation.
+        // process (see windows_emulator's create_child_process callback) - exit_status starts as
+        // STATUS_PENDING and stays that way for as long as the child keeps running, since nothing
+        // observes a still-live child's real exit status (NtWaitForSingleObject support for the minted
+        // process handle remains unimplemented). A successful remote NtTerminateProcess
+        // (handle_NtTerminateProcess, process.cpp) updates it to the requested exit code; from then on
+        // NtQueryInformationProcess's ProcessBasicInformation branch (also process.cpp) answers
+        // straight from this field, including for an already-terminated child. granted_access is the
+        // caller's process_desired_access from NtCreateUserProcess (see handle_NtCreateUserProcess),
+        // checked by resolve_child_target/resolve_child_record (cross_process.hpp) against the required
+        // right for a given cross-process operation.
         struct child_process_record
         {
             windows_path image_path{};

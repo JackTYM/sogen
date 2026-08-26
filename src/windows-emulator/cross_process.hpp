@@ -1,6 +1,7 @@
 #pragma once
 
 #include "handles.hpp"
+#include "process_context.hpp"
 
 #include <variant>
 
@@ -45,5 +46,22 @@ namespace sogen
     // an exact match for the scenario this feature targets (a sandbox broker that only ever duplicates
     // its process handle with DUPLICATE_SAME_ACCESS, never narrowing it).
     std::variant<child_target, NTSTATUS> resolve_child_target(const syscall_context& c, handle h, ACCESS_MASK required_access);
+
+    // A lighter-weight sibling of resolve_child_target for syscall handlers that only need data the
+    // parent already holds about a child - most notably NtQueryInformationProcess's
+    // ProcessBasicInformation, which real Windows answers even after the child has exited (the normal
+    // GetExitCodeProcess pattern). Unlike resolve_child_target, this does NOT require a live control
+    // channel: a terminated child (whose channel was dropped by handle_NtTerminateProcess) still
+    // resolves successfully here, since UniqueProcessId/ExitStatus only ever need
+    // process_context::child_process_record's own fields, never anything fetched from the child
+    // itself. Routing ProcessBasicInformation through resolve_child_target instead would incorrectly
+    // return STATUS_NOT_SUPPORTED for exactly this common case.
+    //
+    // Same handle/record resolution and access-mask check as resolve_child_target otherwise: returns
+    // STATUS_NOT_SUPPORTED if h isn't a child process/thread pseudo handle, STATUS_INVALID_HANDLE if
+    // the record is unknown, and STATUS_ACCESS_DENIED if required_access isn't fully covered by the
+    // record's granted_access.
+    std::variant<const process_context::child_process_record*, NTSTATUS> resolve_child_record(const syscall_context& c, handle h,
+                                                                                              ACCESS_MASK required_access);
 
 } // namespace sogen

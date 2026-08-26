@@ -2,6 +2,7 @@
 #include "../emulator_utils.hpp"
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
+#include "../cross_process.hpp"
 
 namespace sogen
 {
@@ -12,6 +13,78 @@ namespace sogen
         NTSTATUS handle_NtReleaseMutant(const syscall_context& c, handle mutant_handle, emulator_object<LONG> previous_count);
         NTSTATUS handle_NtReleaseSemaphore(const syscall_context& c, handle semaphore_handle, ULONG release_count,
                                            emulator_object<LONG> previous_count);
+
+        namespace
+        {
+            constexpr ACCESS_MASK PROCESS_DUP_HANDLE = 0x0040;
+
+            // TargetProcess::Init hands the sandbox's shared pagefile-backed IPC section to a
+            // suspended child via DuplicateHandle(cur, shared_section_, child, &out,
+            // FILE_MAP_READ|FILE_MAP_WRITE|SECTION_QUERY, false, 0). On real Windows this is genuine
+            // shared memory: the broker's SharedMemIPCServer and the child's CrossCall client poll the
+            // same physical pages. Two separate host address spaces here cannot share a guest section,
+            // so this reconstructs an equivalent section in the child from a content snapshot instead
+            // (adopt_section, process_control_server.cpp) - the section is content-copied, not truly
+            // shared. A real sandbox cross-call issued through it after this point would therefore
+            // never reach the broker. That is plausibly survivable for this one scenario only because
+            // sogen does not enforce the sandbox's restricted token: the child's intercepted syscalls
+            // succeed directly here and never fall through to the broker's cross-call path in the first
+            // place - a claim that must be verified empirically against the real repro (Task 9), not
+            // assumed.
+            NTSTATUS duplicate_section_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
+                                                  const emulator_object<handle> target_handle, const ACCESS_MASK desired_access,
+                                                  const ULONG options)
+            {
+                const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
+                if (resolved_source_handle.value.type != handle_types::section)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                auto* const source_section = c.proc.sections.get(resolved_source_handle);
+                if (!source_section || source_section->object->is_image() || !source_section->object->file_name.empty())
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const bool same_access = (options & DUPLICATE_SAME_ACCESS) != 0;
+                if (!same_access && (desired_access & ~source_section->granted_access) != 0)
+                {
+                    return STATUS_ACCESS_DENIED;
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::adopt_section;
+                request.maximum_size = source_section->object->maximum_size;
+                request.page_protection = source_section->object->section_page_protection;
+                request.allocation_attributes = source_section->object->allocation_attributes;
+                request.granted_access = same_access ? source_section->granted_access : desired_access;
+                request.payload = source_section->object->backing_storage;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status != STATUS_SUCCESS)
+                {
+                    return static_cast<NTSTATUS>(response->status);
+                }
+
+                target_handle.write(make_handle(response->minted_handle_bits));
+                return STATUS_SUCCESS;
+            }
+        }
 
         NTSTATUS handle_NtClose(const syscall_context& c, const handle h)
         {
@@ -81,9 +154,14 @@ namespace sogen
                                           const handle target_process_handle, const emulator_object<handle> target_handle,
                                           const ACCESS_MASK desired_access, const ULONG /*handle_attributes*/, const ULONG options)
         {
-            if (!c.proc.is_current_process_handle(source_process_handle) || !c.proc.is_current_process_handle(target_process_handle))
+            if (!c.proc.is_current_process_handle(source_process_handle))
             {
                 return STATUS_NOT_SUPPORTED;
+            }
+
+            if (!c.proc.is_current_process_handle(target_process_handle))
+            {
+                return duplicate_section_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
             }
 
             const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);

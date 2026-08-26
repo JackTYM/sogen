@@ -15,6 +15,9 @@ namespace sogen
     {
         namespace
         {
+            constexpr ACCESS_MASK PROCESS_TERMINATE = 0x0001;
+            constexpr ACCESS_MASK PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
             // The environment block real ntdll builds (see process_context::setup's construction of
             // RTL_USER_PROCESS_PARAMETERS64.Environment): a sequence of NUL-terminated "name=value"
             // UTF-16 strings, terminated by an empty string (double NUL). Entries starting with '=' are
@@ -125,6 +128,49 @@ namespace sogen
                                                                                     ext = {};
                                                                                     ext.Size = sizeof(PROCESS_EXTENDED_BASIC_INFORMATION);
                                                                                     init_steam_info(ext.BasicInfo);
+                                                                                });
+                    default:
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+                }
+
+                // A child's ProcessBasicInformation (real Windows: the GetExitCodeProcess/GetProcessId
+                // pattern) is answered entirely from this parent's own child_process_record, with no
+                // control-channel round trip - resolve_child_record (unlike resolve_child_target used
+                // by every other cross-process op) deliberately doesn't require a live channel, since
+                // UniqueProcessId/ExitStatus only ever need data already held locally. That's also what
+                // keeps this working for an already-terminated child, whose channel
+                // handle_NtTerminateProcess has since dropped: querying a child's final exit status
+                // after it's gone is the normal case this exists for, not an edge case to special-case
+                // away.
+                if (info_class == ProcessBasicInformation)
+                {
+                    const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    if (std::holds_alternative<NTSTATUS>(child))
+                    {
+                        return std::get<NTSTATUS>(child);
+                    }
+
+                    const auto* const record = std::get<const process_context::child_process_record*>(child);
+
+                    const auto init_child_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
+                        basic_info = {};
+                        basic_info.UniqueProcessId = record->pid;
+                        basic_info.ExitStatus = record->exit_status;
+                    };
+
+                    switch (process_information_length)
+                    {
+                    case sizeof(PROCESS_BASIC_INFORMATION64):
+                        return handle_query<PROCESS_BASIC_INFORMATION64>(c.emu, process_information, process_information_length,
+                                                                         return_length, init_child_info);
+                    case sizeof(PROCESS_EXTENDED_BASIC_INFORMATION):
+                        return handle_query<PROCESS_EXTENDED_BASIC_INFORMATION>(c.emu, process_information, process_information_length,
+                                                                                return_length,
+                                                                                [&](PROCESS_EXTENDED_BASIC_INFORMATION& ext) {
+                                                                                    ext = {};
+                                                                                    ext.Size = sizeof(PROCESS_EXTENDED_BASIC_INFORMATION);
+                                                                                    init_child_info(ext.BasicInfo);
                                                                                 });
                     default:
                         return STATUS_INFO_LENGTH_MISMATCH;
@@ -725,7 +771,37 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            return STATUS_NOT_SUPPORTED;
+            const auto child = resolve_child_target(c, process_handle, PROCESS_TERMINATE);
+            if (std::holds_alternative<NTSTATUS>(child))
+            {
+                return std::get<NTSTATUS>(child);
+            }
+
+            const auto& target = std::get<child_target>(child);
+
+            process_control_request request{};
+            request.op = process_control_op::terminate;
+            request.exit_status = static_cast<int32_t>(exit_status);
+
+            const auto response = target.channel->request(request, process_control_default_timeout_ms);
+            if (!response)
+            {
+                // Treated the same as every other cross-process op's dead-channel case
+                // (STATUS_PROCESS_IS_TERMINATING), for consistency - and it happens to be an accurate
+                // description here too: the channel only ever dies because the child's host process
+                // already exited (crash, or a previous terminate this parent doesn't know succeeded),
+                // so the target is, in fact, terminating or gone.
+                c.win_emu.log.error("NtTerminateProcess: control channel to child %u is dead/unresponsive\n", target.record_id);
+                return STATUS_PROCESS_IS_TERMINATING;
+            }
+
+            if (response->status == STATUS_SUCCESS)
+            {
+                c.proc.child_processes.at(target.record_id).exit_status = exit_status;
+                c.win_emu.drop_child_control_channel(target.record_id);
+            }
+
+            return static_cast<NTSTATUS>(response->status);
         }
 
         NTSTATUS handle_NtCreateUserProcess(const syscall_context& c, const emulator_object<handle> process_handle,

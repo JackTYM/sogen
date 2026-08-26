@@ -646,12 +646,8 @@ namespace sogen
 
         void recreate_inherited_section(windows_emulator& win_emu, const inherited_section_handle& inherited)
         {
-            section s{};
-            s.object->maximum_size = inherited.maximum_size;
-            s.object->section_page_protection = inherited.section_page_protection;
-            s.object->allocation_attributes = inherited.allocation_attributes;
-            s.granted_access = inherited.granted_access;
-            s.object->backing_storage = inherited.content;
+            auto s = section::from_pagefile_backing(inherited.maximum_size, inherited.section_page_protection,
+                                                    inherited.allocation_attributes, inherited.granted_access, inherited.content);
 
             if (!win_emu.process.sections.store_at(inherited.target_handle, std::move(s)))
             {
