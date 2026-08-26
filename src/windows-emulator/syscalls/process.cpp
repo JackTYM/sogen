@@ -727,8 +727,11 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
+        constexpr ACCESS_MASK MAXIMUM_ALLOWED = 0x02000000;
+        constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
+
         NTSTATUS handle_NtCreateUserProcess(const syscall_context& c, const emulator_object<handle> process_handle,
-                                            const emulator_object<handle> thread_handle, ACCESS_MASK /*process_desired_access*/,
+                                            const emulator_object<handle> thread_handle, const ACCESS_MASK process_desired_access,
                                             ACCESS_MASK /*thread_desired_access*/,
                                             const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*process_object_attributes*/,
                                             const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*thread_object_attributes*/,
@@ -937,7 +940,7 @@ namespace sogen
             child_process_outcome outcome{};
             try
             {
-                outcome = c.win_emu.callbacks.create_child_process(std::move(child_settings), std::move(inherited_pipes),
+                outcome = c.win_emu.callbacks.create_child_process(record_id, std::move(child_settings), std::move(inherited_pipes),
                                                                    std::move(inherited_sections), std::move(inherited_events));
             }
             catch (const std::exception& e)
@@ -960,6 +963,9 @@ namespace sogen
             // yet, and nothing in this codebase queries it today (NtWaitForSingleObject/
             // NtQueryInformationProcess on the minted handle remain unimplemented, same as before).
             record.exit_status = STATUS_PENDING;
+            record.granted_access = (process_desired_access == MAXIMUM_ALLOWED || (process_desired_access & GENERIC_ALL) != 0)
+                                        ? PROCESS_ALL_ACCESS
+                                        : process_desired_access;
 
             c.win_emu.log.log("NtCreateUserProcess: child %u started\n", record_id);
 

@@ -740,15 +740,20 @@ namespace sogen
             if (supports_child_process_spawning())
             {
                 spawn_config = build_child_process_spawn_config(options);
-                win_emu->callbacks.create_child_process = [&spawn_config, win_emu_ptr = win_emu.get()](
-                                                              application_settings settings, std::vector<inherited_pipe_handle> pipes,
-                                                              std::vector<inherited_section_handle> sections,
-                                                              std::vector<inherited_event_handle> events) {
+                win_emu->callbacks.create_child_process = [&spawn_config,
+                                                           win_emu_ptr = win_emu.get()](uint32_t record_id, application_settings settings,
+                                                                                        std::vector<inherited_pipe_handle> pipes,
+                                                                                        std::vector<inherited_section_handle> sections,
+                                                                                        std::vector<inherited_event_handle> events) {
                     auto outcome =
                         spawn_child_process(spawn_config, std::move(settings), std::move(pipes), std::move(sections), std::move(events));
                     if (outcome.success && outcome.ipc_fd >= 0)
                     {
                         win_emu_ptr->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
+                    }
+                    if (outcome.success && outcome.control_fd >= 0)
+                    {
+                        win_emu_ptr->register_child_control_channel(record_id, create_fd_process_control_channel(outcome.control_fd));
                     }
                     return outcome;
                 };

@@ -101,4 +101,25 @@ namespace sogen::test
 
         ASSERT_EQ(serializer1.get_buffer(), serializer2.get_buffer());
     }
+
+    TEST(SerializationTest, ChildProcessRecordRoundTripsGrantedAccess)
+    {
+        process_context::child_process_record record{};
+        record.image_path = windows_path{u"C:\\child.exe"};
+        record.pid = 0x1234;
+        record.exit_status = STATUS_PENDING;
+        record.granted_access = 0x001FFFFF;
+
+        utils::buffer_serializer serializer{};
+        record.serialize(serializer);
+
+        utils::buffer_deserializer deserializer{serializer};
+        process_context::child_process_record restored{};
+        restored.deserialize(deserializer);
+
+        ASSERT_EQ(restored.image_path, record.image_path);
+        ASSERT_EQ(restored.pid, record.pid);
+        ASSERT_EQ(restored.exit_status, record.exit_status);
+        ASSERT_EQ(restored.granted_access, record.granted_access);
+    }
 } // namespace sogen::test

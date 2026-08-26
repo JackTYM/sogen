@@ -923,6 +923,27 @@ namespace sogen
         this->pipe_ipc_peers_.push_back(std::move(peer));
     }
 
+    void windows_emulator::register_child_control_channel(const uint32_t record_id, std::unique_ptr<process_control_channel> channel)
+    {
+        this->child_control_channels_[record_id] = std::move(channel);
+    }
+
+    process_control_channel* windows_emulator::find_child_control_channel(const uint32_t record_id)
+    {
+        const auto entry = this->child_control_channels_.find(record_id);
+        if (entry == this->child_control_channels_.end())
+        {
+            return nullptr;
+        }
+
+        return entry->second.get();
+    }
+
+    void windows_emulator::drop_child_control_channel(const uint32_t record_id)
+    {
+        this->child_control_channels_.erase(record_id);
+    }
+
     void windows_emulator::broadcast_named_pipe_write(const std::u16string_view name, const std::string_view data)
     {
         if (this->pipe_ipc_peers_.empty())

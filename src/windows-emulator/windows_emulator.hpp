@@ -18,6 +18,7 @@
 #include "network/socket_factory.hpp"
 #include "version/windows_version_manager.hpp"
 #include "pipe_ipc_channel.hpp"
+#include "process_control_channel.hpp"
 #include <platform/ui_backend.hpp>
 
 namespace sogen
@@ -182,8 +183,11 @@ namespace sogen
         // only the embedder (e.g. the analyzer's main.cpp) knows how to re-invoke itself as a
         // child, so this can't happen inside windows_emulator itself. Unset means the embedder
         // doesn't support child processes; the handler reports STATUS_NOT_SUPPORTED in that case.
-        opt_func<child_process_outcome(application_settings, std::vector<inherited_pipe_handle>, std::vector<inherited_section_handle>,
-                                       std::vector<inherited_event_handle>)>
+        // record_id is the caller's process_context::child_processes key for this child (also shared
+        // by its minted process/thread pseudo handles), passed through so the embedder can register
+        // the child's pipe_ipc_channel/process_control_channel under the same id.
+        opt_func<child_process_outcome(uint32_t record_id, application_settings, std::vector<inherited_pipe_handle>,
+                                       std::vector<inherited_section_handle>, std::vector<inherited_event_handle>)>
             create_child_process{};
 
         opt_func<void(uint64_t address, uint64_t length, memory_permission)> on_memory_protect{};
@@ -330,6 +334,11 @@ namespace sogen
         // back the other way to this process's own named_pipe device instances.
         std::vector<std::unique_ptr<pipe_ipc_channel>> pipe_ipc_peers_{};
 
+        // Live process_control_channel per child this process spawned, keyed by the same record_id
+        // as process_context::child_processes - see register_child_control_channel. Deliberately not
+        // serialized, same as pipe_ipc_peers_.
+        std::map<uint32_t, std::unique_ptr<process_control_channel>> child_control_channels_{};
+
         // Short names (see devices/named_pipe.hpp's pipe_short_name) of every named pipe server
         // instance known to exist, whether created in this process (NtCreateNamedPipeFile) or
         // learned about from a sibling OS process (pipe_ipc_message_type::server_created). Backs
@@ -405,6 +414,22 @@ namespace sogen
         // main.cpp) owns the actual fd/socketpair and constructs the concrete channel; windows_emulator
         // only ever talks to it through the pipe_ipc_channel interface.
         void register_pipe_ipc_peer(std::unique_ptr<pipe_ipc_channel> peer);
+
+        // Registers a live process_control_channel for a child spawned via NtCreateUserProcess (see
+        // child_process_outcome::control_fd), keyed by the same record_id that also indexes
+        // process_context::child_processes and backs the process/thread pseudo handles minted for it
+        // (see handle_NtCreateUserProcess) - resolve_child_target (cross_process.hpp) looks channels up
+        // by that id. Deliberately not serialized, same as pipe_ipc_peers_: a snapshot restore has no
+        // live host OS process on the other end of the socketpair to reconnect to.
+        void register_child_control_channel(uint32_t record_id, std::unique_ptr<process_control_channel> channel);
+
+        // The live control channel for record_id, or nullptr if none is registered (no spawning
+        // support on this platform, or a snapshot-restored process whose children's channels were
+        // never serialized).
+        process_control_channel* find_child_control_channel(uint32_t record_id);
+
+        // Drops the control channel for record_id, e.g. once its child has exited.
+        void drop_child_control_channel(uint32_t record_id);
 
         // Broadcasts a named-pipe write/connect to every registered peer, so a same-named pipe instance
         // in a sibling OS process observes it exactly like a same-process peer instance would (see

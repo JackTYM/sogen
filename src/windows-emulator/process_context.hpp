@@ -219,18 +219,22 @@ namespace sogen
         // process (see windows_emulator's create_child_process callback) - exit_status is STATUS_PENDING
         // for the lifetime of this record, since nothing observes a still-running child's real exit
         // status yet (NtWaitForSingleObject/NtQueryInformationProcess support for the minted process
-        // handle remains unimplemented).
+        // handle remains unimplemented). granted_access is the caller's process_desired_access from
+        // NtCreateUserProcess (see handle_NtCreateUserProcess), checked by resolve_child_target
+        // (cross_process.hpp) against the required right for a given cross-process operation.
         struct child_process_record
         {
             windows_path image_path{};
             uint32_t pid = 0;
             NTSTATUS exit_status = STATUS_SUCCESS;
+            ACCESS_MASK granted_access{};
 
             void serialize(utils::buffer_serializer& buffer) const
             {
                 buffer.write(this->image_path);
                 buffer.write(this->pid);
                 buffer.write(this->exit_status);
+                buffer.write(this->granted_access);
             }
 
             void deserialize(utils::buffer_deserializer& buffer)
@@ -238,6 +242,7 @@ namespace sogen
                 buffer.read(this->image_path);
                 buffer.read(this->pid);
                 buffer.read(this->exit_status);
+                buffer.read(this->granted_access);
             }
         };
 
