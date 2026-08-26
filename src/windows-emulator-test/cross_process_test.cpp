@@ -3,6 +3,7 @@
 #include <cross_process.hpp>
 #include <syscall_utils.hpp>
 #include <process_control_server.hpp>
+#include <cross_process_memory.hpp>
 #include <memory_utils.hpp>
 
 #include <array>
@@ -274,39 +275,61 @@ namespace sogen::test
         ASSERT_EQ(resolve_granted_process_access(GENERIC_ALL), PROCESS_ALL_ACCESS);
     }
 
+    // Uses two genuinely separate windows_emulator instances (rather than one emulator whose channel
+    // loops back onto itself, like most of this file's other tests) so a passing assertion actually
+    // proves cross-instance behavior: emulator_a and emulator_b each get their own, independently
+    // written pattern at the same guest address, and the channel - bound only to emulator_b - must
+    // return emulator_b's bytes, never emulator_a's.
     TEST(CrossProcessTest, ReadMemoryRoundTrips)
     {
-        auto b = create_empty_emulator();
-        loopback_process_control_channel channel{b};
+        auto emulator_a = create_empty_emulator();
+        auto emulator_b = create_empty_emulator();
+        loopback_process_control_channel channel{emulator_b};
 
-        const auto base = b.memory.allocate_memory(0x1000, memory_permission::read_write);
-        ASSERT_NE(base, 0u);
+        const auto base_a = emulator_a.memory.allocate_memory(0x1000, memory_permission::read_write);
+        const auto base_b = emulator_b.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base_a, 0u);
+        ASSERT_NE(base_b, 0u);
 
-        std::vector<std::byte> pattern(0x40);
-        for (size_t i = 0; i < pattern.size(); ++i)
+        std::vector<std::byte> pattern_a(0x40);
+        std::vector<std::byte> pattern_b(0x40);
+        for (size_t i = 0; i < pattern_a.size(); ++i)
         {
-            pattern[i] = static_cast<std::byte>(i);
+            pattern_a[i] = static_cast<std::byte>(i);
+            pattern_b[i] = static_cast<std::byte>(0xC0 + i);
         }
-        ASSERT_TRUE(b.memory.try_write_memory(base, pattern.data(), pattern.size()));
+        ASSERT_TRUE(emulator_a.memory.try_write_memory(base_a, pattern_a.data(), pattern_a.size()));
+        ASSERT_TRUE(emulator_b.memory.try_write_memory(base_b, pattern_b.data(), pattern_b.size()));
 
         process_control_request request{};
         request.op = process_control_op::read_memory;
-        request.address = base;
-        request.size = pattern.size();
+        request.address = base_b;
+        request.size = pattern_b.size();
 
         const auto response = channel.request(request, process_control_default_timeout_ms);
         ASSERT_TRUE(response.has_value());
         ASSERT_EQ(response->status, STATUS_SUCCESS);
-        ASSERT_EQ(response->payload, pattern);
+        ASSERT_EQ(response->payload, pattern_b);
+        ASSERT_NE(response->payload, pattern_a);
     }
 
+    // Two genuinely separate instances again (see ReadMemoryRoundTrips): the write goes through the
+    // channel to emulator_b only, and emulator_a's own memory at the same address - never touched by
+    // the channel - must still hold exactly what it held before, proving the write didn't leak across
+    // address spaces.
     TEST(CrossProcessTest, WriteMemoryRoundTrips)
     {
-        auto b = create_empty_emulator();
-        loopback_process_control_channel channel{b};
+        auto emulator_a = create_empty_emulator();
+        auto emulator_b = create_empty_emulator();
+        loopback_process_control_channel channel{emulator_b};
 
-        const auto base = b.memory.allocate_memory(0x1000, memory_permission::read_write);
-        ASSERT_NE(base, 0u);
+        const auto base_a = emulator_a.memory.allocate_memory(0x1000, memory_permission::read_write);
+        const auto base_b = emulator_b.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base_a, 0u);
+        ASSERT_NE(base_b, 0u);
+
+        std::vector<std::byte> original_a(0x40, std::byte{0x11});
+        ASSERT_TRUE(emulator_a.memory.try_write_memory(base_a, original_a.data(), original_a.size()));
 
         std::vector<std::byte> pattern(0x40);
         for (size_t i = 0; i < pattern.size(); ++i)
@@ -316,7 +339,7 @@ namespace sogen::test
 
         process_control_request request{};
         request.op = process_control_op::write_memory;
-        request.address = base;
+        request.address = base_b;
         request.payload = pattern;
 
         const auto response = channel.request(request, process_control_default_timeout_ms);
@@ -324,9 +347,13 @@ namespace sogen::test
         ASSERT_EQ(response->status, STATUS_SUCCESS);
         ASSERT_EQ(response->bytes_written, pattern.size());
 
-        std::vector<std::byte> actual(pattern.size());
-        ASSERT_TRUE(b.memory.try_read_memory(base, actual.data(), actual.size()));
-        ASSERT_EQ(actual, pattern);
+        std::vector<std::byte> actual_b(pattern.size());
+        ASSERT_TRUE(emulator_b.memory.try_read_memory(base_b, actual_b.data(), actual_b.size()));
+        ASSERT_EQ(actual_b, pattern);
+
+        std::vector<std::byte> actual_a(original_a.size());
+        ASSERT_TRUE(emulator_a.memory.try_read_memory(base_a, actual_a.data(), actual_a.size()));
+        ASSERT_EQ(actual_a, original_a);
     }
 
     TEST(CrossProcessTest, ReadAcrossPageBoundary)
@@ -354,6 +381,52 @@ namespace sogen::test
         ASSERT_TRUE(response.has_value());
         ASSERT_EQ(response->status, STATUS_SUCCESS);
         ASSERT_EQ(response->payload, pattern);
+    }
+
+    // Composes copy_guest_range_out then copy_guest_range_in exactly the way
+    // handle_NtReadVirtualMemory/handle_NtWriteVirtualMemory do (syscalls/memory.cpp), against a
+    // forward-overlapping same-process source/destination range spanning more than one page boundary
+    // (src=region+0, dst=region+0x1000, 0x2000 bytes copied, so [0x1000, 0x2000) is both read from and
+    // written to). Proves the two-pass design is memmove-safe: the destination ends up with exactly
+    // the source's ORIGINAL bytes, not a version corrupted by an earlier chunk's write clobbering a
+    // later chunk's not-yet-read source data (see cross_process_memory.hpp's copy_guest_range_out doc
+    // comment for why the prior interleaved-chunk implementation was vulnerable to this and this one
+    // isn't).
+    TEST(CrossProcessTest, SameProcessOverlappingForwardCopyIsMemmoveSafe)
+    {
+        auto emu = create_empty_emulator();
+
+        constexpr size_t region_size = 0x4000;
+        const auto region = emu.memory.allocate_memory(region_size, memory_permission::read_write);
+        ASSERT_NE(region, 0u);
+
+        std::vector<std::byte> pattern(region_size);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            pattern[i] = static_cast<std::byte>(i % 256);
+        }
+        ASSERT_TRUE(emu.memory.try_write_memory(region, pattern.data(), pattern.size()));
+
+        constexpr uint64_t src_offset = 0;
+        constexpr uint64_t dst_offset = 0x1000;
+        constexpr size_t copy_size = 0x2000;
+
+        const auto src_addr = region + src_offset;
+        const auto dst_addr = region + dst_offset;
+
+        std::vector<std::byte> staging(copy_size);
+        const auto bytes_read = copy_guest_range_out(emu.memory, src_addr, staging);
+        ASSERT_EQ(bytes_read, copy_size);
+
+        const auto bytes_written = copy_guest_range_in(emu.memory, dst_addr, std::span(staging).first(bytes_read));
+        ASSERT_EQ(bytes_written, copy_size);
+
+        std::vector<std::byte> actual(copy_size);
+        ASSERT_TRUE(emu.memory.try_read_memory(dst_addr, actual.data(), actual.size()));
+
+        const std::vector<std::byte> expected(pattern.begin() + static_cast<ptrdiff_t>(src_offset),
+                                              pattern.begin() + static_cast<ptrdiff_t>(src_offset + copy_size));
+        ASSERT_EQ(actual, expected);
     }
 
     TEST(CrossProcessTest, ReadPartialAtUnmappedTail)
@@ -391,10 +464,20 @@ namespace sogen::test
         ASSERT_EQ(response->payload.size(), 0u);
     }
 
+    // Two genuinely separate instances again (see ReadMemoryRoundTrips): emulator_a holds an
+    // independent, already-allocated region with a sentinel pattern for the whole test, untouched by
+    // any request on the channel (which only ever addresses emulator_b) - proving the allocate/write/
+    // read sequence against emulator_b neither reads from nor corrupts emulator_a's address space.
     TEST(CrossProcessTest, AllocateThenWriteThenRead)
     {
-        auto b = create_empty_emulator();
-        loopback_process_control_channel channel{b};
+        auto emulator_a = create_empty_emulator();
+        auto emulator_b = create_empty_emulator();
+        loopback_process_control_channel channel{emulator_b};
+
+        const auto base_a = emulator_a.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base_a, 0u);
+        std::vector<std::byte> sentinel_a(0x20, std::byte{0xEE});
+        ASSERT_TRUE(emulator_a.memory.try_write_memory(base_a, sentinel_a.data(), sentinel_a.size()));
 
         process_control_request allocate_request{};
         allocate_request.op = process_control_op::allocate_memory;
@@ -408,7 +491,7 @@ namespace sogen::test
         ASSERT_EQ(allocate_response->status, STATUS_SUCCESS);
         ASSERT_NE(allocate_response->base_address, 0u);
 
-        const auto base = allocate_response->base_address;
+        const auto base_b = allocate_response->base_address;
 
         std::vector<std::byte> pattern(0x20);
         for (size_t i = 0; i < pattern.size(); ++i)
@@ -418,7 +501,7 @@ namespace sogen::test
 
         process_control_request write_request{};
         write_request.op = process_control_op::write_memory;
-        write_request.address = base;
+        write_request.address = base_b;
         write_request.payload = pattern;
 
         const auto write_response = channel.request(write_request, process_control_default_timeout_ms);
@@ -428,13 +511,17 @@ namespace sogen::test
 
         process_control_request read_request{};
         read_request.op = process_control_op::read_memory;
-        read_request.address = base;
+        read_request.address = base_b;
         read_request.size = pattern.size();
 
         const auto read_response = channel.request(read_request, process_control_default_timeout_ms);
         ASSERT_TRUE(read_response.has_value());
         ASSERT_EQ(read_response->status, STATUS_SUCCESS);
         ASSERT_EQ(read_response->payload, pattern);
+
+        std::vector<std::byte> actual_a(sentinel_a.size());
+        ASSERT_TRUE(emulator_a.memory.try_read_memory(base_a, actual_a.data(), actual_a.size()));
+        ASSERT_EQ(actual_a, sentinel_a);
     }
 
     TEST(CrossProcessTest, ProtectMemoryReportsOldProtection)

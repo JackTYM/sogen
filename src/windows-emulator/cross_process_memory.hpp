@@ -16,6 +16,18 @@ namespace sogen
     // and the cross-process read_memory/write_memory control-channel executors
     // (process_control_server.cpp, where the host buffer is the wire payload) - the one
     // implementation of this partial-transfer chunking both paths rely on.
+    //
+    // For the same-process handlers, this means the source range is read out to a fully-owned host
+    // buffer (sized to the whole request, not one page) before copy_guest_range_in writes any of it
+    // back in - unlike the single-buffer, single-chunk-reused, interleaved read/write loop this
+    // replaced. That old loop could self-corrupt a forward-overlapping copy spanning more than one
+    // page (writing chunk N into the destination could clobber source bytes chunk N+1 was about to
+    // read), because a shared page-sized scratch buffer was reused across both directions per chunk.
+    // The two-pass design here is memmove-safe: since the whole source is captured before any
+    // destination byte is touched, overlapping ranges can never observe a partially-overwritten
+    // source, matching how a real kernel-mediated NtReadVirtualMemory/NtWriteVirtualMemory copy
+    // behaves. This is a deliberate, disclosed correctness improvement over the prior behavior, not
+    // an accidental one - see cross_process_test.cpp's *Overlap* tests.
     size_t copy_guest_range_out(memory_interface& src, uint64_t address, std::span<std::byte> out);
 
     // Mirror of copy_guest_range_out for writes: writes in.size() bytes from the host-side buffer in
