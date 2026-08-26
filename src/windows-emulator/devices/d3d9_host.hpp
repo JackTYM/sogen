@@ -132,6 +132,20 @@ namespace sogen
                      size_t out_capacity, uint32_t& out_data_size);
         int32_t unlock(uint64_t resource, uint32_t subresource, uint32_t offset, const void* data, size_t data_size);
 
+        // Resizes the resource's backing store as needed and returns a writable pointer directly into it
+        // for the caller to fill (typically via a single guest-memory read), avoiding the extra host-side
+        // copy `unlock` above requires when the caller already has the bytes in a separate buffer. Returns
+        // nullptr on an invalid resource/subresource; the caller must then skip both the write and the
+        // matching finish_unlock call. Must be followed by finish_unlock once the pointer's been filled.
+        std::byte* prepare_unlock_target(uint64_t resource, uint32_t subresource, uint32_t offset, size_t data_size);
+        void finish_unlock(uint64_t resource, uint32_t subresource);
+
+        // Returns the resource's real, persistent HOST_VISIBLE|HOST_COHERENT buffer mapping (see
+        // resource_entry::direct_mapped_ptr) for the caller to alias directly into the guest's address
+        // space, letting Lock/Unlock skip the host round-trip entirely for eligible resources. Returns
+        // false (leaving out_ptr/out_size untouched) for any resource without a direct buffer.
+        bool get_direct_mapping(uint64_t resource, void*& out_ptr, size_t& out_size) const;
+
         // Copies the resource's current host-side pixel backing (BGRA8) out for presentation. Lazily
         // syncs from the GPU image first via sync_backing_from_gpu if pfnClear/pfnDrawPrimitive left it
         // dirty. Returns false if the resource doesn't exist or has no GPU backing (not a render target).
@@ -342,6 +356,18 @@ namespace sogen
             // a different byte size, so a single flat vector can't address them. Empty for buffers, render
             // targets, and single-mip textures. Indexed as extra_mips[subresource - 1].
             std::vector<std::vector<std::byte>> extra_mips;
+            // Real, persistent, HOST_VISIBLE|HOST_COHERENT GPU buffer backing this resource directly --
+            // only ever set for eligible D3DUSAGE_DYNAMIC/D3DPOOL_DEFAULT vertex/index buffers (see
+            // create_resource's eligibility check). When set, `backing` above is still correctly sized
+            // (existing `.empty()` validity guards elsewhere never inspect its bytes for buffer-kind
+            // resources, only its size) but is never written to -- Lock/Unlock and execute_draw's
+            // reservation logic all read/write this buffer's mapped memory directly instead, eliminating
+            // both the CPU-side backing copy AND, when execute_draw binds it directly, the per-draw arena
+            // upload memmove entirely. 0 = no direct buffer; falls back to the ordinary `backing`-based
+            // path used by every other resource kind.
+            uint64_t vk_direct_buffer_id{};
+            uint64_t vk_direct_memory_id{};
+            void* direct_mapped_ptr{};
             uint64_t vk_image_id{};      // 0 = no GPU backing (plain buffer); set for render targets and textures
             uint64_t vk_image_view_id{}; // 0 until first drawn to; lazily created, cached per resource
             // Second colour-attachment view of the SAME image, through the format's _SRGB counterpart,
@@ -538,6 +564,19 @@ namespace sogen
         // outstanding GPU work referencing its command buffer/descriptor pool/arena -- either it was never
         // used, or a prior wait already drained it -- so it's immediately safe to reset/rewrite.
         std::array<bool, batch_slot_count> batch_slot_pending_{};
+
+        // color_fill's batched cmd_copy_buffer_to_image (see its own comment) needs its host-visible
+        // staging buffer held alive on the GPU until this slot's submission actually completes --
+        // destroyed by wait_for_batch_slot right after its wait, the same point every other per-slot GPU
+        // resource (arena, descriptor pool) becomes safe to reuse/destroy.
+        struct pending_staging_buffer
+        {
+            uint64_t device{};
+            uint64_t buffer{};
+            uint64_t memory{};
+        };
+
+        std::array<std::vector<pending_staging_buffer>, batch_slot_count> pending_staging_cleanup_{};
         // Which slot the CURRENTLY open batch (if any) is recording into; also the last slot used when no
         // batch is open. Advanced (round-robin) only by execute_draw's batch-management step, and only for
         // the reopen reasons that don't themselves require this exact slot back immediately (see that
@@ -610,6 +649,7 @@ namespace sogen
             size_t arena_offset{};
             bool valid{false};
         };
+
         std::array<ubo_upload_cache_entry, 6> ubo_upload_cache_{};
         // Scratch buffer build_ubo_staging fills the CANDIDATE content into before comparing against
         // ubo_staging_'s current (= last-uploaded) content -- ubo_staging_ itself is only overwritten when
@@ -635,7 +675,32 @@ namespace sogen
             size_t color_count{0};
             uint64_t depth_image_id{0};
         };
+
         std::array<open_render_pass_state, batch_slot_count> open_render_pass_{};
+
+        // A Clear() whose color/depth-stencil target has no render-pass instance open yet in this
+        // batch (open_render_pass_[slot].open == false, i.e. nothing has been drawn into it since the
+        // batch's last flush) defers its value here instead of paying for a standalone
+        // vkCmdClear*Image: the next render-pass-begin for this slot -- execute_draw's own fresh-
+        // instance branch -- consumes it as that attachment's VK_ATTACHMENT_LOAD_OP_CLEAR value, which
+        // is free (the attachment's tile memory is initialized to the clear value as part of beginning
+        // to render into it regardless). color/depth are independent: one aspect can take the fast path
+        // while the other falls back (e.g. a D3DCLEAR_STENCIL against a real stencil format always
+        // falls back, since cmd_begin_rendering never wires up a separate stencil attachment). Reset to
+        // {} whenever a fresh render-pass instance consumes it, and whenever a batch (re)opens on this
+        // slot (same places open_render_pass_[slot] itself is reset) -- and realized via the ordinary
+        // explicit-clear path by submit_batch_async if the batch is submitted before any draw ever
+        // consumes it, so a Clear() is never silently dropped.
+        struct pending_batch_clear
+        {
+            bool color_pending{false};
+            std::array<float, 4> color_value{};
+            bool depth_pending{false};
+            float depth_value{1.0f};
+            uint32_t stencil_value{0};
+        };
+
+        std::array<pending_batch_clear, batch_slot_count> pending_clear_{};
 
         // Process-lifetime instrumentation, never reset: draw_count_ increments once per execute_draw
         // call, batch_submit_count_ once per real flush_batch() submit (an open batch actually
@@ -846,6 +911,28 @@ namespace sogen
         // Initial per-frame descriptor-pool capacity, in draws. One draw needs only 2 sets, so 256 is
         // ample headroom -- the growth path in ensure_frame_descriptor_pool exists for correctness, not
         // because a single draw is expected to exceed it.
+        //
+        // 2026-08-24: tried raising this to 4096 to reduce how often the descriptor-pool-exhaustion trigger
+        // in execute_draw forces a mid-frame render-pass restart (see close_render_pass) on the same render
+        // target. First live A/B found FPS MUCH WORSE (~2.8-3.4 FPS vs. a ~6.8-7 FPS baseline at 256).
+        // Built direct timing diagnostics for both vkResetDescriptorPool (EMULATOR_D3D9_RESETPOOL_DIAG) and
+        // vkAllocateDescriptorSets (EMULATOR_D3D9_ALLOCSET_DIAG, both left in the tree) and measured their
+        // real combined cost is negligible either way (~0.4-0.5% of wall-clock time) -- nowhere near enough
+        // to explain that regression's magnitude even under generous scaling assumptions, so that's NOT the
+        // mechanism. A clean re-test at 4096 with both diagnostics active then showed FPS statistically
+        // matching the 256 baseline (~7.0-7.7 FPS) with LOWER combined descriptor-management overhead
+        // (fewer reopens needed) and reopen_desc_exhaustion=0 throughout, exactly as designed. A THIRD test
+        // (meant as a second confirmation) reproduced a severe drop again (~2-4 FPS) -- but this run had
+        // confirmed, real concurrent host contention at the time (the same unrelated
+        // wt-solidworks-bringup worktree's analyzer process plus a `cargo` build both actively running,
+        // verified via `ps`), which was also present during the original "regression" run. Both severe-drop
+        // observations correlate with detected external contention; the one clean, uncontaminated run at
+        // 4096 was FPS-neutral. This makes external contention the leading explanation for both drops, but
+        // it was not proven with a fully controlled (guaranteed-quiet-throughout, not just checked
+        // periodically) A/B, so the fix was NOT re-applied -- reverted back to 256 as the safe, extensively
+        // verified default. Before retrying 4096, either get a genuinely quiet host for the entire test
+        // window, or use the two diagnostics above alongside FPS to catch any real per-call cost increase
+        // directly rather than inferring causation from FPS alone.
         static constexpr uint32_t frame_desc_initial_draws = 256;
 
         // Reused scratch buffers for the six per-draw constant-register UBOs execute_draw stages into the
@@ -904,10 +991,33 @@ namespace sogen
         // earlier draw's batch-management step may have async-submitted a DIFFERENT slot without waiting
         // for it, so "current slot only" would not actually guarantee this host's GPU work is done. Called
         // at every boundary that must observe ALL of this host's outstanding GPU work before proceeding
-        // (readback, clear, color_fill, blt, resource teardown, render-target/depth-stencil change) --
-        // every one of those needs this full-barrier contract, unlike execute_draw's own internal reopen
-        // decision (see submit_batch_async).
+        // (readback, color_fill, blt, resource teardown, render-target/depth-stencil change) -- every one
+        // of those needs this full-barrier contract, unlike execute_draw's own internal reopen decision
+        // (see submit_batch_async). The D3D9 clear handler deliberately does NOT use this any more (see
+        // ensure_batch_open/batch_clear_color_image) -- a plain Clear returns no data to the CPU, so it
+        // has no need for the wait either.
         void flush_batch();
+        // Opens a batch recording into target_rt/target_ds's identity, or keeps the currently open one if
+        // it already matches -- the same round-robin slot-selection execute_draw's own batch-management
+        // step performs (submit+rotate+wait_for_batch_slot on an identity mismatch, reset the new slot's
+        // arena/descriptor-pool/render-pass state on open), factored out so a Clear that arrives with no
+        // batch open (or a mismatched one) can join the SAME deferred-wait mechanism as draws instead of
+        // its own synchronous submit+wait. Unlike execute_draw's inline version, this has no arena-growth
+        // or descriptor-pool-exhaustion trigger -- a bare clear consumes neither.
+        void ensure_batch_open(uint64_t device, uint64_t target_rt, uint64_t target_ds);
+        // Records a full-image color clear into the currently open batch's command buffer (batch_slot_),
+        // instead of vulkan_host::submit_clear's standalone one-shot-submit-then-wait. Caller must have
+        // already called ensure_batch_open and closed any open render-pass instance on that slot first
+        // (vkCmdClearColorImage is illegal inside one). Leaves the image at its TRANSFER_SRC_OPTIMAL
+        // resting layout, matching submit_clear's own documented post-state.
+        void batch_clear_color_image(uint64_t image, const std::array<float, 4>& color);
+        // Same idea as batch_clear_color_image, but for the currently-bound depth-stencil resource: records
+        // a barrier/clear/barrier sequence onto the open batch's command buffer instead of a standalone
+        // one-shot submit+wait. Caller must have already run ensure_depth_stencil_view (so the image is
+        // resting in DEPTH_STENCIL_ATTACHMENT_OPTIMAL) and closed any open render-pass instance on
+        // batch_slot_ first.
+        void batch_clear_depth_stencil_image(resource_entry& ds_entry, uint32_t depth_format, uint32_t clear_aspects, float depth,
+                                             uint32_t stencil);
         // depth_format is a VkFormat (0 = no depth attachment), matching create_graphics_pipeline's own
         // dynamic-rendering depth_format parameter. color_formats holds one VkFormat per currently-bound
         // render target (slot order), each getting an identical blend-attachment entry -- D3D9 has no
@@ -967,16 +1077,6 @@ namespace sogen
         // D3D9's own default far-plane depth (1.0) -- see the .cpp definition's comment for why.
         // No-op (returns true) if ds_entry already has a view. depth_format is ds_entry's own VkFormat.
         bool ensure_depth_stencil_view(uint64_t device, resource_entry& ds_entry, uint32_t depth_format);
-
-        // Real per-call D3DCLEAR_ZBUFFER/D3DCLEAR_STENCIL: clears the requested aspects of an already
-        // initialized depth-stencil resource (callers must have run ensure_depth_stencil_view first, so
-        // the image is in DEPTH_STENCIL_ATTACHMENT_OPTIMAL and the untouched aspect's contents survive
-        // the transition). clear_aspects selects which of depth/stencil are written; the surrounding
-        // barriers always cover the format's FULL aspect mask, because a combined depth/stencil image
-        // may only be transitioned per-aspect with separateDepthStencilLayouts, which this host does not
-        // require. Blocking, on the shared non-batch command buffer, like every other one-off submit here.
-        void clear_depth_stencil(uint64_t device, resource_entry& ds_entry, uint32_t depth_format, uint32_t clear_aspects, float depth,
-                                 uint32_t stencil);
 
         // If this color RT has GPU-side pixels not yet mirrored into `backing`, copy them now (blocking)
         // and clear the flag -- the sole place this readback happens; pfnClear/pfnDrawPrimitive only

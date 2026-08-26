@@ -3759,6 +3759,7 @@ namespace sogen
             return handle_NtGdiStretchBlt(c, dst_dc, x_dst, y_dst, dst_width, dst_height, src_dc, x_src, y_src, src_width, src_height,
                                           srccopy, 0);
         }
+
         BOOL handle_NtGdiPatBlt(const syscall_context& c, const hdc dc, const LONG x, const LONG y, const LONG width, const LONG height,
                                 const DWORD /*rop*/)
         {
@@ -4700,7 +4701,7 @@ namespace sogen
                                 {
                                     uint64_t vk_image = 0;
                                     const int32_t vk_res = c.proc.dxgk.vk_host->create_render_target(
-                                        dev_it->second, rt_desc.width, rt_desc.height, rt_desc.format, vk_image);
+                                        dev_it->second, rt_desc.width, rt_desc.height, rt_desc.format, false, vk_image);
                                     if (vk_res == 0 && vk_image != 0)
                                     {
                                         auto alloc_it = c.proc.dxgk.allocations.find(alloc_info.hAllocation);

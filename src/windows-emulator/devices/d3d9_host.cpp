@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -21,6 +22,7 @@
 #include <limits>
 #include <span>
 #include <string>
+#include <unordered_set>
 
 namespace sogen
 {
@@ -32,6 +34,48 @@ namespace sogen
         // Public, ABI-stable D3D9 API constants (d3d9types.h), not RE'd DDI internals.
         constexpr uint32_t d3dusage_rendertarget = 0x00000001;
         constexpr uint32_t d3dusage_depthstencil = 0x00000002;
+        constexpr uint32_t d3dusage_writeonly = 0x00000008;
+        constexpr uint32_t d3dusage_dynamic = 0x00000200;
+        constexpr uint32_t d3dpool_default = 0;
+
+        // Whether D3DUSAGE_DEPTHSTENCIL resources get memoryless-attachment (MoltenVK "transient") GPU
+        // backing -- see create_resource's own comment for how this is used, and vulkan_host::
+        // create_render_target's `transient` parameter for what it does at the Vulkan level.
+        //
+        // Left DISABLED (false): a real, likely-frequent correctness hazard was found while wiring this
+        // up. execute_draw's batch-management step force-submits and reopens the current render-pass
+        // instance roughly every 256 programmable draws targeting the SAME render target/depth-stencil,
+        // for the entire life of the process (ensure_frame_descriptor_pool is always called with
+        // needed_draws=1, so frame_desc_capacity_draws_ never grows past frame_desc_initial_draws=256;
+        // see that call site) -- a trigger with no accompanying D3D9 Clear() call. A transient depth-
+        // stencil's store_op is unconditionally VK_ATTACHMENT_STORE_OP_DONT_CARE (the whole point of the
+        // optimization -- see execute_draw's depth_attachment), so the depth content accumulated by every
+        // draw before that reopen is discarded, and the reopened instance's VK_ATTACHMENT_LOAD_OP_LOAD
+        // then reads undefined content instead of it -- not a hypothetical edge case but the FIRST scene
+        // in any real workload (this was written for MW2) that draws more than 256 depth-tested
+        // primitives into one target in a frame, which is unremarkable for a real 3D game. The rest of
+        // this feature (vulkan_host::create_render_target's transient path, the DONT_CARE store_op, the
+        // Clear()-fast-path-is-mandatory-for-transient handling) is implemented and exercised by the
+        // d3d9-depthclip-test/d3d9-mrt-test correctness tests with this flag flipped true, but is kept
+        // off by default until the reopen-without-Clear hazard above has a real fix (e.g. growing
+        // frame_desc_capacity_draws_ so the reopen becomes rare instead of recurring, and/or reasoning
+        // about whether that's sufficient rather than just less likely).
+        constexpr bool depth_stencil_transient_enabled = false;
+
+        // Raw-bytes encoding rendering_attachment::clear_value expects (see vulkan_host::cmd_begin_
+        // rendering's build() -- a memcpy straight into VkClearValue's union). Defined this early
+        // because submit_batch_async (below) needs depth_stencil_clear_value for its pending-clear
+        // safety net.
+        std::array<uint32_t, 4> color_clear_value(const std::array<float, 4>& color)
+        {
+            return {std::bit_cast<uint32_t>(color[0]), std::bit_cast<uint32_t>(color[1]), std::bit_cast<uint32_t>(color[2]),
+                    std::bit_cast<uint32_t>(color[3])};
+        }
+
+        std::array<uint32_t, 4> depth_stencil_clear_value(const float depth, const uint32_t stencil)
+        {
+            return {std::bit_cast<uint32_t>(depth), stencil, 0, 0};
+        }
 
         // Public D3DSAMPLERSTATETYPE values (d3d9types.h) -- the wire protocol's set_sampler_state_record
         // carries these directly (see the UMD's sampler_state_for_ddi_tss_state, which translates the real
@@ -507,6 +551,63 @@ namespace sogen
         {
             return;
         }
+        // A Clear() may have deferred its value onto pending_clear_ (see the fast path in the
+        // d3d9_clear handler) expecting a later draw to fold it into a render-pass LOAD_OP_CLEAR --
+        // but this batch is closing without one ever having opened a render pass to consume it
+        // (open_render_pass_[slot].open is false whenever anything is still pending; see that
+        // struct's comment). Realize it now via the ordinary explicit-clear path so the Clear() this
+        // batch recorded is never silently dropped.
+        pending_batch_clear& pending = this->pending_clear_[this->batch_slot_];
+        if (pending.color_pending)
+        {
+            for (const uint64_t rt_handle : this->state_.render_targets)
+            {
+                const auto it = this->resources_.find(rt_handle);
+                if (it == this->resources_.end() || it->second.vk_image_id == 0)
+                {
+                    continue;
+                }
+                this->batch_clear_color_image(it->second.vk_image_id, pending.color_value);
+                it->second.backing_dirty = true;
+            }
+            pending.color_pending = false;
+        }
+        if (pending.depth_pending)
+        {
+            const auto ds_it = this->resources_.find(this->batch_ds_);
+            uint32_t depth_vk_format = 0;
+            if (ds_it != this->resources_.end() && ds_it->second.vk_image_id != 0 &&
+                d3d9_format_to_vulkan(ds_it->second.format, depth_vk_format))
+            {
+                if (depth_stencil_transient_enabled && (ds_it->second.usage & d3dusage_depthstencil) != 0)
+                {
+                    // A transient depth-stencil has no TRANSFER_DST_BIT usage, so
+                    // batch_clear_depth_stencil_image's vkCmdClearDepthStencilImage is invalid here --
+                    // realize the clear the only way a transient image supports: a self-contained
+                    // render-pass instance that does nothing but LOAD_OP_CLEAR then immediately end.
+                    const uint64_t batch_cmd = this->batch_command_buffer_[this->batch_slot_];
+                    const vulkan_host::rendering_attachment depth_attachment{
+                        .image_view = ds_it->second.vk_image_view_id,
+                        .resolve_image_view = 0,
+                        .image_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        .resolve_image_layout = 0,
+                        .resolve_mode = 0,
+                        .load_op = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                        .store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                        .clear_value = depth_stencil_clear_value(pending.depth_value, pending.stencil_value),
+                    };
+                    this->vulkan_.cmd_begin_rendering(batch_cmd, 0, 0, ds_it->second.width, ds_it->second.height, 1, 0, 0, {},
+                                                      &depth_attachment, nullptr);
+                    this->vulkan_.cmd_end_rendering(batch_cmd);
+                }
+                else
+                {
+                    this->batch_clear_depth_stencil_image(ds_it->second, depth_vk_format, VK_IMAGE_ASPECT_DEPTH_BIT, pending.depth_value,
+                                                          pending.stencil_value);
+                }
+            }
+            pending.depth_pending = false;
+        }
         this->close_render_pass(this->batch_slot_);
         this->vulkan_.end_command_buffer(this->batch_command_buffer_[this->batch_slot_]);
         this->vulkan_.queue_submit(this->queue_, this->batch_command_buffer_[this->batch_slot_], this->batch_fence_[this->batch_slot_]);
@@ -523,6 +624,12 @@ namespace sogen
         }
         this->vulkan_.wait_for_fence(this->batch_fence_[slot], UINT64_MAX);
         this->batch_slot_pending_[slot] = false;
+        for (const pending_staging_buffer& staging : this->pending_staging_cleanup_[slot])
+        {
+            this->vulkan_.destroy_buffer(staging.device, staging.buffer);
+            this->vulkan_.free_memory(staging.device, staging.memory);
+        }
+        this->pending_staging_cleanup_[slot].clear();
     }
 
     void d3d9_host::flush_batch()
@@ -532,6 +639,57 @@ namespace sogen
         {
             this->wait_for_batch_slot(slot);
         }
+    }
+
+    void d3d9_host::ensure_batch_open(const uint64_t device, const uint64_t target_rt, const uint64_t target_ds)
+    {
+        bool rotate_batch_slot = false;
+        if (this->batch_open_ && (target_rt != this->batch_rt_ || target_ds != this->batch_ds_))
+        {
+            this->submit_batch_async();
+            rotate_batch_slot = true;
+        }
+        if (this->batch_open_)
+        {
+            return;
+        }
+        if (rotate_batch_slot)
+        {
+            this->batch_slot_ = (this->batch_slot_ + 1) % batch_slot_count;
+            this->wait_for_batch_slot(this->batch_slot_);
+        }
+        this->vertex_index_uniform_arena_[this->batch_slot_].offset = 0;
+        if (this->frame_descriptor_pool_[this->batch_slot_] != 0)
+        {
+            this->vulkan_.reset_descriptor_pool(device, this->frame_descriptor_pool_[this->batch_slot_], 0);
+        }
+        this->batch_draw_count_ = 0;
+        this->open_render_pass_[this->batch_slot_] = {};
+        this->pending_clear_[this->batch_slot_] = {};
+        this->vulkan_.reset_fence(device, this->batch_fence_[this->batch_slot_]);
+        this->vulkan_.begin_command_buffer(this->batch_command_buffer_[this->batch_slot_], 0, false, 0, {}, 0, 0, 1, 0);
+        this->batch_open_ = true;
+        this->batch_rt_ = target_rt;
+        this->batch_ds_ = target_ds;
+        ++this->batch_generation_;
+    }
+
+    void d3d9_host::batch_clear_color_image(const uint64_t image, const std::array<float, 4>& color)
+    {
+        const uint64_t batch_cmd = this->batch_command_buffer_[this->batch_slot_];
+        const vulkan_host::subresource_range color_range{
+            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
+        // A clear fully overwrites the image, so VK_IMAGE_LAYOUT_UNDEFINED is always a legal old layout
+        // for this transition regardless of the image's real current layout -- lets this skip tracking or
+        // querying it just for this, unlike every other consumer in this file.
+        this->vulkan_.cmd_pipeline_barrier(batch_cmd, image, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
+        this->vulkan_.cmd_clear_color_image(batch_cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color[0], color[1], color[2], color[3],
+                                            color_range);
+        this->vulkan_.cmd_pipeline_barrier(batch_cmd, image, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
     }
 
     bool d3d9_host::ensure_pipeline(const std::span<const uint32_t> color_formats, const uint32_t width, const uint32_t height,
@@ -1396,6 +1554,7 @@ namespace sogen
                 return VK_IMAGE_ASPECT_DEPTH_BIT;
             }
         }
+
     } // namespace
 
     namespace
@@ -1413,6 +1572,90 @@ namespace sogen
         {
             static const bool enabled = getenv("EMULATOR_D3D9_DRAWPROFILE") != nullptr;
             return enabled;
+        }
+
+        // Temporary diagnostic (EMULATOR_D3D9_RESETPOOL_DIAG=1): direct measurement to test the
+        // hypothesis from the 2026-08-24 frame_desc_initial_draws regression (see that constant's own
+        // comment) -- does vkResetDescriptorPool's real cost scale with the pool's total capacity, and
+        // which of execute_draw's three batch-reopen triggers (RT/depth-stencil change, descriptor-pool
+        // exhaustion, arena growth) actually dominates reopen frequency in real gameplay.
+        void resetpool_diag_report(const uint64_t elapsed_ns, const uint64_t rt_change, const uint64_t desc_exhaustion,
+                                   const uint64_t arena_growth)
+        {
+            static std::atomic<uint64_t> total_ns{};
+            static std::atomic<uint64_t> max_ns{};
+            static std::atomic<uint64_t> call_count{};
+            static std::atomic<uint64_t> reopen_rt_change{};
+            static std::atomic<uint64_t> reopen_desc_exhaustion{};
+            static std::atomic<uint64_t> reopen_arena_growth{};
+            static auto window_start = std::chrono::steady_clock::now();
+
+            total_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+            call_count.fetch_add(1, std::memory_order_relaxed);
+            reopen_rt_change.fetch_add(rt_change, std::memory_order_relaxed);
+            reopen_desc_exhaustion.fetch_add(desc_exhaustion, std::memory_order_relaxed);
+            reopen_arena_growth.fetch_add(arena_growth, std::memory_order_relaxed);
+            uint64_t prev_max = max_ns.load(std::memory_order_relaxed);
+            while (elapsed_ns > prev_max && !max_ns.compare_exchange_weak(prev_max, elapsed_ns, std::memory_order_relaxed))
+            {
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - window_start).count() < 5.0)
+            {
+                return;
+            }
+            window_start = now;
+
+            const uint64_t calls = call_count.exchange(0, std::memory_order_relaxed);
+            const uint64_t total = total_ns.exchange(0, std::memory_order_relaxed);
+            const uint64_t peak = max_ns.exchange(0, std::memory_order_relaxed);
+            const uint64_t rt = reopen_rt_change.exchange(0, std::memory_order_relaxed);
+            const uint64_t desc = reopen_desc_exhaustion.exchange(0, std::memory_order_relaxed);
+            const uint64_t arena = reopen_arena_growth.exchange(0, std::memory_order_relaxed);
+            const double avg_us = calls != 0 ? (static_cast<double>(total) / static_cast<double>(calls)) / 1000.0 : 0.0;
+            fprintf(stderr,
+                    "[d3d9-resetpool-diag] reset_calls=%llu avg_us=%.2f max_us=%.2f total_ms=%.2f | reopen_rt_change=%llu "
+                    "reopen_desc_exhaustion=%llu reopen_arena_growth=%llu\n",
+                    static_cast<unsigned long long>(calls), avg_us, static_cast<double>(peak) / 1000.0,
+                    static_cast<double>(total) / 1'000'000.0, static_cast<unsigned long long>(rt), static_cast<unsigned long long>(desc),
+                    static_cast<unsigned long long>(arena));
+        }
+
+        // Temporary diagnostic (EMULATOR_D3D9_ALLOCSET_DIAG=1): same style as resetpool_diag_report,
+        // measuring vkAllocateDescriptorSets instead -- called once per programmable draw (not once per
+        // batch reopen like reset_descriptor_pool), so its cumulative per-frame cost is a much larger
+        // multiple of any per-call regression than the reset call's. Built to test whether THIS is the
+        // real mechanism behind the frame_desc_initial_draws=4096 regression that resetpool_diag_report's
+        // own measurement ruled out as too small to explain.
+        void allocset_diag_report(const uint64_t elapsed_ns)
+        {
+            static std::atomic<uint64_t> total_ns{};
+            static std::atomic<uint64_t> max_ns{};
+            static std::atomic<uint64_t> call_count{};
+            static auto window_start = std::chrono::steady_clock::now();
+
+            total_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+            call_count.fetch_add(1, std::memory_order_relaxed);
+            uint64_t prev_max = max_ns.load(std::memory_order_relaxed);
+            while (elapsed_ns > prev_max && !max_ns.compare_exchange_weak(prev_max, elapsed_ns, std::memory_order_relaxed))
+            {
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - window_start).count() < 5.0)
+            {
+                return;
+            }
+            window_start = now;
+
+            const uint64_t calls = call_count.exchange(0, std::memory_order_relaxed);
+            const uint64_t total = total_ns.exchange(0, std::memory_order_relaxed);
+            const uint64_t peak = max_ns.exchange(0, std::memory_order_relaxed);
+            const double avg_us = calls != 0 ? (static_cast<double>(total) / static_cast<double>(calls)) / 1000.0 : 0.0;
+            fprintf(stderr, "[d3d9-allocset-diag] alloc_calls=%llu avg_us=%.2f max_us=%.2f total_ms=%.2f\n",
+                    static_cast<unsigned long long>(calls), avg_us, static_cast<double>(peak) / 1000.0,
+                    static_cast<double>(total) / 1'000'000.0);
         }
 
         // Accumulates elapsed wall-clock time into `target` on destruction regardless of which of a
@@ -1563,8 +1806,8 @@ namespace sogen
         return true;
     }
 
-    void d3d9_host::clear_depth_stencil(const uint64_t device, resource_entry& ds_entry, const uint32_t depth_format,
-                                        const uint32_t clear_aspects, const float depth, const uint32_t stencil)
+    void d3d9_host::batch_clear_depth_stencil_image(resource_entry& ds_entry, const uint32_t depth_format, const uint32_t clear_aspects,
+                                                    const float depth, const uint32_t stencil)
     {
         const uint32_t full_aspect = depth_aspect_mask(depth_format);
         const uint32_t aspects = clear_aspects & full_aspect;
@@ -1572,27 +1815,22 @@ namespace sogen
         {
             return; // e.g. D3DCLEAR_STENCIL against a depth-only format -- nothing this image can clear
         }
+        const uint64_t batch_cmd = this->batch_command_buffer_[this->batch_slot_];
         const vulkan_host::subresource_range barrier_range{
             .aspect_mask = full_aspect, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
         const vulkan_host::subresource_range clear_range{
             .aspect_mask = aspects, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
-        this->vulkan_.reset_fence(device, this->fence_);
-        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, ds_entry.vk_image_id,
-                                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, barrier_range);
-        this->vulkan_.cmd_clear_depth_stencil_image(this->command_buffer_, ds_entry.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                                    depth, stencil, clear_range);
         this->vulkan_.cmd_pipeline_barrier(
-            this->command_buffer_, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            batch_cmd, ds_entry.vk_image_id, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, barrier_range);
+        this->vulkan_.cmd_clear_depth_stencil_image(batch_cmd, ds_entry.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, depth, stencil,
+                                                    clear_range);
+        this->vulkan_.cmd_pipeline_barrier(
+            batch_cmd, ds_entry.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, barrier_range);
-        this->vulkan_.end_command_buffer(this->command_buffer_);
-        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
     }
 
     // The single alignment used for every arena slice (vertex/index/UBO), because it is simultaneously
@@ -1691,13 +1929,14 @@ namespace sogen
         struct draw_profile_totals
         {
             uint64_t calls{};
-            uint64_t setup_ns{};      // entry through pipeline/RT/depth-stencil-view setup
-            uint64_t reserve_ns{};    // Phase A: resolve+reserve arena slices
-            uint64_t upload_ns{};     // Phase B: upload each reserved range
-            uint64_t texdesc_ns{};    // texture upload/view/sampler setup + descriptor set writes
+            uint64_t setup_ns{};       // entry through pipeline/RT/depth-stencil-view setup
+            uint64_t reserve_ns{};     // Phase A: resolve+reserve arena slices
+            uint64_t upload_ns{};      // Phase B: upload each reserved range
+            uint64_t texdesc_ns{};     // texture upload/view/sampler setup + descriptor set writes
             uint64_t update_desc_ns{}; // subset of texdesc_ns: just the vulkan_.update_descriptor_sets call
-            uint64_t record_ns{};     // barriers, begin-rendering, binds, the draw call itself
+            uint64_t record_ns{};      // barriers, begin-rendering, binds, the draw call itself
         };
+
         draw_profile_totals g_draw_profile{};
 
         bool draw_profile_enabled()
@@ -2006,6 +2245,14 @@ namespace sogen
             return {start, std::max(start, end)};
         };
 
+        // Streams bound to a resource with a real direct GPU buffer (see create_resource's eligibility
+        // check) skip the arena entirely: no reservation, no upload memmove, no cache-hit bookkeeping --
+        // the draw binds the resource's own buffer straight, at its own D3D9-level stream byte offset.
+        // Vulkan's cmd_bind_vertex_buffers already takes one buffer+offset PER binding slot, so a draw
+        // mixing direct-bound and arena-bound streams in the same call needs no special-casing beyond
+        // filling stream_buffers/stream_bind_offsets from each source per slot (done below).
+        std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> direct_streams; // stream -> {vk_buffer, byte_offset}
+
         std::vector<reserved_range> reserved_streams;
         for (uint32_t stream = 0; stream <= highest_binding; ++stream)
         {
@@ -2038,6 +2285,13 @@ namespace sogen
                 {
                     continue;
                 }
+                if (res_it->second.vk_direct_buffer_id != 0)
+                {
+                    const auto off_it = this->state_.stream_offsets.find(stream);
+                    const uint64_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
+                    direct_streams[stream] = {res_it->second.vk_direct_buffer_id, d3d9_stream_offset};
+                    continue;
+                }
                 src_bytes = &res_it->second.backing;
                 src_resource_id = src_it->second;
                 src_content_version = res_it->second.content_version;
@@ -2047,10 +2301,17 @@ namespace sogen
             reserved_streams.push_back({stream, src_bytes, 0, src_resource_id, src_content_version, false, range_start, range_end});
         }
 
+        // A direct-buffer index resource (see create_resource's eligibility check and the matching vertex
+        // stream handling above) skips the arena the same way: no reservation, no upload memmove, the
+        // draw binds the resource's own buffer at offset 0 (D3D9's index buffer has no SetStreamSource-
+        // style byte offset of its own -- SetIndices carries only the resource handle).
+        const bool ib_direct = ib_um_bytes == nullptr && ib_entry != nullptr && ib_entry->vk_direct_buffer_id != 0;
+
         // UM-backed (DrawIndexedPrimitiveUP) inline index bytes take precedence over a resource-backed
-        // index buffer; both upload identically into the arena.
+        // index buffer; both upload identically into the arena. A direct-buffer resource never goes
+        // through this path at all (see ib_direct above), so ib_bytes stays null for it.
         const std::vector<std::byte>* ib_bytes =
-            ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr ? &ib_entry->backing : nullptr);
+            ib_um_bytes != nullptr ? ib_um_bytes : (ib_entry != nullptr && !ib_direct ? &ib_entry->backing : nullptr);
         const uint64_t ib_content_version = ib_entry != nullptr ? ib_entry->content_version : 0;
         size_t ib_arena_offset = 0;
         bool ib_cache_hit = false;
@@ -2204,21 +2465,28 @@ namespace sogen
         const uint64_t target_rt = this->state_.render_targets[0];
         const uint64_t target_ds = ds_entry != nullptr ? this->state_.depth_stencil : 0;
         bool rotate_batch_slot = false;
+        const bool resetpool_diag = getenv("EMULATOR_D3D9_RESETPOOL_DIAG") != nullptr;
+        bool reopen_reason_rt_change = false;
+        bool reopen_reason_desc_exhaustion = false;
+        bool reopen_reason_arena_growth = false;
         if (this->batch_open_ && (target_rt != this->batch_rt_ || target_ds != this->batch_ds_))
         {
             this->submit_batch_async();
             rotate_batch_slot = true;
+            reopen_reason_rt_change = true;
         }
         if (this->batch_open_ && use_programmable && this->frame_desc_capacity_draws_[this->batch_slot_] != 0 &&
             this->batch_draw_count_ + 1 > this->frame_desc_capacity_draws_[this->batch_slot_])
         {
             this->submit_batch_async();
             rotate_batch_slot = true;
+            reopen_reason_desc_exhaustion = true;
         }
         if (this->batch_open_ && this->vertex_index_uniform_arena_[this->batch_slot_].offset + draw_arena_bytes >
                                      this->vertex_index_uniform_arena_[this->batch_slot_].capacity)
         {
             this->submit_batch_async();
+            reopen_reason_arena_growth = true;
             this->wait_for_batch_slot(this->batch_slot_);
             frame_arena& growing_arena = this->vertex_index_uniform_arena_[this->batch_slot_];
             if (!this->grow_arena(growing_arena, std::max(draw_arena_bytes, growing_arena.capacity * 2)))
@@ -2241,14 +2509,28 @@ namespace sogen
             this->vertex_index_uniform_arena_[this->batch_slot_].offset = 0;
             if (this->frame_descriptor_pool_[this->batch_slot_] != 0)
             {
-                this->vulkan_.reset_descriptor_pool(device, this->frame_descriptor_pool_[this->batch_slot_], 0);
+                if (resetpool_diag)
+                {
+                    const auto reset_start = std::chrono::steady_clock::now();
+                    this->vulkan_.reset_descriptor_pool(device, this->frame_descriptor_pool_[this->batch_slot_], 0);
+                    const auto elapsed_ns = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - reset_start).count());
+                    resetpool_diag_report(elapsed_ns, reopen_reason_rt_change ? 1 : 0, reopen_reason_desc_exhaustion ? 1 : 0,
+                                          reopen_reason_arena_growth ? 1 : 0);
+                }
+                else
+                {
+                    this->vulkan_.reset_descriptor_pool(device, this->frame_descriptor_pool_[this->batch_slot_], 0);
+                }
             }
             this->batch_draw_count_ = 0;
             // Whatever render-pass instance this slot last had open was already closed by
             // submit_batch_async (close_render_pass) before its batch could be submitted, or never existed
             // (first use) -- reasserted here defensively rather than trusted, same belt-and-suspenders
-            // convention as the RT/depth-stencil mismatch check above.
+            // convention as the RT/depth-stencil mismatch check above. Same for any deferred Clear() value
+            // still sitting on pending_clear_ -- submit_batch_async already realizes it before this point.
             this->open_render_pass_[this->batch_slot_] = {};
+            this->pending_clear_[this->batch_slot_] = {};
             this->vulkan_.reset_fence(device, this->batch_fence_[this->batch_slot_]);
             this->vulkan_.begin_command_buffer(this->batch_command_buffer_[this->batch_slot_], 0, false, 0, {}, 0, 0, 1, 0);
             this->batch_open_ = true;
@@ -2354,8 +2636,8 @@ namespace sogen
                 ++this->stats_.vertex_upload_done;
                 if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
                 {
-                    fprintf(stderr, "[d3d9-uploadvol-diag] kind=vertex bytes=%zu referenced_verts=%u\n",
-                            rs.range_end - rs.range_start, vertex_count);
+                    fprintf(stderr, "[d3d9-uploadvol-diag] kind=vertex bytes=%zu referenced_verts=%u\n", rs.range_end - rs.range_start,
+                            vertex_count);
                 }
                 if (rs.resource_id != 0)
                 {
@@ -2373,9 +2655,25 @@ namespace sogen
             const uint32_t d3d9_stream_offset = off_it != this->state_.stream_offsets.end() ? off_it->second : 0;
             stream_bind_offsets[rs.stream] = rs.offset + d3d9_stream_offset;
         }
+        // Direct-bound streams (see the reservation loop above) never went into reserved_streams, so
+        // they never got a slot filled by the loop above either -- fill them here from the resource's
+        // own buffer instead of the arena. No upload, no cache bookkeeping: the data is already exactly
+        // where the guest's own Lock/Unlock wrote it.
+        for (const auto& [stream, buffer_and_offset] : direct_streams)
+        {
+            stream_buffers[stream] = buffer_and_offset.first;
+            stream_bind_offsets[stream] = buffer_and_offset.second;
+        }
 
         uint64_t index_buffer_vk = 0;
-        if (ib_bytes != nullptr)
+        uint64_t index_buffer_bind_offset = 0;
+        if (ib_direct)
+        {
+            // D3D9's SetIndices carries only the resource handle, no byte offset of its own (unlike
+            // SetStreamSource) -- the whole resource is the index buffer, so bind it at offset 0.
+            index_buffer_vk = ib_entry->vk_direct_buffer_id;
+        }
+        else if (ib_bytes != nullptr)
         {
             if (ib_cache_hit)
             {
@@ -2383,8 +2681,8 @@ namespace sogen
             }
             else
             {
-                std::memcpy(static_cast<std::byte*>(arena.mapped) + ib_arena_offset + ib_range_start,
-                            ib_bytes->data() + ib_range_start, ib_range_end - ib_range_start);
+                std::memcpy(static_cast<std::byte*>(arena.mapped) + ib_arena_offset + ib_range_start, ib_bytes->data() + ib_range_start,
+                            ib_range_end - ib_range_start);
                 ++this->stats_.index_upload_done;
                 if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
                 {
@@ -2433,8 +2731,7 @@ namespace sogen
                 {
                     fprintf(stderr, "[d3d9-uploadvol-diag] kind=ubo slot=%zu bytes=%zu\n", i, ubo_sizes[i]);
                 }
-                this->ubo_upload_cache_[i] = {
-                    .batch_generation = this->batch_generation_, .arena_offset = ubo_offsets[i], .valid = true};
+                this->ubo_upload_cache_[i] = {.batch_generation = this->batch_generation_, .arena_offset = ubo_offsets[i], .valid = true};
             }
 
             if (profile)
@@ -2592,9 +2889,23 @@ namespace sogen
             }
             const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
             uint32_t set_count = 0;
-            if (this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_], set_layouts,
-                                                       descriptor_sets, set_count) != 0 ||
-                set_count != descriptor_sets.size())
+            const bool allocset_diag = getenv("EMULATOR_D3D9_ALLOCSET_DIAG") != nullptr;
+            int32_t allocset_result = 0;
+            if (allocset_diag)
+            {
+                const auto alloc_start = std::chrono::steady_clock::now();
+                allocset_result = this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_],
+                                                                         set_layouts, descriptor_sets, set_count);
+                const auto elapsed_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - alloc_start).count());
+                allocset_diag_report(elapsed_ns);
+            }
+            else
+            {
+                allocset_result = this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_],
+                                                                         set_layouts, descriptor_sets, set_count);
+            }
+            if (allocset_result != 0 || set_count != descriptor_sets.size())
             {
                 return d3d_ok;
             }
@@ -2773,6 +3084,15 @@ namespace sogen
 
         if (!can_continue_pass)
         {
+            // A Clear() that ran since this slot's last render-pass instance closed (or since the batch
+            // opened) may have deferred its value here instead of an explicit vkCmdClear*Image -- see
+            // pending_clear_'s own comment. Folding it into this fresh instance's load op is free: the
+            // attachment's tile memory is initialized to the clear value as part of beginning to render
+            // into it regardless.
+            pending_batch_clear& pending = this->pending_clear_[this->batch_slot_];
+            const uint32_t color_load_op = pending.color_pending ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            const std::array<uint32_t, 4> color_clear = color_clear_value(pending.color_value);
+
             std::vector<vulkan_host::rendering_attachment> color_attachments;
             color_attachments.reserve(bound_rts.size());
             for (const auto& brt : bound_rts)
@@ -2791,8 +3111,9 @@ namespace sogen
                     .image_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     .resolve_image_layout = 0,
                     .resolve_mode = 0,
-                    .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
+                    .load_op = color_load_op,
                     .store_op = VK_ATTACHMENT_STORE_OP_STORE,
+                    .clear_value = color_clear,
                 });
             }
             // The one-time init above already left the depth image in DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -2813,23 +3134,34 @@ namespace sogen
                                                                  .level_count = 1,
                                                                  .base_array_layer = 0,
                                                                  .layer_count = 1};
-                this->vulkan_.cmd_pipeline_barrier(batch_cmd, ds_entry->vk_image_id,
-                                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
+                this->vulkan_.cmd_pipeline_barrier(
+                    batch_cmd, ds_entry->vk_image_id,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_range);
             }
+            // A transient depth-stencil (see depth_stencil_transient_enabled's own comment for why this
+            // is currently always false, i.e. depth_transient below is currently dead-but-exercised code)
+            // only ever exists in tile memory for the render-pass instance that produced it: DONT_CARE is
+            // what actually realizes MoltenVK's memoryless-attachment bandwidth win (a STORE would force
+            // real VRAM backing to materialize, defeating the optimization) -- at the cost of a same-
+            // batch render-pass reopen against the same target that ISN'T preceded by a fresh D3D9
+            // Clear() (see depth_stencil_transient_enabled's comment for why that's a real, frequent case,
+            // not a hypothetical one) reading undefined content via VK_ATTACHMENT_LOAD_OP_LOAD instead of
+            // the real accumulated depth buffer -- the reason this stays disabled for now.
+            const bool depth_transient =
+                depth_stencil_transient_enabled && ds_entry != nullptr && (ds_entry->usage & d3dusage_depthstencil) != 0;
             const vulkan_host::rendering_attachment depth_attachment{
                 .image_view = ds_entry != nullptr ? ds_entry->vk_image_view_id : 0,
                 .resolve_image_view = 0,
                 .image_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 .resolve_image_layout = 0,
                 .resolve_mode = 0,
-                .load_op = VK_ATTACHMENT_LOAD_OP_LOAD,
-                .store_op = VK_ATTACHMENT_STORE_OP_STORE,
+                .load_op = pending.depth_pending ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                .store_op = depth_transient ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
+                .clear_value = depth_stencil_clear_value(pending.depth_value, pending.stencil_value),
             };
             this->vulkan_.cmd_begin_rendering(batch_cmd, 0, 0, rt.width, rt.height, 1, 0, 0, color_attachments,
                                               ds_entry != nullptr ? &depth_attachment : nullptr, nullptr);
@@ -2842,6 +3174,7 @@ namespace sogen
                 rp.color_view_ids[i] = bound_rts[i].entry != nullptr ? attachment_view(bound_rts[i]) : 0;
             }
             rp.depth_image_id = ds_entry != nullptr ? ds_entry->vk_image_id : 0;
+            pending = {};
         }
 
         this->vulkan_.cmd_bind_pipeline(batch_cmd, use_programmable ? programmable->pipeline : this->pipeline_,
@@ -2914,7 +3247,8 @@ namespace sogen
         if (indexed != nullptr)
         {
             const uint32_t index_type = indexed->index_format != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-            this->vulkan_.cmd_bind_index_buffer(batch_cmd, index_buffer_vk, ib_arena_offset, index_type);
+            this->vulkan_.cmd_bind_index_buffer(batch_cmd, index_buffer_vk, ib_direct ? index_buffer_bind_offset : ib_arena_offset,
+                                                index_type);
             this->vulkan_.cmd_draw_indexed(batch_cmd, vertex_count, instance_count, indexed->first_index, indexed->base_vertex_index, 0);
         }
         else
@@ -2939,8 +3273,9 @@ namespace sogen
         if (profile)
         {
             const auto t_done = std::chrono::steady_clock::now();
-            const auto ns = [](const auto duration)
-            { return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count()); };
+            const auto ns = [](const auto duration) {
+                return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+            };
             ++g_draw_profile.calls;
             g_draw_profile.setup_ns += ns(t_setup_done - t_entry);
             g_draw_profile.reserve_ns += ns(t_reserve_done - t_setup_done);
@@ -3090,13 +3425,75 @@ namespace sogen
             .extra_mips = std::move(extra_mips),
         };
 
+        // Real DXVK source (D3D9CommonBuffer::DetermineMapMode, doitsujin/dxvk) uses this exact
+        // condition -- D3DPOOL_DEFAULT plus DYNAMIC or WRITEONLY -- to decide a buffer gets a real,
+        // persistently host-visible-mapped GPU buffer instead of a plain CPU-side copy. MW2's own
+        // vertex/index streaming buffers hit this case (confirmed via `sogen_d3d9_umd.cpp`'s own
+        // D3DLOCK_NOOVERWRITE handling comments). Live profiling this session found this specific gap
+        // (a CPU-side backing plus a separate arena upload memmove, vs. DXVK's zero-copy direct write)
+        // as the largest remaining per-draw cost after Phase 1's Unlock-copy fix.
+        const bool eligible_for_direct_buffer =
+            is_buffer && pool == d3dpool_default && (usage & (d3dusage_dynamic | d3dusage_writeonly)) != 0 && backing_size != 0;
+        if (eligible_for_direct_buffer)
+        {
+            const uint64_t device = this->ensure_vk_device();
+            uint64_t vk_buffer = 0;
+            if (device != 0 &&
+                this->vulkan_.create_buffer(device, backing_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                            vk_buffer) == 0 &&
+                vk_buffer != 0)
+            {
+                uint64_t mem_size = 0;
+                uint64_t mem_align = 0;
+                uint32_t mem_type_bits = 0;
+                this->vulkan_.get_buffer_memory_requirements(device, vk_buffer, mem_size, mem_align, mem_type_bits);
+                const uint32_t memory_type =
+                    find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                uint64_t vk_memory = 0;
+                void* mapped_ptr = nullptr;
+                if (memory_type != UINT32_MAX && this->vulkan_.allocate_memory(device, mem_size, memory_type, vk_memory) == 0 &&
+                    vk_memory != 0)
+                {
+                    this->vulkan_.bind_buffer_memory(device, vk_buffer, vk_memory, 0);
+                    uint64_t mapped_size = 0;
+                    if (this->vulkan_.map_memory(device, vk_memory, mapped_ptr, mapped_size) == 0 && mapped_ptr != nullptr)
+                    {
+                        entry.vk_direct_buffer_id = vk_buffer;
+                        entry.vk_direct_memory_id = vk_memory;
+                        entry.direct_mapped_ptr = mapped_ptr;
+                    }
+                    else
+                    {
+                        this->vulkan_.free_memory(device, vk_memory);
+                        this->vulkan_.destroy_buffer(device, vk_buffer);
+                    }
+                }
+                else
+                {
+                    this->vulkan_.destroy_buffer(device, vk_buffer);
+                }
+            }
+            // A failed direct-buffer creation is not fatal -- entry.vk_direct_buffer_id stays 0 and every
+            // consumer (prepare_unlock_target, lock, execute_draw) falls back to the ordinary
+            // `backing`-based path exactly as if this resource had never been eligible.
+        }
+
         if (is_render_target)
         {
             const uint64_t device = this->ensure_vk_device();
             if (device != 0)
             {
+                // Every D3DUSAGE_DEPTHSTENCIL resource is structurally never sampled (is_samplable_
+                // render_target excludes DEPTHSTENCIL usage outright -- shadow-map sampling isn't
+                // implemented) or read back (readback_render_target's resting-layout guard already
+                // rejects it; sync_backing_from_gpu never reaches a depth-stencil resource in practice),
+                // so eligibility here is unconditional -- see depth_stencil_transient_enabled's own
+                // comment for why the feature itself is currently disabled regardless (a separate,
+                // real hazard unrelated to sampling/readback).
+                const bool transient = depth_stencil_transient_enabled && (usage & d3dusage_depthstencil) != 0;
                 uint64_t vk_image = 0;
-                if (this->vulkan_.create_render_target(device, width, height, format, vk_image) == 0 && vk_image != 0)
+                if (this->vulkan_.create_render_target(device, width, height, format, transient, vk_image) == 0 && vk_image != 0)
                 {
                     entry.vk_image_id = vk_image;
                 }
@@ -3364,8 +3761,17 @@ namespace sogen
         // Flush any open batch before erasing the resource: a deferred batch may hold recorded commands
         // referencing this resource's VkImage/VkImageView (as a render target or a sampled texture), and
         // the erase destroys those Vulkan objects. Flushing waits for the GPU, so nothing in flight or
-        // recorded-but-unsubmitted still references them.
+        // recorded-but-unsubmitted still references them. The same wait covers a direct-mapped buffer's
+        // own recorded draws below (see create_resource's eligibility check) -- flush_batch() already
+        // guarantees the GPU is idle with respect to anything referencing it before this point.
         this->flush_batch();
+        const auto it = this->resources_.find(resource);
+        if (it != this->resources_.end() && it->second.vk_direct_buffer_id != 0)
+        {
+            const uint64_t device = this->ensure_vk_device();
+            this->vulkan_.destroy_buffer(device, it->second.vk_direct_buffer_id);
+            this->vulkan_.free_memory(device, it->second.vk_direct_memory_id);
+        }
         this->resources_.erase(resource);
     }
 
@@ -3434,19 +3840,26 @@ namespace sogen
             const uint32_t src_resting_layout =
                 src_is_render_target ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-            this->vulkan_.reset_fence(device, this->fence_);
-            this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+            // Record into the currently-open batch (the flush_batch() above just drained and closed
+            // whatever was open, so this reopens fresh on the same slot) instead of a standalone
+            // submit+wait_for_fence(UINT64_MAX) -- same fix as the Clear() fast path: this copy is left
+            // recorded but unsubmitted, to be picked up by whatever draw or flush_batch() (sync_backing_
+            // from_gpu, the next SetRenderTarget, ...) comes next, all of which already flush before
+            // relying on dst's GPU content.
+            this->ensure_batch_open(device, this->state_.render_targets[0], this->state_.depth_stencil);
+            this->close_render_pass(this->batch_slot_); // vkCmdCopyImage is illegal inside a render pass instance
+            const uint64_t batch_cmd = this->batch_command_buffer_[this->batch_slot_];
 
             const vulkan_host::subresource_range color_range{
                 .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
             if (!src_is_render_target)
             {
-                this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, src.vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                this->vulkan_.cmd_pipeline_barrier(batch_cmd, src.vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                    src_resting_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
             }
-            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            this->vulkan_.cmd_pipeline_barrier(batch_cmd, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
 
             const vulkan_host::image_copy_region region{
@@ -3468,24 +3881,20 @@ namespace sogen
                 .height = dst.height,
                 .depth = 1,
             };
-            this->vulkan_.cmd_copy_image(this->command_buffer_, src.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.vk_image_id,
+            this->vulkan_.cmd_copy_image(batch_cmd, src.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.vk_image_id,
                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
 
             if (!src_is_render_target)
             {
                 // Restore src to the layout every other sampler of it (a draw's descriptor set) expects.
-                this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, src.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                this->vulkan_.cmd_pipeline_barrier(batch_cmd, src.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                    VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_resting_layout,
                                                    color_range);
             }
-            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            this->vulkan_.cmd_pipeline_barrier(batch_cmd, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
-
-            this->vulkan_.end_command_buffer(this->command_buffer_);
-            this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-            this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
             dst.backing_dirty = true; // CPU-side backing now stale relative to the GPU image
             dst.upload_dirty = false; // ...but the GPU image itself already matches; no re-upload needed
@@ -3815,16 +4224,22 @@ namespace sogen
         this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
         this->vulkan_.upload_memory(device, staging_memory, 0, required, fill_bytes.data(), required);
 
-        this->vulkan_.reset_fence(device, this->fence_);
-        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+        // Record into the currently-open batch (the flush_batch() above just drained and closed whatever
+        // was open, so this reopens fresh on the same slot) instead of a standalone
+        // submit+wait_for_fence(UINT64_MAX) -- same fix as the Clear() fast path. D3D9's ColorFill can
+        // target a sub-rect, which vkCmdClearColorImage has no way to express (it always clears whole
+        // subresources), so this keeps the buffer-copy approach rather than switching to a native clear.
+        this->ensure_batch_open(device, this->state_.render_targets[0], this->state_.depth_stencil);
+        this->close_render_pass(this->batch_slot_); // vkCmdCopyBufferToImage is illegal inside a render pass instance
+        const uint64_t batch_cmd = this->batch_command_buffer_[this->batch_slot_];
 
         const vulkan_host::subresource_range color_range{
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
         // Resting layout is TRANSFER_SRC_OPTIMAL (submit_clear / execute_draw leave it there); go through
         // cmd_pipeline_barrier so render_targets[image].current_layout stays authoritative.
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
+        this->vulkan_.cmd_pipeline_barrier(batch_cmd, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
 
         const vulkan_host::buffer_image_copy_region region{
             .buffer_offset = 0,
@@ -3841,19 +4256,15 @@ namespace sogen
             .layer_count = 1,
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
         };
-        this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, rt.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                               region);
+        this->vulkan_.cmd_copy_buffer_to_image(batch_cmd, staging_buffer, rt.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
 
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
+        this->vulkan_.cmd_pipeline_barrier(batch_cmd, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
 
-        this->vulkan_.end_command_buffer(this->command_buffer_);
-        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
-
-        this->vulkan_.destroy_buffer(device, staging_buffer);
-        this->vulkan_.free_memory(device, staging_memory);
+        // Freed once this batch slot's submission actually completes (wait_for_batch_slot) -- the staging
+        // buffer must stay alive on the GPU until then, not right after this call returns.
+        this->pending_staging_cleanup_[this->batch_slot_].push_back({.device = device, .buffer = staging_buffer, .memory = staging_memory});
 
         rt.backing_dirty = true;
         return d3d_ok;
@@ -3969,6 +4380,28 @@ namespace sogen
 
         this->sync_backing_from_gpu(it->second);
 
+        // A resource with a direct buffer (see create_resource's eligibility check) never has current
+        // data in `backing` -- reads must come from the real, always-current mapped GPU buffer instead.
+        // Only ever set for subresource 0 (buffers have no mips), matching the check below.
+        if (it->second.vk_direct_buffer_id != 0 && subresource == 0)
+        {
+            const auto* mapped = static_cast<const std::byte*>(it->second.direct_mapped_ptr);
+            const size_t buffer_size = it->second.width;
+            if (offset > buffer_size)
+            {
+                return d3derr_invalidcall;
+            }
+            const size_t available = buffer_size - offset;
+            const size_t requested = size != 0 ? size : available;
+            const size_t to_copy = std::min({requested, available, out_capacity});
+            if (to_copy > 0 && out != nullptr && mapped != nullptr)
+            {
+                std::memcpy(out, mapped + offset, to_copy);
+            }
+            out_data_size = static_cast<uint32_t>(available);
+            return d3d_ok;
+        }
+
         auto& backing = it->second.subresource_backing(subresource);
         const size_t requested = size != 0 ? size : backing.size();
         if (offset > backing.size())
@@ -4036,6 +4469,110 @@ namespace sogen
         // already invalidated any in-flight cached offset.
         ++it->second.content_version;
         return d3d_ok;
+    }
+
+    std::byte* d3d9_host::prepare_unlock_target(const uint64_t resource, const uint32_t subresource, const uint32_t offset,
+                                                const size_t data_size)
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end())
+        {
+            return nullptr;
+        }
+        if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())
+        {
+            return nullptr;
+        }
+
+        // A direct-buffer resource (see create_resource's eligibility check) writes straight into its
+        // real, always-current GPU buffer instead of `backing` -- unlike `backing`, this buffer is
+        // fixed-size (allocated once at resource creation), so an out-of-range write is rejected rather
+        // than silently growing it (growing would mean reallocating live GPU memory a draw might already
+        // be bound to).
+        if (getenv("EMULATOR_D3D9_DIRECT_MISS_DIAG"))
+        {
+            static std::atomic<uint64_t> direct_hits{};
+            static std::atomic<uint64_t> non_direct{};
+            static auto window_start = std::chrono::steady_clock::now();
+            if (it->second.vk_direct_buffer_id != 0)
+            {
+                direct_hits.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                non_direct.fetch_add(1, std::memory_order_relaxed);
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - window_start).count() >= 5.0)
+            {
+                window_start = now;
+                fprintf(stderr, "[d3d9-direct-miss-diag] unlock: direct_but_still_crossed=%llu non_direct=%llu\n",
+                        static_cast<unsigned long long>(direct_hits.exchange(0)), static_cast<unsigned long long>(non_direct.exchange(0)));
+            }
+
+            // One-time dump of every distinct non-direct resource ever unlocked, to characterize WHY
+            // they missed eligibility (kind/pool/usage/width) -- logged once per resource id, not per
+            // call, to stay readable across a whole run.
+            if (it->second.vk_direct_buffer_id == 0)
+            {
+                static std::unordered_set<uint64_t> logged_misses;
+                if (logged_misses.insert(resource).second)
+                {
+                    fprintf(stderr, "[d3d9-direct-miss-diag] non-direct resource=%llu kind=%u pool=%u usage=0x%X width=%u\n",
+                            static_cast<unsigned long long>(resource), it->second.kind, it->second.pool, it->second.usage,
+                            it->second.width);
+                }
+            }
+        }
+
+        if (it->second.vk_direct_buffer_id != 0 && subresource == 0)
+        {
+            const size_t required_size = static_cast<size_t>(offset) + data_size;
+            if (required_size > it->second.width)
+            {
+                return nullptr;
+            }
+            return static_cast<std::byte*>(it->second.direct_mapped_ptr) + offset;
+        }
+
+        auto& backing = it->second.subresource_backing(subresource);
+        const size_t required_size = static_cast<size_t>(offset) + data_size;
+        if (backing.size() < required_size)
+        {
+            backing.resize(required_size);
+        }
+        return backing.data() + offset;
+    }
+
+    void d3d9_host::finish_unlock(const uint64_t resource, const uint32_t subresource)
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end())
+        {
+            return;
+        }
+        if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())
+        {
+            return;
+        }
+
+        // Mirrors unlock()'s own bookkeeping above -- see its comments for why both flags are
+        // unconditional.
+        it->second.upload_dirty = true;
+        ++it->second.content_version;
+    }
+
+    bool d3d9_host::get_direct_mapping(const uint64_t resource, void*& out_ptr, size_t& out_size) const
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end() || it->second.vk_direct_buffer_id == 0)
+        {
+            return false;
+        }
+
+        out_ptr = it->second.direct_mapped_ptr;
+        out_size = it->second.backing.size();
+        return true;
     }
 
     int32_t d3d9_host::create_vertex_shader(const void* tokens, const size_t token_size_bytes, uint64_t& out_shader)
@@ -4445,14 +4982,6 @@ namespace sogen
                 return d3derr_invalidcall;
             }
 
-            // Flush any open batch first: a Clear after batched draws must land after them on the GPU
-            // (D3D9 command order), and submit_clear expects the render target resting in
-            // TRANSFER_SRC_OPTIMAL, which the batch's closing barrier leaves it in.
-            this->flush_batch();
-
-            // Real GPU clear, marking every bound render target's backing store stale; sync_backing_from_gpu
-            // reads it back lazily on the next pfnLock/Present -- see the class comment for why this
-            // sidesteps needing to know how the real d3d9.dll gets pixels onto an actual window.
             // D3DCLEAR_TARGET clears ALL currently-bound render targets (D3D9's SetRenderTarget slots
             // 0-3) to the single supplied color, not just slot 0 -- same slot resolution as
             // execute_draw's rt_slots loop, just without needing a Vulkan format for a pipeline.
@@ -4463,7 +4992,89 @@ namespace sogen
             this->stats_.clear_zbuffer += (req.flags & d3dclear_zbuffer) != 0 ? 1 : 0;
             this->stats_.clear_stencil += (req.flags & d3dclear_stencil) != 0 ? 1 : 0;
 
-            if ((req.flags & d3dclear_target) != 0)
+            const uint64_t device = this->ensure_vk_device();
+            if (device == 0 || !this->ensure_draw_infra())
+            {
+                return d3d_ok; // no GPU backing yet -- nothing to clear
+            }
+
+            // D3DCLEAR_ZBUFFER/D3DCLEAR_STENCIL against the currently-bound depth-stencil. Before this
+            // batching was added, both bits were silently dropped and the depth buffer was only ever
+            // cleared ONCE, by ensure_depth_stencil_view's first-use initialization -- so every frame
+            // after the first depth-tested one ran against the accumulated minimum depth of every frame
+            // before it. With a moving camera that stale buffer rejects essentially every world fragment
+            // (the classic symptom: a correct HUD, drawn with D3DRS_ZENABLE off, over a completely black
+            // 3D scene), while a purely 2D app never notices because it never binds a depth-stencil at
+            // all. Resolved up front, before the batch below is (re)opened, because
+            // ensure_depth_stencil_view's first-use initialization does its own flush_batch() plus a
+            // synchronous submit+wait -- that has to happen before, not interleaved with, the batched
+            // recording further down.
+            resource_entry* ds_entry = nullptr;
+            uint32_t depth_vk_format = 0;
+            if ((req.flags & (d3dclear_zbuffer | d3dclear_stencil)) != 0 && this->state_.depth_stencil != 0)
+            {
+                const auto ds_it = this->resources_.find(this->state_.depth_stencil);
+                if (ds_it != this->resources_.end() && ds_it->second.vk_image_id != 0 &&
+                    d3d9_format_to_vulkan(ds_it->second.format, depth_vk_format) &&
+                    // Establishes the DEPTH_STENCIL_ATTACHMENT_OPTIMAL resting layout
+                    // batch_clear_depth_stencil_image transitions out of; on a resource whose view already
+                    // exists this is a no-op.
+                    this->ensure_depth_stencil_view(device, ds_it->second, depth_vk_format))
+                {
+                    ds_entry = &ds_it->second;
+                }
+            }
+
+            const bool clear_color = (req.flags & d3dclear_target) != 0;
+            if (!clear_color && ds_entry == nullptr)
+            {
+                return d3d_ok;
+            }
+
+            // Record the clear(s) into the currently open batch (opening/continuing one on the same
+            // render-target/depth-stencil identity execute_draw itself uses) instead of the old standalone
+            // synchronous submit_clear/clear_depth_stencil -- lets the deferred, round-robin wait the
+            // batch system already uses for draws cover Clear too, instead of a hard CPU/GPU stall on
+            // every single Clear() call (D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER together used to be up to 4
+            // separate wait_for_fence(UINT64_MAX) calls). Any draw or readback ordered after this Clear
+            // still observes its result correctly: it either continues recording into this SAME command
+            // buffer (ordinary program-order execution plus the barriers below), or -- for a readback --
+            // goes through sync_backing_from_gpu, which already flushes the batch (draining this Clear's
+            // fence) before touching GPU memory.
+            const uint64_t target_rt = this->state_.render_targets[0];
+            const uint64_t target_ds = ds_entry != nullptr ? this->state_.depth_stencil : 0;
+            this->ensure_batch_open(device, target_rt, target_ds);
+
+            // LOAD_OP_CLEAR fast path: when nothing has drawn into this batch's render-pass instance
+            // yet (open_render_pass_[slot].open == false), the cheapest possible clear defers its value
+            // to whichever render-pass-begin comes next -- see pending_clear_'s own comment -- instead
+            // of an explicit vkCmdClear*Image. D3DCLEAR_STENCIL against a format that actually carries a
+            // stencil aspect always falls back: cmd_begin_rendering never wires up a separate stencil
+            // attachment (see execute_draw's depth_attachment), so a stencil load op has nowhere to go.
+            //
+            // A transient depth-stencil (see vulkan_host::create_render_target's transient parameter)
+            // has no TRANSFER_DST_BIT usage at all, so the explicit vkCmdClearDepthStencilImage fallback
+            // is not just slower but outright invalid Vulkan usage for it -- the fast path is therefore
+            // the ONLY path for a transient depth-stencil, unconditionally, even mid-instance (rp.open):
+            // its store_op is already VK_ATTACHMENT_STORE_OP_DONT_CARE (execute_draw), so whatever the
+            // currently-open instance wrote to it was never going to survive past this Clear() anyway --
+            // closing it now to make way for a fresh LOAD_OP_CLEAR instance costs nothing extra.
+            open_render_pass_state& rp = this->open_render_pass_[this->batch_slot_];
+            pending_batch_clear& pending = this->pending_clear_[this->batch_slot_];
+            const bool depth_transient =
+                depth_stencil_transient_enabled && ds_entry != nullptr && (ds_entry->usage & d3dusage_depthstencil) != 0;
+            const bool color_fast_path = clear_color && !rp.open;
+            const bool depth_fast_path =
+                ds_entry != nullptr &&
+                (depth_transient || (!rp.open && ((req.flags & d3dclear_stencil) == 0 ||
+                                                  (depth_aspect_mask(depth_vk_format) & VK_IMAGE_ASPECT_STENCIL_BIT) == 0)));
+
+            if ((clear_color && !color_fast_path) || (ds_entry != nullptr && (!depth_fast_path || rp.open)))
+            {
+                this->close_render_pass(this->batch_slot_); // vkCmdClear*Image is illegal inside a render pass instance
+            }
+
+            if (clear_color)
             {
                 // D3DCOLOR is 0xAARRGGBB.
                 const std::array<float, 4> color{
@@ -4472,6 +5083,15 @@ namespace sogen
                     static_cast<float>(req.color_argb & 0xFF) / 255.0f,
                     static_cast<float>((req.color_argb >> 24) & 0xFF) / 255.0f,
                 };
+                if (color_fast_path)
+                {
+                    pending.color_pending = true;
+                    pending.color_value = color;
+                }
+                else
+                {
+                    pending.color_pending = false;
+                }
                 for (const uint64_t rt_handle : this->state_.render_targets)
                 {
                     const auto it = this->resources_.find(rt_handle);
@@ -4479,34 +5099,33 @@ namespace sogen
                     {
                         continue;
                     }
-                    this->vulkan_.submit_clear(it->second.vk_image_id, color.data());
+                    if (!color_fast_path)
+                    {
+                        this->batch_clear_color_image(it->second.vk_image_id, color);
+                    }
 
+                    // Marks every bound render target's backing store stale; sync_backing_from_gpu reads
+                    // it back lazily on the next pfnLock/Present -- see the class comment for why this
+                    // sidesteps needing to know how the real d3d9.dll gets pixels onto an actual window.
                     it->second.backing_dirty = true;
                 }
             }
 
-            // D3DCLEAR_ZBUFFER/D3DCLEAR_STENCIL against the currently-bound depth-stencil. Before this,
-            // both bits were silently dropped and the depth buffer was only ever cleared ONCE, by
-            // ensure_depth_stencil_view's first-use initialization -- so every frame after the first
-            // depth-tested one ran against the accumulated minimum depth of every frame before it. With a
-            // moving camera that stale buffer rejects essentially every world fragment (the classic
-            // symptom: a correct HUD, drawn with D3DRS_ZENABLE off, over a completely black 3D scene),
-            // while a purely 2D app never notices because it never binds a depth-stencil at all.
-            if ((req.flags & (d3dclear_zbuffer | d3dclear_stencil)) != 0 && this->state_.depth_stencil != 0)
+            if (ds_entry != nullptr)
             {
-                const auto ds_it = this->resources_.find(this->state_.depth_stencil);
-                uint32_t depth_vk_format = 0;
-                const uint64_t device = this->ensure_vk_device();
-                if (device != 0 && this->ensure_draw_infra() && ds_it != this->resources_.end() && ds_it->second.vk_image_id != 0 &&
-                    d3d9_format_to_vulkan(ds_it->second.format, depth_vk_format) &&
-                    // Establishes the DEPTH_STENCIL_ATTACHMENT_OPTIMAL resting layout clear_depth_stencil
-                    // transitions out of; on a resource whose view already exists this is a no-op.
-                    this->ensure_depth_stencil_view(device, ds_it->second, depth_vk_format))
+                if (depth_fast_path)
                 {
+                    pending.depth_pending = true;
+                    pending.depth_value = req.z;
+                    pending.stencil_value = req.stencil;
+                }
+                else
+                {
+                    pending.depth_pending = false;
                     uint32_t aspects = 0;
                     aspects |= (req.flags & d3dclear_zbuffer) != 0 ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u;
                     aspects |= (req.flags & d3dclear_stencil) != 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u;
-                    this->clear_depth_stencil(device, ds_it->second, depth_vk_format, aspects, req.z, req.stencil);
+                    this->batch_clear_depth_stencil_image(*ds_entry, depth_vk_format, aspects, req.z, req.stencil);
                 }
             }
             return d3d_ok;

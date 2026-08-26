@@ -9,6 +9,8 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <string>
+#include <unordered_map>
 
 #include <gpu_bridge_protocol.hpp>
 #include <utils/string.hpp>
@@ -31,7 +33,7 @@ namespace sogen
             {
                 for (auto& frame : this->vulkan_.poll_presented_frames())
                 {
-                    present_surface_if_ready(win_emu, frame.hwnd, frame.width, frame.height, frame.pixels);
+                    present_surface_if_ready(win_emu, frame.hwnd, frame.width, frame.height, frame.pixels, frame.vk_format);
                 }
             }
 
@@ -41,6 +43,66 @@ namespace sogen
                 {
                     win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
                 }
+#ifdef SOGEN_HAS_VKD3D_SHADER
+                if (getenv("EMULATOR_D3D9_CROSSING_DIAG"))
+                {
+                    static std::unordered_map<uint32_t, uint64_t> crossing_counts;
+                    static auto window_start = std::chrono::steady_clock::now();
+                    crossing_counts[static_cast<uint32_t>(context.io_control_code)]++;
+
+                    const auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration<double>(now - window_start).count() >= 5.0)
+                    {
+                        window_start = now;
+                        auto name_for = [](uint32_t code) -> const char* {
+                            switch (code)
+                            {
+                            case gpu_bridge::ioctl_record_commands:
+                                return "record_commands";
+                            case gpu_bridge::ioctl_d3d9_lock:
+                                return "d3d9_lock";
+                            case gpu_bridge::ioctl_d3d9_unlock:
+                                return "d3d9_unlock";
+                            case gpu_bridge::ioctl_d3d9_create_resource:
+                                return "d3d9_create_resource";
+                            case gpu_bridge::ioctl_d3d9_destroy_resource:
+                                return "d3d9_destroy_resource";
+                            case gpu_bridge::ioctl_d3d9_present:
+                                return "d3d9_present";
+                            case gpu_bridge::ioctl_d3d9_tex_blt:
+                                return "d3d9_tex_blt";
+                            case gpu_bridge::ioctl_d3d9_create_vertex_shader:
+                                return "d3d9_create_vertex_shader";
+                            case gpu_bridge::ioctl_d3d9_create_pixel_shader:
+                                return "d3d9_create_pixel_shader";
+                            case gpu_bridge::ioctl_d3d9_create_vertex_decl:
+                                return "d3d9_create_vertex_decl";
+                            case gpu_bridge::ioctl_d3d9_marker:
+                                return "d3d9_marker";
+                            default:
+                                return nullptr;
+                            }
+                        };
+
+                        std::string line = "[d3d9-crossing-diag]";
+                        uint64_t total = 0;
+                        for (const auto& [code, count] : crossing_counts)
+                        {
+                            total += count;
+                        }
+                        for (const auto& [code, count] : crossing_counts)
+                        {
+                            if (const char* name = name_for(code))
+                            {
+                                line += utils::string::va("%s=%llu ", name, static_cast<unsigned long long>(count));
+                            }
+                        }
+                        line += utils::string::va("| total_crossings=%llu\n", static_cast<unsigned long long>(total));
+                        win_emu.log.warn("%s", line.c_str());
+                        crossing_counts.clear();
+                    }
+                }
+#endif
 #ifdef SOGEN_HAS_VKD3D_SHADER
                 if (getenv("EMULATOR_D3D9_DRAWDIAG"))
                 {
@@ -345,6 +407,13 @@ namespace sogen
 
             std::unordered_map<uint64_t, direct_mapping> direct_mappings_{};
 
+            // Guest VA aliasing a D3D9 resource's own direct-mapped Vulkan buffer (see
+            // d3d9_host::get_direct_mapping), keyed by resource id -- lets Lock/Unlock skip the host
+            // round-trip entirely for eligible resources. Released in handle_d3d9_destroy_resource;
+            // unlike direct_mappings_ this never owns the underlying Vulkan memory (d3d9_host's own
+            // destroy_resource does), only the guest VA range aliasing it.
+            std::unordered_map<uint64_t, std::pair<uint64_t, size_t>> resource_direct_va_{};
+
             static void log_alias_lifecycle(windows_emulator& win_emu, const char* action, const direct_mapping& mapping)
             {
                 if (win_emu.callbacks.on_generic_activity)
@@ -407,8 +476,32 @@ namespace sogen
                 }
             }
 
+            // The swapchain's VkFormat is guest-chosen (create_swapchain's is_supported_swapchain_format
+            // accepts both channel orders plus their sRGB counterparts) -- it is NOT always B8G8R8A8.
+            // DXVK in particular has been observed picking R8G8B8A8_UNORM, which a hardcoded bgra8 tag
+            // here silently reads with red/blue swapped. Map every 8-bit-per-channel format this bridge
+            // can produce to its matching channel order; sRGB variants share their UNORM counterpart's
+            // byte layout (only the transfer function differs, which ui_surface_format does not model),
+            // so they map the same way. Formats with no rgba8/bgra8 equivalent (the 10-bit packed
+            // swapchain formats) fall back to bgra8, matching this function's pre-existing behavior for
+            // every format before this fix.
+            static ui_surface_format vk_format_to_ui_surface_format(const uint32_t vk_format)
+            {
+                switch (vk_format)
+                {
+                case 37: // VK_FORMAT_R8G8B8A8_UNORM
+                case 43: // VK_FORMAT_R8G8B8A8_SRGB
+                    return ui_surface_format::rgba8;
+                case 44: // VK_FORMAT_B8G8R8A8_UNORM
+                case 50: // VK_FORMAT_B8G8R8A8_SRGB
+                default:
+                    return ui_surface_format::bgra8;
+                }
+            }
+
             static void present_surface_if_ready(windows_emulator& win_emu, const uint64_t hwnd_value, const uint32_t width,
-                                                 const uint32_t height, const std::vector<std::byte>& pixels)
+                                                 const uint32_t height, const std::vector<std::byte>& pixels,
+                                                 const uint32_t vk_format)
             {
                 if (hwnd_value == 0 || pixels.empty())
                 {
@@ -419,7 +512,7 @@ namespace sogen
                                                                                 .width = static_cast<int>(width),
                                                                                 .height = static_cast<int>(height),
                                                                                 .stride = static_cast<int>(width * 4),
-                                                                                .format = ui_surface_format::bgra8,
+                                                                                .format = vk_format_to_ui_surface_format(vk_format),
                                                                                 .pixels = pixels.data(),
                                                                             });
             }
@@ -1552,10 +1645,14 @@ namespace sogen
                 if (const auto existing = this->direct_mappings_.find(request.memory); existing != this->direct_mappings_.end())
                 {
                     response.vk_result = 0; // VK_SUCCESS
-                    // Only hand back an aliased address for offsets inside the mapping; an out-of-range
-                    // offset returns guest_address = 0 so the shim falls back to the bounded staging path.
-                    response.guest_address =
-                        (request.offset < existing->second.size) ? (existing->second.guest_address + request.offset) : 0;
+                    // Only hand back an aliased address for a [offset, offset + size) that fits entirely
+                    // inside the mapping; anything else (including a request.size of 0 that leaves the
+                    // caller's real access length unknown) returns guest_address = 0 so the shim falls back
+                    // to the bounded staging path instead of handing out a pointer the caller could walk
+                    // past the actual host-backed alias.
+                    const bool in_bounds = request.offset < existing->second.size && request.size != 0 &&
+                                           request.size <= existing->second.size - request.offset;
+                    response.guest_address = in_bounds ? (existing->second.guest_address + request.offset) : 0;
                     return write_output(win_emu, context, response);
                 }
 
@@ -1886,14 +1983,16 @@ namespace sogen
                 uint32_t width = 0;
                 uint32_t height = 0;
                 uint64_t hwnd_value = 0;
-                const int32_t result =
-                    this->vulkan_.queue_present(request.queue, request.swapchain, request.image_index, pixels, width, height, hwnd_value);
+                uint32_t vk_format = 0;
+                const int32_t result = this->vulkan_.queue_present(request.queue, request.swapchain, request.image_index, pixels, width,
+                                                                    height, hwnd_value, vk_format);
 
                 // Hand the freshly read-back pixels to the guest window through the UI backend (the same
-                // seam GDI EndPaint uses). The swapchain is B8G8R8A8, matching bgra8, so no swizzle.
+                // seam GDI EndPaint uses). vk_format_to_ui_surface_format picks the byte order that
+                // actually matches the swapchain's guest-chosen format.
                 if (result == 0 /* VK_SUCCESS */)
                 {
-                    present_surface_if_ready(win_emu, hwnd_value, width, height, pixels);
+                    present_surface_if_ready(win_emu, hwnd_value, width, height, pixels, vk_format);
                 }
 
                 if (std::getenv("EMULATOR_FPS_COUNTER"))
@@ -2290,11 +2389,43 @@ namespace sogen
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                // TEMPDIAG EXPERIMENT: force the DXVK presenter shader's c_dst_is_srgb spec constant (id=5,
-                // matched by the presenter's distinctive 8-entry spec layout) to 0, to test whether the
-                // destination image view being an sRGB format itself ALSO double-encodes on top of the
-                // shader's own manual gamma encoding.
-                if (std::getenv("SOGEN_DEBUG_NO_DST_SRGB") && fs_entries.size() == 8)
+                // TEMPDIAG EXPERIMENT: survey every (constant_id, size, value) tuple across all vertex/fragment
+                // spec constants for a given pipeline, to find other color-transform-shaped constants besides
+                // the known c_dst_is_srgb (id=5) below -- residual DXVK overexposure after zeroing id=5 suggests
+                // a second, still-unidentified constant may also need overriding.
+                if (std::getenv("EMULATOR_SPEC_CONSTANT_SURVEY_DIAG"))
+                {
+                    for (const auto& e : vs_entries)
+                    {
+                        uint32_t v = 0;
+                        if (e.size <= 4 && e.offset + e.size <= vs_data.size())
+                        {
+                            std::memcpy(&v, vs_data.data() + e.offset, e.size);
+                        }
+                        win_emu.log.error("SPEC_CONSTANT_SURVEY stage=vs vs=0x%llx fs=0x%llx id=%u size=%u value=%u",
+                                          static_cast<unsigned long long>(request.vertex_shader),
+                                          static_cast<unsigned long long>(request.fragment_shader), e.constant_id, e.size, v);
+                    }
+                    for (const auto& e : fs_entries)
+                    {
+                        uint32_t v = 0;
+                        if (e.size <= 4 && e.offset + e.size <= fs_data.size())
+                        {
+                            std::memcpy(&v, fs_data.data() + e.offset, e.size);
+                        }
+                        win_emu.log.error("SPEC_CONSTANT_SURVEY stage=fs vs=0x%llx fs=0x%llx id=%u size=%u value=%u",
+                                          static_cast<unsigned long long>(request.vertex_shader),
+                                          static_cast<unsigned long long>(request.fragment_shader), e.constant_id, e.size, v);
+                    }
+                }
+                // TEMPDIAG EXPERIMENT: force any fragment shader's c_dst_is_srgb-shaped spec constant (id=5,
+                // size=4) to 0. The original version of this experiment matched only the presenter's
+                // distinctive 8-entry spec layout and gave a real but partial fix for the overexposure/
+                // wash-to-white regression -- confirming the double-encode theory but leaving most of the
+                // scene still overexposed. Broadened here (any fs_entries layout, not just size==8) to test
+                // whether MW2's OWN pixel shaders (DXVK-translated, writing to intermediate render targets
+                // before the final presenter ever runs) carry the same wrong constant.
+                if (std::getenv("SOGEN_DEBUG_NO_DST_SRGB"))
                 {
                     for (const auto& e : fs_entries)
                     {
@@ -2306,8 +2437,8 @@ namespace sogen
                             {
                                 v = 0;
                                 std::memcpy(fs_data.data() + e.offset, &v, 4);
-                                win_emu.log.error("TEMPDIAG DST_SRGB_OVERRIDE_APPLIED fs=0x%llx",
-                                                  static_cast<unsigned long long>(request.fragment_shader));
+                                win_emu.log.error("TEMPDIAG DST_SRGB_OVERRIDE_APPLIED fs=0x%llx fs_entries=%zu",
+                                                  static_cast<unsigned long long>(request.fragment_shader), fs_entries.size());
                             }
                         }
                     }
@@ -2723,7 +2854,36 @@ namespace sogen
                 uint64_t resource = d3d9_cmd::null_resource;
                 const int32_t hr = this->d3d9_.create_resource(request.kind, request.format, request.width, request.height, request.depth,
                                                                request.mip_levels, request.usage, request.pool, resource);
-                return write_output(win_emu, context, d3d9_cmd::create_resource_response{.hr = hr, .reserved = 0, .resource = resource});
+
+                uint32_t direct_guest_va = 0;
+                uint32_t direct_size = 0;
+                void* host_ptr = nullptr;
+                size_t host_size = 0;
+                if (hr == 0 && this->d3d9_.get_direct_mapping(resource, host_ptr, host_size))
+                {
+                    constexpr uint64_t page = 0x1000;
+                    const uint64_t mapped_size = (host_size + page - 1) & ~(page - 1);
+                    if (host_ptr != nullptr && mapped_size != 0 && (reinterpret_cast<uintptr_t>(host_ptr) % page) == 0)
+                    {
+                        const uint64_t va = win_emu.memory.find_free_allocation_base(static_cast<size_t>(mapped_size));
+                        if (va != 0 && va <= UINT32_MAX &&
+                            win_emu.memory.allocate_host_memory(va, static_cast<size_t>(mapped_size), host_ptr,
+                                                                memory_permission::read_write))
+                        {
+                            this->resource_direct_va_[resource] = {va, static_cast<size_t>(mapped_size)};
+                            direct_guest_va = static_cast<uint32_t>(va);
+                            direct_size = static_cast<uint32_t>(host_size);
+                        }
+                    }
+                    // A failed guest-VA alias is not fatal -- direct_guest_va stays 0 and the guest UMD
+                    // falls back to the ordinary Lock/Unlock IOCTL round-trip, exactly as if this
+                    // resource had never been direct-buffer-eligible on the host side either.
+                }
+
+                return write_output(
+                    win_emu, context,
+                    d3d9_cmd::create_resource_response{
+                        .hr = hr, .reserved = 0, .resource = resource, .direct_guest_va = direct_guest_va, .direct_size = direct_size});
             }
 
             NTSTATUS handle_d3d9_destroy_resource(windows_emulator& win_emu, const io_device_context& context)
@@ -2733,6 +2893,13 @@ namespace sogen
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
+
+                if (const auto it = this->resource_direct_va_.find(request.resource); it != this->resource_direct_va_.end())
+                {
+                    win_emu.memory.release_memory(it->second.first, it->second.second);
+                    this->resource_direct_va_.erase(it);
+                }
+
                 this->d3d9_.destroy_resource(request.resource);
                 return STATUS_SUCCESS;
             }
@@ -2802,16 +2969,22 @@ namespace sogen
                 // buffer -- read it directly rather than via read_trailing_array, which only knows
                 // how to read from within the escape payload itself. This is the whole point of the
                 // new wire shape: the guest never has to copy its data into the escape payload at
-                // all, so this single read_memory is the only copy on the way into `backing`.
-                std::vector<std::byte> data;
+                // all. Reading straight into the resource's own backing store (prepare_unlock_target)
+                // instead of an intermediate std::vector removes what was previously a second,
+                // redundant host-side copy on top of this one -- confirmed via live profiling
+                // (2026-08-24) that this intermediate copy was ~31% of all Unlock handling time.
                 if (request.data_size != 0 && request.data_address != 0)
                 {
-                    data.resize(request.data_size);
-                    win_emu.emu().read_memory(request.data_address, data.data(), data.size());
+                    std::byte* target =
+                        this->d3d9_.prepare_unlock_target(request.resource, request.subresource, request.offset, request.data_size);
+                    if (target == nullptr)
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+                    win_emu.emu().read_memory(request.data_address, target, request.data_size);
+                    this->d3d9_.finish_unlock(request.resource, request.subresource);
                 }
-
-                const int32_t hr = this->d3d9_.unlock(request.resource, request.subresource, request.offset, data.data(), data.size());
-                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+                return STATUS_SUCCESS;
             }
 
             NTSTATUS handle_d3d9_create_vertex_shader(windows_emulator& win_emu, const io_device_context& context)

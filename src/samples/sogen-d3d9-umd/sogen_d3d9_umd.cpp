@@ -2337,6 +2337,80 @@ namespace
         return S_OK;
     }
 
+    // pfnCreateQuery/pfnDestroyQuery/pfnIssueQuery need no state: g_query_types advertises only
+    // D3DQUERYTYPE_EVENT (see its own comment above), and sogen's GPU work is synchronous, so there is
+    // no pending/async state to create, destroy, or issue against -- only pfnGetQueryData below needs a
+    // real body, to answer "has it signalled yet" through the caller's actual output buffer instead of
+    // leaving it unwritten.
+    HRESULT APIENTRY umd_CreateQuery(HANDLE, void*)
+    {
+        log_line("[sogen-d3d9-umd] [xdiag] CreateQuery\n");
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_DestroyQuery(HANDLE, void*)
+    {
+        log_line("[sogen-d3d9-umd] [xdiag] DestroyQuery\n");
+        return S_OK;
+    }
+
+    struct issue_query_args
+    {
+        void* hQuery;
+        uint32_t Flags;
+    };
+
+    HRESULT APIENTRY umd_IssueQuery(HANDLE, void* pArgs)
+    {
+        const auto* args = reinterpret_cast<const issue_query_args*>(pArgs);
+        static uint32_t s_issue_count = 0;
+        ++s_issue_count;
+        if (s_issue_count <= 5 || (s_issue_count % 60) == 0)
+        {
+            log_line("[sogen-d3d9-umd] [xdiag] IssueQuery #%u Flags=0x%x hQuery=%p\n", s_issue_count, args ? args->Flags : 0,
+                      args ? args->hQuery : nullptr);
+        }
+        return S_OK;
+    }
+
+    // D3DDDIARG_GETQUERYDATA field layout (hQuery/pData/DataSize at offsets 0/4/8) was RE-verified live
+    // this session: dumping the raw args struct for MW2's own D3DQUERYTYPE_EVENT polling calls showed
+    // pData always equal to (pArgs + 12) -- i.e. the caller places a DataSize-byte output buffer
+    // immediately after this 12-byte struct on its own stack frame -- and DataSize was always 4,
+    // matching a BOOL out-param. Two independent live samples showed the *(pData) content the
+    // then-unwritten stub left behind was raw stack garbage: one sample read 0x060a0738 (truthy), a
+    // second read 0x00000000 (falsy), for what should always be the same "event already signalled"
+    // answer -- this nondeterministic garbage read is why MW2's Overwatch-scene GPU-completion poll
+    // (IssueQuery(D3DISSUE_END) + GetQueryData loop, confirmed via the same live dump: IssueQuery's
+    // Flags field is a constant 2 = D3DISSUE_END) sometimes progressed by luck and sometimes spun
+    // indefinitely. sogen's GPU work is already complete synchronously by the time this DDI call
+    // returns (see g_query_types's own comment above), so writing TRUE unconditionally is correct.
+    struct query_data_args
+    {
+        void* hQuery;
+        void* pData;
+        uint32_t DataSize;
+    };
+
+    HRESULT APIENTRY umd_GetQueryData(HANDLE hDevice, void* pArgs)
+    {
+        (void)hDevice;
+        const auto* args = reinterpret_cast<const query_data_args*>(pArgs);
+        if (args && args->pData && args->DataSize >= sizeof(BOOL))
+        {
+            *reinterpret_cast<BOOL*>(args->pData) = TRUE;
+        }
+        static uint32_t s_getdata_count = 0;
+        ++s_getdata_count;
+        if (s_getdata_count <= 5 || (s_getdata_count % 60) == 0)
+        {
+            log_line("[sogen-d3d9-umd] [xdiag] GetQueryData #%u hQuery=%p pData=%p DataSize=%u wrote=%d\n", s_getdata_count,
+                      args ? args->hQuery : nullptr, args ? args->pData : nullptr, args ? args->DataSize : 0,
+                      (args && args->pData && args->DataSize >= sizeof(BOOL)) ? 1 : 0);
+        }
+        return S_OK;
+    }
+
     HRESULT APIENTRY umd_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE* pArgs)
     {
         log_line("[sogen-d3d9-umd] CreateDevice reached Interface=0x%x Version=0x%x pDeviceFuncs=%p Flags=0x%x\n", pArgs->Interface,
@@ -2395,6 +2469,10 @@ namespace
             slots[52] = reinterpret_cast<void*>(&umd_SetStreamSourceFreq);    // pfnSetStreamSourceFreq
             slots[55] = reinterpret_cast<void*>(&umd_Blt);                    // pfnBlt (StretchRect)
             slots[56] = reinterpret_cast<void*>(&umd_ColorFill);              // pfnColorFill
+            slots[58] = reinterpret_cast<void*>(&umd_CreateQuery);             // pfnCreateQuery
+            slots[59] = reinterpret_cast<void*>(&umd_DestroyQuery);            // pfnDestroyQuery
+            slots[60] = reinterpret_cast<void*>(&umd_IssueQuery);              // pfnIssueQuery
+            slots[61] = reinterpret_cast<void*>(&umd_GetQueryData);            // pfnGetQueryData
             slots[62] = reinterpret_cast<void*>(&umd_SetRenderTarget);        // pfnSetRenderTarget
             slots[63] = reinterpret_cast<void*>(&umd_SetDepthStencil);        // pfnSetDepthStencil
             slots[65] = reinterpret_cast<void*>(&umd_SetPixelShaderConstI);   // pfnSetPixelShaderConstI

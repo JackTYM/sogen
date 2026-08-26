@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -651,6 +653,7 @@ namespace sogen
             VkQueue queue{};
             VkImageLayout current_layout{VK_IMAGE_LAYOUT_UNDEFINED};
         };
+
         std::unordered_map<uint64_t, render_target_data> render_targets;
 
         static bool drain_readback(swapchain_data& sc, device_data& dev, vulkan_host::presented_frame& frame)
@@ -669,6 +672,7 @@ namespace sogen
             frame.width = sc.width;
             frame.height = sc.height;
             frame.hwnd = sc.hwnd;
+            frame.vk_format = static_cast<uint32_t>(sc.format);
             sc.present_in_flight = false;
             return true;
         }
@@ -2775,8 +2779,60 @@ namespace sogen
         return dev->second.reset_event(dev->second.handle, it->second.handle);
     }
 
+    namespace
+    {
+        // Temporary diagnostic (EMULATOR_D3D9_SUBMIT_FREQ_DIAG=1): tallies real vkQueueSubmit(2) call
+        // frequency and command-buffers-per-call, printed every 5 seconds -- built to properly test
+        // (rather than infer from raw `sample` text, which doesn't encode call counts) whether
+        // native-UMD's per-draw-batch submission cadence (queue_submit, always 1 buffer/call) differs
+        // meaningfully from DXVK's own (queue_submit2, batches command_buffer_count per call). Placed
+        // here rather than in gpu_bridge.cpp's IOCTL handlers since native-UMD's d3d9_host.cpp calls
+        // these vulkan_host methods directly, bypassing the guest-facing IOCTL handlers entirely.
+        void submit_freq_diag_report(bool is_submit2, uint32_t command_buffer_count)
+        {
+            if (!std::getenv("EMULATOR_D3D9_SUBMIT_FREQ_DIAG"))
+            {
+                return;
+            }
+
+            static std::atomic<uint64_t> submit_calls{};
+            static std::atomic<uint64_t> submit_cmd_buffers{};
+            static std::atomic<uint64_t> submit2_calls{};
+            static std::atomic<uint64_t> submit2_cmd_buffers{};
+            static auto window_start = std::chrono::steady_clock::now();
+
+            if (is_submit2)
+            {
+                submit2_calls.fetch_add(1, std::memory_order_relaxed);
+                submit2_cmd_buffers.fetch_add(command_buffer_count, std::memory_order_relaxed);
+            }
+            else
+            {
+                submit_calls.fetch_add(1, std::memory_order_relaxed);
+                submit_cmd_buffers.fetch_add(command_buffer_count, std::memory_order_relaxed);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - window_start).count() >= 5.0)
+            {
+                const auto c1 = submit_calls.exchange(0);
+                const auto b1 = submit_cmd_buffers.exchange(0);
+                const auto c2 = submit2_calls.exchange(0);
+                const auto b2 = submit2_cmd_buffers.exchange(0);
+                fprintf(stderr,
+                        "[submit-freq-diag] queue_submit calls=%llu cmd_buffers=%llu avg=%.2f | "
+                        "queue_submit2 calls=%llu cmd_buffers=%llu avg=%.2f\n",
+                        static_cast<unsigned long long>(c1), static_cast<unsigned long long>(b1),
+                        c1 != 0 ? static_cast<double>(b1) / static_cast<double>(c1) : 0.0, static_cast<unsigned long long>(c2),
+                        static_cast<unsigned long long>(b2), c2 != 0 ? static_cast<double>(b2) / static_cast<double>(c2) : 0.0);
+                window_start = now;
+            }
+        }
+    } // namespace
+
     int32_t vulkan_host::queue_submit(uint64_t queue, uint64_t command_buffer, uint64_t fence)
     {
+        submit_freq_diag_report(false, command_buffer != 0 ? 1 : 0);
         const auto queue_it = this->impl_->queues.find(queue);
         if (queue_it == this->impl_->queues.end())
         {
@@ -2824,6 +2880,7 @@ namespace sogen
                                        const void* command_buffer_ids, uint32_t command_buffer_count, const void* signal_entries,
                                        uint32_t signal_count)
     {
+        submit_freq_diag_report(true, command_buffer_count);
         const auto queue_it = this->impl_->queues.find(queue);
         if (queue_it == this->impl_->queues.end())
         {
@@ -4181,12 +4238,13 @@ namespace sogen
     }
 
     int32_t vulkan_host::queue_present(uint64_t queue, uint64_t swapchain, uint32_t image_index, std::vector<std::byte>& out_pixels,
-                                       uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd)
+                                       uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd, uint32_t& out_vk_format)
     {
         out_pixels.clear();
         out_width = 0;
         out_height = 0;
         out_hwnd = 0;
+        out_vk_format = 0;
 
         const auto queue_it = this->impl_->queues.find(queue);
         const auto sc_it = this->impl_->swapchains.find(swapchain);
@@ -4195,6 +4253,7 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
         impl::swapchain_data& sc = sc_it->second;
+        out_vk_format = static_cast<uint32_t>(sc.format);
         if (queue_it->second.device_id != sc.device_id || image_index >= sc.image_ids.size())
         {
             return VK_ERROR_INITIALIZATION_FAILED;
@@ -6218,7 +6277,7 @@ namespace sogen
     } // namespace
 
     int32_t vulkan_host::create_render_target(const uint64_t device, const uint32_t width, const uint32_t height, const uint32_t format,
-                                              uint64_t& out_image)
+                                              const bool transient, uint64_t& out_image)
     {
         out_image = 0;
 
@@ -6291,9 +6350,16 @@ namespace sogen
         // created without it can never be given a sampled view at all, however it is used later. The bit
         // is free when unused: it constrains nothing else about the image and every driver reports it as
         // a supported optimal-tiling feature for the colour/depth formats that reach here.
+        // A transient depth-stencil (see this function's own header comment) drops TRANSFER_DST/SAMPLED
+        // entirely -- it can never be cleared via a standalone image-clear command or sampled, only
+        // rendered to as an attachment -- and adds TRANSIENT_ATTACHMENT, which is what actually lets
+        // MoltenVK back it with tile memory instead of VRAM on Apple Silicon.
+        const bool depth_transient = transient && is_depth_format(vk_format);
         image_info.usage =
             is_depth_format(vk_format)
-                ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+                ? (depth_transient
+                       ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)
+                       : (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
                 : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                    VK_IMAGE_USAGE_SAMPLED_BIT);
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -6316,7 +6382,19 @@ namespace sogen
 
         VkMemoryRequirements image_reqs{};
         dev.get_image_memory_requirements(dev.handle, rt.image, &image_reqs);
-        uint32_t image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        uint32_t image_type = UINT32_MAX;
+        if (depth_transient)
+        {
+            // The one memory-type combination that actually triggers MoltenVK's memoryless optimization
+            // on Apple Silicon; not every GPU/driver exposes it, so this falls through to the ordinary
+            // search below rather than failing outright when it's absent.
+            image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits,
+                                                       VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
+        if (image_type == UINT32_MAX)
+        {
+            image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
         if (image_type == UINT32_MAX)
         {
             image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, 0);
@@ -6331,43 +6409,51 @@ namespace sogen
         }
         dev.bind_image_memory(dev.handle, rt.image, rt.image_memory, 0);
 
-        // Size the readback staging buffer at the render target's real per-format stride, not a hardcoded
-        // 4 bytes/texel BGRA8 -- lets non-BGRA8 off-screen render targets (R5G6B5, R16G16B16A16_SFLOAT)
-        // read back at their true tight packing.
-        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * vk_format_bytes_per_texel(vk_format);
-        VkBufferCreateInfo buffer_info{};
-        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        buffer_info.size = readback_size;
-        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (dev.create_buffer(dev.handle, &buffer_info, nullptr, &rt.readback_buffer) != VK_SUCCESS)
+        // A transient image can never be read back (by definition -- see this function's own header
+        // comment), so skip the readback staging buffer entirely; rt.readback_buffer/readback_memory
+        // stay VK_NULL_HANDLE, matching readback_render_target's own resting-layout guard, which already
+        // rejects a depth-stencil image (it never reaches TRANSFER_SRC_OPTIMAL) before either would be
+        // touched.
+        if (!depth_transient)
         {
-            return fail();
-        }
+            // Size the readback staging buffer at the render target's real per-format stride, not a
+            // hardcoded 4 bytes/texel BGRA8 -- lets non-BGRA8 off-screen render targets (R5G6B5,
+            // R16G16B16A16_SFLOAT) read back at their true tight packing.
+            const VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * vk_format_bytes_per_texel(vk_format);
+            VkBufferCreateInfo buffer_info{};
+            buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            buffer_info.size = readback_size;
+            buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (dev.create_buffer(dev.handle, &buffer_info, nullptr, &rt.readback_buffer) != VK_SUCCESS)
+            {
+                return fail();
+            }
 
-        VkMemoryRequirements buffer_reqs{};
-        dev.get_buffer_memory_requirements(dev.handle, rt.readback_buffer, &buffer_reqs);
-        uint32_t buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
-                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                                                 VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-        if (buffer_type == UINT32_MAX)
-        {
-            buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
-                                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VkMemoryRequirements buffer_reqs{};
+            dev.get_buffer_memory_requirements(dev.handle, rt.readback_buffer, &buffer_reqs);
+            uint32_t buffer_type = this->impl_->find_memory_type(
+                dev, buffer_reqs.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+            if (buffer_type == UINT32_MAX)
+            {
+                buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
+                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            }
+            if (buffer_type == UINT32_MAX)
+            {
+                return fail();
+            }
+            VkMemoryAllocateInfo buffer_alloc{};
+            buffer_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            buffer_alloc.allocationSize = buffer_reqs.size;
+            buffer_alloc.memoryTypeIndex = buffer_type;
+            if (dev.allocate_memory(dev.handle, &buffer_alloc, nullptr, &rt.readback_memory) != VK_SUCCESS)
+            {
+                return fail();
+            }
+            dev.bind_buffer_memory(dev.handle, rt.readback_buffer, rt.readback_memory, 0);
         }
-        if (buffer_type == UINT32_MAX)
-        {
-            return fail();
-        }
-        VkMemoryAllocateInfo buffer_alloc{};
-        buffer_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        buffer_alloc.allocationSize = buffer_reqs.size;
-        buffer_alloc.memoryTypeIndex = buffer_type;
-        if (dev.allocate_memory(dev.handle, &buffer_alloc, nullptr, &rt.readback_memory) != VK_SUCCESS)
-        {
-            return fail();
-        }
-        dev.bind_buffer_memory(dev.handle, rt.readback_buffer, rt.readback_memory, 0);
 
         VkCommandPoolCreateInfo pool_info{};
         pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;

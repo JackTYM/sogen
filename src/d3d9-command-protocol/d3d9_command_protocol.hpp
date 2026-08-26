@@ -67,6 +67,16 @@ namespace sogen::d3d9_cmd
         int32_t hr;
         uint32_t reserved;
         resource_id resource; // null_resource on failure
+        // Guest-visible 32-bit address of this resource's real, persistent GPU buffer mapping, aliased
+        // directly into the guest's own address space (see gpu_bridge.cpp's handle_map_memory_direct,
+        // the same zero-copy mechanism DXVK's own vulkan_shim.cpp path already uses). 0 when this
+        // resource isn't eligible for a direct buffer (see d3d9_host::create_resource's eligibility
+        // check) -- the guest UMD must fall back to the ordinary Lock/Unlock IOCTL round-trip in that
+        // case. When nonzero, the guest can read/write this resource's bytes directly at this address
+        // with no host crossing at all; direct_size is the mapping's byte extent (>= the resource's own
+        // size, page-rounded -- callers must still bounds-check against the resource's real size).
+        uint32_t direct_guest_va;
+        uint32_t direct_size;
     };
 
     struct destroy_resource_request
@@ -407,7 +417,7 @@ namespace sogen::d3d9_cmd
     // 32-bit WoW64 guest and a 64-bit host agree on layout byte-for-byte.
     static_assert(sizeof(marker_request) == 8, "wire layout drift");
     static_assert(sizeof(create_resource_request) == 32, "wire layout drift");
-    static_assert(sizeof(create_resource_response) == 16, "wire layout drift");
+    static_assert(sizeof(create_resource_response) == 24, "wire layout drift");
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");
     static_assert(sizeof(lock_response) == 8, "wire layout drift");

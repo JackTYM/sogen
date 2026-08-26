@@ -385,7 +385,7 @@ namespace sogen
         // copy has already completed, out_pixels receives that frame immediately; otherwise it is later
         // returned by poll_presented_frames().
         int32_t queue_present(uint64_t queue, uint64_t swapchain, uint32_t image_index, std::vector<std::byte>& out_pixels,
-                              uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd);
+                              uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd, uint32_t& out_vk_format);
 
         struct presented_frame
         {
@@ -393,6 +393,7 @@ namespace sogen
             uint32_t width{};
             uint32_t height{};
             uint64_t hwnd{};
+            uint32_t vk_format{};
         };
 
         // Collects readbacks whose GPU fences have completed without waiting. This lets the host UI
@@ -605,7 +606,17 @@ namespace sogen
         // Creates a single DEVICE_LOCAL B8G8R8A8_UNORM image with COLOR_ATTACHMENT|TRANSFER_SRC usage,
         // plus a host-visible readback buffer and the reusable command infrastructure needed to clear
         // and read it back.  out_image receives a fresh object id.
-        int32_t create_render_target(uint64_t device, uint32_t width, uint32_t height, uint32_t format, uint64_t& out_image);
+        //
+        // `transient` requests MoltenVK's memoryless-attachment optimization for a depth format: the
+        // image gets DEPTH_STENCIL_ATTACHMENT|TRANSIENT_ATTACHMENT usage only (no TRANSFER_DST/SAMPLED --
+        // it can never be cleared via a standalone vkCmdClear*Image or sampled), memory is preferred from
+        // a LAZILY_ALLOCATED heap (never actually backed by VRAM on a tile-based GPU as long as every
+        // render pass that touches it also uses STORE_OP_DONT_CARE), and no CPU-readback staging buffer
+        // is allocated at all. Ignored for a color format -- only a depth-stencil surface this codebase
+        // never samples or reads back (see d3d9_host's create_resource, which is the only caller that
+        // passes true) is eligible.
+        int32_t create_render_target(uint64_t device, uint32_t width, uint32_t height, uint32_t format, bool transient,
+                                     uint64_t& out_image);
 
         // Records a clear of the render-target image to `color` (RGBA, 0..1), submits, and waits
         // synchronously.  The image is left in TRANSFER_SRC_OPTIMAL after the call.
