@@ -458,6 +458,51 @@ namespace sogen::test
         ASSERT_EQ(actual_tail, expected_tail);
     }
 
+    // Mirror of NtReadVirtualMemorySyscallReportsPartialCopyWhenTargetMemoryPartiallyUnmapped: the
+    // LOCAL source is fully readable (the requester reads everything it means to send, so
+    // request.payload.size() equals the full requested chunk), but the TARGET's own destination
+    // memory is only partially committed - proving number_of_bytes_write reflects the target's actual
+    // reported bytes_written, not how much the requester successfully read locally.
+    TEST(CrossProcessTest, NtWriteVirtualMemorySyscallReportsPartialCopyWhenTargetMemoryPartiallyUnmapped)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto child_base = child.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(child_base, 0u);
+
+        const auto local_buffer = parent.memory.allocate_memory(0x2000, memory_permission::read_write);
+        ASSERT_NE(local_buffer, 0u);
+        std::vector<std::byte> pattern(0x2000);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            pattern[i] = static_cast<std::byte>(i % 200);
+        }
+        ASSERT_TRUE(parent.memory.try_write_memory(local_buffer, pattern.data(), pattern.size()));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(out_address, 0u);
+        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+
+        const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, 0x2000, number_of_bytes_written);
+
+        ASSERT_EQ(status, STATUS_PARTIAL_COPY);
+        ASSERT_EQ(number_of_bytes_written.read(), 0x1000u);
+
+        std::vector<std::byte> actual(0x1000);
+        ASSERT_TRUE(child.memory.try_read_memory(child_base, actual.data(), actual.size()));
+        const std::vector<std::byte> expected(pattern.begin(), pattern.begin() + 0x1000);
+        ASSERT_EQ(actual, expected);
+    }
+
     // Mirror of the target-partial case above: this time the TARGET fully produces the requested
     // range, but the LOCAL destination buffer only has its first page mapped - exercising the other
     // arm of min(target-produced, locally-writable), where the local side (not the target) is what
@@ -555,4 +600,51 @@ namespace sogen::test
         ASSERT_EQ(actual, pattern);
     }
 
+    // Mirror of the read direction's multi-chunk test: spans three 1 MiB chunks in the write
+    // direction, each a separate control-channel round trip, using the same chunk-index-dependent
+    // pattern so a wrong-remote-offset-per-chunk bug can't pass by coincidence.
+    TEST(CrossProcessTest, NtWriteVirtualMemorySyscallChunksTransfersLargerThanOneMebibyte)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        constexpr size_t chunk_size = 1u << 20;
+        constexpr size_t total_size = 3u * chunk_size;
+
+        const auto child_base = child.memory.allocate_memory(total_size, memory_permission::read_write);
+        ASSERT_NE(child_base, 0u);
+
+        const auto local_buffer = parent.memory.allocate_memory(total_size, memory_permission::read_write);
+        ASSERT_NE(local_buffer, 0u);
+
+        std::vector<std::byte> pattern(total_size);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            const auto chunk_index = i / chunk_size;
+            pattern[i] = static_cast<std::byte>((chunk_index * 37 + i % chunk_size) & 0xFF);
+        }
+        ASSERT_TRUE(parent.memory.try_write_memory(local_buffer, pattern.data(), pattern.size()));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(out_address, 0u);
+        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+
+        const auto status =
+            syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, static_cast<ULONG>(total_size), number_of_bytes_written);
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+        ASSERT_EQ(number_of_bytes_written.read(), total_size);
+
+        std::vector<std::byte> actual(total_size);
+        ASSERT_TRUE(child.memory.try_read_memory(child_base, actual.data(), actual.size()));
+        ASSERT_EQ(actual, pattern);
+    }
 } // namespace sogen::test
