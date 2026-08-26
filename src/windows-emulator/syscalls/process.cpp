@@ -286,6 +286,52 @@ namespace sogen
                     }
                 }
 
+                if (info_class == ProcessCycleTime)
+                {
+                    // Chromium's cross-process CPU-usage sampling (base::ProcessMetrics::
+                    // GetCumulativeCPUUsage) calls QueryProcessCycleTime against a real handle to a
+                    // spawned child (gpu-process, renderer, ...), not just its own, and its own source
+                    // (base/process/process_metrics_win.cc) treats any failure as an unconditional
+                    // NOTREACHED() - a real Chromium CHECK-style crash, not a recoverable error path.
+                    // So, like ProcessBasicInformation above, this must succeed for any child this
+                    // parent still knows about, live or not: most of the short-lived helper processes
+                    // spawned during startup (failed gpu-process attempts, etc.) exit on their own,
+                    // which leaves this parent no notification to have captured a final cycle count
+                    // at, the way handle_NtTerminateProcess's own exit_status capture does for a
+                    // parent-initiated terminate - so a dead/never-registered channel still answers
+                    // with 0 rather than falling through to this function's own STATUS_NOT_SUPPORTED
+                    // below the way execute_query_wow64_info's sibling branch does, since real Windows
+                    // has no equivalent "handle valid but unreachable" failure mode for this query.
+                    // Real Windows' QueryProcessCycleTime accepts a handle opened with either
+                    // PROCESS_QUERY_INFORMATION or PROCESS_QUERY_LIMITED_INFORMATION, so this checks
+                    // for the lesser of the two - same reasoning as the ProcessBasicInformation check
+                    // above.
+                    const auto record = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    if (std::holds_alternative<const process_context::child_process_record*>(record))
+                    {
+                        uint64_t accumulated_cycles = 0;
+
+                        auto* const channel = c.win_emu.find_child_control_channel(process_handle.value.id);
+                        if (channel)
+                        {
+                            process_control_request request{};
+                            request.op = process_control_op::query_cycle_time;
+
+                            const auto response = channel->request(request, process_control_default_timeout_ms);
+                            if (response && response->status == STATUS_SUCCESS)
+                            {
+                                accumulated_cycles = response->bytes_written;
+                            }
+                        }
+
+                        return handle_query<PROCESS_CYCLE_TIME_INFORMATION>(c.emu, process_information, process_information_length,
+                                                                            return_length, [&](PROCESS_CYCLE_TIME_INFORMATION& info) {
+                                                                                info.AccumulatedCycles = accumulated_cycles;
+                                                                                info.CurrentCycleCount = 0;
+                                                                            });
+                    }
+                }
+
                 return STATUS_NOT_SUPPORTED;
             }
 

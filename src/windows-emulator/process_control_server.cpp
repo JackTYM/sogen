@@ -368,6 +368,13 @@ namespace sogen
             response.status = STATUS_SUCCESS;
         }
 
+        void execute_query_cycle_time(windows_emulator& target, const process_control_request& /*request*/,
+                                      process_control_response& response)
+        {
+            response.bytes_written = target.get_executed_instructions();
+            response.status = STATUS_SUCCESS;
+        }
+
         void execute_adopt_section(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             auto s = section::from_pagefile_backing(request.maximum_size, request.page_protection, request.allocation_attributes,
@@ -417,6 +424,9 @@ namespace sogen
             break;
         case process_control_op::query_wow64_info:
             execute_query_wow64_info(target, request, response);
+            break;
+        case process_control_op::query_cycle_time:
+            execute_query_cycle_time(target, request, response);
             break;
         }
     }

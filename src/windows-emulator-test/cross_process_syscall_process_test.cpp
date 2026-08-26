@@ -282,6 +282,123 @@ namespace sogen::test
         ASSERT_EQ(status, STATUS_INVALID_HANDLE);
     }
 
+    // Chromium's base::ProcessMetrics::GetCumulativeCPUUsage calls QueryProcessCycleTime against a
+    // handle to a spawned child (gpu-process, renderer, ...), not just its own process - this is the
+    // cross-process round trip that answers it, mirroring ProcessWow64Information's own
+    // resolve_child_target/process_control_channel pattern just above.
+    TEST(CrossProcessTest, NtQueryInformationProcessSyscallReturnsCycleTimeForLiveChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_out, 0u);
+        const emulator_object<PROCESS_CYCLE_TIME_INFORMATION> info{parent.memory, info_out};
+
+        const auto status = syscalls::handle_NtQueryInformationProcess(
+            c, h, ProcessCycleTime, info_out, sizeof(PROCESS_CYCLE_TIME_INFORMATION), emulator_object<uint32_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+        const auto value = info.read();
+        ASSERT_EQ(value.AccumulatedCycles, child.get_executed_instructions());
+        ASSERT_EQ(value.CurrentCycleCount, 0u);
+    }
+
+    // Like ProcessWow64Information just above, a resolve_child_record failure of any kind (access
+    // denied here) falls through to this function's own generic STATUS_NOT_SUPPORTED rather than
+    // propagating the specific NTSTATUS - this asserts the access check genuinely runs (a child with a
+    // live channel but insufficient granted_access must not read AccumulatedCycles from it), not just
+    // that the end-to-end status happens to match.
+    TEST(CrossProcessTest, NtQueryInformationProcessSyscallReturnsNotSupportedForCycleTimeWithoutQueryRight)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_TERMINATE; // deliberately lacks PROCESS_QUERY_LIMITED_INFORMATION (0x1000)
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto status = syscalls::handle_NtQueryInformationProcess(c, h, ProcessCycleTime, 0, sizeof(PROCESS_CYCLE_TIME_INFORMATION),
+                                                                       emulator_object<uint32_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_NOT_SUPPORTED);
+    }
+
+    // fake_control_channel's request() always returns nullopt, simulating a dead/unresponsive channel -
+    // the child is otherwise fully authorized, distinguishing this from the access-denied case above.
+    // Unlike ProcessWow64Information's sibling branch, this must still succeed (with a zeroed value)
+    // rather than falling through to STATUS_NOT_SUPPORTED: real Chromium's own QueryProcessCycleTime
+    // call site (base::ProcessMetrics::GetCumulativeCPUUsage) NOTREACHED()s on any failure, and most of
+    // the short-lived children this queries in practice (failed gpu-process attempts, etc.) have
+    // already self-exited by the time this fires, leaving the channel dead with no way for this parent
+    // to have captured a real final value - this is the exact scenario a live SolidWorksSetup.exe/
+    // WebView2 repro hit.
+    TEST(CrossProcessTest, NtQueryInformationProcessSyscallReturnsZeroedCycleTimeOnDeadChannel)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_out, 0u);
+        const emulator_object<PROCESS_CYCLE_TIME_INFORMATION> info{parent.memory, info_out};
+
+        const auto status = syscalls::handle_NtQueryInformationProcess(
+            c, h, ProcessCycleTime, info_out, sizeof(PROCESS_CYCLE_TIME_INFORMATION), emulator_object<uint32_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+        const auto value = info.read();
+        ASSERT_EQ(value.AccumulatedCycles, 0u);
+        ASSERT_EQ(value.CurrentCycleCount, 0u);
+    }
+
+    // The other real-world case a self-exited child leaves behind: no control channel was ever
+    // registered at all (e.g. handle_NtTerminateProcess already dropped it after a parent-initiated
+    // terminate, or - per resolve_child_record's own docs - a snapshot-restored process whose child
+    // channels were never serialized). Must behave identically to the dead-channel case above, since
+    // both represent "this parent knows the child but cannot reach it right now".
+    TEST(CrossProcessTest, NtQueryInformationProcessSyscallReturnsZeroedCycleTimeWithoutLiveChannel)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        ASSERT_EQ(parent.find_child_control_channel(7), nullptr);
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_out, 0u);
+        const emulator_object<PROCESS_CYCLE_TIME_INFORMATION> info{parent.memory, info_out};
+
+        const auto status = syscalls::handle_NtQueryInformationProcess(
+            c, h, ProcessCycleTime, info_out, sizeof(PROCESS_CYCLE_TIME_INFORMATION), emulator_object<uint32_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+        const auto value = info.read();
+        ASSERT_EQ(value.AccumulatedCycles, 0u);
+        ASSERT_EQ(value.CurrentCycleCount, 0u);
+    }
+
     namespace
     {
         section make_pagefile_section(const std::vector<std::byte>& content, const ACCESS_MASK granted_access)
