@@ -146,13 +146,17 @@ namespace sogen
     // (setup_process_if_necessary) to hand back real guest addresses for PS_CREATE_INFO -
     // peb_address/process_parameters_address are the child's own PEB/RTL_USER_PROCESS_PARAMETERS
     // guest virtual addresses, meaningless as host pointers since the child lives in its own
-    // address space entirely.
+    // address space entirely. peb32_address/process_params32_address are the child's PEB32/
+    // RTL_USER_PROCESS_PARAMETERS32 guest addresses (0 if the child isn't a WOW64 process) -
+    // PS_CREATE_INFO's own SuccessState.PebAddressWow64/UserProcessParametersWow64.
     struct child_process_outcome
     {
         bool success{};
         std::string failure_detail{};
         uint64_t peb_address{};
         uint64_t process_parameters_address{};
+        uint64_t peb32_address{};
+        uint64_t process_params32_address{};
 
         // Still-open end of the same socketpair used for the bootstrap handshake, kept alive (rather
         // than closed once the handshake completes) so it can be registered as a pipe_ipc_channel

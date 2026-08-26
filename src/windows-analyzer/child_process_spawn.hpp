@@ -59,7 +59,8 @@ namespace sogen
     // Used by a process running in --child-ipc-fd mode, once it has completed its own initial
     // setup (windows_emulator::setup_process_if_necessary), to answer its parent's blocked
     // spawn_child_process call.
-    void send_child_ready(int fd, uint64_t peb_address, uint64_t process_parameters_address);
+    void send_child_ready(int fd, uint64_t peb_address, uint64_t process_parameters_address, uint64_t peb32_address,
+                          uint64_t process_params32_address);
     void send_child_failed(int fd, const std::string& detail);
 
     // Wraps an already-connected fd (child_process_outcome::ipc_fd on the parent side, or

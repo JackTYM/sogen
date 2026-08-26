@@ -481,6 +481,8 @@ namespace sogen
             {
                 buffer.read(outcome.peb_address);
                 buffer.read(outcome.process_parameters_address);
+                buffer.read(outcome.peb32_address);
+                buffer.read(outcome.process_params32_address);
             }
             else
             {
@@ -654,12 +656,15 @@ namespace sogen
         return data;
     }
 
-    void send_child_ready(const int fd, const uint64_t peb_address, const uint64_t process_parameters_address)
+    void send_child_ready(const int fd, const uint64_t peb_address, const uint64_t process_parameters_address, const uint64_t peb32_address,
+                          const uint64_t process_params32_address)
     {
         utils::buffer_serializer buffer{};
         buffer.write(true);
         buffer.write(peb_address);
         buffer.write(process_parameters_address);
+        buffer.write(peb32_address);
+        buffer.write(process_params32_address);
         send_framed(fd, buffer.get_buffer());
     }
 

@@ -763,7 +763,14 @@ namespace sogen
 
             if (child_bootstrap)
             {
-                send_child_ready(options.child_ipc_fd, win_emu->process.peb64.value(), win_emu->process.process_params64.value());
+                const auto peb32_address = (win_emu->process.is_wow64_process && win_emu->process.peb32.has_value())
+                                               ? win_emu->process.peb32->value()
+                                               : uint64_t{0};
+                const auto process_params32_address = (win_emu->process.is_wow64_process && win_emu->process.process_params32.has_value())
+                                                          ? win_emu->process.process_params32->value()
+                                                          : uint64_t{0};
+                send_child_ready(options.child_ipc_fd, win_emu->process.peb64.value(), win_emu->process.process_params64.value(),
+                                 peb32_address, process_params32_address);
 #ifndef _WIN32
                 win_emu->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(options.child_ipc_fd));
 

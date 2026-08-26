@@ -93,6 +93,75 @@ namespace sogen
                     return std::nullopt;
                 }
             }
+
+            // PsAttributeImageInfo (see the attribute-list loop in handle_NtCreateUserProcess) is an
+            // OUT attribute the kernel fills with the target image's SECTION_IMAGE_INFORMATION as part
+            // of validating/sectioning it, before the process itself is even created. Real
+            // kernelbase.dll's CreateProcessInternalW requires the resulting SubSystemType to be
+            // IMAGE_SUBSYSTEM_WINDOWS_GUI or IMAGE_SUBSYSTEM_WINDOWS_CUI or it abandons the freshly
+            // created child - so this can't be left zeroed the way the child spawns as a genuinely
+            // separate host process, this reads the target file directly, mirroring
+            // section_object::cache_image_info_from_filedata's own magic-detection dance
+            // (windows_objects.hpp) since no section object exists for the child yet at this point.
+            std::optional<SECTION_IMAGE_INFORMATION<EmulatorTraits<Emu64>>> build_section_image_info(const windows_emulator& win_emu,
+                                                                                                     const windows_path& image_path)
+            {
+                std::vector<std::byte> file{};
+                if (!utils::io::read_file(win_emu.file_sys.translate(image_path), &file))
+                {
+                    return std::nullopt;
+                }
+
+                if (file.size() < sizeof(PEDosHeader_t))
+                {
+                    return std::nullopt;
+                }
+
+                const auto* dos_header = reinterpret_cast<const PEDosHeader_t*>(file.data());
+                if (dos_header->e_magic != PEDosHeader_t::k_Magic ||
+                    file.size() < static_cast<size_t>(dos_header->e_lfanew) + sizeof(uint32_t) + sizeof(PEFileHeader_t) + sizeof(uint16_t))
+                {
+                    return std::nullopt;
+                }
+
+                const auto* magic_ptr =
+                    reinterpret_cast<const uint16_t*>(file.data() + dos_header->e_lfanew + sizeof(uint32_t) + sizeof(PEFileHeader_t));
+
+                winpe::pe_image_basic_info info{};
+                bool parsed = false;
+                if (*magic_ptr == PEOptionalHeader_t<uint32_t>::k_Magic)
+                {
+                    parsed = winpe::parse_pe_headers<uint32_t>(file, info);
+                }
+                else if (*magic_ptr == PEOptionalHeader_t<uint64_t>::k_Magic)
+                {
+                    parsed = winpe::parse_pe_headers<uint64_t>(file, info);
+                }
+
+                if (!parsed)
+                {
+                    return std::nullopt;
+                }
+
+                SECTION_IMAGE_INFORMATION<EmulatorTraits<Emu64>> image_info{};
+                image_info.TransferAddress = info.image_base + info.entry_point_rva;
+                image_info.MaximumStackSize = info.size_of_stack_reserve;
+                image_info.CommittedStackSize = info.size_of_stack_commit;
+                image_info.SubSystemType = info.subsystem;
+                image_info.SubSystemMinorVersion = info.subsystem_minor_version;
+                image_info.SubSystemMajorVersion = info.subsystem_major_version;
+                image_info.ImageCharacteristics = info.image_characteristics;
+                image_info.DllCharacteristics = info.dll_characteristics;
+                image_info.Machine = static_cast<PEMachineType>(info.machine);
+                image_info.ImageContainsCode = info.has_code ? TRUE : FALSE;
+                image_info.ImageMappedFlat = 1;
+                image_info.ImageDynamicallyRelocated = (info.dll_characteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE) ? 1 : 0;
+                image_info.LoaderFlags = info.loader_flags;
+                image_info.CheckSum = info.checksum;
+                image_info.ImageFileSize = static_cast<ULONG>(file.size());
+
+                return image_info;
+            }
         }
 
         NTSTATUS handle_NtQueryInformationProcess(const syscall_context& c, const handle process_handle, const uint32_t info_class,
@@ -870,6 +939,7 @@ namespace sogen
             }
 
             std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> client_id_attribute{};
+            std::optional<PS_ATTRIBUTE<EmulatorTraits<Emu64>>> image_info_attribute{};
             std::vector<handle> inherited_handles{};
 
             if (attribute_list)
@@ -893,6 +963,10 @@ namespace sogen
                             else if (type == PsAttributeClientId)
                             {
                                 client_id_attribute = attribute;
+                            }
+                            else if (type == PsAttributeImageInfo)
+                            {
+                                image_info_attribute = attribute;
                             }
                             else if (type == PsAttributeHandleList)
                             {
@@ -920,6 +994,15 @@ namespace sogen
             if (!std::filesystem::exists(c.win_emu.file_sys.translate(image_windows_path), ec))
             {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            if (image_info_attribute && image_info_attribute->Size >= sizeof(SECTION_IMAGE_INFORMATION<EmulatorTraits<Emu64>>))
+            {
+                const auto image_info = build_section_image_info(c.win_emu, image_windows_path);
+                if (image_info)
+                {
+                    c.emu.write_memory(image_info_attribute->Value, &image_info.value(), sizeof(*image_info));
+                }
             }
 
             if (!c.win_emu.callbacks.create_child_process)
@@ -1090,10 +1173,10 @@ namespace sogen
                 info.SuccessState.FileHandle = 0;
                 info.SuccessState.SectionHandle = 0;
                 info.SuccessState.UserProcessParametersNative = outcome.process_parameters_address;
-                info.SuccessState.UserProcessParametersWow64 = 0;
+                info.SuccessState.UserProcessParametersWow64 = static_cast<uint32_t>(outcome.process_params32_address);
                 info.SuccessState.CurrentParameterFlags = 0x6001;
                 info.SuccessState.PebAddressNative = outcome.peb_address;
-                info.SuccessState.PebAddressWow64 = 0;
+                info.SuccessState.PebAddressWow64 = static_cast<uint32_t>(outcome.peb32_address);
                 info.SuccessState.ManifestAddress = 0;
                 info.SuccessState.ManifestSize = 0;
             });
