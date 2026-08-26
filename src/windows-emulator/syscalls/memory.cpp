@@ -182,6 +182,7 @@ namespace sogen
             constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
             constexpr ACCESS_MASK PROCESS_VM_WRITE = 0x0020;
             constexpr ACCESS_MASK PROCESS_VM_OPERATION = 0x0008;
+            constexpr ACCESS_MASK PROCESS_QUERY_INFORMATION = 0x0400;
 
             // Real call sizes on this feature's target (a sandbox broker) are 4-64 bytes plus one
             // interception buffer of a few KiB, so a fixed 1 MiB boundary - well below the control
@@ -237,7 +238,43 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                const auto child = resolve_child_target(c, process_handle, PROCESS_QUERY_INFORMATION);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::query_memory;
+                request.address = base_address;
+                request.info_class = info_class;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtQueryVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status != STATUS_SUCCESS)
+                {
+                    return static_cast<NTSTATUS>(response->status);
+                }
+
+                if (return_length)
+                {
+                    return_length.write(response->payload.size());
+                }
+
+                if (memory_information_length < response->payload.size())
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                c.emu.write_memory(memory_information, response->payload.data(), response->payload.size());
+                return STATUS_SUCCESS;
             }
 
             if (info_class == MemoryWorkingSetExInformation || info_class == MemoryImageExtensionInformation)
@@ -421,11 +458,6 @@ namespace sogen
                                                const emulator_object<uint32_t> bytes_to_protect, const uint32_t protection,
                                                const emulator_object<uint32_t> old_protection)
         {
-            if (!c.proc.is_current_process_handle(process_handle))
-            {
-                return STATUS_NOT_SUPPORTED;
-            }
-
             const auto orig_start = base_address.read();
             const auto orig_length = bytes_to_protect.read();
 
@@ -434,6 +466,37 @@ namespace sogen
 
             base_address.write(aligned_start);
             bytes_to_protect.write(static_cast<uint32_t>(aligned_length));
+
+            if (!c.proc.is_current_process_handle(process_handle))
+            {
+                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_OPERATION);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::protect_memory;
+                request.address = aligned_start;
+                request.size = aligned_length;
+                request.protection = protection;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtProtectVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status == STATUS_SUCCESS && old_protection)
+                {
+                    old_protection.write(response->old_protection);
+                }
+
+                return static_cast<NTSTATUS>(response->status);
+            }
 
             const auto requested_protection = try_map_nt_to_emulator_protection(protection);
             if (!requested_protection.has_value())
@@ -473,7 +536,44 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_OPERATION);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                // Neither has a wire representation in process_control_request, and neither is a call
+                // shape the Chromium sandbox broker (this feature's target) ever makes against a child
+                // via VirtualAllocEx - MEM_RESET only applies to memory the caller already owns
+                // in-process, and extended address requirements are a same-process placement hint.
+                if (extended_parameter_count != 0 || (allocation_type & MEM_RESET) != 0)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                process_control_request request{};
+                request.op = process_control_op::allocate_memory;
+                request.address = base_address.read();
+                request.size = bytes_to_allocate.read();
+                request.allocation_type = allocation_type;
+                request.protection = page_protection;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtAllocateVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status == STATUS_SUCCESS)
+                {
+                    base_address.write(response->base_address);
+                    bytes_to_allocate.write(response->region_size);
+                }
+
+                return static_cast<NTSTATUS>(response->status);
             }
 
             auto allocation_bytes = bytes_to_allocate.read();
@@ -659,7 +759,34 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_OPERATION);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::free_memory;
+                request.address = base_address.read();
+                request.size = bytes_to_allocate.read();
+                request.free_type = free_type;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtFreeVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status == STATUS_SUCCESS)
+                {
+                    base_address.write(response->base_address);
+                    bytes_to_allocate.write(response->region_size);
+                }
+
+                return static_cast<NTSTATUS>(response->status);
             }
 
             if (free_type == 0)

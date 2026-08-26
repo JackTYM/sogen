@@ -32,14 +32,6 @@ namespace sogen
             response.status = transfer_status(transferred, request.payload.size());
         }
 
-        // Narrower than syscalls/memory.cpp's handle_NtAllocateVirtualMemoryEx in two ways, both
-        // deliberate scope cuts for this task: it never validates request.size == 0 or an
-        // unrecognized/empty allocation_type (the real handler rejects both with
-        // STATUS_INVALID_PARAMETER, memory.cpp:426-429/574-577), and it always calls
-        // memory_manager::allocate_memory - there is no commit-onto-an-existing-reservation path
-        // (commit && !reserve calls memory_manager::commit_memory instead, memory.cpp:579-583). Task 7
-        // adds both when this executor starts backing the real NtAllocateVirtualMemory{,Ex}
-        // cross-process path.
         void execute_allocate_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             const auto protection = try_map_nt_to_emulator_protection(request.protection);
@@ -49,8 +41,24 @@ namespace sogen
                 return;
             }
 
+            if (request.size == 0)
+            {
+                response.status = STATUS_INVALID_PARAMETER;
+                return;
+            }
+
+            const bool reserve = (request.allocation_type & MEM_RESERVE) != 0;
+            const bool commit = (request.allocation_type & MEM_COMMIT) != 0;
+
+            if ((request.allocation_type & ~static_cast<uint32_t>(MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN | MEM_WRITE_WATCH)) != 0 ||
+                (!commit && !reserve))
+            {
+                response.status = STATUS_INVALID_PARAMETER;
+                return;
+            }
+
             const auto size = static_cast<size_t>(page_align_up(request.size));
-            const bool reserve_only = (request.allocation_type & MEM_COMMIT) == 0;
+            const bool reserve_only = !commit;
 
             uint64_t base = 0;
             bool success = false;
@@ -58,7 +66,12 @@ namespace sogen
             if (request.address != 0)
             {
                 base = page_align_down(request.address);
-                success = target.memory.allocate_memory(base, size, *protection, reserve_only);
+
+                success = commit && !reserve && target.memory.commit_memory(base, size, *protection);
+                if (!success)
+                {
+                    success = target.memory.allocate_memory(base, size, *protection, reserve_only);
+                }
             }
             else
             {
@@ -190,9 +203,11 @@ namespace sogen
             info.RegionSize = static_cast<int64_t>(region_info.length);
             info.Protect = map_emulator_to_nt_protection(region_info.permissions);
             // Deliberately narrower than syscalls/memory.cpp's map_emulator_to_nt_allocation_protection:
-            // this task's scope only needs private allocations (see AllocateThenWriteThenRead), for which
-            // both formulas agree. Task 7 wires the full section_image-aware mapping when this executor
-            // starts backing the real NtQueryVirtualMemory cross-process path.
+            // this executor now backs the real cross-process NtQueryVirtualMemory path (memory.cpp), but
+            // its only caller is the Chromium sandbox broker's VirtualQueryEx over its own child's
+            // private allocations (VirtualAllocEx results, never a section-backed image mapped into a
+            // different process), for which both formulas agree - the section_image adjustment this
+            // simpler formula skips only ever changes the answer for memory_region_kind::section_image.
             info.AllocationProtect = map_emulator_to_nt_protection(region_info.initial_permissions);
             info.Type = region_info.is_reserved ? memory_region_policy::to_memory_basic_information_type(region_info.kind) : 0;
 
