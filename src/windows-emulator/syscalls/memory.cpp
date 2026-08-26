@@ -5,7 +5,11 @@
 #include "../syscall_utils.hpp"
 #include "../memory_manager.hpp"
 #include "../windows_path.hpp"
+#include "../cross_process.hpp"
 #include "../cross_process_memory.hpp"
+#include "../process_control_channel.hpp"
+
+#include <algorithm>
 
 namespace sogen
 {
@@ -173,6 +177,57 @@ namespace sogen
                 default:
                     return protection;
                 }
+            }
+
+            constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
+            constexpr ACCESS_MASK PROCESS_VM_WRITE = 0x0020;
+            constexpr ACCESS_MASK PROCESS_VM_OPERATION = 0x0008;
+
+            // Real call sizes on this feature's target (a sandbox broker) are 4-64 bytes plus one
+            // interception buffer of a few KiB, so a fixed 1 MiB boundary - well below the control
+            // channel's 64 MiB frame cap (child_process_spawn.cpp's max_reasonable_length) - is enough
+            // to keep every remote transfer within a single frame without building a general streaming
+            // protocol.
+            constexpr uint64_t remote_memory_chunk_size = 1ull << 20;
+
+            struct remote_transfer_outcome
+            {
+                size_t transferred{};
+                bool channel_dead{};
+            };
+
+            // Drives total_size bytes through chunk_operation(offset, chunk_size) in
+            // remote_memory_chunk_size-sized pieces. chunk_operation returns the bytes actually
+            // transferred for that chunk, or nullopt if the control channel round-trip itself failed
+            // (dead/unresponsive channel). Stops at the first chunk that doesn't fully transfer -
+            // whether due to a channel failure or a partial copy on either side - mirroring
+            // copy_guest_range_out/copy_guest_range_in's own first-failing-page early exit.
+            template <typename ChunkOperation>
+            remote_transfer_outcome perform_chunked_remote_transfer(const uint64_t total_size, ChunkOperation&& chunk_operation)
+            {
+                remote_transfer_outcome outcome{};
+
+                while (outcome.transferred < total_size)
+                {
+                    const auto chunk_offset = outcome.transferred;
+                    const auto chunk_size = std::min<uint64_t>(total_size - chunk_offset, remote_memory_chunk_size);
+
+                    const auto chunk_transferred = chunk_operation(chunk_offset, static_cast<size_t>(chunk_size));
+                    if (!chunk_transferred)
+                    {
+                        outcome.channel_dead = true;
+                        break;
+                    }
+
+                    outcome.transferred += *chunk_transferred;
+
+                    if (*chunk_transferred < chunk_size)
+                    {
+                        break;
+                    }
+                }
+
+                return outcome;
             }
         }
 
@@ -716,7 +771,39 @@ namespace sogen
 
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_READ);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                const auto outcome = perform_chunked_remote_transfer(
+                    number_of_bytes_to_read, [&](const uint64_t offset, const size_t chunk_size) -> std::optional<size_t> {
+                        process_control_request request{};
+                        request.op = process_control_op::read_memory;
+                        request.address = static_cast<uint64_t>(base_address) + offset;
+                        request.size = chunk_size;
+
+                        const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                        if (!response)
+                        {
+                            c.win_emu.log.error("NtReadVirtualMemory: control channel to child %u is dead/unresponsive\n",
+                                                target.record_id);
+                            return std::nullopt;
+                        }
+
+                        return copy_guest_range_in(c.emu, static_cast<uint64_t>(buffer) + offset, response->payload);
+                    });
+
+                if (outcome.channel_dead)
+                {
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                number_of_bytes_read.try_write(static_cast<ULONG>(outcome.transferred));
+                return transfer_status(outcome.transferred, number_of_bytes_to_read);
             }
 
             if (number_of_bytes_to_read == 0)
@@ -741,7 +828,43 @@ namespace sogen
 
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_WRITE | PROCESS_VM_OPERATION);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                const auto outcome = perform_chunked_remote_transfer(
+                    number_of_bytes_to_write, [&](const uint64_t offset, const size_t chunk_size) -> std::optional<size_t> {
+                        std::vector<std::byte> data(chunk_size);
+                        const auto bytes_read_from_source = copy_guest_range_out(c.emu, static_cast<uint64_t>(buffer) + offset, data);
+                        data.resize(bytes_read_from_source);
+
+                        process_control_request request{};
+                        request.op = process_control_op::write_memory;
+                        request.address = static_cast<uint64_t>(base_address) + offset;
+                        request.payload = std::move(data);
+
+                        const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                        if (!response)
+                        {
+                            c.win_emu.log.error("NtWriteVirtualMemory: control channel to child %u is dead/unresponsive\n",
+                                                target.record_id);
+                            return std::nullopt;
+                        }
+
+                        return static_cast<size_t>(response->bytes_written);
+                    });
+
+                if (outcome.channel_dead)
+                {
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                number_of_bytes_write.try_write(static_cast<ULONG>(outcome.transferred));
+                return transfer_status(outcome.transferred, number_of_bytes_to_write);
             }
 
             if (number_of_bytes_to_write == 0)
