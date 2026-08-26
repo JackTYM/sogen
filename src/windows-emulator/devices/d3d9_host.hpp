@@ -421,6 +421,20 @@ namespace sogen
             std::optional<parsed_vertex_decl> parsed;
         };
 
+        // Fixed slot order for the six D3D9 constant-register UBOs. device_state::const_versions,
+        // ubo_staging_, ubo_scratch_, ubo_built_version_ and ubo_upload_cache_ are all indexed by it, as
+        // are execute_draw's own per-draw arena offsets and descriptor writes.
+        enum ubo_index : size_t
+        {
+            ubo_vs_f = 0,
+            ubo_ps_f = 1,
+            ubo_vs_i = 2,
+            ubo_ps_i = 3,
+            ubo_vs_b = 4,
+            ubo_ps_b = 5,
+            ubo_slot_count = 6,
+        };
+
         // Per-device fixed-function/DDI state. Most of this is now consumed by execute_draw and the
         // pipeline builders (render_state, bound_textures, sampler_state, index_buffer, stream_sources/
         // strides, vertex_decl, vs/ps_const_f, vs/ps_const_i, vs/ps_const_b, render_targets,
@@ -458,6 +472,12 @@ namespace sogen
             // handler in d3d9_host.cpp) -- only element (register * 4) is ever non-zero.
             std::vector<uint32_t> vs_const_b{};
             std::vector<uint32_t> ps_const_b{};
+            // Bumped by every SetVertex/PixelShaderConstant* handler that writes the matching vector
+            // above. A live MW2 gameplay profile measured the six build_ubo_staging calls at 1.59us of
+            // execute_draw's 2.52us reserve phase -- ~26KB of zero-fill, memcpy and byte-compare per
+            // draw -- while MW2 rewrites at most one or two of the six between consecutive draws, so
+            // execute_draw uses these to skip rebuilding a slot whose source is untouched.
+            std::array<uint64_t, ubo_slot_count> const_versions{};
             std::array<uint64_t, 4> render_targets{};
             uint64_t depth_stencil{};
             // Last SetScissorRect rect (RECT semantics -- exclusive right/bottom); only consulted at
@@ -656,6 +676,11 @@ namespace sogen
         // the candidate actually differs, so it doubles as the "last known uploaded content" snapshot the
         // cache-hit check compares fresh candidates against.
         std::array<std::vector<std::byte>, 6> ubo_scratch_{};
+        // device_state::const_versions value ubo_staging_[slot]'s current content was built from. Equal
+        // versions mean the source registers haven't been written since, so the content cannot differ and
+        // the whole build+compare is skipped. A slot whose ubo_staging_ is still empty (first draw, or a
+        // size change) always rebuilds regardless, so no "never built" sentinel is needed.
+        std::array<uint64_t, 6> ubo_built_version_{};
 
         // Identity of the dynamic-rendering instance (if any) currently left open on a slot's batch
         // command buffer, spanning zero or more already-recorded draws. execute_draw reopens a fresh

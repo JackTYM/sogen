@@ -1973,8 +1973,14 @@ namespace sogen
         struct draw_profile_totals
         {
             uint64_t calls{};
-            uint64_t setup_ns{};       // entry through pipeline/RT/depth-stencil-view setup
-            uint64_t reserve_ns{};     // Phase A: resolve+reserve arena slices
+            uint64_t setup_ns{};   // entry through pipeline/RT/depth-stencil-view setup
+            uint64_t reserve_ns{}; // Phase A: resolve+reserve arena slices
+            // Sub-phases of reserve_ns, in execution order; they sum to it bar the timestamp overhead.
+            uint64_t resolve_ns{};     // stream/index byte-source resolution + per-draw byte-range narrowing
+            uint64_t ubo_build_ns{};   // build_ubo_staging: zero-fill + memcpy + equality compare, x6
+            uint64_t precount_ns{};    // draw_arena_bytes pre-count
+            uint64_t batch_ns{};       // batch flush/grow/reopen decision and the reopen work itself
+            uint64_t suballoc_ns{};    // upload-cache checks + arena_suballoc for every slice
             uint64_t upload_ns{};      // Phase B: upload each reserved range
             uint64_t texdesc_ns{};     // texture upload/view/sampler setup + descriptor set writes
             uint64_t update_desc_ns{}; // subset of texdesc_ns: just the vulkan_.update_descriptor_sets call
@@ -2028,11 +2034,18 @@ namespace sogen
             if (g_draw_profile.calls != 0 && g_draw_profile.calls % 2000 == 0)
             {
                 fprintf(stderr,
-                        "[d3d9-drawprofile] calls=%llu setup=%.2fus reserve=%.2fus upload=%.2fus texdesc=%.2fus "
+                        "[d3d9-drawprofile] calls=%llu setup=%.2fus reserve=%.2fus "
+                        "(resolve=%.2fus ubo_build=%.2fus precount=%.2fus batch=%.2fus suballoc=%.2fus) "
+                        "upload=%.2fus texdesc=%.2fus "
                         "(update_desc=%.2fus) record=%.2fus (avg/draw)\n",
                         static_cast<unsigned long long>(g_draw_profile.calls),
                         static_cast<double>(g_draw_profile.setup_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
                         static_cast<double>(g_draw_profile.reserve_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.resolve_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.ubo_build_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.precount_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.batch_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
+                        static_cast<double>(g_draw_profile.suballoc_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
                         static_cast<double>(g_draw_profile.upload_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
                         static_cast<double>(g_draw_profile.texdesc_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
                         static_cast<double>(g_draw_profile.update_desc_ns) / 1000.0 / static_cast<double>(g_draw_profile.calls),
@@ -2410,6 +2423,8 @@ namespace sogen
             ib_range_end = std::max(start, end);
         }
 
+        const auto t_resolve_done = profile ? std::chrono::steady_clock::now() : t_setup_done;
+
         // D3D9 SM2/3 float constant-register caps (MaxVertexShaderConst = 256, fill_d3d9caps).
         constexpr size_t vs_ubo_size = 256 * 4 * sizeof(float);
         // The pixel stage has no D3DCAPS9 field of its own -- its float-constant count follows
@@ -2422,18 +2437,8 @@ namespace sogen
         // each register expanded to a 16-byte slot (see vs/ps_const_i/b's own comments in d3d9_host.hpp).
         constexpr size_t int_bool_ubo_size = 16 * 4 * sizeof(uint32_t);
 
-        // Order is fixed -- both the reservation/upload here and the descriptor writes below read each UBO
-        // by these names. ubo_sizes is indexed by the same enum.
-        enum ubo_index : size_t
-        {
-            ubo_vs_f = 0,
-            ubo_ps_f = 1,
-            ubo_vs_i = 2,
-            ubo_ps_i = 3,
-            ubo_vs_b = 4,
-            ubo_ps_b = 5,
-        };
-
+        // Indexed by ubo_index (d3d9_host.hpp) -- both the reservation/upload here and the descriptor
+        // writes below read each UBO by those names.
         const std::array<size_t, 6> ubo_sizes{vs_ubo_size,       ps_ubo_size,       int_bool_ubo_size,
                                               int_bool_ubo_size, int_bool_ubo_size, int_bool_ubo_size};
         std::array<size_t, 6> ubo_offsets{};
@@ -2479,19 +2484,29 @@ namespace sogen
         // the cache-hit check in phase A below, which reuses the previous draw's arena offset/upload for any
         // slot that's both unchanged AND still within the same batch_generation_.
         std::array<bool, 6> ubo_changed{};
+        // Skips build_ubo_staging outright for a slot whose source registers haven't been written since the
+        // build ubo_staging_[slot] currently holds -- untouched registers cannot produce different bytes, so
+        // the zero-fill/memcpy/compare would always conclude "unchanged". An empty ubo_staging_[slot] (first
+        // draw, or a size change) is never skipped, which is what makes a zero starting version safe.
+        const auto build_slot = [&](const size_t slot, const size_t size, const auto& consts) {
+            if (ubo_staging[slot].size() == size && this->ubo_built_version_[slot] == this->state_.const_versions[slot])
+            {
+                return false;
+            }
+            this->ubo_built_version_[slot] = this->state_.const_versions[slot];
+            return build_ubo_staging(ubo_staging[slot], ubo_scratch[slot], size, consts);
+        };
         if (use_programmable)
         {
-            ubo_changed[ubo_vs_f] = build_ubo_staging(ubo_staging[ubo_vs_f], ubo_scratch[ubo_vs_f], vs_ubo_size, this->state_.vs_const_f);
-            ubo_changed[ubo_ps_f] = build_ubo_staging(ubo_staging[ubo_ps_f], ubo_scratch[ubo_ps_f], ps_ubo_size, this->state_.ps_const_f);
-            ubo_changed[ubo_vs_i] =
-                build_ubo_staging(ubo_staging[ubo_vs_i], ubo_scratch[ubo_vs_i], int_bool_ubo_size, this->state_.vs_const_i);
-            ubo_changed[ubo_ps_i] =
-                build_ubo_staging(ubo_staging[ubo_ps_i], ubo_scratch[ubo_ps_i], int_bool_ubo_size, this->state_.ps_const_i);
-            ubo_changed[ubo_vs_b] =
-                build_ubo_staging(ubo_staging[ubo_vs_b], ubo_scratch[ubo_vs_b], int_bool_ubo_size, this->state_.vs_const_b);
-            ubo_changed[ubo_ps_b] =
-                build_ubo_staging(ubo_staging[ubo_ps_b], ubo_scratch[ubo_ps_b], int_bool_ubo_size, this->state_.ps_const_b);
+            ubo_changed[ubo_vs_f] = build_slot(ubo_vs_f, vs_ubo_size, this->state_.vs_const_f);
+            ubo_changed[ubo_ps_f] = build_slot(ubo_ps_f, ps_ubo_size, this->state_.ps_const_f);
+            ubo_changed[ubo_vs_i] = build_slot(ubo_vs_i, int_bool_ubo_size, this->state_.vs_const_i);
+            ubo_changed[ubo_ps_i] = build_slot(ubo_ps_i, int_bool_ubo_size, this->state_.ps_const_i);
+            ubo_changed[ubo_vs_b] = build_slot(ubo_vs_b, int_bool_ubo_size, this->state_.vs_const_b);
+            ubo_changed[ubo_ps_b] = build_slot(ubo_ps_b, int_bool_ubo_size, this->state_.ps_const_b);
         }
+
+        const auto t_ubo_build_done = profile ? std::chrono::steady_clock::now() : t_setup_done;
 
         // Total arena bytes this draw's reservations will consume, rounded per slice with the exact same
         // arena_alignment arena_suballoc itself rounds with (a mismatch here would let this pre-count
@@ -2515,6 +2530,8 @@ namespace sogen
                 draw_arena_bytes += aligned(s);
             }
         }
+
+        const auto t_precount_done = profile ? std::chrono::steady_clock::now() : t_setup_done;
 
         // Batch management -- decide whether to keep accumulating into the currently-open batch or close
         // it first, then (re)open a batch this draw records into. Depth-stencil draws batch on exactly the
@@ -2621,6 +2638,8 @@ namespace sogen
             // vertex_index_uniform_arena_[slot].buffer/memory entirely.
             ++this->batch_generation_;
         }
+
+        const auto t_batch_done = profile ? std::chrono::steady_clock::now() : t_setup_done;
 
         // Bound here, now that batch_slot_ is settled for this draw -- every arena_suballoc/upload_memory
         // call below (phase A/B) and every batch_command_buffer_ use in the recording step further down
@@ -3382,6 +3401,11 @@ namespace sogen
             ++g_draw_profile.calls;
             g_draw_profile.setup_ns += ns(t_setup_done - t_entry);
             g_draw_profile.reserve_ns += ns(t_reserve_done - t_setup_done);
+            g_draw_profile.resolve_ns += ns(t_resolve_done - t_setup_done);
+            g_draw_profile.ubo_build_ns += ns(t_ubo_build_done - t_resolve_done);
+            g_draw_profile.precount_ns += ns(t_precount_done - t_ubo_build_done);
+            g_draw_profile.batch_ns += ns(t_batch_done - t_precount_done);
+            g_draw_profile.suballoc_ns += ns(t_reserve_done - t_batch_done);
             // t_upload_done/t_texdesc_done default to t_reserve_done for a fixed-function draw (no
             // separate upload/texture-descriptor checkpoints on that path), so its whole reserve-to-done
             // span is attributed to record_ns instead. Acceptable imprecision for a first-pass profile:
@@ -4993,6 +5017,7 @@ namespace sogen
                 target.resize(required);
             }
             std::memcpy(target.data() + static_cast<size_t>(req.start_register) * 4, payload + sizeof(req), bytes);
+            ++this->state_.const_versions[is_vs ? ubo_vs_f : ubo_ps_f];
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_vs_const_i:
@@ -5008,14 +5033,15 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_i ? this->state_.vs_const_i
-                                                                                                                : this->state_.ps_const_i;
+            const bool is_vs = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_i;
+            auto& target = is_vs ? this->state_.vs_const_i : this->state_.ps_const_i;
             const size_t required = static_cast<size_t>(req.start_register) * 4 + int_count;
             if (target.size() < required)
             {
                 target.resize(required);
             }
             std::memcpy(target.data() + static_cast<size_t>(req.start_register) * 4, payload + sizeof(req), bytes);
+            ++this->state_.const_versions[is_vs ? ubo_vs_i : ubo_ps_i];
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_vs_const_b:
@@ -5030,8 +5056,8 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            auto& target = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_b ? this->state_.vs_const_b
-                                                                                                                : this->state_.ps_const_b;
+            const bool is_vs = static_cast<gpu_bridge::command>(opcode) == gpu_bridge::command::d3d9_set_vs_const_b;
+            auto& target = is_vs ? this->state_.vs_const_b : this->state_.ps_const_b;
             const size_t required = (static_cast<size_t>(req.start_register) + req.count) * 4;
             if (target.size() < required)
             {
@@ -5043,6 +5069,7 @@ namespace sogen
                 std::memcpy(&value, payload + sizeof(req) + static_cast<size_t>(i) * sizeof(uint32_t), sizeof(value));
                 target[(static_cast<size_t>(req.start_register) + i) * 4] = value;
             }
+            ++this->state_.const_versions[is_vs ? ubo_vs_b : ubo_ps_b];
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_render_target: {
