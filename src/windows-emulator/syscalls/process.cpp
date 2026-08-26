@@ -733,7 +733,7 @@ namespace sogen
                                             ACCESS_MASK /*thread_desired_access*/,
                                             const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*process_object_attributes*/,
                                             const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*thread_object_attributes*/,
-                                            ULONG /*process_flags*/, ULONG /*thread_flags*/,
+                                            ULONG /*process_flags*/, const ULONG thread_flags,
                                             const emulator_object<RTL_USER_PROCESS_PARAMETERS64> process_parameters,
                                             const emulator_object<PS_CREATE_INFO<EmulatorTraits<Emu64>>> create_info,
                                             const emulator_object<PS_ATTRIBUTE_LIST<EmulatorTraits<Emu64>>> attribute_list)
@@ -841,6 +841,7 @@ namespace sogen
                 .command_line = std::move(command_line),
                 .image_path = image_path,
                 .process_id = child_pid,
+                .start_suspended = (thread_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) != 0,
             };
 
             std::vector<inherited_pipe_handle> inherited_pipes{};

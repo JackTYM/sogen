@@ -231,6 +231,12 @@ namespace sogen
         // both sides agree on this process's identity - see process_context::process_id's doc comment.
         std::optional<uint32_t> process_id{};
 
+        // Set for a child spawned via NtCreateUserProcess with THREAD_CREATE_FLAGS_CREATE_SUSPENDED
+        // (handle_NtCreateUserProcess) - the child's bootstrap (main.cpp) leaves its initial thread's
+        // suspended count at 1 instead of running it immediately, so it executes no guest instructions
+        // until the parent issues a resume_thread control request (see process_control_server.cpp).
+        bool start_suspended{false};
+
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->application);
@@ -240,6 +246,7 @@ namespace sogen
             buffer.write_optional(this->command_line);
             buffer.write_optional(this->image_path);
             buffer.write_optional(this->process_id);
+            buffer.write(this->start_suspended);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -251,6 +258,7 @@ namespace sogen
             buffer.read_optional(this->command_line);
             buffer.read_optional(this->image_path);
             buffer.read_optional(this->process_id);
+            buffer.read(this->start_suspended);
         }
     };
 

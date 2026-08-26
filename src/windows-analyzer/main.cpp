@@ -723,6 +723,12 @@ namespace sogen
                     }
 
                     win_emu->setup_process_if_necessary();
+
+                    if (child_bootstrap->settings.start_suspended)
+                    {
+                        win_emu->current_thread().suspended = 1;
+                        win_emu->log.log("Child started suspended (THREAD_CREATE_FLAGS_CREATE_SUSPENDED)\n");
+                    }
                 }
             }
             catch (const std::exception& e)

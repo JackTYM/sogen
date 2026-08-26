@@ -655,6 +655,75 @@ namespace sogen::test
         ASSERT_EQ(section_entry->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
     }
 
+    TEST(CrossProcessTest, ResumeThreadClearsSuspendedInitialThread)
+    {
+        auto b = create_empty_emulator();
+        const auto h = b.process.create_thread(b.memory, 0x1000, 0, 0x1000, THREAD_CREATE_FLAGS_CREATE_SUSPENDED, true);
+        auto* const thread = b.process.threads.get(h);
+        ASSERT_NE(thread, nullptr);
+        ASSERT_EQ(thread->suspended, 1u);
+
+        loopback_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::resume_thread;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(response->previous_suspend_count, 1u);
+        ASSERT_EQ(thread->suspended, 0u);
+    }
+
+    TEST(CrossProcessTest, ResumeThreadOnAlreadyRunningThreadReportsZeroAndStaysZero)
+    {
+        auto b = create_empty_emulator();
+        const auto h = b.process.create_thread(b.memory, 0x1000, 0, 0x1000, 0, true);
+        auto* const thread = b.process.threads.get(h);
+        ASSERT_NE(thread, nullptr);
+        ASSERT_EQ(thread->suspended, 0u);
+
+        loopback_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::resume_thread;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(response->previous_suspend_count, 0u);
+        ASSERT_EQ(thread->suspended, 0u);
+    }
+
+    // resume_thread carries no thread id (see process_control_server.cpp's find_initial_thread doc
+    // comment) - it always targets the lowest-id thread, exactly like NtCreateUserProcess's one
+    // pseudo thread handle always denotes the child's initial thread on real Windows. Two threads
+    // here, created out of id order relative to which one should be picked, prove the selection is by
+    // id and not simply "whichever thread was created/inserted last".
+    TEST(CrossProcessTest, ResumeThreadTargetsInitialThreadNotLaterOnes)
+    {
+        auto b = create_empty_emulator();
+        const auto initial_handle = b.process.create_thread(b.memory, 0x1000, 0, 0x1000, THREAD_CREATE_FLAGS_CREATE_SUSPENDED, true);
+        const auto other_handle = b.process.create_thread(b.memory, 0x2000, 0, 0x1000, THREAD_CREATE_FLAGS_CREATE_SUSPENDED, false);
+
+        auto* const initial_thread = b.process.threads.get(initial_handle);
+        auto* const other_thread = b.process.threads.get(other_handle);
+        ASSERT_NE(initial_thread, nullptr);
+        ASSERT_NE(other_thread, nullptr);
+        ASSERT_LT(initial_thread->id, other_thread->id);
+
+        loopback_process_control_channel channel{b};
+
+        process_control_request request{};
+        request.op = process_control_op::resume_thread;
+
+        const auto response = channel.request(request, process_control_default_timeout_ms);
+        ASSERT_TRUE(response.has_value());
+        ASSERT_EQ(response->status, STATUS_SUCCESS);
+        ASSERT_EQ(initial_thread->suspended, 0u);
+        ASSERT_EQ(other_thread->suspended, 1u);
+    }
+
     TEST(CrossProcessTest, SerializationRoundTrip)
     {
         constexpr std::array all_ops = {

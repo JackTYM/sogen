@@ -2,6 +2,8 @@
 #include "../cpu_context.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "../cross_process.hpp"
+#include "../process_control_channel.hpp"
 
 #include <algorithm>
 #include <utils/finally.hpp>
@@ -11,6 +13,18 @@ namespace sogen
 
     namespace syscalls
     {
+        namespace
+        {
+            // NtResumeThread on real Windows operates on a THREAD handle and requires
+            // THREAD_SUSPEND_RESUME, granted independently of the owning process's access mask. This
+            // codebase models cross-process access only via child_process_record::granted_access (a
+            // single process-level mask checked by resolve_child_target, see cross_process.hpp) - there
+            // is nowhere to stash a distinct per-thread right for a pseudo handle. PROCESS_SUSPEND_RESUME
+            // is the closest real NT process-level right for this operation, so it is used here as the
+            // required access, consistent with every other cross-process check in this codebase.
+            constexpr ACCESS_MASK PROCESS_SUSPEND_RESUME = 0x0800;
+        }
+
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, const handle thread_handle, const THREADINFOCLASS info_class,
                                                const uint64_t thread_information, const uint32_t thread_information_length)
         {
@@ -772,17 +786,35 @@ namespace sogen
         {
             // A child process created via NtCreateUserProcess runs as a separate host OS process and
             // only has a pseudo thread handle in this process - there's no local emulator_thread to
-            // resume, but CreateProcessInternalW always resumes the (always-suspended) thread it got
-            // back, so tolerate it here rather than let a real thread-not-found error surface.
+            // resume. Round-trip a resume_thread control request to the child's own host instance
+            // instead (see process_control_server.cpp's execute_resume_thread).
             if (thread_handle.value.is_pseudo && thread_handle.value.type == handle_types::thread &&
                 c.proc.child_processes.contains(thread_handle.value.id))
             {
-                if (previous_suspend_count)
+                const auto child = resolve_child_target(c, thread_handle, PROCESS_SUSPEND_RESUME);
+                if (std::holds_alternative<NTSTATUS>(child))
                 {
-                    previous_suspend_count.write(1);
+                    return std::get<NTSTATUS>(child);
                 }
 
-                return STATUS_SUCCESS;
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::resume_thread;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtResumeThread: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (previous_suspend_count)
+                {
+                    previous_suspend_count.write(response->previous_suspend_count);
+                }
+
+                return static_cast<NTSTATUS>(response->status);
             }
 
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);

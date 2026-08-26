@@ -201,6 +201,44 @@ namespace sogen
             response.status = STATUS_SUCCESS;
         }
 
+        // The initial thread is always the one with the lowest id (process_context::create_thread
+        // hands out 8, 12, 16, ... in creation order, see its own doc comment) - a resume_thread
+        // request never carries a thread id because on real Windows this always targets the one
+        // pseudo thread handle NtCreateUserProcess minted for the child (the sandbox broker's
+        // ResumeThread(target.thread_handle())), which is this thread.
+        emulator_thread* find_initial_thread(process_context& process)
+        {
+            emulator_thread* initial = nullptr;
+            for (auto& thread : process.threads | std::views::values)
+            {
+                if (!initial || thread.id < initial->id)
+                {
+                    initial = &thread;
+                }
+            }
+
+            return initial;
+        }
+
+        void execute_resume_thread(windows_emulator& target, const process_control_request& /*request*/, process_control_response& response)
+        {
+            auto* const thread = find_initial_thread(target.process);
+            if (!thread)
+            {
+                response.status = STATUS_UNSUCCESSFUL;
+                return;
+            }
+
+            response.previous_suspend_count = thread->suspended;
+
+            if (thread->suspended > 0)
+            {
+                thread->suspended -= 1;
+            }
+
+            response.status = STATUS_SUCCESS;
+        }
+
         void execute_terminate(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             target.process.exit_status = request.exit_status;
@@ -254,8 +292,7 @@ namespace sogen
             execute_terminate(target, request, response);
             break;
         case process_control_op::resume_thread:
-            // Task 5 wires this up alongside making children start suspended; nothing issues this op yet.
-            response.status = STATUS_NOT_SUPPORTED;
+            execute_resume_thread(target, request, response);
             break;
         case process_control_op::adopt_section:
             execute_adopt_section(target, request, response);
