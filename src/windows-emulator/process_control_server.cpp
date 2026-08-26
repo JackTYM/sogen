@@ -348,7 +348,7 @@ namespace sogen
         void execute_terminate(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             target.process.exit_status = request.exit_status;
-            target.emu().stop();
+            target.stop();
             response.status = STATUS_SUCCESS;
         }
 
