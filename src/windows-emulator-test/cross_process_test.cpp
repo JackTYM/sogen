@@ -1097,15 +1097,65 @@ namespace sogen::test
         ASSERT_EQ(actual_tail, expected_tail);
     }
 
+    // Mirror of the target-partial case above: this time the TARGET fully produces the requested
+    // range, but the LOCAL destination buffer only has its first page mapped - exercising the other
+    // arm of min(target-produced, locally-writable), where the local side (not the target) is what
+    // limits the transferred count.
+    TEST(CrossProcessTest, NtReadVirtualMemorySyscallReportsPartialCopyWhenLocalDestinationIsPartiallyUnmapped)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto child_base = child.memory.allocate_memory(0x2000, memory_permission::read_write);
+        ASSERT_NE(child_base, 0u);
+
+        std::vector<std::byte> pattern(0x2000);
+        for (size_t i = 0; i < pattern.size(); ++i)
+        {
+            pattern[i] = static_cast<std::byte>(i % 251);
+        }
+        ASSERT_TRUE(child.memory.try_write_memory(child_base, pattern.data(), pattern.size()));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto local_buffer = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(local_buffer, 0u);
+
+        const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(out_address, 0u);
+        const emulator_object<ULONG> number_of_bytes_read{parent.memory, out_address};
+
+        const auto status = syscalls::handle_NtReadVirtualMemory(c, h, child_base, local_buffer, 0x2000, number_of_bytes_read);
+
+        ASSERT_EQ(status, STATUS_PARTIAL_COPY);
+        ASSERT_EQ(number_of_bytes_read.read(), 0x1000u);
+
+        std::vector<std::byte> actual(0x1000);
+        ASSERT_TRUE(parent.memory.try_read_memory(local_buffer, actual.data(), actual.size()));
+        const std::vector<std::byte> expected(pattern.begin(), pattern.begin() + 0x1000);
+        ASSERT_EQ(actual, expected);
+    }
+
     // Spans three of perform_chunked_remote_transfer's 1 MiB chunks (memory.cpp), each executed as a
     // separate control-channel round trip - proving the multi-chunk loop reassembles a large transfer
-    // correctly, not just single-chunk requests under the cap.
+    // correctly, not just single-chunk requests under the cap. The pattern embeds the chunk index
+    // (rather than repeating every 256 bytes, which exactly divides the 1 MiB chunk size and so would
+    // let a wrong-remote-offset-per-chunk bug fetch content that coincidentally matches), so a chunk
+    // fetched from the wrong remote offset produces visibly wrong bytes instead of passing by
+    // coincidence.
     TEST(CrossProcessTest, NtReadVirtualMemorySyscallChunksTransfersLargerThanOneMebibyte)
     {
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        constexpr size_t total_size = 3u * 1024u * 1024u;
+        constexpr size_t chunk_size = 1u << 20;
+        constexpr size_t total_size = 3u * chunk_size;
 
         const auto child_base = child.memory.allocate_memory(total_size, memory_permission::read_write);
         ASSERT_NE(child_base, 0u);
@@ -1113,7 +1163,8 @@ namespace sogen::test
         std::vector<std::byte> pattern(total_size);
         for (size_t i = 0; i < pattern.size(); ++i)
         {
-            pattern[i] = static_cast<std::byte>(i % 256);
+            const auto chunk_index = i / chunk_size;
+            pattern[i] = static_cast<std::byte>((chunk_index * 37 + i % chunk_size) & 0xFF);
         }
         ASSERT_TRUE(child.memory.try_write_memory(child_base, pattern.data(), pattern.size()));
 
