@@ -13,8 +13,15 @@ namespace sogen
             {
                 switch (target_object_handle.value.type)
                 {
-                case handle_types::process:
-                    return target_object_handle == GUEST_PROCESS_HANDLE && process.exit_status.has_value();
+                case handle_types::process: {
+                    if (target_object_handle == GUEST_PROCESS_HANDLE)
+                    {
+                        return process.exit_status.has_value();
+                    }
+
+                    const auto child = process.child_processes.find(target_object_handle.value.id);
+                    return child != process.child_processes.end() && child->second.exit_status != STATUS_PENDING;
+                }
 
                 case handle_types::event: {
                     const auto* e = process.events.get(target_object_handle);

@@ -1142,8 +1142,8 @@ namespace sogen
             record.pid = child_pid;
             // The child now runs as an independent, real host OS process rather than being run to
             // completion synchronously before this syscall returns - its real exit status isn't known
-            // yet, and nothing in this codebase queries it today (NtWaitForSingleObject/
-            // NtQueryInformationProcess on the minted handle remain unimplemented, same as before).
+            // yet, and only becomes known through a remote NtTerminateProcess (see child_process_record
+            // in process_context.hpp); a child that exits or crashes on its own is never observed.
             record.exit_status = STATUS_PENDING;
             record.granted_access = resolve_granted_process_access(process_desired_access);
 

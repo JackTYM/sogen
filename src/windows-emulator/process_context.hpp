@@ -217,15 +217,16 @@ namespace sogen
 
         // A child process created via NtCreateUserProcess, running as a separate, independent host OS
         // process (see windows_emulator's create_child_process callback) - exit_status starts as
-        // STATUS_PENDING and stays that way for as long as the child keeps running, since nothing
-        // observes a still-live child's real exit status (NtWaitForSingleObject support for the minted
-        // process handle remains unimplemented). A successful remote NtTerminateProcess
-        // (handle_NtTerminateProcess, process.cpp) updates it to the requested exit code; from then on
-        // NtQueryInformationProcess's ProcessBasicInformation branch (also process.cpp) answers
-        // straight from this field, including for an already-terminated child. granted_access is the
-        // caller's process_desired_access from NtCreateUserProcess (see handle_NtCreateUserProcess),
-        // checked by resolve_child_target/resolve_child_record (cross_process.hpp) against the required
-        // right for a given cross-process operation.
+        // STATUS_PENDING and stays that way for as long as the child keeps running. A successful remote
+        // NtTerminateProcess (handle_NtTerminateProcess, process.cpp) is the only thing that updates it
+        // to the requested exit code - a child that exits or crashes on its own is not observed, so
+        // waiting on (NtWaitForSingleObject/NtAssociateWaitCompletionPacket, validate_wait_handle in
+        // object.cpp and is_wait_completion_target_signaled in io_completion_wait.cpp) or querying
+        // (NtQueryInformationProcess's ProcessBasicInformation branch, also process.cpp) the minted
+        // process handle for such a child never observes its real exit. granted_access is the caller's
+        // process_desired_access from NtCreateUserProcess (see handle_NtCreateUserProcess), checked by
+        // resolve_child_target/resolve_child_record (cross_process.hpp) against the required right for a
+        // given cross-process operation.
         struct child_process_record
         {
             windows_path image_path{};

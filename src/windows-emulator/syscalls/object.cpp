@@ -578,9 +578,16 @@ namespace sogen
 
             switch (h.value.type)
             {
-            case handle_types::process:
+            case handle_types::process: {
                 // The synthetic Steam process never signals, so a liveness wait times out ("alive").
-                return (h == GUEST_PROCESS_HANDLE || h == STEAM_PROCESS_HANDLE) ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+                if (h == GUEST_PROCESS_HANDLE || h == STEAM_PROCESS_HANDLE)
+                {
+                    return STATUS_SUCCESS;
+                }
+
+                const auto child = resolve_child_record(c, h, SYNCHRONIZE);
+                return std::holds_alternative<NTSTATUS>(child) ? std::get<NTSTATUS>(child) : STATUS_SUCCESS;
+            }
 
             case handle_types::file:
                 if (h.value.is_pseudo)

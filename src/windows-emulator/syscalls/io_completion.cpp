@@ -1,4 +1,5 @@
 #include "../std_include.hpp"
+#include "../cross_process.hpp"
 #include "../emulator_utils.hpp"
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
@@ -318,7 +319,12 @@ namespace sogen
                 switch (resolved_target_handle.value.type)
                 {
                 case handle_types::process:
-                    return resolved_target_handle == GUEST_PROCESS_HANDLE;
+                    if (resolved_target_handle == GUEST_PROCESS_HANDLE)
+                    {
+                        return true;
+                    }
+
+                    return !std::holds_alternative<NTSTATUS>(resolve_child_record(c, resolved_target_handle, SYNCHRONIZE));
                 case handle_types::event:
                     return c.proc.events.get(resolved_target_handle) != nullptr;
                 case handle_types::thread:
