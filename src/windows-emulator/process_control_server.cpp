@@ -258,7 +258,6 @@ namespace sogen
             }
 
             MEMORY_REGION_INFORMATION64 info{};
-            memset(&info, 0, sizeof(info));
             info.AllocationBase = region_info.allocation_base;
             info.AllocationProtect = map_emulator_to_nt_allocation_protection(region_info.initial_permissions, region_info.kind);
             info.RegionType = memory_region_policy::to_memory_region_information_type(region_info.kind);

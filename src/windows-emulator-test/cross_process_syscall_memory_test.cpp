@@ -1258,4 +1258,226 @@ namespace sogen::test
 
         ASSERT_EQ(info_value.AllocationProtect, static_cast<uint32_t>(PAGE_WRITECOPY));
     }
+
+    TEST(CrossProcessTest, NtProtectVirtualMemorySyscallReportsProcessIsTerminatingOnDeadChannel)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto base_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base_out, 0u);
+        const emulator_object<uint64_t> base_address{parent.memory, base_out};
+        base_address.write(0x1000); // already page-aligned, so the alignment math below stays trivial
+
+        const auto size_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(size_out, 0u);
+        const emulator_object<uint32_t> bytes_to_protect{parent.memory, size_out};
+        bytes_to_protect.write(0x1000);
+
+        const auto status = syscalls::handle_NtProtectVirtualMemory(c, h, base_address, bytes_to_protect, PAGE_READONLY,
+                                                                    emulator_object<uint32_t>{parent.memory, 0});
+
+        ASSERT_EQ(status, STATUS_PROCESS_IS_TERMINATING);
+        // Unlike the access-denied case, base_address/bytes_to_protect ARE written here - access was
+        // already resolved (the channel is registered, just dead) before the dead-channel check runs,
+        // and that alignment write happens unconditionally once access is resolved.
+        ASSERT_EQ(base_address.read(), 0x1000u);
+        ASSERT_EQ(bytes_to_protect.read(), 0x1000u);
+    }
+
+    TEST(CrossProcessTest, NtFreeVirtualMemorySyscallReportsProcessIsTerminatingOnDeadChannel)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto base_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(base_out, 0u);
+        const emulator_object<uint64_t> base_address{parent.memory, base_out};
+        base_address.write(0xDEADBEEFu);
+
+        const auto size_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(size_out, 0u);
+        const emulator_object<uint64_t> bytes_to_allocate{parent.memory, size_out};
+        bytes_to_allocate.write(0);
+
+        const auto status = syscalls::handle_NtFreeVirtualMemory(c, h, base_address, bytes_to_allocate, MEM_RELEASE);
+
+        ASSERT_EQ(status, STATUS_PROCESS_IS_TERMINATING);
+        ASSERT_EQ(base_address.read(), 0xDEADBEEFu);
+        ASSERT_EQ(bytes_to_allocate.read(), 0u);
+    }
+
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallReportsProcessIsTerminatingOnDeadChannel)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto return_length_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(return_length_out, 0u);
+        const emulator_object<uint64_t> return_length{parent.memory, return_length_out};
+        return_length.write(0xDEADBEEF);
+
+        const auto status = syscalls::handle_NtQueryVirtualMemory(c, h, 0x1000, MemoryBasicInformation, info_address,
+                                                                  sizeof(EMU_MEMORY_BASIC_INFORMATION64), return_length);
+
+        ASSERT_EQ(status, STATUS_PROCESS_IS_TERMINATING);
+        ASSERT_EQ(return_length.read(), 0xDEADBEEFu);
+    }
+
+    // Undersized-buffer rejection for MemoryImageInformation is a pre-round-trip, purely client-side
+    // check against a compile-time-known constant size (memory.cpp) - proven here by combining it with
+    // an address that has no module mapped in CHILD at all: if the buffer check ran AFTER the round
+    // trip, this would report STATUS_INVALID_ADDRESS instead.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteImageInformationRejectsUndersizedBuffer)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto return_length_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(return_length_out, 0u);
+        const emulator_object<uint64_t> return_length{parent.memory, return_length_out};
+
+        const auto status = syscalls::handle_NtQueryVirtualMemory(c, h, 0x10000, MemoryImageInformation, info_address,
+                                                                  sizeof(MEMORY_IMAGE_INFORMATION64) - 1, return_length);
+
+        ASSERT_EQ(status, STATUS_BUFFER_OVERFLOW);
+        ASSERT_EQ(return_length.read(), sizeof(MEMORY_IMAGE_INFORMATION64));
+    }
+
+    // Mirror of the MemoryImageInformation case: MemoryRegionInformation's undersized-buffer rejection
+    // is also pre-round-trip - proven here against an address CHILD never reserved at all, which would
+    // otherwise report STATUS_INVALID_ADDRESS from the round trip.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteRegionInformationRejectsUndersizedBuffer)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto return_length_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(return_length_out, 0u);
+        const emulator_object<uint64_t> return_length{parent.memory, return_length_out};
+
+        const auto status = syscalls::handle_NtQueryVirtualMemory(c, h, 0x10000, MemoryRegionInformation, info_address,
+                                                                  sizeof(MEMORY_REGION_INFORMATION64) - 1, return_length);
+
+        ASSERT_EQ(status, STATUS_BUFFER_OVERFLOW);
+        ASSERT_EQ(return_length.read(), sizeof(MEMORY_REGION_INFORMATION64));
+    }
+
+    // MemoryMappedFilenameInformation's required length depends on the target's filename (target
+    // state), so unlike Image/Region above it can only be checked AFTER the round trip - this proves
+    // that post-round-trip check still correctly rejects an undersized buffer instead of writing a
+    // truncated string.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteMappedFilenameRejectsUndersizedBuffer)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto child_base = child.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(child_base, 0u);
+        child.memory.set_region_mapped_filename(child_base, u"C:\\Windows\\System32\\ntdll.dll");
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto expected_path = windows_path(u"C:\\Windows\\System32\\ntdll.dll").to_device_path();
+        const auto required_length = static_cast<uint32_t>(sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>) +
+                                                           expected_path.size() * sizeof(char16_t) + sizeof(char16_t));
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto return_length_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(return_length_out, 0u);
+        const emulator_object<uint64_t> return_length{parent.memory, return_length_out};
+
+        const auto status = syscalls::handle_NtQueryVirtualMemory(c, h, child_base, MemoryMappedFilenameInformation, info_address,
+                                                                  required_length - 1, return_length);
+
+        ASSERT_EQ(status, STATUS_BUFFER_OVERFLOW);
+        ASSERT_EQ(return_length.read(), required_length);
+    }
+
+    // MemoryBasicInformation's buffer check is also post-round-trip, but reports the distinct
+    // STATUS_BUFFER_TOO_SMALL (not STATUS_BUFFER_OVERFLOW) - the one status this class uses that no
+    // other query class does, matching the same-process handler exactly.
+    TEST(CrossProcessTest, NtQueryVirtualMemorySyscallRemoteBasicInformationRejectsUndersizedBuffer)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto child_base = child.memory.allocate_memory(0x2000, memory_permission::read_write);
+        ASSERT_NE(child_base, 0u);
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto h = make_pseudo_handle(7, handle_types::process);
+
+        const auto info_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(info_address, 0u);
+
+        const auto return_length_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(return_length_out, 0u);
+        const emulator_object<uint64_t> return_length{parent.memory, return_length_out};
+
+        const auto status = syscalls::handle_NtQueryVirtualMemory(c, h, child_base, MemoryBasicInformation, info_address,
+                                                                  sizeof(EMU_MEMORY_BASIC_INFORMATION64) - 1, return_length);
+
+        ASSERT_EQ(status, STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(return_length.read(), sizeof(EMU_MEMORY_BASIC_INFORMATION64));
+    }
 } // namespace sogen::test
