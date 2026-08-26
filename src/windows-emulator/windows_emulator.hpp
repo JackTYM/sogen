@@ -339,6 +339,12 @@ namespace sogen
         // serialized, same as pipe_ipc_peers_.
         std::map<uint32_t, std::unique_ptr<process_control_channel>> child_control_channels_{};
 
+        // The incoming process_control_channel this process listens on for requests from its own
+        // parent (see child_process_outcome::control_fd and --child-control-fd), serviced by
+        // pump_process_control (perform_context_switch_work). Null for the root process and for any
+        // child on a platform without spawning support - see set_process_control_server.
+        std::unique_ptr<process_control_channel> process_control_server_{};
+
         // Short names (see devices/named_pipe.hpp's pipe_short_name) of every named pipe server
         // instance known to exist, whether created in this process (NtCreateNamedPipeFile) or
         // learned about from a sibling OS process (pipe_ipc_message_type::server_created). Backs
@@ -442,6 +448,19 @@ namespace sogen
         // Called once per scheduler tick (perform_context_switch_work), the same cadence as io_device's
         // own work() pump.
         void pump_pipe_ipc();
+
+        // Sets the incoming process_control_channel this process listens on for requests from its own
+        // parent (see child_process_outcome::control_fd and --child-control-fd). Left null for the root
+        // process and for any child on a platform without spawning support, in which case
+        // pump_process_control_server is a no-op.
+        void set_process_control_server(std::unique_ptr<process_control_channel> channel);
+
+        // Drains every request currently queued on the process_control_server, if one is registered.
+        // Called once per scheduler tick (perform_context_switch_work) right after pump_pipe_ipc, so it
+        // shares that call's idle-loop guarantee: perform_thread_switch keeps invoking
+        // perform_context_switch_work via switch_to_next_thread even while no thread is runnable, so a
+        // child with zero runnable threads still services its parent's requests.
+        void pump_process_control_server();
 
         // Records short_name (see devices/named_pipe.hpp's pipe_short_name) as a known-existing named
         // pipe server instance and wakes every thread currently parked in FSCTL_PIPE_WAIT for it (see

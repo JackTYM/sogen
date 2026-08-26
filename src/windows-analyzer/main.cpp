@@ -764,6 +764,11 @@ namespace sogen
                 send_child_ready(options.child_ipc_fd, win_emu->process.peb64.value(), win_emu->process.process_params64.value());
 #ifndef _WIN32
                 win_emu->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(options.child_ipc_fd));
+
+                if (options.child_control_fd >= 0)
+                {
+                    win_emu->set_process_control_server(create_fd_process_control_channel(options.child_control_fd));
+                }
 #endif
             }
 

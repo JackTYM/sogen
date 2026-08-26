@@ -16,6 +16,7 @@
 #include "network/static_socket_factory.hpp"
 #include "memory_permission_ext.hpp"
 #include "devices/named_pipe.hpp"
+#include "process_control_server.hpp"
 
 namespace sogen
 {
@@ -479,6 +480,7 @@ namespace sogen
             }
 
             win_emu.pump_pipe_ipc();
+            win_emu.pump_process_control_server();
 
             auto& devices = win_emu.process.devices;
 
@@ -1015,6 +1017,19 @@ namespace sogen
                     this->register_named_pipe_server(pipe_short_name(message->pipe_name));
                 }
             }
+        }
+    }
+
+    void windows_emulator::set_process_control_server(std::unique_ptr<process_control_channel> channel)
+    {
+        this->process_control_server_ = std::move(channel);
+    }
+
+    void windows_emulator::pump_process_control_server()
+    {
+        if (this->process_control_server_)
+        {
+            pump_process_control(*this, *this->process_control_server_);
         }
     }
 
