@@ -194,6 +194,7 @@ namespace sogen::gpu_bridge
         cmd_blit_image = 0x887,
         reset_descriptor_pool = 0x888,
         cmd_clear_attachments = 0x889,
+        record_and_call = 0x88A,
 
         // D3D9 UMD <-> host d3d9_host bridge (see d3d9-command-protocol/d3d9_command_protocol.hpp for
         // the payload structs). Dispatched through this same escape_command_header/command_record_header
@@ -328,6 +329,22 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_destroy_pipeline = make_ioctl(static_cast<uint32_t>(command::destroy_pipeline));
     inline constexpr uint32_t ioctl_get_surface_capabilities = make_ioctl(static_cast<uint32_t>(command::get_surface_capabilities));
     inline constexpr uint32_t ioctl_record_commands = make_ioctl(static_cast<uint32_t>(command::record_commands));
+    inline constexpr uint32_t ioctl_record_and_call = make_ioctl(static_cast<uint32_t>(command::record_and_call));
+
+    // ioctl_record_and_call: carries a pending record stream and the sync command whose ordering
+    // requirement forced that stream to be drained, in one Escape instead of two back-to-back ones.
+    // Input region is this header, then `batch_size` bytes of command_record_header stream (byte for
+    // byte what ioctl_record_commands would have carried), then inner_command_id's own input region;
+    // the output region is inner_command_id's output region verbatim. The host replays the stream and
+    // only then dispatches inner_command_id, so host-observed ordering is identical to the two-escape
+    // form -- the sole difference is one guest->host boundary crossing instead of two, which is what
+    // actually dominates the D3D9 UMD's cost (see sogen_d3d9_umd.cpp's bridge_call).
+    struct record_and_call_request
+    {
+        uint32_t inner_command_id;
+        uint32_t batch_size;
+    };
+
     inline constexpr uint32_t ioctl_create_descriptor_set_layout = make_ioctl(static_cast<uint32_t>(command::create_descriptor_set_layout));
     inline constexpr uint32_t ioctl_destroy_descriptor_set_layout =
         make_ioctl(static_cast<uint32_t>(command::destroy_descriptor_set_layout));

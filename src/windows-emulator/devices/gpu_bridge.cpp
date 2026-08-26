@@ -59,6 +59,8 @@ namespace sogen
                             {
                             case gpu_bridge::ioctl_record_commands:
                                 return "record_commands";
+                            case gpu_bridge::ioctl_record_and_call:
+                                return "record_and_call";
                             case gpu_bridge::ioctl_d3d9_lock:
                                 return "d3d9_lock";
                             case gpu_bridge::ioctl_d3d9_unlock:
@@ -117,6 +119,14 @@ namespace sogen
                     }
                 }
 #endif
+                return dispatch_command(win_emu, context);
+            }
+
+            // Routes one already-counted command to its handler. Split out of dispatch so
+            // handle_record_and_call can run its inner command without the diagnostics above counting
+            // it as a second boundary crossing -- it shares the one crossing dispatch was entered for.
+            NTSTATUS dispatch_command(windows_emulator& win_emu, const io_device_context& context)
+            {
                 switch (context.io_control_code)
                 {
                 case gpu_bridge::ioctl_get_version:
@@ -291,6 +301,8 @@ namespace sogen
                     return handle_get_surface_capabilities(win_emu, context);
                 case gpu_bridge::ioctl_record_commands:
                     return handle_record_commands(win_emu, context);
+                case gpu_bridge::ioctl_record_and_call:
+                    return handle_record_and_call(win_emu, context);
                 case gpu_bridge::ioctl_create_descriptor_set_layout:
                     return handle_create_descriptor_set_layout(win_emu, context);
                 case gpu_bridge::ioctl_destroy_descriptor_set_layout:
@@ -3939,8 +3951,17 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                std::vector<std::byte> stream(context.input_buffer_length);
-                win_emu.emu().read_memory(context.input_buffer, stream.data(), stream.size());
+                const int32_t result = replay_command_stream(win_emu, context.input_buffer, context.input_buffer_length);
+                return write_output(win_emu, context, gpu_bridge::result_response{.vk_result = result, .reserved = 0});
+            }
+
+            // Executes `length` bytes of command_record_header stream sitting at `address` in guest
+            // memory, returning the first non-success result. Shared by ioctl_record_commands and the
+            // prelude of ioctl_record_and_call.
+            int32_t replay_command_stream(windows_emulator& win_emu, const emulator_pointer address, const size_t length)
+            {
+                std::vector<std::byte> stream(length);
+                win_emu.emu().read_memory(address, stream.data(), stream.size());
 
                 int32_t result = 0; // VK_SUCCESS
                 size_t offset = 0;
@@ -3962,7 +3983,37 @@ namespace sogen
                     offset += header.size;
                 }
 
-                return write_output(win_emu, context, gpu_bridge::result_response{.vk_result = result, .reserved = 0});
+                return result;
+            }
+
+            // One escape carrying both a pending record stream and the sync command whose ordering
+            // requirement forced it to be drained. Replaying first and dispatching second reproduces
+            // exactly what the two separate escapes did, for one boundary crossing instead of two.
+            NTSTATUS handle_record_and_call(windows_emulator& win_emu, const io_device_context& context)
+            {
+                gpu_bridge::record_and_call_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const uint64_t prefix = uint64_t{sizeof(request)} + request.batch_size;
+                if (request.batch_size > max_recorded_command_bytes || prefix > context.input_buffer_length ||
+                    request.inner_command_id == gpu_bridge::ioctl_record_and_call)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (request.batch_size != 0)
+                {
+                    replay_command_stream(win_emu, context.input_buffer + sizeof(request), request.batch_size);
+                }
+
+                io_device_context inner = context;
+                inner.io_control_code = request.inner_command_id;
+                inner.input_buffer = context.input_buffer + prefix;
+                inner.input_buffer_length = static_cast<ULONG>(context.input_buffer_length - prefix);
+                return dispatch_command(win_emu, inner);
             }
 
             NTSTATUS handle_get_surface_capabilities(windows_emulator& win_emu, const io_device_context& context)

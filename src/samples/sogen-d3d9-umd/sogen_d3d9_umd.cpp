@@ -97,6 +97,7 @@ namespace
     }
 
     void flush_d3d9_batch();
+    std::vector<uint8_t> take_pending_d3d9_batch();
 
     // Writes the escape_command_header prefix of a [header][in][out] private-data buffer. Every byte of
     // the 32-byte header (8 packed 4-byte fields, no padding) is assigned here, so the buffer region it
@@ -147,25 +148,40 @@ namespace
     bool bridge_call(uint32_t code, const void* in, DWORD in_len, void* out, DWORD out_len, bool needs_flush = true)
     {
         // Every other bridge call may make the host observe D3D9 state (draw, clear, lock, present,
-        // create a resource, ...), so drain any pending batched commands first to keep host-observed
-        // ordering identical to the un-batched path. The `!=` guard also prevents flush_d3d9_batch's
-        // own record_commands call from recursing back into itself.
+        // create a resource, ...), so any pending batched commands have to reach the host first to
+        // keep host-observed ordering identical to the un-batched path. Rather than spending a
+        // separate escape on that drain, the batch rides along in this call's own payload as an
+        // ioctl_record_and_call prelude: the host replays it and only then dispatches `code`, so the
+        // ordering is unchanged but a flushing Lock/Unlock/Present costs one boundary crossing
+        // instead of two. Crossing count, not per-crossing work, is what dominates this UMD's cost.
+        // The `!=` guard keeps flush_d3d9_batch's own record_commands call from taking the batch it
+        // is in the middle of sending.
+        std::vector<uint8_t> pending_batch;
         if (code != gb::ioctl_record_commands && needs_flush)
         {
-            flush_d3d9_batch();
+            pending_batch = take_pending_d3d9_batch();
         }
 
-        // The header region is fully written by fill_escape_header, the input region by the memcpy
-        // below, and the output region by the host's escape write-back (every wire command's host
-        // handler fills the full output_size it is given), so the staging buffer needs no zero-init.
+        // The header region is fully written by fill_escape_header, the prelude and input regions by
+        // the memcpys below, and the output region by the host's escape write-back (every wire
+        // command's host handler fills the full output_size it is given), so the staging buffer needs
+        // no zero-init.
         const uint32_t header_size = sizeof(gb::escape_command_header);
-        const size_t total = static_cast<size_t>(header_size) + in_len + out_len;
+        const gb::record_and_call_request prelude{.inner_command_id = code, .batch_size = static_cast<uint32_t>(pending_batch.size())};
+        const size_t prelude_size = pending_batch.empty() ? 0 : sizeof(prelude) + pending_batch.size();
+        const size_t total = static_cast<size_t>(header_size) + prelude_size + in_len + out_len;
         auto storage = std::make_unique_for_overwrite<uint8_t[]>(total);
         uint8_t* buffer = storage.get();
-        fill_escape_header(buffer, code, in_len, out_len);
+        fill_escape_header(buffer, prelude_size == 0 ? code : gb::ioctl_record_and_call, static_cast<uint32_t>(prelude_size + in_len),
+                           out_len);
+        if (prelude_size != 0)
+        {
+            std::memcpy(buffer + header_size, &prelude, sizeof(prelude));
+            std::memcpy(buffer + header_size + sizeof(prelude), pending_batch.data(), pending_batch.size());
+        }
         if (in != nullptr && in_len != 0)
         {
-            std::memcpy(buffer + header_size, in, in_len);
+            std::memcpy(buffer + header_size + prelude_size, in, in_len);
         }
 
         if (!send_escape(buffer, total))
@@ -175,7 +191,7 @@ namespace
 
         if (out != nullptr && out_len != 0)
         {
-            std::memcpy(out, buffer + header_size + in_len, out_len);
+            std::memcpy(out, buffer + header_size + prelude_size + in_len, out_len);
         }
         return reinterpret_cast<gb::escape_command_header*>(buffer)->result >= 0;
     }
@@ -275,16 +291,21 @@ namespace
     // Group-A calls happens with no Group-B call in between.
     constexpr size_t k_d3d9_batch_flush_threshold = 64 * 1024;
 
-    void flush_d3d9_batch()
+    std::vector<uint8_t> take_pending_d3d9_batch()
     {
-        if (g_d3d9_command_batch.empty())
-        {
-            return;
-        }
-
         std::vector<uint8_t> batch;
         batch.swap(g_d3d9_command_batch);
         g_batch_touched_resources.clear();
+        return batch;
+    }
+
+    void flush_d3d9_batch()
+    {
+        std::vector<uint8_t> batch = take_pending_d3d9_batch();
+        if (batch.empty())
+        {
+            return;
+        }
 
         gb::result_response resp{};
         bridge_call(gb::ioctl_record_commands, batch.data(), static_cast<DWORD>(batch.size()), &resp, sizeof(resp));
