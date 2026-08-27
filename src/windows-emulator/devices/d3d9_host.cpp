@@ -3677,7 +3677,16 @@ namespace sogen
             // rather than a fixed count so a large buffer can't multiply into a huge 32-bit-guest VA
             // reservation. Two slices is the floor at which renaming still means anything at all.
             constexpr uint64_t slice_alignment = 0x1000;
-            constexpr uint64_t max_ring_bytes = 4u << 20;
+            // 2026-08-27: measured on settled MW2 gameplay, a wrap is by far the dominant cost of this
+            // whole mechanism -- 99.5% of the guest's GPU syncs are ring wraps, ~1.17ms of vCPU thread
+            // time per frame. At a 4MB budget MW2's two most heavily renamed streaming buffers (2MB and
+            // 4.5MB) got the 2-slice floor and so wrapped on every other Discard, together accounting for
+            // 77% of all wraps; the buffers that got the full 8 slices wrapped at a twelfth the rate.
+            // 16MB buys those two 8 and 3 slices respectively, and is deliberately still a byte budget
+            // rather than a slice count: a 32-bit guest's address space is the real constraint, and MW2's
+            // largest dynamic buffer (12MB, never renamed at all in the measured window) must not be
+            // allowed to multiply into a ring the guest cannot reserve.
+            constexpr uint64_t max_ring_bytes = 16u << 20;
             const uint64_t slice_stride = (backing_size + slice_alignment - 1) & ~(slice_alignment - 1);
             const uint64_t slice_count = std::clamp<uint64_t>(max_ring_bytes / slice_stride, 2, 8);
             const uint64_t ring_size = slice_stride * slice_count;
