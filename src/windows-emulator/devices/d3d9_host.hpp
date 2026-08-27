@@ -508,6 +508,13 @@ namespace sogen
             // draw -- while MW2 rewrites at most one or two of the six between consecutive draws, so
             // execute_draw uses these to skip rebuilding a slot whose source is untouched.
             std::array<uint64_t, ubo_slot_count> const_versions{};
+            // Same version-stamp-and-skip shape as const_versions above, bumped by every SetSamplerState
+            // handler write. build_sampler otherwise re-reads ten separate sampler_state entries and
+            // re-hashes a ten-field cache key on every draw, for every bound texture stage, to reach the
+            // same VkSampler it reached last time -- MW2 changes sampler state far more rarely than it
+            // draws. One counter covering every stage, since a stage-granular version would cost the same
+            // map lookups it exists to avoid.
+            uint64_t sampler_state_version{};
             std::array<uint64_t, 4> render_targets{};
             uint64_t depth_stencil{};
             // Last SetScissorRect rect (RECT semantics -- exclusive right/bottom); only consulted at
@@ -590,7 +597,7 @@ namespace sogen
         // leaving execute_draw's own batch_rt_/batch_ds_ mismatch guard to close and rotate the batch.
         //
         // Every OTHER caller of flush_batch() (destroy_resource, tex_blt, sync_backing_from_gpu,
-        // color_fill, blt, the DDI clear/render-target/depth-stencil handlers, ...) needs the batch's GPU
+        // color_fill, blt, ensure_depth_stencil_view's first-use init, ...) needs the batch's GPU
         // work OBSERVABLY FINISHED before it proceeds -- it reads back pixels, destroys the Vulkan objects
         // the batch referenced, or must be ordered relative to a batch that might still be sitting
         // unsubmitted. flush_batch() stays a full barrier for them: it still submits whatever is
@@ -955,6 +962,22 @@ namespace sogen
         };
 
         std::map<sampler_cache_key, uint64_t> sampler_cache_{};
+
+        // Per-stage shortcut past the whole of build_sampler: with the D3D9 sampler state untouched since
+        // this stage last resolved a sampler, and the bound texture's mip count unchanged, the ten
+        // sampler_state lookups and the sampler_cache_ probe can only reach the same VkSampler again.
+        // Indexed with the pixel stages first and the vertex ones after, since D3D9 numbers vertex
+        // samplers from D3DVERTEXTEXTURESAMPLER0 (257) rather than continuing the pixel range. Nothing
+        // invalidates an entry other than the version stamp: a cached VkSampler lives for the
+        // device's lifetime (see sampler_cache_ above).
+        struct sampler_memo_entry
+        {
+            uint64_t sampler_state_version{};
+            uint32_t mip_levels{};
+            uint64_t sampler{};
+        };
+
+        std::array<sampler_memo_entry, max_ps_sampler_stages + max_vs_sampler_stages> sampler_memo_{};
 
         // One GPU buffer per batch slot (see batch_slot_count's comment above), each backing every
         // vertex/index/uniform range a draw in THAT slot's batch needs. Each range is a distinct

@@ -1796,6 +1796,19 @@ namespace sogen
     {
         const scoped_ns_accumulator _prof(g_build_sampler_ns, drawprofile_enabled_flag());
         out_sampler = 0;
+        // Both call sites bound sampler_index to a real stage (0..max_ps_sampler_stages-1 for the pixel
+        // loop, d3dvertextexturesampler0 + 0..max_vs_sampler_stages-1 for the vertex one).
+        sampler_memo_entry& memo =
+            this->sampler_memo_[sampler_index < max_ps_sampler_stages ? sampler_index
+                                                                      : max_ps_sampler_stages + (sampler_index - d3dvertextexturesampler0)];
+        // A zero sampler is the "never resolved" state -- a real VkSampler is never 0 (see below) -- which
+        // is what makes a zero starting sampler_state_version safe.
+        if (memo.sampler != 0 && memo.sampler_state_version == this->state_.sampler_state_version && memo.mip_levels == mip_levels)
+        {
+            out_sampler = memo.sampler;
+            return true;
+        }
+
         const auto& ss = this->state_.sampler_state;
         // Defaults match real D3D9's own documented per-D3DSAMPLERSTATETYPE defaults (D3DSAMP_MAGFILTER/
         // MINFILTER default to D3DTEXF_POINT, MIPFILTER to D3DTEXF_NONE, ADDRESSU/V/W to D3DTADDRESS_WRAP,
@@ -1833,6 +1846,7 @@ namespace sogen
         if (const auto it = this->sampler_cache_.find(key); it != this->sampler_cache_.end())
         {
             out_sampler = it->second;
+            memo = {.sampler_state_version = this->state_.sampler_state_version, .mip_levels = mip_levels, .sampler = out_sampler};
             return true;
         }
 
@@ -1852,6 +1866,7 @@ namespace sogen
         }
 
         this->sampler_cache_.emplace(key, out_sampler);
+        memo = {.sampler_state_version = this->state_.sampler_state_version, .mip_levels = mip_levels, .sampler = out_sampler};
         return true;
     }
 
@@ -5044,6 +5059,7 @@ namespace sogen
                 return d3derr_invalidcall;
             }
             this->state_.sampler_state[tss_key(req.sampler, req.state)] = req.value;
+            ++this->state_.sampler_state_version;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_texture: {
