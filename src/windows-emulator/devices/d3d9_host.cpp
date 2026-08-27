@@ -1059,17 +1059,25 @@ namespace sogen
         // reason as PS: Vulkan permits a layout to declare more bindings than a shader statically uses,
         // so a VS that never samples (the common case) is unaffected; execute_draw only writes a
         // descriptor when a vertex texture is actually bound to that stage.
+        // The six constant UBOs are DYNAMIC rather than plain: every draw sub-allocates its constants at a
+        // fresh arena offset, and a plain uniform buffer can only express that offset inside the descriptor
+        // write itself, which forces a fresh descriptor-set allocation + write per draw even when nothing
+        // else about the bindings changed. As dynamic buffers the descriptor names the whole slice range at
+        // offset 0 and the per-draw offset travels in vkCmdBindDescriptorSets' pDynamicOffsets instead, so
+        // draws that differ only in where their constants landed reuse execute_draw's descriptor_set_memo.
+        // Both stages use 3 dynamic uniform buffers, well inside the 8 Vulkan guarantees per stage and per
+        // set (maxPerStageDescriptorUniformBuffersDynamic / maxDescriptorSetUniformBuffersDynamic).
         std::array<vulkan_host::descriptor_binding, 3 + max_vs_sampler_stages> vs_bindings{{
             {.binding = 0,
-             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
              .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
             {.binding = 2,
-             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
              .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
             {.binding = 3,
-             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
              .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_VERTEX_BIT},
         }};
@@ -1093,15 +1101,15 @@ namespace sogen
         // sizing (this constant is now the only place that needs to change for the bindings themselves).
         std::array<vulkan_host::descriptor_binding, 3 + max_ps_sampler_stages> ps_bindings{{
             {.binding = 0,
-             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
              .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
             {.binding = 2,
-             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
              .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
             {.binding = 3,
-             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+             .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
              .descriptor_count = 1,
              .stage_flags = VK_SHADER_STAGE_FRAGMENT_BIT},
         }};
@@ -1303,7 +1311,7 @@ namespace sogen
         // Same per-draw accounting as the removed per-pipeline pool (maxSets=2, 6 UBOs, max_vs_sampler_stages
         // + max_ps_sampler_stages combined-image-samplers), scaled by the number of draws the pool covers.
         const std::array<vulkan_host::descriptor_pool_size, 2> pool_sizes{{
-            {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptor_count = 6 * new_capacity},
+            {.descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptor_count = 6 * new_capacity},
             {.descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
              .descriptor_count = (max_vs_sampler_stages + max_ps_sampler_stages) * new_capacity},
         }};
@@ -3049,14 +3057,18 @@ namespace sogen
             // Build the write list first, with dst_set holding the set INDEX rather than a set id, so it
             // can be compared against the previous draw's list before anything is allocated (see
             // descriptor_set_memo). Reused scratch: no per-draw heap allocation.
+            // The UBO descriptors are dynamic (see ensure_programmable_pipeline's vs_bindings comment), so
+            // each names its slice range from offset 0 and this draw's actual arena offset is supplied at
+            // bind time in ubo_dynamic_offsets below. Keeping the offsets out of the writes is what lets
+            // draws whose constants merely landed elsewhere in the arena still hit descriptor_set_memo.
             std::vector<vulkan_host::descriptor_write>& writes = this->draw_writes_;
             writes.assign({
                 {.dst_set = 0,
                  .dst_binding = 0,
                  .dst_array_element = 0,
-                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                  .buffer = arena.buffer,
-                 .offset = ubo_offsets[ubo_vs_f],
+                 .offset = 0,
                  .range = vs_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -3064,9 +3076,9 @@ namespace sogen
                 {.dst_set = 1,
                  .dst_binding = 0,
                  .dst_array_element = 0,
-                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                  .buffer = arena.buffer,
-                 .offset = ubo_offsets[ubo_ps_f],
+                 .offset = 0,
                  .range = ps_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -3074,9 +3086,9 @@ namespace sogen
                 {.dst_set = 0,
                  .dst_binding = 2,
                  .dst_array_element = 0,
-                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                  .buffer = arena.buffer,
-                 .offset = ubo_offsets[ubo_vs_i],
+                 .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -3084,9 +3096,9 @@ namespace sogen
                 {.dst_set = 0,
                  .dst_binding = 3,
                  .dst_array_element = 0,
-                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                  .buffer = arena.buffer,
-                 .offset = ubo_offsets[ubo_vs_b],
+                 .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -3094,9 +3106,9 @@ namespace sogen
                 {.dst_set = 1,
                  .dst_binding = 2,
                  .dst_array_element = 0,
-                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                  .buffer = arena.buffer,
-                 .offset = ubo_offsets[ubo_ps_i],
+                 .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -3104,9 +3116,9 @@ namespace sogen
                 {.dst_set = 1,
                  .dst_binding = 3,
                  .dst_array_element = 0,
-                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                 .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                  .buffer = arena.buffer,
-                 .offset = ubo_offsets[ubo_ps_b],
+                 .offset = 0,
                  .range = int_bool_ubo_size,
                  .sampler = 0,
                  .image_view = 0,
@@ -3426,8 +3438,15 @@ namespace sogen
 
         if (use_programmable)
         {
+            // Vulkan consumes pDynamicOffsets in ascending set order, then ascending binding order within a
+            // set, counting only the dynamic descriptors -- so this is set 0's bindings 0/2/3 followed by
+            // set 1's, and the combined-image-sampler bindings interleaved among them contribute nothing.
+            const std::array<uint32_t, 6> ubo_dynamic_offsets{
+                static_cast<uint32_t>(ubo_offsets[ubo_vs_f]), static_cast<uint32_t>(ubo_offsets[ubo_vs_i]),
+                static_cast<uint32_t>(ubo_offsets[ubo_vs_b]), static_cast<uint32_t>(ubo_offsets[ubo_ps_f]),
+                static_cast<uint32_t>(ubo_offsets[ubo_ps_i]), static_cast<uint32_t>(ubo_offsets[ubo_ps_b])};
             this->vulkan_.cmd_bind_descriptor_sets(batch_cmd, programmable->pipeline_layout, 0, descriptor_sets,
-                                                   VK_PIPELINE_BIND_POINT_GRAPHICS, {});
+                                                   VK_PIPELINE_BIND_POINT_GRAPHICS, ubo_dynamic_offsets);
         }
 
         // Negative height (VK_KHR_maintenance1, core since Vulkan 1.1): D3D9 puts clip-space y = +1 at the
