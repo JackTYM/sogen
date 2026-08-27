@@ -188,6 +188,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_cube_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-volume-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_pending_clear_rebind_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-pending-clear-rebind-test-x86.exe -ld3d9 -ld3dcompiler_43
 ```
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,

@@ -588,6 +588,25 @@ namespace sogen
         rp = {};
     }
 
+    void d3d9_host::realize_pending_color_clear(pending_batch_clear& pending)
+    {
+        if (!pending.color_pending)
+        {
+            return;
+        }
+        for (const uint64_t rt_handle : pending.color_targets)
+        {
+            const auto it = this->resources_.find(rt_handle);
+            if (it == this->resources_.end() || it->second.vk_image_id == 0)
+            {
+                continue;
+            }
+            this->batch_clear_color_image(it->second.vk_image_id, pending.color_value);
+            it->second.backing_dirty = true;
+        }
+        pending.color_pending = false;
+    }
+
     void d3d9_host::submit_batch_async()
     {
         if (!this->batch_open_)
@@ -601,20 +620,7 @@ namespace sogen
         // struct's comment). Realize it now via the ordinary explicit-clear path so the Clear() this
         // batch recorded is never silently dropped.
         pending_batch_clear& pending = this->pending_clear_[this->batch_slot_];
-        if (pending.color_pending)
-        {
-            for (const uint64_t rt_handle : this->state_.render_targets)
-            {
-                const auto it = this->resources_.find(rt_handle);
-                if (it == this->resources_.end() || it->second.vk_image_id == 0)
-                {
-                    continue;
-                }
-                this->batch_clear_color_image(it->second.vk_image_id, pending.color_value);
-                it->second.backing_dirty = true;
-            }
-            pending.color_pending = false;
-        }
+        this->realize_pending_color_clear(pending);
         if (pending.depth_pending)
         {
             const auto ds_it = this->resources_.find(this->batch_ds_);
@@ -2584,16 +2590,18 @@ namespace sogen
         // same terms as colour ones; the only extra requirement they carry is the inter-draw depth
         // dependency the recording step below emits (see its comment).
         //   * A draw whose slot-0 render target differs from the open batch's closes it first, so a batch
-        //     never mixes render targets. In practice the d3d9_set_render_target DDI handler has ALREADY
-        //     closed (and fully drained -- see flush_batch's own comment) the batch by the time a real RT
-        //     change reaches here, since it flushes unconditionally on any render-target-slot change; this
-        //     check only exists as defensive belt-and-suspenders, same as before this file gained
-        //     multiple batch slots. When it DOES fire, the reopen below round-robins to the other slot
-        //     (see batch_slot_count's header comment) exactly like the descriptor-pool trigger below.
+        //     never mixes render targets. This is the ONLY thing enforcing that: the
+        //     d3d9_set_render_target DDI handler deliberately does not drain the batch itself (see its
+        //     own comment). The reopen below round-robins to the other slot (see batch_slot_count's
+        //     header comment) exactly like the descriptor-pool trigger below, so an RT change costs a
+        //     submit plus a one-slot-back wait rather than a full GPU drain.
         //   * A draw whose bound depth-stencil differs from the open batch's closes it first, for the same
         //     reason: the recording step's depth barrier only synchronizes the ONE depth image the batch
-        //     accumulates into. Same "normally already closed by d3d9_set_depth_stencil" caveat and
-        //     round-robin-on-reopen behavior as the render-target check above.
+        //     accumulates into. Same round-robin-on-reopen behavior as the render-target check above.
+        //   * A change to a non-slot-0 MRT slot leaves the batch open (batch_rt_ tracks slot 0 only) and
+        //     is instead caught by the recording step's own render-pass attachment comparison, which
+        //     opens a fresh dynamic-rendering instance inside the same batch -- cheaper still, and legal
+        //     because the two instances are ordered by program order within one command buffer.
         //   * A programmable draw that would exceed the descriptor pool's per-batch capacity closes it
         //     first, so the pool can be reset (reset only happens on batch open, when it is idle). This is
         //     the trigger that actually fires in ordinary gameplay -- once every frame_desc_initial_draws
@@ -3234,6 +3242,16 @@ namespace sogen
         if (!can_continue_pass)
         {
             this->close_render_pass(this->batch_slot_);
+            // A Clear() deferred against a render-target set the app has since rebound cannot be folded
+            // into this instance's load op -- doing so would clear whatever is bound NOW rather than what
+            // the Clear() named. Realize it explicitly against its own snapshot instead, while the
+            // instance is still closed (vkCmdClearColorImage is illegal inside one) and before the
+            // attachment transitions below.
+            pending_batch_clear& stale = this->pending_clear_[this->batch_slot_];
+            if (stale.color_pending && stale.color_targets != this->state_.render_targets)
+            {
+                this->realize_pending_color_clear(stale);
+            }
             for (const auto& brt : bound_rts)
             {
                 if (brt.entry == nullptr)
@@ -5187,16 +5205,13 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            // Flush any open batch before changing the bound render targets. execute_draw's own slot-0
-            // batch_rt_ guard already prevents cross-render-target batching; this is a defensive
-            // belt-and-suspenders that also covers a change to a non-slot-0 MRT slot. Skipped when the
-            // app rebinds the same surface it already has bound (a real, observed pattern), since there's
-            // nothing to flush against in that case.
-            if (this->state_.render_targets[req.render_target_index] != req.surface)
-            {
-                this->flush_batch();
-                this->state_.render_targets[req.render_target_index] = req.surface;
-            }
+            // Deliberately does NOT flush. A rebind is pure CPU-side state: execute_draw's own slot-0
+            // batch_rt_ guard closes and ROTATES the batch (submit + wait one slot back) on the next
+            // draw, which is the same ordering a full drain gave but pipelined, and a change to a
+            // non-slot-0 MRT slot is caught by the render-pass attachment comparison there instead. The
+            // one thing a drain also did implicitly -- forcing a still-deferred Clear() to be realized
+            // before its target could be rebound -- is now handled by pending_batch_clear::color_targets.
+            this->state_.render_targets[req.render_target_index] = req.surface;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_depth_stencil: {
@@ -5205,15 +5220,12 @@ namespace sogen
             {
                 return d3derr_invalidcall;
             }
-            // Flush any open batch before changing the bound depth-stencil, mirroring set_render_target
-            // above. execute_draw's own batch_ds_ guard already prevents a batch from mixing depth-stencil
-            // resources (its per-draw depth barrier only covers the one image the batch accumulates into);
-            // this is the same defensive belt-and-suspenders, and the same same-surface skip applies.
-            if (this->state_.depth_stencil != req.surface)
-            {
-                this->flush_batch();
-                this->state_.depth_stencil = req.surface;
-            }
+            // Same no-flush reasoning as set_render_target above: execute_draw's batch_ds_ guard closes
+            // and rotates the batch on the next draw, which is what actually keeps a batch's single
+            // inter-draw depth barrier covering only the one image that batch accumulates into. A
+            // deferred depth Clear() is already immune to a rebind -- it resolves against batch_ds_, a
+            // per-batch snapshot, and any depth-stencil change rotates the batch before a new one opens.
+            this->state_.depth_stencil = req.surface;
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_viewport: {
@@ -5328,6 +5340,12 @@ namespace sogen
             // closing it now to make way for a fresh LOAD_OP_CLEAR instance costs nothing extra.
             open_render_pass_state& rp = this->open_render_pass_[this->batch_slot_];
             pending_batch_clear& pending = this->pending_clear_[this->batch_slot_];
+            // An earlier Clear() still deferred against a render-target set the app has since rebound
+            // would be silently dropped by the overwrite below. Realize it against its own snapshot first.
+            if (pending.color_pending && pending.color_targets != this->state_.render_targets)
+            {
+                this->realize_pending_color_clear(pending);
+            }
             const bool depth_transient =
                 depth_stencil_transient_enabled && ds_entry != nullptr && (ds_entry->usage & d3dusage_depthstencil) != 0;
             const bool color_fast_path = clear_color && !rp.open;
@@ -5354,6 +5372,7 @@ namespace sogen
                 {
                     pending.color_pending = true;
                     pending.color_value = color;
+                    pending.color_targets = this->state_.render_targets;
                 }
                 else
                 {

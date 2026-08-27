@@ -585,11 +585,9 @@ namespace sogen
         // step) -- by then the GPU has typically already finished it, so the wait is usually free. Live
         // profiling (2026-08-22 session) found the batch's descriptor-pool-exhaustion reopen (every
         // frame_desc_initial_draws draws into the same render target -- the common case for a single
-        // scene render) as the dominant real-world trigger of this reopen path; render-target/depth-
-        // stencil changes are already flushed synchronously and unconditionally by the
-        // d3d9_set_render_target/d3d9_set_depth_stencil DDI handlers before execute_draw ever sees a
-        // mismatch, so that guard in execute_draw is normally dead code (kept as defensive belt-and-
-        // suspenders, same as before).
+        // scene render) as the dominant real-world trigger of this reopen path. Render-target and
+        // depth-stencil changes take the same round-robin path: their DDI handlers only update state,
+        // leaving execute_draw's own batch_rt_/batch_ds_ mismatch guard to close and rotate the batch.
         //
         // Every OTHER caller of flush_batch() (destroy_resource, tex_blt, sync_backing_from_gpu,
         // color_fill, blt, the DDI clear/render-target/depth-stencil handlers, ...) needs the batch's GPU
@@ -758,6 +756,15 @@ namespace sogen
         {
             bool color_pending{false};
             std::array<float, 4> color_value{};
+            // device_state::render_targets as it stood when the Clear() deferred its value here. The
+            // realization sites (submit_batch_async's explicit-clear fallback, execute_draw's
+            // LOAD_OP_CLEAR fold) run arbitrarily later, by which point the app may have rebound a render
+            // target -- resolving the clear against the CURRENT bindings would land it on a surface the
+            // Clear() never named. A slot-0 or depth-stencil rebind rotates the batch (submit_batch_async
+            // realizes the clear against this snapshot first), so only an MRT slot-1..3 rebind can
+            // actually reach a realization site with a mismatched set; that case is detected by comparing
+            // this against the live bindings and realized explicitly instead of folded.
+            std::array<uint64_t, 4> color_targets{};
             bool depth_pending{false};
             float depth_value{1.0f};
             uint32_t stencil_value{0};
@@ -1040,6 +1047,12 @@ namespace sogen
         // which deliberately defers it to get CPU/GPU overlap across the round-robin slots (see
         // batch_slot_count's comment) -- every other caller must use flush_batch() below instead.
         void submit_batch_async();
+        // Records a deferred colour Clear() as an explicit vkCmdClearColorImage against the render-target
+        // set it was queued against (pending_batch_clear::color_targets), and clears the pending flag. A
+        // no-op when nothing is pending. The caller must have no dynamic-rendering instance open on the
+        // current batch slot -- vkCmdClearColorImage is illegal inside one -- which holds by construction
+        // wherever a colour clear can be pending (see pending_clear_'s own comment).
+        void realize_pending_color_clear(pending_batch_clear& pending);
         // Ends slot `slot`'s currently open dynamic-rendering instance (if any -- a no-op otherwise) and
         // restores every colour attachment it used to the TRANSFER_SRC_OPTIMAL resting layout the rest of
         // this host relies on between draws. Must run before that slot's command buffer is ended
@@ -1054,11 +1067,11 @@ namespace sogen
         // earlier draw's batch-management step may have async-submitted a DIFFERENT slot without waiting
         // for it, so "current slot only" would not actually guarantee this host's GPU work is done. Called
         // at every boundary that must observe ALL of this host's outstanding GPU work before proceeding
-        // (readback, color_fill, blt, resource teardown, render-target/depth-stencil change) -- every one
-        // of those needs this full-barrier contract, unlike execute_draw's own internal reopen decision
-        // (see submit_batch_async). The D3D9 clear handler deliberately does NOT use this any more (see
-        // ensure_batch_open/batch_clear_color_image) -- a plain Clear returns no data to the CPU, so it
-        // has no need for the wait either.
+        // (readback, color_fill, blt, resource teardown) -- every one of those needs this full-barrier
+        // contract, unlike execute_draw's own internal reopen decision (see submit_batch_async). The
+        // D3D9 clear and render-target/depth-stencil handlers deliberately do NOT use this: none of them
+        // returns data to the CPU or destroys anything the batch references, so a plain
+        // submit-and-rotate on the next draw gives them the ordering they need without the wait.
         void flush_batch();
         // Opens a batch recording into target_rt/target_ds's identity, or keeps the currently open one if
         // it already matches -- the same round-robin slot-selection execute_draw's own batch-management
