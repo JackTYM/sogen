@@ -626,6 +626,12 @@ namespace sogen
         // out_pixels (BGRA8, tightly packed).  out_width / out_height are set from the image dims.
         int32_t readback_render_target(uint64_t image, std::vector<std::byte>& out_pixels, uint32_t& out_width, uint32_t& out_height);
 
+        // Paired teardown for create_render_target: releases the image, its memory, the readback
+        // buffer/memory, the command pool and the fence, then drops the id from both the render-target
+        // and the generic image table it was registered in. destroy_image alone would leak everything
+        // except the VkImage itself, since the caller never sees any of those other objects' ids.
+        void destroy_render_target(uint64_t device, uint64_t image);
+
       private:
         struct impl;
         std::unique_ptr<impl> impl_;

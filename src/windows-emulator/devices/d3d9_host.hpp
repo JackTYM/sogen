@@ -307,6 +307,13 @@ namespace sogen
             return this->programmable_pipelines_.size();
         }
 
+        // Diagnostic (EMULATOR_D3D9_RESLIFE_DIAG): how many resources are alive right now. A leak in the
+        // create/destroy path shows up here as a count that only ever climbs.
+        size_t live_resource_count() const
+        {
+            return this->resources_.size();
+        }
+
         // True if `resource` is a render-target-kind resource -- the frame-output image whose pixels a
         // Lock/Present reads back. Lets gpu_bridge fire its draw/submit summary only at a real frame
         // completion (a render-target Lock), not on every vertex/index-buffer Lock.
@@ -386,7 +393,12 @@ namespace sogen
             uint32_t direct_slice_stride{};
             uint32_t direct_slice_count{};
             uint32_t direct_slice_offset{};
-            uint64_t vk_image_id{};      // 0 = no GPU backing (plain buffer); set for render targets and textures
+            uint64_t vk_image_id{}; // 0 = no GPU backing (plain buffer); set for render targets and textures
+            // Device memory bound to vk_image_id, owned by this entry -- set only for the sampled-texture
+            // path, which allocates the image's memory itself. A render target's image and memory are both
+            // owned by vulkan_host's own render_target_data (create_render_target), released through
+            // destroy_render_target instead, so this stays 0 for those.
+            uint64_t vk_image_memory_id{};
             uint64_t vk_image_view_id{}; // 0 until first drawn to; lazily created, cached per resource
             // Second colour-attachment view of the SAME image, through the format's _SRGB counterpart,
             // used only while D3DRS_SRGBWRITEENABLE is set (see execute_draw). Vulkan performs the

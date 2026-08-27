@@ -3667,6 +3667,7 @@ namespace sogen
                         this->vulkan_.bind_image_memory(device, vk_image, image_memory, 0) == 0)
                     {
                         entry.vk_image_id = vk_image;
+                        entry.vk_image_memory_id = image_memory;
                     }
                     else
                     {
@@ -3896,13 +3897,48 @@ namespace sogen
         // guarantees the GPU is idle with respect to anything referencing it before this point.
         this->flush_batch();
         const auto it = this->resources_.find(resource);
-        if (it != this->resources_.end() && it->second.vk_direct_buffer_id != 0)
+        if (it == this->resources_.end())
+        {
+            return;
+        }
+
+        resource_entry& entry = it->second;
+        // A resource with no Vulkan object of its own (a plain, non-direct-mapped buffer) must not drag a
+        // device into existence just to be freed -- ensure_vk_device() creates one on first call.
+        if (entry.vk_direct_buffer_id != 0 || entry.vk_image_id != 0 || entry.vk_image_view_id != 0 || entry.vk_image_view_srgb_id != 0)
         {
             const uint64_t device = this->ensure_vk_device();
-            this->vulkan_.destroy_buffer(device, it->second.vk_direct_buffer_id);
-            this->vulkan_.free_memory(device, it->second.vk_direct_memory_id);
+            if (entry.vk_direct_buffer_id != 0)
+            {
+                this->vulkan_.destroy_buffer(device, entry.vk_direct_buffer_id);
+                this->vulkan_.free_memory(device, entry.vk_direct_memory_id);
+            }
+            if (entry.vk_image_view_id != 0)
+            {
+                this->vulkan_.destroy_image_view(device, entry.vk_image_view_id);
+            }
+            if (entry.vk_image_view_srgb_id != 0)
+            {
+                this->vulkan_.destroy_image_view(device, entry.vk_image_view_srgb_id);
+            }
+            if (entry.vk_image_id != 0)
+            {
+                // A render target's image, its memory, and the readback buffer/command pool/fence attached
+                // to it are all owned by vulkan_host's render_target_data, so it needs the paired teardown;
+                // a sampled texture's image and memory are this entry's own (see vk_image_memory_id).
+                if (entry.vk_image_memory_id != 0)
+                {
+                    this->vulkan_.destroy_image(device, entry.vk_image_id);
+                    this->vulkan_.free_memory(device, entry.vk_image_memory_id);
+                }
+                else
+                {
+                    this->vulkan_.destroy_render_target(device, entry.vk_image_id);
+                }
+            }
         }
-        this->resources_.erase(resource);
+
+        this->resources_.erase(it);
     }
 
     int32_t d3d9_host::tex_blt(const uint64_t dst_resource, const uint64_t src_resource)

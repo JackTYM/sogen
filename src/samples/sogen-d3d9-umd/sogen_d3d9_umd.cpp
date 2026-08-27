@@ -1023,6 +1023,52 @@ namespace
         return k_batch_unknown_resource;
     }
 
+    // pfnDestroyResource (device-func-table slot 38), behind every IDirect3DResource9 release. Its real
+    // signature takes the resource handle by value, not an argument struct -- (HANDLE hDevice,
+    // HANDLE hResource), matching k_device_func_arity's 8 bytes for this slot.
+    //
+    // Without this the host never learned a resource was gone: its VkImage/VkBuffer, the device memory
+    // bound to them, and (since direct buffer mapping) the guest VA range aliasing a dynamic buffer's
+    // ring all stayed reserved for the whole process lifetime.
+    //
+    // A plain synchronous bridge_call is the right transport, not a batched record: the default
+    // needs_flush=true makes the pending batch ride along as this same escape's prelude, so every
+    // already-recorded draw referencing this resource is replayed by the host BEFORE the destroy, and
+    // the host's own d3d9_host::destroy_resource then flushes and waits for the GPU before freeing
+    // anything. No resource_currently_referenced check is needed or wanted here (that one exists to let
+    // umd_Lock SKIP a flush; a destroy must never skip it).
+    HRESULT APIENTRY umd_DestroyResource(HANDLE /*hDevice*/, HANDLE hResource)
+    {
+        const auto raw = reinterpret_cast<uint64_t>(hResource);
+        if (raw == 0)
+        {
+            return S_OK;
+        }
+
+        uint64_t resource = 0;
+        if (const auto created_it = g_created_resource_ids.find(raw); created_it != g_created_resource_ids.end())
+        {
+            resource = created_it->second;
+            g_created_resource_ids.erase(created_it);
+        }
+        else if (const auto it = g_resource_ids.find(raw); it != g_resource_ids.end())
+        {
+            resource = it->second;
+            g_resource_ids.erase(it);
+        }
+        else
+        {
+            // A handle no resolver ever registered names no host resource -- nothing to destroy.
+            return S_OK;
+        }
+
+        g_direct_buffers.erase(resource);
+
+        const d3d9c::destroy_resource_request req{.resource = resource};
+        bridge_call(gb::ioctl_d3d9_destroy_resource, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
     void fill_d3d9caps(D3DCAPS9* caps)
     {
         std::memset(caps, 0, sizeof(*caps));
@@ -2609,6 +2655,7 @@ namespace
             slots[35] = reinterpret_cast<void*>(&umd_Lock);                   // pfnLock
             slots[36] = reinterpret_cast<void*>(&umd_Unlock);                 // pfnUnlock
             slots[37] = reinterpret_cast<void*>(&umd_CreateResource);         // pfnCreateResource
+            slots[38] = reinterpret_cast<void*>(&umd_DestroyResource);        // pfnDestroyResource
             slots[40] = reinterpret_cast<void*>(&umd_Present);                // pfnPresent
             slots[41] = reinterpret_cast<void*>(&umd_Flush);                  // pfnFlush
             slots[42] = reinterpret_cast<void*>(&umd_CreateVertexShaderFunc); // pfnCreateVertexShaderFunc
@@ -2623,10 +2670,10 @@ namespace
             slots[52] = reinterpret_cast<void*>(&umd_SetStreamSourceFreq);    // pfnSetStreamSourceFreq
             slots[55] = reinterpret_cast<void*>(&umd_Blt);                    // pfnBlt (StretchRect)
             slots[56] = reinterpret_cast<void*>(&umd_ColorFill);              // pfnColorFill
-            slots[58] = reinterpret_cast<void*>(&umd_CreateQuery);             // pfnCreateQuery
-            slots[59] = reinterpret_cast<void*>(&umd_DestroyQuery);            // pfnDestroyQuery
-            slots[60] = reinterpret_cast<void*>(&umd_IssueQuery);              // pfnIssueQuery
-            slots[61] = reinterpret_cast<void*>(&umd_GetQueryData);            // pfnGetQueryData
+            slots[58] = reinterpret_cast<void*>(&umd_CreateQuery);            // pfnCreateQuery
+            slots[59] = reinterpret_cast<void*>(&umd_DestroyQuery);           // pfnDestroyQuery
+            slots[60] = reinterpret_cast<void*>(&umd_IssueQuery);             // pfnIssueQuery
+            slots[61] = reinterpret_cast<void*>(&umd_GetQueryData);           // pfnGetQueryData
             slots[62] = reinterpret_cast<void*>(&umd_SetRenderTarget);        // pfnSetRenderTarget
             slots[63] = reinterpret_cast<void*>(&umd_SetDepthStencil);        // pfnSetDepthStencil
             slots[65] = reinterpret_cast<void*>(&umd_SetPixelShaderConstI);   // pfnSetPixelShaderConstI

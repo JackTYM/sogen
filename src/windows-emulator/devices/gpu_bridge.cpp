@@ -2899,6 +2899,8 @@ namespace sogen
                     // resource had never been direct-buffer-eligible on the host side either.
                 }
 
+                this->log_resource_lifetime("create", resource);
+
                 return write_output(win_emu, context,
                                     d3d9_cmd::create_resource_response{.hr = hr,
                                                                        .reserved = 0,
@@ -2924,7 +2926,31 @@ namespace sogen
                 }
 
                 this->d3d9_.destroy_resource(request.resource);
+                this->log_resource_lifetime("destroy", request.resource);
                 return STATUS_SUCCESS;
+            }
+
+            // EMULATOR_D3D9_RESLIFE_DIAG: the two numbers that prove whether the resource lifecycle
+            // actually closes -- how many host resources are alive, and how many bytes of the scarce
+            // 32-bit guest address space the direct-buffer aliases are holding. Both must come back down
+            // after a create/destroy burst; before pfnDestroyResource was wired up in the guest UMD they
+            // only ever climbed.
+            void log_resource_lifetime(const char* action, const uint64_t resource) const
+            {
+                if (getenv("EMULATOR_D3D9_RESLIFE_DIAG") == nullptr)
+                {
+                    return;
+                }
+
+                size_t direct_va_bytes = 0;
+                for (const auto& [id, reservation] : this->resource_direct_va_)
+                {
+                    direct_va_bytes += reservation.second;
+                }
+
+                fprintf(stderr, "[d3d9-reslife-diag] %s resource=%llu live_resources=%zu direct_va_reservations=%zu direct_va_bytes=%zu\n",
+                        action, static_cast<unsigned long long>(resource), this->d3d9_.live_resource_count(),
+                        this->resource_direct_va_.size(), direct_va_bytes);
             }
 
             NTSTATUS handle_d3d9_tex_blt(windows_emulator& win_emu, const io_device_context& context)

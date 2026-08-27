@@ -6653,4 +6653,55 @@ namespace sogen
         out_height = rt.height;
         return VK_SUCCESS;
     }
+
+    void vulkan_host::destroy_render_target(const uint64_t device, const uint64_t image)
+    {
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end() || rt_it->second.device_id != device)
+        {
+            return;
+        }
+
+        const auto dev_it = this->impl_->devices.find(device);
+        if (dev_it != this->impl_->devices.end())
+        {
+            impl::device_data& dev = dev_it->second;
+            impl::render_target_data& rt = rt_it->second;
+            // submit_clear/readback_render_target both submit onto rt.cmd and wait on rt.fence inline, so
+            // the only work that can still be in flight against this image was submitted on d3d9_host's
+            // own queue -- which its flush_batch already waited out before reaching here. This is belt and
+            // braces for any future path that does not.
+            if (dev.device_wait_idle)
+            {
+                dev.device_wait_idle(dev.handle);
+            }
+            if (rt.fence && dev.destroy_fence)
+            {
+                dev.destroy_fence(dev.handle, rt.fence, nullptr);
+            }
+            if (rt.pool && dev.destroy_command_pool)
+            {
+                dev.destroy_command_pool(dev.handle, rt.pool, nullptr); // also frees rt.cmd
+            }
+            if (rt.readback_buffer && dev.destroy_buffer)
+            {
+                dev.destroy_buffer(dev.handle, rt.readback_buffer, nullptr);
+            }
+            if (rt.readback_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.readback_memory, nullptr);
+            }
+            if (rt.image && dev.destroy_image)
+            {
+                dev.destroy_image(dev.handle, rt.image, nullptr);
+            }
+            if (rt.image_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.image_memory, nullptr);
+            }
+        }
+
+        this->impl_->render_targets.erase(rt_it);
+        this->impl_->images.erase(image);
+    }
 }

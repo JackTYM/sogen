@@ -60,6 +60,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_partial_lock_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_partial_lock_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-partial-lock-test-x86.exe -ld3d9
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_resource_lifetime_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-resource-lifetime-test-x64.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_resource_lifetime_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-resource-lifetime-test-x86.exe -ld3d9
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_int_bool_const_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-int-bool-const-test-x64.exe -ld3d9 -ld3dcompiler_43
 
