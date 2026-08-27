@@ -1617,6 +1617,53 @@ namespace sogen
             return enabled;
         }
 
+        // glibc/libc getenv takes a process-wide lock and linearly scans environ, so a per-draw or
+        // per-Unlock check is not free: a live MW2 profile measured the unhoisted checks below at ~1.5%
+        // of both vCPU threads' wall time, all of it inside execute_draw. The guest cannot change the
+        // host environment, so every diagnostic flag on a hot path resolves exactly once -- the same
+        // idiom drawprofile_enabled_flag/pass_diag_enabled/present_timing_enabled already use.
+        bool resetpool_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_RESETPOOL_DIAG") != nullptr;
+            return enabled;
+        }
+
+        bool allocset_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_ALLOCSET_DIAG") != nullptr;
+            return enabled;
+        }
+
+        bool uploadvol_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_UPLOADVOL_DIAG") != nullptr;
+            return enabled;
+        }
+
+        bool uploadid_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_UPLOADID_DIAG") != nullptr;
+            return enabled;
+        }
+
+        bool texupload_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_TEXUPLOAD_DIAG") != nullptr;
+            return enabled;
+        }
+
+        bool texblt_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_TEXBLT_DIAG") != nullptr;
+            return enabled;
+        }
+
+        bool direct_miss_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_DIRECT_MISS_DIAG") != nullptr;
+            return enabled;
+        }
+
         // Temporary diagnostic (EMULATOR_D3D9_RESETPOOL_DIAG=1): direct measurement to test the
         // hypothesis from the 2026-08-24 frame_desc_initial_draws regression (see that constant's own
         // comment) -- does vkResetDescriptorPool's real cost scale with the pool's total capacity, and
@@ -2560,7 +2607,7 @@ namespace sogen
         const uint64_t target_rt = this->state_.render_targets[0];
         const uint64_t target_ds = ds_entry != nullptr ? this->state_.depth_stencil : 0;
         bool rotate_batch_slot = false;
-        const bool resetpool_diag = getenv("EMULATOR_D3D9_RESETPOOL_DIAG") != nullptr;
+        const bool resetpool_diag = resetpool_diag_enabled();
         bool reopen_reason_rt_change = false;
         bool reopen_reason_desc_exhaustion = false;
         bool reopen_reason_arena_growth = false;
@@ -2731,7 +2778,7 @@ namespace sogen
                 std::memcpy(static_cast<std::byte*>(arena.mapped) + rs.offset + rs.range_start, rs.bytes->data() + rs.range_start,
                             rs.range_end - rs.range_start);
                 ++this->stats_.vertex_upload_done;
-                if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
+                if (uploadvol_diag_enabled())
                 {
                     fprintf(stderr, "[d3d9-uploadvol-diag] kind=vertex bytes=%zu referenced_verts=%u\n", rs.range_end - rs.range_start,
                             vertex_count);
@@ -2783,7 +2830,7 @@ namespace sogen
                 std::memcpy(static_cast<std::byte*>(arena.mapped) + ib_arena_offset + ib_range_start, ib_bytes->data() + ib_range_start,
                             ib_range_end - ib_range_start);
                 ++this->stats_.index_upload_done;
-                if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
+                if (uploadvol_diag_enabled())
                 {
                     fprintf(stderr, "[d3d9-uploadvol-diag] kind=index bytes=%zu\n", ib_range_end - ib_range_start);
                 }
@@ -2826,7 +2873,7 @@ namespace sogen
                     continue;
                 }
                 std::memcpy(static_cast<std::byte*>(arena.mapped) + ubo_offsets[i], ubo_staging[i].data(), ubo_sizes[i]);
-                if (getenv("EMULATOR_D3D9_UPLOADVOL_DIAG"))
+                if (uploadvol_diag_enabled())
                 {
                     fprintf(stderr, "[d3d9-uploadvol-diag] kind=ubo slot=%zu bytes=%zu\n", i, ubo_sizes[i]);
                 }
@@ -2988,7 +3035,7 @@ namespace sogen
             }
             const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
             uint32_t set_count = 0;
-            const bool allocset_diag = getenv("EMULATOR_D3D9_ALLOCSET_DIAG") != nullptr;
+            const bool allocset_diag = allocset_diag_enabled();
             int32_t allocset_result = 0;
             if (allocset_diag)
             {
@@ -3728,7 +3775,7 @@ namespace sogen
             return true;
         }
         ++g_texture_real_upload_count;
-        if (getenv("EMULATOR_D3D9_UPLOADID_DIAG"))
+        if (uploadid_diag_enabled())
         {
             fprintf(stderr, "[d3d9-uploadid-diag] resource=%llu width=%u height=%u\n", static_cast<unsigned long long>(resource), tex.width,
                     tex.height);
@@ -3871,7 +3918,7 @@ namespace sogen
         tex.upload_dirty = false;
         ++this->stats_.texture_upload_done;
 
-        if (getenv("EMULATOR_D3D9_TEXUPLOAD_DIAG"))
+        if (texupload_diag_enabled())
         {
             uint64_t hash = 14695981039346656037ull; // FNV-1a, offset basis
             for (const auto byte : tex.backing)
@@ -3947,7 +3994,7 @@ namespace sogen
         const auto src_it = this->resources_.find(src_resource);
         if (dst_it == this->resources_.end() || src_it == this->resources_.end())
         {
-            if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
+            if (texblt_diag_enabled())
             {
                 fprintf(stderr, "[d3d9-texblt-diag] dst=%llu(found=%d) src=%llu(found=%d) -> invalidcall\n",
                         static_cast<unsigned long long>(dst_resource), dst_it != this->resources_.end(),
@@ -3965,7 +4012,7 @@ namespace sogen
         this->flush_batch();
         resource_entry& dst = dst_it->second;
         resource_entry& src = src_it->second;
-        if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
+        if (texblt_diag_enabled())
         {
             const auto hash_of = [](const std::vector<std::byte>& bytes) {
                 uint64_t hash = 14695981039346656037ull;
@@ -4654,7 +4701,7 @@ namespace sogen
             backing.resize(required_size);
         }
         std::memcpy(backing.data() + offset, data, data_size);
-        if (getenv("EMULATOR_D3D9_TEXBLT_DIAG"))
+        if (texblt_diag_enabled())
         {
             uint64_t hash = 14695981039346656037ull;
             for (size_t i = 0; i < data_size; ++i)
@@ -4698,7 +4745,7 @@ namespace sogen
         // fixed-size (allocated once at resource creation), so an out-of-range write is rejected rather
         // than silently growing it (growing would mean reallocating live GPU memory a draw might already
         // be bound to).
-        if (getenv("EMULATOR_D3D9_DIRECT_MISS_DIAG"))
+        if (direct_miss_diag_enabled())
         {
             static std::atomic<uint64_t> direct_hits{};
             static std::atomic<uint64_t> non_direct{};
