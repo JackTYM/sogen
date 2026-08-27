@@ -467,6 +467,8 @@ namespace sogen
             uint64_t sampler;
             uint64_t image_view;
             uint32_t image_layout;
+
+            friend bool operator==(const descriptor_write&, const descriptor_write&) = default;
         };
 
         int32_t create_descriptor_set_layout(uint64_t device, std::span<const descriptor_binding> bindings, uint64_t& out_layout);

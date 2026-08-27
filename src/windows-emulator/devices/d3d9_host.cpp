@@ -3046,42 +3046,12 @@ namespace sogen
                 }
             }
 
-            // Allocate a fresh per-draw VS/PS descriptor-set pair from the shared frame pool (reset on
-            // batch open), against this pipeline's cached set layouts. The pool is reset only when a batch
-            // opens, so each batched draw allocates 2 more sets against it without a reset; the batch is
-            // flushed (closing it, so the next draw reopens and resets the pool) before batch_draw_count_
-            // could exceed frame_desc_capacity_draws_ -- see the batch-management overflow guard above --
-            // so allocation here always fits and ensure_frame_descriptor_pool's growth path stays dormant.
-            if (!this->ensure_frame_descriptor_pool(device, this->batch_slot_, 1))
-            {
-                return d3d_ok; // GPU allocation failure; degrade silently like the rest of this host does
-            }
-            const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
-            uint32_t set_count = 0;
-            const bool allocset_diag = allocset_diag_enabled();
-            int32_t allocset_result = 0;
-            if (allocset_diag)
-            {
-                const auto alloc_start = std::chrono::steady_clock::now();
-                allocset_result = this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_],
-                                                                         set_layouts, descriptor_sets, set_count);
-                const auto elapsed_ns = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - alloc_start).count());
-                allocset_diag_report(elapsed_ns);
-            }
-            else
-            {
-                allocset_result = this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_],
-                                                                         set_layouts, descriptor_sets, set_count);
-            }
-            if (allocset_result != 0 || set_count != descriptor_sets.size())
-            {
-                return d3d_ok;
-            }
-            ++this->batch_draw_count_;
-
-            std::vector<vulkan_host::descriptor_write> writes{
-                {.dst_set = descriptor_sets[0],
+            // Build the write list first, with dst_set holding the set INDEX rather than a set id, so it
+            // can be compared against the previous draw's list before anything is allocated (see
+            // descriptor_set_memo). Reused scratch: no per-draw heap allocation.
+            std::vector<vulkan_host::descriptor_write>& writes = this->draw_writes_;
+            writes.assign({
+                {.dst_set = 0,
                  .dst_binding = 0,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -3091,7 +3061,7 @@ namespace sogen
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
-                {.dst_set = descriptor_sets[1],
+                {.dst_set = 1,
                  .dst_binding = 0,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -3101,7 +3071,7 @@ namespace sogen
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
-                {.dst_set = descriptor_sets[0],
+                {.dst_set = 0,
                  .dst_binding = 2,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -3111,7 +3081,7 @@ namespace sogen
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
-                {.dst_set = descriptor_sets[0],
+                {.dst_set = 0,
                  .dst_binding = 3,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -3121,7 +3091,7 @@ namespace sogen
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
-                {.dst_set = descriptor_sets[1],
+                {.dst_set = 1,
                  .dst_binding = 2,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -3131,7 +3101,7 @@ namespace sogen
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
-                {.dst_set = descriptor_sets[1],
+                {.dst_set = 1,
                  .dst_binding = 3,
                  .dst_array_element = 0,
                  .descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -3141,14 +3111,14 @@ namespace sogen
                  .sampler = 0,
                  .image_view = 0,
                  .image_layout = 0},
-            };
+            });
             for (uint32_t stage = 0; stage < max_ps_sampler_stages; ++stage)
             {
                 if (tex_image_views[stage] == 0 || tex_samplers[stage] == 0)
                 {
                     continue;
                 }
-                writes.push_back({.dst_set = descriptor_sets[1],
+                writes.push_back({.dst_set = 1,
                                   .dst_binding = ps_sampler_binding_for_stage(stage),
                                   .dst_array_element = 0,
                                   .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -3167,7 +3137,7 @@ namespace sogen
                 {
                     continue;
                 }
-                writes.push_back({.dst_set = descriptor_sets[0],
+                writes.push_back({.dst_set = 0,
                                   .dst_binding = vs_sampler_binding_for_stage(k),
                                   .dst_array_element = 0,
                                   .descriptor_type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -3178,12 +3148,77 @@ namespace sogen
                                   .image_view = vs_tex_image_views[k],
                                   .image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
             }
-            const auto t_before_update_desc = profile ? std::chrono::steady_clock::now() : t_upload_done;
-            this->vulkan_.update_descriptor_sets(device, writes);
-            if (profile)
+            descriptor_set_memo& memo = this->descriptor_memo_;
+            const bool memo_hit = memo.valid && memo.batch_generation == this->batch_generation_ &&
+                                  memo.vs_set_layout == programmable->vs_set_layout && memo.ps_set_layout == programmable->ps_set_layout &&
+                                  memo.writes == writes;
+            if (memo_hit)
             {
-                g_draw_profile.update_desc_ns += static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t_before_update_desc).count());
+                descriptor_sets = memo.sets;
+                ++this->stats_.descriptor_set_reused;
+            }
+            else
+            {
+                // Allocate a fresh per-draw VS/PS descriptor-set pair from the shared frame pool (reset on
+                // batch open), against this pipeline's cached set layouts. The pool is reset only when a
+                // batch opens, so each batched draw allocates 2 more sets against it without a reset; the
+                // batch is flushed (closing it, so the next draw reopens and resets the pool) before
+                // batch_draw_count_ could exceed frame_desc_capacity_draws_ -- see the batch-management
+                // overflow guard above -- so allocation here always fits and ensure_frame_descriptor_pool's
+                // growth path stays dormant.
+                // The growth path in here destroys the slot's old pool, freeing every set the memo could
+                // still be naming, so the memo must not survive a failure to build the replacement.
+                if (!this->ensure_frame_descriptor_pool(device, this->batch_slot_, 1))
+                {
+                    memo.valid = false;
+                    return d3d_ok; // GPU allocation failure; degrade silently like the rest of this host does
+                }
+                const std::array<uint64_t, 2> set_layouts{programmable->vs_set_layout, programmable->ps_set_layout};
+                uint32_t set_count = 0;
+                const bool allocset_diag = allocset_diag_enabled();
+                int32_t allocset_result = 0;
+                if (allocset_diag)
+                {
+                    const auto alloc_start = std::chrono::steady_clock::now();
+                    allocset_result = this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_],
+                                                                             set_layouts, descriptor_sets, set_count);
+                    const auto elapsed_ns = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - alloc_start).count());
+                    allocset_diag_report(elapsed_ns);
+                }
+                else
+                {
+                    allocset_result = this->vulkan_.allocate_descriptor_sets(device, this->frame_descriptor_pool_[this->batch_slot_],
+                                                                             set_layouts, descriptor_sets, set_count);
+                }
+                if (allocset_result != 0 || set_count != descriptor_sets.size())
+                {
+                    memo.valid = false;
+                    return d3d_ok;
+                }
+                ++this->batch_draw_count_;
+                ++this->stats_.descriptor_set_allocated;
+
+                memo.writes = writes;
+                for (vulkan_host::descriptor_write& w : writes)
+                {
+                    w.dst_set = descriptor_sets[w.dst_set];
+                }
+
+                const auto t_before_update_desc = profile ? std::chrono::steady_clock::now() : t_upload_done;
+                this->vulkan_.update_descriptor_sets(device, writes);
+                if (profile)
+                {
+                    g_draw_profile.update_desc_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t_before_update_desc)
+                            .count());
+                }
+
+                memo.batch_generation = this->batch_generation_;
+                memo.vs_set_layout = programmable->vs_set_layout;
+                memo.ps_set_layout = programmable->ps_set_layout;
+                memo.sets = descriptor_sets;
+                memo.valid = true;
             }
         }
 
@@ -3497,12 +3532,15 @@ namespace sogen
             {
                 fprintf(stderr,
                         "[d3d9-drawprofile] texture_upload_skipped=%llu draw_count=%llu build_sampler_total=%.2fus "
-                        "ensure_texture_uploaded_total=%.2fus ensure_texture_uploaded_max=%.2fus real_upload_count=%llu\n",
+                        "ensure_texture_uploaded_total=%.2fus ensure_texture_uploaded_max=%.2fus real_upload_count=%llu "
+                        "descset_allocated=%llu descset_reused=%llu\n",
                         static_cast<unsigned long long>(this->stats_.texture_upload_skipped),
                         static_cast<unsigned long long>(this->draw_count_), static_cast<double>(g_build_sampler_ns) / 1000.0,
                         static_cast<double>(g_ensure_texture_uploaded_ns) / 1000.0,
                         static_cast<double>(g_ensure_texture_uploaded_max_ns) / 1000.0,
-                        static_cast<unsigned long long>(g_texture_real_upload_count));
+                        static_cast<unsigned long long>(g_texture_real_upload_count),
+                        static_cast<unsigned long long>(this->stats_.descriptor_set_allocated),
+                        static_cast<unsigned long long>(this->stats_.descriptor_set_reused));
             }
         }
 

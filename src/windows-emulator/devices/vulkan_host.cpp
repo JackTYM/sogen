@@ -607,20 +607,11 @@ namespace sogen
             uint64_t device_id{};
         };
 
-        struct bound_buffer_info
-        {
-            uint64_t buffer_id{};
-            uint64_t offset{};
-            uint64_t range{};
-            uint32_t type{};
-        };
-
         struct descriptor_set_data
         {
             VkDescriptorSet handle{};
             uint64_t device_id{};
             uint64_t pool_id{};
-            std::unordered_map<uint32_t, bound_buffer_info> buffer_bindings;
         };
 
         std::unordered_map<uint64_t, shader_module_data> shader_modules;
@@ -5096,7 +5087,11 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
-        std::vector<VkDescriptorSetLayout> vk_layouts;
+        // Called once per programmable draw (~100k/s in heavy scenes), so both scratch buffers are reused
+        // across calls instead of heap-allocated per call. Single emulator thread, no reentrancy.
+        static thread_local std::vector<VkDescriptorSetLayout> vk_layouts;
+        static thread_local std::vector<VkDescriptorSet> sets;
+        vk_layouts.clear();
         vk_layouts.reserve(set_layouts.size());
         for (const uint64_t id : set_layouts)
         {
@@ -5114,7 +5109,7 @@ namespace sogen
         info.descriptorSetCount = static_cast<uint32_t>(vk_layouts.size());
         info.pSetLayouts = vk_layouts.empty() ? nullptr : vk_layouts.data();
 
-        std::vector<VkDescriptorSet> sets(vk_layouts.size());
+        sets.assign(vk_layouts.size(), VK_NULL_HANDLE);
         const VkResult result = dev->second.allocate_descriptor_sets(dev->second.handle, &info, sets.data());
         if (result != VK_SUCCESS)
         {
@@ -5125,8 +5120,7 @@ namespace sogen
         for (size_t i = 0; i < sets.size(); ++i)
         {
             const uint64_t id = this->impl_->next_id++;
-            this->impl_->descriptor_sets.emplace(
-                id, impl::descriptor_set_data{.handle = sets[i], .device_id = device, .pool_id = pool, .buffer_bindings = {}});
+            this->impl_->descriptor_sets.emplace(id, impl::descriptor_set_data{.handle = sets[i], .device_id = device, .pool_id = pool});
             if (i < out_sets.size())
             {
                 out_sets[i] = id;
@@ -5159,12 +5153,11 @@ namespace sogen
         // probe per write.
         uint64_t cached_set_id = 0;
         VkDescriptorSet cached_set_handle = VK_NULL_HANDLE;
-        impl::descriptor_set_data* cached_set = nullptr;
 
         for (size_t i = 0; i < writes.size(); ++i)
         {
             const descriptor_write& w = writes[i];
-            if (w.dst_set != cached_set_id || cached_set == nullptr)
+            if (w.dst_set != cached_set_id || cached_set_handle == VK_NULL_HANDLE)
             {
                 const auto set = this->impl_->descriptor_sets.find(w.dst_set);
                 if (set == this->impl_->descriptor_sets.end() || set->second.device_id != device)
@@ -5173,7 +5166,6 @@ namespace sogen
                 }
                 cached_set_id = w.dst_set;
                 cached_set_handle = set->second.handle;
-                cached_set = &set->second;
             }
 
             VkWriteDescriptorSet vw{};
@@ -5232,8 +5224,6 @@ namespace sogen
                     bi.buffer = buf->second.handle;
                     bi.offset = w.offset;
                     bi.range = w.range;
-                    cached_set->buffer_bindings[w.dst_binding] =
-                        impl::bound_buffer_info{.buffer_id = w.buffer, .offset = w.offset, .range = w.range, .type = w.descriptor_type};
                 }
                 vw.pBufferInfo = &bi;
             }

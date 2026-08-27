@@ -229,6 +229,11 @@ namespace sogen
             uint64_t vertex_upload_skipped{};
             uint64_t index_upload_done{};
             uint64_t index_upload_skipped{};
+            // Programmable draws that rebound the previous draw's descriptor-set pair because their whole
+            // write list was unchanged (`reused`) versus those that allocated and wrote a fresh pair
+            // (`allocated`) -- see descriptor_set_memo.
+            uint64_t descriptor_set_allocated{};
+            uint64_t descriptor_set_reused{};
             // programmable_pipelines_ lookups. A steady-state frame should be all hits: the cache is never
             // evicted, so a per-frame `miss` count means the key is genuinely varying (new shader pair,
             // new RT format, new vertex shape, or new depth/blend combination) and every one of those
@@ -978,6 +983,37 @@ namespace sogen
         };
 
         std::array<sampler_memo_entry, max_ps_sampler_stages + max_vs_sampler_stages> sampler_memo_{};
+
+        // Scratch for the per-draw descriptor writes execute_draw hands to update_descriptor_sets, reused
+        // across draws rather than rebuilt as a fresh std::vector each time. Written with dst_set holding
+        // the SET INDEX (0 = VS, 1 = PS) rather than a descriptor-set id, so a draw's write list can be
+        // compared against the previous draw's before any set has been allocated; execute_draw patches the
+        // real ids in just before issuing the update.
+        std::vector<vulkan_host::descriptor_write> draw_writes_{};
+
+        // Consecutive draws in MW2 very often bind the exact same thing: the constant UBOs resolve to the
+        // same arena offsets whenever f5e8cb60's UBO cache hits, and the bound textures/samplers resolve to
+        // the same ids whenever 2c2a31c9's sampler memo hits. When the whole write list is unchanged, the
+        // descriptor sets the previous draw already allocated and wrote hold exactly the contents this draw
+        // would write into fresh ones -- a set is never mutated after its own draw wrote it -- so the draw
+        // can rebind them and skip vkAllocateDescriptorSets, the two id-map inserts, and (the expensive
+        // part on MoltenVK, which re-encodes a Metal argument buffer per write) vkUpdateDescriptorSets.
+        //
+        // batch_generation is the invalidation key: it is bumped in exactly the block that calls
+        // reset_descriptor_pool, which implicitly frees every set the memo could be holding. The pipeline's
+        // two set layouts are part of the key because a different pipeline's sets are not interchangeable
+        // even when the writes match.
+        struct descriptor_set_memo
+        {
+            uint64_t batch_generation{};
+            uint64_t vs_set_layout{};
+            uint64_t ps_set_layout{};
+            std::array<uint64_t, 2> sets{};
+            std::vector<vulkan_host::descriptor_write> writes{};
+            bool valid{false};
+        };
+
+        descriptor_set_memo descriptor_memo_{};
 
         // One GPU buffer per batch slot (see batch_slot_count's comment above), each backing every
         // vertex/index/uniform range a draw in THAT slot's batch needs. Each range is a distinct
