@@ -576,8 +576,9 @@ namespace sogen
 
         // Lazily created once per device: a single command pool/queue, plus a command_buffer_/fence_
         // pair reused (submitted and waited on synchronously) by the prep helpers
-        // (ensure_texture_uploaded, ensure_depth_stencil_view), color_fill, and blt -- draws themselves
-        // record into the separate batch_command_buffer_/batch_fence_ below.
+        // (ensure_texture_uploaded, ensure_depth_stencil_view) -- draws, and every transfer that can be
+        // pipelined behind them (color_fill, tex_blt's GPU fast path, blt), record into the separate
+        // batch_command_buffer_/batch_fence_ below instead.
         uint64_t queue_{};
         uint64_t command_pool_{};
         uint64_t command_buffer_{};
@@ -602,7 +603,7 @@ namespace sogen
         // leaving execute_draw's own batch_rt_/batch_ds_ mismatch guard to close and rotate the batch.
         //
         // Every OTHER caller of flush_batch() (destroy_resource, tex_blt, sync_backing_from_gpu,
-        // color_fill, blt, ensure_depth_stencil_view's first-use init, ...) needs the batch's GPU
+        // color_fill, ensure_depth_stencil_view's first-use init, ...) needs the batch's GPU
         // work OBSERVABLY FINISHED before it proceeds -- it reads back pixels, destroys the Vulkan objects
         // the batch referenced, or must be ordered relative to a batch that might still be sitting
         // unsubmitted. flush_batch() stays a full barrier for them: it still submits whatever is
@@ -615,8 +616,8 @@ namespace sogen
         static constexpr uint32_t batch_slot_count = 2;
 
         // A separate, dedicated command buffer/fence pair per slot for the batched-draw recording, so
-        // neither collides with the shared command_buffer_/fence_ that the prep helpers, color_fill, and
-        // blt submit+wait on synchronously above.
+        // neither collides with the shared command_buffer_/fence_ that the prep helpers submit+wait on
+        // synchronously above.
         std::array<uint64_t, batch_slot_count> batch_command_buffer_{};
         std::array<uint64_t, batch_slot_count> batch_fence_{};
         // Set by submit_batch_async() right after it submits slot i's batch (before any wait), cleared by
@@ -1126,11 +1127,12 @@ namespace sogen
         // earlier draw's batch-management step may have async-submitted a DIFFERENT slot without waiting
         // for it, so "current slot only" would not actually guarantee this host's GPU work is done. Called
         // at every boundary that must observe ALL of this host's outstanding GPU work before proceeding
-        // (readback, color_fill, blt, resource teardown) -- every one of those needs this full-barrier
+        // (readback, color_fill, resource teardown) -- every one of those needs this full-barrier
         // contract, unlike execute_draw's own internal reopen decision (see submit_batch_async). The
-        // D3D9 clear and render-target/depth-stencil handlers deliberately do NOT use this: none of them
-        // returns data to the CPU or destroys anything the batch references, so a plain
-        // submit-and-rotate on the next draw gives them the ordering they need without the wait.
+        // D3D9 clear, blt, and render-target/depth-stencil handlers deliberately do NOT use this: none of
+        // them returns data to the CPU or destroys anything the batch references, so recording into the
+        // open batch (blt) or a plain submit-and-rotate on the next draw gives them the ordering they
+        // need without the wait.
         void flush_batch();
         // Opens a batch recording into target_rt/target_ds's identity, or keeps the currently open one if
         // it already matches -- the same round-robin slot-selection execute_draw's own batch-management
@@ -1234,9 +1236,11 @@ namespace sogen
                            uint32_t color_argb);
 
         // pfnBlt (StretchRect): blits src_rect of src_resource's image into dst_rect of dst_resource's
-        // image via vkCmdBlitImage (which scales natively when the rects differ in size). Same shared
-        // command buffer / cmd_pipeline_barrier choke point as color_fill; both RTs assumed at their
-        // resting TRANSFER_SRC_OPTIMAL layout on entry. Marks the destination backing_dirty.
+        // image via vkCmdBlitImage (which scales natively when the rects differ in size). Recorded into
+        // the open batch (never its own submit+wait) through the same cmd_pipeline_barrier choke point as
+        // color_fill; both RTs assumed at their resting TRANSFER_SRC_OPTIMAL layout on entry, which
+        // close_render_pass re-establishes for whatever the batch was mid-way through rendering. Marks
+        // the destination backing_dirty, so the next Lock/Present readback flushes and picks it up.
         // `dst_subresource`/`src_subresource` are always 0 (single-mip, single-layer resources only) and
         // unused -- not yet plumbed to a real mip/array level; a future mip-generation consumer reusing
         // this as a blit-between-mip-levels primitive would need to thread these through into the

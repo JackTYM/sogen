@@ -4630,10 +4630,6 @@ namespace sogen
                            const uint32_t /*src_subresource*/, const int32_t src_left, const int32_t src_top, const int32_t src_right,
                            const int32_t src_bottom, const uint32_t filter)
     {
-        // Flush any open batch first: this blit reads the source and writes the destination on the GPU,
-        // both of which a batched draw may still be about to render into; both must rest in
-        // TRANSFER_SRC_OPTIMAL (the batch's closing barrier guarantees it) before the blit runs.
-        this->flush_batch();
         const auto dst_it = this->resources_.find(dst_resource);
         const auto src_it = this->resources_.find(src_resource);
         if (dst_it == this->resources_.end() || src_it == this->resources_.end() || dst_it->second.vk_image_id == 0 ||
@@ -4663,17 +4659,33 @@ namespace sogen
             return d3derr_invalidcall;
         }
 
-        this->vulkan_.reset_fence(device, this->fence_);
-        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+        // Record into the currently-open batch instead of flush_batch() + a standalone
+        // submit+wait_for_fence(UINT64_MAX), the same way tex_blt's and color_fill's GPU paths do. What
+        // the old drain bought -- every batched draw into src/dst already executed, and both images back
+        // at their TRANSFER_SRC_OPTIMAL resting layout -- is delivered without any GPU wait by recording
+        // after close_render_pass(): program order inside one command buffer orders the blit after those
+        // draws, and close_render_pass emits exactly the attachment/sampled-image barriers that restore
+        // the resting layout. Every consumer that must OBSERVE the blit (Lock/Present via
+        // sync_backing_from_gpu, resource teardown) already flushes for itself.
+        this->ensure_batch_open(device, this->state_.render_targets[0], this->state_.depth_stencil);
+        this->close_render_pass(this->batch_slot_); // vkCmdBlitImage is illegal inside a render pass instance
+        // A Clear() whose colour is still parked on pending_clear_ was issued BEFORE this blit, but would
+        // otherwise be realized after it -- folded into a later draw's LOAD_OP_CLEAR, wiping a dst the
+        // Clear() named, or leaving the blit reading a not-yet-cleared src. The drain used to force it out
+        // (via submit_batch_async); do the same explicitly, while the render pass is still closed.
+        // pending_clear_'s depth half needs no such treatment: this blit only ever touches the colour
+        // aspect, so it cannot alias the depth-stencil the deferred depth clear names.
+        this->realize_pending_color_clear(this->pending_clear_[this->batch_slot_]);
+        const uint64_t batch_cmd = this->batch_command_buffer_[this->batch_slot_];
 
         const vulkan_host::subresource_range color_range{
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1};
         // Both RTs rest in TRANSFER_SRC_OPTIMAL. The source is already blit-ready there; only the
         // destination needs a TRANSFER_DST_OPTIMAL round trip. Route through cmd_pipeline_barrier so
         // render_targets[dst].current_layout stays authoritative.
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
+        this->vulkan_.cmd_pipeline_barrier(batch_cmd, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color_range);
 
         // D3DTEXF_LINEAR (2) -> VK_FILTER_LINEAR; every other value (incl. NONE/POINT) -> NEAREST, which
         // is an exact copy for same-size blits.
@@ -4701,16 +4713,12 @@ namespace sogen
             .dst_offset_z1 = 1,
             .filter = vk_filter,
         };
-        this->vulkan_.cmd_blit_image(this->command_buffer_, src.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.vk_image_id,
+        this->vulkan_.cmd_blit_image(batch_cmd, src.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.vk_image_id,
                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, blit);
 
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
-
-        this->vulkan_.end_command_buffer(this->command_buffer_);
-        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
+        this->vulkan_.cmd_pipeline_barrier(batch_cmd, dst.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
 
         dst.backing_dirty = true;
         return d3d_ok;
