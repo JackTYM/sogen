@@ -191,7 +191,17 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_pending_clear_rebind_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-pending-clear-rebind-test-x86.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_gpu_sync_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-gpu-sync-test-x86.exe -ld3d9
 ```
+
+`d3d9_gpu_sync_test.cpp` is x86-only on purpose. Its trigger is an unqualified `Lock()` reaching
+`classify_lock_intent`'s `synchronized` case, and that decode is x86-only -- x64's `D3DDDIARG_LOCK`
+layout is unverified, so x64 treats every lock as synchronized. Built for x64 the test fails against
+the blocking `ioctl_d3d9_flush` in tree today: an unqualified `Lock()` on a direct-mapped dynamic
+buffer does not actually synchronize with the GPU there. That is a real, separate, pre-existing x64
+bug in this UMD, found by this test and not yet diagnosed.
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
 `d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`,
