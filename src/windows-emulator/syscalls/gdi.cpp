@@ -4476,6 +4476,11 @@ namespace sogen
                 }
 
                 io_device_context ctx{c.emu};
+                // ioctl_wait_semaphores parks the issuing thread when an infinite wait is not satisfied
+                // yet, and reaches it through io_device_context::thread(), which throws on a null vcpu.
+                // The \\.\SogenGpu transport already sets this; without it here the same bridge command
+                // dies on the Escape transport instead of parking.
+                ctx.vcpu = &c.vcpu;
                 ctx.io_control_code = header.command_id;
                 ctx.input_buffer = escape.pPrivateDriverData + header.input_offset;
                 ctx.input_buffer_length = header.input_size;
