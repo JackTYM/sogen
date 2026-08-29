@@ -348,8 +348,7 @@ namespace sogen
                 case gpu_bridge::ioctl_d3d9_tex_blt:
                     return handle_d3d9_tex_blt(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_flush:
-                    this->d3d9_.flush_pending();
-                    return STATUS_SUCCESS;
+                    return handle_d3d9_flush(win_emu, context);
 
                 case gpu_bridge::ioctl_d3d9_set_render_state:
                     return handle_d3d9_streamed(win_emu, context, gpu_bridge::command::d3d9_set_render_state);
@@ -2848,6 +2847,27 @@ namespace sogen
             // D3D9 UMD <-> host d3d9_host bridge sync commands (see d3d9-command-protocol/
             // d3d9_command_protocol.hpp for the payload structs). Dispatched below the same way as the
             // Vulkan handlers above.
+
+            // The guest UMD issues this to get "every draw I have recorded has FINISHED on the GPU"
+            // before it recycles memory the GPU may still be reading. Submitting and then blocking in
+            // vkWaitForFences here would hold the emulator kernel lock across a GPU wait, which
+            // docs/multi-vcpu-design.md section 7.2 forbids and which stalls every other guest thread.
+            // Park the calling thread on a non-blocking fence poll instead, the same way
+            // handle_wait_semaphores parks DXVK's frame waits.
+            NTSTATUS handle_d3d9_flush(windows_emulator& win_emu, const io_device_context& context)
+            {
+                this->d3d9_.begin_flush_pending();
+
+                if (this->d3d9_.poll_flush_complete())
+                {
+                    return STATUS_SUCCESS;
+                }
+
+                auto* d3d9 = &this->d3d9_;
+                context.thread().await_host_condition = [d3d9]() { return d3d9->poll_flush_complete(); };
+                win_emu.yield_thread(*context.vcpu, false);
+                return STATUS_SUCCESS;
+            }
 
             NTSTATUS handle_d3d9_marker(windows_emulator& win_emu, const io_device_context& context)
             {

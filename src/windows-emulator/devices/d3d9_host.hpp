@@ -149,11 +149,19 @@ namespace sogen
         bool get_direct_mapping(uint64_t resource, void*& out_ptr, size_t& out_size, uint32_t& out_slice_stride,
                                 uint32_t& out_slice_count) const;
 
-        // Submits whatever the open batch has recorded and waits for the GPU to finish it, so nothing the
-        // guest wrote before this call can still be in flight afterwards. The guest UMD needs this before
-        // recycling a direct buffer's oldest ring slice, the one point where renaming alone can't prove
-        // the GPU is done with the bytes about to be overwritten.
-        void flush_pending();
+        // Submits whatever the open batch has recorded, without waiting. Pair with poll_flush_complete
+        // to get the guarantee the guest UMD needs before recycling a direct buffer's oldest ring slice
+        // (the one point where renaming alone can't prove the GPU is done with the bytes about to be
+        // overwritten): nothing the guest wrote before the flush can still be in flight once
+        // poll_flush_complete has returned true. Split from the wait so the caller can park the guest
+        // thread instead of blocking the emulator's kernel lock across a GPU wait, which
+        // docs/multi-vcpu-design.md section 7.2 forbids.
+        void begin_flush_pending();
+
+        // Non-blocking counterpart to begin_flush_pending: returns true once every submitted batch slot
+        // has completed on the GPU (retiring each as it does), false while any is still running. Safe to
+        // call repeatedly, and safe to call with no flush outstanding (returns true).
+        bool poll_flush_complete();
 
         // Copies the resource's current host-side pixel backing (BGRA8) out for presentation. Lazily
         // syncs from the GPU image first via sync_backing_from_gpu if pfnClear/pfnDrawPrimitive left it
@@ -1122,6 +1130,9 @@ namespace sogen
         // clears batch_slot_pending_[slot]. A no-op when that slot has no outstanding submission -- either
         // it was never used, or an earlier wait already drained it.
         void wait_for_batch_slot(uint32_t slot);
+        // Clears batch_slot_pending_[slot] and releases the staging buffers its submission was keeping
+        // alive. The caller must already have established that the slot's fence is done.
+        void retire_batch_slot(uint32_t slot);
         // Full barrier: submits whatever batch is currently open (submit_batch_async), then waits on EVERY
         // slot that still has a pending (submitted-but-unwaited) fence, not just the current one -- an
         // earlier draw's batch-management step may have async-submitted a DIFFERENT slot without waiting

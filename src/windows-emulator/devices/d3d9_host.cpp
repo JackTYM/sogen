@@ -665,13 +665,8 @@ namespace sogen
         ++this->batch_submit_count_;
     }
 
-    void d3d9_host::wait_for_batch_slot(const uint32_t slot)
+    void d3d9_host::retire_batch_slot(const uint32_t slot)
     {
-        if (!this->batch_slot_pending_[slot])
-        {
-            return;
-        }
-        this->vulkan_.wait_for_fence(this->batch_fence_[slot], UINT64_MAX);
         this->batch_slot_pending_[slot] = false;
         for (const pending_staging_buffer& staging : this->pending_staging_cleanup_[slot])
         {
@@ -679,6 +674,16 @@ namespace sogen
             this->vulkan_.free_memory(staging.device, staging.memory);
         }
         this->pending_staging_cleanup_[slot].clear();
+    }
+
+    void d3d9_host::wait_for_batch_slot(const uint32_t slot)
+    {
+        if (!this->batch_slot_pending_[slot])
+        {
+            return;
+        }
+        this->vulkan_.wait_for_fence(this->batch_fence_[slot], UINT64_MAX);
+        this->retire_batch_slot(slot);
     }
 
     void d3d9_host::flush_batch()
@@ -4941,9 +4946,33 @@ namespace sogen
         return true;
     }
 
-    void d3d9_host::flush_pending()
+    void d3d9_host::begin_flush_pending()
     {
-        this->flush_batch();
+        this->submit_batch_async();
+    }
+
+    bool d3d9_host::poll_flush_complete()
+    {
+        bool all_complete = true;
+        for (uint32_t slot = 0; slot < batch_slot_count; ++slot)
+        {
+            if (!this->batch_slot_pending_[slot])
+            {
+                continue;
+            }
+
+            // Only VK_NOT_READY means "still executing". Anything else -- completion or a lost device --
+            // retires the slot, so a device loss can never leave the guest thread parked forever.
+            if (this->vulkan_.get_fence_status(this->batch_fence_[slot]) == VK_NOT_READY)
+            {
+                all_complete = false;
+                continue;
+            }
+
+            this->retire_batch_slot(slot);
+        }
+
+        return all_complete;
     }
 
     int32_t d3d9_host::create_vertex_shader(const void* tokens, const size_t token_size_bytes, uint64_t& out_shader)
