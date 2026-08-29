@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -96,6 +97,15 @@ namespace sogen
 
         // Resolves a queue created with the device; out_queue receives a stable object id.
         int32_t get_device_queue(uint64_t device, uint32_t queue_family_index, uint32_t queue_index, uint64_t& out_queue);
+
+        // Starts a host thread that blocks until the GPU retires work submitted to this device, calling
+        // on_progress once per completion. Every subsequent queue_submit/queue_submit2 on the device
+        // additionally signals an internal timeline semaphore, which is what the thread waits on, so the
+        // device must have been created with the timelineSemaphore feature enabled; without it this
+        // fails and the caller is expected to fall back to polling. on_progress runs on that host thread
+        // and must not block on it, nor take any lock a submitting thread could be holding.
+        // Idempotent per device. The thread is stopped and joined by destroy_device.
+        int32_t start_gpu_progress_watch(uint64_t device, std::function<void()> on_progress);
 
         int32_t create_command_pool(uint64_t device, uint32_t queue_family_index, uint32_t flags, uint64_t& out_pool);
         void destroy_command_pool(uint64_t device, uint64_t pool);

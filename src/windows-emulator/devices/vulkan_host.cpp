@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -13,8 +14,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <ranges>
@@ -289,6 +293,97 @@ namespace sogen
             return *device.portability;
         }
 
+        // Blocks a host thread on a device's progress timeline (start_gpu_progress_watch) so the
+        // emulator can learn that the GPU retired something without polling for it, and reports each
+        // advance through on_progress.
+        //
+        // A timeline semaphore rather than the fences the work already signals, because vkResetFences
+        // demands external synchronization on the fence: a fence the guest side may reset and re-submit
+        // at any moment cannot legally be waited on from a second thread. A timeline is monotonic, never
+        // reset, and carries no such requirement, so this may wait on it concurrently with the
+        // submissions that signal it.
+        //
+        // Everything the thread touches is resolved once and copied here: it never re-enters
+        // vulkan_host, whose object tables have no locking of their own and are safe only under the
+        // emulator's kernel lock -- which this thread must never take, or a guest thread blocked on the
+        // GPU could never be woken.
+        class gpu_progress_watch
+        {
+          public:
+            gpu_progress_watch(const VkDevice device, const VkSemaphore semaphore, const PFN_vkWaitSemaphores wait_semaphores,
+                               const PFN_vkGetSemaphoreCounterValue get_counter_value, std::function<void()> on_progress)
+                : device_(device),
+                  semaphore_(semaphore),
+                  wait_semaphores_(wait_semaphores),
+                  get_counter_value_(get_counter_value),
+                  on_progress_(std::move(on_progress))
+            {
+                this->thread_ = std::thread([this] { this->run(); });
+            }
+
+            gpu_progress_watch(const gpu_progress_watch&) = delete;
+            gpu_progress_watch& operator=(const gpu_progress_watch&) = delete;
+            gpu_progress_watch(gpu_progress_watch&&) = delete;
+            gpu_progress_watch& operator=(gpu_progress_watch&&) = delete;
+
+            ~gpu_progress_watch()
+            {
+                this->stop_.store(true, std::memory_order_relaxed);
+                this->thread_.join();
+            }
+
+          private:
+            // Nothing can signal the semaphore to release a wait that is no longer wanted, so the wait
+            // is bounded purely so the destructor's stop flag is eventually seen. It is a liveness net,
+            // not the wake path.
+            static constexpr uint64_t wait_timeout_ns = 50'000'000;
+
+            void run()
+            {
+                uint64_t observed = 0;
+                if (this->get_counter_value_(this->device_, this->semaphore_, &observed) != VK_SUCCESS)
+                {
+                    return;
+                }
+
+                while (!this->stop_.load(std::memory_order_relaxed))
+                {
+                    const uint64_t target = observed + 1;
+                    VkSemaphoreWaitInfo info{};
+                    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                    info.semaphoreCount = 1;
+                    info.pSemaphores = &this->semaphore_;
+                    info.pValues = &target;
+
+                    const VkResult wait_result = this->wait_semaphores_(this->device_, &info, wait_timeout_ns);
+                    if (wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT)
+                    {
+                        return;
+                    }
+
+                    uint64_t value = 0;
+                    if (this->get_counter_value_(this->device_, this->semaphore_, &value) != VK_SUCCESS)
+                    {
+                        return;
+                    }
+
+                    if (value != observed)
+                    {
+                        observed = value;
+                        this->on_progress_();
+                    }
+                }
+            }
+
+            VkDevice device_{};
+            VkSemaphore semaphore_{};
+            PFN_vkWaitSemaphores wait_semaphores_{};
+            PFN_vkGetSemaphoreCounterValue get_counter_value_{};
+            std::function<void()> on_progress_{};
+            std::atomic_bool stop_{false};
+            std::thread thread_{};
+        };
+
         struct device_data
         {
             VkDevice handle{};
@@ -296,6 +391,14 @@ namespace sogen
             VkPhysicalDevice physical_device{}; // the device this was created from (for memory queries)
             uint32_t queue_family_index{};      // the single family this device was created with
             bool depth_clamp_enabled{};         // whether the depthClamp feature was enabled (gates pipeline depthClampEnable)
+
+            // Progress timeline (start_gpu_progress_watch). Null on a device nobody asked to watch, in
+            // which case every submit path below is unchanged. Not an entry in `semaphores`: it has no
+            // object id and is never reachable from the guest, so erase_device destroys it by hand.
+            VkSemaphore progress_semaphore{};
+            uint64_t progress_value{};
+            std::unique_ptr<gpu_progress_watch> progress_watch{};
+
             PFN_vkDestroyDevice destroy_device{};
             PFN_vkGetDeviceQueue get_device_queue{};
             PFN_vkQueueWaitIdle queue_wait_idle{};
@@ -839,6 +942,15 @@ namespace sogen
             if (it == this->devices.end())
             {
                 return;
+            }
+
+            // Before anything the watcher thread touches goes away: its destructor joins, so once this
+            // returns no other thread is inside this device.
+            it->second.progress_watch.reset();
+            if (it->second.progress_semaphore && it->second.destroy_semaphore)
+            {
+                it->second.destroy_semaphore(it->second.handle, it->second.progress_semaphore, nullptr);
+                it->second.progress_semaphore = VK_NULL_HANDLE;
             }
 
             // Tear down swapchains first: they own offscreen images (in the `images` table), a readback
@@ -2174,7 +2286,7 @@ namespace sogen
         }
 
         const uint64_t id = this->impl_->next_id++;
-        this->impl_->devices.emplace(id, data);
+        this->impl_->devices.emplace(id, std::move(data));
         out_device = id;
         return VK_SUCCESS;
     }
@@ -2204,6 +2316,44 @@ namespace sogen
         const uint64_t id = this->impl_->next_id++;
         this->impl_->queues.emplace(id, impl::queue_data{.handle = queue, .device_id = device});
         out_queue = id;
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::start_gpu_progress_watch(uint64_t device, std::function<void()> on_progress)
+    {
+        const auto dev = this->impl_->devices.find(device);
+        if (dev == this->impl_->devices.end() || !dev->second.create_semaphore || !dev->second.wait_semaphores ||
+            !dev->second.get_semaphore_counter_value)
+        {
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+
+        if (dev->second.progress_watch)
+        {
+            return VK_SUCCESS;
+        }
+
+        VkSemaphoreTypeCreateInfo type_info{};
+        type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        type_info.initialValue = 0;
+
+        VkSemaphoreCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        info.pNext = &type_info;
+
+        VkSemaphore semaphore{};
+        const VkResult result = dev->second.create_semaphore(dev->second.handle, &info, nullptr, &semaphore);
+        if (result != VK_SUCCESS)
+        {
+            return result;
+        }
+
+        // Published before the thread starts so the very first submit after this already ticks the
+        // timeline the thread is about to wait on.
+        dev->second.progress_semaphore = semaphore;
+        dev->second.progress_watch = std::make_unique<impl::gpu_progress_watch>(
+            dev->second.handle, semaphore, dev->second.wait_semaphores, dev->second.get_semaphore_counter_value, std::move(on_progress));
         return VK_SUCCESS;
     }
 
@@ -2848,21 +2998,39 @@ namespace sogen
         }
 
         // Zero-command-buffer submission: still a valid fence signal operation (no work batched).
-        if (command_buffer == 0)
+        if (command_buffer == 0 && !dev->second.progress_semaphore)
         {
             return dev->second.queue_submit(queue_it->second.handle, 0, nullptr, fence_handle);
         }
 
-        const auto cb = this->impl_->command_buffers.find(command_buffer);
-        if (cb == this->impl_->command_buffers.end() || cb->second.device_id != queue_it->second.device_id)
+        VkCommandBuffer command_buffer_handle = VK_NULL_HANDLE;
+        if (command_buffer != 0)
         {
-            return VK_ERROR_INITIALIZATION_FAILED;
+            const auto cb = this->impl_->command_buffers.find(command_buffer);
+            if (cb == this->impl_->command_buffers.end() || cb->second.device_id != queue_it->second.device_id)
+            {
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+            command_buffer_handle = cb->second.handle;
         }
 
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &cb->second.handle;
+        submit.commandBufferCount = command_buffer_handle != VK_NULL_HANDLE ? 1u : 0u;
+        submit.pCommandBuffers = &command_buffer_handle;
+
+        VkTimelineSemaphoreSubmitInfo progress{};
+        uint64_t progress_value = 0;
+        if (dev->second.progress_semaphore)
+        {
+            progress_value = ++dev->second.progress_value;
+            progress.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            progress.signalSemaphoreValueCount = 1;
+            progress.pSignalSemaphoreValues = &progress_value;
+            submit.pNext = &progress;
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores = &dev->second.progress_semaphore;
+        }
 
         return dev->second.queue_submit(queue_it->second.handle, 1, &submit, fence_handle);
     }
@@ -2936,6 +3104,16 @@ namespace sogen
             info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
             info.commandBuffer = cb->second.handle;
             command_buffers.push_back(info);
+        }
+
+        if (dev->second.progress_semaphore)
+        {
+            VkSemaphoreSubmitInfo progress{};
+            progress.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            progress.semaphore = dev->second.progress_semaphore;
+            progress.value = ++dev->second.progress_value;
+            progress.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            signals.push_back(progress);
         }
 
         VkSubmitInfo2 submit{};
