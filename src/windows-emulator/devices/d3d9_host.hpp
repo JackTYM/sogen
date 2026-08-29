@@ -163,18 +163,6 @@ namespace sogen
         // call repeatedly, and safe to call with no flush outstanding (returns true).
         bool poll_flush_complete();
 
-        // True when replaying this recorded command would have to block on a GPU fence: it is a draw
-        // whose batch-management step must rotate to the other batch slot, and that slot's previous
-        // submission is still executing. Nothing is inspected but device state and fence status, and
-        // nothing is mutated other than retiring a slot that turns out to be finished already -- so the
-        // caller can park the guest thread on this predicate and re-issue the very same command
-        // unchanged once it clears, instead of letting execute_draw's wait_for_batch_slot block with the
-        // emulator's kernel lock held (docs/multi-vcpu-design.md section 7.2 rule 1). Re-issuing rather
-        // than resuming is what keeps the park safe: no resource_entry reference, batch slot index or
-        // arena offset outlives it, so a concurrent create/destroy on another vCPU cannot invalidate
-        // anything the parked thread is holding.
-        bool recorded_command_would_block(uint32_t command);
-
         // Copies the resource's current host-side pixel backing (BGRA8) out for presentation. Lazily
         // syncs from the GPU image first via sync_backing_from_gpu if pfnClear/pfnDrawPrimitive left it
         // dirty. Returns false if the resource doesn't exist or has no GPU backing (not a render target).
@@ -1145,15 +1133,6 @@ namespace sogen
         // Clears batch_slot_pending_[slot] and releases the staging buffers its submission was keeping
         // alive. The caller must already have established that the slot's fence is done.
         void retire_batch_slot(uint32_t slot);
-        // The depth-stencil handle the next draw's batch identity would use: the bound one once it has
-        // real GPU backing in a format this host understands, 0 otherwise. Shared by execute_draw and
-        // recorded_command_would_block so the two can never disagree about whether a draw rotates.
-        uint64_t resolve_batch_target_ds() const;
-        // Backend of recorded_command_would_block for the two draw opcodes: replays execute_draw's
-        // rotation triggers against current state without recording anything, then probes the slot the
-        // rotation would land on. Retires that slot when its fence turns out to be signaled already, so
-        // the draw's own wait_for_batch_slot is free once this has answered false.
-        bool draw_would_rotate_into_busy_slot();
         // Full barrier: submits whatever batch is currently open (submit_batch_async), then waits on EVERY
         // slot that still has a pending (submitted-but-unwaited) fence, not just the current one -- an
         // earlier draw's batch-management step may have async-submitted a DIFFERENT slot without waiting

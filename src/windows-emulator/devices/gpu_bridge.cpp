@@ -20,27 +20,6 @@ namespace sogen
 {
     namespace
     {
-        // One D3D9 escape in flight: the recorded-command batch it carries, plus (for
-        // ioctl_record_and_call) the sync command whose ordering requirement forced that batch to be
-        // drained. Outlives the syscall handler whenever the escape has to wait for a batch slot's GPU
-        // submission -- the await_host_condition closure keeps it alive while the guest thread is parked
-        // and drives it forward from the scheduler. See gpu_command_processor::run_d3d9_escape.
-        struct d3d9_escape_state
-        {
-            explicit d3d9_escape_state(const io_device_context& outer)
-                : context(outer)
-            {
-            }
-
-            io_device_context context;
-            std::vector<std::byte> batch{};
-            size_t offset{};
-            int32_t batch_result{};
-            bool batch_done{};
-            std::optional<io_device_context> inner{};
-            bool inner_flush_submitted{};
-        };
-
         // Host endpoint of the GPU paravirtualization bridge. The guest reaches it by opening
         // \\.\SogenGpu and issuing IOCTLs; each control code maps to one bridge command, with the
         // payload carried in the input/output buffers. Real Vulkan objects live on the host (behind
@@ -4029,10 +4008,39 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                auto state = std::make_shared<d3d9_escape_state>(context);
-                state->batch.resize(context.input_buffer_length);
-                win_emu.emu().read_memory(context.input_buffer, state->batch.data(), state->batch.size());
-                return run_d3d9_escape(win_emu, std::move(state));
+                const int32_t result = replay_command_stream(win_emu, context.input_buffer, context.input_buffer_length);
+                return write_output(win_emu, context, gpu_bridge::result_response{.vk_result = result, .reserved = 0});
+            }
+
+            // Executes `length` bytes of command_record_header stream sitting at `address` in guest
+            // memory, returning the first non-success result. Shared by ioctl_record_commands and the
+            // prelude of ioctl_record_and_call.
+            int32_t replay_command_stream(windows_emulator& win_emu, const emulator_pointer address, const size_t length)
+            {
+                std::vector<std::byte> stream(length);
+                win_emu.emu().read_memory(address, stream.data(), stream.size());
+
+                int32_t result = 0; // VK_SUCCESS
+                size_t offset = 0;
+                while (offset + sizeof(gpu_bridge::command_record_header) <= stream.size())
+                {
+                    gpu_bridge::command_record_header header{};
+                    std::memcpy(&header, stream.data() + offset, sizeof(header));
+                    offset += sizeof(header);
+                    if (header.size > stream.size() - offset)
+                    {
+                        break; // truncated / malformed record
+                    }
+
+                    const int32_t r = this->execute_recorded_command(win_emu, header.command, stream.data() + offset, header.size);
+                    if (r != 0 && result == 0)
+                    {
+                        result = r; // report the first failure
+                    }
+                    offset += header.size;
+                }
+
+                return result;
             }
 
             // One escape carrying both a pending record stream and the sync command whose ordering
@@ -4053,114 +4061,16 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                auto state = std::make_shared<d3d9_escape_state>(context);
                 if (request.batch_size != 0)
                 {
-                    state->batch.resize(request.batch_size);
-                    win_emu.emu().read_memory(context.input_buffer + sizeof(request), state->batch.data(), state->batch.size());
+                    replay_command_stream(win_emu, context.input_buffer + sizeof(request), request.batch_size);
                 }
 
                 io_device_context inner = context;
                 inner.io_control_code = request.inner_command_id;
                 inner.input_buffer = context.input_buffer + prefix;
                 inner.input_buffer_length = static_cast<ULONG>(context.input_buffer_length - prefix);
-                state->inner.emplace(std::move(inner));
-                return run_d3d9_escape(win_emu, std::move(state));
-            }
-
-            // Drives one D3D9 escape to completion, parking the guest thread rather than blocking on the
-            // GPU. A draw in the recorded stream whose batch-management step would have to wait for the
-            // other batch slot's submission stops the replay right before that draw -- nothing of it has
-            // run -- and the escape resumes from the scheduler once the fence clears, re-issuing that same
-            // draw unchanged. Holding nothing across the park but the copied stream bytes and an offset is
-            // what makes this safe: another vCPU's create/destroy cannot invalidate anything, because
-            // there is nothing live to invalidate.
-            NTSTATUS run_d3d9_escape(windows_emulator& win_emu, std::shared_ptr<d3d9_escape_state> state)
-            {
-                NTSTATUS status = STATUS_SUCCESS;
-                if (this->advance_d3d9_escape(win_emu, *state, status))
-                {
-                    return status;
-                }
-
-                const io_device_context& context = state->context;
-                // Like handle_wait_semaphores, the parked completion reports STATUS_SUCCESS: the escape's
-                // real outcome reaches the guest through its output buffer, which advance_d3d9_escape
-                // writes before it reports completion.
-                context.thread().await_host_condition = [this, &win_emu, state]() {
-                    NTSTATUS parked_status = STATUS_SUCCESS;
-                    return this->advance_d3d9_escape(win_emu, *state, parked_status);
-                };
-                win_emu.yield_thread(*context.vcpu, false);
-                return STATUS_SUCCESS;
-            }
-
-            // Runs as much of `state` as it can without waiting on the GPU. Returns false with `state`
-            // updated when it has to wait, true (with `status` set) once the escape is finished.
-            bool advance_d3d9_escape(windows_emulator& win_emu, d3d9_escape_state& state, NTSTATUS& status)
-            {
-                while (!state.batch_done)
-                {
-                    if (state.offset + sizeof(gpu_bridge::command_record_header) > state.batch.size())
-                    {
-                        state.batch_done = true;
-                        break;
-                    }
-
-                    gpu_bridge::command_record_header header{};
-                    std::memcpy(&header, state.batch.data() + state.offset, sizeof(header));
-                    const size_t payload_offset = state.offset + sizeof(header);
-                    if (header.size > state.batch.size() - payload_offset)
-                    {
-                        state.batch_done = true; // truncated / malformed record
-                        break;
-                    }
-
-#ifdef SOGEN_HAS_VKD3D_SHADER
-                    if (this->d3d9_.recorded_command_would_block(header.command))
-                    {
-                        return false;
-                    }
-#endif
-
-                    const int32_t result =
-                        this->execute_recorded_command(win_emu, header.command, state.batch.data() + payload_offset, header.size);
-                    if (result != 0 && state.batch_result == 0)
-                    {
-                        state.batch_result = result; // report the first failure
-                    }
-                    state.offset = payload_offset + header.size;
-                }
-
-                if (!state.inner.has_value())
-                {
-                    status =
-                        write_output(win_emu, state.context, gpu_bridge::result_response{.vk_result = state.batch_result, .reserved = 0});
-                    return true;
-                }
-
-#ifdef SOGEN_HAS_VKD3D_SHADER
-                // ioctl_d3d9_flush is the one inner command that waits on the GPU itself. Its handler
-                // parks, which must not happen from inside this predicate -- a nested park would replace
-                // the closure currently executing -- so drive its submit-then-poll split here instead.
-                if (state.inner->io_control_code == gpu_bridge::ioctl_d3d9_flush)
-                {
-                    if (!state.inner_flush_submitted)
-                    {
-                        this->d3d9_.begin_flush_pending();
-                        state.inner_flush_submitted = true;
-                    }
-                    if (!this->d3d9_.poll_flush_complete())
-                    {
-                        return false;
-                    }
-                    status = STATUS_SUCCESS;
-                    return true;
-                }
-#endif
-
-                status = dispatch_command(win_emu, *state.inner);
-                return true;
+                return dispatch_command(win_emu, inner);
             }
 
             NTSTATUS handle_get_surface_capabilities(windows_emulator& win_emu, const io_device_context& context)
