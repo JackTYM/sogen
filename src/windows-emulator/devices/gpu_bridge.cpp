@@ -3029,6 +3029,13 @@ namespace sogen
                 const bool render_target_readback = this->d3d9_.is_render_target(request.resource);
                 const int32_t hr = this->d3d9_.lock(request.resource, request.subresource, request.offset, request.size, request.flags,
                                                     data.data(), data.size(), data_size);
+                static const bool lock_diag = getenv("EMULATOR_D3D9_TEXBLT_DIAG") != nullptr;
+                if (lock_diag)
+                {
+                    fprintf(stderr, "[d3d9-lock-diag] resource=%llu subresource=%u offset=%u size=%u capacity=%zu hr=%d data_size=%u\n",
+                            static_cast<unsigned long long>(request.resource), request.subresource, request.offset, request.size,
+                            out_capacity, hr, data_size);
+                }
                 // A render-target Lock is how the frame's rendering is forced to complete for tests that
                 // read pixels back instead of presenting (e.g. d3d9-manydraws); log the frame stats here
                 // too so those runs still emit a data point. A single guest LockRect drives this path
@@ -3081,6 +3088,32 @@ namespace sogen
                     }
                     win_emu.emu().read_memory(request.data_address, target, request.data_size);
                     this->d3d9_.finish_unlock(request.resource, request.subresource);
+                    static const bool unlock_diag = getenv("EMULATOR_D3D9_TEXBLT_DIAG") != nullptr;
+                    if (unlock_diag)
+                    {
+                        uint64_t hash = 14695981039346656037ull;
+                        uint32_t nonzero = 0;
+                        int64_t first_nonzero = -1;
+                        int64_t last_nonzero = -1;
+                        for (uint32_t i = 0; i < request.data_size; ++i)
+                        {
+                            const auto byte = static_cast<uint8_t>(target[i]);
+                            hash ^= byte;
+                            hash *= 1099511628211ull;
+                            if (byte != 0)
+                            {
+                                ++nonzero;
+                                first_nonzero = first_nonzero < 0 ? i : first_nonzero;
+                                last_nonzero = i;
+                            }
+                        }
+                        fprintf(stderr,
+                                "[d3d9-unlock-diag] resource=%llu subresource=%u offset=%u data_size=%u data_hash=0x%llx nonzero=%u "
+                                "first=%lld last=%lld\n",
+                                static_cast<unsigned long long>(request.resource), request.subresource, request.offset, request.data_size,
+                                static_cast<unsigned long long>(hash), nonzero, static_cast<long long>(first_nonzero),
+                                static_cast<long long>(last_nonzero));
+                    }
                 }
                 return STATUS_SUCCESS;
             }
