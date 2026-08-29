@@ -710,6 +710,10 @@ namespace sogen
     void emulator_thread::mark_as_ready(const NTSTATUS status)
     {
         wait_storm_diag::record_wait_resolved(this->id);
+        if (this->await_host_condition)
+        {
+            wait_storm_diag::record_host_wait_resolved(this->id);
+        }
 
         this->pending_status = status;
         this->await_time = {};

@@ -975,6 +975,10 @@ namespace sogen
 
         vcpu.switch_thread = true;
         vcpu.thread().apc_alertable = alertable;
+        if (vcpu.thread().await_host_condition)
+        {
+            wait_storm_diag::record_host_wait_park(vcpu.thread().id);
+        }
         vcpu.cpu.stop();
     }
 

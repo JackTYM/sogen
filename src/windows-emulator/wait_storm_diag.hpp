@@ -8,6 +8,7 @@
 // (syscall handlers run inside the syscall hook's scoped_lock; the scheduler asserts the lock is
 // held), so plain (non-atomic) state is safe here.
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -39,8 +40,21 @@ namespace sogen::wait_storm_diag
         uint64_t switch_scan_iterations{};
         uint64_t switch_scan_ns{};
 
+        // How long a guest thread parked on a host condition (a GPU fence) actually stays parked, and
+        // how many readiness scans it takes to notice. Both are the cost the wake path is judged on:
+        // parking a sub-millisecond wait only pays if waking it costs about one scan, not dozens.
+        uint64_t host_wait_parks{};
+        uint64_t host_wait_wake_ns{};
+        uint64_t host_wait_wake_ns_max{};
+        uint64_t host_wait_wake_scans{};
+
+        // Never reset by the report, unlike switch_to_next_thread_calls, so a park spanning a report
+        // boundary still measures its own scan count correctly.
+        uint64_t scan_epoch{};
+
         std::chrono::steady_clock::time_point last_report{std::chrono::steady_clock::now()};
         std::unordered_map<uint32_t, std::pair<wait_kind, std::chrono::steady_clock::time_point>> pending{};
+        std::unordered_map<uint32_t, std::pair<uint64_t, std::chrono::steady_clock::time_point>> parked{};
     };
 
     inline state& get_state()
@@ -100,6 +114,41 @@ namespace sogen::wait_storm_diag
         }
     }
 
+    inline void record_host_wait_park(const uint32_t thread_id)
+    {
+        auto& s = get_state();
+        if (!s.enabled)
+        {
+            return;
+        }
+
+        s.parked[thread_id] = {s.scan_epoch, std::chrono::steady_clock::now()};
+    }
+
+    inline void record_host_wait_resolved(const uint32_t thread_id)
+    {
+        auto& s = get_state();
+        if (!s.enabled)
+        {
+            return;
+        }
+
+        const auto it = s.parked.find(thread_id);
+        if (it == s.parked.end())
+        {
+            return;
+        }
+
+        const auto elapsed_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - it->second.second).count());
+
+        ++s.host_wait_parks;
+        s.host_wait_wake_ns += elapsed_ns;
+        s.host_wait_wake_ns_max = std::max(s.host_wait_wake_ns_max, elapsed_ns);
+        s.host_wait_wake_scans += s.scan_epoch - it->second.first;
+        s.parked.erase(it);
+    }
+
     inline void note_switch_scan_iteration()
     {
         auto& s = get_state();
@@ -146,6 +195,7 @@ namespace sogen::wait_storm_diag
         }
 
         ++s.switch_to_next_thread_calls;
+        ++s.scan_epoch;
 
         const auto now = std::chrono::steady_clock::now();
         const auto dt = std::chrono::duration<double>(now - s.last_report).count();
@@ -170,6 +220,16 @@ namespace sogen::wait_storm_diag
                     : 0.0,
                 s.pending.size());
 
+        if (s.host_wait_parks != 0)
+        {
+            fprintf(stderr,
+                    "[WAIT_STORM_DIAG] host_wait_park       parks=%llu (%.0f/s) wake_mean=%.2f ms wake_max=%.2f ms scans/wake=%.1f\n",
+                    static_cast<unsigned long long>(s.host_wait_parks), s.host_wait_parks / dt,
+                    static_cast<double>(s.host_wait_wake_ns) / 1e6 / static_cast<double>(s.host_wait_parks),
+                    static_cast<double>(s.host_wait_wake_ns_max) / 1e6,
+                    static_cast<double>(s.host_wait_wake_scans) / static_cast<double>(s.host_wait_parks));
+        }
+
         for (size_t i = 0; i < static_cast<size_t>(wait_kind::count); ++i)
         {
             if (s.calls[i] == 0)
@@ -189,6 +249,10 @@ namespace sogen::wait_storm_diag
         s.switch_to_next_thread_calls = 0;
         s.switch_scan_iterations = 0;
         s.switch_scan_ns = 0;
+        s.host_wait_parks = 0;
+        s.host_wait_wake_ns = 0;
+        s.host_wait_wake_ns_max = 0;
+        s.host_wait_wake_scans = 0;
         s.last_report = now;
     }
 }
