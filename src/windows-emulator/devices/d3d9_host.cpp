@@ -687,6 +687,22 @@ namespace sogen
         ++this->batch_submit_count_;
     }
 
+    uint64_t d3d9_host::resolve_batch_target_ds() const
+    {
+        if (this->state_.depth_stencil == 0)
+        {
+            return 0;
+        }
+        const auto ds_it = this->resources_.find(this->state_.depth_stencil);
+        uint32_t depth_vk_format = 0;
+        if (ds_it == this->resources_.end() || ds_it->second.vk_image_id == 0 ||
+            !d3d9_format_to_vulkan(ds_it->second.format, depth_vk_format))
+        {
+            return 0;
+        }
+        return this->state_.depth_stencil;
+    }
+
     void d3d9_host::retire_batch_slot(const uint32_t slot)
     {
         this->batch_slot_pending_[slot] = false;
@@ -2663,7 +2679,7 @@ namespace sogen
         //     submission is provably complete -- so unlike the two triggers above, this one waits for that
         //     slot's own fence right here instead of deferring the wait to a later reopen.
         const uint64_t target_rt = this->state_.render_targets[0];
-        const uint64_t target_ds = ds_entry != nullptr ? this->state_.depth_stencil : 0;
+        const uint64_t target_ds = this->resolve_batch_target_ds();
         bool rotate_batch_slot = false;
         const bool resetpool_diag = resetpool_diag_enabled();
         bool reopen_reason_rt_change = false;
@@ -4995,6 +5011,59 @@ namespace sogen
         }
 
         return all_complete;
+    }
+
+    bool d3d9_host::recorded_command_would_block(const uint32_t command)
+    {
+        switch (static_cast<gpu_bridge::command>(command))
+        {
+        case gpu_bridge::command::d3d9_draw_primitive:
+        case gpu_bridge::command::d3d9_draw_indexed_primitive:
+            return this->draw_would_rotate_into_busy_slot();
+        default:
+            return false;
+        }
+    }
+
+    bool d3d9_host::draw_would_rotate_into_busy_slot()
+    {
+        // Ordered cheapest-first: this runs once per recorded draw, and the array read below already
+        // rules out the overwhelming majority of them without touching resources_ or the driver.
+        if (!this->batch_open_)
+        {
+            return false;
+        }
+
+        const uint32_t next_slot = (this->batch_slot_ + 1) % batch_slot_count;
+        if (!this->batch_slot_pending_[next_slot])
+        {
+            return false;
+        }
+
+        const bool programmable = this->state_.vertex_shader != 0 && this->state_.pixel_shader != 0;
+        const bool descriptors_exhausted = programmable && this->frame_desc_capacity_draws_[this->batch_slot_] != 0 &&
+                                           this->batch_draw_count_ + 1 > this->frame_desc_capacity_draws_[this->batch_slot_];
+        const uint64_t target_rt = this->state_.render_targets[0];
+        if (!descriptors_exhausted && target_rt == this->batch_rt_ && this->resolve_batch_target_ds() == this->batch_ds_)
+        {
+            return false;
+        }
+
+        const auto rt_it = this->resources_.find(target_rt);
+        if (rt_it == this->resources_.end() || rt_it->second.vk_image_id == 0)
+        {
+            return false; // execute_draw drops the draw before it ever reaches the batch-management step
+        }
+
+        // Same VK_NOT_READY-only rule as poll_flush_complete: a lost device retires the slot rather than
+        // parking the guest thread on a fence that will never signal.
+        if (this->vulkan_.get_fence_status(this->batch_fence_[next_slot]) != VK_NOT_READY)
+        {
+            this->retire_batch_slot(next_slot);
+            return false;
+        }
+
+        return true;
     }
 
     int32_t d3d9_host::create_vertex_shader(const void* tokens, const size_t token_size_bytes, uint64_t& out_shader)
