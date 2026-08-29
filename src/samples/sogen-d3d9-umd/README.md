@@ -138,6 +138,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_updatetexture_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_updatetexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-volume-updatetexture-test-x86.exe -ld3d9 -ld3dcompiler_43
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_srgb_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-srgb-texture-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_srgb_texture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-srgb-texture-test-x86.exe -ld3d9 -ld3dcompiler_43
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_rs_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-rs-test-x64.exe -ld3d9 -ld3dcompiler_43
 
@@ -362,6 +368,8 @@ cp d3d9-cube-test-x86.exe <root>/filesys/c/d3d9-cube-test-x86.exe
 cp d3d9-volume-test-x86.exe <root>/filesys/c/d3d9-volume-test-x86.exe
 cp d3d9-volume-updatetexture-test-x64.exe <root>/filesys/c/d3d9-volume-updatetexture-test.exe
 cp d3d9-volume-updatetexture-test-x86.exe <root>/filesys/c/d3d9-volume-updatetexture-test-x86.exe
+cp d3d9-srgb-texture-test-x64.exe <root>/filesys/c/d3d9-srgb-texture-test.exe
+cp d3d9-srgb-texture-test-x86.exe <root>/filesys/c/d3d9-srgb-texture-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -430,6 +438,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-volume-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-volume-updatetexture-test.exe
 ./analyzer -e <root> -c c:/d3d9-volume-updatetexture-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-srgb-texture-test.exe
+./analyzer -e <root> -c c:/d3d9-srgb-texture-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -1310,3 +1320,25 @@ the viewport offset it reports `unwritten=63` (the 32+32-1 texels of the far row
 architectures. In MW2 this was worth a measured 1-pixel misregistration against DXVK (best integer
 alignment `dy=1 dx=1` before, `dy=0 dx=0` after) plus an extra half-texel blur on every one of its
 full-screen post-process passes.
+
+`d3d9_srgb_texture_test.cpp` (`d3d9-srgb-texture-test-x86.exe` / `-x64.exe`, needs `d3dcompiler_43`) pins
+the read half of D3D9's sRGB pair. `D3DSAMP_SRGBTEXTURE` decodes sRGB->linear on every fetch from a
+sampler stage; `D3DRS_SRGBWRITEENABLE` encodes linear->sRGB on the write. Only the write half existed, so
+a chain of passes that sets both -- the ordinary shape of a bloom chain ping-ponging the same surfaces --
+got the encode at every pass with nothing undoing it, driving anything above black towards white with no
+error anywhere. The test draws a 16x16 source texture covering all 256 byte values 1:1 over a 16x16
+render target, POINT-sampled so each destination texel is exactly one source texel, and runs the same
+draw twice: with the state clear every texel must come back as the stored byte, with it set every texel
+must come back as its sRGB-decoded value (plus a guard that something actually changed, so a build that
+ignores the state cannot pass the second half by returning the stored bytes). Against a build with the
+decode neutered it reports `251/256 texels wrong` on both architectures; with it, `ALL CHECKS PASSED`.
+In MW2 this was the whole of the glow/bloom over-brightness: its five glow passes set both states, and
+the missing decode amplified a faint bright-pass signal into a flat haze block over roughly a third of
+the frame.
+
+The mapping side of the same fix is in `sampler_state_for_ddi_tss_state`: DDI texture-stage-states 29/30/
+31 are `D3DSAMP_SRGBTEXTURE`/`ELEMENTINDEX`/`DMAPOFFSET`, round-tripped live against the real 32-bit
+`d3d9.dll` by setting each to a distinct sentinel value. The probe has to draw a textured quad first --
+the runtime only forwards sampler state for samplers the current pipeline actually references, so a bare
+`SetSamplerState` before any draw is dropped, which is why earlier attempts could not pin these three
+down.

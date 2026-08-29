@@ -450,6 +450,12 @@ namespace sogen
             // attachment. A resource that is both a render target and a sampled texture therefore needs
             // one view of each kind rather than whichever kind happened to be created first.
             uint64_t vk_image_view_sampled_id{};
+            // The same shader-read view through the format's _SRGB counterpart, used only while the
+            // sampling stage's D3DSAMP_SRGBTEXTURE is set. It is the read-side half of the pair whose
+            // write-side half is vk_image_view_srgb_id above: real D3D9 hardware decodes sRGB->linear on
+            // the sample and encodes linear->sRGB on the write, so a chain of passes that sets both
+            // round-trips exactly. Stays 0 for formats with no sRGB counterpart.
+            uint64_t vk_image_view_sampled_srgb_id{};
             bool backing_dirty{}; // color RT: GPU image has drawn/cleared pixels not yet copied to backing
 
             // Sampled texture: the CPU-side backing has bytes the GPU image does not have yet, so the next
