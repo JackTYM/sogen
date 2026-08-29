@@ -20,8 +20,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <set>
 #include <span>
 #include <string>
 #include <unordered_set>
@@ -1766,6 +1768,31 @@ namespace sogen
         {
             static const char* const pattern = getenv("EMULATOR_D3D9_PSCONSTDIAG");
             return pattern;
+        }
+
+        // EMULATOR_D3D9_RTCONSTDIAG=<id>[,<id>...]: the same report selected by the render target a draw
+        // writes rather than by its shader's text. An intermediate pass is found from the frame graph
+        // (draws_per_render_target names the target) long before its program is known, so this is the
+        // entry point that names the shaders feeding one; PSCONSTDIAG then follows them by content.
+        const std::set<uint64_t>& rtconst_diag_targets()
+        {
+            static const std::set<uint64_t> targets = [] {
+                std::set<uint64_t> parsed;
+                const char* const spec = getenv("EMULATOR_D3D9_RTCONSTDIAG");
+                for (const char* cursor = spec; cursor != nullptr && *cursor != '\0';)
+                {
+                    char* end = nullptr;
+                    const auto id = std::strtoull(cursor, &end, 10);
+                    if (end == cursor)
+                    {
+                        break;
+                    }
+                    parsed.insert(id);
+                    cursor = *end == ',' ? end + 1 : end;
+                }
+                return parsed;
+            }();
+            return targets;
         }
 
         // Temporary diagnostic (EMULATOR_D3D9_RESETPOOL_DIAG=1): direct measurement to test the
@@ -3666,6 +3693,10 @@ namespace sogen
                 this->report_ps_const_diag(target_rt, srgb_write);
             }
         }
+        if (rtconst_diag_targets().contains(target_rt))
+        {
+            this->report_ps_const_diag(target_rt, srgb_write);
+        }
         if (!srgb_write && render_state_or(this->state_.render_state, d3drs_alphablendenable, 0) != 0)
         {
             for (const auto& brt : bound_rts)
@@ -4609,36 +4640,57 @@ namespace sogen
 
     void d3d9_host::report_ps_const_diag(const uint64_t target_rt, const bool srgb_write) const
     {
-        static std::atomic<uint64_t> seen{};
-        if ((seen.fetch_add(1, std::memory_order_relaxed) % 200) != 0)
+        // Counted per {shader, target} rather than globally: a pass that runs once per frame and one that
+        // runs thousands of times share this report, and a single global counter would print almost
+        // nothing but the busy one.
+        static std::map<std::array<uint64_t, 2>, uint64_t> seen;
+        if ((seen[{this->state_.pixel_shader, target_rt}]++ % 200) != 0)
         {
             return;
         }
+        const auto dump_registers = [](const char* const prefix, const std::vector<float>& cf) {
+            std::string regs;
+            for (uint32_t r = 0; r <= 19; ++r)
+            {
+                const size_t base = static_cast<size_t>(r) * 4;
+                std::array<char, 96> buf{};
+                if (cf.size() < base + 4)
+                {
+                    std::snprintf(buf.data(), buf.size(), " %s%u=unset", prefix, r);
+                }
+                else
+                {
+                    std::snprintf(buf.data(), buf.size(), " %s%u=(%.6f,%.6f,%.6f,%.6f)", prefix, r, cf[base], cf[base + 1], cf[base + 2],
+                                  cf[base + 3]);
+                }
+                regs += buf.data();
+            }
+            return regs;
+        };
         const auto& cf = this->state_.ps_const_f;
-        std::string regs;
-        for (uint32_t r = 0; r <= 9; ++r)
+        // Both stages: a post-process pass keeps its sample offsets in vertex constants and its weights in
+        // pixel constants, so either half alone leaves the pass's actual filter kernel unrecoverable.
+        const std::string regs = dump_registers("c", cf) + " |" + dump_registers("vc", this->state_.vs_const_f);
+        std::string textures;
+        std::map<uint32_t, uint64_t> ordered_textures(this->state_.bound_textures.begin(), this->state_.bound_textures.end());
+        for (const auto& [stage, resource] : ordered_textures)
         {
-            const size_t base = static_cast<size_t>(r) * 4;
-            std::array<char, 96> buf{};
-            if (cf.size() < base + 4)
-            {
-                std::snprintf(buf.data(), buf.size(), " c%u=unset", r);
-            }
-            else
-            {
-                std::snprintf(buf.data(), buf.size(), " c%u=(%.6f,%.6f,%.6f,%.6f)", r, cf[base], cf[base + 1], cf[base + 2], cf[base + 3]);
-            }
-            regs += buf.data();
+            textures += " s" + std::to_string(stage) + "=" + std::to_string(resource);
         }
-        const auto tex_it = this->state_.bound_textures.find(0);
-        const uint64_t tex0 = tex_it != this->state_.bound_textures.end() ? tex_it->second : 0;
-        fprintf(
-            stderr, "[d3d9-psconst] ps=%llu rt=%llu tex0=%llu srgb_write=%d blend=%u src=%u dst=%u colorwrite=%u ps_const_f_size=%zu%s\n",
-            static_cast<unsigned long long>(this->state_.pixel_shader), static_cast<unsigned long long>(target_rt),
-            static_cast<unsigned long long>(tex0), srgb_write ? 1 : 0,
-            render_state_or(this->state_.render_state, d3drs_alphablendenable, 0),
-            render_state_or(this->state_.render_state, d3drs_srcblend, 0), render_state_or(this->state_.render_state, d3drs_destblend, 0),
-            render_state_or(this->state_.render_state, d3drs_colorwriteenable, 15), cf.size(), regs.c_str());
+        std::array<char, 128> viewport{};
+        std::snprintf(viewport.data(), viewport.size(), " vp=%gx%g+%g+%g", this->state_.viewport_width, this->state_.viewport_height,
+                      this->state_.viewport_x, this->state_.viewport_y);
+        fprintf(stderr,
+                "[d3d9-psconst] ps=%llu vs=%llu rt=%llu srgb_write=%d blend=%u src=%u dst=%u op=%u colorwrite=%u%s tex:%s "
+                "ps_const_f_size=%zu%s\n",
+                static_cast<unsigned long long>(this->state_.pixel_shader), static_cast<unsigned long long>(this->state_.vertex_shader),
+                static_cast<unsigned long long>(target_rt), srgb_write ? 1 : 0,
+                render_state_or(this->state_.render_state, d3drs_alphablendenable, 0),
+                render_state_or(this->state_.render_state, d3drs_srcblend, 0),
+                render_state_or(this->state_.render_state, d3drs_destblend, 0),
+                render_state_or(this->state_.render_state, d3drs_blendop, 1),
+                render_state_or(this->state_.render_state, d3drs_colorwriteenable, 15), viewport.data(), textures.c_str(), cf.size(),
+                regs.c_str());
     }
 
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)

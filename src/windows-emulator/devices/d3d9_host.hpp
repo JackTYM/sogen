@@ -1186,10 +1186,11 @@ namespace sogen
         // open batch (blt) or a plain submit-and-rotate on the next draw gives them the ordering they
         // need without the wait.
         void flush_batch();
-        // Diagnostic (EMULATOR_D3D9_PSCONSTDIAG=<asm substring>): prints the PS float constant registers,
-        // the bound sampler-0 texture and the colour-write/blend/sRGB render states as they stood for a
-        // draw whose pixel shader's disassembly contains the substring. Rate-limited to one line per
-        // report interval so a per-frame draw stays readable across a whole gameplay capture.
+        // Diagnostic (EMULATOR_D3D9_PSCONSTDIAG=<asm substring>, EMULATOR_D3D9_RTCONSTDIAG=<rt ids>):
+        // prints the PS float constant registers, the shader pair, every bound texture, the viewport and
+        // the colour-write/blend/sRGB render states as they stood for a draw selected either by its pixel
+        // shader's disassembly or by the render target it writes. Rate-limited per {shader, target} so a
+        // once-per-frame pass stays readable alongside a thousands-per-frame one.
         void report_ps_const_diag(uint64_t target_rt, bool srgb_write) const;
         // Opens a batch recording into target_rt/target_ds's identity, or keeps the currently open one if
         // it already matches -- the same round-robin slot-selection execute_draw's own batch-management
