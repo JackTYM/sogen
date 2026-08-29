@@ -643,6 +643,19 @@ typedef struct _D3DDDIARG_TEXBLT
 static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt, x86)");
 #endif
 
+// D3DDDIARG_VOLUMEBLT -- pfnVolBlt, device-func-table slot 16: the volume-texture analog of pfnTexBlt
+// (slot 18), which is what IDirect3DDevice9::UpdateTexture issues to sync a volume texture's
+// system-memory master into its video-memory copy. Only the leading handle pair is modeled: the WDK
+// shape (hDstResource, hSrcResource, DstX, DstY, DstZ, SrcBox) leads with the same two handles
+// D3DDDIARG_TEXBLT does, and umd_VolBlt forwards a whole-resource copy, so the destination-point and
+// source-box region that follows is deliberately not read -- exactly the convention umd_TexBlt already
+// uses for its own DstPoint/SrcRect.
+typedef struct _D3DDDIARG_VOLUMEBLT
+{
+    HANDLE hDstResource; // 0
+    HANDLE hSrcResource; // x64: 8, x86: 4 -- HANDLE is 4 bytes there, as in D3DDDIARG_TEXBLT above
+} D3DDDIARG_VOLUMEBLT;
+
 // D3DDDIARG_COLORFILL -- pfnColorFill, device-func-table slot 56 (behind IDirect3DDevice9::ColorFill).
 // RE'd this session (2026-07-06) to the same standard as D3DDDIARG_TEXBLT above: BOTH static
 // decompilation AND live tracing of the real staged d3d9.dll.

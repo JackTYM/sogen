@@ -4282,7 +4282,8 @@ namespace sogen
         const bool src_is_render_target = (src.usage & (d3dusage_rendertarget | d3dusage_depthstencil)) != 0;
         const bool src_ready_as_texture = !src_is_render_target && this->ensure_texture_uploaded(src_resource);
         if (device != 0 && (src_is_render_target || src_ready_as_texture) && dst.vk_image_id != 0 && src.vk_image_id != 0 &&
-            dst.width == src.width && dst.height == src.height && dst.format == src.format && this->ensure_draw_infra())
+            dst.width == src.width && dst.height == src.height && dst.format == src.format && dst.kind == src.kind &&
+            dst.depth == src.depth && this->ensure_draw_infra())
         {
             const uint32_t src_resting_layout =
                 src_is_render_target ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -4326,7 +4327,9 @@ namespace sogen
                 .dst_offset_z = 0,
                 .width = dst.width,
                 .height = dst.height,
-                .depth = 1,
+                // A 3D image's depth extent is a real copy dimension, not an array-layer count -- a
+                // volume copied at depth 1 would carry only its first slice across.
+                .depth = dst.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume) ? std::max(1u, dst.depth) : 1u,
             };
             this->vulkan_.cmd_copy_image(batch_cmd, src.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.vk_image_id,
                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);

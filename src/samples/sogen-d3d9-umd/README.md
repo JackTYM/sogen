@@ -132,6 +132,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_updatetexture_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_updatetexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-updatetexture-test-x86.exe -ld3d9 -ld3dcompiler_43
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_updatetexture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-volume-updatetexture-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_volume_updatetexture_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-volume-updatetexture-test-x86.exe -ld3d9 -ld3dcompiler_43
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_rs_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-rs-test-x64.exe -ld3d9 -ld3dcompiler_43
 
@@ -354,6 +360,8 @@ cp d3d9-cube-test-x64.exe <root>/filesys/c/d3d9-cube-test.exe
 cp d3d9-volume-test-x64.exe <root>/filesys/c/d3d9-volume-test.exe
 cp d3d9-cube-test-x86.exe <root>/filesys/c/d3d9-cube-test-x86.exe
 cp d3d9-volume-test-x86.exe <root>/filesys/c/d3d9-volume-test-x86.exe
+cp d3d9-volume-updatetexture-test-x64.exe <root>/filesys/c/d3d9-volume-updatetexture-test.exe
+cp d3d9-volume-updatetexture-test-x86.exe <root>/filesys/c/d3d9-volume-updatetexture-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -420,6 +428,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-volume-test.exe
 ./analyzer -e <root> -c c:/d3d9-cube-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-volume-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-volume-updatetexture-test.exe
+./analyzer -e <root> -c c:/d3d9-volume-updatetexture-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -1052,6 +1062,20 @@ architectures.
   `D3DPOOL_MANAGED`, no workaround) is expected to keep failing for this reason, permanently, until a
   fundamentally different mechanism is found; `d3d9_texture_test.cpp` continues to use
   `D3DUSAGE_DYNAMIC` + `D3DPOOL_DEFAULT` to avoid the whole area.
+- **`pfnVolBlt` (slot 16) was an unwired no-op stub, so `UpdateTexture` on a VOLUME texture silently
+  did nothing (fixed 2026-08-29).** The runtime routes a volume's `UpdateTexture` to `pfnVolBlt`, not
+  `pfnTexBlt` (slot 18) -- so a driver that implements only the latter leaves the sampled
+  `D3DPOOL_DEFAULT` copy of every staged volume permanently black. Found by a creation-side census
+  (`EMULATOR_D3D9_VOLUME_CENSUS=1`) of a real MW2 gameplay session: the title creates exactly one pair
+  of 256x256x4 `D3DFMT_A8R8G8B8` volumes -- a `D3DDDIPOOL_SYSTEMMEM` master and its `D3DPOOL_DEFAULT`
+  sampled copy -- writes the master 229 times, and the copy uploaded with zero non-zero bytes. That
+  volume is the ambient light grid `ps68499` (MW2's dominant world-material shader) reads through
+  `dcl_volume s4`, so every diffuse world surface rendered with no ambient term at all.
+  `umd_VolBlt` now forwards `{hDstResource, hSrcResource}` to the same host `tex_blt` that backs
+  `pfnTexBlt`; the host's GPU fast path had a matching hole (it copied at a hardcoded depth of 1, which
+  carries only slice 0 of a 3D image) and now copies the resource's real depth extent.
+  `d3d9_volume_updatetexture_test.cpp` covers the pair -- one colour per depth slice, so "never
+  written" and "only slice 0 written" are distinguishable failures.
 - **Int (`i#`) / bool (`b#`) shader constant registers, wired end to end and ported to x86 (2026-07-05,
   `jazzy-giggling-cloud.md` Tasks 1-5).** Mirrors the float (`c#`) path: wire protocol opcodes,
   `device_state` storage, and two more UBO/descriptor bindings per set (binding 2 = int CBV, binding 3
@@ -1245,8 +1269,8 @@ is filled per level through its own `LockBox(level)`: level 0 (32x32x4) with RED
 solid color per depth slice, and level 1 (16x16x2, depth halved) with MAGENTA/CYAN (distinct from every
 level-0 slice color). The host backs each subresource as one tightly-packed slice-major block (slice `d`
 at byte offset `d*width*height*4`), and this UMD's Lock DDI does NOT populate
-`D3DLOCKED_BOX::RowPitch`/`SlicePitch` (both came back 0, same known gap `d3d9_miptexture_test.cpp`
-documents for `D3DLOCKED_RECT`), so the test writes each slice at `pBits + d*(width*height*4)` with
+`D3DLOCKED_BOX::SlicePitch` (`RowPitch` is populated as of the `D3DDDIARG_LOCK::Pitch` fix; `SlicePitch`
+lives in the still-unmodelled x86 `D3DDDIARG_LOCK` bytes 40..47), so the test writes each slice at `pBits + d*(width*height*4)` with
 self-computed per-level pitches -- exactly the tight layout the host's buffer->3D-image copy reads. Four
 level-0 sub-passes each sample `tex3D` at the texture center (`u,v = 0.5,0.5`) with `w = (d + 0.5) / 4`
 (0.125/0.375/0.625/0.875) via a `float3` PS constant `c0`, draw a full-screen quad, and read back the

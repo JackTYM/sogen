@@ -1667,6 +1667,26 @@ namespace
         return S_OK;
     }
 
+    // pfnVolBlt (slot 16) is pfnTexBlt's volume-texture counterpart, and was an unwired no-op stub. MW2
+    // pushes its ambient light-grid volume texture (256x256x4 A8R8G8B8) through the same sysmem-master /
+    // vidmem-copy pair every D3DPOOL_MANAGED texture uses, and syncs it with UpdateTexture -- which the
+    // runtime routes to pfnVolBlt, not pfnTexBlt, because the resource is a volume. With the slot
+    // stubbed, the vidmem copy the shaders actually sample stayed permanently black: a live census
+    // showed the sysmem master written 229 times while the vidmem copy uploaded with zero non-zero
+    // bytes. The host's own tex_blt is dimensionality-agnostic (it copies one resource's pixel backing
+    // into another's), so both DDI entry points share it.
+    HRESULT APIENTRY umd_VolBlt(HANDLE /*hDevice*/, CONST D3DDDIARG_VOLUMEBLT* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
+        const d3d9c::tex_blt_request req{.dst_resource = reinterpret_cast<uint64_t>(pArgs->hDstResource),
+                                         .src_resource = reinterpret_cast<uint64_t>(pArgs->hSrcResource)};
+        bridge_call(gb::ioctl_d3d9_tex_blt, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
     // pfnColorFill (device-func-table slot 56), behind IDirect3DDevice9::ColorFill. Reads the RE'd
     // D3DDDIARG_COLORFILL (see d3d9_ddi.hpp) and records a streamed color_fill so it batches in-order
     // with the surrounding draw/clear stream, exactly like umd_Clear. hResource is the same direct
@@ -2762,6 +2782,7 @@ namespace
             slots[9] = reinterpret_cast<void*>(&umd_SetIndicesUm);            // pfnSetIndicesUm
             slots[10] = reinterpret_cast<void*>(&umd_DrawPrimitive);          // pfnDrawPrimitive
             slots[11] = reinterpret_cast<void*>(&umd_DrawIndexedPrimitive);   // pfnDrawIndexedPrimitive
+            slots[16] = reinterpret_cast<void*>(&umd_VolBlt);                 // pfnVolBlt
             slots[18] = reinterpret_cast<void*>(&umd_TexBlt);                 // pfnTexBlt
             slots[21] = reinterpret_cast<void*>(&umd_Clear);                  // pfnClear
             slots[24] = reinterpret_cast<void*>(&umd_SetVertexShaderConst);   // pfnSetVertexShaderConst
