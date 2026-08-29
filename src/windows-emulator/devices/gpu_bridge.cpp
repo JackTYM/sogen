@@ -3026,15 +3026,17 @@ namespace sogen
                                               : 0;
                 std::vector<std::byte> data(out_capacity);
                 uint32_t data_size = 0;
+                uint32_t pitch = 0;
                 const bool render_target_readback = this->d3d9_.is_render_target(request.resource);
                 const int32_t hr = this->d3d9_.lock(request.resource, request.subresource, request.offset, request.size, request.flags,
-                                                    data.data(), data.size(), data_size);
+                                                    data.data(), data.size(), data_size, pitch);
                 static const bool lock_diag = getenv("EMULATOR_D3D9_TEXBLT_DIAG") != nullptr;
                 if (lock_diag)
                 {
-                    fprintf(stderr, "[d3d9-lock-diag] resource=%llu subresource=%u offset=%u size=%u capacity=%zu hr=%d data_size=%u\n",
+                    fprintf(stderr,
+                            "[d3d9-lock-diag] resource=%llu subresource=%u offset=%u size=%u capacity=%zu hr=%d data_size=%u pitch=%u\n",
                             static_cast<unsigned long long>(request.resource), request.subresource, request.offset, request.size,
-                            out_capacity, hr, data_size);
+                            out_capacity, hr, data_size, pitch);
                 }
                 // A render-target Lock is how the frame's rendering is forced to complete for tests that
                 // read pixels back instead of presenting (e.g. d3d9-manydraws); log the frame stats here
@@ -3052,7 +3054,7 @@ namespace sogen
                 }
                 const auto copy_bytes = std::min<size_t>(data.size(), data_size);
                 emulator_object<d3d9_cmd::lock_response>{win_emu.emu(), context.output_buffer}.write(
-                    d3d9_cmd::lock_response{.hr = hr, .data_size = data_size});
+                    d3d9_cmd::lock_response{.hr = hr, .data_size = data_size, .pitch = pitch, .reserved = 0});
                 if (copy_bytes > 0)
                 {
                     win_emu.emu().write_memory(context.output_buffer + sizeof(d3d9_cmd::lock_response), data.data(), copy_bytes);

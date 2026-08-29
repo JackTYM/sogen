@@ -120,6 +120,13 @@ namespace sogen::d3d9_cmd
     {
         int32_t hr;
         uint32_t data_size;
+        // Byte distance between two consecutive rows of the locked subresource, which the guest hands
+        // back to the D3D9 runtime as D3DDDIARG_LOCK::Pitch (and thus to the app as
+        // D3DLOCKED_RECT::Pitch). Derived host-side from the same layout that sizes the backing store,
+        // so the two can never disagree. For a block-compressed format this is one block row, per
+        // D3D9's own definition; 0 for buffers and for any format with no known layout.
+        uint32_t pitch;
+        uint32_t reserved;
         // uint8_t data[data_size];
     };
 
@@ -440,7 +447,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(create_resource_response) == 32, "wire layout drift");
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");
-    static_assert(sizeof(lock_response) == 8, "wire layout drift");
+    static_assert(sizeof(lock_response) == 16, "wire layout drift");
     static_assert(sizeof(unlock_request) == 32, "wire layout drift");
     static_assert(sizeof(create_shader_request) == 8, "wire layout drift");
     static_assert(sizeof(create_shader_response) == 16, "wire layout drift");

@@ -120,6 +120,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_x8_alpha_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_x8_alpha_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-x8-alpha-test-x86.exe -ld3d9 -ld3dcompiler_43
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_lock_pitch_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-lock-pitch-test-x64.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_lock_pitch_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-lock-pitch-test-x86.exe -ld3d9
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_pipeline_cache_rs_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-pipeline-cache-rs-test-x64.exe -ld3d9 -ld3dcompiler_43
 

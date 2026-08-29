@@ -2259,15 +2259,21 @@ namespace
     std::map<locked_key, std::vector<uint8_t>> g_locked_buffers;
     std::map<locked_key, uint32_t> g_locked_offsets;
 
-    // Total resource size (bytes from offset 0 to the end of the subresource), cached the first time
-    // any Lock() on this (resource, subresource) learns it via a real probe round trip. A D3D9
-    // resource's size is fixed for its entire lifetime (a vertex/index buffer's byte count and a
+    // Total resource size (bytes from offset 0 to the end of the subresource) and row pitch, cached the
+    // first time any Lock() on this (resource, subresource) learns them via a real probe round trip. A
+    // D3D9 resource's layout is fixed for its entire lifetime (a vertex/index buffer's byte count and a
     // texture subresource's mip dimensions never change after creation), so this cache entry is valid
     // forever once populated -- every subsequent Lock() on the same key can derive data_size locally
     // (full_size - offset) and skip the probe round trip entirely. This is the same class of win DXVK
     // gets for free from its own client-side buffer pool (it never asks the "GPU" for a size it
     // already tracks itself); the DDI's per-call design means this UMD has to earn it explicitly.
-    std::map<locked_key, uint32_t> g_resource_full_size;
+    struct locked_layout
+    {
+        uint32_t full_size;
+        uint32_t pitch;
+    };
+
+    std::map<locked_key, locked_layout> g_resource_layouts;
 
     // Locks currently satisfied straight out of a direct mapping, so umd_Unlock knows there is nothing
     // to ship back. Disjoint from g_locked_buffers by construction: the direct path returns before that
@@ -2411,16 +2417,17 @@ namespace
         // conservatively treats any unresolvable slot as a match -- see k_batch_unknown_resource).
         const bool resource_needs_flush = !g_d3d9_command_batch.empty() && resource_currently_referenced(resource);
 
-        // Learn the true backing size, either from the immutable-for-the-resource's-lifetime cache
-        // (skips the probe round trip entirely -- see g_resource_full_size's own comment) or, on a
-        // genuine first touch of this (resource, subresource), via a real probe round trip whose
-        // result then seeds the cache for every future Lock() on the same key.
+        // Learn the true backing size and row pitch, either from the immutable-for-the-resource's-
+        // lifetime cache (skips the probe round trip entirely -- see g_resource_layouts' own comment)
+        // or, on a genuine first touch of this (resource, subresource), via a real probe round trip
+        // whose result then seeds the cache for every future Lock() on the same key.
         uint32_t data_size = 0;
         bool probe_hr_nonzero = false;
-        const auto cached_size_it = g_resource_full_size.find(key);
-        if (cached_size_it != g_resource_full_size.end())
+        const auto cached_layout_it = g_resource_layouts.find(key);
+        if (cached_layout_it != g_resource_layouts.end())
         {
-            data_size = offset <= cached_size_it->second ? cached_size_it->second - offset : 0;
+            data_size = offset <= cached_layout_it->second.full_size ? cached_layout_it->second.full_size - offset : 0;
+            pArgs->Pitch = cached_layout_it->second.pitch;
         }
         else
         {
@@ -2430,7 +2437,8 @@ namespace
             data_size = probe.data_size;
             if (!probe_hr_nonzero)
             {
-                g_resource_full_size[key] = offset + probe.data_size;
+                g_resource_layouts[key] = {offset + probe.data_size, probe.pitch};
+                pArgs->Pitch = probe.pitch;
             }
         }
 

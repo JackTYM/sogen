@@ -1464,6 +1464,32 @@ namespace sogen
             return out;
         }
 
+        // D3DLOCKED_RECT::Pitch for one subresource: the byte distance between two consecutive rows of
+        // the level that `subresource` addresses -- one block row for a block-compressed format, which
+        // is what D3D9 defines Pitch as there. Derived from the same vk_texture_data_size that sizes the
+        // per-subresource backing store, so the pitch the guest writes its rows at can never disagree
+        // with the layout its write-back lands in. Buffers (no rows) and formats with no known layout
+        // report 0.
+        uint32_t subresource_row_pitch(const uint32_t kind, const uint32_t format, const uint32_t width, const uint32_t mip_levels,
+                                       const uint32_t subresource)
+        {
+            if (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) ||
+                kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer))
+            {
+                return 0;
+            }
+            uint32_t vk_format = 0;
+            if (!d3d9_format_to_vulkan(format, vk_format))
+            {
+                return 0;
+            }
+            // A cube's flattened subresource index is face * mip_levels + level, a 2D/volume texture's is
+            // the level itself -- the remainder recovers the level in both cases.
+            const uint32_t level = subresource % std::max(1u, mip_levels);
+            const uint32_t level_width = std::max(1u, width >> level);
+            return static_cast<uint32_t>(vk_texture_data_size(vk_format, level_width, 1));
+        }
+
         // View dimensionality for sampling a resource of `kind`: cube -> CUBE / 6 layers, volume ->
         // 3D / 1 layer, everything else -> 2D / 1 layer. The PS and VS sampler-binding sites both call
         // this so a cube/volume view can never be built 2D at one site and cube/3D at the other.
@@ -4774,15 +4800,17 @@ namespace sogen
     }
 
     int32_t d3d9_host::lock(const uint64_t resource, const uint32_t subresource, const uint32_t offset, const uint32_t size,
-                            const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size)
+                            const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size, uint32_t& out_pitch)
     {
         out_data_size = 0;
+        out_pitch = 0;
 
         const auto it = this->resources_.find(resource);
         if (it == this->resources_.end())
         {
             return d3derr_invalidcall;
         }
+        out_pitch = subresource_row_pitch(it->second.kind, it->second.format, it->second.width, it->second.mip_levels, subresource);
         // subresource != 0 addresses a mip level in extra_mips (see resource_entry); reject an index the
         // resource doesn't have. Buffers/render targets only ever use subresource 0.
         if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())

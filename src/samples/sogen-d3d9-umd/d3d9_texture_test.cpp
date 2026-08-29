@@ -262,9 +262,9 @@ int main()
             d3d->Release();
             return 1;
         }
-        // D3DLOCKED_RECT::Pitch is not populated by this UMD's Lock DDI implementation (same
-        // known gap d3d9_const_test.cpp already documents) -- the texture's backing is known tightly
-        // packed (32bpp, no row padding), so write with a hardcoded stride instead of trusting Pitch.
+        // The texture's backing is known tightly packed (32bpp, no row padding), so write with a
+        // hardcoded stride rather than lr.Pitch -- Pitch itself is covered by d3d9_lock_pitch_test.cpp,
+        // and this test stays independent of it.
         constexpr LONG kStride = kCanvasWidth * 4;
         auto* base = static_cast<unsigned char*>(lr.pBits);
         for (int y = 0; y < kCanvasHeight; ++y)

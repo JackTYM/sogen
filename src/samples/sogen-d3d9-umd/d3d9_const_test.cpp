@@ -249,12 +249,10 @@ int main()
     {
         const auto* base = static_cast<const unsigned char*>(lr.pBits);
 
-        // D3DLOCKED_RECT::Pitch is not populated by the UMD's Lock DDI implementation (the real
-        // internal DDI struct's Pitch-equivalent field hasn't been RE'd yet -- see d3d9_ddi.hpp's
-        // D3DDDIARG_LOCK comment; it prints as 0 above). The render target's backing store is known
-        // tightly packed (32bpp, no row padding -- d3d9_host.cpp sizes it as width*height*4 and
-        // reads/writes it flat), so compute the row stride directly instead of trusting lr.Pitch,
-        // the same implicit assumption d3d9_triangle_test.cpp's single-pixel(0,0) check already relies on.
+        // The render target's backing store is known tightly packed (32bpp, no row padding --
+        // d3d9_host.cpp sizes it as width*height*4 and reads/writes it flat), so the row stride is
+        // computed directly rather than read from lr.Pitch: keeping this check independent of the
+        // driver's own Pitch reporting is what d3d9_lock_pitch_test.cpp exists to cover separately.
         constexpr LONG kStride = 640 * 4;
 
         // Point A: (col=320, row=240) -> NDC (~0.0, ~0.0), well inside the scaled-down triangle

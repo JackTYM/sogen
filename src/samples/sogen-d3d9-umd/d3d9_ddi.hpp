@@ -933,7 +933,12 @@ typedef struct _D3DDDIARG_LOCK
     UINT Reserved0Hi;      // 12 -- always 0 live (high half of the former UINT64 Reserved0 slot)
     BYTE Reserved1[24];    // 16..39 -- Range/Box input region (DdLockLH's v30/v31); not modeled
     VOID* pData;           // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
-    BYTE Reserved2[32];    // 48..79 -- unconfirmed
+    UINT Pitch;            // 48 -- INFERRED, not RE-verified: the x64 analog of the x86 struct's
+                           // RE-verified Pitch (DdLockLH's v29[9], the DWORD immediately after pData).
+                           // Validated behaviourally instead, by d3d9_lock_pitch_test asserting the
+                           // exact stride it reads back from D3DLOCKED_RECT::Pitch on both architectures.
+    UINT Reserved2Hi;      // 52 -- unconfirmed
+    BYTE Reserved2[24];    // 56..79 -- unconfirmed
     UINT OffsetToLock;     // 80 -- RE-verified live (see comment above): the app's requested byte offset,
                            // reliably present in the "driver-routed" shape. In the "sysmem-routed" shape
                            // this offset holds unrelated data instead, but that path's driver-returned
@@ -1019,7 +1024,14 @@ typedef struct _D3DDDIARG_LOCK
                            // resource" is exactly the tail-append semantics this enables -- see x64 comment).
     BYTE Reserved1[20];    // 12..31 -- unconfirmed (SizeToLock or Rect/Box input region)
     VOID* pData;           // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
-    BYTE Reserved2[12];    // 36..47 -- unconfirmed (Pitch/SlicePitch/Flags; not read by umd_Lock)
+    UINT Pitch;            // 36 -- DdLockLH's v29[9], the second driver OUTPUT (see the block comment
+                           // above): the runtime hands it straight to the app as D3DLOCKED_RECT::Pitch.
+                           // DdLockLH memsets its wire struct before the call, so a driver that never
+                           // writes this reports a 0 row stride and every row of an app's LockRect copy
+                           // lands on row 0 -- which is exactly what MW2's uncompressed menu/UI/video
+                           // textures did until umd_Lock started filling it.
+    BYTE Reserved2[8];     // 40..47 -- unconfirmed (SlicePitch/Flags; Flags is read at 44 by
+                           // classify_lock_intent)
 } D3DDDIARG_LOCK;
 #endif
 
@@ -1071,6 +1083,7 @@ typedef struct _D3DDDIARG_PRESENT
 #ifdef _WIN64
 static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll RE");
 static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 8, "SubResourceIndex RE-verified live+static 2026-07-06");
+static_assert(offsetof(D3DDDIARG_LOCK, Pitch) == 48, "Pitch inferred as the DWORD after pData; validated by d3d9_lock_pitch_test");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll RE (LHBatchPresent copy pattern)");
 #else
@@ -1080,6 +1093,7 @@ static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll
 static_assert(sizeof(D3DDDIARG_LOCK) == 48, "D3DDDIARG_LOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 4, "SubResourceIndex RE-verified live+static 2026-07-06 (x86)");
 static_assert(offsetof(D3DDDIARG_LOCK, OffsetToLock) == 8, "OffsetToLock RE-verified live 2026-07-06 (x86, markers 0x4321/0x8642)");
+static_assert(offsetof(D3DDDIARG_LOCK, Pitch) == 36, "Pitch is DdLockLH's v29[9] (x86, RE-verified output slot)");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 8, "D3DDDIARG_UNLOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 36, "D3DDDIARG_PRESENT x86 layout");
 #endif

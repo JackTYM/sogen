@@ -126,9 +126,9 @@ float4 main(PSInput input) : COLOR0
         }
     }
 
-    // Write one solid color into an already-locked, tightly-packed 32bpp A8R8G8B8 mip level. Pitch is
-    // not populated by this UMD's Lock DDI (same known gap d3d9_texture_test.cpp documents), so the
-    // stride is computed from the level's own width.
+    // Write one solid color into an already-locked, tightly-packed 32bpp A8R8G8B8 mip level. The
+    // stride is computed from the level's own width rather than read from Pitch, keeping this test
+    // independent of the driver's Pitch reporting (which d3d9_lock_pitch_test.cpp covers).
     void fill_level(void* bits, const int width, const int height, const DWORD argb)
     {
         const LONG stride = width * 4;

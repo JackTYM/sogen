@@ -138,9 +138,10 @@ namespace sogen
         int32_t tex_blt(uint64_t dst_resource, uint64_t src_resource);
 
         // Copies up to out_capacity bytes of the resource's host-side shadow copy into out.
-        // out_data_size always receives the true backing-store size.
+        // out_data_size always receives the true backing-store size, out_pitch the subresource's row
+        // stride (0 for buffers and for formats with no known layout) -- see subresource_row_pitch.
         int32_t lock(uint64_t resource, uint32_t subresource, uint32_t offset, uint32_t size, uint32_t flags, void* out,
-                     size_t out_capacity, uint32_t& out_data_size);
+                     size_t out_capacity, uint32_t& out_data_size, uint32_t& out_pitch);
         int32_t unlock(uint64_t resource, uint32_t subresource, uint32_t offset, const void* data, size_t data_size);
 
         // Resizes the resource's backing store as needed and returns a writable pointer directly into it
