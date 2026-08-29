@@ -1494,6 +1494,29 @@ namespace sogen
             return static_cast<uint32_t>(vk_texture_data_size(vk_format, level_width, 1));
         }
 
+        // D3DLOCKED_BOX::SlicePitch for one subresource: the byte distance between two consecutive depth
+        // slices. Derived from the same vk_texture_data_size that texture_subresource_layout multiplies by
+        // the level's depth to size the backing store, so a slice-major write laid out at this stride
+        // always lands on the slices the upload reads. Only a volume texture has slices; everything else
+        // reports 0.
+        uint32_t subresource_slice_pitch(const uint32_t kind, const uint32_t format, const uint32_t width, const uint32_t height,
+                                         const uint32_t mip_levels, const uint32_t subresource)
+        {
+            if (kind != static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
+            {
+                return 0;
+            }
+            uint32_t vk_format = 0;
+            if (!d3d9_format_to_vulkan(format, vk_format))
+            {
+                return 0;
+            }
+            const uint32_t level = subresource % std::max(1u, mip_levels);
+            const uint32_t level_width = std::max(1u, width >> level);
+            const uint32_t level_height = std::max(1u, height >> level);
+            return static_cast<uint32_t>(vk_texture_data_size(vk_format, level_width, level_height));
+        }
+
         // View dimensionality for sampling a resource of `kind`: cube -> CUBE / 6 layers, volume ->
         // 3D / 1 layer, everything else -> 2D / 1 layer. The PS and VS sampler-binding sites both call
         // this so a cube/volume view can never be built 2D at one site and cube/3D at the other.
@@ -5009,10 +5032,12 @@ namespace sogen
     }
 
     int32_t d3d9_host::lock(const uint64_t resource, const uint32_t subresource, const uint32_t offset, const uint32_t size,
-                            const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size, uint32_t& out_pitch)
+                            const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size, uint32_t& out_pitch,
+                            uint32_t& out_slice_pitch)
     {
         out_data_size = 0;
         out_pitch = 0;
+        out_slice_pitch = 0;
 
         const auto it = this->resources_.find(resource);
         if (it == this->resources_.end())
@@ -5020,6 +5045,8 @@ namespace sogen
             return d3derr_invalidcall;
         }
         out_pitch = subresource_row_pitch(it->second.kind, it->second.format, it->second.width, it->second.mip_levels, subresource);
+        out_slice_pitch = subresource_slice_pitch(it->second.kind, it->second.format, it->second.width, it->second.height,
+                                                  it->second.mip_levels, subresource);
         if (volume_census_enabled() && it->second.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
         {
             fprintf(stderr, "[d3d9-volcensus] lock resource=%llu subresource=%u offset=%u size=%u pitch=%u\n",
@@ -5228,9 +5255,7 @@ namespace sogen
             // which shows up here as content in slice 0 and nothing in the rest.
             resource_entry& tex = it->second;
             const std::vector<std::byte>& backing = tex.subresource_backing(subresource);
-            const uint32_t level = subresource % std::max(1u, tex.mip_levels);
-            const uint32_t row_pitch = subresource_row_pitch(tex.kind, tex.format, tex.width, tex.mip_levels, subresource);
-            const size_t slice_size = static_cast<size_t>(row_pitch) * std::max(1u, tex.height >> level);
+            const size_t slice_size = subresource_slice_pitch(tex.kind, tex.format, tex.width, tex.height, tex.mip_levels, subresource);
             const uint32_t slices = slice_size != 0 ? static_cast<uint32_t>(backing.size() / slice_size) : 0;
             for (uint32_t slice = 0; slice < slices; ++slice)
             {

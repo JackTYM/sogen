@@ -960,7 +960,10 @@ typedef struct _D3DDDIARG_LOCK
                            // RE-verified Pitch (DdLockLH's v29[9], the DWORD immediately after pData).
                            // Validated behaviourally instead, by d3d9_lock_pitch_test asserting the
                            // exact stride it reads back from D3DLOCKED_RECT::Pitch on both architectures.
-    UINT Reserved2Hi;      // 52 -- unconfirmed
+    UINT SlicePitch;       // 52 -- INFERRED the same way Pitch above is, one slot further along: the x64
+                           // analog of the x86 struct's v29[10], the "conditional third OUTPUT" DdLockLH
+                           // writes only for a lock that has depth slices. Validated behaviourally by
+                           // d3d9_lock_slicepitch_test on both architectures.
     BYTE Reserved2[24];    // 56..79 -- unconfirmed
     UINT OffsetToLock;     // 80 -- RE-verified live (see comment above): the app's requested byte offset,
                            // reliably present in the "driver-routed" shape. In the "sysmem-routed" shape
@@ -1053,8 +1056,18 @@ typedef struct _D3DDDIARG_LOCK
                            // writes this reports a 0 row stride and every row of an app's LockRect copy
                            // lands on row 0 -- which is exactly what MW2's uncompressed menu/UI/video
                            // textures did until umd_Lock started filling it.
-    BYTE Reserved2[8];     // 40..47 -- unconfirmed (SlicePitch/Flags; Flags is read at 44 by
-                           // classify_lock_intent)
+    UINT SlicePitch;       // 40 -- DdLockLH's v29[10], the "conditional third OUTPUT" of the block comment
+                           // above: `mov [edi+4Ch], eax` at 0x100655C4 copies it into the outer struct's
+                           // SlicePitch slot, which CDriverVolume::InternalLockBox hands the app as
+                           // D3DLOCKED_BOX::SlicePitch. That copy is gated on the LH surface object's own
+                           // flag word: `test dword ptr [ebx+3Ch], 40000h` at 0x10065571. Live-measured on
+                           // this runtime: a D3DPOOL_DEFAULT/MANAGED volume never carries that bit, so the
+                           // app is handed SlicePitch == 0 no matter what the driver writes here -- a
+                           // runtime-side gate no driver can influence (confirmed by patching that one jnz
+                           // to jmp in a scratch copy of d3d9.dll: the driver's value then arrives intact,
+                           // which is also what pins this field to offset 40). Hence
+                           // d3d9_lock_slicepitch_test is x64-only; see the UMD README.
+    UINT Reserved2;        // 44 -- unconfirmed (Flags; read, never written, at 44 by classify_lock_intent)
 } D3DDDIARG_LOCK;
 #endif
 
@@ -1107,6 +1120,8 @@ typedef struct _D3DDDIARG_PRESENT
 static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll RE");
 static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 8, "SubResourceIndex RE-verified live+static 2026-07-06");
 static_assert(offsetof(D3DDDIARG_LOCK, Pitch) == 48, "Pitch inferred as the DWORD after pData; validated by d3d9_lock_pitch_test");
+static_assert(offsetof(D3DDDIARG_LOCK, SlicePitch) == 52,
+              "SlicePitch inferred as the DWORD after Pitch; validated by d3d9_lock_slicepitch_test");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll RE (LHBatchPresent copy pattern)");
 #else
@@ -1117,6 +1132,7 @@ static_assert(sizeof(D3DDDIARG_LOCK) == 48, "D3DDDIARG_LOCK x86 layout (RE-verif
 static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 4, "SubResourceIndex RE-verified live+static 2026-07-06 (x86)");
 static_assert(offsetof(D3DDDIARG_LOCK, OffsetToLock) == 8, "OffsetToLock RE-verified live 2026-07-06 (x86, markers 0x4321/0x8642)");
 static_assert(offsetof(D3DDDIARG_LOCK, Pitch) == 36, "Pitch is DdLockLH's v29[9] (x86, RE-verified output slot)");
+static_assert(offsetof(D3DDDIARG_LOCK, SlicePitch) == 40, "SlicePitch is DdLockLH's v29[10] (x86, RE-verified output slot)");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 8, "D3DDDIARG_UNLOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 36, "D3DDDIARG_PRESENT x86 layout");
 #endif

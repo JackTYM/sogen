@@ -126,6 +126,9 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_lock_pitch_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_lock_pitch_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-lock-pitch-test-x86.exe -ld3d9
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_lock_slicepitch_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-lock-slicepitch-test-x64.exe -ld3d9
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_updatetexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-updatetexture-test-x64.exe -ld3d9 -ld3dcompiler_43
 
@@ -370,6 +373,7 @@ cp d3d9-volume-updatetexture-test-x64.exe <root>/filesys/c/d3d9-volume-updatetex
 cp d3d9-volume-updatetexture-test-x86.exe <root>/filesys/c/d3d9-volume-updatetexture-test-x86.exe
 cp d3d9-srgb-texture-test-x64.exe <root>/filesys/c/d3d9-srgb-texture-test.exe
 cp d3d9-srgb-texture-test-x86.exe <root>/filesys/c/d3d9-srgb-texture-test-x86.exe
+cp d3d9-lock-slicepitch-test-x64.exe <root>/filesys/c/d3d9-lock-slicepitch-test.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -440,6 +444,7 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-volume-updatetexture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-srgb-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-srgb-texture-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-lock-slicepitch-test.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -1278,9 +1283,8 @@ slice for a given `w`. A 32x32x4 volume with TWO real mip levels (`D3DUSAGE_DYNA
 is filled per level through its own `LockBox(level)`: level 0 (32x32x4) with RED/GREEN/BLUE/YELLOW, one
 solid color per depth slice, and level 1 (16x16x2, depth halved) with MAGENTA/CYAN (distinct from every
 level-0 slice color). The host backs each subresource as one tightly-packed slice-major block (slice `d`
-at byte offset `d*width*height*4`), and this UMD's Lock DDI does NOT populate
-`D3DLOCKED_BOX::SlicePitch` (`RowPitch` is populated as of the `D3DDDIARG_LOCK::Pitch` fix; `SlicePitch`
-lives in the still-unmodelled x86 `D3DDDIARG_LOCK` bytes 40..47), so the test writes each slice at `pBits + d*(width*height*4)` with
+at byte offset `d*width*height*4`), and this test predates the `D3DDDIARG_LOCK::Pitch`/`SlicePitch`
+fixes (both pitches are populated now -- see `d3d9-lock-slicepitch-test.exe` below), so it writes each slice at `pBits + d*(width*height*4)` with
 self-computed per-level pitches -- exactly the tight layout the host's buffer->3D-image copy reads. Four
 level-0 sub-passes each sample `tex3D` at the texture center (`u,v = 0.5,0.5`) with `w = (d + 0.5) / 4`
 (0.125/0.375/0.625/0.875) via a `float3` PS constant `c0`, draw a full-screen quad, and read back the
@@ -1302,6 +1306,27 @@ parity with x64 on all six sub-passes -- level 0's four slices (`slice0=B00 G00 
 `slice1=B00 GFF R00`, `slice2=BFF G00 R00`, `slice3=B00 GFF RFF`) and level 1's two
 (`slice0=BFF G00 RFF`, `slice1=BFF GFF R00`), `ALL CHECKS PASSED`, exit 0 -- zero source changes needed
 for the port.
+
+`d3d9_lock_slicepitch_test.cpp` (`d3d9-lock-slicepitch-test-x64.exe`) is the volume counterpart of
+`d3d9_lock_pitch_test.cpp`: it locks a `D3DUSAGE_DYNAMIC | D3DPOOL_DEFAULT` 32x16x4 volume with two mip
+levels, writes each level with the ordinary `pBits + z*SlicePitch + y*RowPitch` pattern using the
+driver-reported pitches, and reads the level back at the known-tight strides, so a wrong write stride
+cannot hide. `umd_Lock` never wrote `D3DDDIARG_LOCK::SlicePitch` before this, and the runtime memsets that
+struct per call, so the app got `SlicePitch == 0` and every depth slice landed on slice 0 -- the same bug
+class as the row-pitch one, one dimension up. The value is derived host-side by
+`d3d9_host::subresource_slice_pitch` from the same `vk_texture_data_size` that
+`texture_subresource_layout` multiplies by the level's depth to size the backing store, so a slice-major
+write at the reported stride always lands on the slices the upload reads.
+
+The test is x64-only on purpose. On x86 the value reaches the DDI struct correctly (offset 40, the same
+`v29[10]` slot `DdLockLH` is RE'd to copy out) but the runtime's copy-back is gated on the locked
+surface's own flag word -- `test dword ptr [ebx+3Ch], 40000h` at `d3d9.dll+0x65571`, guarding
+`mov [edi+4Ch], eax` at `+0x655C4` -- and a `D3DPOOL_DEFAULT` or `D3DPOOL_MANAGED` volume never carries
+that bit, so `D3DLOCKED_BOX::SlicePitch` reads 0 there whatever the driver writes. That was pinned by
+patching exactly that one `jnz` to `jmp` in a scratch copy of `d3d9.dll`: the driver's marker value then
+arrived intact in the app's `SlicePitch`, which both proves the offset and proves the gate is the only
+remaining blocker. `D3DPOOL_SYSTEMMEM`/`D3DPOOL_SCRATCH` volumes are unaffected on both architectures --
+the runtime owns those allocations and computes both pitches itself, never asking the driver.
 
 `d3d9_half_pixel_test.cpp` (`d3d9-half-pixel-test-x86.exe` / `-x64.exe`, needs `d3dcompiler_43`) pins the
 pixel-centre convention. D3D9 rasterizes with the pixel centre AT integer screen coordinates while Vulkan

@@ -2327,8 +2327,8 @@ namespace
     std::map<locked_key, std::vector<uint8_t>> g_locked_buffers;
     std::map<locked_key, uint32_t> g_locked_offsets;
 
-    // Total resource size (bytes from offset 0 to the end of the subresource) and row pitch, cached the
-    // first time any Lock() on this (resource, subresource) learns them via a real probe round trip. A
+    // Total resource size (bytes from offset 0 to the end of the subresource) and row/slice pitch, cached
+    // the first time any Lock() on this (resource, subresource) learns them via a real probe round trip. A
     // D3D9 resource's layout is fixed for its entire lifetime (a vertex/index buffer's byte count and a
     // texture subresource's mip dimensions never change after creation), so this cache entry is valid
     // forever once populated -- every subsequent Lock() on the same key can derive data_size locally
@@ -2339,6 +2339,7 @@ namespace
     {
         uint32_t full_size;
         uint32_t pitch;
+        uint32_t slice_pitch;
     };
 
     std::map<locked_key, locked_layout> g_resource_layouts;
@@ -2498,7 +2499,7 @@ namespace
         // conservatively treats any unresolvable slot as a match -- see k_batch_unknown_resource).
         const bool resource_needs_flush = !g_d3d9_command_batch.empty() && resource_currently_referenced(resource);
 
-        // Learn the true backing size and row pitch, either from the immutable-for-the-resource's-
+        // Learn the true backing size and row/slice pitch, either from the immutable-for-the-resource's-
         // lifetime cache (skips the probe round trip entirely -- see g_resource_layouts' own comment)
         // or, on a genuine first touch of this (resource, subresource), via a real probe round trip
         // whose result then seeds the cache for every future Lock() on the same key.
@@ -2509,6 +2510,7 @@ namespace
         {
             data_size = offset <= cached_layout_it->second.full_size ? cached_layout_it->second.full_size - offset : 0;
             pArgs->Pitch = cached_layout_it->second.pitch;
+            pArgs->SlicePitch = cached_layout_it->second.slice_pitch;
         }
         else
         {
@@ -2518,8 +2520,9 @@ namespace
             data_size = probe.data_size;
             if (!probe_hr_nonzero)
             {
-                g_resource_layouts[key] = {offset + probe.data_size, probe.pitch};
+                g_resource_layouts[key] = {offset + probe.data_size, probe.pitch, probe.slice_pitch};
                 pArgs->Pitch = probe.pitch;
+                pArgs->SlicePitch = probe.slice_pitch;
             }
         }
 

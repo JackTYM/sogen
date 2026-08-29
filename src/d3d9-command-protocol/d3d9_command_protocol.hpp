@@ -136,7 +136,11 @@ namespace sogen::d3d9_cmd
         // so the two can never disagree. For a block-compressed format this is one block row, per
         // D3D9's own definition; 0 for buffers and for any format with no known layout.
         uint32_t pitch;
-        uint32_t reserved;
+        // Byte distance between two consecutive depth slices of the locked subresource, handed back as
+        // D3DDDIARG_LOCK::SlicePitch (and thus to the app as D3DLOCKED_BOX::SlicePitch). Derived from
+        // the same layout as `pitch`, so a volume's rows and slices can never disagree. 0 for anything
+        // that is not a volume texture.
+        uint32_t slice_pitch;
         // uint8_t data[data_size];
     };
 
