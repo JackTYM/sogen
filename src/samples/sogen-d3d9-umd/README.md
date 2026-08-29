@@ -1292,3 +1292,21 @@ parity with x64 on all six sub-passes -- level 0's four slices (`slice0=B00 G00 
 `slice1=B00 GFF R00`, `slice2=BFF G00 R00`, `slice3=B00 GFF RFF`) and level 1's two
 (`slice0=BFF G00 RFF`, `slice1=BFF GFF R00`), `ALL CHECKS PASSED`, exit 0 -- zero source changes needed
 for the port.
+
+`d3d9_half_pixel_test.cpp` (`d3d9-half-pixel-test-x86.exe` / `-x64.exe`, needs `d3dcompiler_43`) pins the
+pixel-centre convention. D3D9 rasterizes with the pixel centre AT integer screen coordinates while Vulkan
+(like D3D10+) puts it at integer+0.5, so an app that wants an exact texel-to-pixel blit shifts its quad by
+-0.5 pixels -- the documented D3D9 recipe -- and `d3d9_host::execute_draw` has to put that half pixel back
+in the viewport origin. Without it two things go wrong at once and neither raises an error: every sample
+lands exactly between two texels, so a LINEAR sampler returns a 50/50 blend instead of the texel, and the
+quad's far edge falls on the last pixel's centre, which the top-left fill rule excludes, leaving the last
+row and column unwritten. The test draws a 32x32 source texture (texels carrying their own coordinates in
+R/G plus a 1-texel checkerboard in blue that any half-texel blend collapses to mid-grey) 1:1 over a 32x32
+render target through a quad positioned by that exact recipe, samples LINEAR (POINT would snap the error
+away and hide the bug), and compares every destination texel against its source. Against a build without
+the viewport offset it reports `unwritten=63` (the 32+32-1 texels of the far row/column) and
+`mismatched=961` with the first mismatch at (0,0) reading `B=80 G=08 R=08` against an expected
+`B=05 G=04 R=04` -- the exact 50/50 blend signature; with it, `unwritten=0 mismatched=0` on both
+architectures. In MW2 this was worth a measured 1-pixel misregistration against DXVK (best integer
+alignment `dy=1 dx=1` before, `dy=0 dx=0` after) plus an extra half-texel blur on every one of its
+full-screen post-process passes.

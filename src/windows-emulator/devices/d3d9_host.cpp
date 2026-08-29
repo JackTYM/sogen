@@ -3586,6 +3586,16 @@ namespace sogen
         // Winding order: a negative-height viewport reverses the effective face orientation the rasterizer
         // sees. Paid back once, permanently, in the pipeline's baked frontFace rather than here -- see
         // d3dcull_to_vk_cull_mode's comment for the reasoning.
+        //
+        // Pixel centres: D3D9 rasterizes with the pixel centre AT integer screen coordinates, Vulkan (like
+        // D3D10+) at integer+0.5. An app that wants an exact texel-to-pixel blit compensates by shifting
+        // its quad -0.5 pixels -- the documented D3D9 recipe -- so the transform has to put that half pixel
+        // back or every such pass samples exactly between two texels (a LINEAR sampler then returns a
+        // 50/50 blend instead of the texel, turning a post-process chain into a chain of extra blurs) and
+        // the quad's far edge lands on the last pixel's centre, which the fill rule excludes, leaving the
+        // last row and column unwritten. Applied to the viewport origin so it covers the fixed-function
+        // path (whose input is already in D3D9 screen space) on the same terms as a translated shader's.
+        constexpr float pixel_centre_offset = 0.5f;
         const bool has_explicit_viewport = this->state_.viewport_width > 0.0f && this->state_.viewport_height > 0.0f;
         const float vp_x = has_explicit_viewport ? this->state_.viewport_x : 0.0f;
         const float vp_y = has_explicit_viewport ? this->state_.viewport_y : 0.0f;
@@ -3593,8 +3603,12 @@ namespace sogen
         const float vp_height = has_explicit_viewport ? this->state_.viewport_height : static_cast<float>(rt.height);
         const float vp_min_z = has_explicit_viewport ? this->state_.viewport_min_z : 0.0f;
         const float vp_max_z = has_explicit_viewport ? this->state_.viewport_max_z : 1.0f;
-        const std::array<vulkan_host::viewport_entry, 1> viewports{
-            {{.x = vp_x, .y = vp_y + vp_height, .width = vp_width, .height = -vp_height, .min_depth = vp_min_z, .max_depth = vp_max_z}}};
+        const std::array<vulkan_host::viewport_entry, 1> viewports{{{.x = vp_x + pixel_centre_offset,
+                                                                     .y = vp_y + vp_height + pixel_centre_offset,
+                                                                     .width = vp_width,
+                                                                     .height = -vp_height,
+                                                                     .min_depth = vp_min_z,
+                                                                     .max_depth = vp_max_z}}};
         this->vulkan_.cmd_set_viewport(batch_cmd, 0, false, viewports);
         vulkan_host::scissor_entry scissor{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height};
         if (render_state_or(this->state_.render_state, d3drs_scissortestenable, 0) != 0)
