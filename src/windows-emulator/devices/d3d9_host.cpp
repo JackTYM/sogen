@@ -3019,7 +3019,7 @@ namespace sogen
                     this->stats_.sampler_skip_formats[tex.format] += 1;
                     continue;
                 }
-                if (tex.vk_image_view_id == 0)
+                if (tex.vk_image_view_sampled_id == 0)
                 {
                     uint32_t tex_vk_format = 0;
                     if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
@@ -3036,18 +3036,18 @@ namespace sogen
                         const auto swizzle = d3d9_format_to_vulkan_swizzle(tex.format);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                         view_shape.view_type, 0, view_levels, 0, view_shape.layer_count, swizzle.r,
-                                                        swizzle.g, swizzle.b, swizzle.a, tex.vk_image_view_id);
+                                                        swizzle.g, swizzle.b, swizzle.a, tex.vk_image_view_sampled_id);
                     }
                 }
                 const uint32_t sampler_mips = rt_as_texture ? 1u : std::max(1u, tex.mip_levels);
-                if (tex.vk_image_view_id == 0)
+                if (tex.vk_image_view_sampled_id == 0)
                 {
                     ++this->stats_.sampler_skip_no_view;
                     this->stats_.sampler_skip_formats[tex.format] += 1;
                 }
-                if (tex.vk_image_view_id != 0 && this->build_sampler(device, stage, sampler_mips, tex_samplers[stage]))
+                if (tex.vk_image_view_sampled_id != 0 && this->build_sampler(device, stage, sampler_mips, tex_samplers[stage]))
                 {
-                    tex_image_views[stage] = tex.vk_image_view_id;
+                    tex_image_views[stage] = tex.vk_image_view_sampled_id;
                     if (rt_as_texture)
                     {
                         sampled_render_targets.push_back(&tex);
@@ -3078,7 +3078,7 @@ namespace sogen
                     continue;
                 }
                 resource_entry& tex = tex_res_it->second;
-                if (tex.vk_image_view_id == 0)
+                if (tex.vk_image_view_sampled_id == 0)
                 {
                     uint32_t tex_vk_format = 0;
                     if (d3d9_format_to_vulkan(tex.format, tex_vk_format))
@@ -3088,12 +3088,13 @@ namespace sogen
                         const auto swizzle = d3d9_format_to_vulkan_swizzle(tex.format);
                         this->vulkan_.create_image_view(device, tex.vk_image_id, tex_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                                                         view_shape.view_type, 0, view_levels, 0, view_shape.layer_count, swizzle.r,
-                                                        swizzle.g, swizzle.b, swizzle.a, tex.vk_image_view_id);
+                                                        swizzle.g, swizzle.b, swizzle.a, tex.vk_image_view_sampled_id);
                     }
                 }
-                if (tex.vk_image_view_id != 0 && this->build_sampler(device, vs_stage, std::max(1u, tex.mip_levels), vs_tex_samplers[k]))
+                if (tex.vk_image_view_sampled_id != 0 &&
+                    this->build_sampler(device, vs_stage, std::max(1u, tex.mip_levels), vs_tex_samplers[k]))
                 {
-                    vs_tex_image_views[k] = tex.vk_image_view_id;
+                    vs_tex_image_views[k] = tex.vk_image_view_sampled_id;
                 }
             }
 
@@ -4094,7 +4095,8 @@ namespace sogen
         resource_entry& entry = it->second;
         // A resource with no Vulkan object of its own (a plain, non-direct-mapped buffer) must not drag a
         // device into existence just to be freed -- ensure_vk_device() creates one on first call.
-        if (entry.vk_direct_buffer_id != 0 || entry.vk_image_id != 0 || entry.vk_image_view_id != 0 || entry.vk_image_view_srgb_id != 0)
+        if (entry.vk_direct_buffer_id != 0 || entry.vk_image_id != 0 || entry.vk_image_view_id != 0 || entry.vk_image_view_srgb_id != 0 ||
+            entry.vk_image_view_sampled_id != 0)
         {
             const uint64_t device = this->ensure_vk_device();
             if (entry.vk_direct_buffer_id != 0)
@@ -4109,6 +4111,10 @@ namespace sogen
             if (entry.vk_image_view_srgb_id != 0)
             {
                 this->vulkan_.destroy_image_view(device, entry.vk_image_view_srgb_id);
+            }
+            if (entry.vk_image_view_sampled_id != 0)
+            {
+                this->vulkan_.destroy_image_view(device, entry.vk_image_view_sampled_id);
             }
             if (entry.vk_image_id != 0)
             {

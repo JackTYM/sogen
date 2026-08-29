@@ -182,6 +182,16 @@ namespace sogen
             // Real D3D9 D3DFMT_A8L8 samples as R=G=B=byte0 (L), A=byte1 (A). R8G8_UNORM's identity
             // mapping puts A in G and leaves B at 0, matching neither channel's real placement.
             return {vk_component_swizzle_r, vk_component_swizzle_r, vk_component_swizzle_r, vk_component_swizzle_g};
+        case d3dfmt_x8r8g8b8:
+            // Real D3D9 D3DFMT_X8R8G8B8 has no alpha channel: its fourth byte is undefined padding and
+            // sampling always yields A=1.0. B8G8R8A8_UNORM (the only byte-exact VkFormat) does have one,
+            // so an identity mapping samples whatever the guest happened to leave in that byte -- zero
+            // for anything that only ever wrote RGB, which makes every SRCALPHA-blended draw of such a
+            // texture fully transparent.
+            return {.r = vk_component_swizzle_identity,
+                    .g = vk_component_swizzle_identity,
+                    .b = vk_component_swizzle_identity,
+                    .a = vk_component_swizzle_one};
         default:
             return {vk_component_swizzle_identity, vk_component_swizzle_identity, vk_component_swizzle_identity,
                     vk_component_swizzle_identity};

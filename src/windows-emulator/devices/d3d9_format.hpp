@@ -39,7 +39,11 @@ namespace sogen
     // D3DFMT_L8, D3DFMT_A8L8) have no direct VkFormat equivalent -- they're stored in R8/R8G8_UNORM,
     // whose channels don't line up with where D3D9 expects the data to sample from (e.g. D3DFMT_A8's
     // single byte is real D3D9's ALPHA channel with RGB=0, not R8_UNORM's default R-channel-with-
-    // alpha-forced-to-1). Always succeeds; unrecognized formats get the identity mapping.
+    // alpha-forced-to-1) -- and the alpha-less D3DFMT_X8R8G8B8, whose byte-exact VkFormat does have an
+    // alpha channel that D3D9 says must not be sampled. Always succeeds; unrecognized formats get the
+    // identity mapping. A view carrying a non-identity mapping must never be used as a render-pass
+    // attachment (Vulkan requires identity swizzle there), which is why resource_entry keeps the
+    // shader-read view separate from the attachment ones.
     struct d3d9_format_swizzle
     {
         uint32_t r, g, b, a;

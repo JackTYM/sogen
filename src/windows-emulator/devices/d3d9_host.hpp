@@ -443,6 +443,12 @@ namespace sogen
             // used for SAMPLING -- a render target's stored bytes are read back exactly as they were
             // written, which is what the guest's own later passes expect.
             uint64_t vk_image_view_srgb_id{};
+            // Shader-read view of the SAME image, kept apart from the two attachment views above because
+            // d3d9_format_to_vulkan_swizzle may give it a non-identity component mapping (D3DFMT_A8/L8/
+            // A8L8/X8R8G8B8), and Vulkan requires identity swizzle on any view used as a render-pass
+            // attachment. A resource that is both a render target and a sampled texture therefore needs
+            // one view of each kind rather than whichever kind happened to be created first.
+            uint64_t vk_image_view_sampled_id{};
             bool backing_dirty{}; // color RT: GPU image has drawn/cleared pixels not yet copied to backing
 
             // Sampled texture: the CPU-side backing has bytes the GPU image does not have yet, so the next
