@@ -1542,18 +1542,17 @@ namespace
             return D3DSAMP_MAXMIPLEVEL;
         case 21:
             return D3DSAMP_MAXANISOTROPY;
-        // Confirmed sampler-shaped (present in every sampler's default-init sequence, distinct from any
-        // TSS default) but never individually round-tripped through an explicit non-default
-        // SetSamplerState() call, so their real D3DSAMPLERSTATETYPE identity (candidates: SRGBTEXTURE/
-        // ELEMENTINDEX/DMAPOFFSET, D3DSAMP 11-13) isn't confirmed. Still routed to the sampler bucket
-        // (the correct category) under reserved values outside D3DSAMPLERSTATETYPE's real range, instead
-        // of guessing a specific identity or silently misfiling them as texture-stage-state.
+        // Round-tripped the same way as the ten above, once a probe drew a textured quad first so the
+        // runtime actually flushed the sampler (it only forwards state for samplers the current pipeline
+        // references): SetSamplerState(0, SRGBTEXTURE, 1) arrived as State=29 Value=1,
+        // ELEMENTINDEX 0x21 as State=30, DMAPOFFSET 0x31 as State=31. The default-init sequence emits
+        // these three in the order 29,31,30, which is why their identity could not be read off it.
         case 29:
-            return 1029;
+            return D3DSAMP_SRGBTEXTURE;
         case 30:
-            return 1030;
+            return D3DSAMP_ELEMENTINDEX;
         case 31:
-            return 1031;
+            return D3DSAMP_DMAPOFFSET;
         default:
             return 0; // a genuine D3DTEXTURESTAGESTATETYPE value; 0 is never a real D3DSAMPLERSTATETYPE
         }

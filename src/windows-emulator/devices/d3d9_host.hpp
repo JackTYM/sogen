@@ -974,6 +974,9 @@ namespace sogen
         // failure() for how those are excluded so they keep retrying.
         std::set<pipeline_cache_key> failed_pipelines_{};
 
+        std::set<std::array<uint32_t, 3>> sampler_state_census_seen_{};
+        std::set<std::array<uint64_t, 4>> sampler_state_census_draws_{};
+
         // Records `key` as unbuildable (unless the failure was transient) and returns nullptr, so
         // ensure_programmable_pipeline's failure paths can `return this->remember_pipeline_failure(...)`.
         const programmable_pipeline_entry* remember_pipeline_failure(const pipeline_cache_key& key, int32_t vk_result);

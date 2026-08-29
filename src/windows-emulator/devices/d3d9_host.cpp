@@ -126,6 +126,7 @@ namespace sogen
         constexpr uint32_t d3dsamp_mipfilter = 7;
         constexpr uint32_t d3dsamp_maxmiplevel = 9;
         constexpr uint32_t d3dsamp_maxanisotropy = 10;
+        constexpr uint32_t d3dsamp_srgbtexture = 11;
 
         // Public D3DSAMPLER_TEXTURE_TYPE base (d3d9types.h): D3D9 folds the vertex-stage texture samplers
         // into the SAME SetTexture/bound_textures stage-key space as the pixel samplers, starting at
@@ -1758,6 +1759,16 @@ namespace sogen
         bool volume_census_enabled()
         {
             static const bool enabled = getenv("EMULATOR_D3D9_VOLUME_CENSUS") != nullptr;
+            return enabled;
+        }
+
+        // EMULATOR_D3D9_SAMPLERSTATE_CENSUS=1: one line per distinct (sampler, state, value) triple a
+        // title ever sets, plus one per draw that samples with D3DSAMP_SRGBTEXTURE on. Deduplicated
+        // because the D3D9 runtime re-sends every sampler's whole state block constantly: what identifies
+        // a title's real usage is the set of values it asks for, not how often they arrive.
+        bool sampler_state_census_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_SAMPLERSTATE_CENSUS") != nullptr;
             return enabled;
         }
 
@@ -3711,6 +3722,24 @@ namespace sogen
         {
             this->report_ps_const_diag(target_rt, srgb_write);
         }
+        if (sampler_state_census_enabled())
+        {
+            for (const auto& [stage, resource] : this->state_.bound_textures)
+            {
+                if (sampler_state_or(this->state_.sampler_state, stage, d3dsamp_srgbtexture, 0) == 0)
+                {
+                    continue;
+                }
+                if (this->sampler_state_census_draws_
+                        .emplace(std::array<uint64_t, 4>{target_rt, this->state_.pixel_shader, stage, resource})
+                        .second)
+                {
+                    fprintf(stderr, "[d3d9-samplerstate-census] srgbtex draw rt=%llu ps=%llu stage=%u texture=%llu srgb_write=%d\n",
+                            static_cast<unsigned long long>(target_rt), static_cast<unsigned long long>(this->state_.pixel_shader), stage,
+                            static_cast<unsigned long long>(resource), srgb_write ? 1 : 0);
+                }
+            }
+        }
         if (!srgb_write && render_state_or(this->state_.render_state, d3drs_alphablendenable, 0) != 0)
         {
             for (const auto& brt : bound_rts)
@@ -4689,7 +4718,8 @@ namespace sogen
         std::map<uint32_t, uint64_t> ordered_textures(this->state_.bound_textures.begin(), this->state_.bound_textures.end());
         for (const auto& [stage, resource] : ordered_textures)
         {
-            textures += " s" + std::to_string(stage) + "=" + std::to_string(resource);
+            textures += " s" + std::to_string(stage) + "=" + std::to_string(resource) + "/srgbtex" +
+                        std::to_string(sampler_state_or(this->state_.sampler_state, stage, d3dsamp_srgbtexture, 0));
         }
         std::array<char, 128> viewport{};
         std::snprintf(viewport.data(), viewport.size(), " vp=%gx%g+%g+%g", this->state_.viewport_width, this->state_.viewport_height,
@@ -5499,6 +5529,11 @@ namespace sogen
             }
             this->state_.sampler_state[tss_key(req.sampler, req.state)] = req.value;
             ++this->state_.sampler_state_version;
+            if (sampler_state_census_enabled() &&
+                this->sampler_state_census_seen_.emplace(std::array{req.sampler, req.state, req.value}).second)
+            {
+                fprintf(stderr, "[d3d9-samplerstate-census] sampler=%u state=%u value=%u\n", req.sampler, req.state, req.value);
+            }
             return d3d_ok;
         }
         case gpu_bridge::command::d3d9_set_texture: {
