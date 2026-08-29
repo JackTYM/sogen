@@ -10,6 +10,8 @@
 // header comment); this .cpp mirrors that same "real Vulkan types stay out of the header" rule.
 #include <vulkan/vulkan_core.h>
 
+#include <vk_feature_chain.hpp>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -494,10 +496,25 @@ namespace sogen
             return 0;
         }
 
+        // Ask for the timeline semaphore vulkan_host::start_gpu_progress_watch needs to block on GPU
+        // completion, and fall back to a bare device when the driver cannot offer it -- the watch only
+        // shortens the scheduler's wake latency, which polls correctly without it.
+        constexpr auto timeline_feature = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+        std::vector<std::byte> features(sizeof(gpu_bridge::feature_chain_record) + gpu_bridge::feature_body_size(timeline_feature));
+        const gpu_bridge::feature_chain_record record{.s_type = timeline_feature,
+                                                      .body_size = static_cast<uint32_t>(features.size() - sizeof(record))};
+        std::memcpy(features.data(), &record, sizeof(record));
+        constexpr VkBool32 requested = VK_TRUE;
+        std::memcpy(features.data() + sizeof(record), &requested, sizeof(requested));
+
         uint64_t device = 0;
-        if (this->vulkan_.create_device(phys_ids[0], nullptr, 0, nullptr, 0, 0, nullptr, 0, 0, device) != 0 || device == 0)
+        if (this->vulkan_.create_device(phys_ids[0], nullptr, 0, nullptr, 0, 0, features.data(), features.size(), 1, device) != 0 ||
+            device == 0)
         {
-            return 0;
+            if (this->vulkan_.create_device(phys_ids[0], nullptr, 0, nullptr, 0, 0, nullptr, 0, 0, device) != 0 || device == 0)
+            {
+                return 0;
+            }
         }
 
         this->vk_instance_ = instance;
@@ -548,6 +565,11 @@ namespace sogen
             {
                 return false;
             }
+        }
+
+        if (this->gpu_progress_callback_)
+        {
+            this->vulkan_.start_gpu_progress_watch(device, this->gpu_progress_callback_);
         }
 
         this->draw_infra_ready_ = true;

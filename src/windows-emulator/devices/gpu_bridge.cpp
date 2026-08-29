@@ -44,6 +44,14 @@ namespace sogen
                     win_emu.log.warn("[gpu-trace] op 0x%X\n", static_cast<unsigned>(context.io_control_code));
                 }
 #ifdef SOGEN_HAS_VKD3D_SHADER
+                // Earliest point that has both halves: the emulator only reaches d3d9_host through here,
+                // and d3d9_host creates its Vulkan device lazily somewhere below.
+                if (!this->gpu_progress_callback_installed_)
+                {
+                    this->gpu_progress_callback_installed_ = true;
+                    this->d3d9_.set_gpu_progress_callback([&win_emu] { win_emu.notify_host_wait_progress(); });
+                }
+
                 if (getenv("EMULATOR_D3D9_CROSSING_DIAG"))
                 {
                     static std::unordered_map<uint32_t, uint64_t> crossing_counts;
@@ -408,6 +416,7 @@ namespace sogen
             vulkan_host vulkan_{};
 #ifdef SOGEN_HAS_VKD3D_SHADER
             d3d9_host d3d9_{this->vulkan_};
+            bool gpu_progress_callback_installed_{false};
 #endif
 
             // VkDeviceMemory aliased directly into the guest address space (see handle_map_memory_direct),
@@ -516,8 +525,7 @@ namespace sogen
             }
 
             static void present_surface_if_ready(windows_emulator& win_emu, const uint64_t hwnd_value, const uint32_t width,
-                                                 const uint32_t height, const std::vector<std::byte>& pixels,
-                                                 const uint32_t vk_format)
+                                                 const uint32_t height, const std::vector<std::byte>& pixels, const uint32_t vk_format)
             {
                 if (hwnd_value == 0 || pixels.empty())
                 {
@@ -2001,7 +2009,7 @@ namespace sogen
                 uint64_t hwnd_value = 0;
                 uint32_t vk_format = 0;
                 const int32_t result = this->vulkan_.queue_present(request.queue, request.swapchain, request.image_index, pixels, width,
-                                                                    height, hwnd_value, vk_format);
+                                                                   height, hwnd_value, vk_format);
 
                 // Hand the freshly read-back pixels to the guest window through the UI backend (the same
                 // seam GDI EndPaint uses). vk_format_to_ui_surface_format picks the byte order that

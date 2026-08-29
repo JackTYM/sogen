@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -105,6 +106,16 @@ namespace sogen
         explicit d3d9_host(vulkan_host& vulkan)
             : vulkan_(vulkan)
         {
+        }
+
+        // Called from a host thread every time the GPU retires D3D9 work, so a guest thread parked on
+        // a batch fence can be woken the moment it clears instead of on the scheduler's next poll.
+        // Must be installed before the first draw reaches this host: the watch it feeds is started
+        // together with the draw infrastructure, and a driver with no timeline semaphore simply never
+        // starts one, leaving the scheduler to poll as it did before.
+        void set_gpu_progress_callback(std::function<void()> callback)
+        {
+            this->gpu_progress_callback_ = std::move(callback);
         }
 
         // ---------------------------------------------------------------------------------------
@@ -578,6 +589,7 @@ namespace sogen
         device_state state_{};
 
         vulkan_host& vulkan_;
+        std::function<void()> gpu_progress_callback_{};
         uint64_t vk_instance_{};        // 0 until lazily created
         uint64_t vk_physical_device_{}; // 0 until lazily created
         uint64_t vk_device_{};          // 0 until lazily created

@@ -2,8 +2,9 @@
 
 // Helpers for marshalling VkPhysicalDevice*Features pNext chains across the GPU bridge. Unlike
 // gpu_bridge_protocol.hpp (which is dependency-free), this header needs the Vulkan struct layouts, so
-// it is included only by the two ends that speak Vulkan: the host wrapper (vulkan_host.cpp) and the
-// guest shim (vulkan_shim.cpp) -- never by the emulator-side dispatcher, which only shuttles bytes.
+// it is included only by the ends that speak Vulkan: the host wrapper (vulkan_host.cpp), the guest
+// shim (vulkan_shim.cpp) and d3d9_host.cpp, which builds its own device's feature chain rather than
+// relaying a guest one -- never by the emulator-side dispatcher, which only shuttles bytes.
 //
 // Every VkPhysicalDevice*Features struct is a { VkStructureType sType; void* pNext; } header followed
 // by a run of VkBool32 toggles. The header size differs by ABI (8 on x86, 16 on x64) but the bool run
