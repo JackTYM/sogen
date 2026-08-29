@@ -225,7 +225,7 @@ namespace sogen::wait_storm_diag
         {
             fprintf(stderr,
                     "[WAIT_STORM_DIAG] host_wait_park       parks=%llu (%.0f/s) wake_mean=%.2f ms wake_max=%.2f ms scans/wake=%.1f\n",
-                    static_cast<unsigned long long>(s.host_wait_parks), s.host_wait_parks / dt,
+                    static_cast<unsigned long long>(s.host_wait_parks), static_cast<double>(s.host_wait_parks) / dt,
                     static_cast<double>(s.host_wait_wake_ns) / 1e6 / static_cast<double>(s.host_wait_parks),
                     static_cast<double>(s.host_wait_wake_ns_max) / 1e6,
                     static_cast<double>(s.host_wait_wake_scans) / static_cast<double>(s.host_wait_parks));

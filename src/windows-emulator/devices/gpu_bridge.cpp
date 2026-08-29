@@ -4072,7 +4072,7 @@ namespace sogen
                 inner.io_control_code = request.inner_command_id;
                 inner.input_buffer = context.input_buffer + prefix;
                 inner.input_buffer_length = static_cast<ULONG>(context.input_buffer_length - prefix);
-                state->inner.emplace(std::move(inner));
+                state->inner.emplace(inner);
                 return run_d3d9_escape(win_emu, std::move(state));
             }
 
@@ -4091,15 +4091,19 @@ namespace sogen
                     return status;
                 }
 
-                const io_device_context& context = state->context;
+                // Resolved before the closure takes ownership of `state`, since the escape's context lives
+                // inside it.
+                emulator_thread& thread = state->context.thread();
+                vcpu_context& vcpu = *state->context.vcpu;
+
                 // Like handle_wait_semaphores, the parked completion reports STATUS_SUCCESS: the escape's
                 // real outcome reaches the guest through its output buffer, which advance_d3d9_escape
                 // writes before it reports completion.
-                context.thread().await_host_condition = [this, &win_emu, state]() {
+                thread.await_host_condition = [this, &win_emu, state = std::move(state)]() {
                     NTSTATUS parked_status = STATUS_SUCCESS;
                     return this->advance_d3d9_escape(win_emu, *state, parked_status);
                 };
-                win_emu.yield_thread(*context.vcpu, false);
+                win_emu.yield_thread(vcpu, false);
                 return STATUS_SUCCESS;
             }
 
