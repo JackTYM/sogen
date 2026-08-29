@@ -1748,6 +1748,17 @@ namespace sogen
             return enabled;
         }
 
+        // EMULATOR_D3D9_VOLUME_CENSUS=1: a creation-side census. Logs every resource create (the only
+        // place a resource's dimensionality is known for certain) plus every subsequent touch of a
+        // volume resource, so "does this title use volume textures, and through which population path"
+        // can be answered from one capture. Deliberately not folded into TEXUPLOAD_DIAG, whose
+        // upload-side view misses any resource that is created and populated but never re-uploaded.
+        bool volume_census_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_D3D9_VOLUME_CENSUS") != nullptr;
+            return enabled;
+        }
+
         // EMULATOR_D3D9_PSCONSTDIAG=<asm substring>: matches the shader by its own disassembled text
         // rather than by resource id, because ids are allocation-order dependent and shift between runs
         // while the instruction sequence of the shader under investigation does not.
@@ -3926,6 +3937,14 @@ namespace sogen
                     "backing_size=%zu\n",
                     static_cast<unsigned long long>(id), kind, format, width, height, depth, mip_levels, usage, pool, backing_size);
         }
+        if (volume_census_enabled())
+        {
+            fprintf(stderr,
+                    "[d3d9-volcensus] create resource=%llu kind=%u format=%u %ux%ux%u mips=%u usage=0x%X pool=%u subresources=%zu "
+                    "backing_size=%zu\n",
+                    static_cast<unsigned long long>(id), kind, format, width, height, depth, mip_levels, usage, pool, subresources.size(),
+                    backing_size);
+        }
         return d3d_ok;
     }
 
@@ -4118,6 +4137,23 @@ namespace sogen
                     static_cast<unsigned long long>(hash));
         }
 
+        if (volume_census_enabled() && tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
+        {
+            // Per-subresource non-zero byte counts, not a hash: a volume whose slices past slice 0 are
+            // all zero is exactly what an unreported SlicePitch (or an unwired population path) looks
+            // like, and a hash cannot tell that apart from correctly-populated content.
+            for (const auto& up : uploads)
+            {
+                size_t nonzero = 0;
+                for (size_t i = 0; i < up.size; ++i)
+                {
+                    nonzero += up.src[i] != std::byte{0} ? 1 : 0;
+                }
+                fprintf(stderr, "[d3d9-volcensus] upload resource=%llu level=%u %ux%ux%u size=%zu nonzero=%zu\n",
+                        static_cast<unsigned long long>(resource), up.mip_level, up.width, up.height, up.depth, up.size, nonzero);
+            }
+        }
+
         return true;
     }
 
@@ -4186,7 +4222,7 @@ namespace sogen
         const auto src_it = this->resources_.find(src_resource);
         if (dst_it == this->resources_.end() || src_it == this->resources_.end())
         {
-            if (texblt_diag_enabled())
+            if (texblt_diag_enabled() || volume_census_enabled())
             {
                 fprintf(stderr, "[d3d9-texblt-diag] dst=%llu(found=%d) src=%llu(found=%d) -> invalidcall\n",
                         static_cast<unsigned long long>(dst_resource), dst_it != this->resources_.end(),
@@ -4204,6 +4240,12 @@ namespace sogen
         this->flush_batch();
         resource_entry& dst = dst_it->second;
         resource_entry& src = src_it->second;
+        if (volume_census_enabled() && (dst.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume) ||
+                                        src.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume)))
+        {
+            fprintf(stderr, "[d3d9-volcensus] texblt dst=%llu(kind=%u) src=%llu(kind=%u)\n", static_cast<unsigned long long>(dst_resource),
+                    dst.kind, static_cast<unsigned long long>(src_resource), src.kind);
+        }
         if (texblt_diag_enabled())
         {
             const auto hash_of = [](const std::vector<std::byte>& bytes) {
@@ -4863,6 +4905,11 @@ namespace sogen
             return d3derr_invalidcall;
         }
         out_pitch = subresource_row_pitch(it->second.kind, it->second.format, it->second.width, it->second.mip_levels, subresource);
+        if (volume_census_enabled() && it->second.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
+        {
+            fprintf(stderr, "[d3d9-volcensus] lock resource=%llu subresource=%u offset=%u size=%u pitch=%u\n",
+                    static_cast<unsigned long long>(resource), subresource, offset, size, out_pitch);
+        }
         // subresource != 0 addresses a mip level in extra_mips (see resource_entry); reject an index the
         // resource doesn't have. Buffers/render targets only ever use subresource 0.
         if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())
@@ -4937,6 +4984,11 @@ namespace sogen
             backing.resize(required_size);
         }
         std::memcpy(backing.data() + offset, data, data_size);
+        if (volume_census_enabled() && it->second.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
+        {
+            fprintf(stderr, "[d3d9-volcensus] unlock resource=%llu subresource=%u offset=%u data_size=%zu\n",
+                    static_cast<unsigned long long>(resource), subresource, offset, data_size);
+        }
         if (texblt_diag_enabled())
         {
             uint64_t hash = 14695981039346656037ull;
@@ -4974,6 +5026,12 @@ namespace sogen
         if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())
         {
             return nullptr;
+        }
+
+        if (volume_census_enabled() && it->second.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
+        {
+            fprintf(stderr, "[d3d9-volcensus] unlock-target resource=%llu subresource=%u offset=%u data_size=%zu\n",
+                    static_cast<unsigned long long>(resource), subresource, offset, data_size);
         }
 
         // A direct-buffer resource (see create_resource's eligibility check) writes straight into its
@@ -5046,6 +5104,29 @@ namespace sogen
         if (subresource != 0 && (subresource - 1) >= it->second.extra_mips.size())
         {
             return;
+        }
+
+        if (volume_census_enabled() && it->second.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
+        {
+            // Per-depth-slice non-zero byte counts of what the guest just wrote. A guest that lays its
+            // writes out with an unreported D3DLOCKED_BOX::SlicePitch collapses every slice onto slice 0,
+            // which shows up here as content in slice 0 and nothing in the rest.
+            resource_entry& tex = it->second;
+            const std::vector<std::byte>& backing = tex.subresource_backing(subresource);
+            const uint32_t level = subresource % std::max(1u, tex.mip_levels);
+            const uint32_t row_pitch = subresource_row_pitch(tex.kind, tex.format, tex.width, tex.mip_levels, subresource);
+            const size_t slice_size = static_cast<size_t>(row_pitch) * std::max(1u, tex.height >> level);
+            const uint32_t slices = slice_size != 0 ? static_cast<uint32_t>(backing.size() / slice_size) : 0;
+            for (uint32_t slice = 0; slice < slices; ++slice)
+            {
+                size_t nonzero = 0;
+                for (size_t i = 0; i < slice_size; ++i)
+                {
+                    nonzero += backing[slice * slice_size + i] != std::byte{0} ? 1 : 0;
+                }
+                fprintf(stderr, "[d3d9-volcensus] wrote resource=%llu subresource=%u slice=%u slice_size=%zu nonzero=%zu\n",
+                        static_cast<unsigned long long>(resource), subresource, slice, slice_size, nonzero);
+            }
         }
 
         // Mirrors unlock()'s own bookkeeping above -- see its comments for why both flags are
