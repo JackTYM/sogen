@@ -483,6 +483,7 @@ namespace sogen
         struct shader_entry
         {
             std::vector<uint32_t> tokens;
+            bool const_diag{}; // EMULATOR_D3D9_PSCONSTDIAG matched this shader's disassembly
         };
 
         struct vertex_decl_entry
@@ -1185,6 +1186,11 @@ namespace sogen
         // open batch (blt) or a plain submit-and-rotate on the next draw gives them the ordering they
         // need without the wait.
         void flush_batch();
+        // Diagnostic (EMULATOR_D3D9_PSCONSTDIAG=<asm substring>): prints the PS float constant registers,
+        // the bound sampler-0 texture and the colour-write/blend/sRGB render states as they stood for a
+        // draw whose pixel shader's disassembly contains the substring. Rate-limited to one line per
+        // report interval so a per-frame draw stays readable across a whole gameplay capture.
+        void report_ps_const_diag(uint64_t target_rt, bool srgb_write) const;
         // Opens a batch recording into target_rt/target_ds's identity, or keeps the currently open one if
         // it already matches -- the same round-robin slot-selection execute_draw's own batch-management
         // step performs (submit+rotate+wait_for_batch_slot on an identity mismatch, reset the new slot's

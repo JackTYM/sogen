@@ -155,6 +155,7 @@ namespace sogen
         constexpr uint32_t d3drs_destblend = 20;
         constexpr uint32_t d3drs_alphablendenable = 27;
         constexpr uint32_t d3drs_blendop = 171;
+        constexpr uint32_t d3drs_colorwriteenable = 168;
 
         // Public D3DRENDERSTATETYPE value (d3d9types.h) needed for real scissor-test wiring.
         constexpr uint32_t d3drs_scissortestenable = 174;
@@ -1745,6 +1746,15 @@ namespace sogen
         {
             static const bool enabled = getenv("EMULATOR_D3D9_DIRECT_MISS_DIAG") != nullptr;
             return enabled;
+        }
+
+        // EMULATOR_D3D9_PSCONSTDIAG=<asm substring>: matches the shader by its own disassembled text
+        // rather than by resource id, because ids are allocation-order dependent and shift between runs
+        // while the instruction sequence of the shader under investigation does not.
+        const char* psconst_diag_pattern()
+        {
+            static const char* const pattern = getenv("EMULATOR_D3D9_PSCONSTDIAG");
+            return pattern;
         }
 
         // Temporary diagnostic (EMULATOR_D3D9_RESETPOOL_DIAG=1): direct measurement to test the
@@ -3637,6 +3647,14 @@ namespace sogen
         ++(use_programmable ? this->stats_.recorded_programmable : this->stats_.recorded_fixed);
         ++this->stats_.draws_per_render_target[target_rt];
         ++this->stats_.draws_per_shader_pair[{target_rt, this->state_.vertex_shader, this->state_.pixel_shader}];
+        if (psconst_diag_pattern() != nullptr)
+        {
+            const auto ps_it = this->shaders_.find(this->state_.pixel_shader);
+            if (ps_it != this->shaders_.end() && ps_it->second.const_diag)
+            {
+                this->report_ps_const_diag(target_rt, srgb_write);
+            }
+        }
         if (!srgb_write && render_state_or(this->state_.render_state, d3drs_alphablendenable, 0) != 0)
         {
             for (const auto& brt : bound_rts)
@@ -4095,8 +4113,8 @@ namespace sogen
                 hash ^= static_cast<uint8_t>(byte);
                 hash *= 1099511628211ull; // FNV-1a prime
             }
-            fprintf(stderr, "[d3d9-texupload-diag] resource=%llu %ux%u format=%u usage=0x%x backing_hash=0x%llx\n",
-                    static_cast<unsigned long long>(resource), tex.width, tex.height, tex.format, tex.usage,
+            fprintf(stderr, "[d3d9-texupload-diag] resource=%llu kind=%u %ux%ux%u format=%u usage=0x%x backing_hash=0x%llx\n",
+                    static_cast<unsigned long long>(resource), tex.kind, tex.width, tex.height, tex.depth, tex.format, tex.usage,
                     static_cast<unsigned long long>(hash));
         }
 
@@ -4542,6 +4560,40 @@ namespace sogen
         std::snprintf(buf.data(), buf.size(), "c0=(%.4f,%.4f,%.4f,%.4f) c32=(%.4f,%.4f,%.4f,%.4f) c34=(%.4f,%.4f,%.4f,%.4f)", c0[0], c0[1],
                       c0[2], c0[3], c32[0], c32[1], c32[2], c32[3], c34[0], c34[1], c34[2], c34[3]);
         return {buf.data()};
+    }
+
+    void d3d9_host::report_ps_const_diag(const uint64_t target_rt, const bool srgb_write) const
+    {
+        static std::atomic<uint64_t> seen{};
+        if ((seen.fetch_add(1, std::memory_order_relaxed) % 200) != 0)
+        {
+            return;
+        }
+        const auto& cf = this->state_.ps_const_f;
+        std::string regs;
+        for (uint32_t r = 0; r <= 9; ++r)
+        {
+            const size_t base = static_cast<size_t>(r) * 4;
+            std::array<char, 96> buf{};
+            if (cf.size() < base + 4)
+            {
+                std::snprintf(buf.data(), buf.size(), " c%u=unset", r);
+            }
+            else
+            {
+                std::snprintf(buf.data(), buf.size(), " c%u=(%.6f,%.6f,%.6f,%.6f)", r, cf[base], cf[base + 1], cf[base + 2], cf[base + 3]);
+            }
+            regs += buf.data();
+        }
+        const auto tex_it = this->state_.bound_textures.find(0);
+        const uint64_t tex0 = tex_it != this->state_.bound_textures.end() ? tex_it->second : 0;
+        fprintf(
+            stderr, "[d3d9-psconst] ps=%llu rt=%llu tex0=%llu srgb_write=%d blend=%u src=%u dst=%u colorwrite=%u ps_const_f_size=%zu%s\n",
+            static_cast<unsigned long long>(this->state_.pixel_shader), static_cast<unsigned long long>(target_rt),
+            static_cast<unsigned long long>(tex0), srgb_write ? 1 : 0,
+            render_state_or(this->state_.render_state, d3drs_alphablendenable, 0),
+            render_state_or(this->state_.render_state, d3drs_srcblend, 0), render_state_or(this->state_.render_state, d3drs_destblend, 0),
+            render_state_or(this->state_.render_state, d3drs_colorwriteenable, 15), cf.size(), regs.c_str());
     }
 
     void d3d9_host::sync_backing_from_gpu(resource_entry& rt)
@@ -5118,17 +5170,26 @@ namespace sogen
         // <dir>/sh_<id>.asm. Read alongside the draws_per_shader_pair counter (which names the ids that
         // actually matter) this turns "the pixels are wrong and every counter is clean" into a readable
         // program. Files are named by the same resource id the counters print, so the two join directly.
-        if (const char* dump_dir = getenv("EMULATOR_D3D9_SHADERDUMP"))
+        const char* const dump_dir = getenv("EMULATOR_D3D9_SHADERDUMP");
+        const char* const const_diag_pattern = psconst_diag_pattern();
+        if (dump_dir != nullptr || const_diag_pattern != nullptr)
         {
             std::string text;
             if (disassemble_d3d9_shader(tokens, token_size_bytes, text))
             {
-                std::array<char, 512> path{};
-                std::snprintf(path.data(), path.size(), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
-                if (FILE* file = std::fopen(path.data(), "wb"))
+                if (const_diag_pattern != nullptr)
                 {
-                    std::fwrite(text.data(), 1, text.size(), file);
-                    std::fclose(file);
+                    entry.const_diag = text.find(const_diag_pattern) != std::string::npos;
+                }
+                if (dump_dir != nullptr)
+                {
+                    std::array<char, 512> path{};
+                    std::snprintf(path.data(), path.size(), "%s/sh_%llu.asm", dump_dir, static_cast<unsigned long long>(id));
+                    if (FILE* file = std::fopen(path.data(), "wb"))
+                    {
+                        std::fwrite(text.data(), 1, text.size(), file);
+                        std::fclose(file);
+                    }
                 }
             }
         }
