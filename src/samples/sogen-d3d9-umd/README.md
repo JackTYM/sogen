@@ -206,12 +206,10 @@ the blocking `ioctl_d3d9_flush` in tree today: an unqualified `Lock()` on a dire
 buffer does not actually synchronize with the GPU there. That is a real, separate, pre-existing x64
 bug in this UMD, found by this test and not yet diagnosed.
 
-`d3d9_park_rotation_test.cpp` gates the batch-slot rotation wait: a draw whose batch-management step
-has to rotate into a slot the GPU is still executing. That wait blocks with the kernel lock held in
-tree today; the intended repair is to stop the recorded-command replay in front of that draw, park
-the guest thread, and re-issue the same draw once the fence clears. That park was implemented,
-proven correct by this test, and then reverted for cost (see the note at the end of this section);
-the test stays because it gates the guarantee, not the mechanism.
+`d3d9_park_rotation_test.cpp` gates the batch-slot rotation park (`recorded_command_would_block` in
+`d3d9_host.cpp`): a draw whose batch-management step has to rotate into a slot the GPU is still
+executing stops the recorded-command replay in front of that draw and parks the guest thread, then
+re-issues that same draw once the fence clears.
 
 Its discrimination was verified against three deliberately-broken variants of that park, each
 injected temporarily into `advance_d3d9_escape` / `draw_would_rotate_into_busy_slot`:
@@ -228,17 +226,39 @@ injected temporarily into `advance_d3d9_escape` / `draw_would_rotate_into_busy_s
   slot index across the park at all, and re-derives the rotation decision from live state on every
   poll.
 
-The unmodified park passed 3/3 in the same loop, and the blocking `wait_for_batch_slot` in tree
-passes too.
+The unmodified park passes 3/3 in the same loop, and so does the older blocking `wait_for_batch_slot`
+-- the test gates the guarantee, not the mechanism.
 
-The park itself was reverted on measured cost, not on correctness. Matched A/B on settled MW2
-gameplay (native UMD, FEX+HVF `--vcpus 2`, draws/frame 1996-2022 on both arms) had the blocking wait
-flat at 68.9-72.9 FPS over nine minutes and the park starting at 21.6 and decaying to 5.6. An
-instrumented build put the reason at the wake path rather than the D3D9 side: the rotation park fires
-only 20-25 times a second, but each park takes a mean 4.1-4.3 ms (max 7.6 ms) and a mean of 44
-scheduler readiness scans to wake, against a sub-millisecond fence wait. Parking this site again
-needs the scheduler wake to cost closer to one scan than to 44; `ioctl_d3d9_flush`'s park is rare
-enough to afford today's.
+The park was landed once, reverted, and re-landed. The revert measured something real: waking a park
+cost a mean 4.1-4.3 ms and 44 scheduler readiness scans against a sub-millisecond fence wait, because
+nothing told the scheduler when a fence had cleared -- it only re-checked on a backoff timer. That is
+fixed at the source. `vulkan_host::start_gpu_progress_watch` blocks a host thread on a timeline
+semaphore every D3D9 submit signals, and `windows_emulator::notify_host_wait_progress` cuts the idle
+backoff short when it fires, which puts a park at a 0.42-0.47 ms mean wake on `d3d9-ringstress-x86`
+and 0.68 ms in settled MW2 gameplay.
+
+**A warning for whoever measures this next.** The FPS split the first revert was decided on is not a
+park effect. On this machine an MW2 run enters settled gameplay in one of two modes and stays there:
+flat somewhere in 72-83 FPS, or starting around 25 and decaying into single digits over ten to
+fifteen minutes. Which one a run lands in is independent of the build. Eight matched trials caught it
+both ways on BOTH arms:
+
+| arm | trial | minutes | FPS |
+| --- | --- | --- | --- |
+| park off | a1 | 6 | 79.3 81.8 82.0 82.2 |
+| park off | a2 | 10 | 23.3 20.9 21.3 18.0 15.1 13.4 12.0 10.7 9.4 8.0 |
+| park off | a3 | 15 | 70.1 72.7 72.8 72.7 72.6 72.5 72.7 72.3 71.0 72.3 72.5 72.6 72.7 72.6 72.6 |
+| park off | a4 | 12 | 81.0 82.3 82.6 82.4 82.0 81.6 81.8 82.0 79.9 80.8 81.9 81.3 |
+| park on | b2 | 10 | 82.6 82.7 83.2 82.8 82.9 82.8 82.9 83.0 82.9 83.1 |
+| park on | b3 | 15 | 25.7 21.2 19.7 15.3 13.7 12.1 10.4 8.6 7.4 5.9 5.3 5.2 5.0 4.9 4.8 |
+| park on | b4 | 15 | 73.2 75.7 75.7 75.4 75.6 75.4 75.3 75.3 75.3 75.2 75.5 75.3 75.2 75.4 75.1 |
+
+The guest workload is identical across modes (2000-2030 draws/frame, 7-8 submits/frame), no frames
+are reported dropped, and resident memory, thread count and host load are flat through a decaying
+run -- so it is neither a leak, nor host contention, nor a different scene. The analyzer runs at nice
+10 with its vCPU threads in the throttled scheduling tier in both modes, which is the most promising
+lead and is not otherwise investigated here. Any A/B on this machine needs several trials per arm;
+one decaying run is not evidence of anything.
 
 A separate, pre-existing UMD bug surfaced while building it and is worked around inside the test
 rather than fixed: `LockRect` on a render target that is no longer BOUND does not drain the pending

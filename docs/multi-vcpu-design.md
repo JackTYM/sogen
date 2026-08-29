@@ -555,7 +555,7 @@ holding a lock may only acquire locks of a strictly higher level:
 ```
 L0  BEL (windows_emulator kernel mutex)     — outermost
 L1  partition_mutex_ (one per backend)      — may be taken under the BEL, never above it
-L2  leaf mutexes (logger)                   — never call out while held
+L2  leaf mutexes (logger, host_wait_signal) — never call out while held
 ```
 
 Rules that make the hierarchy sufficient:
@@ -576,6 +576,12 @@ Rules that make the hierarchy sufficient:
    for the kicked vCPU to react does so via a CV on the BEL (rule 1), never by spinning
    with a lock held.
 4. **Leaf locks never call out.** The logger mutex wraps formatting+write only.
+   `host_wait_signal`'s (`host_wait_signal.hpp`) wraps a generation bump; a waiter is an
+   idle vCPU that has already released the BEL, and a signaler is a host thread — the
+   GPU-completion watcher — that never acquires the BEL at all, so the L0/L2 pair can be
+   taken from either side without an ordering obligation. The wake it carries is an
+   optimization over a timeout-bounded poll, never the only path to progress, so losing
+   one costs latency rather than liveness.
 5. **Adding a mutex requires assigning it a level** in the hierarchy (documented next
    to the BEL). The expected steady state is that no one ever needs to: contention
    fixes in Phase 4 should prefer sharding data or shrinking BEL scope over introducing

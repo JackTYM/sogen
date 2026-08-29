@@ -3,8 +3,9 @@
 // EMULATOR_WAIT_STORM_DIAG=1: temporary diagnostic for the "82% of RIP samples land right after a
 // wait/alert syscall" investigation. Measures, live, how often the four dominant wait syscalls
 // (NtWaitForAlertByThreadId, NtDelayExecution, NtWaitForSingleObject, NtWaitForMultipleObjects32)
-// are called, how quickly each resolves (near-instant vs. genuinely blocking), and how often/how
-// expensive the scheduler's switch_to_next_thread scan is. All access happens under kernel_lock_
+// are called, how quickly each resolves (near-instant vs. genuinely blocking), how often/how
+// expensive the scheduler's switch_to_next_thread scan is, and what a guest thread parked on a host
+// condition pays to be woken again. All access happens under kernel_lock_
 // (syscall handlers run inside the syscall hook's scoped_lock; the scheduler asserts the lock is
 // held), so plain (non-atomic) state is safe here.
 

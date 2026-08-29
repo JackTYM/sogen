@@ -2,10 +2,11 @@
 //
 // Exercises the one path where a recorded draw has to wait for the GPU before it can record
 // anything: execute_draw's batch-management step rotates to the other batch slot on a render-target
-// change, and that slot's previous submission may still be executing. Today that wait blocks in
-// vkWaitForFences with the emulator kernel lock held, which docs/multi-vcpu-design.md section 7.2
-// forbids; the repair is to park the guest thread on a fence poll instead, and this is the gate for
-// whatever eventually replaces the blocking wait.
+// change, and that slot's previous submission may still be executing. The host answers that wait by
+// parking the guest thread (recorded_command_would_block + await_host_condition) instead of blocking
+// in vkWaitForFences with the emulator kernel lock held, which docs/multi-vcpu-design.md section 7.2
+// forbids. This is the gate for that park -- and, since it also passes against the older blocking
+// wait, for whatever else may replace it.
 //
 // A park is only correct if the draw it stopped in front of is re-issued exactly once, against
 // whatever state is live when the thread wakes. The three ways to get that wrong -- dropping the
