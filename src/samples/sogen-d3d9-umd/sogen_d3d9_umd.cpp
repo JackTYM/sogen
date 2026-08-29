@@ -42,12 +42,14 @@ namespace
     // stores pointers as UINT64 even for 32-bit (WoW64) guests, so pack to 8 and widen the
     // private-data pointer -- same discipline as vulkan_shim.cpp's own copy of these structs.
 #pragma pack(push, 8)
+
     struct kmt_open_adapter_from_luid
     {
         uint32_t luid_low;
         int32_t luid_high;
         uint32_t h_adapter;
     };
+
     struct kmt_escape
     {
         uint32_t h_adapter;
@@ -569,8 +571,8 @@ namespace
     // Flags, plus D3DDDI_SURFACEINFO::Width/Height/Depth) is now RE-verified and modeled in d3d9_ddi.hpp,
     // and umd_CreateResource reads width/height/depth/mip/pool/usage from it instead of the old hardcoded
     // 640x480 shape. `kind` is classified via Flags' live-confirmed CubeMap/Volume bits (see
-    // resource_flags_to_kind). What REMAINS a limitation: D3DDDI_SURFACEINFO's pSysMem/pitch fields are
-    // inferred, not live-confirmed (see d3d9_ddi.hpp) -- not on this milestone's D3DPOOL_DEFAULT path.
+    // resource_flags_to_kind). D3DDDI_SURFACEINFO's pSysMem/SysMemPitch are read here too, for the
+    // D3DDDIPOOL_SYSTEMMEM resources whose pixels the runtime owns outright (see g_sysmem_surfaces).
     //
     // Offset 48 for hResource (x64) was found by writing a distinct, identifiable sentinel to every
     // 8-byte-aligned offset (0..80) and observing which one came back unchanged in the very next
@@ -621,6 +623,31 @@ namespace
 
     std::unordered_map<uint64_t, direct_buffer_state> g_direct_buffers;
 
+    // A D3DDDIPOOL_SYSTEMMEM resource's pixels do NOT live in anything this driver owns: the runtime
+    // allocates them itself, names them in D3DDDI_SURFACEINFO::pSysMem at pfnCreateResource, and hands
+    // that same allocation straight back from IDirect3DTexture9::LockRect -- so the app never touches
+    // whatever pfnLock returns (live-confirmed: LockRect's pBits equals pSysMem byte for byte). Every
+    // such resource must therefore be read from `address`, not from a driver-side staging buffer, or
+    // it stays permanently zero-filled and any UpdateTexture out of it copies zeros. One entry per
+    // D3DDDI_SURFACEINFO, indexed by the same flattened subresource index pfnLock/pfnUnlock carry.
+    struct sysmem_surface
+    {
+        uint64_t address;
+        uint32_t pitch;
+    };
+
+    std::unordered_map<uint64_t, std::vector<sysmem_surface>> g_sysmem_surfaces;
+
+    const sysmem_surface* find_sysmem_surface(const uint64_t resource, const uint32_t subresource)
+    {
+        const auto it = g_sysmem_surfaces.find(resource);
+        if (it == g_sysmem_surfaces.end() || subresource >= it->second.size() || it->second[subresource].address == 0)
+        {
+            return nullptr;
+        }
+        return &it->second[subresource];
+    }
+
     // Translate D3DDDIARG_CREATERESOURCE::Flags (a D3DDDI_RESOURCEFLAGS bitfield) into the D3DUSAGE_* bits
     // the host's create_resource actually tests. The two bitfields are unrelated numbering spaces that only
     // coincide for the first two bits, so every bit is mapped explicitly rather than passing the raw flags
@@ -663,11 +690,13 @@ namespace
     // no member for at all). Passing the raw D3DDDI_POOL through made every host pool comparison
     // structurally unsatisfiable: MW2 creates 100% of its buffers in D3DDDI_POOL_VIDEOMEMORY (2), which
     // read as D3DPOOL_MANAGED on the host side.
+    constexpr uint32_t k_ddi_pool_systemmem = 1;
+
     uint32_t ddi_pool_to_d3dpool(uint32_t ddi_pool)
     {
         switch (ddi_pool)
         {
-        case 1:       // D3DDDIPOOL_SYSTEMMEM
+        case k_ddi_pool_systemmem:
             return 2; // D3DPOOL_SYSTEMMEM
         case 5:       // D3DDDIPOOL_STAGINGMEM
             return 3; // D3DPOOL_SCRATCH
@@ -713,6 +742,9 @@ namespace
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t depth = 1;
+        uint64_t sys_mem_address = 0;
+        uint32_t sys_mem_pitch = 0;
+        uint32_t sys_mem_slice_pitch = 0;
         // pSurfList/SurfCount can genuinely be null/0 here: this same function also handles the
         // internal-use synthetic buffer formats (100/101/102, see is_internal_buffer_format below) --
         // vertex/index buffers have no D3DDDI_SURFACEINFO array at all, since they carry no width/height.
@@ -725,6 +757,9 @@ namespace
             width = surf0.Width;
             height = surf0.Height;
             depth = surf0.Depth != 0 ? surf0.Depth : 1;
+            sys_mem_address = reinterpret_cast<uintptr_t>(surf0.pSysMem);
+            sys_mem_pitch = surf0.SysMemPitch;
+            sys_mem_slice_pitch = surf0.SysMemSlicePitch;
         }
 
         // Usage comes from the real Flags field for every resource kind, buffers included -- their
@@ -760,6 +795,9 @@ namespace
             .mip_levels = args->MipLevels,
             .usage = usage,
             .pool = ddi_pool_to_d3dpool(args->Pool),
+            .sys_mem_address = sys_mem_address,
+            .sys_mem_pitch = sys_mem_pitch,
+            .sys_mem_slice_pitch = sys_mem_slice_pitch,
         };
         d3d9c::create_resource_response resp{};
         bridge_call(gb::ioctl_d3d9_create_resource, &req, sizeof(req), &resp, sizeof(resp));
@@ -815,6 +853,16 @@ namespace
             if (format != 100 && format != 101 && format != 102)
             {
                 g_created_resource_ids[resp.resource] = resp.resource;
+                if (args->Pool == k_ddi_pool_systemmem && args->pSurfList != nullptr && sys_mem_address != 0)
+                {
+                    std::vector<sysmem_surface> surfaces;
+                    surfaces.reserve(surf_count);
+                    for (uint32_t i = 0; i < surf_count; ++i)
+                    {
+                        surfaces.push_back({reinterpret_cast<uintptr_t>(args->pSurfList[i].pSysMem), args->pSurfList[i].SysMemPitch});
+                    }
+                    g_sysmem_surfaces[resp.resource] = std::move(surfaces);
+                }
             }
             else
             {
@@ -1063,6 +1111,7 @@ namespace
         }
 
         g_direct_buffers.erase(resource);
+        g_sysmem_surfaces.erase(resource);
 
         const d3d9c::destroy_resource_request req{.resource = resource};
         bridge_call(gb::ioctl_d3d9_destroy_resource, &req, sizeof(req), nullptr, 0);
@@ -2280,6 +2329,19 @@ namespace
     // map is ever touched.
     std::set<locked_key> g_direct_locks;
 
+    // Locks satisfied out of the runtime's own system-memory allocation (see g_sysmem_surfaces), so
+    // umd_Unlock ships that allocation's bytes instead of a driver-side staging buffer's. `dst_pitch`
+    // is the host backing's own row stride, which the runtime's `src_pitch` need not match.
+    struct sysmem_lock
+    {
+        uint64_t address;
+        uint32_t size;
+        uint32_t src_pitch;
+        uint32_t dst_pitch;
+    };
+
+    std::map<locked_key, sysmem_lock> g_sysmem_locks;
+
     // How the app promised to treat the bytes it is about to be handed. Only D3DLOCK_DISCARD and
     // D3DLOCK_NOOVERWRITE carry a promise strong enough to skip synchronizing with the GPU; everything
     // else (including a read) has to assume the current contents are both live and being read.
@@ -2442,6 +2504,21 @@ namespace
             }
         }
 
+        // The runtime owns this surface's pixels outright (see g_sysmem_surfaces): hand its allocation
+        // back as pData -- which is what a real WDDM driver does for a D3DDDIPOOL_SYSTEMMEM resource,
+        // and is already the pointer the app is writing through -- and let umd_Unlock ship those bytes.
+        // No staging buffer, and no round trip to fetch contents the app is about to overwrite.
+        if (const auto* surface = find_sysmem_surface(resource, subresource); surface != nullptr && data_size != 0 && !probe_hr_nonzero)
+        {
+            g_sysmem_locks[key] = {surface->address, data_size, surface->pitch, pArgs->Pitch};
+            if (surface->pitch != 0)
+            {
+                pArgs->Pitch = surface->pitch;
+            }
+            pArgs->pData = reinterpret_cast<void*>(static_cast<uintptr_t>(surface->address));
+            return S_OK;
+        }
+
         auto& buffer = g_locked_buffers[key];
 
         if (is_buffer && classify_lock_intent(pArgs) != lock_intent::synchronized)
@@ -2515,6 +2592,36 @@ namespace
             return S_OK;
         }
 
+        // A lock served straight out of the runtime's own system-memory allocation: ship that
+        // allocation, since it -- not any driver-side buffer -- is what the app wrote into. Its rows
+        // only need repacking when the runtime's stride differs from the host backing's own.
+        if (const auto sysmem_it = g_sysmem_locks.find(key); sysmem_it != g_sysmem_locks.end())
+        {
+            const sysmem_lock lock = sysmem_it->second;
+            g_sysmem_locks.erase(sysmem_it);
+
+            uint64_t data_address = lock.address;
+            if (lock.src_pitch != 0 && lock.dst_pitch != 0 && lock.src_pitch != lock.dst_pitch)
+            {
+                auto& repacked = g_locked_buffers[key];
+                repacked.assign(lock.size, 0);
+                const auto* src = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(lock.address));
+                const uint32_t row_bytes = std::min(lock.src_pitch, lock.dst_pitch);
+                for (uint32_t row = 0; row < lock.size / lock.dst_pitch; ++row)
+                {
+                    std::memcpy(repacked.data() + row * lock.dst_pitch, src + row * lock.src_pitch, row_bytes);
+                }
+                data_address = reinterpret_cast<uint64_t>(repacked.data());
+            }
+
+            const d3d9c::unlock_request req{
+                .resource = resource, .subresource = subresource, .offset = 0, .data_size = lock.size, .data_address = data_address};
+            const bool needs_flush = !g_d3d9_command_batch.empty() && resource_currently_referenced(resource);
+            bridge_call(gb::ioctl_d3d9_unlock, &req, sizeof(req), nullptr, 0, needs_flush);
+            g_locked_buffers.erase(key);
+            return S_OK;
+        }
+
         const auto it = g_locked_buffers.find(key);
         if (it == g_locked_buffers.end())
         {
@@ -2576,7 +2683,7 @@ namespace
         if (s_issue_count <= 5 || (s_issue_count % 60) == 0)
         {
             log_line("[sogen-d3d9-umd] [xdiag] IssueQuery #%u Flags=0x%x hQuery=%p\n", s_issue_count, args ? args->Flags : 0,
-                      args ? args->hQuery : nullptr);
+                     args ? args->hQuery : nullptr);
         }
         return S_OK;
     }
@@ -2613,8 +2720,8 @@ namespace
         if (s_getdata_count <= 5 || (s_getdata_count % 60) == 0)
         {
             log_line("[sogen-d3d9-umd] [xdiag] GetQueryData #%u hQuery=%p pData=%p DataSize=%u wrote=%d\n", s_getdata_count,
-                      args ? args->hQuery : nullptr, args ? args->pData : nullptr, args ? args->DataSize : 0,
-                      (args && args->pData && args->DataSize >= sizeof(BOOL)) ? 1 : 0);
+                     args ? args->hQuery : nullptr, args ? args->pData : nullptr, args ? args->DataSize : 0,
+                     (args && args->pData && args->DataSize >= sizeof(BOOL)) ? 1 : 0);
         }
         return S_OK;
     }

@@ -337,6 +337,7 @@ typedef struct _D3DDDIARG_SETSTREAMSOURCEUM
     UINT StreamNumber;
     UINT Stride;
 } D3DDDIARG_SETSTREAMSOURCEUM;
+
 static_assert(sizeof(D3DDDIARG_SETSTREAMSOURCEUM) == 8, "D3DDDIARG_SETSTREAMSOURCEUM layout (identical x64/x86)");
 
 typedef struct _D3DDDIARG_SETSTREAMSOURCEFREQ
@@ -574,6 +575,7 @@ typedef struct _D3DDDIARG_CLEAR
     FLOAT Z;
     UINT Stencil;
 } D3DDDIARG_CLEAR;
+
 static_assert(sizeof(D3DDDIARG_CLEAR) == 16);
 
 typedef struct _D3DDDIARG_DRAWPRIMITIVE
@@ -616,6 +618,7 @@ typedef struct _D3DDDIARG_TEXBLT
     D3DDDIRECT SrcRect;       // 28, 16 bytes (left/top/right/bottom) -- from *pSrcRect
     UINT Reserved;            // 44 -- always 0, confirmed via decompile (CD3DDDIDX10::TexBlt's own v18)
 } D3DDDIARG_TEXBLT;
+
 static_assert(sizeof(D3DDDIARG_TEXBLT) == 48, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt)");
 #else
 // x86 shape live-RE'd the same way (idasql decompile of the real 32-bit d3d9.dll's own
@@ -636,6 +639,7 @@ typedef struct _D3DDDIARG_TEXBLT
     D3DDDIRECT SrcRect;       // 20, 16 bytes (left/top/right/bottom) -- from *pSrcRect
     UINT Reserved;            // 36 -- always 0, confirmed via decompile
 } D3DDDIARG_TEXBLT;
+
 static_assert(sizeof(D3DDDIARG_TEXBLT) == 40, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::TexBlt, x86)");
 #endif
 
@@ -667,6 +671,7 @@ typedef struct _D3DDDIARG_COLORFILL
     UINT Flags;            // 32 -- always 0 (the builder zeroes an 8-byte slot here; the second UINT is
                            // struct tail padding on x64). Field name per the WDK; value never seen non-zero.
 } D3DDDIARG_COLORFILL;
+
 static_assert(sizeof(D3DDDIARG_COLORFILL) == 40,
               "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Colorfill + LHBatchColorFill, x64) + live trace");
 #else
@@ -682,6 +687,7 @@ typedef struct _D3DDDIARG_COLORFILL
     UINT Color;            // 24 -- D3DCOLOR (ARGB)
     UINT Flags;            // 28 -- always 0 (builder's `v10 = 0`)
 } D3DDDIARG_COLORFILL;
+
 static_assert(sizeof(D3DDDIARG_COLORFILL) == 32, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Colorfill + LHBatchColorFill, x86)");
 #endif
 
@@ -720,6 +726,7 @@ typedef struct _D3DDDIARG_BLT
                               // arg); 0 == D3DTEXF_NONE observed live. Scaling is inferred by the driver
                               // from the Src/Dst rect-size ratio (the DDI carries no explicit scale field).
 } D3DDDIARG_BLT;
+
 static_assert(sizeof(D3DDDIARG_BLT) == 72, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x64) + live trace");
 #else
 // x86 shape decompile-RE'd independently (d3d9_x86.dll.i64 CD3DDDIDX10::Blt @ 0x10062CB0 + LHBatchBlt's
@@ -737,6 +744,7 @@ typedef struct _D3DDDIARG_BLT
     UINT Reserved;            // 48 -- always 0 (builder's `v20 = 0`)
     UINT Flags;               // 52 -- Filter / blt-flags (builder's a10)
 } D3DDDIARG_BLT;
+
 static_assert(sizeof(D3DDDIARG_BLT) == 56, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::Blt + LHBatchBlt, x86)");
 #endif
 
@@ -751,21 +759,21 @@ static_assert(sizeof(D3DDDIARG_BLT) == 56, "size confirmed via real d3d9.dll RE 
 // the three probe sizes, on both arches): D3DDDIARG_CREATERESOURCE::{Format, Pool, pSurfList, SurfCount,
 // MipLevels, hResource, Flags} and D3DDDI_SURFACEINFO::{Width, Height, Depth}.
 //
-// NOT independently live-confirmed -- INFERRED only: D3DDDI_SURFACEINFO::{pSysMem, SysMemPitch,
-// SysMemSlicePitch}. These were 0 in every probe (consistent with D3DPOOL_DEFAULT resources created
-// with no initial system-memory data), so their offsets are derived from the confirmed element stride
-// (the live-confirmed sizeof one D3DDDI_SURFACEINFO) plus the standard WDK field order, not observed
-// live. Structurally sound but weaker evidence than the dimension fields above -- do not rely on them
-// until a forcing function (a D3DPOOL_SYSTEMMEM create carrying real init data) pins them live.
+// D3DDDI_SURFACEINFO::{pSysMem, SysMemPitch} were INFERRED until 2026-08-29, when the forcing function
+// their note asked for finally arrived: a D3DPOOL_SYSTEMMEM CreateTexture (d3d9_updatetexture_test.cpp).
+// Both are now LIVE-confirmed on x64 AND x86 -- the address read back at the stated offset is byte-for-
+// byte the pBits the runtime's own IDirect3DTexture9::LockRect hands the app, and SysMemPitch matches
+// that lock's D3DLOCKED_RECT::Pitch. SysMemSlicePitch stays INFERRED (0 for the 2D surfaces this
+// forcing function creates); it is derived from the confirmed element stride plus WDK field order.
 typedef struct _D3DDDI_SURFACEINFO
 {
     UINT Width;            // 0 -- live-confirmed
     UINT Height;           // 4 -- live-confirmed
     UINT Depth;            // 8 -- live-confirmed (1 for 2D surfaces)
-    VOID* pSysMem;         // x64:16 / x86:12 -- INFERRED (0 in every probe; see block comment above). On
-                           // x64, 4 bytes of alignment padding precede this (Depth ends at 12, an 8-byte
-                           // pointer aligns up to 16); on x86 the 4-byte pointer already sits at 12.
-    UINT SysMemPitch;      // x64:24 / x86:16 -- INFERRED
+    VOID* pSysMem;         // x64:16 / x86:12 -- live-confirmed. On x64, 4 bytes of alignment padding
+                           // precede this (Depth ends at 12, an 8-byte pointer aligns up to 16); on x86
+                           // the 4-byte pointer already sits at 12.
+    UINT SysMemPitch;      // x64:24 / x86:16 -- live-confirmed
     UINT SysMemSlicePitch; // x64:28 / x86:20 -- INFERRED
 } D3DDDI_SURFACEINFO;
 #ifdef _WIN64
@@ -813,6 +821,7 @@ typedef struct _D3DDDIARG_CREATERESOURCE
     BYTE ReservedTail[12];               // 60..71 -- Rotation/Flags2/etc.: region size-confirmed (total
                                          //           struct is 72), individual fields not pinned
 } D3DDDIARG_CREATERESOURCE;
+
 static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Format) == 0, "D3DDDIARG_CREATERESOURCE x64 layout");
 static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Pool) == 4, "D3DDDIARG_CREATERESOURCE x64 layout");
 static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MultisampleType) == 8, "D3DDDIARG_CREATERESOURCE x64 layout");
@@ -842,6 +851,7 @@ typedef struct _D3DDDIARG_CREATERESOURCE
     UINT Flags;                          // 48 -- live-confirmed
     BYTE ReservedTail[8];                // 52..59 -- region size-confirmed (total struct is 60)
 } D3DDDIARG_CREATERESOURCE;
+
 static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Format) == 0, "D3DDDIARG_CREATERESOURCE x86 layout");
 static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Pool) == 4, "D3DDDIARG_CREATERESOURCE x86 layout");
 static_assert(offsetof(D3DDDIARG_CREATERESOURCE, MultisampleType) == 8, "D3DDDIARG_CREATERESOURCE x86 layout");

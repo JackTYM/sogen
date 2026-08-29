@@ -60,6 +60,16 @@ namespace sogen::d3d9_cmd
         uint32_t mip_levels;
         uint32_t usage; // D3DUSAGE_* bits
         uint32_t pool;  // D3DPOOL_*
+        // D3DDDI_SURFACEINFO::pSysMem/SysMemPitch/SysMemSlicePitch of the first surface. For a
+        // D3DDDIPOOL_SYSTEMMEM resource the runtime allocates the pixels itself and hands the app that
+        // allocation from LockRect, discarding whatever pfnLock returns -- so this address, not any
+        // driver-side buffer, is where the app's writes land; 0 for every other pool. The guest UMD is
+        // what acts on it (see sogen_d3d9_umd.cpp's g_sysmem_surfaces); the host only reports these
+        // under EMULATOR_D3D9_TEXBLT_DIAG, which is what distinguishes "the runtime told us where the
+        // pixels are" from "the pixels are structurally unreachable through the DDI".
+        uint64_t sys_mem_address;
+        uint32_t sys_mem_pitch;
+        uint32_t sys_mem_slice_pitch;
     };
 
     struct create_resource_response
@@ -443,7 +453,7 @@ namespace sogen::d3d9_cmd
     // uses only fixed-width integers/floats and resource_id (a uint64), never size_t/pointers, so a
     // 32-bit WoW64 guest and a 64-bit host agree on layout byte-for-byte.
     static_assert(sizeof(marker_request) == 8, "wire layout drift");
-    static_assert(sizeof(create_resource_request) == 32, "wire layout drift");
+    static_assert(sizeof(create_resource_request) == 48, "wire layout drift");
     static_assert(sizeof(create_resource_response) == 32, "wire layout drift");
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");

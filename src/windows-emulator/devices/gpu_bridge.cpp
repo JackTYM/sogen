@@ -2950,6 +2950,17 @@ namespace sogen
 
                 this->log_resource_lifetime("create", resource);
 
+                static const bool create_diag = getenv("EMULATOR_D3D9_TEXBLT_DIAG") != nullptr;
+                if (create_diag)
+                {
+                    fprintf(stderr,
+                            "[d3d9-create-diag] resource=%llu kind=%u format=%u %ux%ux%u mips=%u usage=0x%X pool=%u "
+                            "sysmem=0x%llx sysmem_pitch=%u sysmem_slice=%u\n",
+                            static_cast<unsigned long long>(resource), request.kind, request.format, request.width, request.height,
+                            request.depth, request.mip_levels, request.usage, request.pool,
+                            static_cast<unsigned long long>(request.sys_mem_address), request.sys_mem_pitch, request.sys_mem_slice_pitch);
+                }
+
                 return write_output(win_emu, context,
                                     d3d9_cmd::create_resource_response{.hr = hr,
                                                                        .reserved = 0,
