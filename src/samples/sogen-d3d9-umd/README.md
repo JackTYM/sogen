@@ -194,6 +194,9 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_pending_clear_rebind_test.cpp \
 
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_gpu_sync_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-gpu-sync-test-x86.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_park_rotation_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-park-rotation-test-x86.exe -ld3d9
 ```
 
 `d3d9_gpu_sync_test.cpp` is x86-only on purpose. Its trigger is an unqualified `Lock()` reaching
@@ -202,6 +205,35 @@ layout is unverified, so x64 treats every lock as synchronized. Built for x64 th
 the blocking `ioctl_d3d9_flush` in tree today: an unqualified `Lock()` on a direct-mapped dynamic
 buffer does not actually synchronize with the GPU there. That is a real, separate, pre-existing x64
 bug in this UMD, found by this test and not yet diagnosed.
+
+`d3d9_park_rotation_test.cpp` gates the batch-slot rotation park (`recorded_command_would_block` in
+`d3d9_host.cpp`): a draw whose batch-management step has to rotate into a slot the GPU is still
+executing stops the recorded-command replay in front of that draw and parks the guest thread, then
+re-issues that same draw once the fence clears. Its discrimination was verified against three
+deliberately-broken host variants, each injected temporarily into `advance_d3d9_escape` /
+`draw_would_rotate_into_busy_slot`:
+
+- resuming PAST the blocked draw (i.e. dropping it): **fails 3/3**, counting 88-105 draws where 160
+  were recorded.
+- re-executing the blocked record once more on resume: **fails 3/3**, counting 178 where 160 were
+  recorded.
+- retiring the busy batch slot without revalidating its fence, so the draw reuses a command
+  buffer/arena/descriptor pool the GPU is still reading: **passes 3/3, i.e. NOT discriminated**.
+  Recorded as a real negative result: on MoltenVK/Metal, re-encoding a slot whose submission is
+  still in flight does not visibly corrupt this workload, so no guest-observable test can gate that
+  particular hazard on this stack. The shipped design does not rely on being able to: it captures no
+  slot index across the park at all, and re-derives the rotation decision from live state on every
+  poll.
+
+The unmodified build passes 3/3 in the same loop, and also passes against the pre-park blocking
+`wait_for_batch_slot` -- it gates the guarantee, not the mechanism.
+
+A separate, pre-existing UMD bug surfaced while building it and is worked around inside the test
+rather than fixed: `LockRect` on a render target that is no longer BOUND does not drain the pending
+recorded-command batch, because `umd_Lock`'s `resource_currently_referenced` only recognises
+currently-bound slots and `g_batch_touched_resources` (which draws never populate). A readback of an
+unbound render target with pending draws therefore returns stale pixels. The test presents between
+drawing and readback to stay aimed at the park.
 
 `d3d9_shader_test.cpp`, `d3d9_const_test.cpp`, `d3d9_texture_test.cpp`, `d3d9_texcoord_test.cpp`,
 `d3d9_int_bool_const_test.cpp`, `d3d9_mrt_test.cpp`, `d3d9_multistream_test.cpp`,
