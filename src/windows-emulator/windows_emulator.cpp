@@ -998,13 +998,16 @@ namespace sogen
         // scan is O(threads) with a non-trivial constant, so the poll costs far more than the wake
         // latency it saves. Poll hot for a small, bounded number of scans first (a GPU fence is often
         // already signaled or about to be), then fall back to a real sleep that backs off to the same
-        // 1ms the timed-wait path already uses.
+        // 1ms the timed-wait path already uses. host_wait_signal_ cuts that sleep short whenever
+        // something host-side (the GPU-completion watcher) knows a predicate may now pass, so the
+        // backoff is only the ceiling for conditions nothing reports on.
         constexpr int host_wait_hot_polls = 16;
         constexpr auto host_wait_min_sleep = std::chrono::microseconds(100);
         constexpr auto host_wait_max_sleep = std::chrono::microseconds(1000);
 
         int host_wait_polls = 0;
         auto host_wait_sleep = host_wait_min_sleep;
+        auto wait_generation = this->host_wait_signal_.generation();
 
         while (!switch_to_next_thread(*this, vcpu))
         {
@@ -1051,7 +1054,7 @@ namespace sogen
                 }
                 else
                 {
-                    std::this_thread::sleep_for(host_wait_sleep);
+                    this->host_wait_signal_.wait_for(wait_generation, host_wait_sleep);
                     host_wait_sleep = std::min(host_wait_sleep * 2, host_wait_max_sleep);
                 }
             }
@@ -1068,6 +1071,8 @@ namespace sogen
                 vcpu.switch_thread = needed_switch;
                 return false;
             }
+
+            wait_generation = this->host_wait_signal_.generation();
         }
 
         idle_spin_count = 0;

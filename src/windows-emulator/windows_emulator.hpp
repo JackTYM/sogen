@@ -9,6 +9,7 @@
 #include "syscall_dispatcher.hpp"
 #include "process_context.hpp"
 #include "kernel_lock.hpp"
+#include "host_wait_signal.hpp"
 #include "logger.hpp"
 #include "file_system.hpp"
 #include "memory_manager.hpp"
@@ -151,6 +152,10 @@ namespace sogen
         std::unique_ptr<ui_backend> ui_backend_{};
         std::unique_ptr<audio_backend> audio_backend_{};
         bool setup_completed_{false};
+
+        // Declared ahead of `process` on purpose: the host threads that signal it (the GPU-completion
+        // watcher) are owned by devices under `process`, so they are joined while this must still exist.
+        host_wait_signal host_wait_signal_{};
 
       public:
         const std::filesystem::path emulation_root{};
@@ -429,6 +434,15 @@ namespace sogen
         }
 
         void yield_thread(vcpu_context& vcpu, bool alertable = false);
+
+        // Wakes every vCPU idling on a parked host wait so it re-runs its readiness scan immediately.
+        // Callable from any host thread holding no emulator lock -- in particular the GPU-completion
+        // watcher, which must never touch the kernel lock to make progress.
+        void notify_host_wait_progress()
+        {
+            this->host_wait_signal_.signal();
+        }
+
         bool perform_thread_switch(vcpu_context& vcpu, std::unique_lock<kernel_lock>& lock);
         bool perform_thread_switch(vcpu_context& vcpu);
         bool activate_thread(vcpu_context& vcpu, uint32_t id);
