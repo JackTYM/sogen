@@ -206,12 +206,15 @@ the blocking `ioctl_d3d9_flush` in tree today: an unqualified `Lock()` on a dire
 buffer does not actually synchronize with the GPU there. That is a real, separate, pre-existing x64
 bug in this UMD, found by this test and not yet diagnosed.
 
-`d3d9_park_rotation_test.cpp` gates the batch-slot rotation park (`recorded_command_would_block` in
-`d3d9_host.cpp`): a draw whose batch-management step has to rotate into a slot the GPU is still
-executing stops the recorded-command replay in front of that draw and parks the guest thread, then
-re-issues that same draw once the fence clears. Its discrimination was verified against three
-deliberately-broken host variants, each injected temporarily into `advance_d3d9_escape` /
-`draw_would_rotate_into_busy_slot`:
+`d3d9_park_rotation_test.cpp` gates the batch-slot rotation wait: a draw whose batch-management step
+has to rotate into a slot the GPU is still executing. That wait blocks with the kernel lock held in
+tree today; the intended repair is to stop the recorded-command replay in front of that draw, park
+the guest thread, and re-issue the same draw once the fence clears. That park was implemented,
+proven correct by this test, and then reverted for cost (see the note at the end of this section);
+the test stays because it gates the guarantee, not the mechanism.
+
+Its discrimination was verified against three deliberately-broken variants of that park, each
+injected temporarily into `advance_d3d9_escape` / `draw_would_rotate_into_busy_slot`:
 
 - resuming PAST the blocked draw (i.e. dropping it): **fails 3/3**, counting 88-105 draws where 160
   were recorded.
@@ -225,8 +228,17 @@ deliberately-broken host variants, each injected temporarily into `advance_d3d9_
   slot index across the park at all, and re-derives the rotation decision from live state on every
   poll.
 
-The unmodified build passes 3/3 in the same loop, and also passes against the pre-park blocking
-`wait_for_batch_slot` -- it gates the guarantee, not the mechanism.
+The unmodified park passed 3/3 in the same loop, and the blocking `wait_for_batch_slot` in tree
+passes too.
+
+The park itself was reverted on measured cost, not on correctness. Matched A/B on settled MW2
+gameplay (native UMD, FEX+HVF `--vcpus 2`, draws/frame 1996-2022 on both arms) had the blocking wait
+flat at 68.9-72.9 FPS over nine minutes and the park starting at 21.6 and decaying to 5.6. An
+instrumented build put the reason at the wake path rather than the D3D9 side: the rotation park fires
+only 20-25 times a second, but each park takes a mean 4.1-4.3 ms (max 7.6 ms) and a mean of 44
+scheduler readiness scans to wake, against a sub-millisecond fence wait. Parking this site again
+needs the scheduler wake to cost closer to one scan than to 44; `ioctl_d3d9_flush`'s park is rare
+enough to afford today's.
 
 A separate, pre-existing UMD bug surfaced while building it and is worked around inside the test
 rather than fixed: `LockRect` on a render target that is no longer BOUND does not drain the pending
