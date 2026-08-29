@@ -632,6 +632,19 @@ namespace sogen
             uint64_t device_id{};
         };
 
+        // Joins the watcher thread and drops the timeline it waits on. Must run before anything
+        // destroys the device: the thread sits inside vkWaitSemaphores on it, and vkDestroyDevice frees
+        // what it is blocked in.
+        static void stop_progress_watch(device_data& device)
+        {
+            device.progress_watch.reset();
+            if (device.progress_semaphore && device.destroy_semaphore)
+            {
+                device.destroy_semaphore(device.handle, device.progress_semaphore, nullptr);
+                device.progress_semaphore = VK_NULL_HANDLE;
+            }
+        }
+
         std::unordered_map<uint64_t, device_data> devices;
         std::unordered_map<uint64_t, queue_data> queues;
         std::unordered_map<uint64_t, command_pool_data> command_pools;
@@ -944,14 +957,7 @@ namespace sogen
                 return;
             }
 
-            // Before anything the watcher thread touches goes away: its destructor joins, so once this
-            // returns no other thread is inside this device.
-            it->second.progress_watch.reset();
-            if (it->second.progress_semaphore && it->second.destroy_semaphore)
-            {
-                it->second.destroy_semaphore(it->second.handle, it->second.progress_semaphore, nullptr);
-                it->second.progress_semaphore = VK_NULL_HANDLE;
-            }
+            stop_progress_watch(it->second);
 
             // Tear down swapchains first: they own offscreen images (in the `images` table), a readback
             // buffer, and a present command pool/fence that must go before the device.
@@ -1169,6 +1175,11 @@ namespace sogen
 
         ~impl()
         {
+            for (auto& [id, device] : this->devices)
+            {
+                stop_progress_watch(device);
+            }
+
             for (auto& [id, device] : this->devices)
             {
                 if (device.handle && device.destroy_device)
