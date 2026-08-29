@@ -37,6 +37,7 @@ namespace sogen::wait_storm_diag
 
         uint64_t switch_to_next_thread_calls{};
         uint64_t switch_scan_iterations{};
+        uint64_t switch_scan_ns{};
 
         std::chrono::steady_clock::time_point last_report{std::chrono::steady_clock::now()};
         std::unordered_map<uint32_t, std::pair<wait_kind, std::chrono::steady_clock::time_point>> pending{};
@@ -110,6 +111,32 @@ namespace sogen::wait_storm_diag
         ++s.switch_scan_iterations;
     }
 
+    // Accumulates the wall-clock cost of the scan itself, so the reported rate can be turned into a
+    // real "how much host CPU is the scheduler burning" number rather than just a call count.
+    struct scan_timer
+    {
+        bool active;
+        std::chrono::steady_clock::time_point start;
+
+        scan_timer()
+            : active(get_state().enabled),
+              start(active ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{})
+        {
+        }
+
+        ~scan_timer()
+        {
+            if (active)
+            {
+                get_state().switch_scan_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
+
+        scan_timer(const scan_timer&) = delete;
+        scan_timer& operator=(const scan_timer&) = delete;
+    };
+
     inline void note_switch_to_next_thread(const size_t thread_count)
     {
         auto& s = get_state();
@@ -131,11 +158,15 @@ namespace sogen::wait_storm_diag
 
         fprintf(stderr,
                 "[WAIT_STORM_DIAG] --- %.1fs window, thread_count=%zu, switch_to_next_thread calls=%llu (%.0f/s) "
-                "scan_iterations=%llu (%.0f/s, %.1f/call) pending_waiters=%zu ---\n",
+                "scan_iterations=%llu (%.0f/s, %.1f/call) scan_cost=%.1f ms/s (%.2f us/call) pending_waiters=%zu ---\n",
                 dt, thread_count, static_cast<unsigned long long>(s.switch_to_next_thread_calls), s.switch_to_next_thread_calls / dt,
                 static_cast<unsigned long long>(s.switch_scan_iterations), s.switch_scan_iterations / dt,
                 s.switch_to_next_thread_calls
                     ? static_cast<double>(s.switch_scan_iterations) / static_cast<double>(s.switch_to_next_thread_calls)
+                    : 0.0,
+                static_cast<double>(s.switch_scan_ns) / 1e6 / dt,
+                s.switch_to_next_thread_calls
+                    ? static_cast<double>(s.switch_scan_ns) / 1e3 / static_cast<double>(s.switch_to_next_thread_calls)
                     : 0.0,
                 s.pending.size());
 
@@ -157,6 +188,7 @@ namespace sogen::wait_storm_diag
         s.blocking.fill(0);
         s.switch_to_next_thread_calls = 0;
         s.switch_scan_iterations = 0;
+        s.switch_scan_ns = 0;
         s.last_report = now;
     }
 }

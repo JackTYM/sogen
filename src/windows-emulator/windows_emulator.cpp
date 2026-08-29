@@ -648,6 +648,7 @@ namespace sogen
             auto& threads = win_emu.process.threads;
 
             static const bool wait_storm_diag_enabled = wait_storm_diag::enabled();
+            const wait_storm_diag::scan_timer scan_timer{};
             if (wait_storm_diag_enabled)
             {
                 wait_storm_diag::note_switch_to_next_thread(threads.size());
@@ -992,6 +993,19 @@ namespace sogen
         static thread_local int idle_spin_count = 0;
         static const bool sched_diag = std::getenv("EMULATOR_SCHED_DIAG") != nullptr;
 
+        // Idle pacing for a parked host wait. Yielding for the whole park makes every vCPU re-run
+        // switch_to_next_thread's full readiness scan as fast as the host will schedule it, and that
+        // scan is O(threads) with a non-trivial constant, so the poll costs far more than the wake
+        // latency it saves. Poll hot for a small, bounded number of scans first (a GPU fence is often
+        // already signaled or about to be), then fall back to a real sleep that backs off to the same
+        // 1ms the timed-wait path already uses.
+        constexpr int host_wait_hot_polls = 16;
+        constexpr auto host_wait_min_sleep = std::chrono::microseconds(100);
+        constexpr auto host_wait_max_sleep = std::chrono::microseconds(1000);
+
+        int host_wait_polls = 0;
+        auto host_wait_sleep = host_wait_min_sleep;
+
         while (!switch_to_next_thread(*this, vcpu))
         {
             if (sched_diag)
@@ -1031,7 +1045,15 @@ namespace sogen
             else if (host_wait_pending)
             {
                 // A host wait (e.g. a GPU semaphore) is parked - re-poll immediately to wake it promptly.
-                std::this_thread::yield();
+                if (host_wait_polls++ < host_wait_hot_polls)
+                {
+                    std::this_thread::yield();
+                }
+                else
+                {
+                    std::this_thread::sleep_for(host_wait_sleep);
+                    host_wait_sleep = std::min(host_wait_sleep * 2, host_wait_max_sleep);
+                }
             }
             else
             {
