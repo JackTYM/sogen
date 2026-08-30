@@ -131,6 +131,16 @@ namespace sogen::d3d9_cmd
         uint32_t reserved;
     };
 
+    // ioctl_d3d9_generate_mip_sub_levels: pfnGenerateMipSubLevels, the driver-side mip-chain
+    // regeneration D3D9 requires of a D3DUSAGE_AUTOGENMIPMAP texture whenever its top level changes
+    // (and on an explicit IDirect3DBaseTexture9::GenerateMipSubLevels call).
+    struct generate_mip_sub_levels_request
+    {
+        resource_id resource;
+        uint32_t filter; // D3DDDITEXTUREFILTERTYPE, from IDirect3DBaseTexture9::SetAutoGenFilterType
+        uint32_t reserved;
+    };
+
     // ioctl_d3d9_lock: out header immediately followed by data_size bytes of the locked region.
     struct lock_request
     {
@@ -477,6 +487,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(create_resource_response) == 32, "wire layout drift");
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(buf_blt_request) == 32, "wire layout drift");
+    static_assert(sizeof(generate_mip_sub_levels_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");
     static_assert(sizeof(lock_response) == 16, "wire layout drift");
     static_assert(sizeof(unlock_request) == 32, "wire layout drift");

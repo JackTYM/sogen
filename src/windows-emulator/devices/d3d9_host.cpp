@@ -3980,7 +3980,11 @@ namespace sogen
             if (device != 0)
             {
                 uint64_t vk_image = 0;
-                constexpr uint32_t sampled_usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                // TRANSFER_SRC as well as TRANSFER_DST: generate_mip_sub_levels blits level N-1 into
+                // level N of this same image, and tex_blt's GPU fast path reads a sampled texture as its
+                // copy source.
+                constexpr uint32_t sampled_usage =
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
                 uint32_t image_type = VK_IMAGE_TYPE_2D;
                 uint32_t image_depth = 1;
                 uint32_t array_layers = 1;
@@ -4530,6 +4534,128 @@ namespace sogen
         // execute_draw's vertex/index upload cache keys on content_version, so a cached arena offset from
         // before this copy must not be reused (the same reason unlock() bumps it).
         ++dst.content_version;
+        return d3d_ok;
+    }
+
+    int32_t d3d9_host::generate_mip_sub_levels(const uint64_t resource, const uint32_t filter)
+    {
+        const auto it = this->resources_.find(resource);
+        if (it == this->resources_.end())
+        {
+            return d3derr_invalidcall;
+        }
+        resource_entry& tex = it->second;
+        const uint32_t mip_levels = std::max(1u, tex.mip_levels);
+        if (mip_levels < 2)
+        {
+            return d3d_ok; // nothing below the top level to generate
+        }
+
+        // Puts level 0 (and the still-empty lower levels) on the GPU and leaves every level resting in
+        // SHADER_READ_ONLY_OPTIMAL, which the barrier sequence below starts from. Also rejects every
+        // resource kind that has no sampled GPU image to blit within.
+        if (!this->ensure_texture_uploaded(resource))
+        {
+            return d3derr_invalidcall;
+        }
+
+        const uint64_t device = this->ensure_vk_device();
+        if (device == 0 || !this->ensure_draw_infra())
+        {
+            return d3derr_invalidcall;
+        }
+        this->flush_batch();
+
+        const bool is_cube = tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_cube);
+        const bool is_volume = tex.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume);
+        const uint32_t layer_count = is_cube ? cube_face_count : 1u;
+        // D3DTEXF_NONE/D3DTEXF_POINT are the only unfiltered D3DDDITEXTUREFILTERTYPE values; every other
+        // one (LINEAR and the anisotropic/quad variants) is a box-style average, which vkCmdBlitImage's
+        // linear filter is.
+        constexpr uint32_t d3dtexf_point = 1;
+        const uint32_t vk_filter = filter <= d3dtexf_point ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+
+        this->vulkan_.reset_fence(device, this->fence_);
+        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+
+        const auto level_range = [layer_count](const uint32_t level) {
+            return vulkan_host::subresource_range{.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                                  .base_mip_level = level,
+                                                  .level_count = 1,
+                                                  .base_array_layer = 0,
+                                                  .layer_count = layer_count};
+        };
+
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, level_range(0));
+
+        for (uint32_t level = 1; level < mip_levels; ++level)
+        {
+            const uint32_t src_w = std::max(1u, tex.width >> (level - 1));
+            const uint32_t src_h = std::max(1u, tex.height >> (level - 1));
+            const uint32_t src_d = is_volume ? std::max(1u, tex.depth >> (level - 1)) : 1u;
+            const uint32_t dst_w = std::max(1u, tex.width >> level);
+            const uint32_t dst_h = std::max(1u, tex.height >> level);
+            const uint32_t dst_d = is_volume ? std::max(1u, tex.depth >> level) : 1u;
+
+            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                               level_range(level));
+
+            const vulkan_host::image_blit_region region{
+                .src_aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .src_mip_level = level - 1,
+                .src_base_array_layer = 0,
+                .src_layer_count = layer_count,
+                .src_offset_x0 = 0,
+                .src_offset_y0 = 0,
+                .src_offset_z0 = 0,
+                .src_offset_x1 = static_cast<int32_t>(src_w),
+                .src_offset_y1 = static_cast<int32_t>(src_h),
+                .src_offset_z1 = static_cast<int32_t>(src_d),
+                .dst_aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .dst_mip_level = level,
+                .dst_base_array_layer = 0,
+                .dst_layer_count = layer_count,
+                .dst_offset_x0 = 0,
+                .dst_offset_y0 = 0,
+                .dst_offset_z0 = 0,
+                .dst_offset_x1 = static_cast<int32_t>(dst_w),
+                .dst_offset_y1 = static_cast<int32_t>(dst_h),
+                .dst_offset_z1 = static_cast<int32_t>(dst_d),
+                .filter = vk_filter,
+            };
+            this->vulkan_.cmd_blit_image(this->command_buffer_, tex.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex.vk_image_id,
+                                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+
+            // This level is the next iteration's blit source, so it goes straight to TRANSFER_SRC rather
+            // than back to SHADER_READ_ONLY; the final barrier below restores the whole chain at once.
+            this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                               level_range(level));
+        }
+
+        const vulkan_host::subresource_range whole_chain{.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                                         .base_mip_level = 0,
+                                                         .level_count = mip_levels,
+                                                         .base_array_layer = 0,
+                                                         .layer_count = layer_count};
+        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, whole_chain);
+
+        this->vulkan_.end_command_buffer(this->command_buffer_);
+        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
+        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
+
+        // The generated levels exist only in the GPU image; `backing`/`extra_mips` still hold whatever the
+        // guest last wrote (zeros, for a chain it never touches). Leaving the resource clean is what stops
+        // ensure_texture_uploaded from re-uploading those zeros over the chain on the next draw -- and is
+        // correct, because the next write to level 0 marks it dirty again and D3D9 re-issues this call.
+        tex.upload_dirty = false;
         return d3d_ok;
     }
 

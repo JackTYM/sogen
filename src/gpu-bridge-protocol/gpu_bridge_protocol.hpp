@@ -210,6 +210,7 @@ namespace sogen::gpu_bridge
         d3d9_present = 0x908,
         d3d9_tex_blt = 0x909,
         d3d9_buf_blt = 0x90A,
+        d3d9_generate_mip_sub_levels = 0x90B,
 
         // Streamed (recorded via command_record_header, flushed as one ioctl_record_commands escape).
         d3d9_set_render_state = 0x920,
@@ -408,6 +409,7 @@ namespace sogen::gpu_bridge
     inline constexpr uint32_t ioctl_d3d9_present = make_ioctl(static_cast<uint32_t>(command::d3d9_present));
     inline constexpr uint32_t ioctl_d3d9_tex_blt = make_ioctl(static_cast<uint32_t>(command::d3d9_tex_blt));
     inline constexpr uint32_t ioctl_d3d9_buf_blt = make_ioctl(static_cast<uint32_t>(command::d3d9_buf_blt));
+    inline constexpr uint32_t ioctl_d3d9_generate_mip_sub_levels = make_ioctl(static_cast<uint32_t>(command::d3d9_generate_mip_sub_levels));
 
     // Streamed D3D9 opcodes. State-setting/draw/clear calls are batched guest-side into
     // g_d3d9_command_batch (sogen_d3d9_umd.cpp's record_d3d9) and flushed as one ioctl_record_commands

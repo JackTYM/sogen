@@ -144,6 +144,12 @@ namespace sogen
         // and copies nothing.
         int32_t buf_blt(uint64_t dst_resource, uint64_t src_resource, uint32_t dst_offset, uint32_t src_offset, uint32_t size);
 
+        // Real pfnGenerateMipSubLevels handler: regenerates mip levels 1..N-1 of a sampled texture from
+        // level 0 with a GPU blit chain, one level at a time, using `filter` (a D3DDDITEXTUREFILTERTYPE).
+        // The generated levels live only in the GPU image -- the CPU-side per-level backing is left
+        // untouched and the resource is marked clean so the next draw does not re-upload zeros over them.
+        int32_t generate_mip_sub_levels(uint64_t resource, uint32_t filter);
+
         // Copies up to out_capacity bytes of the resource's host-side shadow copy into out.
         // out_data_size always receives the true backing-store size, out_pitch the subresource's row
         // stride (0 for buffers and for formats with no known layout) -- see subresource_row_pitch --

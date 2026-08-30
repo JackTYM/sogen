@@ -104,6 +104,8 @@ namespace sogen
                                 return "d3d9_tex_blt";
                             case gpu_bridge::ioctl_d3d9_buf_blt:
                                 return "d3d9_buf_blt";
+                            case gpu_bridge::ioctl_d3d9_generate_mip_sub_levels:
+                                return "d3d9_generate_mip_sub_levels";
                             case gpu_bridge::ioctl_d3d9_flush:
                                 return "d3d9_flush";
                             case gpu_bridge::ioctl_d3d9_create_vertex_shader:
@@ -380,6 +382,8 @@ namespace sogen
                     return handle_d3d9_tex_blt(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_buf_blt:
                     return handle_d3d9_buf_blt(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_generate_mip_sub_levels:
+                    return handle_d3d9_generate_mip_sub_levels(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_flush:
                     return handle_d3d9_flush(win_emu, context);
 
@@ -3037,6 +3041,17 @@ namespace sogen
                 }
                 const int32_t hr =
                     this->d3d9_.buf_blt(request.dst_resource, request.src_resource, request.dst_offset, request.src_offset, request.size);
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+
+            NTSTATUS handle_d3d9_generate_mip_sub_levels(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::generate_mip_sub_levels_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const int32_t hr = this->d3d9_.generate_mip_sub_levels(request.resource, request.filter);
                 return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             }
 

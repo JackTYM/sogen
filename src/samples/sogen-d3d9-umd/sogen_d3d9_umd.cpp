@@ -685,6 +685,27 @@ namespace
         return usage;
     }
 
+    // D3D9 puts a D3DUSAGE_AUTOGENMIPMAP texture's whole mip chain on the DRIVER: the runtime exposes
+    // only level 0 to the app (GetLevelCount() reports 1) and creates the resource with MipLevels=1 plus
+    // D3DDDI_RESOURCEFLAGS.AutogenMipmap, expecting the driver to allocate the sublevels itself and refill
+    // them on every pfnGenerateMipSubLevels. Nothing else in the DDI ever tells the host how many levels
+    // to back, so this is where the chain length comes from.
+    uint32_t full_mip_chain_levels(uint32_t width, uint32_t height, uint32_t depth)
+    {
+        uint32_t extent = width > height ? width : height;
+        if (depth > extent)
+        {
+            extent = depth;
+        }
+        uint32_t levels = 1;
+        while (extent > 1)
+        {
+            extent >>= 1;
+            ++levels;
+        }
+        return levels;
+    }
+
     // D3DDDIARG_CREATERESOURCE::Pool is a D3DDDI_POOL, a different enum from the D3DPOOL the wire's
     // `pool` field carries and the host compares against (D3DPOOL_DEFAULT is 0, a value D3DDDI_POOL has
     // no member for at all). Passing the raw D3DDDI_POOL through made every host pool comparison
@@ -785,6 +806,11 @@ namespace
                                               ? (format == 100 ? d3d9c::resource_kind::vertex_buffer : d3d9c::resource_kind::index_buffer)
                                               : resource_flags_to_kind(args->Flags);
 
+        constexpr uint32_t k_resflag_autogen_mipmap = 0x10; // D3DDDI_RESOURCEFLAGS.AutogenMipmap
+        const uint32_t mip_levels = !is_internal_buffer_format && (args->Flags & k_resflag_autogen_mipmap) != 0
+                                        ? full_mip_chain_levels(width, height, depth)
+                                        : args->MipLevels;
+
         // width/height/mip_levels/pool are the app's real values (read from the RE'd struct above).
         const d3d9c::create_resource_request req{
             .kind = static_cast<uint32_t>(kind),
@@ -792,7 +818,7 @@ namespace
             .width = width,
             .height = height,
             .depth = depth,
-            .mip_levels = args->MipLevels,
+            .mip_levels = mip_levels,
             .usage = usage,
             .pool = ddi_pool_to_d3dpool(args->Pool),
             .sys_mem_address = sys_mem_address,
@@ -1335,8 +1361,18 @@ namespace
         FMT_OP_3DACCELERATION = 0x00000800,
         FMT_OP_CONVERT_TO_ARGB = 0x00002000,
         FMT_OP_OFFSCREENPLAIN = 0x00004000,
+        FMT_OP_AUTOGENMIPMAP = 0x00400000, // D3DFORMAT_OP_AUTOGENMIPMAP (ddrawint.h)
         FMT_OP_VERTEXTEXTURE = 0x00800000, // D3DFORMAT_OP_VERTEXTEXTURE (ddrawint.h): CheckDeviceFormat(QUERY_VERTEXTEXTURE)
     };
+
+    // FMT_OP_AUTOGENMIPMAP is what makes D3DUSAGE_AUTOGENMIPMAP real for a format: without it
+    // CheckDeviceFormat returns D3DOK_NOAUTOGEN and the runtime silently strips the usage bit, creating a
+    // plain single-level texture that never issues pfnGenerateMipSubLevels. It is advertised only for the
+    // formats whose host mapping Vulkan guarantees can be linearly filtered and blitted with OPTIMAL
+    // tiling (B8G8R8A8_UNORM, R8_UNORM, R8G8_UNORM, R5G6B5_UNORM_PACK16 -- the mandatory-format table),
+    // since d3d9_host::generate_mip_sub_levels downsamples with vkCmdBlitImage. Notably NOT the
+    // block-compressed formats, which cannot be blit destinations at all.
+    constexpr uint32_t AUTOGEN = FMT_OP_AUTOGENMIPMAP;
 
     constexpr uint32_t RT_TEX = FMT_OP_OFFSCREEN_RENDERTARGET | FMT_OP_SAME_FORMAT_RENDERTARGET | FMT_OP_TEXTURE;
     constexpr uint32_t DISPLAY_RT = FMT_OP_DISPLAYMODE | FMT_OP_3DACCELERATION | RT_TEX;
@@ -1355,14 +1391,14 @@ namespace
         // exact bits were RE-confirmed live against real d3d9.dll: adding them flips CreateCubeTexture/
         // CreateVolumeTexture from D3DERR_INVALIDCALL (0x8876086c) to S_OK. (Host GPU backing for cube/volume
         // is a later task; only the FORMATOP advertisement + UMD kind classification gate creation.)
-        {22 /*X8R8G8B8    */, DISPLAY_RT | FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE, 0, 0, 0},
+        {22 /*X8R8G8B8    */, DISPLAY_RT | FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE | AUTOGEN, 0, 0, 0},
         {75 /*D24S8       */, FMT_OP_ZSTENCIL, 0, 0, 0},
         {77 /*D24X8       */, FMT_OP_ZSTENCIL, 0, 0, 0}, // depth-only variant (matches D24S8)
         // A8R8G8B8: sampled textures (d3d9_texture_test.cpp) AND offscreen render targets -- alpha
         // render targets are common (MRT/HDR-ish passes); RT_TEX, not DISPLAY_RT (no 3DACCELERATION). Also
         // cube- and volume-texture-creatable (FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE) -- RE-confirmed live:
         // the bits flip CreateCubeTexture/CreateVolumeTexture from D3DERR_INVALIDCALL (0x8876086c) to S_OK.
-        {21 /*A8R8G8B8    */, RT_TEX | FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE, 0, 0, 0},
+        {21 /*A8R8G8B8    */, RT_TEX | FMT_OP_CUBETEXTURE | FMT_OP_VOLUMETEXTURE | AUTOGEN, 0, 0, 0},
         // R5G6B5: 16-bit off-screen render target + texture (RT_TEX). The host RT sizing/readback/ColorFill
         // paths are now per-format bytes-per-texel aware (shared vk_format_bytes_per_texel helper +
         // d3d9_host::color_fill's format-aware texel encoder, added by the off-screen-render-target format
@@ -1370,10 +1406,10 @@ namespace
         // d3d9_format_coverage_test.cpp's R5G6B5 sub-pass). NOT DISPLAY_RT: presenting a non-BGRA8 format to
         // the OS window is a separate, out-of-scope architectural item (ui_surface_format has no 16-bit
         // stage), so no DISPLAYMODE/3DACCELERATION -- off-screen use only, matching real G-buffer patterns.
-        {23 /*R5G6B5      */, RT_TEX, 0, 0, 0},
-        {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0}, // texture-only single-channel formats
-        {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
-        {51 /*A8L8        */, FMT_OP_TEXTURE, 0, 0, 0}, // luminance-alpha (host maps to R8G8_UNORM)
+        {23 /*R5G6B5      */, RT_TEX | AUTOGEN, 0, 0, 0},
+        {28 /*A8          */, FMT_OP_TEXTURE | AUTOGEN, 0, 0, 0}, // texture-only single-channel formats
+        {50 /*L8          */, FMT_OP_TEXTURE | AUTOGEN, 0, 0, 0},
+        {51 /*A8L8        */, FMT_OP_TEXTURE | AUTOGEN, 0, 0, 0}, // luminance-alpha (host maps to R8G8_UNORM)
         {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only
         {63 /*Q8W8V8U8    */, FMT_OP_TEXTURE, 0, 0, 0},
         // A16B16G16R16F: HDR off-screen render target + texture (RT_TEX), plus vertex-texture-usable. The
@@ -1724,8 +1760,24 @@ namespace
         return S_OK;
     }
 
-    // pfnComposeRects (slot 54) and pfnGenerateMipSubLevels (64) are the DDI slots left that a title
-    // could reach and get silence from.
+    // pfnGenerateMipSubLevels (slot 64): D3D9 makes the DRIVER, not the runtime, own mip-chain
+    // generation below the top level for a D3DUSAGE_AUTOGENMIPMAP texture -- the runtime hands the app
+    // only level 0 (GetLevelCount() reports 1) and issues this call whenever that level changes or the
+    // app calls IDirect3DBaseTexture9::GenerateMipSubLevels. The host does the real box-filter downsample
+    // as a GPU blit chain. See D3DDDIARG_GENERATEMIPSUBLEVELS in d3d9_ddi.hpp.
+    HRESULT APIENTRY umd_GenerateMipSubLevels(HANDLE /*hDevice*/, CONST D3DDDIARG_GENERATEMIPSUBLEVELS* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
+        const d3d9c::generate_mip_sub_levels_request req{
+            .resource = reinterpret_cast<uint64_t>(pArgs->hResource), .filter = pArgs->Filter, .reserved = 0};
+        bridge_call(gb::ioctl_d3d9_generate_mip_sub_levels, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    // pfnComposeRects (slot 54) is the one DDI slot left that a title could reach and get silence from.
     // pfnVolBlt sat in exactly that state and turned out to be a real, high-impact bug, so rather than
     // assume it is inert it is wired to a counting stub that makes a live hit visible. The argument
     // pointer is logged but deliberately not dereferenced -- a reachability census must not be able to
@@ -1754,13 +1806,6 @@ namespace
     {
         static uint32_t count = 0;
         census_unimplemented_ddi("pfnComposeRects", count, pArgs);
-        return S_OK;
-    }
-
-    HRESULT APIENTRY umd_GenerateMipSubLevels(HANDLE /*hDevice*/, CONST void* pArgs)
-    {
-        static uint32_t count = 0;
-        census_unimplemented_ddi("pfnGenerateMipSubLevels", count, pArgs);
         return S_OK;
     }
 

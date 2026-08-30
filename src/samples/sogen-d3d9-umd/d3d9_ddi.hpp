@@ -707,6 +707,25 @@ typedef struct _D3DDDIARG_BUFFERBLT
 static_assert(sizeof(D3DDDIARG_BUFFERBLT) == 20, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::BufBlt + LHBatchBufBlt, x86)");
 #endif
 
+// D3DDDIARG_GENERATEMIPSUBLEVELS -- pfnGenerateMipSubLevels, device-func-table slot 64. RE'd the same
+// way (2026-08-29): the x64 builder CD3DDDIDX10::GenerateMipSublevels (@ 0x180122570) writes only
+// `v6@0 = *pResourceHandle` and `v7@8 = filter` before dispatching through slot 64 (`(*(v4 + 512))(...)`,
+// 512 == 64*8), and its consumer LHBatchGenerateMipSubLevels (@ 0x180126ED0) copies exactly 16 bytes and
+// references offset 0. The x86 builder (@ 0x101403A0) writes `v5[0]@0` / `v5[1]@4` and dispatches through
+// slot 64 (`(*(... + 256))(...)`, 256 == 64*4); its consumer (@ 0x10145040) copies two dwords.
+//
+// The filter is the texture's own D3DTEXTUREFILTERTYPE autogen filter (IDirect3DBaseTexture9::
+// SetAutoGenFilterType), read straight off the resource wrapper by CBaseTexture::GenerateMipSubLevelsI
+// (@ 0x1800D11D0). That same function is the only producer of this call, and CMipMap::GenerateMipSubLevels
+// (@ 0x1800C94E0) gates reaching it on the texture carrying D3DUSAGE_AUTOGENMIPMAP -- which the runtime
+// only grants when the driver advertises D3DFORMAT_OP_AUTOGENMIPMAP for the format (see g_formats in
+// sogen_d3d9_umd.cpp).
+typedef struct _D3DDDIARG_GENERATEMIPSUBLEVELS
+{
+    HANDLE hResource; // 0
+    UINT Filter;      // x64: 8, x86: 4 -- D3DDDITEXTUREFILTERTYPE
+} D3DDDIARG_GENERATEMIPSUBLEVELS;
+
 // D3DDDIARG_COLORFILL -- pfnColorFill, device-func-table slot 56 (behind IDirect3DDevice9::ColorFill).
 // RE'd this session (2026-07-06) to the same standard as D3DDDIARG_TEXBLT above: BOTH static
 // decompilation AND live tracing of the real staged d3d9.dll.

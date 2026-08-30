@@ -135,6 +135,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_managed_buffer_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_managed_buffer_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-managed-buffer-test-x86.exe -ld3d9
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_autogen_mipmap_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-autogen-mipmap-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_autogen_mipmap_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-autogen-mipmap-test-x86.exe -ld3d9 -ld3dcompiler_43
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_updatetexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-updatetexture-test-x64.exe -ld3d9 -ld3dcompiler_43
 
@@ -382,6 +388,8 @@ cp d3d9-srgb-texture-test-x86.exe <root>/filesys/c/d3d9-srgb-texture-test-x86.ex
 cp d3d9-lock-slicepitch-test-x64.exe <root>/filesys/c/d3d9-lock-slicepitch-test.exe
 cp d3d9-managed-buffer-test-x64.exe <root>/filesys/c/d3d9-managed-buffer-test.exe
 cp d3d9-managed-buffer-test-x86.exe <root>/filesys/c/d3d9-managed-buffer-test-x86.exe
+cp d3d9-autogen-mipmap-test-x64.exe <root>/filesys/c/d3d9-autogen-mipmap-test.exe
+cp d3d9-autogen-mipmap-test-x86.exe <root>/filesys/c/d3d9-autogen-mipmap-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -455,6 +463,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-lock-slicepitch-test.exe
 ./analyzer -e <root> -c c:/d3d9-managed-buffer-test.exe
 ./analyzer -e <root> -c c:/d3d9-managed-buffer-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-autogen-mipmap-test.exe
+./analyzer -e <root> -c c:/d3d9-autogen-mipmap-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -1120,20 +1130,42 @@ architectures.
   read back), which nothing in this suite covered before. Separately found and NOT fixed: a
   `D3DPOOL_MANAGED` buffer created *without* `D3DUSAGE_WRITEONLY` fails inside the runtime with `E_FAIL`
   out of `CVertexBuffer::Create`'s non-write-only branch -- an unrelated gap.
-- **The two remaining unimplemented DDI slots -- `pfnComposeRects` (54) and
-  `pfnGenerateMipSubLevels` (64) -- are confirmed unreached by MW2, so they stay unimplemented
-  (2026-08-29).** They have the same silent-no-op shape `pfnVolBlt` turned out to be a real bug in, so
-  each is now wired to a counting stub that prints `[sogen-d3d9-umd] [ddi-census] <name> reached #N`
-  on the first hit and every 256th after (guest stdout, so it survives the analyzer's silent mode).
-  Seven MW2 sessions -- main menu, loading, "The Pit" Special Ops and the campaign FOB mission,
-  ~182M draws total, screenshot-confirmed in-mission -- produced zero hits on all three. Two of those
-  sessions additionally ran a scratch driver advertising `FMT_OP_AUTOGENMIPMAP` (0x00400000) on every
-  format, since without that bit the runtime never routes autogen mips to the driver at all and a
-  plain negative would say nothing about the title; still zero, so MW2 genuinely never creates a
-  `D3DUSAGE_AUTOGENMIPMAP` texture. `pfnComposeRects` is reachable only through
-  `IDirect3DDevice9Ex::ComposeRects`, which a plain `Direct3DCreate9` title cannot call. The census
-  itself is positive-controlled: with the autogen format bit advertised, a probe calling
-  `CreateTexture(D3DUSAGE_AUTOGENMIPMAP)` fires the `pfnGenerateMipSubLevels` line immediately.
+- **`pfnGenerateMipSubLevels` (slot 64) is implemented, and `D3DUSAGE_AUTOGENMIPMAP` now works end to
+  end (2026-08-29).** D3D9 puts an autogen texture's whole mip chain on the DRIVER: the runtime exposes
+  only level 0 to the app (`GetLevelCount()` reports 1), creates the driver resource with `MipLevels=1`
+  plus `D3DDDI_RESOURCEFLAGS.AutogenMipmap` (bit 0x10, confirmed live), and issues this call whenever the
+  top level changes. Three pieces were missing and all three are independently necessary, each proven by
+  its own A/B: (1) the `FORMATOP` table never advertised `FMT_OP_AUTOGENMIPMAP` (0x00400000), so
+  `CheckDeviceFormat` answered `D3DOK_NOAUTOGEN` (a SUCCESS code) and the runtime silently stripped the
+  usage bit -- now advertised for the formats whose host mapping Vulkan guarantees is linearly
+  filterable and blittable (`X8R8G8B8`, `A8R8G8B8`, `R5G6B5`, `A8`, `L8`, `A8L8`; deliberately not the
+  block-compressed ones, which cannot be blit destinations); (2) `umd_CreateResource` now expands
+  `MipLevels` to the full chain when the autogen flag is set, since nothing else in the DDI tells the
+  host how many levels to back; (3) `d3d9_host::generate_mip_sub_levels` downsamples level N-1 into
+  level N with `vkCmdBlitImage`, one level at a time, filtered per the `D3DDDIARG_GENERATEMIPSUBLEVELS`
+  filter type, and leaves the resource marked clean so the next draw does not re-upload the (zero) CPU
+  backing over the generated chain. Sampled images now also carry `VK_IMAGE_USAGE_TRANSFER_SRC_BIT`,
+  which the intra-image blit needs. `d3d9_autogen_mipmap_test.cpp` (x86+x64) separates all three failure
+  modes: level 0 is a one-texel RED/GREEN checkerboard whose box-filtered average is R=G=128, so a
+  correct chain reads mid yellow, an allocated-but-unfilled chain reads BLACK, and a driver that ignored
+  the autogen flag reads pure RED. Both neutered variants were run and produce exactly those signatures.
+- **`pfnComposeRects` (slot 54) stays unimplemented, blocked on `D3DFMT_A1` (2026-08-29).** It keeps the
+  counting stub that prints `[sogen-d3d9-umd] [ddi-census] pfnComposeRects reached #N` on the first hit
+  and every 256th after (guest stdout, so it survives the analyzer's silent mode); seven MW2 sessions --
+  main menu, loading, "The Pit" Special Ops and the campaign FOB mission, ~182M draws total,
+  screenshot-confirmed in-mission -- produced zero hits, and it is structurally unreachable from a plain
+  `Direct3DCreate9` title anyway. **The blocker is now RE-confirmed and is not the one previously
+  assumed.** `Direct3DCreate9Ex`/`CreateDeviceEx` both work here, and the D3D9Ex "text API" gate passes;
+  what fails is the second gate in `CD3DBase::ComposeRects`, an internal bit that
+  `CD3DBase::StateInitialize` sets only when *both* `CheckDeviceFormat(0, D3DRTYPE_TEXTURE, D3DFMT_A1)`
+  succeeds and `D3DCAPS9::TextureFilterCaps` carries `D3DPTFILTERCAPS_CONVOLUTIONMONO`. This driver
+  already advertises the filter cap; what is missing is `D3DFMT_A1` -- one bit per texel, with no Vulkan
+  equivalent and no host-side packed-bit layout, pitch or bit-expanding upload path. Every host texture
+  size/pitch/upload decision runs through one `vk_texture_data_size` choke point keyed on the *Vulkan*
+  format, so a format whose guest layout differs from its host layout is a pixel-format feature in its
+  own right, not part of this DDI slot. Implementing `D3DFMT_A1` is the whole remaining prerequisite;
+  everything else for `ComposeRects` is already in place, including the RE'd 72-byte (x64) / 40-byte
+  (x86) `D3DDDIARG_COMPOSERECTS` shape and its `D3DCOMPOSERECTSOP` values (COPY=1, OR=2, AND=3, NEG=4).
 - **Int (`i#`) / bool (`b#`) shader constant registers, wired end to end and ported to x86 (2026-07-05,
   `jazzy-giggling-cloud.md` Tasks 1-5).** Mirrors the float (`c#`) path: wire protocol opcodes,
   `device_state` storage, and two more UBO/descriptor bindings per set (binding 2 = int CBV, binding 3
