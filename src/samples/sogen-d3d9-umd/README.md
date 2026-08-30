@@ -1091,6 +1091,20 @@ architectures.
   carries only slice 0 of a 3D image) and now copies the resource's real depth extent.
   `d3d9_volume_updatetexture_test.cpp` covers the pair -- one colour per depth slice, so "never
   written" and "only slice 0 written" are distinguishable failures.
+- **The three remaining unimplemented DDI slots -- `pfnBufBlt` (17), `pfnComposeRects` (54) and
+  `pfnGenerateMipSubLevels` (64) -- are confirmed unreached by MW2, so they stay unimplemented
+  (2026-08-29).** They have the same silent-no-op shape `pfnVolBlt` turned out to be a real bug in, so
+  each is now wired to a counting stub that prints `[sogen-d3d9-umd] [ddi-census] <name> reached #N`
+  on the first hit and every 256th after (guest stdout, so it survives the analyzer's silent mode).
+  Seven MW2 sessions -- main menu, loading, "The Pit" Special Ops and the campaign FOB mission,
+  ~182M draws total, screenshot-confirmed in-mission -- produced zero hits on all three. Two of those
+  sessions additionally ran a scratch driver advertising `FMT_OP_AUTOGENMIPMAP` (0x00400000) on every
+  format, since without that bit the runtime never routes autogen mips to the driver at all and a
+  plain negative would say nothing about the title; still zero, so MW2 genuinely never creates a
+  `D3DUSAGE_AUTOGENMIPMAP` texture. `pfnComposeRects` is reachable only through
+  `IDirect3DDevice9Ex::ComposeRects`, which a plain `Direct3DCreate9` title cannot call. The census
+  itself is positive-controlled: with the autogen format bit advertised, a probe calling
+  `CreateTexture(D3DUSAGE_AUTOGENMIPMAP)` fires the `pfnGenerateMipSubLevels` line immediately.
 - **Int (`i#`) / bool (`b#`) shader constant registers, wired end to end and ported to x86 (2026-07-05,
   `jazzy-giggling-cloud.md` Tasks 1-5).** Mirrors the float (`c#`) path: wire protocol opcodes,
   `device_state` storage, and two more UBO/descriptor bindings per set (binding 2 = int CBV, binding 3

@@ -1686,6 +1686,45 @@ namespace
         return S_OK;
     }
 
+    // pfnBufBlt (17), pfnComposeRects (54) and pfnGenerateMipSubLevels (64) are the only DDI slots left
+    // that a title could plausibly reach and get silence from. pfnVolBlt sat in exactly that state and
+    // turned out to be a real, high-impact bug, so rather than assume these are inert they are wired to
+    // a counting stub that makes a live hit visible. The argument pointer is logged but deliberately not
+    // dereferenced -- none of the three argument structs has been RE-confirmed for this runtime, and a
+    // reachability census must not be able to fault. Output goes to stdout rather than through log_line:
+    // the analyzer's silent mode (which every MW2 session recipe uses) drops debug strings but keeps
+    // guest console output, same reason vulkan_shim.cpp mirrors its own log there.
+    void census_unimplemented_ddi(const char* name, uint32_t& count, const void* args)
+    {
+        ++count;
+        if (count == 1 || (count % 256) == 0)
+        {
+            printf("[sogen-d3d9-umd] [ddi-census] %s reached #%u pArgs=%p\n", name, count, args);
+            fflush(stdout);
+        }
+    }
+
+    HRESULT APIENTRY umd_BufBlt(HANDLE /*hDevice*/, CONST void* pArgs)
+    {
+        static uint32_t count = 0;
+        census_unimplemented_ddi("pfnBufBlt", count, pArgs);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_ComposeRects(HANDLE /*hDevice*/, CONST void* pArgs)
+    {
+        static uint32_t count = 0;
+        census_unimplemented_ddi("pfnComposeRects", count, pArgs);
+        return S_OK;
+    }
+
+    HRESULT APIENTRY umd_GenerateMipSubLevels(HANDLE /*hDevice*/, CONST void* pArgs)
+    {
+        static uint32_t count = 0;
+        census_unimplemented_ddi("pfnGenerateMipSubLevels", count, pArgs);
+        return S_OK;
+    }
+
     // pfnColorFill (device-func-table slot 56), behind IDirect3DDevice9::ColorFill. Reads the RE'd
     // D3DDDIARG_COLORFILL (see d3d9_ddi.hpp) and records a streamed color_fill so it batches in-order
     // with the surrounding draw/clear stream, exactly like umd_Clear. hResource is the same direct
@@ -2785,6 +2824,7 @@ namespace
             slots[10] = reinterpret_cast<void*>(&umd_DrawPrimitive);          // pfnDrawPrimitive
             slots[11] = reinterpret_cast<void*>(&umd_DrawIndexedPrimitive);   // pfnDrawIndexedPrimitive
             slots[16] = reinterpret_cast<void*>(&umd_VolBlt);                 // pfnVolBlt
+            slots[17] = reinterpret_cast<void*>(&umd_BufBlt);                 // pfnBufBlt
             slots[18] = reinterpret_cast<void*>(&umd_TexBlt);                 // pfnTexBlt
             slots[21] = reinterpret_cast<void*>(&umd_Clear);                  // pfnClear
             slots[24] = reinterpret_cast<void*>(&umd_SetVertexShaderConst);   // pfnSetVertexShaderConst
@@ -2806,6 +2846,7 @@ namespace
             slots[50] = reinterpret_cast<void*>(&umd_SetScissorRect);         // pfnSetScissorRect
             slots[51] = reinterpret_cast<void*>(&umd_SetStreamSource);        // pfnSetStreamSource
             slots[52] = reinterpret_cast<void*>(&umd_SetStreamSourceFreq);    // pfnSetStreamSourceFreq
+            slots[54] = reinterpret_cast<void*>(&umd_ComposeRects);           // pfnComposeRects
             slots[55] = reinterpret_cast<void*>(&umd_Blt);                    // pfnBlt (StretchRect)
             slots[56] = reinterpret_cast<void*>(&umd_ColorFill);              // pfnColorFill
             slots[58] = reinterpret_cast<void*>(&umd_CreateQuery);            // pfnCreateQuery
@@ -2814,6 +2855,7 @@ namespace
             slots[61] = reinterpret_cast<void*>(&umd_GetQueryData);           // pfnGetQueryData
             slots[62] = reinterpret_cast<void*>(&umd_SetRenderTarget);        // pfnSetRenderTarget
             slots[63] = reinterpret_cast<void*>(&umd_SetDepthStencil);        // pfnSetDepthStencil
+            slots[64] = reinterpret_cast<void*>(&umd_GenerateMipSubLevels);   // pfnGenerateMipSubLevels
             slots[65] = reinterpret_cast<void*>(&umd_SetPixelShaderConstI);   // pfnSetPixelShaderConstI
             slots[66] = reinterpret_cast<void*>(&umd_SetPixelShaderConstB);   // pfnSetPixelShaderConstB
             slots[67] = reinterpret_cast<void*>(&umd_CreatePixelShader);      // pfnCreatePixelShader
