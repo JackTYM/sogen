@@ -1374,7 +1374,7 @@ namespace
         {28 /*A8          */, FMT_OP_TEXTURE, 0, 0, 0}, // texture-only single-channel formats
         {50 /*L8          */, FMT_OP_TEXTURE, 0, 0, 0},
         {51 /*A8L8        */, FMT_OP_TEXTURE, 0, 0, 0}, // luminance-alpha (host maps to R8G8_UNORM)
-        {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0}, // bump/normal map, texture-only
+        {60 /*V8U8        */, FMT_OP_TEXTURE, 0, 0, 0},           // bump/normal map, texture-only
         {63 /*Q8W8V8U8    */, FMT_OP_TEXTURE, 0, 0, 0},
         // A16B16G16R16F: HDR off-screen render target + texture (RT_TEX), plus vertex-texture-usable. The
         // former 8-byte/texel readback-buffer undersizing is fixed: the host RT sizing/readback/ColorFill
@@ -1686,14 +1686,60 @@ namespace
         return S_OK;
     }
 
-    // pfnBufBlt (17), pfnComposeRects (54) and pfnGenerateMipSubLevels (64) are the only DDI slots left
-    // that a title could plausibly reach and get silence from. pfnVolBlt sat in exactly that state and
-    // turned out to be a real, high-impact bug, so rather than assume these are inert they are wired to
-    // a counting stub that makes a live hit visible. The argument pointer is logged but deliberately not
-    // dereferenced -- none of the three argument structs has been RE-confirmed for this runtime, and a
-    // reachability census must not be able to fault. Output goes to stdout rather than through log_line:
-    // the analyzer's silent mode (which every MW2 session recipe uses) drops debug strings but keeps
-    // guest console output, same reason vulkan_shim.cpp mirrors its own log there.
+    // pfnBufBlt (slot 17) is pfnTexBlt's vertex/index-buffer counterpart. The real d3d9.dll issues it
+    // from CVertexBuffer/CIndexBuffer::UpdateDirtyPortion to push a D3DPOOL_MANAGED buffer's
+    // system-memory master into its video-memory copy, and from CBuffer::PreLoadImpl as an explicit
+    // PreLoad() hint. Unlike TexBlt/VolBlt this one's region really is used: UpdateDirtyPortion sends
+    // only the buffer's dirty byte range, so forwarding a whole-resource copy would overwrite bytes the
+    // app never touched with the master's stale contents. See D3DDDIARG_BUFFERBLT in d3d9_ddi.hpp for the
+    // RE trail, including why offset 0 is the destination (PreLoad passes NULL there).
+    //
+    // Reachability, measured rather than assumed (2026-08-29): the slot DOES fire live, on both
+    // architectures, for a D3DPOOL_MANAGED|D3DUSAGE_WRITEONLY vertex or index buffer -- but every call
+    // observed so far carries hDstResource == NULL, i.e. PreLoadImpl's destination-less "make this
+    // current in video memory" hint, which correctly copies nothing. The region-copying form needs the
+    // runtime to be holding a SEPARATE system-memory master and video-memory copy for the buffer, which
+    // only happens on the CResourceManager path (CResourceManager::UpdateVideoInternal calls
+    // UpdateDirtyPortion with the freshly allocated video resource). Every managed buffer created here
+    // instead comes back driver-managed (CVertexBuffer::CreateDriverManagedVertexBuffer, no CMgmtInfo),
+    // where there is only one resource and nothing to sync. Both forms are implemented; the diagnostic
+    // in d3d9_host::buf_blt (EMULATOR_D3D9_TEXBLT_DIAG) is the tripwire for a real destination showing up.
+    //
+    // Note also that D3DPOOL_MANAGED without D3DUSAGE_WRITEONLY currently fails creation outright inside
+    // the runtime (E_FAIL out of CVertexBuffer::Create's non-write-only branch) -- a separate, unrelated
+    // gap, not something this slot can affect.
+    HRESULT APIENTRY umd_BufBlt(HANDLE /*hDevice*/, CONST D3DDDIARG_BUFFERBLT* pArgs)
+    {
+        if (pArgs == nullptr)
+        {
+            return S_OK;
+        }
+        const d3d9c::buf_blt_request req{.dst_resource = reinterpret_cast<uint64_t>(pArgs->hDstResource),
+                                         .src_resource = reinterpret_cast<uint64_t>(pArgs->hSrcResource),
+                                         .dst_offset = pArgs->Offset,
+                                         .src_offset = pArgs->SrcRange.Offset,
+                                         .size = pArgs->SrcRange.Size,
+                                         .reserved = 0};
+        bridge_call(gb::ioctl_d3d9_buf_blt, &req, sizeof(req), nullptr, 0);
+        return S_OK;
+    }
+
+    // pfnComposeRects (slot 54) and pfnGenerateMipSubLevels (64) are the DDI slots left that a title
+    // could reach and get silence from.
+    // pfnVolBlt sat in exactly that state and turned out to be a real, high-impact bug, so rather than
+    // assume it is inert it is wired to a counting stub that makes a live hit visible. The argument
+    // pointer is logged but deliberately not dereferenced -- a reachability census must not be able to
+    // fault. Output goes to stdout rather than through log_line: the analyzer's silent mode (which every
+    // MW2 session recipe uses) drops debug strings but keeps guest console output, same reason
+    // vulkan_shim.cpp mirrors its own log there.
+    //
+    // It cannot currently be reached at all, and the gate is RE-confirmed rather than guessed:
+    // CD3DBase::ComposeRects refuses with D3DERR_INVALIDCALL unless CD3DBase::StateInitialize has set an
+    // internal "convolution mono available" bit, and StateInitialize only sets it when
+    // CheckDeviceFormat(0, D3DRTYPE_TEXTURE, D3DFMT_A1) succeeds AND D3DCAPS9::TextureFilterCaps carries
+    // D3DPTFILTERCAPS_CONVOLUTIONMONO. This driver already advertises the filter cap; what is missing is
+    // D3DFMT_A1, a 1-bit-per-texel format with no Vulkan equivalent and no host-side packed-bit
+    // layout/upload path -- a pixel-format feature, separate from this DDI slot.
     void census_unimplemented_ddi(const char* name, uint32_t& count, const void* args)
     {
         ++count;
@@ -1702,13 +1748,6 @@ namespace
             printf("[sogen-d3d9-umd] [ddi-census] %s reached #%u pArgs=%p\n", name, count, args);
             fflush(stdout);
         }
-    }
-
-    HRESULT APIENTRY umd_BufBlt(HANDLE /*hDevice*/, CONST void* pArgs)
-    {
-        static uint32_t count = 0;
-        census_unimplemented_ddi("pfnBufBlt", count, pArgs);
-        return S_OK;
     }
 
     HRESULT APIENTRY umd_ComposeRects(HANDLE /*hDevice*/, CONST void* pArgs)

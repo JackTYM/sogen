@@ -137,6 +137,13 @@ namespace sogen
         // image on the next draw that samples it.
         int32_t tex_blt(uint64_t dst_resource, uint64_t src_resource);
 
+        // Real pfnBufBlt handler: the vertex/index-buffer counterpart of tex_blt above, copying `size`
+        // bytes from src_resource at src_offset into dst_resource at dst_offset. The region is real, not
+        // decorative: the runtime pushes only a D3DPOOL_MANAGED buffer's dirty byte range (see
+        // d3d9_cmd::buf_blt_request). A zero dst_resource is PreLoad's "move this to video memory" hint
+        // and copies nothing.
+        int32_t buf_blt(uint64_t dst_resource, uint64_t src_resource, uint32_t dst_offset, uint32_t src_offset, uint32_t size);
+
         // Copies up to out_capacity bytes of the resource's host-side shadow copy into out.
         // out_data_size always receives the true backing-store size, out_pitch the subresource's row
         // stride (0 for buffers and for formats with no known layout) -- see subresource_row_pitch --

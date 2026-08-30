@@ -4469,6 +4469,70 @@ namespace sogen
         return d3d_ok;
     }
 
+    int32_t d3d9_host::buf_blt(const uint64_t dst_resource, const uint64_t src_resource, const uint32_t dst_offset,
+                               const uint32_t src_offset, const uint32_t size)
+    {
+        // CBuffer::PreLoadImpl issues pfnBufBlt with a null destination and an empty range purely as a
+        // "this managed buffer is about to be used, move it to video memory" hint (RE-confirmed against
+        // the real d3d9.dll). There is nothing to copy, and no destination to copy into.
+        if (texblt_diag_enabled())
+        {
+            fprintf(stderr, "[d3d9-bufblt-diag] dst=%llu src=%llu dst_offset=%u src_offset=%u size=%u\n",
+                    static_cast<unsigned long long>(dst_resource), static_cast<unsigned long long>(src_resource), dst_offset, src_offset,
+                    size);
+        }
+
+        if (dst_resource == 0)
+        {
+            return d3d_ok;
+        }
+
+        const auto dst_it = this->resources_.find(dst_resource);
+        const auto src_it = this->resources_.find(src_resource);
+        if (dst_it == this->resources_.end() || src_it == this->resources_.end())
+        {
+            return d3derr_invalidcall;
+        }
+
+        // Same reason tex_blt flushes: an already-recorded-but-unsubmitted draw may still read the bytes
+        // this write is about to replace, and a direct-mapped destination is written straight into the
+        // GPU buffer that draw is bound to.
+        this->flush_batch();
+
+        resource_entry& dst = dst_it->second;
+        resource_entry& src = src_it->second;
+
+        // A direct-mapped buffer's live bytes are in its GPU mapping's current ring slice, never in
+        // `backing` (see resource_entry::vk_direct_buffer_id).
+        const auto live_bytes = [](resource_entry& entry) -> std::pair<std::byte*, size_t> {
+            if (entry.vk_direct_buffer_id != 0 && entry.direct_mapped_ptr != nullptr)
+            {
+                return {static_cast<std::byte*>(entry.direct_mapped_ptr) + entry.direct_slice_offset, entry.width};
+            }
+            return {entry.backing.data(), entry.backing.size()};
+        };
+
+        const auto [src_base, src_size] = live_bytes(src);
+        const auto [dst_base, dst_size] = live_bytes(dst);
+        if (src_offset > src_size || dst_offset > dst_size)
+        {
+            return d3derr_invalidcall;
+        }
+        const size_t requested = size != 0 ? size : src_size - src_offset;
+        const size_t to_copy = std::min({requested, src_size - src_offset, dst_size - dst_offset});
+        if (to_copy == 0)
+        {
+            return d3d_ok;
+        }
+        std::memcpy(dst_base + dst_offset, src_base + src_offset, to_copy);
+
+        dst.upload_dirty = true;
+        // execute_draw's vertex/index upload cache keys on content_version, so a cached arena offset from
+        // before this copy must not be reused (the same reason unlock() bumps it).
+        ++dst.content_version;
+        return d3d_ok;
+    }
+
     bool d3d9_host::snapshot_resource(const uint64_t resource, std::vector<std::byte>& out_pixels, uint32_t& out_width,
                                       uint32_t& out_height)
     {

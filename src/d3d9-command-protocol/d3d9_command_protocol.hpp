@@ -115,6 +115,22 @@ namespace sogen::d3d9_cmd
         resource_id src_resource;
     };
 
+    // ioctl_d3d9_buf_blt: pfnBufBlt, the vertex/index-buffer counterpart of pfnTexBlt -- the real
+    // d3d9.dll issues it to push a D3DPOOL_MANAGED buffer's system-memory master into its video-memory
+    // copy (CVertexBuffer/CIndexBuffer::UpdateDirtyPortion) and as an explicit PreLoad() hint
+    // (CBuffer::PreLoadImpl). Unlike tex_blt this DOES carry a region: the runtime sends only the
+    // buffer's dirty byte range, so a whole-resource copy would be both wasteful and wrong for a
+    // partial update. See sogen_d3d9_umd.cpp's umd_BufBlt and D3DDDIARG_BUFFERBLT in d3d9_ddi.hpp.
+    struct buf_blt_request
+    {
+        resource_id dst_resource; // 0 for PreLoad's "move this to video memory" hint (nothing to copy)
+        resource_id src_resource;
+        uint32_t dst_offset;
+        uint32_t src_offset;
+        uint32_t size; // 0 = from src_offset to the end of the source buffer
+        uint32_t reserved;
+    };
+
     // ioctl_d3d9_lock: out header immediately followed by data_size bytes of the locked region.
     struct lock_request
     {
@@ -460,6 +476,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(create_resource_request) == 48, "wire layout drift");
     static_assert(sizeof(create_resource_response) == 32, "wire layout drift");
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
+    static_assert(sizeof(buf_blt_request) == 32, "wire layout drift");
     static_assert(sizeof(lock_request) == 32, "wire layout drift");
     static_assert(sizeof(lock_response) == 16, "wire layout drift");
     static_assert(sizeof(unlock_request) == 32, "wire layout drift");

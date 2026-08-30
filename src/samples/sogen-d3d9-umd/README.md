@@ -129,6 +129,12 @@ i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_lock_pitch_test.cpp \
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_lock_slicepitch_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-lock-slicepitch-test-x64.exe -ld3d9
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_managed_buffer_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-managed-buffer-test-x64.exe -ld3d9
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_managed_buffer_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-managed-buffer-test-x86.exe -ld3d9
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_updatetexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-updatetexture-test-x64.exe -ld3d9 -ld3dcompiler_43
 
@@ -374,6 +380,8 @@ cp d3d9-volume-updatetexture-test-x86.exe <root>/filesys/c/d3d9-volume-updatetex
 cp d3d9-srgb-texture-test-x64.exe <root>/filesys/c/d3d9-srgb-texture-test.exe
 cp d3d9-srgb-texture-test-x86.exe <root>/filesys/c/d3d9-srgb-texture-test-x86.exe
 cp d3d9-lock-slicepitch-test-x64.exe <root>/filesys/c/d3d9-lock-slicepitch-test.exe
+cp d3d9-managed-buffer-test-x64.exe <root>/filesys/c/d3d9-managed-buffer-test.exe
+cp d3d9-managed-buffer-test-x86.exe <root>/filesys/c/d3d9-managed-buffer-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -445,6 +453,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-srgb-texture-test.exe
 ./analyzer -e <root> -c c:/d3d9-srgb-texture-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-lock-slicepitch-test.exe
+./analyzer -e <root> -c c:/d3d9-managed-buffer-test.exe
+./analyzer -e <root> -c c:/d3d9-managed-buffer-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory
@@ -1091,7 +1101,26 @@ architectures.
   carries only slice 0 of a 3D image) and now copies the resource's real depth extent.
   `d3d9_volume_updatetexture_test.cpp` covers the pair -- one colour per depth slice, so "never
   written" and "only slice 0 written" are distinguishable failures.
-- **The three remaining unimplemented DDI slots -- `pfnBufBlt` (17), `pfnComposeRects` (54) and
+- **`pfnBufBlt` (slot 17) is implemented (2026-08-29).** It is the vertex/index-buffer counterpart of
+  `pfnTexBlt`/`pfnVolBlt`: the runtime issues it to push a `D3DPOOL_MANAGED` buffer's system-memory
+  master into its video-memory copy (`CVertexBuffer`/`CIndexBuffer::UpdateDirtyPortion`) and as an
+  explicit `PreLoad()` hint (`CBuffer::PreLoadImpl`). `D3DDDIARG_BUFFERBLT` is RE'd in `d3d9_ddi.hpp` to
+  the same both-architectures, builder-plus-batch-consumer standard as `D3DDDIARG_TEXBLT`; unlike TexBlt
+  it carries a real region (`Offset` + `D3DDDIRANGE SrcRange`), because the runtime sends only the dirty
+  byte range. **Measured reachability, not assumed**: the slot fires live on both architectures for a
+  `D3DPOOL_MANAGED|D3DUSAGE_WRITEONLY` buffer, but every observed call carries `hDstResource == NULL` --
+  PreLoadImpl's destination-less "make this current in video memory" hint, which correctly copies
+  nothing. The region-copying form needs the runtime to hold a *separate* sysmem master and vidmem copy
+  (`CResourceManager::UpdateVideoInternal` -> `UpdateDirtyPortion(pDest)`), and every managed buffer here
+  comes back driver-managed instead (`CreateDriverManagedVertexBuffer`, no `CMgmtInfo`) because
+  `install_d3d9_caps_patch_hook` forces `D3DCAPS2_CANMANAGERESOURCE` on -- one resource, nothing to sync.
+  Both forms are implemented; `EMULATOR_D3D9_TEXBLT_DIAG=1` prints a `[d3d9-bufblt-diag]` line per call
+  and is the tripwire for a real destination appearing. `d3d9_managed_buffer_test.cpp` covers the whole
+  `D3DPOOL_MANAGED` buffer path (write/PreLoad/rewrite/evict/partial-range-rewrite, each redrawn and
+  read back), which nothing in this suite covered before. Separately found and NOT fixed: a
+  `D3DPOOL_MANAGED` buffer created *without* `D3DUSAGE_WRITEONLY` fails inside the runtime with `E_FAIL`
+  out of `CVertexBuffer::Create`'s non-write-only branch -- an unrelated gap.
+- **The two remaining unimplemented DDI slots -- `pfnComposeRects` (54) and
   `pfnGenerateMipSubLevels` (64) -- are confirmed unreached by MW2, so they stay unimplemented
   (2026-08-29).** They have the same silent-no-op shape `pfnVolBlt` turned out to be a real bug in, so
   each is now wired to a counting stub that prints `[sogen-d3d9-umd] [ddi-census] <name> reached #N`

@@ -102,6 +102,8 @@ namespace sogen
                                 return "d3d9_present";
                             case gpu_bridge::ioctl_d3d9_tex_blt:
                                 return "d3d9_tex_blt";
+                            case gpu_bridge::ioctl_d3d9_buf_blt:
+                                return "d3d9_buf_blt";
                             case gpu_bridge::ioctl_d3d9_flush:
                                 return "d3d9_flush";
                             case gpu_bridge::ioctl_d3d9_create_vertex_shader:
@@ -376,6 +378,8 @@ namespace sogen
                     return handle_d3d9_present(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_tex_blt:
                     return handle_d3d9_tex_blt(win_emu, context);
+                case gpu_bridge::ioctl_d3d9_buf_blt:
+                    return handle_d3d9_buf_blt(win_emu, context);
                 case gpu_bridge::ioctl_d3d9_flush:
                     return handle_d3d9_flush(win_emu, context);
 
@@ -3021,6 +3025,18 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
                 const int32_t hr = this->d3d9_.tex_blt(request.dst_resource, request.src_resource);
+                return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            }
+
+            NTSTATUS handle_d3d9_buf_blt(windows_emulator& win_emu, const io_device_context& context)
+            {
+                d3d9_cmd::buf_blt_request request{};
+                if (!read_input(win_emu, context, request))
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const int32_t hr =
+                    this->d3d9_.buf_blt(request.dst_resource, request.src_resource, request.dst_offset, request.src_offset, request.size);
                 return hr == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             }
 

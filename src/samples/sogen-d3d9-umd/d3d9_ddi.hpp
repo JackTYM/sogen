@@ -656,6 +656,57 @@ typedef struct _D3DDDIARG_VOLUMEBLT
     HANDLE hSrcResource; // x64: 8, x86: 4 -- HANDLE is 4 bytes there, as in D3DDDIARG_TEXBLT above
 } D3DDDIARG_VOLUMEBLT;
 
+// D3DDDIARG_BUFFERBLT -- pfnBufBlt, device-func-table slot 17: the vertex/index-buffer counterpart of
+// pfnTexBlt/pfnVolBlt. RE'd (2026-08-29) to the same both-ends standard the structs above use, by
+// idasql-decompiling BOTH the builder and the independent batch consumer, on both architectures:
+//   * x64 builder CD3DDDIDX10::BufBlt (d3d9_x64.dll.i64 @ 0x180120180) fills a stack struct from its own
+//     (CBuffer* pDst, CBuffer* pSrc, UINT offset, D3DRANGE* pRange) parameters and passes it to device-func
+//     slot 17 (`(*(v8 + 136))(...)`, 136 == 17*8; DDI >= 0x4001 uses slot 122, pfnBufBlt1, instead).
+//     Locals: v12[0]@0 = dst handle, v12[1]@8 = src handle, v13@16 = the UINT offset, v14@20 = *pRange
+//     (8 bytes), v15@28 = 0.
+//   * x64 consumer CBatchFilterI::LHBatchBufBlt (@ 0x180125AE0) copies exactly 32 bytes and
+//     ReferenceResource()s offsets 0 and 8, cross-confirming both the size and both handle positions.
+//   * x86 builder (d3d9_x86.dll.i64 @ 0x1013E3A0) is an independent decompile, not an extrapolation:
+//     v16[0]@0 = dst, v16[1]@4 = src, v16[2]@8 = offset, v16[3]@12 = Range.Offset, v16[4]@16 = Range.Size,
+//     dispatched through slot 17 (`(*(v8 + 68))(...)`, 68 == 17*4). Its consumer (@ 0x10144120) copies
+//     0x14 == 20 bytes and references offsets 0 and 4.
+// The trailing zeroed dword the x64 builder writes at offset 28 is the struct's tail padding (x86, where
+// the two handles are 4 bytes, needs none and its consumer copies 20 bytes flat).
+//
+// Which handle is which was settled by the callers, not guessed: CVertexBuffer::UpdateDirtyPortion
+// (@ 0x1800CFD86) passes its own `this` (the system-memory master) as the SECOND argument and the
+// destination CResource it was handed as the first, and CBuffer::PreLoadImpl (@ 0x1800D4561) passes a
+// NULL first argument with an empty range -- a destination-less "move this to video memory" hint, which
+// only makes sense if argument one is the destination.
+typedef struct _D3DDDIRANGE
+{
+    UINT Offset;
+    UINT Size;
+} D3DDDIRANGE;
+
+#ifdef _WIN64
+typedef struct _D3DDDIARG_BUFFERBLT
+{
+    HANDLE hDstResource;  // 0 -- NULL for CBuffer::PreLoadImpl's preload hint
+    HANDLE hSrcResource;  // 8
+    UINT Offset;          // 16 -- destination byte offset
+    D3DDDIRANGE SrcRange; // 20, 8 bytes -- the source's dirty byte range
+    UINT Reserved;        // 28 -- always 0 (the builder's own v15)
+} D3DDDIARG_BUFFERBLT;
+
+static_assert(sizeof(D3DDDIARG_BUFFERBLT) == 32, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::BufBlt + LHBatchBufBlt)");
+#else
+typedef struct _D3DDDIARG_BUFFERBLT
+{
+    HANDLE hDstResource;  // 0
+    HANDLE hSrcResource;  // 4 -- NOT 8: HANDLE is 4 bytes on x86
+    UINT Offset;          // 8
+    D3DDDIRANGE SrcRange; // 12, 8 bytes
+} D3DDDIARG_BUFFERBLT;
+
+static_assert(sizeof(D3DDDIARG_BUFFERBLT) == 20, "size confirmed via real d3d9.dll RE (CD3DDDIDX10::BufBlt + LHBatchBufBlt, x86)");
+#endif
+
 // D3DDDIARG_COLORFILL -- pfnColorFill, device-func-table slot 56 (behind IDirect3DDevice9::ColorFill).
 // RE'd this session (2026-07-06) to the same standard as D3DDDIARG_TEXBLT above: BOTH static
 // decompilation AND live tracing of the real staged d3d9.dll.
