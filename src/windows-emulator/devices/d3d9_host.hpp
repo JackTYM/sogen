@@ -475,13 +475,23 @@ namespace sogen
             // Sampled texture: the CPU-side backing has bytes the GPU image does not have yet, so the next
             // ensure_texture_uploaded must do a real staging upload. The inverse of backing_dirty above,
             // which tracks the render-target direction (GPU -> CPU). Defaults to true so a texture that
-            // was never uploaded still gets its first upload; cleared only by a fully successful upload,
-            // so a failed/refused upload can never leave a stale image marked clean. Set by every writer
-            // of a sampled texture's backing store -- unlock() (the Lock/Unlock DDI write-back) and
-            // tex_blt() (UpdateTexture's whole-surface copy). One flag covers all subresources because
+            // was never uploaded still gets its first upload; cleared only once a fence has proved a full
+            // upload landed, so a failed/refused upload can never leave a stale image marked clean. Set by
+            // every writer of a sampled texture's backing store -- unlock() (the Lock/Unlock DDI
+            // write-back) and tex_blt() (UpdateTexture's whole-surface copy). One flag covers all
+            // subresources because
             // ensure_texture_uploaded is all-or-nothing: it re-uploads every mip level/cube face in a
             // single staging buffer, so per-subresource granularity would buy nothing.
             bool upload_dirty{true};
+
+            // A staging copy for the CURRENT backing bytes is already recorded into batch slot
+            // upload_batch_slot, whose fence has not signalled yet. upload_dirty is still true (only the
+            // fence may clear it, in retire_batch_slot), but the copy must not be recorded a second time,
+            // and every draw recorded after it in submission order already samples the new content. Every
+            // writer of `backing` clears this alongside setting upload_dirty, so a copy of superseded bytes
+            // can never be mistaken for one of the current bytes.
+            bool upload_in_flight{};
+            uint32_t upload_batch_slot{};
 
             // Monotonic counter bumped every time this resource's backing bytes are mutated (currently the
             // sole site is unlock()'s write-back memcpy -- see its own comment). execute_draw's vertex/index
@@ -491,6 +501,14 @@ namespace sogen
             // resource ids (allocate_id()) are never reused either, so a stale cache entry can never alias a
             // different, newer resource.
             uint64_t content_version{};
+
+            // Every write to `backing` invalidates both the GPU image and any staging copy already recorded
+            // for the bytes it replaced, so the two flags are only ever set together.
+            void mark_backing_written()
+            {
+                upload_dirty = true;
+                upload_in_flight = false;
+            }
 
             // Selects subresource `index`'s backing store (index 0 == `backing`; higher == a mip level).
             // Callers must bounds-check index against extra_mips.size() + 1 before calling.
@@ -636,8 +654,9 @@ namespace sogen
 
         // Lazily created once per device: a single command pool/queue, plus a command_buffer_/fence_
         // pair reused (submitted and waited on synchronously) by the prep helpers
-        // (ensure_texture_uploaded, ensure_depth_stencil_view) -- draws, and every transfer that can be
-        // pipelined behind them (color_fill, tex_blt's GPU fast path, blt), record into the separate
+        // (ensure_depth_stencil_view, generate_mip_sub_levels, and ensure_texture_uploaded's
+        // over-budget fallback) -- draws, and every transfer that can be pipelined behind them
+        // (color_fill, tex_blt's GPU fast path, blt, ensure_texture_uploaded), record into the separate
         // batch_command_buffer_/batch_fence_ below instead.
         uint64_t queue_{};
         uint64_t command_pool_{};
@@ -698,6 +717,16 @@ namespace sogen
         };
 
         std::array<std::vector<pending_staging_buffer>, batch_slot_count> pending_staging_cleanup_{};
+        // Total bytes of the staging buffers pending_staging_cleanup_[slot] is holding alive. A level-load
+        // burst can need hundreds of texture uploads before anything flushes, and each one's staging buffer
+        // has to outlive the batch, so ensure_texture_uploaded stops batching (and pays its own
+        // submit+wait, freeing immediately) once a slot is holding this much -- bounding the peak at a
+        // fixed cost instead of letting it scale with the burst.
+        std::array<uint64_t, batch_slot_count> pending_staging_bytes_{};
+        static constexpr uint64_t max_pending_staging_bytes = 64ull << 20;
+        // Sampled textures whose staging copy ensure_texture_uploaded recorded into slot `i` -- their
+        // upload_dirty is cleared by retire_batch_slot, once that slot's fence proves the copy landed.
+        std::array<std::vector<uint64_t>, batch_slot_count> pending_texture_uploads_{};
         // Which slot the CURRENTLY open batch (if any) is recording into; also the last slot used when no
         // batch is open. Advanced (round-robin) only by execute_draw's batch-management step, and only for
         // the reopen reasons that don't themselves require this exact slot back immediately (see that

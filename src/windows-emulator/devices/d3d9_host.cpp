@@ -716,6 +716,20 @@ namespace sogen
             this->vulkan_.free_memory(staging.device, staging.memory);
         }
         this->pending_staging_cleanup_[slot].clear();
+        this->pending_staging_bytes_[slot] = 0;
+        for (const uint64_t resource : this->pending_texture_uploads_[slot])
+        {
+            const auto it = this->resources_.find(resource);
+            // A resource re-marked dirty since (upload_in_flight cleared by the writer), or already
+            // re-recorded into the OTHER slot, must keep its dirty flag: only the copy this slot's fence
+            // just proved is allowed to declare the GPU image current.
+            if (it != this->resources_.end() && it->second.upload_in_flight && it->second.upload_batch_slot == slot)
+            {
+                it->second.upload_in_flight = false;
+                it->second.upload_dirty = false;
+            }
+        }
+        this->pending_texture_uploads_[slot].clear();
     }
 
     void d3d9_host::wait_for_batch_slot(const uint32_t slot)
@@ -4085,10 +4099,14 @@ namespace sogen
         // would produce. Short-circuiting here is what makes a repeatedly-sampled texture cost nothing
         // after its first use, instead of a staging allocate + copy + submit + fence-wait + free per
         // draw. Placed after the guards above (not before) so a "clean" verdict can only ever be reached
-        // by a resource that really is an uploadable sampled texture -- upload_dirty is cleared solely at
-        // the successful end of this function, so a refused or failed upload always stays dirty and gets
-        // retried, never silently reported as uploaded.
-        if (!tex.upload_dirty)
+        // by a resource that really is an uploadable sampled texture -- upload_dirty is cleared only once
+        // a fence has proved a full upload landed (retire_batch_slot, or the non-batched path at the end
+        // of this function), so a refused or failed upload always stays dirty and gets retried, never
+        // silently reported as uploaded.
+        // upload_in_flight is the same verdict one step earlier: the copy for exactly these bytes is
+        // already recorded into a batch, ahead of every command this call's caller is about to record, so
+        // re-recording it would only duplicate the transfer.
+        if (!tex.upload_dirty || tex.upload_in_flight)
         {
             ++this->stats_.texture_upload_skipped;
             return true;
@@ -4182,8 +4200,29 @@ namespace sogen
             this->vulkan_.upload_memory(device, staging_memory, up.staging_offset, up.size, up.src, up.size);
         }
 
-        this->vulkan_.reset_fence(device, this->fence_);
-        this->vulkan_.begin_command_buffer(this->command_buffer_, 0, false, 0, {}, 0, 0, 1, 0);
+        // Record into the currently-open batch rather than submitting a private command buffer and
+        // blocking on its fence: that round trip was measured at 2.31ms of frame time PER TEXTURE, so a
+        // level-load burst of a few hundred uploads cost hundreds of milliseconds of pure CPU-waits-for-GPU
+        // stall. Batched, an arbitrary number of uploads share one submit and one fence, and the fence is
+        // waited on only when the slot is reused. Past max_pending_staging_bytes the batch is already
+        // holding more staging memory alive than is reasonable (see that constant), so the upload falls
+        // back to its own submit+wait, which frees its staging buffer immediately.
+        const bool batched = this->pending_staging_bytes_[this->batch_slot_] + total_size <= max_pending_staging_bytes;
+        uint64_t upload_cmd = this->command_buffer_;
+        if (batched)
+        {
+            if (!this->batch_open_)
+            {
+                this->ensure_batch_open(device, this->state_.render_targets[0], this->state_.depth_stencil);
+            }
+            this->close_render_pass(this->batch_slot_); // vkCmdCopyBufferToImage is illegal inside a render pass instance
+            upload_cmd = this->batch_command_buffer_[this->batch_slot_];
+        }
+        else
+        {
+            this->vulkan_.reset_fence(device, this->fence_);
+            this->vulkan_.begin_command_buffer(upload_cmd, 0, false, 0, {}, 0, 0, 1, 0);
+        }
 
         // One barrier over the whole image, then one buffer->image copy per subresource. A cube's six
         // faces are array layers 0..5 of a single image, so the barrier must span all six; a 2D texture
@@ -4197,8 +4236,15 @@ namespace sogen
         // VK_IMAGE_LAYOUT_UNDEFINED is a valid old_layout regardless of the image's actual current
         // layout (Vulkan's "discard previous contents" transition) -- correct here since every upload
         // fully overwrites every level anyway, whether this is the first upload or a later re-upload.
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+        // Both scopes span the vertex stage as well as the fragment stage: these copies now sit in the
+        // same command buffer as the draws around them, so the barriers -- not a fence -- are what order
+        // them, and a texture reached by SM3.0 vertex texture fetch is read at VERTEX_SHADER. The source
+        // scope is a real read rather than TOP_OF_PIPE for the same reason: an earlier draw in this batch
+        // may still be sampling the image these copies overwrite (a re-upload after a Lock/Unlock between
+        // two draws).
+        constexpr uint32_t sampling_stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        this->vulkan_.cmd_pipeline_barrier(upload_cmd, tex.vk_image_id, sampling_stages, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, range);
 
         for (const auto& up : uploads)
@@ -4218,23 +4264,38 @@ namespace sogen
                 .layer_count = 1,
                 .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
             };
-            this->vulkan_.cmd_copy_buffer_to_image(this->command_buffer_, staging_buffer, tex.vk_image_id,
-                                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+            this->vulkan_.cmd_copy_buffer_to_image(upload_cmd, staging_buffer, tex.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                                   region);
         }
 
-        this->vulkan_.cmd_pipeline_barrier(this->command_buffer_, tex.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, range);
+        this->vulkan_.cmd_pipeline_barrier(upload_cmd, tex.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, sampling_stages,
+                                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, range);
 
-        this->vulkan_.end_command_buffer(this->command_buffer_);
-        this->vulkan_.queue_submit(this->queue_, this->command_buffer_, this->fence_);
-        this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
+        if (batched)
+        {
+            // The staging buffer is read by the GPU only when this slot's batch executes, so it -- and the
+            // upload_dirty clear this copy earns -- both belong to retire_batch_slot, not to this call.
+            this->pending_staging_cleanup_[this->batch_slot_].push_back(
+                {.device = device, .buffer = staging_buffer, .memory = staging_memory});
+            this->pending_staging_bytes_[this->batch_slot_] += total_size;
+            this->pending_texture_uploads_[this->batch_slot_].push_back(resource);
+            tex.upload_in_flight = true;
+            tex.upload_batch_slot = this->batch_slot_;
+        }
+        else
+        {
+            this->vulkan_.end_command_buffer(upload_cmd);
+            this->vulkan_.queue_submit(this->queue_, upload_cmd, this->fence_);
+            this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
-        this->vulkan_.destroy_buffer(device, staging_buffer);
-        this->vulkan_.free_memory(device, staging_memory);
+            this->vulkan_.destroy_buffer(device, staging_buffer);
+            this->vulkan_.free_memory(device, staging_memory);
 
-        // Only here, after the fence proved every copy landed, is the GPU image known to match `backing`.
-        tex.upload_dirty = false;
+            // Only here, after the fence proved every copy landed, is the GPU image known to match
+            // `backing`.
+            tex.upload_dirty = false;
+        }
         ++this->stats_.texture_upload_done;
 
         if (texupload_diag_enabled())
@@ -4469,7 +4530,7 @@ namespace sogen
         }
 
         dst.backing = src.backing;
-        dst.upload_dirty = true; // dst's GPU image no longer matches its (just replaced) backing
+        dst.mark_backing_written(); // dst's GPU image no longer matches its (just replaced) backing
         return d3d_ok;
     }
 
@@ -4530,7 +4591,7 @@ namespace sogen
         }
         std::memcpy(dst_base + dst_offset, src_base + src_offset, to_copy);
 
-        dst.upload_dirty = true;
+        dst.mark_backing_written();
         // execute_draw's vertex/index upload cache keys on content_version, so a cached arena offset from
         // before this copy must not be reused (the same reason unlock() bumps it).
         ++dst.content_version;
@@ -5337,7 +5398,7 @@ namespace sogen
         // re-upload before the next draw samples it. Unconditional -- cheap, and deliberately not
         // narrowed to "is this a texture kind", since a mislabelled resource that later turns out to be
         // sampled would then silently render stale pixels.
-        it->second.upload_dirty = true;
+        it->second.mark_backing_written();
         // Same unconditional treatment for execute_draw's vertex/index upload cache (Task #161) -- this is
         // the one site that mutates `backing` without the batch already having been flushed first (every
         // other writer -- tex_blt, sync_backing_from_gpu -- calls flush_batch() before touching backing),
@@ -5461,7 +5522,7 @@ namespace sogen
 
         // Mirrors unlock()'s own bookkeeping above -- see its comments for why both flags are
         // unconditional.
-        it->second.upload_dirty = true;
+        it->second.mark_backing_written();
         ++it->second.content_version;
     }
 
