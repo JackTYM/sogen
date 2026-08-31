@@ -185,10 +185,11 @@ namespace sogen
                 : win_emu_(win_emu),
                   buffer_bytes_(buffer_bytes),
                   section_size_(section_size),
-                  host_storage_(static_cast<size_t>(section_size) + k_audio_page_size)
+                  host_storage_(static_cast<size_t>(section_size) + 2 * k_host_alias_alignment)
             {
-                this->host_ptr_ = reinterpret_cast<uint8_t*>(
-                    (reinterpret_cast<uintptr_t>(this->host_storage_.data()) + (k_audio_page_size - 1)) & ~(k_audio_page_size - 1));
+                this->host_ptr_ =
+                    reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(this->host_storage_.data()) + (k_host_alias_alignment - 1)) &
+                                               ~(k_host_alias_alignment - 1));
                 std::memcpy(this->host_ptr_, control_header, control_header_size);
 
                 this->guest_address_ = win_emu.memory.find_free_allocation_base(static_cast<size_t>(section_size));
@@ -242,7 +243,13 @@ namespace sogen
             }
 
           private:
-            static constexpr size_t k_audio_page_size = 0x1000;
+            // allocate_host_memory aliases this buffer into the guest with mach_vm_remap/mremap, which work at
+            // HOST page granularity and silently truncate a finer-grained source address down to it. Apple
+            // Silicon's host page is 16 KB -- four times the guest's -- so a buffer aligned only to the guest
+            // page size hands the guest a window shifted onto whatever host heap precedes it, and audioses
+            // rejects the control header it finds there. 64 KB covers every host page size sogen runs on, and
+            // host_storage_ carries a second one so the host-page round-up of section_size still lands inside it.
+            static constexpr size_t k_host_alias_alignment = 0x10000;
 
             uint64_t read_cursor(const uint32_t offset) const
             {
