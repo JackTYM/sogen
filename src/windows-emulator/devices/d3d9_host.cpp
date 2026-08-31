@@ -573,7 +573,14 @@ namespace sogen
 
         if (this->gpu_progress_callback_)
         {
-            this->vulkan_.start_gpu_progress_watch(device, this->gpu_progress_callback_);
+            const int32_t watch_result = this->vulkan_.start_gpu_progress_watch(device, this->gpu_progress_callback_);
+            if (watch_result != 0)
+            {
+                fprintf(stderr,
+                        "[d3d9-host] WARNING: start_gpu_progress_watch failed (VkResult=%d) -- parked guest threads fall back to "
+                        "poll-with-backoff wakes, which costs roughly an order of magnitude more wake latency\n",
+                        watch_result);
+            }
         }
 
         this->draw_infra_ready_ = true;
