@@ -369,6 +369,7 @@ namespace sogen
             wait_packet->io_status_block.Information = io_status_information;
             wait_packet->io_status_information = io_status_information;
             wait_packet->associated = true;
+            completion->associate_wait_packet(wait_completion_packet_handle);
 
             io_completion_wait::materialize_signaled_wait_packets(c.proc, io_completion_handle);
             already_signaled.write_if_valid(wait_packet->queued_completion ? TRUE : FALSE);

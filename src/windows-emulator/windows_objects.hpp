@@ -879,6 +879,22 @@ namespace sogen
         uint32_t number_of_concurrent_threads{};
         std::vector<io_completion_message> queue{};
 
+        // Handles of the wait completion packets currently associated with this port. Without it, every
+        // readiness check of a thread parked in NtRemoveIoCompletion has to walk the whole process-wide
+        // packet store, which a guest that keeps allocating thread pools grows without bound. Entries
+        // are added on association and dropped lazily by the reader once they no longer resolve to a
+        // packet associated with this port, so a stale entry costs one skipped visit and can never
+        // deliver a completion to a port the packet does not belong to.
+        std::vector<uint64_t> associated_wait_packets{};
+
+        void associate_wait_packet(const handle wait_packet_handle)
+        {
+            if (std::ranges::find(this->associated_wait_packets, wait_packet_handle.bits) == this->associated_wait_packets.end())
+            {
+                this->associated_wait_packets.push_back(wait_packet_handle.bits);
+            }
+        }
+
         void enqueue(const io_completion_message& message)
         {
             this->queue.push_back(message);
@@ -916,6 +932,7 @@ namespace sogen
             buffer.write(this->name);
             buffer.write(this->number_of_concurrent_threads);
             buffer.write_vector(this->queue);
+            buffer.write_vector(this->associated_wait_packets);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -923,6 +940,7 @@ namespace sogen
             buffer.read(this->name);
             buffer.read(this->number_of_concurrent_threads);
             buffer.read_vector(this->queue);
+            buffer.read_vector(this->associated_wait_packets);
         }
     };
 
