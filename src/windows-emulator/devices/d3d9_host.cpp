@@ -3667,7 +3667,13 @@ namespace sogen
                                                                      .height = -vp_height,
                                                                      .min_depth = vp_min_z,
                                                                      .max_depth = vp_max_z}}};
-        this->vulkan_.cmd_set_viewport(batch_cmd, 0, false, viewports);
+        viewport_scissor_memo& vp_memo = this->viewport_scissor_memo_;
+        const bool vp_memo_current = vp_memo.valid && vp_memo.batch_generation == this->batch_generation_;
+        if (!vp_memo_current || vp_memo.viewport != viewports[0])
+        {
+            this->vulkan_.cmd_set_viewport(batch_cmd, 0, false, viewports);
+            vp_memo.viewport = viewports[0];
+        }
         vulkan_host::scissor_entry scissor{.offset_x = 0, .offset_y = 0, .width = rt.width, .height = rt.height};
         if (render_state_or(this->state_.render_state, d3drs_scissortestenable, 0) != 0)
         {
@@ -3681,7 +3687,13 @@ namespace sogen
                        .height = static_cast<uint32_t>(clamped_bottom - clamped_top)};
         }
         const std::array<vulkan_host::scissor_entry, 1> scissors{scissor};
-        this->vulkan_.cmd_set_scissor(batch_cmd, 0, false, scissors);
+        if (!vp_memo_current || vp_memo.scissor != scissors[0])
+        {
+            this->vulkan_.cmd_set_scissor(batch_cmd, 0, false, scissors);
+            vp_memo.scissor = scissors[0];
+        }
+        vp_memo.batch_generation = this->batch_generation_;
+        vp_memo.valid = true;
 
         if (!use_programmable)
         {

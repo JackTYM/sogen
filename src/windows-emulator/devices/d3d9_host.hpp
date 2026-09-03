@@ -1108,6 +1108,25 @@ namespace sogen
 
         descriptor_set_memo descriptor_memo_{};
 
+        // vkCmdSetViewport/vkCmdSetScissor are dynamic state scoped to the recording command buffer, so a
+        // value already recorded into the open batch stays bound for every later draw in it -- and MW2
+        // re-derives the same rect for long runs of consecutive draws. Re-issuing it is not free on
+        // MoltenVK (each call re-encodes the Metal render encoder's viewport/scissor), so a draw whose
+        // rect matches what this batch already recorded skips the call.
+        //
+        // batch_generation is the invalidation key for the same reason it is on descriptor_set_memo, but
+        // the failure mode is sharper: a fresh command buffer starts with its dynamic state UNDEFINED, so
+        // a rect "unchanged" since a previous batch is not actually bound and must be re-issued.
+        struct viewport_scissor_memo
+        {
+            uint64_t batch_generation{};
+            vulkan_host::viewport_entry viewport{};
+            vulkan_host::scissor_entry scissor{};
+            bool valid{false};
+        };
+
+        viewport_scissor_memo viewport_scissor_memo_{};
+
         // One GPU buffer per batch slot (see batch_slot_count's comment above), each backing every
         // vertex/index/uniform range a draw in THAT slot's batch needs. Each range is a distinct
         // 256-byte-aligned slice handed out by arena_suballoc; a slot's buffer is created lazily and grown

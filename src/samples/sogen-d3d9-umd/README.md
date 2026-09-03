@@ -147,6 +147,12 @@ x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_upload_batch_test.cpp \
 i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_texture_upload_batch_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-texture-upload-batch-test-x86.exe -ld3d9 -ld3dcompiler_43
 
+x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_viewport_scissor_cache_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-viewport-scissor-cache-test-x64.exe -ld3d9 -ld3dcompiler_43
+
+i686-w64-mingw32-g++ -O2 -std=c++20 d3d9_viewport_scissor_cache_test.cpp \
+    -static -static-libgcc -static-libstdc++ -o d3d9-viewport-scissor-cache-test-x86.exe -ld3d9 -ld3dcompiler_43
+
 x86_64-w64-mingw32-g++ -O2 -std=c++20 d3d9_updatetexture_test.cpp \
     -static -static-libgcc -static-libstdc++ -o d3d9-updatetexture-test-x64.exe -ld3d9 -ld3dcompiler_43
 

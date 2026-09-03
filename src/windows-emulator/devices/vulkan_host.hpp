@@ -238,6 +238,8 @@ namespace sogen
             float height;
             float min_depth;
             float max_depth;
+
+            friend bool operator==(const viewport_entry&, const viewport_entry&) = default;
         };
 
         // One VkRect2D as plain integers (dynamic scissor state).
@@ -247,6 +249,8 @@ namespace sogen
             int32_t offset_y;
             uint32_t width;
             uint32_t height;
+
+            friend bool operator==(const scissor_entry&, const scissor_entry&) = default;
         };
 
         // Creates a 2D, single-mip, single-layer image (initial layout UNDEFINED). samples selects the
