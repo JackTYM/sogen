@@ -165,10 +165,13 @@ namespace
             pending_batch = take_pending_d3d9_batch();
         }
 
-        // The header region is fully written by fill_escape_header, the prelude and input regions by
-        // the memcpys below, and the output region by the host's escape write-back (every wire
-        // command's host handler fills the full output_size it is given), so the staging buffer needs
-        // no zero-init.
+        // The header region is fully written by fill_escape_header and the prelude and input regions
+        // by the memcpys below, so only the output region needs clearing: a host handler fills it
+        // only on the paths it answers successfully, and a failure it reports by parking (which the
+        // escape syscall always completes with STATUS_SUCCESS, the real outcome being the output
+        // buffer itself) leaves the caller no other way to tell the two apart. Clearing it is what
+        // makes an unfilled response read as an all-zero one instead of as this allocation's
+        // leftovers.
         const uint32_t header_size = sizeof(gb::escape_command_header);
         const gb::record_and_call_request prelude{.inner_command_id = code, .batch_size = static_cast<uint32_t>(pending_batch.size())};
         const size_t prelude_size = pending_batch.empty() ? 0 : sizeof(prelude) + pending_batch.size();
@@ -185,6 +188,10 @@ namespace
         if (in != nullptr && in_len != 0)
         {
             std::memcpy(buffer + header_size + prelude_size, in, in_len);
+        }
+        if (out_len != 0)
+        {
+            std::memset(buffer + header_size + prelude_size + in_len, 0, out_len);
         }
 
         if (!send_escape(buffer, total))
@@ -2661,7 +2668,6 @@ namespace
         // or, on a genuine first touch of this (resource, subresource), via a real probe round trip
         // whose result then seeds the cache for every future Lock() on the same key.
         uint32_t data_size = 0;
-        bool probe_hr_nonzero = false;
         locked_layout layout{};
         const auto cached_layout_it = g_resource_layouts.find(key);
         if (cached_layout_it != g_resource_layouts.end())
@@ -2673,24 +2679,30 @@ namespace
         }
         else
         {
+            // Nothing below can run on a response the host did not actually produce: it would size the
+            // app's buffer, and place the pointer handed back in it, from whatever the zeroed response
+            // happens to read as -- an empty allocation the app then writes a whole subresource
+            // through. A zero data_size is the host's own answer for every lock it refuses (see
+            // d3d9_host::lock), so it fails the Lock here for the same reason a nonzero hr does.
             d3d9c::lock_response probe{};
-            bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe), resource_needs_flush);
-            probe_hr_nonzero = probe.hr != 0;
-            data_size = probe.data_size;
-            if (!probe_hr_nonzero)
+            const bool sent = bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &probe, sizeof(probe), resource_needs_flush);
+            if (!sent || probe.hr != 0 || probe.data_size == 0)
             {
-                layout = {offset + probe.data_size, probe.pitch, probe.slice_pitch, probe.block_bytes, probe.block_texels};
-                g_resource_layouts[key] = layout;
-                pArgs->Pitch = probe.pitch;
-                pArgs->SlicePitch = probe.slice_pitch;
+                pArgs->pData = nullptr;
+                return E_FAIL;
             }
+            data_size = probe.data_size;
+            layout = {offset + probe.data_size, probe.pitch, probe.slice_pitch, probe.block_bytes, probe.block_texels};
+            g_resource_layouts[key] = layout;
+            pArgs->Pitch = probe.pitch;
+            pArgs->SlicePitch = probe.slice_pitch;
         }
 
         // The runtime owns this surface's pixels outright (see g_sysmem_surfaces): hand its allocation
         // back as pData -- which is what a real WDDM driver does for a D3DDDIPOOL_SYSTEMMEM resource,
         // and is already the pointer the app is writing through -- and let umd_Unlock ship those bytes.
         // No staging buffer, and no round trip to fetch contents the app is about to overwrite.
-        if (const auto* surface = find_sysmem_surface(resource, subresource); surface != nullptr && data_size != 0 && !probe_hr_nonzero)
+        if (const auto* surface = find_sysmem_surface(resource, subresource); surface != nullptr && data_size != 0)
         {
             g_sysmem_locks[key] = {surface->address, data_size, surface->pitch, pArgs->Pitch};
             if (surface->pitch != 0)
@@ -2714,12 +2726,6 @@ namespace
             // payload) that would otherwise fetch bytes the app is going to discard anyway.
             // umd_Unlock always ships whatever the app wrote into `buffer` regardless of how it
             // got sized, so this is safe.
-            if (probe_hr_nonzero)
-            {
-                g_locked_buffers.erase(key);
-                pArgs->pData = nullptr;
-                return E_FAIL;
-            }
             buffer = {std::make_unique<uint8_t[]>(data_size), data_size};
             pArgs->pData = buffer.bytes.get();
             g_locked_offsets[key] = offset;
@@ -2738,8 +2744,8 @@ namespace
         // cache hit (no probe this call), the batch is exactly as it was when resource_needs_flush was
         // computed just above, so it's equally valid there too.
         d3d9c::lock_response resp{};
-        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &resp, sizeof(resp), resource_needs_flush);
-        if (resp.hr != 0)
+        const bool sent = bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &resp, sizeof(resp), resource_needs_flush);
+        if (!sent || resp.hr != 0 || resp.data_size == 0)
         {
             g_locked_buffers.erase(key);
             pArgs->pData = nullptr;

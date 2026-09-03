@@ -343,6 +343,14 @@ link either -- it's fixed-function-only (`D3DFVF_XYZRHW|D3DFVF_DIFFUSE`), no sha
 
 ## Stage
 
+The driver and the host share one wire protocol with no runtime version negotiation, so
+`sogen_d3d9um.dll` has to be re-staged into **every** root anything is run against whenever
+`sogen_d3d9_umd.cpp` or `d3d9_command_protocol.hpp` changes. A root left holding an older copy
+still loads and still negotiates a device; what goes wrong is that the host rejects each record
+whose size the two sides no longer agree on, so (for instance) a `lock_response` that grew fails
+every `Lock` the app makes and the app renders nothing. Roots are outside the build tree and
+nothing re-stages them for you.
+
 ```bash
 cp sogen_d3d9um-x64.dll <root>/filesys/c/windows/system32/sogen_d3d9um.dll
 cp d3d9-spike-test-x64.exe <root>/filesys/c/d3d9-spike-test.exe
