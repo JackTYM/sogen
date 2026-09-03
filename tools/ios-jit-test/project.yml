@@ -1,0 +1,21 @@
+name: JITTest
+options:
+  bundleIdPrefix: com.jacksonyarger
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  JITTest:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jacksonyarger.jittest
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging-Header.h
+        CODE_SIGN_ENTITLEMENTS: JITTest.entitlements
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
