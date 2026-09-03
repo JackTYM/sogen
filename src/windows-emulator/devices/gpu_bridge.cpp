@@ -3067,9 +3067,11 @@ namespace sogen
                 uint32_t data_size = 0;
                 uint32_t pitch = 0;
                 uint32_t slice_pitch = 0;
+                uint32_t block_bytes = 0;
+                uint32_t block_texels = 0;
                 const bool render_target_readback = this->d3d9_.is_render_target(request.resource);
                 const int32_t hr = this->d3d9_.lock(request.resource, request.subresource, request.offset, request.size, request.flags,
-                                                    view, data_size, pitch, slice_pitch);
+                                                    view, data_size, pitch, slice_pitch, block_bytes, block_texels);
                 static const bool lock_diag = getenv("EMULATOR_D3D9_TEXBLT_DIAG") != nullptr;
                 if (lock_diag)
                 {
@@ -3094,7 +3096,12 @@ namespace sogen
                     return STATUS_BUFFER_TOO_SMALL;
                 }
                 emulator_object<d3d9_cmd::lock_response>{win_emu.emu(), context.output_buffer}.write(
-                    d3d9_cmd::lock_response{.hr = hr, .data_size = data_size, .pitch = pitch, .slice_pitch = slice_pitch});
+                    d3d9_cmd::lock_response{.hr = hr,
+                                            .data_size = data_size,
+                                            .pitch = pitch,
+                                            .slice_pitch = slice_pitch,
+                                            .block_bytes = block_bytes,
+                                            .block_texels = block_texels});
                 const auto copy_bytes = request.data_address != 0 ? std::min<size_t>(view.size, request.data_capacity) : 0;
                 if (copy_bytes > 0)
                 {

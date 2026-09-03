@@ -174,6 +174,15 @@ namespace sogen::d3d9_cmd
         // the same layout as `pitch`, so a volume's rows and slices can never disagree. 0 for anything
         // that is not a volume texture.
         uint32_t slice_pitch;
+        // The addressing granularity of one row: `block_texels` is the edge of the smallest
+        // independently addressable square (1 for an uncompressed format, 4 for a block-compressed one)
+        // and `block_bytes` is how many bytes that square occupies. Together with `pitch` they are
+        // exactly what a rect-scoped LockRect needs to place its own top-left texel
+        // (`(top / block_texels) * pitch + (left / block_texels) * block_bytes`), which the guest has to
+        // compute for itself: the D3D9 runtime hands the driver's pData to the app unadjusted. Both are
+        // 0 for buffers and for any format with no known layout.
+        uint32_t block_bytes;
+        uint32_t block_texels;
     };
 
     // ioctl_d3d9_unlock: a fixed-size request only, no trailing data. data_address is the guest
@@ -495,7 +504,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(buf_blt_request) == 32, "wire layout drift");
     static_assert(sizeof(generate_mip_sub_levels_request) == 16, "wire layout drift");
     static_assert(sizeof(lock_request) == 40, "wire layout drift");
-    static_assert(sizeof(lock_response) == 16, "wire layout drift");
+    static_assert(sizeof(lock_response) == 24, "wire layout drift");
     static_assert(sizeof(unlock_request) == 32, "wire layout drift");
     static_assert(sizeof(create_shader_request) == 8, "wire layout drift");
     static_assert(sizeof(create_shader_response) == 16, "wire layout drift");

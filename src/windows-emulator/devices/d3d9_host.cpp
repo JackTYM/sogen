@@ -1515,6 +1515,34 @@ namespace sogen
             return static_cast<uint32_t>(vk_texture_data_size(vk_format, level_width, 1));
         }
 
+        // The smallest independently addressable square of a subresource's format: its edge in texels and
+        // its size in bytes. Derived from the same vk_texture_data_size that produces the row pitch and
+        // sizes the backing store, so a rect-scoped lock placed with these can never land at a stride the
+        // layout disagrees with. Both 0 for buffers and for formats with no known layout.
+        struct format_block
+        {
+            uint32_t bytes;
+            uint32_t texels;
+        };
+
+        format_block subresource_format_block(const uint32_t kind, const uint32_t format)
+        {
+            if (kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::vertex_buffer) ||
+                kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::index_buffer))
+            {
+                return {};
+            }
+            uint32_t vk_format = 0;
+            if (!d3d9_format_to_vulkan(format, vk_format))
+            {
+                return {};
+            }
+            const bool compressed = vk_format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK || vk_format == VK_FORMAT_BC2_UNORM_BLOCK ||
+                                    vk_format == VK_FORMAT_BC3_UNORM_BLOCK;
+            const uint32_t texels = compressed ? 4u : 1u;
+            return {.bytes = static_cast<uint32_t>(vk_texture_data_size(vk_format, texels, texels)), .texels = texels};
+        }
+
         // D3DLOCKED_BOX::SlicePitch for one subresource: the byte distance between two consecutive depth
         // slices. Derived from the same vk_texture_data_size that texture_subresource_layout multiplies by
         // the level's depth to size the backing store, so a slice-major write laid out at this stride
@@ -5303,12 +5331,14 @@ namespace sogen
 
     int32_t d3d9_host::lock(const uint64_t resource, const uint32_t subresource, const uint32_t offset, const uint32_t size,
                             const uint32_t /*flags*/, lock_view& out_view, uint32_t& out_data_size, uint32_t& out_pitch,
-                            uint32_t& out_slice_pitch)
+                            uint32_t& out_slice_pitch, uint32_t& out_block_bytes, uint32_t& out_block_texels)
     {
         out_view = {};
         out_data_size = 0;
         out_pitch = 0;
         out_slice_pitch = 0;
+        out_block_bytes = 0;
+        out_block_texels = 0;
 
         const auto it = this->resources_.find(resource);
         if (it == this->resources_.end())
@@ -5318,6 +5348,9 @@ namespace sogen
         out_pitch = subresource_row_pitch(it->second.kind, it->second.format, it->second.width, it->second.mip_levels, subresource);
         out_slice_pitch = subresource_slice_pitch(it->second.kind, it->second.format, it->second.width, it->second.height,
                                                   it->second.mip_levels, subresource);
+        const format_block block = subresource_format_block(it->second.kind, it->second.format);
+        out_block_bytes = block.bytes;
+        out_block_texels = block.texels;
         if (volume_census_enabled() && it->second.kind == static_cast<uint32_t>(d3d9_cmd::resource_kind::texture_volume))
         {
             fprintf(stderr, "[d3d9-volcensus] lock resource=%llu subresource=%u offset=%u size=%u pitch=%u\n",

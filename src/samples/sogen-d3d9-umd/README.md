@@ -408,6 +408,8 @@ cp d3d9-managed-buffer-test-x64.exe <root>/filesys/c/d3d9-managed-buffer-test.ex
 cp d3d9-managed-buffer-test-x86.exe <root>/filesys/c/d3d9-managed-buffer-test-x86.exe
 cp d3d9-autogen-mipmap-test-x64.exe <root>/filesys/c/d3d9-autogen-mipmap-test.exe
 cp d3d9-autogen-mipmap-test-x86.exe <root>/filesys/c/d3d9-autogen-mipmap-test-x86.exe
+cp d3d9-lock-readback-test-x64.exe <root>/filesys/c/d3d9-lock-readback-test.exe
+cp d3d9-lock-readback-test-x86.exe <root>/filesys/c/d3d9-lock-readback-test-x86.exe
 ```
 
 `<root>` is the emulated filesystem passed to the analyzer via `-e`; the real 64-bit Microsoft
@@ -483,6 +485,8 @@ fixed-function-only and needs no `d3dcompiler_43` on either architecture.)
 ./analyzer -e <root> -c c:/d3d9-managed-buffer-test-x86.exe
 ./analyzer -e <root> -c c:/d3d9-autogen-mipmap-test.exe
 ./analyzer -e <root> -c c:/d3d9-autogen-mipmap-test-x86.exe
+./analyzer -e <root> -c c:/d3d9-lock-readback-test.exe
+./analyzer -e <root> -c c:/d3d9-lock-readback-test-x86.exe
 ```
 
 `d3d9-drawprimitiveup-test.exe` proves `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` (user-memory

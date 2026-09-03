@@ -7,17 +7,24 @@
 // texture test only ever writes a full surface, which passes just as well when the read side returns
 // garbage.
 //
-// Four properties, each checked against the exact bytes written rather than a tolerance:
-//   1. a full-surface write-only lock's bytes survive to the next lock;
-//   2. a lock through which the app rewrites only a sub-region preserves everything outside it;
-//   3. a D3DLOCK_DISCARD lock's bytes reach the surface like any other write;
-//   4. the GPU samples the final content, so the checks above cannot pass on a CPU-side buffer the
-//      upload path never delivered.
+// A RECT-scoped LockRect adds a second way to get this wrong: D3D9 hands the app the driver's pointer
+// unadjusted, so the driver has to return the rect's own top-left texel (with Pitch still the whole
+// surface's row stride). A driver that ignores the rect returns the surface origin instead, and every
+// write the app makes relative to pBits lands at the wrong texel -- silently, since the write itself
+// succeeds. Both rects below start away from (0,0) precisely so that failure cannot masquerade as a
+// pass.
 //
-// Property 2 deliberately drives its sub-region through a whole-surface LockRect rather than a RECT-
-// scoped one: this driver does not implement D3DDDIARG_LOCK's Area field yet (a RECT lock returns the
-// surface origin, verified live 2026-09-03), which is a separate gap from anything this test covers and
-// would mask the read-side property with an addressing failure.
+// Six properties, each checked against the exact bytes written rather than a tolerance:
+//   1. a full-surface write-only lock's bytes survive to the next lock;
+//   2. a RECT-scoped lock's writes land at the rect's texels, and every texel outside it survives;
+//   3. a second RECT-scoped lock, placed in a different corner and of a different shape, lands
+//      correctly too -- a single rect cannot tell a correct placement from one off by a fixed amount;
+//   4. a RECT-scoped lock reads back the rect's own current texels, not the surface's first ones;
+//   5. a D3DLOCK_DISCARD lock's bytes reach the surface like any other write;
+//   6. the GPU samples the final content, so the checks above cannot pass on a CPU-side buffer the
+//      upload path never delivered;
+//   7. a RECT-scoped lock of an IDirect3DSurface9 render target -- not a texture -- is placed the same
+//      way, since both reach the identical DDI entry point.
 
 #include <windows.h>
 #include <d3d9.h>
@@ -66,28 +73,40 @@ float4 main(PSInput input) : COLOR0
     constexpr int kCanvasWidth = 640;
     constexpr int kCanvasHeight = 480;
     constexpr int kTexSize = 16;
-    constexpr int kRectLeft = 4;
-    constexpr int kRectTop = 4;
-    constexpr int kRectRight = 12;
-    constexpr int kRectBottom = 12;
     constexpr int kProbeGrid = 4;
     constexpr int kProbeCount = kProbeGrid * kProbeGrid;
 
-    bool in_rect(const int x, const int y)
+    struct Rect
     {
-        return x >= kRectLeft && x < kRectRight && y >= kRectTop && y < kRectBottom;
+        int left, top, right, bottom;
+    };
+
+    // Both start away from the surface origin, and they differ in shape as well as position: a driver
+    // that returns the origin, or that gets the row stride or the column stride wrong, misses at least
+    // one of them.
+    constexpr Rect kRectA = {4, 4, 12, 12};
+    constexpr Rect kRectB = {12, 13, 16, 16};
+
+    bool inside(const Rect& r, const int x, const int y)
+    {
+        return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
     }
 
-    // Three per-texel patterns, each a bijection of (x, y) in every channel pair, so a texel that ends up
+    // Four per-texel patterns, each a bijection of (x, y) in every channel pair, so a texel that ends up
     // holding a neighbour's value -- or another pattern's -- is a hard mismatch rather than a near miss.
     Rgb pattern_base(const int x, const int y)
     {
         return {16 * x + 8, 16 * y + 8, 128};
     }
 
-    Rgb pattern_rect(const int x, const int y)
+    Rgb pattern_rect_a(const int x, const int y)
     {
         return {255 - (16 * x + 8), 255 - (16 * y + 8), 32};
+    }
+
+    Rgb pattern_rect_b(const int x, const int y)
+    {
+        return {64, 16 * x + 8, 255 - (16 * y + 8)};
     }
 
     Rgb pattern_discard(const int x, const int y)
@@ -97,7 +116,11 @@ float4 main(PSInput input) : COLOR0
 
     Rgb expected_final(const int x, const int y)
     {
-        return in_rect(x, y) ? pattern_rect(x, y) : pattern_base(x, y);
+        if (inside(kRectB, x, y))
+        {
+            return pattern_rect_b(x, y);
+        }
+        return inside(kRectA, x, y) ? pattern_rect_a(x, y) : pattern_base(x, y);
     }
 
     DWORD to_argb(const Rgb c)
@@ -120,6 +143,55 @@ float4 main(PSInput input) : COLOR0
                 row[x] = to_argb(pattern(x, y));
             }
         }
+    }
+
+    // Writes `pattern` through a RECT-scoped lock, addressing texel (r.left + i, r.top + j) as (i, j)
+    // from pBits -- which is exactly what an app does, and exactly what a driver that returns the
+    // surface origin instead of the rect's own corner gets wrong.
+    void write_rect(const D3DLOCKED_RECT& lr, const Rect& r, Rgb (*pattern)(int, int))
+    {
+        const LONG pitch = lr.Pitch != 0 ? lr.Pitch : static_cast<LONG>(kTexSize * 4);
+        auto* base = static_cast<unsigned char*>(lr.pBits);
+        for (int j = 0; j < r.bottom - r.top; ++j)
+        {
+            auto* row = reinterpret_cast<DWORD*>(base + static_cast<size_t>(j) * pitch);
+            for (int i = 0; i < r.right - r.left; ++i)
+            {
+                row[i] = to_argb(pattern(r.left + i, r.top + j));
+            }
+        }
+    }
+
+    // The read-side counterpart: the same rect-relative addressing, checked against what the surface is
+    // known to hold there.
+    int check_rect(const D3DLOCKED_RECT& lr, const Rect& r, Rgb (*expected)(int, int), const char* label)
+    {
+        const LONG pitch = lr.Pitch != 0 ? lr.Pitch : static_cast<LONG>(kTexSize * 4);
+        const auto* base = static_cast<const unsigned char*>(lr.pBits);
+        int bad = 0;
+        for (int j = 0; j < r.bottom - r.top; ++j)
+        {
+            const auto* row = reinterpret_cast<const DWORD*>(base + static_cast<size_t>(j) * pitch);
+            for (int i = 0; i < r.right - r.left; ++i)
+            {
+                const DWORD want = to_argb(expected(r.left + i, r.top + j)) & 0x00FFFFFF;
+                const DWORD got = row[i] & 0x00FFFFFF;
+                if (got != want)
+                {
+                    if (bad == 0)
+                    {
+                        printf("[d3d9-lock-readback-test] FAIL: %s -- rect texel (%d,%d) got=0x%06lX want=0x%06lX\n", label, r.left + i,
+                               r.top + j, static_cast<unsigned long>(got), static_cast<unsigned long>(want));
+                    }
+                    ++bad;
+                }
+            }
+        }
+        if (bad == 0)
+        {
+            printf("[d3d9-lock-readback-test] PASS: %s -- all %d rect texels match\n", label, (r.right - r.left) * (r.bottom - r.top));
+        }
+        return bad;
     }
 
     // Compares every texel of an already-locked full surface against `expected`, reporting the first
@@ -288,6 +360,7 @@ int main()
         printf("[d3d9-lock-readback-test] FAIL: LockRect(full, write) failed\n");
         return 1;
     }
+    const LONG full_pitch = lr.Pitch;
     write_subregion(lr, 0, 0, kTexSize, kTexSize, pattern_base);
     tex->UnlockRect(0);
 
@@ -303,35 +376,66 @@ int main()
         tex->UnlockRect(0);
     }
 
-    // 2. Sub-region rewrite: overwrite only the inner rectangle, then confirm both that it took the new
-    // pattern and that every texel outside it still holds the original one.
-    hl = tex->LockRect(0, &lr, nullptr, 0);
-    printf("[d3d9-lock-readback-test] LockRect(full, sub-region rewrite) hr=0x%08lx pBits=%p Pitch=%ld\n", static_cast<unsigned long>(hl),
-           lr.pBits, lr.Pitch);
-    if (FAILED(hl) || !lr.pBits)
+    // 2/3. Two RECT-scoped rewrites, each addressed relative to its own rect. Pitch has to stay the whole
+    // surface's row stride through both, which is what the app steps its rows by.
+    const Rect rects[2] = {kRectA, kRectB};
+    Rgb (*const rect_patterns[2])(int, int) = {pattern_rect_a, pattern_rect_b};
+    const char* const rect_labels[2] = {"rect A", "rect B"};
+    for (int i = 0; i < 2; ++i)
     {
-        printf("[d3d9-lock-readback-test] FAIL: LockRect(full, sub-region rewrite) failed\n");
-        ++failures;
-    }
-    else
-    {
-        write_subregion(lr, kRectLeft, kRectTop, kRectRight, kRectBottom, pattern_rect);
-        tex->UnlockRect(0);
-
-        hl = tex->LockRect(0, &lr, nullptr, D3DLOCK_READONLY);
+        RECT area{rects[i].left, rects[i].top, rects[i].right, rects[i].bottom};
+        hl = tex->LockRect(0, &lr, &area, 0);
+        printf("[d3d9-lock-readback-test] LockRect(%s {%d,%d,%d,%d}) hr=0x%08lx pBits=%p Pitch=%ld\n", rect_labels[i], rects[i].left,
+               rects[i].top, rects[i].right, rects[i].bottom, static_cast<unsigned long>(hl), lr.pBits, lr.Pitch);
         if (FAILED(hl) || !lr.pBits)
         {
-            printf("[d3d9-lock-readback-test] FAIL: LockRect(full, readonly) hr=0x%08lx\n", static_cast<unsigned long>(hl));
+            printf("[d3d9-lock-readback-test] FAIL: LockRect(%s) failed\n", rect_labels[i]);
+            ++failures;
+            continue;
+        }
+        if (lr.Pitch != full_pitch)
+        {
+            printf("[d3d9-lock-readback-test] FAIL: %s Pitch=%ld, expected the full-surface stride %ld\n", rect_labels[i], lr.Pitch,
+                   full_pitch);
             ++failures;
         }
         else
         {
-            failures += check_surface(lr, expected_final, "sub-region read-modify-write") != 0 ? 1 : 0;
+            printf("[d3d9-lock-readback-test] PASS: %s Pitch is the full-surface stride %ld\n", rect_labels[i], full_pitch);
+        }
+        write_rect(lr, rects[i], rect_patterns[i]);
+        tex->UnlockRect(0);
+    }
+
+    hl = tex->LockRect(0, &lr, nullptr, D3DLOCK_READONLY);
+    if (FAILED(hl) || !lr.pBits)
+    {
+        printf("[d3d9-lock-readback-test] FAIL: LockRect(full, readonly) hr=0x%08lx\n", static_cast<unsigned long>(hl));
+        ++failures;
+    }
+    else
+    {
+        failures += check_surface(lr, expected_final, "two rect-scoped rewrites") != 0 ? 1 : 0;
+        tex->UnlockRect(0);
+    }
+
+    // 4. The read side of the same addressing: a RECT-scoped lock has to deliver the rect's own texels.
+    {
+        RECT area{kRectA.left, kRectA.top, kRectA.right, kRectA.bottom};
+        hl = tex->LockRect(0, &lr, &area, D3DLOCK_READONLY);
+        if (FAILED(hl) || !lr.pBits)
+        {
+            printf("[d3d9-lock-readback-test] FAIL: LockRect(rect A, readonly) hr=0x%08lx\n", static_cast<unsigned long>(hl));
+            ++failures;
+        }
+        else
+        {
+            failures += check_rect(lr, kRectA, expected_final, "rect-scoped readback") != 0 ? 1 : 0;
             tex->UnlockRect(0);
         }
     }
 
-    // 3. D3DLOCK_DISCARD: the app is handed a buffer whose previous contents it promises not to read,
+    // 5. D3DLOCK_DISCARD: the app is handed a buffer whose previous contents it promises not to read,
     // but everything it does write still has to land.
     hl = discard_tex->LockRect(0, &lr, nullptr, 0);
     if (FAILED(hl) || !lr.pBits)
@@ -370,7 +474,7 @@ int main()
         }
     }
 
-    // 4. The same final content, read back out of the GPU image this time: one quad per probe texel,
+    // 6. The same final content, read back out of the GPU image this time: one quad per probe texel,
     // each sampling that texel's own centre.
     QuadRect quads[kProbeCount]{};
     int probe_x[kProbeCount]{};
@@ -469,6 +573,37 @@ int main()
             }
         }
         rt->UnlockRect();
+    }
+
+    // 7. IDirect3DSurface9::LockRect reaches the same DDI entry point as a texture's, so a rect-scoped
+    // lock of a plain render target has to place its pointer the same way. Reads one probe quad's centre
+    // pixel through a rect that starts well away from the surface origin.
+    {
+        const int cx = (quads[0].left + quads[0].right) / 2;
+        const int cy = (quads[0].top + quads[0].bottom) / 2;
+        RECT area{cx - 16, cy - 12, cx + 16, cy + 12};
+        D3DLOCKED_RECT sub_lr{};
+        const HRESULT hsl = rt->LockRect(&sub_lr, &area, D3DLOCK_READONLY);
+        if (FAILED(hsl) || !sub_lr.pBits)
+        {
+            printf("[d3d9-lock-readback-test] FAIL: render target rect LockRect hr=0x%08lx\n", static_cast<unsigned long>(hsl));
+            ++failures;
+        }
+        else
+        {
+            const LONG pitch = sub_lr.Pitch != 0 ? sub_lr.Pitch : static_cast<LONG>(kCanvasWidth * 4);
+            const auto* p = static_cast<const unsigned char*>(sub_lr.pBits) + static_cast<size_t>(12) * pitch + static_cast<size_t>(16) * 4;
+            const Rgb want = expected_final(probe_x[0], probe_y[0]);
+            const bool ok = std::abs(static_cast<int>(p[2]) - want.r) <= 2 && std::abs(static_cast<int>(p[1]) - want.g) <= 2 &&
+                            std::abs(static_cast<int>(p[0]) - want.b) <= 2;
+            printf("[d3d9-lock-readback-test] %s: surface rect lock at (%d,%d) R=%02X G=%02X B=%02X expected R=%02X G=%02X B=%02X\n",
+                   ok ? "PASS" : "FAIL", cx, cy, p[2], p[1], p[0], want.r, want.g, want.b);
+            if (!ok)
+            {
+                ++failures;
+            }
+            rt->UnlockRect();
+        }
     }
 
     rt->Release();

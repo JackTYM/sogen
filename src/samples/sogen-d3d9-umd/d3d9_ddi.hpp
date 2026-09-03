@@ -947,38 +947,45 @@ static_assert(offsetof(D3DDDIARG_CREATERESOURCE, Flags) == 48, "D3DDDIARG_CREATE
 static_assert(sizeof(D3DDDIARG_CREATERESOURCE) == 60, "size confirmed via real d3d9.dll RE (x86)");
 #endif
 
-// hResource@0 and pData@40 are RE-verified and reliable across every resource kind and routing path
-// (confirmed live 2026-07-03/2026-07-04 -- see below). SizeToLock is deliberately NOT modeled as a
-// named field (no reliable offset exists for it in either routing path -- see below); OffsetToLock IS
-// named (Task 6, 2026-07-04) since it has one reliable offset (80) in the routing path this UMD's own
-// DevCaps bits actually enable (see the field's own comment for why reading it unconditionally, even
-// on the other routing path, is safe). Real d3d9.dll builds this 104-byte struct from at least TWO
-// DIFFERENT code paths depending on internal buffer routing (see HANDOFF_MACBOOK.md for the full
-// capture), and the two paths disagree on which offset (if any) carries which value:
-//   - "sysmem-routed" buffers (CVertexBuffer::Lock / CIndexBuffer::Lock's own direct dispatch, taken
-//     when CreateXxxBuffer's DevCaps-gated routing picks CreateSysmemXxxBuffer): offset 72 reliably
-//     carries the app's requested SizeToLock (confirmed across 4 distinct sizes: 12, 12, 6, 40 bytes);
-//     OffsetToLock has no field at all here (confirmed by locking at a distinctive nonzero offset, 96,
-//     and finding that value nowhere in the captured bytes) -- the driver is only ever asked to lock
-//     from its own resource's base; the runtime adds OffsetToLock to the driver's returned base
-//     pointer itself, after the DDI call returns.
-//   - "driver-routed" buffers (CDriverVertexBuffer::Lock/CDriverIndexBuffer::Lock -> ::LockI, taken
-//     once the real per-resource-kind DevCaps routing bit is set -- see fill_d3d9caps's
-//     k_devcaps_driver_managed_pool/k_devcaps_driver_managed_index_pool): offset 80 carries the app's
-//     requested OffsetToLock instead (confirmed: locking at offsets 6 and 96 on two different buffers
-//     read back exactly 6 and 96 at this offset); SizeToLock has no reliable field in THIS shape --
-//     the offset umd_Lock originally also tried (72) holds an unrelated caller-stack address here, not
-//     a size (confirmed: it produced a ~25MB "size" once index buffers started using this path).
-// umd_Lock is one resource-kind- and routing-path-agnostic function (by design -- see its own
-// comment) and cannot statically know which shape a given call used -- but per-call detection turns
-// out unnecessary on x64 (Task 6, 2026-07-04): fill_d3d9caps's k_devcaps_driver_managed_pool/
-// k_devcaps_driver_managed_index_pool are set UNCONDITIONALLY, so every real D3DPOOL_DEFAULT buffer
-// (the common case, including every D3DLOCK_NOOVERWRITE append) is always driver-routed in practice --
-// offset 80 is real there. For the sysmem-routed shape, the app discards whatever pData/offset this
-// driver returns regardless (confirmed live), so reading offset 80 as "OffsetToLock" in that shape too
-// is harmless even though it isn't really that field there. umd_Lock therefore reads offset 80
-// unconditionally on x64. resolve_buffer_resource_id's size-unknown fallback (size 0 = "to end of
-// resource") still covers SizeToLock, which no shape reliably carries.
+// The struct that actually crosses into pfnLock is the one DdLockLH builds on its own stack, not the
+// larger bookkeeping struct its caller (CDriverVertexBuffer::Lock / CDriverMipSurface::InternalLockRect)
+// hands it -- the two-tier shape the x86 note further down describes in full. Both architectures were
+// re-derived from the real staged d3d9.dll on 2026-09-03 and then confirmed field-by-field against a
+// live raw dump of pArgs, replacing an earlier reading in which the third slot was left unmodelled and
+// OffsetToLock was pinned to a coincidentally-adjacent caller-stack offset (80 on x64).
+//
+// That third slot is a union, and the runtime announces which member it filled in the Flags word:
+//   * Static (x86 DdLockLH @ 0x10065460, x64 DdLockLH @ 0x180030ba0, decompiled with idasql). x86's wire
+//     struct is `_DWORD v29[12]` (memset to sizeof(v29) == 48); x64's is v28..v34 at [rsp+60h..9Fh], 64
+//     bytes. The three mutually exclusive branches that fill the union are, on x86:
+//       `v29[2] = a1[3]; v29[3] = a1[4]; v29[11] |= 0x10`      -> D3DDDI_RANGE (Offset, Size)
+//       `v29[2..5] = a1[6..9]; v29[11] |= 0x20`                -> RECT Area (left, top, right, bottom)
+//       `qmemcpy(&v29[2], a1 + 11, 0x18); v29[11] |= 0x40`     -> D3DDDIBOX (6 UINTs)
+//     x64 shows the identical three branches writing v30/v31 and OR-ing the same three bits into
+//     HIDWORD(v33).
+//   * Live (raw dump of pArgs at umd_Lock entry, both arches, 2026-09-03): a LockRect with
+//     RECT{0x11,0x22,0x33,0x44} reads back exactly 11/22/33/44 in four consecutive DWORDs from the union
+//     base with Flags == 0x20; a second lock with {0x55,0x66,0x77,0x78} reads back those; a null-rect
+//     lock leaves the whole union zero with Flags == 0; and Lock(offset=0x321, size=0x10,
+//     D3DLOCK_NOOVERWRITE) on a vertex buffer reads 0x321/0x10 in the first two union DWORDs with
+//     Flags == 0x14 (RangeValid | NoOverwrite). An IDirect3DSurface9::LockRect on a render target
+//     produces the identical shape, so surfaces and textures share this path exactly.
+//
+// Flags carries the WDK's D3DDDI_LOCKFLAGS bits: ReadOnly 0x01, WriteOnly 0x02, NoOverwrite 0x04,
+// Discard 0x08, RangeValid 0x10, AreaValid 0x20, BoxValid 0x40. Those bits -- not the resource kind --
+// are what says which union member is live, which is why umd_Lock keys off them alone and why the two
+// buffer routing shapes the x86 note below describes no longer need to be told apart: a shape that is
+// not DdLockLH's simply does not have those bits set.
+//
+// The runtime does NOT adjust the driver's pData for an Area lock (x86 `a1[17] = v29[8]` /
+// x64 `*(_QWORD *)(a1 + 80) = ...` copy it out verbatim), so the driver has to return a pointer to the
+// rect's top-left texel itself, with Pitch still the whole subresource's row stride. Confirmed live:
+// before umd_Lock consumed Area, a null-rect lock and two different rect locks of the same texture all
+// handed the app the identical pBits.
+//
+// SizeToLock (Range.Size) is modelled but deliberately unused: resolve_buffer_resource_id's
+// size-unknown fallback (size 0 = "to the end of the resource") is what the common D3DLOCK_NOOVERWRITE
+// tail-append pattern needs, and no path here benefits from narrowing it.
 //
 // x86 note: this x64 layout does NOT carry over -- see the separate x86 definition below. Task 6's
 // live idasql RE (2026-07-04) found the x86 struct is genuinely different, not just pointer-shrunk.
@@ -1007,14 +1014,23 @@ static_assert(sizeof(D3DDDIARG_CREATERESOURCE) == 60, "size confirmed via real d
 //     8 (x64) / 4 (x86) holding exactly {0, 1, 2} -- the level -- and NOTHING else in the struct
 //     varying. On the buffer path (a real vertex-buffer Lock via the triangle test) the same offset
 //     reads 0, as expected (buffers have no subresources).
-//   * Safe to read UNCONDITIONALLY, by the same argument that already justifies OffsetToLock@80:
-//     DdLockLH is the single builder for the driver-routed path that actually reaches pfnLock, and it
+//   * Safe to read UNCONDITIONALLY: DdLockLH is the single builder for the path that reaches pfnLock,
+//     and it
 //     writes 0 there for buffers (correct) and the real level for textures/surfaces; the only other
 //     path (sysmem-routed buffers) has its driver-returned output discarded by the app regardless. So
 //     umd_Lock reads this field for every lock without per-call routing detection. As of the real
 //     mip-mapping work, umd_Lock/umd_Unlock DO consume it (replacing the former hardcoded subresource
 //     0): it rides the wire's `subresource` field and addresses the correct per-mip-level backing store
 //     host-side (d3d9_host.cpp's extra_mips / subresource_backing).
+// D3DDDI_LOCKFLAGS bits, as decoded above. Only the three "which union member is live" bits and the two
+// GPU-synchronization promises are named -- nothing else here reads the rest.
+constexpr UINT k_ddi_lock_readonly = 0x01;
+constexpr UINT k_ddi_lock_nooverwrite = 0x04;
+constexpr UINT k_ddi_lock_discard = 0x08;
+constexpr UINT k_ddi_lock_range_valid = 0x10;
+constexpr UINT k_ddi_lock_area_valid = 0x20;
+constexpr UINT k_ddi_lock_box_valid = 0x40;
+
 #ifdef _WIN64
 typedef struct _D3DDDIARG_LOCK
 {
@@ -1023,26 +1039,41 @@ typedef struct _D3DDDIARG_LOCK
                            //      flattened subresource index (Level for mips; FaceType*MipLevels +
                            //      Level for cube/array). 0 for buffers. Consumed by umd_Lock as of the
                            //      real mip-mapping work (see block comment above).
-    UINT Reserved0Hi;      // 12 -- always 0 live (high half of the former UINT64 Reserved0 slot)
-    BYTE Reserved1[24];    // 16..39 -- Range/Box input region (DdLockLH's v30/v31); not modeled
-    VOID* pData;           // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
-    UINT Pitch;            // 48 -- INFERRED, not RE-verified: the x64 analog of the x86 struct's
-                           // RE-verified Pitch (DdLockLH's v29[9], the DWORD immediately after pData).
-                           // Validated behaviourally instead, by d3d9_lock_pitch_test asserting the
-                           // exact stride it reads back from D3DLOCKED_RECT::Pitch on both architectures.
-    UINT SlicePitch;       // 52 -- INFERRED the same way Pitch above is, one slot further along: the x64
-                           // analog of the x86 struct's v29[10], the "conditional third OUTPUT" DdLockLH
-                           // writes only for a lock that has depth slices. Validated behaviourally by
-                           // d3d9_lock_slicepitch_test on both architectures.
-    BYTE Reserved2[24];    // 56..79 -- unconfirmed
-    UINT OffsetToLock;     // 80 -- RE-verified live (see comment above): the app's requested byte offset,
-                           // reliably present in the "driver-routed" shape. In the "sysmem-routed" shape
-                           // this offset holds unrelated data instead, but that path's driver-returned
-                           // pData is discarded by the app regardless (confirmed live,
-                           // HANDOFF_MACBOOK.md #16.1), so umd_Lock reading this field unconditionally
-                           // for buffer resources is safe either way -- the host's own lock() already
-                           // rejects an out-of-range offset.
-    BYTE Reserved3[20];    // 84..103 -- unconfirmed
+
+    union // 12..35 -- DdLockLH's v30/v31; the live member is the one Flags names
+    {
+        struct
+        {
+            UINT Offset;
+            UINT Size;
+        } Range;
+
+        struct
+        {
+            LONG left;
+            LONG top;
+            LONG right;
+            LONG bottom;
+        } Area;
+
+        struct
+        {
+            UINT Left;
+            UINT Top;
+            UINT Right;
+            UINT Bottom;
+            UINT Front;
+            UINT Back;
+        } Box;
+    };
+
+    VOID* pData;     // 40 -- RE-verified live 2026-07-03; the real, correct output offset.
+    UINT Pitch;      // 48 -- the x64 analog of the x86 struct's Pitch (DdLockLH's v29[9]): x64's
+                     // `*(_DWORD *)(a1 + 88) = HIDWORD(v32)` copies it out of exactly this slot.
+    UINT SlicePitch; // 52 -- the "conditional third OUTPUT" DdLockLH writes only for a lock that has
+                     // depth slices; x64's `*(_DWORD *)(a1 + 92) = v33` reads it here.
+    UINT Flags;      // 56 -- D3DDDI_LOCKFLAGS in, HIDWORD(v33) (see the block comment above).
+    UINT Reserved0;  // 60 -- trailing padding to the struct's real 64-byte extent; always 0 live.
 } D3DDDIARG_LOCK;
 #else
 // x86 D3DDDIARG_LOCK is a GENUINELY DIFFERENT, smaller (48-byte) struct, not a pointer-shrunk copy of
@@ -1108,36 +1139,53 @@ typedef struct _D3DDDIARG_LOCK
                            //      struct): flattened subresource index (Level for mips; FaceType*MipLevels
                            //      + Level for cube/array). 0 for buffers. Was "Reserved0"; NOT a UINT64.
                            //      Consumed by umd_Lock as of the real mip-mapping work.
-    UINT OffsetToLock;     // 8 -- RE-verified live 2026-07-06: the app's requested byte offset, reliably
-                           // present in the "driver-routed" shape (the x86 analog of the x64 field at 80).
-                           // Two distinctive marker offsets, 0x4321 and 0x8642, both read back exactly here
-                           // as a 32-bit little-endian value, with a Lock(offset=0) baseline reading 0 --
-                           // cross-checked, not a coincidence. In the "sysmem-routed" shape this offset
-                           // holds unrelated data, but that path's driver-returned pData is discarded by
-                           // the app regardless, so umd_Lock reading this field unconditionally for buffer
-                           // resources is safe either way -- the host's own lock() rejects an out-of-range
-                           // offset. SizeToLock is not modeled (no reliable offset; size=0 "to end of
-                           // resource" is exactly the tail-append semantics this enables -- see x64 comment).
-    BYTE Reserved1[20];    // 12..31 -- unconfirmed (SizeToLock or Rect/Box input region)
-    VOID* pData;           // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
-    UINT Pitch;            // 36 -- DdLockLH's v29[9], the second driver OUTPUT (see the block comment
-                           // above): the runtime hands it straight to the app as D3DLOCKED_RECT::Pitch.
-                           // DdLockLH memsets its wire struct before the call, so a driver that never
-                           // writes this reports a 0 row stride and every row of an app's LockRect copy
-                           // lands on row 0 -- which is exactly what MW2's uncompressed menu/UI/video
-                           // textures did until umd_Lock started filling it.
-    UINT SlicePitch;       // 40 -- DdLockLH's v29[10], the "conditional third OUTPUT" of the block comment
-                           // above: `mov [edi+4Ch], eax` at 0x100655C4 copies it into the outer struct's
-                           // SlicePitch slot, which CDriverVolume::InternalLockBox hands the app as
-                           // D3DLOCKED_BOX::SlicePitch. That copy is gated on the LH surface object's own
-                           // flag word: `test dword ptr [ebx+3Ch], 40000h` at 0x10065571. Live-measured on
-                           // this runtime: a D3DPOOL_DEFAULT/MANAGED volume never carries that bit, so the
-                           // app is handed SlicePitch == 0 no matter what the driver writes here -- a
-                           // runtime-side gate no driver can influence (confirmed by patching that one jnz
-                           // to jmp in a scratch copy of d3d9.dll: the driver's value then arrives intact,
-                           // which is also what pins this field to offset 40). Hence
-                           // d3d9_lock_slicepitch_test is x64-only; see the UMD README.
-    UINT Reserved2;        // 44 -- unconfirmed (Flags; read, never written, at 44 by classify_lock_intent)
+
+    union // 8..31 -- DdLockLH's v29[2..7]; the live member is the one Flags names
+    {
+        struct
+        {
+            UINT Offset;
+            UINT Size;
+        } Range;
+
+        struct
+        {
+            LONG left;
+            LONG top;
+            LONG right;
+            LONG bottom;
+        } Area;
+
+        struct
+        {
+            UINT Left;
+            UINT Top;
+            UINT Right;
+            UINT Bottom;
+            UINT Front;
+            UINT Back;
+        } Box;
+    };
+
+    VOID* pData;     // 32 -- RE-verified live 2026-07-04; the real, correct output offset.
+    UINT Pitch;      // 36 -- DdLockLH's v29[9], the second driver OUTPUT (see the block comment
+                     // above): the runtime hands it straight to the app as D3DLOCKED_RECT::Pitch.
+                     // DdLockLH memsets its wire struct before the call, so a driver that never
+                     // writes this reports a 0 row stride and every row of an app's LockRect copy
+                     // lands on row 0 -- which is exactly what MW2's uncompressed menu/UI/video
+                     // textures did until umd_Lock started filling it.
+    UINT SlicePitch; // 40 -- DdLockLH's v29[10], the "conditional third OUTPUT" of the block comment
+                     // above: `mov [edi+4Ch], eax` at 0x100655C4 copies it into the outer struct's
+                     // SlicePitch slot, which CDriverVolume::InternalLockBox hands the app as
+                     // D3DLOCKED_BOX::SlicePitch. That copy is gated on the LH surface object's own
+                     // flag word: `test dword ptr [ebx+3Ch], 40000h` at 0x10065571. Live-measured on
+                     // this runtime: a D3DPOOL_DEFAULT/MANAGED volume never carries that bit, so the
+                     // app is handed SlicePitch == 0 no matter what the driver writes here -- a
+                     // runtime-side gate no driver can influence (confirmed by patching that one jnz
+                     // to jmp in a scratch copy of d3d9.dll: the driver's value then arrives intact,
+                     // which is also what pins this field to offset 40). Hence
+                     // d3d9_lock_slicepitch_test is x64-only; see the UMD README.
+    UINT Flags;      // 44 -- D3DDDI_LOCKFLAGS in, DdLockLH's v29[11] (see the block comment above).
 } D3DDDIARG_LOCK;
 #endif
 
@@ -1187,11 +1235,15 @@ typedef struct _D3DDDIARG_PRESENT
 } D3DDDIARG_PRESENT;
 
 #ifdef _WIN64
-static_assert(sizeof(D3DDDIARG_LOCK) == 104, "size confirmed via real d3d9.dll RE");
+static_assert(sizeof(D3DDDIARG_LOCK) == 64, "DdLockLH's x64 wire struct is [rsp+60h..9Fh] (RE-verified 2026-09-03)");
 static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 8, "SubResourceIndex RE-verified live+static 2026-07-06");
-static_assert(offsetof(D3DDDIARG_LOCK, Pitch) == 48, "Pitch inferred as the DWORD after pData; validated by d3d9_lock_pitch_test");
-static_assert(offsetof(D3DDDIARG_LOCK, SlicePitch) == 52,
-              "SlicePitch inferred as the DWORD after Pitch; validated by d3d9_lock_slicepitch_test");
+static_assert(offsetof(D3DDDIARG_LOCK, Range) == 12, "Range is the union's first member (RE-verified live 2026-09-03)");
+static_assert(offsetof(D3DDDIARG_LOCK, Area) == 12, "Area RE-verified live 2026-09-03 (markers 0x11/0x22/0x33/0x44)");
+static_assert(offsetof(D3DDDIARG_LOCK, Box) == 12, "Box shares the union (DdLockLH's 24-byte qmemcpy)");
+static_assert(offsetof(D3DDDIARG_LOCK, pData) == 40, "pData RE-verified live 2026-07-03");
+static_assert(offsetof(D3DDDIARG_LOCK, Pitch) == 48, "Pitch is the DWORD after pData; validated by d3d9_lock_pitch_test");
+static_assert(offsetof(D3DDDIARG_LOCK, SlicePitch) == 52, "SlicePitch is the DWORD after Pitch; validated by d3d9_lock_slicepitch_test");
+static_assert(offsetof(D3DDDIARG_LOCK, Flags) == 56, "Flags RE-verified live 2026-09-03 (0x20 for a rect lock, 0x14 for NOOVERWRITE)");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 16, "size confirmed via real d3d9.dll RE");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll RE (LHBatchPresent copy pattern)");
 #else
@@ -1200,9 +1252,13 @@ static_assert(sizeof(D3DDDIARG_PRESENT) == 40, "size confirmed via real d3d9.dll
 // shrinkage" theory was wrong and what the real, live-RE'd x86 sizes (48 / 8 bytes) are.
 static_assert(sizeof(D3DDDIARG_LOCK) == 48, "D3DDDIARG_LOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(offsetof(D3DDDIARG_LOCK, SubResourceIndex) == 4, "SubResourceIndex RE-verified live+static 2026-07-06 (x86)");
-static_assert(offsetof(D3DDDIARG_LOCK, OffsetToLock) == 8, "OffsetToLock RE-verified live 2026-07-06 (x86, markers 0x4321/0x8642)");
+static_assert(offsetof(D3DDDIARG_LOCK, Range) == 8, "Range RE-verified live 2026-07-06 (x86, markers 0x4321/0x8642)");
+static_assert(offsetof(D3DDDIARG_LOCK, Area) == 8, "Area RE-verified live 2026-09-03 (x86, markers 0x11/0x22/0x33/0x44)");
+static_assert(offsetof(D3DDDIARG_LOCK, Box) == 8, "Box shares the union (DdLockLH's v29[2..7] qmemcpy)");
+static_assert(offsetof(D3DDDIARG_LOCK, pData) == 32, "pData RE-verified live 2026-07-04 (x86)");
 static_assert(offsetof(D3DDDIARG_LOCK, Pitch) == 36, "Pitch is DdLockLH's v29[9] (x86, RE-verified output slot)");
 static_assert(offsetof(D3DDDIARG_LOCK, SlicePitch) == 40, "SlicePitch is DdLockLH's v29[10] (x86, RE-verified output slot)");
+static_assert(offsetof(D3DDDIARG_LOCK, Flags) == 44, "Flags is DdLockLH's v29[11] (x86, RE-verified live 2026-08-23/2026-09-03)");
 static_assert(sizeof(D3DDDIARG_UNLOCK) == 8, "D3DDDIARG_UNLOCK x86 layout (RE-verified live 2026-07-04)");
 static_assert(sizeof(D3DDDIARG_PRESENT) == 36, "D3DDDIARG_PRESENT x86 layout");
 #endif

@@ -896,8 +896,7 @@ namespace
                 // (see the `kind` comment above), so register the handle in the lazy-bind map. The
                 // runtime echoes resp.resource back as the Lock hResource, so resolve_buffer_resource_id
                 // finds this correctly-sized resource here instead of synthesizing a 64 KB-floored guess.
-                // They stay OUT of g_created_resource_ids so umd_Lock keeps treating them as buffers
-                // (reading OffsetToLock), which textures/render targets must not do.
+                // They stay OUT of g_created_resource_ids so umd_Lock keeps treating them as buffers.
                 g_resource_ids[resp.resource] = resp.resource;
 
                 // A host that judged this buffer direct-mappable AND managed to alias it into this
@@ -1021,9 +1020,9 @@ namespace
     // own sequential ids -- reaches pfnLock completely unregistered. pfnLock is the right place to
     // lazily register a correctly-kinded resource instead of resolve_resource_id's texture-shaped
     // fallback, which previously made every never-seen Lock() land on a wrong-kind 640x480 texture.
-    // byte_size is umd_Lock's real OffsetToLock (Task 6, 2026-07-04) when known, used only as a lower
-    // bound -- there is still no reliable SizeToLock in any routing path (see umd_Lock's own comment),
-    // so the fallback floor below stays the effective size for the common (offset-0 first lock) case.
+    // byte_size is the lock's own D3DDDIARG_LOCK::Range.Offset when known, used only as a lower bound --
+    // the size a lock asks for is never narrowed (see umd_Lock's own comment), so the fallback floor
+    // below stays the effective size for the common (offset-0 first lock) case.
     uint64_t resolve_buffer_resource_id(void* handle, uint32_t byte_size)
     {
         const auto raw = reinterpret_cast<uint64_t>(handle);
@@ -2474,6 +2473,8 @@ namespace
         uint32_t full_size;
         uint32_t pitch;
         uint32_t slice_pitch;
+        uint32_t block_bytes;
+        uint32_t block_texels;
     };
 
     std::map<locked_key, locked_layout> g_resource_layouts;
@@ -2509,21 +2510,17 @@ namespace
     lock_intent classify_lock_intent(const D3DDDIARG_LOCK* pArgs)
     {
 #ifndef _WIN64
-        // D3DDDIARG_LOCK::Flags (x86 only, offset 44 -- RE-verified live 2026-08-23 by diffing the raw
-        // struct bytes of matched Lock() calls on the same buffer with known D3D9-level flags: DISCARD
-        // -> 0x18, NOOVERWRITE -> 0x14, READONLY -> 0x11. bit0=ReadOnly, bit2=NoOverwrite, bit3=Discard,
-        // bit4=NoSysLock (present in all three samples -- always set for driver-routed D3DPOOL_DEFAULT
-        // dynamic buffers, not itself meaningful here). x64's D3DDDIARG_LOCK is a genuinely different,
-        // larger struct (see d3d9_ddi.hpp's own note on the x86/x64 layout divergence) -- this offset has
-        // NOT been verified there, so x64 conservatively treats every lock as fully synchronized.
-        const uint32_t raw_flags = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pArgs) + 44);
-        constexpr uint32_t k_ddi_discard = 0x08;
-        constexpr uint32_t k_ddi_nooverwrite = 0x04;
-        if ((raw_flags & k_ddi_discard) != 0)
+        // The three D3D9-level flags this cares about were matched to their DDI bits live (2026-08-23) by
+        // diffing the raw struct bytes of Lock() calls on the same buffer: DISCARD -> 0x18,
+        // NOOVERWRITE -> 0x14, READONLY -> 0x11 -- i.e. the WDK's Discard/NoOverwrite/ReadOnly bits each
+        // OR'd with RangeValid, which a buffer lock always carries (see d3d9_ddi.hpp). x64 deliberately
+        // stays fully synchronized: its Flags offset is equally RE-verified now, but eliding a GPU wait
+        // there has never been validated against a real workload, and "synchronized" is always correct.
+        if ((pArgs->Flags & k_ddi_lock_discard) != 0)
         {
             return lock_intent::discard;
         }
-        if ((raw_flags & k_ddi_nooverwrite) != 0)
+        if ((pArgs->Flags & k_ddi_lock_nooverwrite) != 0)
         {
             return lock_intent::no_overwrite;
         }
@@ -2531,6 +2528,32 @@ namespace
         (void)pArgs;
 #endif
         return lock_intent::synchronized;
+    }
+
+    // Byte distance from a subresource's origin to the top-left texel of the rect a LockRect asked for.
+    // The D3D9 runtime hands the driver's pData to the app unadjusted (see d3d9_ddi.hpp's D3DDDIARG_LOCK
+    // note), so placing that pointer is the driver's job; D3DLOCKED_RECT::Pitch stays the whole
+    // subresource's row stride either way, which is what an app steps its rows by. Returns 0 for any lock
+    // whose union does not hold an Area -- every buffer lock, and every whole-surface LockRect.
+    //
+    // The union's third member, D3DDDIBOX (a sub-box of a volume texture, k_ddi_lock_box_valid), is
+    // deliberately NOT placed: a sub-box LockBox still lands on the volume's origin. Its offset would be
+    // `Front * SlicePitch` on top of the same row/column term computed here, but this runtime never hands
+    // an app a nonzero D3DLOCKED_BOX::SlicePitch for a D3DPOOL_DEFAULT/MANAGED volume (see
+    // D3DDDIARG_LOCK::SlicePitch in d3d9_ddi.hpp), so there is no way to verify such a placement from the
+    // guest side yet. A whole-volume LockBox -- the only shape the suite and MW2 use -- is unaffected.
+    uint32_t locked_area_offset(const D3DDDIARG_LOCK* pArgs, const uint32_t pitch, const locked_layout& layout, const uint32_t data_size)
+    {
+        if ((pArgs->Flags & k_ddi_lock_area_valid) == 0 || layout.block_texels == 0 || pArgs->Area.left < 0 || pArgs->Area.top < 0)
+        {
+            return 0;
+        }
+        const uint64_t left = static_cast<uint32_t>(pArgs->Area.left) / layout.block_texels;
+        const uint64_t top = static_cast<uint32_t>(pArgs->Area.top) / layout.block_texels;
+        const uint64_t byte_offset = top * pitch + left * layout.block_bytes;
+        // d3d9.dll rejects a rect that leaves the subresource before the call ever reaches a driver, so
+        // this bound guards against a malformed DDI call rather than anything an app can ask for.
+        return byte_offset < data_size ? static_cast<uint32_t>(byte_offset) : 0;
     }
 
     // Drains the batch and makes the host wait for the GPU to finish everything recorded so far. One
@@ -2567,29 +2590,22 @@ namespace
         // Lock() reaches them (confirmed live) -- resolve_buffer_resource_id checks g_created_resource_ids
         // first and uses that resource id directly for them; only an unregistered handle (vertex/index
         // buffers, which never call pfnCreateResource) falls through to its own buffer lazy-bind path.
-        // Only buffers get OffsetToLock treatment below: LockRect (textures/render targets/depth-
-        // stencil) uses this same struct region for Rect/Box input, not a byte offset.
         const auto raw_handle = reinterpret_cast<uint64_t>(pArgs->hResource);
         const bool is_buffer = g_created_resource_ids.find(raw_handle) == g_created_resource_ids.end();
 
         // SubResourceIndex (d3d9_ddi.hpp, offset 8 x64 / 4 x86, RE-verified live+static 2026-07-06) is the
         // flattened subresource index: the real mip level for a LockRect(level) call, and 0 for buffers
-        // (which have no subresources). Safe to read unconditionally for every lock (same argument that
-        // justifies reading OffsetToLock unconditionally -- see d3d9_ddi.hpp). This is what routes a
-        // per-mip-level texture lock to the correct per-level backing store host-side.
+        // (which have no subresources). Safe to read unconditionally for every lock (see d3d9_ddi.hpp).
+        // This is what routes a per-mip-level texture lock to the correct per-level backing store
+        // host-side.
         const uint32_t subresource = pArgs->SubResourceIndex;
 
-        // OffsetToLock (d3d9_ddi.hpp, offset 80 on x64 / 8 on x86, both RE-verified live) is reliable for
-        // "driver-routed" buffer locks -- the routing this UMD's own DevCaps bits
-        // (k_devcaps_driver_managed_pool/_index_pool) make the common case for D3DPOOL_DEFAULT buffers.
-        // "Sysmem-routed" locks read something unrelated from this offset, but their driver-returned pData
-        // is discarded by the app regardless (confirmed live, HANDOFF_MACBOOK.md #16.1), and an
-        // out-of-range offset is safely rejected by the host's own lock() below rather than misbehaving
-        // locally -- so reading it unconditionally for every buffer lock is safe. SizeToLock still has no
-        // reliable offset in either shape (see d3d9_ddi.hpp) -- size = 0 below means "from offset to the
-        // end of the resource", which is exactly right for the common D3DLOCK_NOOVERWRITE tail-append
-        // pattern this fixes: the app only ever writes forward from OffsetToLock anyway.
-        const uint32_t offset = is_buffer ? pArgs->OffsetToLock : 0;
+        // hResource is followed by a union whose live member the Flags word names, so a byte offset is
+        // only there to be read when RangeValid says so -- a LockRect fills the same bytes with its rect
+        // instead (see d3d9_ddi.hpp). size = 0 below means "from offset to the end of the resource",
+        // which is exactly right for the common D3DLOCK_NOOVERWRITE tail-append pattern: the app only
+        // ever writes forward from the offset it asked for.
+        const uint32_t offset = (pArgs->Flags & k_ddi_lock_range_valid) != 0 ? pArgs->Range.Offset : 0;
 
         const auto resource = resolve_buffer_resource_id(pArgs->hResource, offset);
         const locked_key key{resource, subresource};
@@ -2646,12 +2662,14 @@ namespace
         // whose result then seeds the cache for every future Lock() on the same key.
         uint32_t data_size = 0;
         bool probe_hr_nonzero = false;
+        locked_layout layout{};
         const auto cached_layout_it = g_resource_layouts.find(key);
         if (cached_layout_it != g_resource_layouts.end())
         {
-            data_size = offset <= cached_layout_it->second.full_size ? cached_layout_it->second.full_size - offset : 0;
-            pArgs->Pitch = cached_layout_it->second.pitch;
-            pArgs->SlicePitch = cached_layout_it->second.slice_pitch;
+            layout = cached_layout_it->second;
+            data_size = offset <= layout.full_size ? layout.full_size - offset : 0;
+            pArgs->Pitch = layout.pitch;
+            pArgs->SlicePitch = layout.slice_pitch;
         }
         else
         {
@@ -2661,7 +2679,8 @@ namespace
             data_size = probe.data_size;
             if (!probe_hr_nonzero)
             {
-                g_resource_layouts[key] = {offset + probe.data_size, probe.pitch, probe.slice_pitch};
+                layout = {offset + probe.data_size, probe.pitch, probe.slice_pitch, probe.block_bytes, probe.block_texels};
+                g_resource_layouts[key] = layout;
                 pArgs->Pitch = probe.pitch;
                 pArgs->SlicePitch = probe.slice_pitch;
             }
@@ -2678,7 +2697,10 @@ namespace
             {
                 pArgs->Pitch = surface->pitch;
             }
-            pArgs->pData = reinterpret_cast<void*>(static_cast<uintptr_t>(surface->address));
+            // The app steps its rows by the pitch it is handed, so the rect has to be placed at that same
+            // stride -- the runtime's own, when it owns the allocation.
+            pArgs->pData = reinterpret_cast<void*>(static_cast<uintptr_t>(surface->address) +
+                                                   locked_area_offset(pArgs, pArgs->Pitch, layout, data_size));
             return S_OK;
         }
 
@@ -2723,7 +2745,9 @@ namespace
             pArgs->pData = nullptr;
             return E_FAIL;
         }
-        pArgs->pData = buffer.bytes.get();
+        // A rect-scoped LockRect still fetches and writes back the whole subresource -- everything the
+        // app does not touch has to survive the Unlock -- so only the pointer the app is handed moves.
+        pArgs->pData = buffer.bytes.get() + locked_area_offset(pArgs, pArgs->Pitch, layout, data_size);
         g_locked_offsets[key] = offset;
         return S_OK;
     }
