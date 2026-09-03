@@ -1,8 +1,10 @@
 #include "../std_include.hpp"
 #include <platform/audio_backend.hpp>
 
+#include <cstddef>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 #include <SDL3/SDL.h>
 
@@ -86,6 +88,13 @@ namespace sogen
 
                 if (this->stream_ && data && size)
                 {
+                    static const bool silent = getenv("EMULATOR_AUDIO_SILENT") != nullptr;
+                    if (silent)
+                    {
+                        this->silence_buffer_.assign(size, std::byte{0});
+                        data = this->silence_buffer_.data();
+                    }
+
                     SDL_PutAudioStreamData(this->stream_, data, static_cast<int>(size));
                 }
             }
@@ -126,6 +135,7 @@ namespace sogen
             bool initialized_{false};
             SDL_AudioStream* stream_{nullptr};
             audio_format format_{};
+            std::vector<std::byte> silence_buffer_{};
         };
     }
 
