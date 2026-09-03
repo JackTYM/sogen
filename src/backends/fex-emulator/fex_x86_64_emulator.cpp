@@ -226,6 +226,39 @@ namespace sogen::fex
             return (value + host_page_size_apple - 1) & ~(host_page_size_apple - 1);
         }
 
+        // Second, writable host mapping of the same physical pages, so an mmio_region's backing can be
+        // rewritten without ever making the guest-visible mapping writable (see refresh_mmio_backings).
+        // mach_vm_remap works at host-page granularity and silently truncates a finer-grained source
+        // address down to it, which would hand the caller a window onto the wrong memory instead of an
+        // error - refuse anything that is not exactly host-page aligned and sized rather than rely on
+        // the caller having got that right.
+        void* map_writable_alias_apple(void* host_pointer, const size_t size)
+        {
+            constexpr size_t host_page_mask = host_page_size_apple - 1;
+            if ((reinterpret_cast<uintptr_t>(host_pointer) & host_page_mask) != 0 || (size & host_page_mask) != 0)
+            {
+                return nullptr;
+            }
+
+            mach_vm_address_t alias = 0;
+            vm_prot_t cur_protection = VM_PROT_NONE;
+            vm_prot_t max_protection = VM_PROT_NONE;
+            if (::mach_vm_remap(mach_task_self(), &alias, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                                reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection, &max_protection,
+                                VM_INHERIT_NONE) != KERN_SUCCESS)
+            {
+                return nullptr;
+            }
+
+            if (::mprotect(reinterpret_cast<void*>(alias), size, PROT_READ | PROT_WRITE) != 0)
+            {
+                ::munmap(reinterpret_cast<void*>(alias), size);
+                return nullptr;
+            }
+
+            return reinterpret_cast<void*>(alias);
+        }
+
         // Decodes just enough of an AArch64 "Load register" instruction to service an mmio_region
         // fault: destination register, transfer size, and zero/sign extension. Deliberately does not
         // decode the addressing mode (immediate, unscaled, register-offset, ...) - the effective
@@ -625,6 +658,7 @@ namespace sogen::fex
             size_t size = 0;
             mmio_read_callback read_cb;
             void* host_backing = nullptr;
+            void* host_backing_alias = nullptr;
             size_t host_backing_size = 0;
         };
 
@@ -2315,6 +2349,7 @@ namespace sogen::fex
             }
 
             void* host_backing = nullptr;
+            void* host_backing_alias = nullptr;
             size_t host_backing_size = 0;
 
 #ifdef __APPLE__
@@ -2331,6 +2366,9 @@ namespace sogen::fex
             if (host_backing != nullptr)
             {
                 read_cb(0, host_backing, size);
+#ifdef __APPLE__
+                host_backing_alias = map_writable_alias_apple(host_backing, host_backing_size);
+#endif
                 ::mprotect(host_backing, host_backing_size, PROT_READ);
 #ifdef __APPLE__
                 if (g_hvf != nullptr)
@@ -2365,15 +2403,17 @@ namespace sogen::fex
                                                          .size = size,
                                                          .read_cb = std::move(read_cb),
                                                          .host_backing = host_backing,
+                                                         .host_backing_alias = host_backing_alias,
                                                          .host_backing_size = host_backing_size});
         }
 
         // Rewrites every MMIO region's real backing (see mmio_region's doc comment) with fresh
         // content. Called once per quantum from every vCPU's start() loop independently under real
-        // multi-vCPU concurrency - a shared_lock here would let one vCPU's mprotect(read-only) race
-        // another vCPU's in-flight read_cb memcpy into the same shared host_backing memory, which
-        // Darwin can report as BUS_ADRALN rather than the "expected" SEGV_ACCERR (the same
-        // misclassification documented elsewhere in this file). A unique lock excludes both.
+        // multi-vCPU concurrency - a shared_lock here would let two vCPUs interleave their read_cb
+        // memcpys into the same shared backing and publish a mix of two snapshots, and on the
+        // mprotect fallback path below it would additionally let one vCPU's mprotect(read-only) race
+        // another's in-flight memcpy, which Darwin can report as BUS_ADRALN rather than the
+        // "expected" SEGV_ACCERR (the same misclassification documented elsewhere in this file).
         void refresh_mmio_backings()
         {
             const tables_write_lock lock(this->tables_mutex_);
@@ -2381,6 +2421,12 @@ namespace sogen::fex
             {
                 if (region.host_backing == nullptr)
                 {
+                    continue;
+                }
+
+                if (region.host_backing_alias != nullptr)
+                {
+                    region.read_cb(0, region.host_backing_alias, region.size);
                     continue;
                 }
 
@@ -2683,6 +2729,10 @@ namespace sogen::fex
                                 g_hvf->unmap(reinterpret_cast<uint64_t>(region.host_backing), region.host_backing_size);
                             }
 #endif
+                            if (region.host_backing_alias != nullptr)
+                            {
+                                ::munmap(region.host_backing_alias, region.host_backing_size);
+                            }
                             ::munmap(region.host_backing, region.host_backing_size);
                         }
                         return true;
