@@ -2447,7 +2447,18 @@ namespace
     // The buffer holds only `[offset, end)` of the resource (see umd_Lock), so g_locked_offsets
     // remembers which offset it started at, for umd_Unlock to write it back to the right place.
     using locked_key = std::pair<uint64_t, uint32_t>;
-    std::map<locked_key, std::vector<uint8_t>> g_locked_buffers;
+
+    // Deliberately not a std::vector: on the fetch path below the host writes every byte of this
+    // buffer itself, so a vector's value-initialising resize() would spend a full extra pass zeroing
+    // data nothing ever reads. The two paths that do hand the app a buffer it may only partly write
+    // allocate a zeroed one explicitly instead.
+    struct locked_buffer
+    {
+        std::unique_ptr<uint8_t[]> bytes;
+        uint32_t size;
+    };
+
+    std::map<locked_key, locked_buffer> g_locked_buffers;
     std::map<locked_key, uint32_t> g_locked_offsets;
 
     // Total resource size (bytes from offset 0 to the end of the subresource) and row/slice pitch, cached
@@ -2582,7 +2593,14 @@ namespace
 
         const auto resource = resolve_buffer_resource_id(pArgs->hResource, offset);
         const locked_key key{resource, subresource};
-        d3d9c::lock_request req{.resource = resource, .subresource = subresource, .offset = offset, .size = 0, .flags = 0, .reserved = 0};
+        d3d9c::lock_request req{.resource = resource,
+                                .subresource = subresource,
+                                .offset = offset,
+                                .size = 0,
+                                .flags = 0,
+                                .data_address = 0,
+                                .data_capacity = 0,
+                                .reserved = 0};
 
         // Direct-mapped buffer: the app writes real GPU memory through the pointer handed back here, so
         // there is no staging buffer to fill on the way in and nothing to ship back on the way out --
@@ -2680,36 +2698,32 @@ namespace
                 pArgs->pData = nullptr;
                 return E_FAIL;
             }
-            buffer.resize(data_size);
-            pArgs->pData = buffer.data();
+            buffer = {std::make_unique<uint8_t[]>(data_size), data_size};
+            pArgs->pData = buffer.bytes.get();
             g_locked_offsets[key] = offset;
             return S_OK;
         }
 
-        // The host fills the whole [lock_response][data] output region (handle_d3d9_lock writes
-        // lock_response + min(capacity, data_size) bytes, and this real call's data_size equals the
-        // already-known size from above, cached or freshly probed), so out_buf needs no zero-init.
-        // The data payload is then copied once, directly into the persistent app-facing buffer via
-        // range-assign -- no separate zero-fill of `buffer` (the old buffer.assign(N, 0) was fully
-        // overwritten here).
-        const size_t out_buf_size = sizeof(d3d9c::lock_response) + data_size;
-        auto out_buf = std::make_unique_for_overwrite<uint8_t[]>(out_buf_size);
+        // The host writes the locked bytes straight into `buffer` (see lock_request::data_address), so
+        // the app-facing allocation is the only one this path needs and nothing is copied guest-side:
+        // the escape carries just the fixed-size response.
+        buffer = {std::make_unique_for_overwrite<uint8_t[]>(data_size), data_size};
+        req.data_address = reinterpret_cast<uint64_t>(buffer.bytes.get());
+        req.data_capacity = data_size;
         // Batch state is unchanged since the size lookup above (straight-line code, no other D3D9 API
         // calls in between), so resource_needs_flush is still valid: if a fresh probe already proved
         // (or needed) a flush, this real fetch's own flush-gate reaches the same, correct answer; on a
         // cache hit (no probe this call), the batch is exactly as it was when resource_needs_flush was
         // computed just above, so it's equally valid there too.
-        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), out_buf.get(), static_cast<DWORD>(out_buf_size), resource_needs_flush);
-        const auto* resp = reinterpret_cast<const d3d9c::lock_response*>(out_buf.get());
-        if (resp->hr != 0)
+        d3d9c::lock_response resp{};
+        bridge_call(gb::ioctl_d3d9_lock, &req, sizeof(req), &resp, sizeof(resp), resource_needs_flush);
+        if (resp.hr != 0)
         {
             g_locked_buffers.erase(key);
             pArgs->pData = nullptr;
             return E_FAIL;
         }
-        const uint8_t* data_ptr = out_buf.get() + sizeof(d3d9c::lock_response);
-        buffer.assign(data_ptr, data_ptr + data_size);
-        pArgs->pData = buffer.data();
+        pArgs->pData = buffer.bytes.get();
         g_locked_offsets[key] = offset;
         return S_OK;
     }
@@ -2749,14 +2763,14 @@ namespace
             if (lock.src_pitch != 0 && lock.dst_pitch != 0 && lock.src_pitch != lock.dst_pitch)
             {
                 auto& repacked = g_locked_buffers[key];
-                repacked.assign(lock.size, 0);
+                repacked = {std::make_unique<uint8_t[]>(lock.size), lock.size};
                 const auto* src = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(lock.address));
                 const uint32_t row_bytes = std::min(lock.src_pitch, lock.dst_pitch);
                 for (uint32_t row = 0; row < lock.size / lock.dst_pitch; ++row)
                 {
-                    std::memcpy(repacked.data() + row * lock.dst_pitch, src + row * lock.src_pitch, row_bytes);
+                    std::memcpy(repacked.bytes.get() + row * lock.dst_pitch, src + row * lock.src_pitch, row_bytes);
                 }
-                data_address = reinterpret_cast<uint64_t>(repacked.data());
+                data_address = reinterpret_cast<uint64_t>(repacked.bytes.get());
             }
 
             const d3d9c::unlock_request req{
@@ -2782,12 +2796,11 @@ namespace
         // handle_d3d9_unlock/d3d9_host::unlock's own comments). `buffer` (below) stays valid and
         // unchanged for the whole synchronous duration of this escape call, so there's no window for
         // the host to read stale or torn bytes.
-        const uint32_t data_size = static_cast<uint32_t>(it->second.size());
         const d3d9c::unlock_request req{.resource = resource,
                                         .subresource = subresource,
                                         .offset = offset,
-                                        .data_size = data_size,
-                                        .data_address = reinterpret_cast<uint64_t>(it->second.data())};
+                                        .data_size = it->second.size,
+                                        .data_address = reinterpret_cast<uint64_t>(it->second.bytes.get())};
 
         const bool resource_needs_flush = !g_d3d9_command_batch.empty() && resource_currently_referenced(resource);
         bridge_call(gb::ioctl_d3d9_unlock, &req, sizeof(req), nullptr, 0, resource_needs_flush);

@@ -150,12 +150,22 @@ namespace sogen
         // untouched and the resource is marked clean so the next draw does not re-upload zeros over them.
         int32_t generate_mip_sub_levels(uint64_t resource, uint32_t filter);
 
-        // Copies up to out_capacity bytes of the resource's host-side shadow copy into out.
+        // The locked region's current bytes, borrowed straight from the resource's host-side shadow copy
+        // (or its mapped direct buffer), for the caller to hand to the guest with a single copy.
+        struct lock_view
+        {
+            const std::byte* data;
+            size_t size;
+        };
+
+        // Points out_view at the locked region rather than copying it anywhere, so the one copy this
+        // path needs is the caller's own write into the guest -- the read-side counterpart of
+        // prepare_unlock_target. The view stays valid until the next call that can touch this resource.
         // out_data_size always receives the true backing-store size, out_pitch the subresource's row
         // stride (0 for buffers and for formats with no known layout) -- see subresource_row_pitch --
         // and out_slice_pitch its depth-slice stride (0 for anything but a volume texture).
-        int32_t lock(uint64_t resource, uint32_t subresource, uint32_t offset, uint32_t size, uint32_t flags, void* out,
-                     size_t out_capacity, uint32_t& out_data_size, uint32_t& out_pitch, uint32_t& out_slice_pitch);
+        int32_t lock(uint64_t resource, uint32_t subresource, uint32_t offset, uint32_t size, uint32_t flags, lock_view& out_view,
+                     uint32_t& out_data_size, uint32_t& out_pitch, uint32_t& out_slice_pitch);
         int32_t unlock(uint64_t resource, uint32_t subresource, uint32_t offset, const void* data, size_t data_size);
 
         // Resizes the resource's backing store as needed and returns a writable pointer directly into it

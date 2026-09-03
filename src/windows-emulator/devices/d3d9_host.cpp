@@ -5302,9 +5302,10 @@ namespace sogen
     }
 
     int32_t d3d9_host::lock(const uint64_t resource, const uint32_t subresource, const uint32_t offset, const uint32_t size,
-                            const uint32_t /*flags*/, void* out, const size_t out_capacity, uint32_t& out_data_size, uint32_t& out_pitch,
+                            const uint32_t /*flags*/, lock_view& out_view, uint32_t& out_data_size, uint32_t& out_pitch,
                             uint32_t& out_slice_pitch)
     {
+        out_view = {};
         out_data_size = 0;
         out_pitch = 0;
         out_slice_pitch = 0;
@@ -5344,10 +5345,9 @@ namespace sogen
             }
             const size_t available = buffer_size - offset;
             const size_t requested = size != 0 ? size : available;
-            const size_t to_copy = std::min({requested, available, out_capacity});
-            if (to_copy > 0 && out != nullptr && mapped != nullptr)
+            if (mapped != nullptr)
             {
-                std::memcpy(out, mapped + offset, to_copy);
+                out_view = {mapped + offset, std::min(requested, available)};
             }
             out_data_size = static_cast<uint32_t>(available);
             return d3d_ok;
@@ -5361,12 +5361,7 @@ namespace sogen
         }
 
         const size_t available = backing.size() - offset;
-        const size_t to_copy = std::min({requested, available, out_capacity});
-
-        if (to_copy > 0 && out != nullptr)
-        {
-            std::memcpy(out, backing.data() + offset, to_copy);
-        }
+        out_view = {backing.data() + offset, std::min(requested, available)};
         out_data_size = static_cast<uint32_t>(available);
         return d3d_ok;
     }

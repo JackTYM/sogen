@@ -3063,24 +3063,21 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                const auto out_capacity = context.output_buffer_length > sizeof(d3d9_cmd::lock_response)
-                                              ? context.output_buffer_length - sizeof(d3d9_cmd::lock_response)
-                                              : 0;
-                std::vector<std::byte> data(out_capacity);
+                d3d9_host::lock_view view{};
                 uint32_t data_size = 0;
                 uint32_t pitch = 0;
                 uint32_t slice_pitch = 0;
                 const bool render_target_readback = this->d3d9_.is_render_target(request.resource);
                 const int32_t hr = this->d3d9_.lock(request.resource, request.subresource, request.offset, request.size, request.flags,
-                                                    data.data(), data.size(), data_size, pitch, slice_pitch);
+                                                    view, data_size, pitch, slice_pitch);
                 static const bool lock_diag = getenv("EMULATOR_D3D9_TEXBLT_DIAG") != nullptr;
                 if (lock_diag)
                 {
                     fprintf(stderr,
-                            "[d3d9-lock-diag] resource=%llu subresource=%u offset=%u size=%u capacity=%zu hr=%d data_size=%u pitch=%u "
+                            "[d3d9-lock-diag] resource=%llu subresource=%u offset=%u size=%u capacity=%u hr=%d data_size=%u pitch=%u "
                             "slice_pitch=%u\n",
                             static_cast<unsigned long long>(request.resource), request.subresource, request.offset, request.size,
-                            out_capacity, hr, data_size, pitch, slice_pitch);
+                            request.data_capacity, hr, data_size, pitch, slice_pitch);
                 }
                 // A render-target Lock is how the frame's rendering is forced to complete for tests that
                 // read pixels back instead of presenting (e.g. d3d9-manydraws); log the frame stats here
@@ -3096,14 +3093,14 @@ namespace sogen
                 {
                     return STATUS_BUFFER_TOO_SMALL;
                 }
-                const auto copy_bytes = std::min<size_t>(data.size(), data_size);
                 emulator_object<d3d9_cmd::lock_response>{win_emu.emu(), context.output_buffer}.write(
                     d3d9_cmd::lock_response{.hr = hr, .data_size = data_size, .pitch = pitch, .slice_pitch = slice_pitch});
+                const auto copy_bytes = request.data_address != 0 ? std::min<size_t>(view.size, request.data_capacity) : 0;
                 if (copy_bytes > 0)
                 {
-                    win_emu.emu().write_memory(context.output_buffer + sizeof(d3d9_cmd::lock_response), data.data(), copy_bytes);
+                    win_emu.emu().write_memory(request.data_address, view.data, copy_bytes);
                 }
-                set_information(context, static_cast<ULONG>(sizeof(d3d9_cmd::lock_response) + copy_bytes));
+                set_information(context, static_cast<ULONG>(sizeof(d3d9_cmd::lock_response)));
                 return STATUS_SUCCESS;
             }
 

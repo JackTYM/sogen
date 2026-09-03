@@ -141,7 +141,12 @@ namespace sogen::d3d9_cmd
         uint32_t reserved;
     };
 
-    // ioctl_d3d9_lock: out header immediately followed by data_size bytes of the locked region.
+    // ioctl_d3d9_lock: a fixed-size response only, no trailing data. data_address is the guest virtual
+    // address of the data_capacity-byte buffer the locked region's current bytes are written into --
+    // the host writes them there directly, straight out of the resource's backing store, instead of
+    // into the escape payload, which would additionally cost the guest a second buffer to receive them
+    // in and a full copy to move them into the one the app actually locks. Mirrors unlock_request's
+    // write-back side. data_address/data_capacity are 0 for a probe that only wants the layout.
     struct lock_request
     {
         resource_id resource;
@@ -149,6 +154,8 @@ namespace sogen::d3d9_cmd
         uint32_t offset;
         uint32_t size;  // 0 = whole resource
         uint32_t flags; // D3DLOCK_* bits
+        uint64_t data_address;
+        uint32_t data_capacity;
         uint32_t reserved;
     };
 
@@ -167,7 +174,6 @@ namespace sogen::d3d9_cmd
         // the same layout as `pitch`, so a volume's rows and slices can never disagree. 0 for anything
         // that is not a volume texture.
         uint32_t slice_pitch;
-        // uint8_t data[data_size];
     };
 
     // ioctl_d3d9_unlock: a fixed-size request only, no trailing data. data_address is the guest
@@ -488,7 +494,7 @@ namespace sogen::d3d9_cmd
     static_assert(sizeof(tex_blt_request) == 16, "wire layout drift");
     static_assert(sizeof(buf_blt_request) == 32, "wire layout drift");
     static_assert(sizeof(generate_mip_sub_levels_request) == 16, "wire layout drift");
-    static_assert(sizeof(lock_request) == 32, "wire layout drift");
+    static_assert(sizeof(lock_request) == 40, "wire layout drift");
     static_assert(sizeof(lock_response) == 16, "wire layout drift");
     static_assert(sizeof(unlock_request) == 32, "wire layout drift");
     static_assert(sizeof(create_shader_request) == 8, "wire layout drift");
