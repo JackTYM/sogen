@@ -94,6 +94,20 @@ namespace sogen
             resolved = true;
         }
 
+        // libc's getenv takes a process-wide lock and linearly scans environ, so re-reading these on
+        // every dispatch costs more than the diagnostics they gate.
+        bool syscall_freq_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_SYSCALL_FREQ_DIAG") != nullptr;
+            return enabled;
+        }
+
+        bool bink_control_diag_enabled()
+        {
+            static const bool enabled = getenv("EMULATOR_BINK_CONTROL_DIAG") != nullptr;
+            return enabled;
+        }
+
     } // namespace
 
     static void serialize(utils::buffer_serializer& buffer, const syscall_handler_entry& obj)
@@ -175,7 +189,7 @@ namespace sogen
         // fex_x86_64_emulator.cpp's EMULATOR_FEX_RIP_SAMPLE) consistently finding ~98% of guest-
         // execution samples in FEXCore's own syscall-dispatch/WoW64-gate-crossing trampoline, this
         // checks what the guest is actually spending syscall volume on beyond D3D9's own Escape calls.
-        if (getenv("EMULATOR_SYSCALL_FREQ_DIAG"))
+        if (syscall_freq_diag_enabled())
         {
             static std::unordered_map<std::string, uint64_t> counts;
             static uint64_t total = 0;
@@ -188,12 +202,13 @@ namespace sogen
                 for (size_t i = 0; i < sorted.size() && i < 15; ++i)
                 {
                     fprintf(stderr, "[syscall-freq-diag]   %s = %llu (%.1f%%)\n", sorted[i].first.c_str(),
-                            static_cast<unsigned long long>(sorted[i].second), 100.0 * static_cast<double>(sorted[i].second) / static_cast<double>(total));
+                            static_cast<unsigned long long>(sorted[i].second),
+                            100.0 * static_cast<double>(sorted[i].second) / static_cast<double>(total));
                 }
             }
         }
 
-        if (getenv("EMULATOR_BINK_CONTROL_DIAG"))
+        if (bink_control_diag_enabled())
         {
             constexpr uint64_t bink_ptr_addr = 0x1C87BD4;
             constexpr uint64_t caller_pause_state_addr = 0x1C87CC0; // iw4sp.exe's own sub_508FB0 pause flag
