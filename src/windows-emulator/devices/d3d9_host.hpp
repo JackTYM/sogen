@@ -1149,6 +1149,17 @@ namespace sogen
         // same bytes by an earlier batch on the same slot. Combined VERTEX|INDEX|UNIFORM usage so one
         // buffer serves all three binding points.
         std::array<frame_arena, batch_slot_count> vertex_index_uniform_arena_{};
+        // Size past which an arena overflow stops growing the arena and instead reopens the batch on the
+        // other slot (see execute_draw's batch-management step). A resource-backed stream reserves the
+        // whole [0, range_end) prefix of its vertex buffer -- only [range_start, range_end) is written, but
+        // the reservation has to start at resource byte 0 so the draw's own base-vertex addressing still
+        // lands -- so a batch whose draws walk progressively deeper into one large shared vertex buffer
+        // re-reserves an ever-larger prefix per draw. Unbounded doubling follows that quadratic demand:
+        // live MW2 area transitions drove the two arenas to 3.4GB+2.4GB (worst observed 6.6GB), and the
+        // doubling chain's allocate+map+destroy-the-old cost 0.6-1.4s of the load's own stall. Growth past
+        // this bound is still allowed for a single draw that needs more than the whole arena, so no draw is
+        // ever dropped for want of space.
+        static constexpr size_t max_batch_arena_bytes = 256ull << 20;
 
         // One shared descriptor pool per batch slot that every programmable draw in that slot's batch
         // allocates its per-draw VS/PS descriptor-set pair from, replacing the old per-pipeline pool that

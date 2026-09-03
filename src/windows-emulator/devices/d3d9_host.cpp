@@ -2830,11 +2830,14 @@ namespace sogen
         //     the trigger that actually fires in ordinary gameplay -- once every frame_desc_initial_draws
         //     draws into the same render target -- so it's the one the round-robin buys real CPU/GPU
         //     overlap for; see batch_slot_count's header comment for the full reasoning.
-        //   * A draw whose arena slices would overflow the current arena capacity closes it first, then
-        //     grows THIS SLOT's arena (amortized doubling) before reopening on the SAME slot rather than
-        //     rotating. Growing destroys and recreates the buffer, which is only safe once this slot's own
-        //     submission is provably complete -- so unlike the two triggers above, this one waits for that
-        //     slot's own fence right here instead of deferring the wait to a later reopen.
+        //   * A draw whose arena slices would overflow the current arena capacity closes it first. Once the
+        //     arena is at least max_batch_arena_bytes the overflow reopens on the OTHER slot exactly like
+        //     the two triggers above -- resetting the offset is all the room the draw needs, and the
+        //     round-robin's deferred wait is far cheaper than another reallocation. Below that size, or for
+        //     a single draw that genuinely needs more than the whole arena, THIS SLOT's arena is grown
+        //     instead (amortized doubling) and the batch reopens on the SAME slot. Growing destroys and
+        //     recreates the buffer, which is only safe once this slot's own submission is provably
+        //     complete -- so that path waits for this slot's own fence right here.
         const uint64_t target_rt = this->state_.render_targets[0];
         const uint64_t target_ds = this->resolve_batch_target_ds();
         bool rotate_batch_slot = false;
@@ -2860,13 +2863,21 @@ namespace sogen
         {
             this->submit_batch_async();
             reopen_reason_arena_growth = true;
-            this->wait_for_batch_slot(this->batch_slot_);
-            frame_arena& growing_arena = this->vertex_index_uniform_arena_[this->batch_slot_];
-            if (!this->grow_arena(growing_arena, std::max(draw_arena_bytes, growing_arena.capacity * 2)))
+            const frame_arena& overflowed_arena = this->vertex_index_uniform_arena_[this->batch_slot_];
+            if (overflowed_arena.capacity >= max_batch_arena_bytes && draw_arena_bytes <= overflowed_arena.capacity)
             {
-                return d3d_ok;
+                rotate_batch_slot = true;
             }
-            growing_arena.offset = 0;
+            else
+            {
+                this->wait_for_batch_slot(this->batch_slot_);
+                frame_arena& growing_arena = this->vertex_index_uniform_arena_[this->batch_slot_];
+                if (!this->grow_arena(growing_arena, std::max(draw_arena_bytes, growing_arena.capacity * 2)))
+                {
+                    return d3d_ok;
+                }
+                growing_arena.offset = 0;
+            }
         }
         if (!this->batch_open_)
         {
