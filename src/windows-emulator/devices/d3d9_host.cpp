@@ -2166,7 +2166,7 @@ namespace sogen
         const size_t aligned_size = (size + arena_alignment - 1) & ~(arena_alignment - 1);
         if (arena.offset + aligned_size > arena.capacity)
         {
-            // Grow-only, high-water-mark growth (new capacity = max(needed, 2 * old)). This is
+            // Grow-only, high-water-mark growth (see grown_arena_capacity). This is
             // DELIBERATELY different from ensure_pooled_buffer's former exact-fit, no-headroom growth: a
             // pool held exactly one range per slot, so exact-fit never re-grew once a slot reached its
             // steady-state size. This arena instead packs MANY ranges whose combined size varies per
@@ -2175,7 +2175,7 @@ namespace sogen
             // slice a draw needs must be reserved (this called for all of them) BEFORE any bytes are
             // uploaded into the arena -- execute_draw does exactly that (reserve phase, then upload phase).
             const size_t needed = arena.offset + aligned_size;
-            if (!this->grow_arena(arena, std::max(needed, arena.capacity * 2)))
+            if (!this->grow_arena(arena, grown_arena_capacity(arena.capacity, needed)))
             {
                 return false;
             }
@@ -2183,6 +2183,25 @@ namespace sogen
         out_offset = arena.offset;
         arena.offset += aligned_size;
         return true;
+    }
+
+    size_t d3d9_host::grown_arena_capacity(const size_t capacity, const size_t needed)
+    {
+        size_t target = std::max(needed, capacity * 2);
+        if (target < arena_jump_to_cap_bytes)
+        {
+            return target;
+        }
+        // Past the threshold this arena is on its way to max_batch_arena_bytes, where an overflow rotates
+        // slots instead of growing any further. Land in one allocation on the capacity the doubling chain
+        // would have stopped at anyway, rather than paying every intermediate allocate+map+destroy to walk
+        // there -- the terminal capacity is deliberately identical, so how often a batch rotates for want
+        // of arena space (and with it the steady-state draw cost) is unchanged.
+        while (target < max_batch_arena_bytes)
+        {
+            target *= 2;
+        }
+        return target;
     }
 
     bool d3d9_host::grow_arena(frame_arena& arena, const size_t new_capacity)
@@ -2872,7 +2891,7 @@ namespace sogen
             {
                 this->wait_for_batch_slot(this->batch_slot_);
                 frame_arena& growing_arena = this->vertex_index_uniform_arena_[this->batch_slot_];
-                if (!this->grow_arena(growing_arena, std::max(draw_arena_bytes, growing_arena.capacity * 2)))
+                if (!this->grow_arena(growing_arena, grown_arena_capacity(growing_arena.capacity, draw_arena_bytes)))
                 {
                     return d3d_ok;
                 }

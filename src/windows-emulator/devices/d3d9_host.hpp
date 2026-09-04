@@ -1160,6 +1160,14 @@ namespace sogen
         // this bound is still allowed for a single draw that needs more than the whole arena, so no draw is
         // ever dropped for want of space.
         static constexpr size_t max_batch_arena_bytes = 256ull << 20;
+        // Capacity past which growth stops doubling one step at a time and jumps to where the doubling
+        // chain would have ended (see grown_arena_capacity). Doubling amortizes reallocation for an arena
+        // settling on its steady-state size, but an arena already headed for the bound above pays every
+        // intermediate allocate+map+destroy on the way there for nothing: a live MW2 area transition
+        // walked the two arenas up in 13 steps costing 102ms, of which the four biggest were 79ms. Below
+        // this threshold the step-by-step doubling is kept, so an app whose batches stay small never
+        // commits more than twice this much.
+        static constexpr size_t arena_jump_to_cap_bytes = 8ull << 20;
 
         // One shared descriptor pool per batch slot that every programmable draw in that slot's batch
         // allocates its per-draw VS/PS descriptor-set pair from, replacing the old per-pipeline pool that
@@ -1223,6 +1231,9 @@ namespace sogen
         // recorded-but-unsubmitted command references it, so callers must flush any open batch first.
         // Returns false only on a Vulkan allocation failure.
         bool grow_arena(frame_arena& arena, size_t new_capacity);
+        // The capacity an arena of the given capacity that cannot fit `needed` bytes should be grown to.
+        // Shared by both growth sites so they cannot drift apart; see arena_jump_to_cap_bytes.
+        static size_t grown_arena_capacity(size_t capacity, size_t needed);
         // Ensures frame_descriptor_pool_[slot] exists and is sized for at least needed_draws draws' worth
         // of descriptor sets (2 per draw). Creates it lazily at frame_desc_initial_draws capacity, or
         // doubles and recreates it (dropping the old pool) when needed_draws exceeds the current capacity.
