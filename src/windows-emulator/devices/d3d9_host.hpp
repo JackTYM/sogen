@@ -720,13 +720,16 @@ namespace sogen
 
         // color_fill's batched cmd_copy_buffer_to_image (see its own comment) needs its host-visible
         // staging buffer held alive on the GPU until this slot's submission actually completes --
-        // destroyed by wait_for_batch_slot right after its wait, the same point every other per-slot GPU
-        // resource (arena, descriptor pool) becomes safe to reuse/destroy.
+        // released by retire_batch_slot, the same point every other per-slot GPU resource (arena,
+        // descriptor pool) becomes safe to reuse/destroy.
         struct pending_staging_buffer
         {
             uint64_t device{};
             uint64_t buffer{};
             uint64_t memory{};
+            // The size the buffer was created with, which is what bounds a copy region's buffer_offset +
+            // extent -- NOT the (>=) allocation size vkGetBufferMemoryRequirements reported for it.
+            uint64_t capacity{};
         };
 
         std::array<std::vector<pending_staging_buffer>, batch_slot_count> pending_staging_cleanup_{};
@@ -737,6 +740,17 @@ namespace sogen
         // fixed cost instead of letting it scale with the burst.
         std::array<uint64_t, batch_slot_count> pending_staging_bytes_{};
         static constexpr uint64_t max_pending_staging_bytes = 64ull << 20;
+        // Staging buffers whose owning slot has been retired, kept for reuse instead of destroyed. A slot
+        // is retired only once its fence has actually signaled (wait_for_batch_slot, or the fence-status
+        // checks in poll_flush_complete/draw_would_rotate_into_busy_slot), so every buffer in here is
+        // provably no longer being read by the GPU. A level-load burst uploads hundreds of textures, and
+        // the vkCreateBuffer+vkAllocateMemory pair per upload measured 15.7ms of a single 305ms burst
+        // frame; recycling them removes nearly all of that. Bounded by both totals below so the pool
+        // cannot grow with the burst -- anything past them is destroyed as before.
+        std::vector<pending_staging_buffer> staging_pool_{};
+        uint64_t staging_pool_bytes_{};
+        static constexpr uint64_t max_staging_pool_bytes = 64ull << 20;
+        static constexpr size_t max_staging_pool_entries = 128;
         // Sampled textures whose staging copy ensure_texture_uploaded recorded into slot `i` -- their
         // upload_dirty is cleared by retire_batch_slot, once that slot's fence proves the copy landed.
         std::array<std::vector<uint64_t>, batch_slot_count> pending_texture_uploads_{};
@@ -1271,6 +1285,14 @@ namespace sogen
         // Clears batch_slot_pending_[slot] and releases the staging buffers its submission was keeping
         // alive. The caller must already have established that the slot's fence is done.
         void retire_batch_slot(uint32_t slot);
+        // Hands back a host-visible TRANSFER_SRC staging buffer of at least `size` bytes, recycling the
+        // smallest one in staging_pool_ that fits before falling back to creating one. Returns false, and
+        // leaves `out` untouched, only on a Vulkan allocation failure.
+        bool acquire_staging_buffer(uint64_t device, uint64_t size, pending_staging_buffer& out);
+        // Returns a staging buffer acquire_staging_buffer handed out to the pool, or destroys it when the
+        // pool is already at either of its bounds. The caller must already have established that no GPU
+        // work still references it.
+        void release_staging_buffer(const pending_staging_buffer& staging);
         // The depth-stencil handle the next draw's batch identity would use: the bound one once it has
         // real GPU backing in a format this host understands, 0 otherwise. Shared by execute_draw and
         // recorded_command_would_block so the two can never disagree about whether a draw rotates.

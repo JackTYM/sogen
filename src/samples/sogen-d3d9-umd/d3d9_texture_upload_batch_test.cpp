@@ -16,6 +16,13 @@
 // path has to be invalidated by the write) and be ordered after the first draw's sampling of the same
 // image. A driver that misses either reads the first colour twice.
 //
+// Phase 3 -- four textures of four DIFFERENT sizes are uploaded in one batch, then rewritten and
+// uploaded again in a second batch, by which point phases 1 and 2 have already retired staging buffers of
+// a fifth size. The host recycles a retired staging buffer rather than allocating one per upload, so this
+// is what discriminates a recycler that hands a buffer back before its slot's fence has signalled (the
+// second round samples the first round's colours), or one that hands out a buffer too small for the
+// upload, or one whose leftover bytes from a larger previous tenant bleed into a smaller texture.
+//
 // Every colour is checked analytically against the exact value written into the texture, so a batch that
 // drops, reorders or corrupts any individual texture's content is a hard failure rather than a subtle
 // shade difference.
@@ -74,6 +81,13 @@ float4 main(PSInput input) : COLOR0
     constexpr Rgb k_batch_colors[kBatchTextures] = {
         {255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 0}, {255, 0, 255}, {0, 255, 255}, {255, 128, 0}, {128, 0, 255},
     };
+    // Phase 3's four textures, deliberately four different sizes so the host's staging recycling has to
+    // match a request against differently-sized retired buffers rather than always finding an exact fit.
+    constexpr int kMixedTextures = 4;
+    constexpr int kMixedSizes[kMixedTextures] = {16, 128, 64, 32};
+    constexpr Rgb k_mixed_first[kMixedTextures] = {{240, 32, 16}, {32, 240, 16}, {16, 32, 240}, {240, 240, 32}};
+    constexpr Rgb k_mixed_second[kMixedTextures] = {{16, 128, 240}, {240, 16, 128}, {128, 240, 16}, {32, 32, 240}};
+
     struct QuadRect
     {
         int left, top, right, bottom;
@@ -81,7 +95,8 @@ float4 main(PSInput input) : COLOR0
 
     constexpr int kLeftQuad = kBatchTextures;
     constexpr int kRightQuad = kBatchTextures + 1;
-    constexpr int kQuadCount = kBatchTextures + 2;
+    constexpr int kMixedQuad = kBatchTextures + 2;
+    constexpr int kQuadCount = kMixedQuad + kMixedTextures;
 
     constexpr Rgb k_rewrite_before{16, 224, 128};
     constexpr Rgb k_rewrite_after{224, 16, 96};
@@ -107,7 +122,7 @@ float4 main(PSInput input) : COLOR0
         out[3] = {to_ndc_x(left), to_ndc_y(bottom), 0.5f, uv_color(0.0f, 1.0f)};
     }
 
-    bool fill_texture(IDirect3DTexture9* tex, const Rgb color, const char* label)
+    bool fill_texture(IDirect3DTexture9* tex, const Rgb color, const char* label, const int size)
     {
         D3DLOCKED_RECT lr{};
         const HRESULT hr = tex->LockRect(0, &lr, nullptr, 0);
@@ -117,13 +132,13 @@ float4 main(PSInput input) : COLOR0
                    lr.pBits);
             return false;
         }
-        const LONG pitch = lr.Pitch != 0 ? lr.Pitch : static_cast<LONG>(kTexSize * 4);
+        const LONG pitch = lr.Pitch != 0 ? lr.Pitch : static_cast<LONG>(size * 4);
         const DWORD argb = D3DCOLOR_ARGB(255, color.r, color.g, color.b);
         auto* base = static_cast<unsigned char*>(lr.pBits);
-        for (int y = 0; y < kTexSize; ++y)
+        for (int y = 0; y < size; ++y)
         {
             auto* row = reinterpret_cast<DWORD*>(base + static_cast<size_t>(y) * pitch);
-            for (int x = 0; x < kTexSize; ++x)
+            for (int x = 0; x < size; ++x)
             {
                 row[x] = argb;
             }
@@ -132,16 +147,16 @@ float4 main(PSInput input) : COLOR0
         return true;
     }
 
-    IDirect3DTexture9* make_texture(IDirect3DDevice9* dev, const Rgb color, const char* label)
+    IDirect3DTexture9* make_texture(IDirect3DDevice9* dev, const Rgb color, const char* label, const int size)
     {
         IDirect3DTexture9* tex = nullptr;
-        const HRESULT hr = dev->CreateTexture(kTexSize, kTexSize, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
+        const HRESULT hr = dev->CreateTexture(size, size, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, nullptr);
         if (FAILED(hr) || !tex)
         {
             printf("[d3d9-texture-upload-batch-test] FAIL: CreateTexture(%s) hr=0x%08lx\n", label, static_cast<unsigned long>(hr));
             return nullptr;
         }
-        if (!fill_texture(tex, color, label))
+        if (!fill_texture(tex, color, label, size))
         {
             tex->Release();
             return nullptr;
@@ -250,11 +265,20 @@ int main()
     {
         char label[32];
         snprintf(label, sizeof(label), "batch%d", i);
-        textures[i] = make_texture(dev, k_batch_colors[i], label);
+        textures[i] = make_texture(dev, k_batch_colors[i], label, kTexSize);
         textures_ok = textures_ok && textures[i] != nullptr;
     }
-    IDirect3DTexture9* rewrite_tex = make_texture(dev, k_rewrite_before, "rewrite");
+    IDirect3DTexture9* rewrite_tex = make_texture(dev, k_rewrite_before, "rewrite", kTexSize);
     textures_ok = textures_ok && rewrite_tex != nullptr;
+
+    IDirect3DTexture9* mixed[kMixedTextures]{};
+    for (int i = 0; i < kMixedTextures; ++i)
+    {
+        char label[32];
+        snprintf(label, sizeof(label), "mixed%d", i);
+        mixed[i] = make_texture(dev, k_mixed_first[i], label, kMixedSizes[i]);
+        textures_ok = textures_ok && mixed[i] != nullptr;
+    }
 
     // Quad 0..7 are phase 1's grid; quad 8/9 are phase 2's left/right pair.
     QuadRect quads[kQuadCount]{};
@@ -266,6 +290,10 @@ int main()
     }
     quads[kLeftQuad] = {40, 40, 280, 440};
     quads[kRightQuad] = {360, 40, 600, 440};
+    for (int i = 0; i < kMixedTextures; ++i)
+    {
+        quads[kMixedQuad + i] = {i * 160 + 20, 120, i * 160 + 140, 360};
+    }
 
     IDirect3DSurface9* rt = nullptr;
     const HRESULT hcrt = dev->CreateRenderTarget(kCanvasWidth, kCanvasHeight, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &rt, nullptr);
@@ -350,7 +378,7 @@ int main()
     dev->BeginScene();
     dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
     draw_quad(dev, rewrite_tex, kLeftQuad);
-    if (!fill_texture(rewrite_tex, k_rewrite_after, "rewrite/after"))
+    if (!fill_texture(rewrite_tex, k_rewrite_after, "rewrite/after", kTexSize))
     {
         ++failures;
     }
@@ -371,7 +399,59 @@ int main()
         ++failures;
     }
 
+    // Phase 3: four sizes in one batch, then the same four rewritten and re-uploaded in a second batch,
+    // whose staging buffers can only come from the ones phases 1-2 retired.
+    for (int round = 0; round < 2; ++round)
+    {
+        const Rgb* expected = round == 0 ? k_mixed_first : k_mixed_second;
+        if (round == 1)
+        {
+            for (int i = 0; i < kMixedTextures; ++i)
+            {
+                char label[32];
+                snprintf(label, sizeof(label), "mixed%d/round1", i);
+                if (!fill_texture(mixed[i], k_mixed_second[i], label, kMixedSizes[i]))
+                {
+                    ++failures;
+                }
+            }
+        }
+        dev->BeginScene();
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+        for (int i = 0; i < kMixedTextures; ++i)
+        {
+            draw_quad(dev, mixed[i], kMixedQuad + i);
+        }
+        dev->EndScene();
+
+        lr = {};
+        hlr = rt->LockRect(&lr, nullptr, D3DLOCK_READONLY);
+        if (SUCCEEDED(hlr) && lr.pBits)
+        {
+            for (int i = 0; i < kMixedTextures; ++i)
+            {
+                char label[64];
+                snprintf(label, sizeof(label), "phase3 round %d quad %d (%dx%d)", round, i, kMixedSizes[i], kMixedSizes[i]);
+                failures += check_center(lr, quads[kMixedQuad + i], expected[i], label) ? 0 : 1;
+            }
+            rt->UnlockRect();
+        }
+        else
+        {
+            printf("[d3d9-texture-upload-batch-test] FAIL: phase3 round %d rt LockRect hr=0x%08lx\n", round,
+                   static_cast<unsigned long>(hlr));
+            ++failures;
+        }
+    }
+
     for (auto* tex : textures)
+    {
+        if (tex)
+        {
+            tex->Release();
+        }
+    }
+    for (auto* tex : mixed)
     {
         if (tex)
         {

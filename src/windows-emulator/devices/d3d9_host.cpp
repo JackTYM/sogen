@@ -719,8 +719,7 @@ namespace sogen
         this->batch_slot_pending_[slot] = false;
         for (const pending_staging_buffer& staging : this->pending_staging_cleanup_[slot])
         {
-            this->vulkan_.destroy_buffer(staging.device, staging.buffer);
-            this->vulkan_.free_memory(staging.device, staging.memory);
+            this->release_staging_buffer(staging);
         }
         this->pending_staging_cleanup_[slot].clear();
         this->pending_staging_bytes_[slot] = 0;
@@ -2255,6 +2254,61 @@ namespace sogen
         arena.capacity = new_capacity;
         arena.mapped = mapped_ptr;
         return true;
+    }
+
+    bool d3d9_host::acquire_staging_buffer(const uint64_t device, const uint64_t size, pending_staging_buffer& out)
+    {
+        // Smallest entry that fits, so a small upload cannot consume the one large buffer a later big one
+        // would otherwise have reused.
+        auto best = this->staging_pool_.end();
+        for (auto it = this->staging_pool_.begin(); it != this->staging_pool_.end(); ++it)
+        {
+            if (it->device == device && it->capacity >= size && (best == this->staging_pool_.end() || it->capacity < best->capacity))
+            {
+                best = it;
+            }
+        }
+        if (best != this->staging_pool_.end())
+        {
+            out = *best;
+            this->staging_pool_bytes_ -= best->capacity;
+            *best = this->staging_pool_.back();
+            this->staging_pool_.pop_back();
+            return true;
+        }
+
+        uint64_t buffer = 0;
+        if (this->vulkan_.create_buffer(device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, buffer) != 0 || buffer == 0)
+        {
+            return false;
+        }
+        uint64_t mem_size = 0;
+        uint64_t mem_align = 0;
+        uint32_t mem_type_bits = 0;
+        this->vulkan_.get_buffer_memory_requirements(device, buffer, mem_size, mem_align, mem_type_bits);
+        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
+                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        uint64_t memory = 0;
+        if (memory_type == UINT32_MAX || this->vulkan_.allocate_memory(device, mem_size, memory_type, memory) != 0 || memory == 0)
+        {
+            this->vulkan_.destroy_buffer(device, buffer);
+            return false;
+        }
+        this->vulkan_.bind_buffer_memory(device, buffer, memory, 0);
+        out = {.device = device, .buffer = buffer, .memory = memory, .capacity = size};
+        return true;
+    }
+
+    void d3d9_host::release_staging_buffer(const pending_staging_buffer& staging)
+    {
+        if (this->staging_pool_.size() < max_staging_pool_entries && this->staging_pool_bytes_ + staging.capacity <= max_staging_pool_bytes)
+        {
+            this->staging_pool_bytes_ += staging.capacity;
+            this->staging_pool_.push_back(staging);
+            return;
+        }
+        this->vulkan_.destroy_buffer(staging.device, staging.buffer);
+        this->vulkan_.free_memory(staging.device, staging.memory);
     }
 
     namespace
@@ -4253,28 +4307,14 @@ namespace sogen
         // tracking for no real gain -- an app that writes one level of a texture almost always writes
         // the whole chain in one Lock/Unlock burst, and this whole path now runs once per change rather
         // than once per draw.
-        uint64_t staging_buffer = 0;
-        if (this->vulkan_.create_buffer(device, total_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 || staging_buffer == 0)
+        pending_staging_buffer staging{};
+        if (!this->acquire_staging_buffer(device, total_size, staging))
         {
             return false;
         }
-        uint64_t mem_size = 0;
-        uint64_t mem_align = 0;
-        uint32_t mem_type_bits = 0;
-        this->vulkan_.get_buffer_memory_requirements(device, staging_buffer, mem_size, mem_align, mem_type_bits);
-        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
-                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        uint64_t staging_memory = 0;
-        if (memory_type == UINT32_MAX || this->vulkan_.allocate_memory(device, mem_size, memory_type, staging_memory) != 0 ||
-            staging_memory == 0)
-        {
-            this->vulkan_.destroy_buffer(device, staging_buffer);
-            return false;
-        }
-        this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
         for (const auto& up : uploads)
         {
-            this->vulkan_.upload_memory(device, staging_memory, up.staging_offset, up.size, up.src, up.size);
+            this->vulkan_.upload_memory(device, staging.memory, up.staging_offset, up.size, up.src, up.size);
         }
 
         // Record into the currently-open batch rather than submitting a private command buffer and
@@ -4284,7 +4324,7 @@ namespace sogen
         // waited on only when the slot is reused. Past max_pending_staging_bytes the batch is already
         // holding more staging memory alive than is reasonable (see that constant), so the upload falls
         // back to its own submit+wait, which frees its staging buffer immediately.
-        const bool batched = this->pending_staging_bytes_[this->batch_slot_] + total_size <= max_pending_staging_bytes;
+        const bool batched = this->pending_staging_bytes_[this->batch_slot_] + staging.capacity <= max_pending_staging_bytes;
         uint64_t upload_cmd = this->command_buffer_;
         if (batched)
         {
@@ -4341,7 +4381,7 @@ namespace sogen
                 .layer_count = 1,
                 .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
             };
-            this->vulkan_.cmd_copy_buffer_to_image(upload_cmd, staging_buffer, tex.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            this->vulkan_.cmd_copy_buffer_to_image(upload_cmd, staging.buffer, tex.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                                    region);
         }
 
@@ -4353,9 +4393,8 @@ namespace sogen
         {
             // The staging buffer is read by the GPU only when this slot's batch executes, so it -- and the
             // upload_dirty clear this copy earns -- both belong to retire_batch_slot, not to this call.
-            this->pending_staging_cleanup_[this->batch_slot_].push_back(
-                {.device = device, .buffer = staging_buffer, .memory = staging_memory});
-            this->pending_staging_bytes_[this->batch_slot_] += total_size;
+            this->pending_staging_cleanup_[this->batch_slot_].push_back(staging);
+            this->pending_staging_bytes_[this->batch_slot_] += staging.capacity;
             this->pending_texture_uploads_[this->batch_slot_].push_back(resource);
             tex.upload_in_flight = true;
             tex.upload_batch_slot = this->batch_slot_;
@@ -4366,8 +4405,7 @@ namespace sogen
             this->vulkan_.queue_submit(this->queue_, upload_cmd, this->fence_);
             this->vulkan_.wait_for_fence(this->fence_, UINT64_MAX);
 
-            this->vulkan_.destroy_buffer(device, staging_buffer);
-            this->vulkan_.free_memory(device, staging_memory);
+            this->release_staging_buffer(staging);
 
             // Only here, after the fence proved every copy landed, is the GPU image known to match
             // `backing`.
@@ -5193,26 +5231,12 @@ namespace sogen
             std::memcpy(fill_bytes.data() + i * bytes_per_texel, texel.data(), bytes_per_texel);
         }
 
-        uint64_t staging_buffer = 0;
-        if (this->vulkan_.create_buffer(device, required, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging_buffer) != 0 || staging_buffer == 0)
+        pending_staging_buffer staging{};
+        if (!this->acquire_staging_buffer(device, required, staging))
         {
             return d3derr_invalidcall;
         }
-        uint64_t mem_size = 0;
-        uint64_t mem_align = 0;
-        uint32_t mem_type_bits = 0;
-        this->vulkan_.get_buffer_memory_requirements(device, staging_buffer, mem_size, mem_align, mem_type_bits);
-        const uint32_t memory_type = find_memory_type_index(this->vulkan_, this->vk_physical_device_, mem_type_bits,
-                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        uint64_t staging_memory = 0;
-        if (memory_type == UINT32_MAX || this->vulkan_.allocate_memory(device, mem_size, memory_type, staging_memory) != 0 ||
-            staging_memory == 0)
-        {
-            this->vulkan_.destroy_buffer(device, staging_buffer);
-            return d3derr_invalidcall;
-        }
-        this->vulkan_.bind_buffer_memory(device, staging_buffer, staging_memory, 0);
-        this->vulkan_.upload_memory(device, staging_memory, 0, required, fill_bytes.data(), required);
+        this->vulkan_.upload_memory(device, staging.memory, 0, required, fill_bytes.data(), required);
 
         // Record into the currently-open batch (the flush_batch() above just drained and closed whatever
         // was open, so this reopens fresh on the same slot) instead of a standalone
@@ -5246,15 +5270,15 @@ namespace sogen
             .layer_count = 1,
             .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
         };
-        this->vulkan_.cmd_copy_buffer_to_image(batch_cmd, staging_buffer, rt.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+        this->vulkan_.cmd_copy_buffer_to_image(batch_cmd, staging.buffer, rt.vk_image_id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
 
         this->vulkan_.cmd_pipeline_barrier(batch_cmd, rt.vk_image_id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color_range);
 
-        // Freed once this batch slot's submission actually completes (wait_for_batch_slot) -- the staging
-        // buffer must stay alive on the GPU until then, not right after this call returns.
-        this->pending_staging_cleanup_[this->batch_slot_].push_back({.device = device, .buffer = staging_buffer, .memory = staging_memory});
+        // Released once this batch slot's submission actually completes (wait_for_batch_slot) -- the
+        // staging buffer must stay alive on the GPU until then, not right after this call returns.
+        this->pending_staging_cleanup_[this->batch_slot_].push_back(staging);
 
         rt.backing_dirty = true;
         return d3d_ok;
