@@ -84,6 +84,95 @@ namespace sogen
                 target_handle.write(make_handle(response->minted_handle_bits));
                 return STATUS_SUCCESS;
             }
+
+            // Mirrors duplicate_section_into_child for SharedMemIPCServer::Init's ping/pong event pair
+            // (sandbox/win/src/sharedmem_ipc_server.cc), duplicated into the child right after the
+            // shared IPC section - see that function's comment for why minting an unshared local event
+            // (adopt_event, process_control_server.cpp) is survivable here rather than a real gap.
+            NTSTATUS duplicate_event_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
+                                                const emulator_object<handle> target_handle, const ACCESS_MASK /*desired_access*/,
+                                                const ULONG /*options*/)
+            {
+                const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
+                auto* const source_event = c.proc.events.get(resolved_source_handle);
+                if (!source_event)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::adopt_event;
+                request.allocation_type = static_cast<uint32_t>(source_event->type);
+                request.page_protection = source_event->signaled ? 1 : 0;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status != STATUS_SUCCESS)
+                {
+                    return static_cast<NTSTATUS>(response->status);
+                }
+
+                target_handle.write(make_handle(response->minted_handle_bits));
+                return STATUS_SUCCESS;
+            }
+
+            // Mirrors duplicate_event_into_child for SharedMemIPCServer::Init's g_alive_mutex
+            // (sandbox/win/src/sharedmem_ipc_server.cc), duplicated into the child once after all the
+            // ping/pong events - see that function's comment for why an unshared local mutant
+            // (adopt_mutant, process_control_server.cpp) is survivable here rather than a real gap.
+            NTSTATUS duplicate_mutant_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
+                                                 const emulator_object<handle> target_handle, const ACCESS_MASK /*desired_access*/,
+                                                 const ULONG /*options*/)
+            {
+                const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
+                auto* const source_mutant = c.proc.mutants.get(resolved_source_handle);
+                if (!source_mutant)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::adopt_mutant;
+                request.allocation_type = source_mutant->locked_count;
+                request.size = source_mutant->owning_thread_id;
+                request.page_protection = source_mutant->abandoned ? 1 : 0;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status != STATUS_SUCCESS)
+                {
+                    return static_cast<NTSTATUS>(response->status);
+                }
+
+                target_handle.write(make_handle(response->minted_handle_bits));
+                return STATUS_SUCCESS;
+            }
         }
 
         NTSTATUS handle_NtClose(const syscall_context& c, const handle h)
@@ -161,6 +250,16 @@ namespace sogen
 
             if (!c.proc.is_current_process_handle(target_process_handle))
             {
+                const auto resolved_for_child = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
+                if (resolved_for_child.value.type == handle_types::event)
+                {
+                    return duplicate_event_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
+                }
+                if (resolved_for_child.value.type == handle_types::mutant)
+                {
+                    return duplicate_mutant_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
+                }
+
                 return duplicate_section_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
             }
 

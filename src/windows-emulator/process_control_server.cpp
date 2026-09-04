@@ -385,6 +385,41 @@ namespace sogen
             response.minted_handle_bits = h.bits;
             response.status = STATUS_SUCCESS;
         }
+
+        // Mints a fresh, unnamed event local to the child rather than a genuinely shared kernel
+        // object - the same deliberate compromise execute_adopt_section documents for its own case
+        // (see duplicate_section_into_child's comment in syscalls/object.cpp): two separate host
+        // address spaces cannot share a guest event either, and the sandbox's ping/pong cross-call
+        // signaling this event is duplicated for is never actually exercised here, since sogen's
+        // intercepted syscalls resolve directly in the child instead of round-tripping through the
+        // broker's cross-call IPC.
+        void execute_adopt_event(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        {
+            event e{};
+            e.type = static_cast<EVENT_TYPE>(request.allocation_type);
+            e.signaled = request.page_protection != 0;
+
+            const auto h = target.process.events.store(std::move(e));
+
+            response.minted_handle_bits = h.bits;
+            response.status = STATUS_SUCCESS;
+        }
+
+        // Mirrors execute_adopt_event for SharedMemIPCServer::Init's g_alive_mutex (duplicated into
+        // the child once, after all the ping/pong events - sandbox/win/src/sharedmem_ipc_server.cc):
+        // same unshared-local-object compromise, matching the broker's own lock state as a snapshot.
+        void execute_adopt_mutant(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        {
+            mutant m{};
+            m.locked_count = request.allocation_type;
+            m.owning_thread_id = static_cast<uint32_t>(request.size);
+            m.abandoned = request.page_protection != 0;
+
+            const auto h = target.process.mutants.store(std::move(m));
+
+            response.minted_handle_bits = h.bits;
+            response.status = STATUS_SUCCESS;
+        }
     }
 
     void execute_process_control_request(windows_emulator& target, const process_control_request& request,
@@ -421,6 +456,12 @@ namespace sogen
             break;
         case process_control_op::adopt_section:
             execute_adopt_section(target, request, response);
+            break;
+        case process_control_op::adopt_event:
+            execute_adopt_event(target, request, response);
+            break;
+        case process_control_op::adopt_mutant:
+            execute_adopt_mutant(target, request, response);
             break;
         case process_control_op::query_wow64_info:
             execute_query_wow64_info(target, request, response);

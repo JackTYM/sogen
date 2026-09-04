@@ -22,6 +22,8 @@ namespace sogen
         adopt_section = 8,
         query_wow64_info = 9,
         query_cycle_time = 10,
+        adopt_event = 11,
+        adopt_mutant = 12,
     };
 
     inline constexpr int process_control_default_timeout_ms = 10000;

@@ -488,12 +488,15 @@ namespace sogen::test
         ASSERT_EQ(status, STATUS_NOT_SUPPORTED);
     }
 
-    TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsNonSectionSource)
+    // TargetProcess::Init/SharedMemIPCServer::Init duplicate the sandbox's shared IPC section, its
+    // ping/pong events, and its g_alive_mutex into the child (all three handled below); any other
+    // object type stays unsupported.
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsNonSectionNonEventNonMutantSource)
     {
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        const auto source_handle = parent.process.events.store({});
+        const auto source_handle = parent.process.semaphores.store({});
 
         process_context::child_process_record record{};
         record.granted_access = PROCESS_ALL_ACCESS;
@@ -507,6 +510,86 @@ namespace sogen::test
                                                                emulator_object<handle>{parent.memory, 0}, 0, 0, DUPLICATE_SAME_ACCESS);
 
         ASSERT_EQ(status, STATUS_NOT_SUPPORTED);
+    }
+
+    // Mirrors NtDuplicateObjectSyscallDuplicatesPagefileSectionIntoChild for
+    // SharedMemIPCServer::Init's ping/pong events (sandbox/win/src/sharedmem_ipc_server.cc):
+    // duplicate_event_into_child mints an unshared local event in the child with the same type and
+    // initial signaled state, rather than rejecting the duplication outright.
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallDuplicatesEventIntoChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        event e{};
+        e.type = SynchronizationEvent;
+        e.signaled = true;
+        const auto source_handle = parent.process.events.store(std::move(e));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto target_process = make_pseudo_handle(7, handle_types::process);
+
+        const auto handle_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(handle_out, 0u);
+        const emulator_object<handle> target_handle{parent.memory, handle_out};
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, CURRENT_PROCESS, source_handle, target_process, target_handle, 0, 0,
+                                                               DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+
+        const auto minted = target_handle.read();
+        ASSERT_NE(minted.bits, 0u);
+
+        auto* const child_event = child.process.events.get(minted);
+        ASSERT_NE(child_event, nullptr);
+        ASSERT_EQ(child_event->type, SynchronizationEvent);
+        ASSERT_TRUE(child_event->signaled);
+    }
+
+    // Mirrors NtDuplicateObjectSyscallDuplicatesEventIntoChild for SharedMemIPCServer::Init's
+    // g_alive_mutex (sandbox/win/src/sharedmem_ipc_server.cc): duplicate_mutant_into_child mints an
+    // unshared local mutant in the child matching the broker's own lock state as a snapshot.
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallDuplicatesMutantIntoChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        mutant m{};
+        m.locked_count = 1;
+        m.owning_thread_id = 42;
+        const auto source_handle = parent.process.mutants.store(std::move(m));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto target_process = make_pseudo_handle(7, handle_types::process);
+
+        const auto handle_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(handle_out, 0u);
+        const emulator_object<handle> target_handle{parent.memory, handle_out};
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, CURRENT_PROCESS, source_handle, target_process, target_handle, 0, 0,
+                                                               DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+
+        const auto minted = target_handle.read();
+        ASSERT_NE(minted.bits, 0u);
+
+        auto* const child_mutant = child.process.mutants.get(minted);
+        ASSERT_NE(child_mutant, nullptr);
+        ASSERT_EQ(child_mutant->locked_count, 1u);
+        ASSERT_EQ(child_mutant->owning_thread_id, 42u);
+        ASSERT_FALSE(child_mutant->abandoned);
     }
 
     TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsNonCurrentSourceProcess)
