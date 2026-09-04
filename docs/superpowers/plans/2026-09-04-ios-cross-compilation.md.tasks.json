@@ -21,7 +21,7 @@
     {
       "id": 2,
       "subject": "Task 3: Get analyzer to build for iOS",
-      "status": "in_progress",
+      "status": "completed",
       "blockedBy": [
         1
       ],
@@ -31,7 +31,7 @@
     {
       "id": 3,
       "subject": "Task 4: Document the result and hand off to the next plan",
-      "status": "pending",
+      "status": "in_progress",
       "blockedBy": [
         2
       ],
@@ -39,5 +39,5 @@
       "activeForm": "Documenting the result and handoff"
     }
   ],
-  "lastUpdated": "2026-09-04T02:20:55.580951-07:00"
+  "lastUpdated": "2026-09-04T02:46:10.776110-07:00"
 }
