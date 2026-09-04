@@ -173,6 +173,7 @@ namespace sogen
             if (t)
             {
                 t->signal_time = {};
+                c.win_emu.notify_thread_readiness_change();
             }
             return STATUS_SUCCESS;
         }
@@ -183,6 +184,7 @@ namespace sogen
             if (t)
             {
                 t->signal_time = {};
+                c.win_emu.notify_thread_readiness_change();
             }
             return STATUS_SUCCESS;
         }

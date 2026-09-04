@@ -420,6 +420,8 @@ namespace sogen
                     --factory->pending_release_count;
                     return STATUS_INVALID_HANDLE;
                 }
+
+                c.win_emu.notify_thread_readiness_change();
             }
 
             ensure_worker_factory_threads(c, *factory);

@@ -1071,8 +1071,11 @@ namespace sogen
             }
             else
             {
-                // Only timed waits remain; nothing host-side wakes sooner than wall-clock, so don't busy-spin.
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // No parked host wait, so the only deadline of our own is wall-clock and a plain poll would
+                // do. But another vCPU can make one of these threads ready at any instant, and with 2+ vCPUs
+                // that is the common case, so wait on the readiness signal with the poll interval as the
+                // ceiling: a reported transition wakes us now, an unreported one still costs at most a poll.
+                this->host_wait_signal_.wait_for(wait_generation, host_wait_max_sleep);
             }
 
             lock.lock();
@@ -2722,6 +2725,7 @@ namespace sogen
         }
 
         entry->signaled = true;
+        this->notify_thread_readiness_change();
         return true;
     }
 
@@ -2756,6 +2760,8 @@ namespace sogen
         {
             this->vcpu(i).cpu.stop();
         }
+
+        this->host_wait_signal_.signal();
     }
 
     void windows_emulator::register_factories(utils::buffer_deserializer& buffer)

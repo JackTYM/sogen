@@ -467,6 +467,16 @@ namespace sogen
             this->host_wait_signal_.signal();
         }
 
+        // Reports a kernel transition that can make some *other* thread runnable (a signalled event, a
+        // released mutant, a delivered alert, ...), so a vCPU idling in perform_thread_switch re-scans
+        // now instead of at its next poll. That poll interval stays the ceiling: an unreported
+        // transition costs up to one poll of latency, never liveness, so this is a scheduling hint and
+        // not a correctness obligation on every future mutator.
+        void notify_thread_readiness_change()
+        {
+            this->host_wait_signal_.signal_one();
+        }
+
         bool perform_thread_switch(vcpu_context& vcpu, std::unique_lock<kernel_lock>& lock);
         bool perform_thread_switch(vcpu_context& vcpu);
         bool activate_thread(vcpu_context& vcpu, uint32_t id);
