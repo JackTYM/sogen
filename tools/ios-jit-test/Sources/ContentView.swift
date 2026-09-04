@@ -7,7 +7,7 @@ struct ContentView: View {
 
     private var pairingFileURL: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documents.appendingPathComponent("StikJIT/pairingFile.plist")
+        return documents.appendingPathComponent("pairingFile.plist")
     }
 
     var body: some View {
