@@ -343,13 +343,16 @@ link either -- it's fixed-function-only (`D3DFVF_XYZRHW|D3DFVF_DIFFUSE`), no sha
 
 ## Stage
 
-The driver and the host share one wire protocol with no runtime version negotiation, so
 `sogen_d3d9um.dll` has to be re-staged into **every** root anything is run against whenever
-`sogen_d3d9_umd.cpp` or `d3d9_command_protocol.hpp` changes. A root left holding an older copy
-still loads and still negotiates a device; what goes wrong is that the host rejects each record
-whose size the two sides no longer agree on, so (for instance) a `lock_response` that grew fails
-every `Lock` the app makes and the app renders nothing. Roots are outside the build tree and
-nothing re-stages them for you.
+`sogen_d3d9_umd.cpp`, `d3d9_command_protocol.hpp` or `gpu_bridge_protocol.hpp` changes. Roots are
+outside the build tree and nothing re-stages them for you.
+
+Any change to the wire shape must come with a bump of `gpu_bridge::protocol_version`, which the two
+sides compare in a handshake `OpenAdapter` runs before it hands the runtime an adapter function
+table. A root left holding a driver built against a different version now fails device creation
+outright, with a `[sogen-d3d9-umd] FATAL: GPU bridge protocol mismatch` line naming both versions,
+instead of loading, negotiating a device and then misreading every response whose size the two sides
+no longer agree on.
 
 ```bash
 cp sogen_d3d9um-x64.dll <root>/filesys/c/windows/system32/sogen_d3d9um.dll

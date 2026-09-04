@@ -409,6 +409,34 @@ namespace
         std::fflush(stdout);
     }
 
+    // This DLL is staged into an emulation root by hand and nothing re-stages it when the host is
+    // rebuilt, so a root can be left holding a shim that speaks an older wire shape than the host it
+    // runs against. Confirm the two agree once, before any instance exists, so that shows up as the
+    // message below rather than as whatever the first structurally-disagreeing command does.
+    //
+    // Only a positive disagreement counts: a handshake the host never answered leaves the response
+    // zeroed, and treating that as a mismatch would turn any setup where the bridge is merely
+    // unreachable into one that refuses to start.
+    bool bridge_protocol_ok()
+    {
+        static const bool ok = [] {
+            gb::version_response response{};
+            if (!bridge_call(gb::ioctl_get_version, nullptr, 0, &response, sizeof(response)) || response.magic != gb::protocol_magic ||
+                response.version == gb::protocol_version)
+            {
+                return true;
+            }
+
+            char message[320];
+            std::snprintf(message, sizeof(message),
+                          "vulkan-shim: FATAL: GPU bridge protocol mismatch -- this shim was built for version %u, the host speaks "
+                          "version %u. The staged vulkan-1.dll is stale: rebuild it and re-stage it into every emulation root.\n",
+                          gb::protocol_version, response.version);
+            shim_log(message);
+            return false;
+        }();
+        return ok;
+    }
 }
 
 extern "C"
@@ -422,6 +450,11 @@ extern "C"
             {
                 return fn(pCreateInfo, pAllocator, pInstance);
             }
+        }
+
+        if (!bridge_protocol_ok())
+        {
+            return VK_ERROR_INCOMPATIBLE_DRIVER;
         }
 
         gb::create_instance_response response{};

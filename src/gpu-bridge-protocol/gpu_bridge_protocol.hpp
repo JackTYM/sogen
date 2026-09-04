@@ -14,9 +14,12 @@
 namespace sogen::gpu_bridge
 {
     // Identifies a valid bridge and lets the guest detect a host that speaks a different
-    // protocol revision before issuing any further commands.
+    // protocol revision before issuing any further commands. Bump this on every wire-shape change,
+    // including ones made in d3d9_command_protocol.hpp: those payloads ride this same transport and
+    // share this one version, and the guest driver they belong to is a hand-staged blob that nothing
+    // rebuilds automatically, so the version is all that separates a stale one from a matching one.
     inline constexpr uint32_t protocol_magic = 0x55504753; // 'SGPU'
-    inline constexpr uint32_t protocol_version = 27;
+    inline constexpr uint32_t protocol_version = 28;
 
     // Windows IOCTL encoding: CTL_CODE(DeviceType, Function, Method, Access).
     //   value = (DeviceType << 16) | (Access << 14) | (Function << 2) | Method
