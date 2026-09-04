@@ -8,6 +8,7 @@ enum JITLog {
 
     static func append(_ message: String) {
         let line = "[\(Date())] \(message)\n"
+        print(line, terminator: "")
         guard let data = line.data(using: .utf8) else { return }
         let fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
         guard fd >= 0 else { return }

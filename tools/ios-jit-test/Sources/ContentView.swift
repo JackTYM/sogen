@@ -2,6 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var log: String = JITLog.readAll()
+    @State private var showingPairingFileImporter = false
+
+    private var pairingFileURL: URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documents.appendingPathComponent("StikJIT/pairingFile.plist")
+    }
 
     var body: some View {
         NavigationView {
@@ -34,6 +40,49 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
 
+                    Button("Open StikDebug (Enable JIT)") {
+                        openStikDebugJIT()
+                        refresh()
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Test 3: Attempt JIT (after StikDebug)") {
+                        JITLog.append("=== Test 3: JIT attempt, after StikDebug ===")
+                        refresh()
+                        attemptJIT(label: "Test3-AfterStikDebug-plain")
+                        refresh()
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Test 4: JIT26 protocol (after StikDebug)") {
+                        JITLog.append("=== Test 4: JIT26 breakpoint-protocol attempt ===")
+                        refresh()
+                        attemptJIT26(label: "Test4-JIT26")
+                        refresh()
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Import Pairing File") {
+                        showingPairingFileImporter = true
+                    }
+                    .buttonStyle(.bordered)
+                    .fileImporter(isPresented: $showingPairingFileImporter, allowedContentTypes: [.data, .propertyList]) { result in
+                        switch result {
+                        case .success(let sourceURL):
+                            importPairingFile(from: sourceURL)
+                        case .failure(let error):
+                            JITLog.append("Pairing file import FAILED: \(error.localizedDescription)")
+                        }
+                        refresh()
+                    }
+
+                    Button("Test 5: Built-in JIT (in-app helper)") {
+                        JITLog.append("=== Test 5: Built-in JIT via helper extension ===")
+                        refresh()
+                        attemptBuiltInJIT()
+                    }
+                    .buttonStyle(.borderedProminent)
+
                     Button("Clear Log", role: .destructive) {
                         JITLog.clear()
                         refresh()
@@ -42,11 +91,68 @@ struct ContentView: View {
                 .padding(.horizontal)
             }
             .navigationTitle("JIT Test")
-            .onAppear { refresh() }
+            .onAppear {
+                refresh()
+                runAutomatedSequence()
+            }
         }
     }
 
     private func refresh() {
         log = JITLog.readAll()
+    }
+
+    private func importPairingFile(from sourceURL: URL) {
+        let manager = FileManager.default
+        let didAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer { if didAccess { sourceURL.stopAccessingSecurityScopedResource() } }
+
+        do {
+            try manager.createDirectory(at: pairingFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if manager.fileExists(atPath: pairingFileURL.path) {
+                try manager.removeItem(at: pairingFileURL)
+            }
+            try manager.copyItem(at: sourceURL, to: pairingFileURL)
+            JITLog.append("Pairing file imported to \(pairingFileURL.path)")
+        } catch {
+            JITLog.append("Pairing file import FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    private func attemptBuiltInJIT() {
+        guard let pairingData = try? Data(contentsOf: pairingFileURL) else {
+            JITLog.append("[Test5] No pairing file imported yet — tap \"Import Pairing File\" first")
+            refresh()
+            return
+        }
+
+        JITCoordinator.enableJIT(targetPID: getpid(), pairingData: pairingData) { success, message in
+            JITLog.append("[Test5] Built-in JIT \(success ? "SUCCEEDED" : "FAILED"): \(message)")
+            refresh()
+            if success {
+                JITLog.append("[Test5] Attempting JIT execution now that the helper reports success ...")
+                refresh()
+                attemptJIT26(label: "Test5-AfterBuiltInHelper")
+                refresh()
+            }
+        }
+    }
+
+    private func runAutomatedSequence() {
+        if !log.contains("Test1-NoDebugger") {
+            JITLog.append("=== AUTO: Test 1 (no debugger) ===")
+            refresh()
+            attemptJIT(label: "Test1-NoDebugger")
+            refresh()
+        }
+
+        if log.contains("Test1-NoDebugger"), !log.contains("Test2-AfterSelfAttach") {
+            JITLog.append("=== AUTO: Test 2 (self-attach + JIT) ===")
+            refresh()
+            _ = selfAttachViaPtrace()
+            refresh()
+            attemptJIT(label: "Test2-AfterSelfAttach")
+            refresh()
+        }
     }
 }
