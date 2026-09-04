@@ -25,14 +25,22 @@ func attemptJIT(label: String) {
     jit_munmap_region(region, size)
 }
 
-func attemptJIT26(label: String) {
-    let size = 16384
+let jit26RegionSize = 16384
+
+// Calls the JIT26 breakpoint protocol (prepare region, write through a
+// writable alias, detach). Must run concurrently with whatever debugger is
+// attached and waiting for these brk calls — universal.js's wait loop
+// (`while (!detached) { send_command('c') ... }`) blocks until this runs, so
+// calling this only *after* the attach completes deadlocks: the attach can
+// never report success until this has already happened.
+func prepareJIT26(label: String) -> UnsafeMutableRawPointer? {
+    let size = jit26RegionSize
     let debugged = jit26_is_debugged()
     JITLog.append("[\(label)] CS_DEBUGGED = \(debugged)")
 
     guard let region = jit26_prepare_region(nil, size) else {
         JITLog.append("[\(label)] jit26_prepare_region FAILED (returned null)")
-        return
+        return nil
     }
     JITLog.append("[\(label)] jit26_prepare_region OK at \(region)")
 
@@ -41,14 +49,14 @@ func attemptJIT26(label: String) {
     var maxProt: UInt32 = 0
     guard let writableAlias = jit26_writable_alias(region, size, &kernReturn, &curProt, &maxProt) else {
         JITLog.append("[\(label)] jit26_writable_alias FAILED kern_return=\(kernReturn)")
-        return
+        return nil
     }
     JITLog.append("[\(label)] writable alias OK at \(writableAlias), cur_prot=0x\(String(curProt, radix: 16)), max_prot=0x\(String(maxProt, radix: 16))")
 
     let writeBit: UInt32 = 0x2 // VM_PROT_WRITE
     guard (curProt & writeBit) != 0 else {
         JITLog.append("[\(label)] alias is NOT writable (cur_prot lacks VM_PROT_WRITE) — stopping before the write that would crash")
-        return
+        return nil
     }
 
     let word = writableAlias.assumingMemoryBound(to: UInt32.self)
@@ -57,11 +65,20 @@ func attemptJIT26(label: String) {
 
     JITLog.append("[\(label)] wrote RET, calling jit26_detach ...")
     jit26_detach()
+    JITLog.append("[\(label)] jit26_detach returned")
 
+    return region
+}
+
+func executeJIT26(label: String, region: UnsafeMutableRawPointer) {
     JITLog.append("[\(label)] about to execute JIT'd code ...")
     jit_execute(region)
-
     JITLog.append("[\(label)] EXECUTION SUCCEEDED — JIT works")
+}
+
+func attemptJIT26(label: String) {
+    guard let region = prepareJIT26(label: label) else { return }
+    executeJIT26(label: label, region: region)
 }
 
 func selfAttachViaPtrace() -> Bool {

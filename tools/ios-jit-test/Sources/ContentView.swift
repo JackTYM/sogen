@@ -1,6 +1,10 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private final class JIT26RegionHolder {
+    var region: UnsafeMutableRawPointer?
+}
+
 struct ContentView: View {
     @State private var log: String = JITLog.readAll()
     @State private var showingPairingFileImporter = false
@@ -138,15 +142,26 @@ struct ContentView: View {
     }
 
     private func startBuiltInJIT(pairingData: Data) {
+        let holder = JIT26RegionHolder()
+
+        JITLog.append("[Test5] Calling helper (XPC) — preparing JIT26 region concurrently, not after, since the attached script blocks waiting for our brk calls ...")
+        refresh()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            holder.region = prepareJIT26(label: "Test5")
+        }
+
         JITCoordinator.enableJIT(targetPID: getpid(), pairingData: pairingData) { success, message in
             JITLog.append("[Test5] Built-in JIT \(success ? "SUCCEEDED" : "FAILED"): \(message)")
             refresh()
-            if success {
-                JITLog.append("[Test5] Attempting JIT execution now that the helper reports success ...")
+            guard success else { return }
+            guard let region = holder.region else {
+                JITLog.append("[Test5] helper reported success but no region was prepared")
                 refresh()
-                attemptJIT26(label: "Test5-AfterBuiltInHelper")
-                refresh()
+                return
             }
+            executeJIT26(label: "Test5", region: region)
+            refresh()
         }
     }
 
