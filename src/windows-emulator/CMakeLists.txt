@@ -62,6 +62,18 @@ if(ANDROID OR IOS)
   set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
   add_subdirectory(${CMAKE_SOURCE_DIR}/deps/freetype ${CMAKE_BINARY_DIR}/deps/freetype EXCLUDE_FROM_ALL)
   set(SOGEN_FREETYPE_TARGET freetype)
+
+  if(IOS)
+    # deps/freetype's vendored zlib shim (src/gzip/zutil.h) defines OS_CODE once for
+    # TARGET_OS_MAC and again, unguarded, for __APPLE__. Both macros are defined together once
+    # <TargetConditionals.h> is visible, which only happens transitively in this translation
+    # unit on the iOS SDK (not the macOS one), so only the iOS build sees the resulting
+    # -Werror,-Wmacro-redefined. Silence just that warning for just this one file instead of
+    # patching the vendored submodule.
+    set_property(SOURCE ${CMAKE_SOURCE_DIR}/deps/freetype/src/gzip/ftgzip.c
+      DIRECTORY ${CMAKE_SOURCE_DIR}/deps/freetype
+      APPEND PROPERTY COMPILE_OPTIONS -Wno-macro-redefined)
+  endif()
 elseif(NOT EMSCRIPTEN)
   find_package(Freetype REQUIRED)
   set(SOGEN_FREETYPE_TARGET Freetype::Freetype)
