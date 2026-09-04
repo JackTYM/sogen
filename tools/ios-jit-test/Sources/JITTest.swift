@@ -35,8 +35,25 @@ let jit26RegionSize = 16384
 // never report success until this has already happened.
 func prepareJIT26(label: String) -> UnsafeMutableRawPointer? {
     let size = jit26RegionSize
-    let debugged = jit26_is_debugged()
-    JITLog.append("[\(label)] CS_DEBUGGED = \(debugged)")
+
+    // A brk with no debugger attached crashes the process outright, so we
+    // must actually wait for CS_DEBUGGED to go true (not just log it) before
+    // touching jit26_prepare_region.
+    let pollInterval: useconds_t = 50_000 // 50ms
+    let maxAttempts = 300 // 15s
+    var debugged = jit26_is_debugged()
+    var attempts = 0
+    while !debugged, attempts < maxAttempts {
+        usleep(pollInterval)
+        debugged = jit26_is_debugged()
+        attempts += 1
+    }
+    JITLog.append("[\(label)] CS_DEBUGGED = \(debugged) (after \(attempts) poll(s))")
+
+    guard debugged else {
+        JITLog.append("[\(label)] Timed out waiting for CS_DEBUGGED — not calling jit26_prepare_region (would crash)")
+        return nil
+    }
 
     guard let region = jit26_prepare_region(nil, size) else {
         JITLog.append("[\(label)] jit26_prepare_region FAILED (returned null)")
