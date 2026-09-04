@@ -23,11 +23,41 @@ namespace sogen
             // is the closest real NT process-level right for this operation, so it is used here as the
             // required access, consistent with every other cross-process check in this codebase.
             constexpr ACCESS_MASK PROCESS_SUSPEND_RESUME = 0x0800;
+
+            // Same reasoning as PROCESS_SUSPEND_RESUME above, for NtSetInformationThread's
+            // ThreadImpersonationToken case: real Windows requires THREAD_SET_THREAD_TOKEN on the
+            // thread, which this codebase has no per-thread model for either. PROCESS_SET_INFORMATION
+            // is the closest process-level right.
+            constexpr ACCESS_MASK PROCESS_SET_INFORMATION = 0x0200;
         }
 
         NTSTATUS handle_NtSetInformationThread(const syscall_context& c, const handle thread_handle, const THREADINFOCLASS info_class,
                                                const uint64_t thread_information, const uint32_t thread_information_length)
         {
+            // The sandbox broker's CreateSandboxProcess (sandbox/win/src/broker_services.cc) calls
+            // SetThreadToken on a still-suspended child's initial thread immediately after creating it,
+            // before NtResumeThread is ever reached - a failure here makes the broker terminate the
+            // child right away without resuming it, matching NtResumeThread's own cross-process case.
+            if (info_class == ThreadImpersonationToken && thread_handle.value.is_pseudo &&
+                thread_handle.value.type == handle_types::thread && c.proc.child_processes.contains(thread_handle.value.id))
+            {
+                const auto child = resolve_child_target(c, thread_handle, PROCESS_SET_INFORMATION);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                if (thread_information_length != sizeof(handle))
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+
+                const emulator_object<handle> info{c.emu, thread_information};
+                info.write(DUMMY_IMPERSONATION_TOKEN);
+
+                return STATUS_SUCCESS;
+            }
+
             auto* thread = thread_handle == CURRENT_THREAD ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
@@ -631,6 +661,23 @@ namespace sogen
         NTSTATUS handle_NtOpenThreadToken(const syscall_context& c, const handle thread_handle, const ACCESS_MASK /*desired_access*/,
                                           const BOOLEAN /*open_as_self*/, const emulator_object<handle> token_handle)
         {
+            // Mirrors NtSetInformationThread's ThreadImpersonationToken case above: CreateSandboxProcess
+            // (sandbox/win/src/broker_services.cc) immediately re-opens the token it just set via
+            // OpenThreadToken (base::win::AccessToken::FromThread) to verify the impersonation level
+            // actually took, before ever resuming the child.
+            if (thread_handle.value.is_pseudo && thread_handle.value.type == handle_types::thread &&
+                c.proc.child_processes.contains(thread_handle.value.id))
+            {
+                const auto child = resolve_child_target(c, thread_handle, PROCESS_SET_INFORMATION);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                token_handle.write(DUMMY_IMPERSONATION_TOKEN);
+                return STATUS_SUCCESS;
+            }
+
             if (!c.proc.is_current_thread_handle(thread_handle, c.vcpu.active_thread))
             {
                 return STATUS_NOT_SUPPORTED;
