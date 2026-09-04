@@ -508,6 +508,7 @@ namespace sogen
                         if (auto* event = win_emu.process.events.get(*this->event_select_event_))
                         {
                             event->signaled = true;
+                            win_emu.notify_thread_readiness_change();
                         }
                     }
                 }
@@ -546,6 +547,7 @@ namespace sogen
                     if (e)
                     {
                         e->signaled = true;
+                        win_emu.notify_thread_readiness_change();
                     }
 
                     this->clear_pending_state();

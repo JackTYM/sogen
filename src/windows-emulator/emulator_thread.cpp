@@ -1020,6 +1020,7 @@ namespace sogen
         {
             this->queue_status_changed_bits |= bits;
             message_queue.back() = msg;
+            win_emu.notify_thread_readiness_change();
             return;
         }
 
@@ -1030,6 +1031,8 @@ namespace sogen
         this->message_queue_status_bits |= bits;
         this->queue_status_changed_bits |= bits;
         message_queue.push_back(msg);
+
+        win_emu.notify_thread_readiness_change();
     }
 
     void emulator_thread::remove_window_messages(const hwnd window)

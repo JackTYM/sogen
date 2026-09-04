@@ -71,6 +71,7 @@ namespace sogen
             message.io_status_block.Information = io_status_information;
 
             completion->enqueue(message);
+            c.win_emu.notify_thread_readiness_change();
             return STATUS_SUCCESS;
         }
 
@@ -132,6 +133,7 @@ namespace sogen
             message.wait_packet_handle = wait_packet_handle;
 
             completion->enqueue(message);
+            c.win_emu.notify_thread_readiness_change();
             return STATUS_SUCCESS;
         }
 

@@ -620,6 +620,7 @@ namespace sogen
                     }
                 }
 
+                c.win_emu.notify_thread_readiness_change();
                 return STATUS_SUCCESS;
             }
 
