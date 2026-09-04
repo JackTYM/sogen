@@ -240,6 +240,75 @@ including upstream security fixes. Picking up an upstream FEX-Emu update require
 rebasing/merging this fork onto the corresponding upstream release and re-verifying the Darwin
 patches still apply.
 
+## iOS cross-compilation
+
+### Porting notes
+
+`cmake --workflow --preset=ios` (or `cmake --preset=ios && cmake --build --preset=ios`) configures
+and builds the `analyzer` target for `arm64-apple-ios`, producing a real Mach-O binary at
+`build/ios/artifacts/analyzer` — confirmed via `file` (`Mach-O 64-bit executable arm64`) and
+`otool -l` (`LC_BUILD_VERSION` `platform 2` / `minos 14.0`). The preset trio (configure, build,
+workflow, all named `ios`) lives in `CMakePresets.json` and points `CMAKE_TOOLCHAIN_FILE` at
+`cmake/toolchain/ios.cmake`.
+
+Getting there required no source or `src/CMakeLists.txt` gating at all beyond one narrow fix:
+
+- **Configuring** (`cmake --preset=ios`) needed zero `add_subdirectory` gating anywhere in the
+  tree — every dependency's `find_package`/`find_library` resolved cleanly for the iOS toolchain
+  once the `ios` preset's own cache settings were in place, in particular
+  `SOGEN_USE_SYSTEM_SDL3=OFF`, which forces the vendored `deps/SDL` submodule instead of
+  accidentally resolving this host's Homebrew macOS SDL3.
+- **Building** `analyzer` hit exactly one real compile error across the whole ~570-step build
+  graph: vendored FreeType's zlib shim (`deps/freetype/src/gzip/zutil.h`) defines the `OS_CODE`
+  macro twice — once for `TARGET_OS_MAC`, once for `__APPLE__` — and both are true simultaneously
+  on any Apple platform. This only trips `-Werror -Wmacro-redefined` on the iOS SDK, not the macOS
+  one, apparently because `<TargetConditionals.h>` becomes visible at a different point in this
+  translation unit between the two SDKs. It's fixed with a targeted, `IOS`-gated
+  `-Wno-macro-redefined` on just `deps/freetype/src/gzip/ftgzip.c` in
+  `src/windows-emulator/CMakeLists.txt` (next to the existing freetype `add_subdirectory` there),
+  not by patching the `deps/freetype` submodule itself. An earlier attempt patched the submodule
+  directly and was discarded before being committed: `deps/freetype` is a shallow submodule
+  tracking upstream with no push access, so a local-only submodule commit would silently vanish on
+  any future fresh clone/CI checkout. Worth remembering for any other `deps/` submodule patch in
+  this repo.
+
+FEX itself stays **off** for iOS, deliberately. The gate above (`CMakeLists.txt:69`) only enables
+`SOGEN_ENABLE_FEX` for `(Linux AND NOT ANDROID) OR Darwin`; under the `ios` preset
+`CMAKE_SYSTEM_NAME` is `"iOS"`, which matches neither, so the backend is silently skipped. This
+was left untouched on purpose — enabling FEX for iOS is real follow-on work, not part of this
+plan.
+
+Note also that `analyzer` compiling and linking for iOS is necessary but not sufficient to run
+anything there: stock iOS cannot execute a bare Mach-O binary outside a signed `.app` bundle
+launched through LaunchServices — there is no interactive shell to `exec` it from the way
+`./analyzer` works on macOS. Live on-device execution is out of scope here and belongs to the
+app-shell plan below.
+
+### Follow-on work
+
+This unblocks two follow-on plans:
+
+- **FEXCore JIT26 allocator changes** — `deps/FEX/FEXCore/Source/Interface/Core/JIT/JIT.cpp` and
+  `deps/FEX/FEXCore/include/FEXCore/Utils/AllocatorHooks.h` need a breakpoint-driven
+  memory-blessing protocol (`brk #0xf00d` with `x16=1` to prepare a region, `x16=0` to detach)
+  plus a `mach_vm_remap`+`mprotect` writable-alias technique, gated on TXM/SPTM hardware
+  presence, before FEX's JIT can actually execute code on iOS 26+ hardware. Plain
+  `mmap(MAP_JIT)` + `pthread_jit_write_protect_np` is insufficient there — confirmed blocked with
+  `EPERM` even under a real, externally-granted `CS_DEBUGGED`, in a separate out-of-tree
+  investigation.
+- **The three-target iOS app shell** — host app + an ExtensionKit `JITHelper` extension
+  (vendoring the open-source `StikJIT` library, MPL-2.0) + a `TunnelExtension`
+  (`NEPacketTunnelProvider`, adapted with attribution from the open-source `StosVPN` project,
+  MIT-licensed). This architecture was fully validated and got real JIT execution working
+  end-to-end, entirely self-contained (no external app dependencies beyond a one-time
+  pairing-file import), in a throwaway Swift spike that lives outside this repository — it's not
+  under `tools/`, not part of sogen's CMake build. Full write-up:
+  https://claude.ai/code/artifact/0e1a4eee-b721-450d-acbd-18bc25f96963
+
+Shipping either of the above requires signing through an Apple Developer account with the
+`NetworkExtension` entitlement approved — confirmed unavailable to free personal-team accounts via
+a real Xcode provisioning error in that same out-of-tree investigation.
+
 ## Selecting the backend
 
 ```sh
