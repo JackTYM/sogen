@@ -56,6 +56,19 @@
             }
         },
         {
+            "name": "ios",
+            "inherits": [
+                "ninja",
+                "build"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchain/ios.cmake",
+                "SOGEN_ENABLE_RUST_CODE": "OFF",
+                "SOGEN_USE_SYSTEM_SDL3": "OFF"
+            }
+        },
+        {
             "name": "emscripten-base",
             "hidden": true,
             "inherits": [
@@ -130,6 +143,13 @@
                 "analyzer",
                 "linux-analyzer"
             ]
+        },
+        {
+            "name": "ios",
+            "configurePreset": "ios",
+            "targets": [
+                "analyzer"
+            ]
         }
     ],
     "workflowPresets": [
@@ -195,6 +215,19 @@
                 {
                     "type": "build",
                     "name": "emscripten64"
+                }
+            ]
+        },
+        {
+            "name": "ios",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "ios"
+                },
+                {
+                    "type": "build",
+                    "name": "ios"
                 }
             ]
         }
