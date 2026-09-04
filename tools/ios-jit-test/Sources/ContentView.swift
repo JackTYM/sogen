@@ -128,6 +128,16 @@ struct ContentView: View {
             return
         }
 
+        JITLog.append("[Test5] Starting our own tunnel extension ...")
+        refresh()
+        TunnelManager.ensureConnected { tunnelUp, tunnelMessage in
+            JITLog.append("[Test5] Tunnel \(tunnelUp ? "UP" : "FAILED"): \(tunnelMessage)")
+            refresh()
+            self.startBuiltInJIT(pairingData: pairingData)
+        }
+    }
+
+    private func startBuiltInJIT(pairingData: Data) {
         JITCoordinator.enableJIT(targetPID: getpid(), pairingData: pairingData) { success, message in
             JITLog.append("[Test5] Built-in JIT \(success ? "SUCCEEDED" : "FAILED"): \(message)")
             refresh()
