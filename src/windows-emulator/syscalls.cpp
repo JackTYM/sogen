@@ -160,11 +160,11 @@ namespace sogen
         NTSTATUS handle_NtFreeVirtualMemory(const syscall_context& c, handle process_handle, emulator_object<uint64_t> base_address,
                                             emulator_object<uint64_t> bytes_to_allocate, uint32_t free_type);
         NTSTATUS handle_NtReadVirtualMemory(const syscall_context& c, handle process_handle, emulator_pointer base_address,
-                                            emulator_pointer buffer, ULONG number_of_bytes_to_read,
-                                            emulator_object<ULONG> number_of_bytes_read);
+                                            emulator_pointer buffer, uint64_t number_of_bytes_to_read,
+                                            emulator_object<uint64_t> number_of_bytes_read);
         NTSTATUS handle_NtWriteVirtualMemory(const syscall_context& c, handle process_handle, emulator_pointer base_address,
-                                             emulator_pointer buffer, ULONG number_of_bytes_to_write,
-                                             emulator_object<ULONG> number_of_bytes_write);
+                                             emulator_pointer buffer, uint64_t number_of_bytes_to_write,
+                                             emulator_object<uint64_t> number_of_bytes_write);
         NTSTATUS handle_NtSetInformationVirtualMemory();
         BOOL handle_NtLockVirtualMemory();
         NTSTATUS handle_NtUnlockVirtualMemory();
@@ -1103,11 +1103,16 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle /*job_handle*/,
+        NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle job_handle,
                                                     const uint32_t /*job_object_information_class*/, const uint64_t job_object_information,
                                                     const uint32_t job_object_information_length,
                                                     const emulator_object<uint32_t> return_length)
         {
+            if (job_handle.value.type != handle_types::job || !c.proc.jobs.get(job_handle))
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
             // Defensive zero-fill stub: doesn't model per-info-class output sizes yet.
             if (job_object_information != 0 && job_object_information_length != 0)
             {
@@ -1119,7 +1124,7 @@ namespace sogen
                 return_length.write(0);
             }
 
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCreateDebugObject()

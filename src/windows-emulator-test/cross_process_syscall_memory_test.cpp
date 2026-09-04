@@ -6,9 +6,9 @@
 namespace sogen::syscalls
 {
     NTSTATUS handle_NtReadVirtualMemory(const syscall_context& c, handle process_handle, uint64_t base_address, uint64_t buffer,
-                                        ULONG number_of_bytes_to_read, emulator_object<ULONG> number_of_bytes_read);
+                                        uint64_t number_of_bytes_to_read, emulator_object<uint64_t> number_of_bytes_read);
     NTSTATUS handle_NtWriteVirtualMemory(const syscall_context& c, handle process_handle, uint64_t base_address, uint64_t buffer,
-                                         ULONG number_of_bytes_to_write, emulator_object<ULONG> number_of_bytes_write);
+                                         uint64_t number_of_bytes_to_write, emulator_object<uint64_t> number_of_bytes_write);
     NTSTATUS handle_NtAllocateVirtualMemory(const syscall_context& c, handle process_handle, emulator_object<uint64_t> base_address,
                                             uint64_t zero_bits, emulator_object<uint64_t> bytes_to_allocate, uint32_t allocation_type,
                                             uint32_t page_protection);
@@ -136,10 +136,9 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_read{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_read{parent.memory, out_address};
 
-        const auto status =
-            syscalls::handle_NtReadVirtualMemory(c, h, child_base, local_buffer, static_cast<ULONG>(pattern.size()), number_of_bytes_read);
+        const auto status = syscalls::handle_NtReadVirtualMemory(c, h, child_base, local_buffer, pattern.size(), number_of_bytes_read);
 
         ASSERT_EQ(status, STATUS_SUCCESS);
         ASSERT_EQ(number_of_bytes_read.read(), pattern.size());
@@ -180,10 +179,9 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_written{parent.memory, out_address};
 
-        const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, static_cast<ULONG>(pattern.size()),
-                                                                  number_of_bytes_written);
+        const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, pattern.size(), number_of_bytes_written);
 
         ASSERT_EQ(status, STATUS_SUCCESS);
         ASSERT_EQ(number_of_bytes_written.read(), pattern.size());
@@ -208,7 +206,7 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_read{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_read{parent.memory, out_address};
         number_of_bytes_read.write(0xDEADBEEF);
 
         const auto status = syscalls::handle_NtReadVirtualMemory(c, h, 0x1000, 0x2000, 0x10, number_of_bytes_read);
@@ -232,7 +230,7 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_written{parent.memory, out_address};
         number_of_bytes_written.write(0xDEADBEEF);
 
         const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, 0x1000, 0x2000, 0x10, number_of_bytes_written);
@@ -258,7 +256,7 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_read{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_read{parent.memory, out_address};
         number_of_bytes_read.write(0xDEADBEEF);
 
         const auto status = syscalls::handle_NtReadVirtualMemory(c, h, 0x1000, local_buffer, 0x10, number_of_bytes_read);
@@ -286,11 +284,10 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_written{parent.memory, out_address};
         number_of_bytes_written.write(0xDEADBEEF);
 
-        const auto status =
-            syscalls::handle_NtWriteVirtualMemory(c, h, 0x1000, local_buffer, static_cast<ULONG>(pattern.size()), number_of_bytes_written);
+        const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, 0x1000, local_buffer, pattern.size(), number_of_bytes_written);
 
         ASSERT_EQ(status, STATUS_PROCESS_IS_TERMINATING);
         ASSERT_EQ(number_of_bytes_written.read(), 0u);
@@ -328,7 +325,7 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_read{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_read{parent.memory, out_address};
 
         const auto status = syscalls::handle_NtReadVirtualMemory(c, h, child_base, local_buffer, 0x2000, number_of_bytes_read);
 
@@ -373,7 +370,7 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_written{parent.memory, out_address};
 
         const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, 0x2000, number_of_bytes_written);
 
@@ -422,7 +419,7 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_written{parent.memory, out_address};
 
         const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, 0x2000, number_of_bytes_written);
 
@@ -467,7 +464,7 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_read{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_read{parent.memory, out_address};
 
         const auto status = syscalls::handle_NtReadVirtualMemory(c, h, child_base, local_buffer, 0x2000, number_of_bytes_read);
 
@@ -519,10 +516,9 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_read{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_read{parent.memory, out_address};
 
-        const auto status =
-            syscalls::handle_NtReadVirtualMemory(c, h, child_base, local_buffer, static_cast<ULONG>(total_size), number_of_bytes_read);
+        const auto status = syscalls::handle_NtReadVirtualMemory(c, h, child_base, local_buffer, total_size, number_of_bytes_read);
 
         ASSERT_EQ(status, STATUS_SUCCESS);
         ASSERT_EQ(number_of_bytes_read.read(), total_size);
@@ -567,10 +563,9 @@ namespace sogen::test
 
         const auto out_address = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
         ASSERT_NE(out_address, 0u);
-        const emulator_object<ULONG> number_of_bytes_written{parent.memory, out_address};
+        const emulator_object<uint64_t> number_of_bytes_written{parent.memory, out_address};
 
-        const auto status =
-            syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, static_cast<ULONG>(total_size), number_of_bytes_written);
+        const auto status = syscalls::handle_NtWriteVirtualMemory(c, h, child_base, local_buffer, total_size, number_of_bytes_written);
 
         ASSERT_EQ(status, STATUS_SUCCESS);
         ASSERT_EQ(number_of_bytes_written.read(), total_size);

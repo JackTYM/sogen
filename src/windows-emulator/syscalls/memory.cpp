@@ -921,8 +921,8 @@ namespace sogen
         }
 
         NTSTATUS handle_NtReadVirtualMemory(const syscall_context& c, const handle process_handle, const emulator_pointer base_address,
-                                            const emulator_pointer buffer, const ULONG number_of_bytes_to_read,
-                                            const emulator_object<ULONG> number_of_bytes_read)
+                                            const emulator_pointer buffer, const uint64_t number_of_bytes_to_read,
+                                            const emulator_object<uint64_t> number_of_bytes_read)
         {
             number_of_bytes_read.try_write(0);
 
@@ -959,7 +959,7 @@ namespace sogen
                     return STATUS_PROCESS_IS_TERMINATING;
                 }
 
-                number_of_bytes_read.try_write(static_cast<ULONG>(outcome.transferred));
+                number_of_bytes_read.try_write(outcome.transferred);
                 return transfer_status(outcome.transferred, number_of_bytes_to_read);
             }
 
@@ -973,13 +973,13 @@ namespace sogen
             const auto bytes_written_to_dest =
                 copy_guest_range_in(c.emu, static_cast<uint64_t>(buffer), std::span(data).first(bytes_read_from_source));
 
-            number_of_bytes_read.try_write(static_cast<ULONG>(bytes_written_to_dest));
+            number_of_bytes_read.try_write(bytes_written_to_dest);
             return transfer_status(bytes_written_to_dest, number_of_bytes_to_read);
         }
 
         NTSTATUS handle_NtWriteVirtualMemory(const syscall_context& c, const handle process_handle, const emulator_pointer base_address,
-                                             const emulator_pointer buffer, const ULONG number_of_bytes_to_write,
-                                             const emulator_object<ULONG> number_of_bytes_write)
+                                             const emulator_pointer buffer, const uint64_t number_of_bytes_to_write,
+                                             const emulator_object<uint64_t> number_of_bytes_write)
         {
             number_of_bytes_write.try_write(0);
 
@@ -1020,7 +1020,7 @@ namespace sogen
                     return STATUS_PROCESS_IS_TERMINATING;
                 }
 
-                number_of_bytes_write.try_write(static_cast<ULONG>(outcome.transferred));
+                number_of_bytes_write.try_write(outcome.transferred);
                 return transfer_status(outcome.transferred, number_of_bytes_to_write);
             }
 
@@ -1034,7 +1034,7 @@ namespace sogen
             const auto bytes_written_to_dest =
                 copy_guest_range_in(c.emu, static_cast<uint64_t>(base_address), std::span(data).first(bytes_read_from_source));
 
-            number_of_bytes_write.try_write(static_cast<ULONG>(bytes_written_to_dest));
+            number_of_bytes_write.try_write(bytes_written_to_dest);
             return transfer_status(bytes_written_to_dest, number_of_bytes_to_write);
         }
 
