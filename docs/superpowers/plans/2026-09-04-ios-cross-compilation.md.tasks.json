@@ -11,7 +11,7 @@
     {
       "id": 1,
       "subject": "Task 2: Get cmake --preset=ios to configure cleanly",
-      "status": "in_progress",
+      "status": "completed",
       "blockedBy": [
         0
       ],
@@ -21,7 +21,7 @@
     {
       "id": 2,
       "subject": "Task 3: Get analyzer to build for iOS",
-      "status": "pending",
+      "status": "in_progress",
       "blockedBy": [
         1
       ],
@@ -39,5 +39,5 @@
       "activeForm": "Documenting the result and handoff"
     }
   ],
-  "lastUpdated": "2026-09-04T02:13:14.898471-07:00"
+  "lastUpdated": "2026-09-04T02:20:55.580951-07:00"
 }
