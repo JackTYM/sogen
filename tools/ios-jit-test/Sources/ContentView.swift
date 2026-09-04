@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var log: String = JITLog.readAll()
@@ -66,7 +67,7 @@ struct ContentView: View {
                         showingPairingFileImporter = true
                     }
                     .buttonStyle(.bordered)
-                    .fileImporter(isPresented: $showingPairingFileImporter, allowedContentTypes: [.data, .propertyList]) { result in
+                    .fileImporter(isPresented: $showingPairingFileImporter, allowedContentTypes: [.item]) { result in
                         switch result {
                         case .success(let sourceURL):
                             importPairingFile(from: sourceURL)
