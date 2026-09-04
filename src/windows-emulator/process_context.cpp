@@ -368,6 +368,19 @@ namespace sogen
 
             return env_map;
         }
+
+        // ntdll copies PEB->CriticalSectionTimeout into its own RtlpTimeout and passes that as the wait
+        // interval in RtlpWaitOnCriticalSection, where zero means "time out immediately", not "wait
+        // forever": leaving the field unset makes every contended acquisition time out at once, emit
+        // three filtered DbgPrintEx calls and re-wait in a loop. Windows seeds it from MmCritsectTimeout,
+        // whose default is 30 days. The opt-out restores the historic zero, and exists only until the
+        // idle wait learns to wake on a cross-vCPU signal instead of a fixed sleep.
+        uint64_t get_critical_section_timeout()
+        {
+            static const bool legacy_zero = getenv("EMULATOR_LEGACY_ZERO_CRITSECT_TIMEOUT") != nullptr;
+            constexpr int64_t thirty_days = -25920000000000LL;
+            return legacy_zero ? 0 : static_cast<uint64_t>(thirty_days);
+        }
     }
 
     void process_context::setup(windows_emulator& win_emu, const application_settings& app_settings, const mapped_module& executable,
@@ -500,6 +513,7 @@ namespace sogen
             p.NumberOfHeaps = 0x00000000;
             p.MaximumNumberOfHeaps = 0x00000010;
             p.NumberOfProcessors = fake_env.number_of_processors;
+            p.CriticalSectionTimeout.QuadPart = get_critical_section_timeout();
             p.ImageSubsystemMajorVersion = 6;
 
             // TODO: p.SessionId = 1;
@@ -611,6 +625,7 @@ namespace sogen
                 p32.NumberOfHeaps = 0;
                 p32.MaximumNumberOfHeaps = 0x10;
                 p32.NumberOfProcessors = fake_env.number_of_processors;
+                p32.CriticalSectionTimeout.QuadPart = get_critical_section_timeout();
                 p32.ImageSubsystemMajorVersion = 6;
 
                 // TODO: p32.SessionId = 1;
