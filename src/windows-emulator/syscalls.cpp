@@ -1038,12 +1038,11 @@ namespace sogen
         }
 
         NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle /*job_handle*/,
-                                                    const uint32_t /*job_object_information_class*/,
-                                                    const uint64_t job_object_information,
+                                                    const uint32_t /*job_object_information_class*/, const uint64_t job_object_information,
                                                     const uint32_t job_object_information_length,
                                                     const emulator_object<uint32_t> return_length)
         {
-            // Defensive zero-fill stub: doesn't model per-info-class output sizes yet.
+            // Cleared on the failure return as well, which NT does not do, so a guest that skips the status check reads zeroes.
             if (job_object_information != 0 && job_object_information_length != 0)
             {
                 c.emu.set_memory(job_object_information, 0, job_object_information_length);
