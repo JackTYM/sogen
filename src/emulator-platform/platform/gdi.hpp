@@ -339,6 +339,25 @@ namespace sogen
         UINT32 PrivateDriverDataSize;
     };
 
+    enum class D3DDDI_QUERYREGISTRY_STATUS : UINT32
+    {
+        D3DDDI_QUERYREGISTRY_STATUS_SUCCESS = 0,
+        D3DDDI_QUERYREGISTRY_STATUS_BUFFER_OVERFLOW = 1,
+        D3DDDI_QUERYREGISTRY_STATUS_FAIL = 2,
+    };
+
+    struct EMU_D3DDDI_QUERYREGISTRY_INFO
+    {
+        UINT32 QueryType;
+        UINT32 QueryFlags;
+        char16_t ValueName[260]; // NOLINT
+        UINT32 ValueType;
+        UINT32 PhysicalAdapterIndex;
+        UINT32 OutputValueSize;
+        D3DDDI_QUERYREGISTRY_STATUS Status;
+        UINT32 OutputValue;
+    };
+
     struct EMU_D3DKMT_CREATEDEVICE
     {
         UINT64 hAdapter;

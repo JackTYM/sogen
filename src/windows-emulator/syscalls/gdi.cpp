@@ -4322,6 +4322,22 @@ namespace sogen
                 return write_query_adapter_info(c, query, unique_guid);
             }
 
+            case KMTQAITYPE::KMTQAITYPE_QUERYREGISTRY: {
+                if (query.PrivateDriverDataSize < offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, Status) + sizeof(D3DDDI_QUERYREGISTRY_STATUS))
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                std::vector<uint8_t> zeros(query.PrivateDriverDataSize, 0);
+                c.emu.write_memory(query.pPrivateDriverData, zeros.data(), zeros.size());
+
+                constexpr auto fail_status = D3DDDI_QUERYREGISTRY_STATUS::D3DDDI_QUERYREGISTRY_STATUS_FAIL;
+                c.emu.write_memory(query.pPrivateDriverData + offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, Status), &fail_status,
+                                   sizeof(fail_status));
+
+                return STATUS_SUCCESS;
+            }
+
             default: {
                 dxgk_warn(c, "NtGdiDdDDIQueryAdapterInfo: Unhandled query Type %d", static_cast<UINT32>(query.Type));
 
