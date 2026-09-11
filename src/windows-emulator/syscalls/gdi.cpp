@@ -215,6 +215,7 @@ namespace sogen
             constexpr uint32_t k_dxgk_fake_vendor_id = 0x10DE;
             constexpr uint32_t k_dxgk_fake_device_id = 0x1C03;
             constexpr uint32_t k_dxgk_fake_revision_id = 0xA1;
+            constexpr int64_t k_dxgk_fake_umd_driver_version = 0x001F0000000F17CE; // 31.0.15.6094
             constexpr uint32_t k_dxgk_open_resource_resource_private_size = 0x18;
             constexpr uint32_t k_dxgk_open_resource_allocation_private_size = 0x18;
             constexpr uint32_t k_dxgk_open_resource_descriptor_size = 0x80;
@@ -4188,6 +4189,10 @@ namespace sogen
 
                 c.emu.write_memory(query.pPrivateDriverData, &driver_name, sizeof(driver_name));
                 return STATUS_SUCCESS;
+            }
+
+            case KMTQAITYPE::KMTQAITYPE_UMD_DRIVER_VERSION: {
+                return write_query_adapter_info(c, query, k_dxgk_fake_umd_driver_version);
             }
 
             case KMTQAITYPE::KMTQAITYPE_GETSEGMENTSIZE: {
