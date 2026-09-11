@@ -1918,7 +1918,8 @@ namespace sogen
             const auto dc = allocate_gdi_dc(c, dc_attr);
             if (dc != 0)
             {
-                c.proc.gdi_dc_states[dc].target_window = window;
+                const hwnd desktop_window = c.proc.default_desktop_window_handle.bits;
+                c.proc.gdi_dc_states[dc].target_window = window == 0 ? desktop_window : window;
             }
             return dc;
         }
