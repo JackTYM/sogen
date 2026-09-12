@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -42,6 +43,9 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #endif
 
 namespace sogen
@@ -107,7 +111,13 @@ namespace sogen
             ::dlclose(handle);
         }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        // iOS ships no Vulkan loader, and dlopen() by leaf name never searches an app bundle, so
+        // MoltenVK is linked statically into the embedding app instead (see the -force_load in
+        // tools/sogen-ios/project.yml). A null path makes dlopen() return the main executable's
+        // own handle, which is where vkGetInstanceProcAddr then resolves from.
+        constexpr std::array<const char*, 1> vulkan_loader_names{nullptr};
+#elif defined(__APPLE__)
         // Bare names rely on the dynamic linker's default search path, which covers Intel
         // Homebrew's /usr/local/lib but not Apple Silicon Homebrew's /opt/homebrew/lib unless
         // DYLD_LIBRARY_PATH is set; the absolute paths below are a fallback for that case.
@@ -216,6 +226,16 @@ namespace sogen
         PFN_vkCreateInstance create_instance{};
         PFN_vkEnumerateInstanceVersion enumerate_instance_version{};
         PFN_vkEnumerateInstanceExtensionProperties enumerate_instance_extension_properties{};
+        // Set at each stage of the constructor below so available()'s caller (gdi.cpp's
+        // NtGdiDdDDICreateDevice) can report exactly which step failed instead of just "not
+        // available" -- dlopen(nullptr) itself failing, dlsym(vkGetInstanceProcAddr) failing
+        // (e.g. the symbol existing in the linked binary but not surviving Xcode's archive strip
+        // phase, or not being exported at all), or vkGetInstanceProcAddr resolving but returning
+        // null for "vkCreateInstance" specifically.
+        const char* init_diagnostic = "constructor did not run";
+        // Step-by-step trace of the most recent create_render_target() call -- see
+        // vulkan_host::render_target_diagnostic()'s own comment.
+        std::string last_render_target_diagnostic = "create_render_target() was never called";
 
         struct instance_data
         {
@@ -1143,6 +1163,7 @@ namespace sogen
         {
             if constexpr (sizeof(size_t) != 8)
             {
+                this->init_diagnostic = "sizeof(size_t) != 8 (32-bit host, not supported)";
                 return;
             }
 
@@ -1157,12 +1178,14 @@ namespace sogen
 
             if (!this->loader)
             {
+                this->init_diagnostic = "load_library() (dlopen) returned null for every loader name";
                 return;
             }
 
             this->get_instance_proc_addr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(get_symbol(this->loader, "vkGetInstanceProcAddr"));
             if (!this->get_instance_proc_addr)
             {
+                this->init_diagnostic = "dlopen succeeded but get_symbol(vkGetInstanceProcAddr) returned null";
                 return;
             }
 
@@ -1171,6 +1194,8 @@ namespace sogen
                 reinterpret_cast<PFN_vkEnumerateInstanceVersion>(this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceVersion"));
             this->enumerate_instance_extension_properties = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
                 this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceExtensionProperties"));
+
+            this->init_diagnostic = this->create_instance ? "ok" : "vkGetInstanceProcAddr resolved but returned null for vkCreateInstance";
         }
 
         ~impl()
@@ -1215,6 +1240,16 @@ namespace sogen
     }
 
     vulkan_host::~vulkan_host() = default;
+
+    const char* vulkan_host::diagnostic() const
+    {
+        return this->impl_->init_diagnostic;
+    }
+
+    const char* vulkan_host::render_target_diagnostic() const
+    {
+        return this->impl_->last_render_target_diagnostic.c_str();
+    }
 
     bool vulkan_host::available() const
     {
@@ -6460,22 +6495,36 @@ namespace sogen
     {
         out_image = 0;
 
+        std::string diag = "requested: width=" + std::to_string(width) + " height=" + std::to_string(height) +
+                           " format(input, D3DFORMAT)=" + std::to_string(format) + " transient=" + (transient ? "true" : "false");
+        // Always stored before returning, whichever path that turns out to be -- finish() below
+        // wraps every return in this function so no call site can forget to flush it.
+        const auto finish = [&](const int32_t result) -> int32_t {
+            diag += " -> result=" + std::to_string(result);
+            this->impl_->last_render_target_diagnostic = diag;
+            return result;
+        };
+
         uint32_t vk_format = 0;
         if (!d3d9_format_to_vulkan(format, vk_format))
         {
-            return VK_ERROR_INITIALIZATION_FAILED;
+            diag += " | d3d9_format_to_vulkan(" + std::to_string(format) + ") returned false (not a recognized D3DFORMAT)";
+            return finish(VK_ERROR_INITIALIZATION_FAILED);
         }
+        diag += " | vk_format=" + std::to_string(vk_format);
 
         const auto dev_it = this->impl_->devices.find(device);
         if (dev_it == this->impl_->devices.end())
         {
-            return VK_ERROR_INITIALIZATION_FAILED;
+            diag += " | device 0x" + std::to_string(device) + " not found";
+            return finish(VK_ERROR_INITIALIZATION_FAILED);
         }
         impl::device_data& dev = dev_it->second;
         if (!dev.create_image || !dev.allocate_memory || !dev.bind_image_memory || !dev.create_buffer || !dev.bind_buffer_memory ||
             !dev.create_command_pool || !dev.allocate_command_buffers || !dev.create_fence || !dev.get_device_queue)
         {
-            return VK_ERROR_INITIALIZATION_FAILED;
+            diag += " | one or more required device function pointers are null";
+            return finish(VK_ERROR_INITIALIZATION_FAILED);
         }
 
         impl::render_target_data rt{};
@@ -6554,9 +6603,14 @@ namespace sogen
         {
             image_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
         }
-        if (dev.create_image(dev.handle, &image_info, nullptr, &rt.image) != VK_SUCCESS)
         {
-            return fail();
+            const VkResult vk_res = dev.create_image(dev.handle, &image_info, nullptr, &rt.image);
+            diag += " | create_image usage=0x" + std::to_string(image_info.usage) + " flags=0x" +
+                    std::to_string(image_info.flags) + " -> vkCreateImage=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
         }
 
         VkMemoryRequirements image_reqs{};
@@ -6578,13 +6632,18 @@ namespace sogen
         {
             image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, 0);
         }
+        diag += " | image_type=" + std::to_string(image_type) + " image_reqs.size=" + std::to_string(image_reqs.size);
         VkMemoryAllocateInfo image_alloc{};
         image_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         image_alloc.allocationSize = image_reqs.size;
         image_alloc.memoryTypeIndex = image_type;
-        if (dev.allocate_memory(dev.handle, &image_alloc, nullptr, &rt.image_memory) != VK_SUCCESS)
         {
-            return fail();
+            const VkResult vk_res = dev.allocate_memory(dev.handle, &image_alloc, nullptr, &rt.image_memory);
+            diag += " | vkAllocateMemory(image)=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
         }
         dev.bind_image_memory(dev.handle, rt.image, rt.image_memory, 0);
 
@@ -6604,9 +6663,13 @@ namespace sogen
             buffer_info.size = readback_size;
             buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
             buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            if (dev.create_buffer(dev.handle, &buffer_info, nullptr, &rt.readback_buffer) != VK_SUCCESS)
             {
-                return fail();
+                const VkResult vk_res = dev.create_buffer(dev.handle, &buffer_info, nullptr, &rt.readback_buffer);
+                diag += " | readback_size=" + std::to_string(readback_size) + " -> vkCreateBuffer=" + std::to_string(vk_res);
+                if (vk_res != VK_SUCCESS)
+                {
+                    return finish(fail());
+                }
             }
 
             VkMemoryRequirements buffer_reqs{};
@@ -6619,17 +6682,23 @@ namespace sogen
                 buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
             }
+            diag += " | buffer_type=" + std::to_string(buffer_type);
             if (buffer_type == UINT32_MAX)
             {
-                return fail();
+                diag += " (no host-visible+coherent memory type found)";
+                return finish(fail());
             }
             VkMemoryAllocateInfo buffer_alloc{};
             buffer_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
             buffer_alloc.allocationSize = buffer_reqs.size;
             buffer_alloc.memoryTypeIndex = buffer_type;
-            if (dev.allocate_memory(dev.handle, &buffer_alloc, nullptr, &rt.readback_memory) != VK_SUCCESS)
             {
-                return fail();
+                const VkResult vk_res = dev.allocate_memory(dev.handle, &buffer_alloc, nullptr, &rt.readback_memory);
+                diag += " | vkAllocateMemory(buffer)=" + std::to_string(vk_res);
+                if (vk_res != VK_SUCCESS)
+                {
+                    return finish(fail());
+                }
             }
             dev.bind_buffer_memory(dev.handle, rt.readback_buffer, rt.readback_memory, 0);
         }
@@ -6638,9 +6707,13 @@ namespace sogen
         pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pool_info.queueFamilyIndex = dev.queue_family_index;
-        if (dev.create_command_pool(dev.handle, &pool_info, nullptr, &rt.pool) != VK_SUCCESS)
         {
-            return fail();
+            const VkResult vk_res = dev.create_command_pool(dev.handle, &pool_info, nullptr, &rt.pool);
+            diag += " | vkCreateCommandPool=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
         }
 
         VkCommandBufferAllocateInfo cb_info{};
@@ -6648,29 +6721,39 @@ namespace sogen
         cb_info.commandPool = rt.pool;
         cb_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cb_info.commandBufferCount = 1;
-        if (dev.allocate_command_buffers(dev.handle, &cb_info, &rt.cmd) != VK_SUCCESS)
         {
-            return fail();
+            const VkResult vk_res = dev.allocate_command_buffers(dev.handle, &cb_info, &rt.cmd);
+            diag += " | vkAllocateCommandBuffers=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
         }
 
         VkFenceCreateInfo fence_info{};
         fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        if (dev.create_fence(dev.handle, &fence_info, nullptr, &rt.fence) != VK_SUCCESS)
         {
-            return fail();
+            const VkResult vk_res = dev.create_fence(dev.handle, &fence_info, nullptr, &rt.fence);
+            diag += " | vkCreateFence=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
         }
 
         dev.get_device_queue(dev.handle, dev.queue_family_index, 0, &rt.queue);
+        diag += " | get_device_queue rt.queue=" + std::string(rt.queue ? "non-null" : "null");
         if (!rt.queue)
         {
-            return fail();
+            return finish(fail());
         }
 
         const uint64_t id = this->impl_->next_id++;
         this->impl_->images.emplace(id, impl::image_data{.handle = rt.image, .device_id = device});
         this->impl_->render_targets.emplace(id, std::move(rt));
         out_image = id;
-        return VK_SUCCESS;
+        diag += " | SUCCESS id=" + std::to_string(id);
+        return finish(VK_SUCCESS);
     }
 
     int32_t vulkan_host::submit_clear(const uint64_t image, const float* color)

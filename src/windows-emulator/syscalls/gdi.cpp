@@ -13,7 +13,7 @@
 #include <limits>
 #include <utils/buffer_accessor.hpp>
 
-// #define ENABLE_DXGK_LOGGING
+#define ENABLE_DXGK_LOGGING
 
 namespace sogen
 {
@@ -4356,8 +4356,9 @@ namespace sogen
                 c.proc.dxgk.vk_host = std::make_shared<vulkan_host>();
                 if (!c.proc.dxgk.vk_host->available())
                 {
+                    const char* const diagnostic = c.proc.dxgk.vk_host->diagnostic();
                     c.proc.dxgk.vk_host.reset();
-                    dxgk_warn(c, "NtGdiDdDDICreateDevice: host Vulkan not available");
+                    dxgk_warn(c, "NtGdiDdDDICreateDevice: host Vulkan not available (%s)", diagnostic);
                 }
                 else
                 {
@@ -4704,9 +4705,20 @@ namespace sogen
                                 const auto dev_it = c.proc.dxgk.device_vk_ids.find(create_alloc.hDevice);
                                 if (dev_it != c.proc.dxgk.device_vk_ids.end())
                                 {
+                                    // dxgk_cmd::render_target_desc.format is this project's own tiny protocol-specific
+                                    // code (see dxgk_command_protocol.hpp: "0 = VK_FORMAT_B8G8R8A8_UNORM"), NOT a real
+                                    // D3DFORMAT -- create_render_target's format parameter IS a D3DFORMAT (its other
+                                    // caller, d3d9_host.cpp, always passes a genuine one). Forwarding rt_desc.format
+                                    // directly made d3d9_format_to_vulkan() reject it outright as an unrecognized
+                                    // D3DFORMAT (0 isn't one), failing every render-target allocation this protocol
+                                    // ever created, with VK_ERROR_INITIALIZATION_FAILED thrown before any real Vulkan
+                                    // call ran. Translate the one protocol value currently defined to the D3DFORMAT
+                                    // that maps to the same VkFormat (D3DFMT_A8R8G8B8 = 21 -> VK_FORMAT_B8G8R8A8_UNORM,
+                                    // see d3d9_format.cpp) instead.
+                                    constexpr uint32_t d3dfmt_a8r8g8b8 = 21;
                                     uint64_t vk_image = 0;
                                     const int32_t vk_res = c.proc.dxgk.vk_host->create_render_target(
-                                        dev_it->second, rt_desc.width, rt_desc.height, rt_desc.format, false, vk_image);
+                                        dev_it->second, rt_desc.width, rt_desc.height, d3dfmt_a8r8g8b8, false, vk_image);
                                     if (vk_res == 0 && vk_image != 0)
                                     {
                                         auto alloc_it = c.proc.dxgk.allocations.find(alloc_info.hAllocation);
@@ -4719,7 +4731,8 @@ namespace sogen
                                     }
                                     else
                                     {
-                                        dxgk_warn(c, "NtGdiDdDDICreateAllocation: create_render_target failed (vk=%d)", vk_res);
+                                        dxgk_warn(c, "NtGdiDdDDICreateAllocation: create_render_target failed (vk=%d) [%s]", vk_res,
+                                                  c.proc.dxgk.vk_host->render_target_diagnostic());
                                     }
                                 }
                             }

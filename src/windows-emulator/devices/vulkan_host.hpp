@@ -32,6 +32,16 @@ namespace sogen
         // False if no Vulkan driver could be loaded on the host.
         bool available() const;
 
+        // Which specific step of loading the host Vulkan driver failed (or "ok" if available()
+        // is true). Meant for logging when available() is false, not for programmatic branching.
+        const char* diagnostic() const;
+
+        // Step-by-step trace of the most recent create_render_target() call (requested
+        // parameters, then the real VkResult of each Vulkan call in sequence, or which internal
+        // check rejected the request before any Vulkan call ran) -- always populated, whether
+        // that call succeeded or failed. Meant for logging, not programmatic branching.
+        const char* render_target_diagnostic() const;
+
         // Creates a bare instance (no layers/extensions). out_instance is set to a fresh object id
         // on success, or 0 on failure.
         int32_t create_instance(uint64_t& out_instance);
