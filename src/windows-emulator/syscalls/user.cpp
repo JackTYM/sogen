@@ -5198,6 +5198,9 @@ namespace sogen
                         return;
                     }
 
+                    info.DisplayAdapterVendorID = 0x1414;
+                    info.DisplayAdapterDeviceID = 0x008C;
+
                     info.VendorID = 0x1414;
                     info.DeviceID = 0x008C;
                     info.SubSysID0 = 0;

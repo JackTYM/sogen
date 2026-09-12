@@ -4289,7 +4289,7 @@ namespace sogen
             }
 
             case KMTQAITYPE::KMTQAITYPE_ADAPTERTYPE: {
-                return write_query_adapter_info(c, query, 3);
+                return write_query_adapter_info(c, query, 1);
             }
 
             case KMTQAITYPE::KMTQAITYPE_PHYSICALADAPTERCOUNT: {

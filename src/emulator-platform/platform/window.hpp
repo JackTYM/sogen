@@ -802,7 +802,12 @@ namespace sogen
         LUID adapterId;
         UINT32 sourceId;
 
-        uint8_t padding_0014[836 - 20];
+        uint8_t padding_0014[24 - 20];
+
+        UINT32 DisplayAdapterVendorID;
+        UINT32 DisplayAdapterDeviceID;
+
+        uint8_t padding_0020[836 - 32];
 
         UINT32 VendorID;
         UINT32 DeviceID;
@@ -835,6 +840,8 @@ namespace sogen
     static_assert(sizeof(EMU_GET_DISPLAY_INFO_EX) == 2056);
     static_assert(offsetof(EMU_GET_DISPLAY_INFO_EX, adapterId) == 8);
     static_assert(offsetof(EMU_GET_DISPLAY_INFO_EX, sourceId) == 16);
+    static_assert(offsetof(EMU_GET_DISPLAY_INFO_EX, DisplayAdapterVendorID) == 24);
+    static_assert(offsetof(EMU_GET_DISPLAY_INFO_EX, DisplayAdapterDeviceID) == 28);
     static_assert(offsetof(EMU_GET_DISPLAY_INFO_EX, VendorID) == 836);
     static_assert(offsetof(EMU_GET_DISPLAY_INFO_EX, AdapterDesc) == 860);
     static_assert(offsetof(EMU_GET_DISPLAY_INFO_EX, DisplayLeft) == 1644);
