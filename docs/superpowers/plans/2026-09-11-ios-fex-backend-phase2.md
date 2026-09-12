@@ -467,7 +467,7 @@ All four must succeed, with the new file compiling to nothing observable outside
 cd deps/FEX
 git add FEXCore/Source/Utils/JIT26.c FEXCore/include/FEXCore/Utils/JIT26.h FEXCore/Source/CMakeLists.txt
 git commit -m "feat(ios): add a self-contained JIT26 breakpoint-protocol client"
-git push origin HEAD:dev   # matches this session's existing deps/unicorn fork workflow
+git push origin HEAD:macos-arm64   # deps/FEX's actual fork branch (confirmed via deps/FEX/CLAUDE.md) -- NOT "dev" (that's deps/unicorn's branch, a different fork)
 cd ../..
 git add deps/FEX
 git commit -m "chore(deps): bump FEX pin — self-contained JIT26 client primitives"
@@ -545,7 +545,7 @@ Expected: full pass, unchanged from before this task. This task's real-device co
 cd deps/FEX
 git add FEXCore/include/FEXCore/Utils/AllocatorHooks.h FEXCore/Source/Interface/Core/JIT/JIT.cpp
 git commit -m "feat(ios): route FEXCore's JIT allocator through JIT26 on real device"
-git push origin HEAD:dev
+git push origin HEAD:macos-arm64   # deps/FEX's actual fork branch, NOT "dev"
 cd ../..
 git add deps/FEX
 git commit -m "chore(deps): bump FEX pin — JIT26-blessed allocator for real iOS device"
