@@ -467,7 +467,7 @@ All four must succeed, with the new file compiling to nothing observable outside
 cd deps/FEX
 git add FEXCore/Source/Utils/JIT26.c FEXCore/include/FEXCore/Utils/JIT26.h FEXCore/Source/CMakeLists.txt
 git commit -m "feat(ios): add a self-contained JIT26 breakpoint-protocol client"
-git push origin HEAD:macos-arm64   # deps/FEX's actual fork branch (confirmed via deps/FEX/CLAUDE.md) -- NOT "dev" (that's deps/unicorn's branch, a different fork)
+git push origin HEAD:main   # the deps/FEX submodule checkout's actual local branch is "main", not "dev" (that's deps/unicorn's branch, a different fork) -- "macos-arm64" was a separate, stale branch on this fork that fell behind "main"; it was fast-forwarded to match during Task 4 (2026-09-11) but "main" is the one this checkout actually tracks and should keep being pushed to
 cd ../..
 git add deps/FEX
 git commit -m "chore(deps): bump FEX pin — self-contained JIT26 client primitives"
