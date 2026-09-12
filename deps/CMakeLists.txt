@@ -1,6 +1,9 @@
 set(UNICORN_ARCH "x86" CACHE STRING "")
 add_subdirectory(unicorn)
 
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/unicorn-ios-simulator-jit.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/unicorn-ios-device-jit.cmake")
+
 ##########################################
 
 option(BASE64_ENABLE_TESTING "" OFF)

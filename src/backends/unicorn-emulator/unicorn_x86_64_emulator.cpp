@@ -4,11 +4,20 @@
 #include <array>
 #include <ranges>
 #include <optional>
+#include <atomic>
+#include <thread>
+#include <chrono>
+#include <cstdio>
 
 #include "unicorn_memory_regions.hpp"
 #include "unicorn_hook.hpp"
 
 #include "function_wrapper.hpp"
+#include <utils/ios_device_log.hpp>
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 namespace sogen::unicorn
 {
@@ -200,19 +209,46 @@ namespace sogen::unicorn
           public:
             unicorn_x86_64_emulator()
             {
+                sogen::utils::log_ios_device_milestone("[milestone] unicorn_x86_64_emulator ctor: before uc_open");
                 uce(uc_open(UC_ARCH_X86, UC_MODE_64, &this->uc_));
+                sogen::utils::log_ios_device_milestone("[milestone] unicorn_x86_64_emulator ctor: after uc_open");
                 // uce(uc_ctl_set_cpu_model(this->uc_, UC_CPU_X86_EPYC_ROME));
 
 #ifndef OS_WINDOWS
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
 #endif
+                sogen::utils::log_ios_device_milestone(
+                    "[milestone] unicorn_x86_64_emulator ctor: before uc_ctl_set_tcg_buffer_size");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+                // Growing Unicorn's TCG buffer on iOS means routing its allocation through the
+                // JIT26 debugger-blessing protocol -- a real per-page network round trip, not a
+                // plain mmap() (see cmake/unicorn-ios-device-jit-shim.h). Two live device tests
+                // showed the desktop-tuned 2GB default below never completes in any practical
+                // time through that protocol. This app's own sample guest
+                // (native-gpu-clear-sample.exe) is tiny and short-lived and comes nowhere near
+                // needing gigabytes of JIT cache, so use a much smaller size on iOS specifically
+                // -- large enough to be useful, small enough for blessing to actually finish.
+                constexpr uint32_t tcg_buffer_size = 64 * 1024 * 1024; // 64 MB
+#else
                 constexpr auto is_64_bit = sizeof(void*) >= 8;
-                uce(uc_ctl_set_tcg_buffer_size(this->uc_, (is_64_bit ? 2 : 1) << 30 /* 2 gb */));
+                constexpr uint32_t tcg_buffer_size = (is_64_bit ? 2 : 1) << 30; // 2 GB / 1 GB
+#endif
+                uce(uc_ctl_set_tcg_buffer_size(this->uc_, tcg_buffer_size));
+                sogen::utils::log_ios_device_milestone(
+                    "[milestone] unicorn_x86_64_emulator ctor: after uc_ctl_set_tcg_buffer_size");
 
 #ifndef OS_WINDOWS
 #pragma GCC diagnostic pop
 #endif
+
+                // Unicorn's own TCG buffer allocation (triggered lazily, at whatever later call
+                // first needs the engine initialized -- not necessarily here) transparently goes
+                // through the proven-working JIT26 create+bless path on real iOS device instead
+                // of a plain mmap(); see cmake/unicorn-ios-device-jit-shim.h for the full story,
+                // including why an earlier bless-after-the-fact approach (blessing the buffer
+                // here, after uc_open, via its already-known address) is gone -- live device
+                // testing proved that doesn't actually grant real execute capability.
             }
 
             ~unicorn_x86_64_emulator() override
@@ -227,7 +263,7 @@ namespace sogen::unicorn
                 this->violation_ip_ = std::nullopt;
 
                 constexpr auto end = std::numeric_limits<uint64_t>::max();
-                const auto res = uc_emu_start(*this, start, end, 0, count);
+                const auto res = this->run_uc_emu_start(start, end, count);
                 if (res == UC_ERR_OK)
                 {
                     return;
@@ -757,6 +793,89 @@ namespace sogen::unicorn
             std::optional<uint64_t> violation_ip_{};
             std::vector<std::unique_ptr<hook_object>> hooks_{};
             std::unordered_map<uint64_t, mmio_callbacks> mmio_{};
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+            bool logged_first_emu_start_{false};
+#endif
+
+            // Only the very first call is logged (with a heartbeat for its duration) rather than
+            // every call: start() is invoked repeatedly, once per instruction-count slice, for the
+            // entire life of the guest, so logging every call would flood the log. The first call
+            // is the interesting one -- it is where the original real-device crash's backtrace
+            // showed the fault (executing translated code out of Unicorn's just-allocated TCG
+            // buffer), and a no-op everywhere except real iOS device (TARGET_OS_IPHONE, not
+            // Simulator) so this never spins up a heartbeat thread on any other platform.
+            uc_err run_uc_emu_start(const uint64_t start, const uint64_t end, const size_t count)
+            {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+                if (!this->logged_first_emu_start_)
+                {
+                    this->logged_first_emu_start_ = true;
+                    sogen::utils::log_ios_device_milestone(
+                        "[milestone] first unicorn_x86_64_emulator::start() -- calling uc_emu_start "
+                        "(this is the exact call whose backtrace showed the original device crash)");
+
+                    // A literal count of automatic tb_flush() events (fired when the TCG buffer
+                    // fills up and Unicorn throws away and re-translates everything -- see
+                    // translate-all.c's tb_gen_code()) turns out not to be cleanly reachable from
+                    // outside deps/unicorn: unlike mmap()/mprotect() (external libSystem calls
+                    // this session already wraps via force-included macros), tb_flush() is both
+                    // CALLED and DEFINED inside the same vendored translation unit
+                    // (translate-all.c). A macro substitution there would rename its own
+                    // definition too, and a separate wrapper meant to call through to "the real
+                    // one" would collide with that renamed definition at link time -- there is no
+                    // real tb_flush() left to call through to. uc->tb_flush (a function pointer
+                    // field) doesn't help either: this automatic path calls tb_flush() directly,
+                    // not through that field (which only serves uc_ctl_flush_tb()'s manual path).
+                    //
+                    // hook_basic_block() (already implemented, used elsewhere in this file) is the
+                    // closest available signal without touching deps/unicorn: it fires on every
+                    // translated block's ENTRY during execution, cached or not. It can't
+                    // distinguish "re-translating the same code after a flush" from "genuinely
+                    // executing a lot of different code" on its own, but its THROUGHPUT (logged
+                    // every heartbeat) still answers the real question -- very low blocks-per-3s
+                    // despite continuous heartbeats is consistent with something expensive
+                    // happening per block (translation dominating, plausibly flush-driven
+                    // re-translation); healthy throughput is not.
+                    auto block_count = std::make_shared<std::atomic<uint64_t>>(0);
+                    this->hook_basic_block(
+                        [block_count](cpu_interface&, const basic_block&)
+                        { block_count->fetch_add(1, std::memory_order_relaxed); });
+
+                    std::atomic<bool> still_running{true};
+                    std::thread heartbeat([&still_running, block_count]() {
+                        uint64_t last_count = 0;
+                        for (int beats = 1;; ++beats)
+                        {
+                            std::this_thread::sleep_for(std::chrono::seconds(3));
+                            if (!still_running.load())
+                            {
+                                break;
+                            }
+                            const uint64_t count = block_count->load(std::memory_order_relaxed);
+                            char line[160];
+                            std::snprintf(line, sizeof(line),
+                                          "[milestone] heartbeat #%d -- still inside the first uc_emu_start "
+                                          "(basic blocks entered: %llu total, +%llu since last heartbeat)",
+                                          beats, static_cast<unsigned long long>(count),
+                                          static_cast<unsigned long long>(count - last_count));
+                            sogen::utils::log_ios_device_milestone(line);
+                            last_count = count;
+                        }
+                    });
+
+                    const auto res = uc_emu_start(*this, start, end, 0, count);
+                    still_running.store(false);
+                    heartbeat.join();
+
+                    char line[128];
+                    std::snprintf(line, sizeof(line), "[milestone] first uc_emu_start returned, result=%d",
+                                  static_cast<int>(res));
+                    sogen::utils::log_ios_device_milestone(line);
+                    return res;
+                }
+#endif
+                return uc_emu_start(*this, start, end, 0, count);
+            }
 
             static uint64_t calc_end_address(const uint64_t address, uint64_t size)
             {

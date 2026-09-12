@@ -1,6 +1,6 @@
 [submodule "deps/unicorn"]
 	path = deps/unicorn
-	url = https://github.com/momo5502/unicorn.git
+	url = https://github.com/JackTYM/unicorn.git
 	shallow = true
 	branch = dev
 [submodule "deps/reflect"]
