@@ -57,6 +57,7 @@ CALL :collect coloradapterclient.dll
 CALL :collect combase.dll
 CALL :collect comctl32.dll
 CALL :collect comdlg32.dll
+CALL :collect comppkgsup.dll
 CALL :collect coremessaging.dll
 CALL :collect credui.dll
 CALL :collect crypt32.dll
