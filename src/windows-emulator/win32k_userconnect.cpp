@@ -147,7 +147,7 @@ namespace sogen
             constexpr uint64_t k_atom_sys_class_offset = 0x364;
             constexpr std::array<uint16_t, 6> k_atom_sys_class = {0x80, 0x81, 0x82, 0x83, 0x84, 0x85};
             memory.write_memory(serverinfo_base + k_atom_sys_class_offset, k_atom_sys_class.data(),
-                                 k_atom_sys_class.size() * sizeof(uint16_t));
+                                k_atom_sys_class.size() * sizeof(uint16_t));
         }
 
         bool try_copy_client_pfn_arrays(memory_interface& memory, process_context& process, const client_pfn_arrays arrays)
