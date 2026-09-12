@@ -5109,7 +5109,7 @@ namespace sogen
                     adapterName.header = header;
                     utils::string::copy(
                         adapterName.adapterDevicePath,
-                        u"\\\\?\\PCI#VEN_10DE&DEV_1C03&SUBSYS_00000000&REV_A1#4&1234567&0&0008#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}");
+                        u"\\\\?\\PCI#VEN_1414&DEV_008C&SUBSYS_00000000&REV_A1#4&1234567&0&0008#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}");
                 });
 
                 return STATUS_SUCCESS;
@@ -5158,17 +5158,17 @@ namespace sogen
 
                     const auto fill_block = [](EMU_DISPLAY_INFO_DEVICE_BLOCK& block) {
                         block.Valid = 1;
-                        block.VendorID = 0x10DE;
-                        block.DeviceID = 0x1C03;
-                        block.SubSystemVendorID = 0x10DE;
+                        block.VendorID = 0x1414;
+                        block.DeviceID = 0x008C;
+                        block.SubSystemVendorID = 0x1414;
                         block.SubSystemID = 0;
                         block.RevisionID = 0xA1;
                         block.WddmVersion = 3200;
 
-                        utils::string::copy(block.AdapterDesc, u"NVIDIA GeForce GTX 1060 6GB");
+                        utils::string::copy(block.AdapterDesc, u"Microsoft Basic Render Driver");
                         utils::string::copy(
                             block.AdapterDevicePath,
-                            u"\\\\?\\PCI#VEN_10DE&DEV_1C03&SUBSYS_00000000&REV_A1#4&1234567&0&0008#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}");
+                            u"\\\\?\\PCI#VEN_1414&DEV_008C&SUBSYS_00000000&REV_A1#4&1234567&0&0008#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}");
                     };
 
                     fill_block(info.DisplayAdapter);
@@ -5198,14 +5198,14 @@ namespace sogen
                         return;
                     }
 
-                    info.VendorID = 0x10DE;
-                    info.DeviceID = 0x1C03;
+                    info.VendorID = 0x1414;
+                    info.DeviceID = 0x008C;
                     info.SubSysID0 = 0;
                     info.SubSysID1 = 0;
                     info.RevisionID = 0xA1;
                     info.WddmVersion = 2700;
 
-                    utils::string::copy(info.AdapterDesc, u"NVIDIA GeForce GTX 1060 6GB");
+                    utils::string::copy(info.AdapterDesc, u"Microsoft Basic Render Driver");
 
                     info.DisplayLeft = 0;
                     info.DisplayTop = 0;

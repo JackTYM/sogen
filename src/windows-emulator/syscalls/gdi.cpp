@@ -212,8 +212,8 @@ namespace sogen
             constexpr uint32_t k_dxgk_max_list_count = 0x10000;            // 64k entries (<= 1.5 MiB of list bytes)
             constexpr uint64_t k_dxgk_dedicated_video_memory_size = 4ull * 1024 * 1024 * 1024;
             constexpr uint64_t k_dxgk_shared_system_memory_size = 8ull * 1024 * 1024 * 1024;
-            constexpr uint32_t k_dxgk_fake_vendor_id = 0x10DE;
-            constexpr uint32_t k_dxgk_fake_device_id = 0x1C03;
+            constexpr uint32_t k_dxgk_fake_vendor_id = 0x1414;
+            constexpr uint32_t k_dxgk_fake_device_id = 0x008C;
             constexpr uint32_t k_dxgk_fake_revision_id = 0xA1;
             constexpr int64_t k_dxgk_fake_umd_driver_version = 0x001F0000000F17CE; // 31.0.15.6094
             constexpr uint32_t k_dxgk_open_resource_resource_private_size = 0x18;
