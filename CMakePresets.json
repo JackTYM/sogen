@@ -69,6 +69,33 @@
             }
         },
         {
+            "name": "ios-embed-base",
+            "hidden": true,
+            "inherits": [
+                "ios"
+            ],
+            "cacheVariables": {
+                "SOGEN_BUILD_STATIC": "ON",
+                "SOGEN_BUILD_TOOLS": "OFF",
+                "SOGEN_ENABLE_LTO": "OFF"
+            }
+        },
+        {
+            "name": "ios-embed-device",
+            "inherits": [
+                "ios-embed-base"
+            ]
+        },
+        {
+            "name": "ios-embed-simulator",
+            "inherits": [
+                "ios-embed-base"
+            ],
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchain/ios-simulator.cmake"
+            }
+        },
+        {
             "name": "emscripten-base",
             "hidden": true,
             "inherits": [
@@ -150,6 +177,26 @@
             "targets": [
                 "analyzer"
             ]
+        },
+        {
+            "name": "ios-embed-device",
+            "configurePreset": "ios-embed-device",
+            "targets": [
+                "windows-emulator",
+                "backend-selection",
+                "unicorn-emulator",
+                "fex-emulator"
+            ]
+        },
+        {
+            "name": "ios-embed-simulator",
+            "configurePreset": "ios-embed-simulator",
+            "targets": [
+                "windows-emulator",
+                "backend-selection",
+                "unicorn-emulator",
+                "fex-emulator"
+            ]
         }
     ],
     "workflowPresets": [
@@ -228,6 +275,32 @@
                 {
                     "type": "build",
                     "name": "ios"
+                }
+            ]
+        },
+        {
+            "name": "ios-embed-device",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "ios-embed-device"
+                },
+                {
+                    "type": "build",
+                    "name": "ios-embed-device"
+                }
+            ]
+        },
+        {
+            "name": "ios-embed-simulator",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "ios-embed-simulator"
+                },
+                {
+                    "type": "build",
+                    "name": "ios-embed-simulator"
                 }
             ]
         }

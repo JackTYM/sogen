@@ -53,14 +53,23 @@
 #include <execinfo.h>
 
 #ifdef __APPLE__
+#include <TargetConditionals.h>
 #include <sys/sysctl.h>
 #include <mach/mach.h>
+#if TARGET_OS_IPHONE
+#include "ios_mach_vm_compat.hpp"
+#else
 #include <mach/mach_vm.h>
+#endif
 #include <mach/arm/thread_status.h>
 #include <signal.h>
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
+#if TARGET_OS_IPHONE
+#include "ios_libproc_compat.hpp"
+#else
 #include <libproc.h>
+#endif
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -845,6 +854,22 @@ namespace sogen::fex
             ::sigaction(SIGTRAP, &action, nullptr);
         }
 
+        // pthread_jit_write_protect_np does not exist on iOS at all (device or Simulator) - no
+        // per-thread MAP_JIT W^X model applies there the way it does on macOS. Matches the identical
+        // fix already made in deps/FEX's own JITWriteScope (FEXCore/include/FEXCore/Utils/
+        // AllocatorHooks.h): no-op here, since real device write/execute control needs the separate
+        // JIT26 breakpoint-protocol technique and the Simulator needs no protection at all.
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+        void jit_write_protect(const int enabled)
+        {
+            ::pthread_jit_write_protect_np(enabled);
+        }
+#else
+        void jit_write_protect(const int /*enabled*/)
+        {
+        }
+#endif
+
         // FEXCore::CPU::Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call
         // site once its target block becomes known - self-modifying code, writing directly into a
         // MAP_JIT code buffer. It doesn't bracket that write with a JIT-write-protect toggle (see
@@ -863,9 +888,9 @@ namespace sogen::fex
             using exit_function_link_fn = uint64_t (*)(FEXCore::Core::CpuStateFrame*, void*);
             const auto real = reinterpret_cast<exit_function_link_fn>(g_original_exit_function_link.load());
 
-            ::pthread_jit_write_protect_np(0);
+            jit_write_protect(0);
             const uint64_t result = real(frame, record);
-            ::pthread_jit_write_protect_np(1);
+            jit_write_protect(1);
             return result;
         }
 
@@ -4527,17 +4552,13 @@ namespace sogen::fex
         // already hold GetCodeInvalidationMutex() exclusively.
         std::unique_lock lock(context->GetCodeInvalidationMutex());
 
-#ifdef __APPLE__
-        ::pthread_jit_write_protect_np(0);
-#endif
+        jit_write_protect(0);
         context->InvalidateCodeBuffersCodeRange(address, size);
         if (thread != nullptr)
         {
             context->InvalidateThreadCachedCodeRange(thread, address, size);
         }
-#ifdef __APPLE__
-        ::pthread_jit_write_protect_np(1);
-#endif
+        jit_write_protect(1);
     }
 
     void fex_vcpu::invalidate_code_range(uint64_t address, size_t size, bool include_inactive_contexts) const
@@ -5809,7 +5830,7 @@ namespace sogen::fex
                 const auto host_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
                 if (fault_addr == host_pc && this->host_pc_in_any_dispatcher(host_pc))
                 {
-                    ::pthread_jit_write_protect_np(1);
+                    jit_write_protect(1);
                     return true;
                 }
             }
@@ -5845,7 +5866,7 @@ namespace sogen::fex
                 if (retry_count < max_write_protect_retries)
                 {
                     ++retry_count;
-                    ::pthread_jit_write_protect_np(0);
+                    jit_write_protect(0);
                     return true;
                 }
             }
@@ -5880,7 +5901,7 @@ namespace sogen::fex
                     ++retry_count;
                     const uint64_t faulting_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
                     const bool is_instruction_fetch = (faulting_pc == fault_addr_u64);
-                    ::pthread_jit_write_protect_np(is_instruction_fetch ? 1 : 0);
+                    jit_write_protect(is_instruction_fetch ? 1 : 0);
                     return true;
                 }
             }

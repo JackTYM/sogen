@@ -9,7 +9,25 @@
 #include <string>
 #include <vector>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+// Hypervisor.framework does not exist on iOS at all (device or Simulator - no header, no
+// binary, no third-party entitlement path), unlike the header-only gaps elsewhere in this
+// backend. hvf_vcpu_executor's real implementation is Darwin-desktop-only and excluded from the
+// iOS build entirely (see CMakeLists.txt) - g_hvf (fex_x86_64_emulator.cpp) can never become
+// non-null on iOS, so every use of this class there is unreachable dead code. These placeholder
+// types exist only so that dead code still parses.
+using hv_vcpu_t = uint64_t;
+struct hv_vcpu_exit_t;
+enum class hv_sys_reg_t : uint32_t
+{
+};
+#else
 #include <Hypervisor/Hypervisor.h>
+#endif
 
 #include "hvf_vm.hpp"
 
