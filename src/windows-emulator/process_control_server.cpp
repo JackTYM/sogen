@@ -16,12 +16,12 @@ namespace sogen
     {
         void execute_read_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
-            std::vector<std::byte> data(request.size);
+            std::vector<std::byte> data(static_cast<size_t>(request.size));
             const auto transferred = copy_guest_range_out(target.memory, request.address, data);
             data.resize(transferred);
 
             response.payload = std::move(data);
-            response.status = transfer_status(transferred, request.size);
+            response.status = transfer_status(transferred, static_cast<size_t>(request.size));
         }
 
         void execute_write_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)
