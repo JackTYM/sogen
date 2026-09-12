@@ -902,6 +902,7 @@ namespace sogen::fex
         // ===========================================================================================
         hvf::hvf_vm* g_hvf = nullptr;
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         bool hvf_requested()
         {
             const char* value = std::getenv("EMULATOR_FEX_HVF");
@@ -915,6 +916,7 @@ namespace sogen::fex
                 g_hvf->refresh_backing(reinterpret_cast<uint64_t>(ptr), size);
             }
         }
+#endif
 
         // Apple Silicon's SPTM tracks a type for every physical frame and refuses - with a
         // whole-machine panic (VIOLATION_ILLEGAL_MAPPING_TYPE), not a returnable error - to insert
@@ -938,6 +940,7 @@ namespace sogen::fex
         // ever read through those slots, so a snapshot is equivalent to the live image; a pointer
         // into the image that this misses lands outside the mirror and faults inside the vCPU
         // rather than reading stale data.
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         struct fexcore_image_mirror
         {
             uint64_t image_base = 0;
@@ -1026,6 +1029,7 @@ namespace sogen::fex
                 fexcore_image_mirror{.image_base = lowest, .image_size = size, .mirror_base = reinterpret_cast<uint64_t>(mirror)};
             g_hvf->map(g_fexcore_mirror.mirror_base, size, PROT_READ);
         }
+#endif
 
         // ===========================================================================================
         // FEXCore-internal host allocation arena (Apple, guest VA == host VA).
@@ -1224,6 +1228,7 @@ namespace sogen::fex
                     return MAP_FAILED;
                 }
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if ((flags & MAP_JIT) && this->hvf_mode_)
                 {
                     // Same trailing-guard trick as the MAP_JIT branch below, but committed plain RW:
@@ -1241,6 +1246,7 @@ namespace sogen::fex
                     g_hvf->map(slot, exec_size, PROT_READ | PROT_WRITE | PROT_EXEC);
                     return result;
                 }
+#endif
 
                 if (flags & MAP_JIT)
                 {
@@ -1286,10 +1292,12 @@ namespace sogen::fex
 
                 // Non-executable: commit directly over the reserved region.
                 void* result = ::mmap(reinterpret_cast<void*>(slot), rounded, prot, flags | MAP_FIXED, fd, offset);
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (this->hvf_mode_ && result == reinterpret_cast<void*>(slot) && prot != PROT_NONE)
                 {
                     g_hvf->map(slot, rounded, prot);
                 }
+#endif
                 return result;
             }
 
@@ -1303,10 +1311,12 @@ namespace sogen::fex
                 const size_t rounded = host_page_align_up_apple(length);
 
                 std::lock_guard<std::mutex> guard(this->lock_);
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (this->hvf_mode_)
                 {
                     g_hvf->unmap(reinterpret_cast<uint64_t>(addr), rounded);
                 }
+#endif
                 // Return the region to the reserved (PROT_NONE) state so it stays part of the arena's
                 // contiguous reservation, and record it for reuse. Arena VA is never returned to the OS.
                 void* r = ::mmap(addr, rounded, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -1539,6 +1549,7 @@ namespace sogen::fex
         void defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled);
 
         // --[ HVF execution path (active only when g_hvf != nullptr) ]-------------------------------
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 
         struct hvf_exit_adapter final : hvf::hvf_exit_handler
         {
@@ -1578,6 +1589,7 @@ namespace sogen::fex
         // above is only ever touched by the owning worker thread, this mirror is the cross-thread view.
         std::atomic<hvf::hvf_vcpu_executor*> hvf_executor_for_kick_{nullptr};
         uint64_t hvf_emulator_stack_top_ = 0;
+#endif
 
         pending_fault_dispatch pending_fault_dispatch_{};
         // Set by handle_fault_signal when it unwinds ExecuteThread through an InterruptFaultPage hit;
@@ -1660,7 +1672,7 @@ namespace sogen::fex
 
             this->initialize_context();
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
             {
                 const auto max_vcpus = g_hvf->max_vcpu_count();
@@ -1696,7 +1708,7 @@ namespace sogen::fex
             {
                 if (vcpu->thread_ != nullptr && this->context_)
                 {
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
                     {
                         g_hvf->unmap(reinterpret_cast<uint64_t>(vcpu->thread_), sizeof(FEXCore::Core::InternalThreadState));
@@ -1707,7 +1719,7 @@ namespace sogen::fex
                 }
                 if (vcpu->thread32_ != nullptr && this->context32_)
                 {
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
                     {
                         g_hvf->unmap(reinterpret_cast<uint64_t>(vcpu->thread32_), sizeof(FEXCore::Core::InternalThreadState));
@@ -1729,10 +1741,12 @@ namespace sogen::fex
             for (const auto host_page : this->mapped_host_pages_apple_)
             {
                 const auto rebase = rebase_for(this->is_wow64_process_, host_page);
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (g_hvf != nullptr)
                 {
                     g_hvf->sync_page(host_page + rebase, PROT_NONE);
                 }
+#endif
                 if (rebase != 0 && this->wow64_host_window_reserved_)
                 {
                     // Covered by the whole-window munmap below.
@@ -2342,7 +2356,7 @@ namespace sogen::fex
 #endif
             this->context32_ = FEXCore::Context::Context::CreateNewContext(features);
             this->context32_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
             {
                 this->context32_->SetHardwareTSOSupport(true);
@@ -2395,7 +2409,7 @@ namespace sogen::fex
                 host_backing_alias = map_writable_alias_apple(host_backing, host_backing_size);
 #endif
                 ::mprotect(host_backing, host_backing_size, PROT_READ);
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (g_hvf != nullptr)
                 {
                     // Read-only inside the VM for the whole region lifetime: the once-per-quantum
@@ -2540,10 +2554,12 @@ namespace sogen::fex
                     for (const auto rollback_page : claimed_this_call)
                     {
                         const auto rollback_rebase = rebase_for(this->is_wow64_process_, rollback_page);
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                         if (g_hvf != nullptr)
                         {
                             g_hvf->sync_page(rollback_page + rollback_rebase, PROT_NONE);
                         }
+#endif
                         ::munmap(reinterpret_cast<void*>(rollback_page + rollback_rebase), host_page_size_apple);
                         this->mapped_host_pages_apple_.erase(rollback_page);
                     }
@@ -2555,6 +2571,7 @@ namespace sogen::fex
                     this->mapped_host_pages_apple_.insert(host_page);
                     claimed_this_call.push_back(host_page);
                 }
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (g_hvf != nullptr)
                 {
                     // mach_vm_allocate hands back VM_PROT_DEFAULT (rw) memory; mirror that so the
@@ -2562,6 +2579,7 @@ namespace sogen::fex
                     // guest permissions.
                     g_hvf->map(cursor + rebase, run_size, PROT_READ | PROT_WRITE);
                 }
+#endif
 
                 cursor = run_end;
             }
@@ -2622,10 +2640,12 @@ namespace sogen::fex
                 void* const host_ptr = reinterpret_cast<void*>(run_start + rebase);
                 const size_t run_size = run_end - run_start;
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (g_hvf != nullptr)
                 {
                     g_hvf->unmap(reinterpret_cast<uint64_t>(host_ptr), run_size);
                 }
+#endif
 
                 if (placeholder)
                 {
@@ -2695,10 +2715,12 @@ namespace sogen::fex
 
 #ifdef __APPLE__
             ::mprotect(reinterpret_cast<void*>(host_address), size, to_host_prot_hvf(to_prot(permissions)));
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
             {
                 g_hvf->map(host_address, size, to_prot_apple(permissions));
             }
+#endif
 #else
             ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
 #endif
@@ -2748,7 +2770,7 @@ namespace sogen::fex
                         }
                         if (region.host_backing != nullptr)
                         {
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                             if (g_hvf != nullptr)
                             {
                                 g_hvf->unmap(reinterpret_cast<uint64_t>(region.host_backing), region.host_backing_size);
@@ -2908,10 +2930,12 @@ namespace sogen::fex
                     {
                         throw std::runtime_error("FEX backend failed to change memory protection");
                     }
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
                     {
                         g_hvf->map(cursor + rebase, run_size, hvf_prot);
                     }
+#endif
 
                     cursor = run_end;
                 }
@@ -3132,10 +3156,12 @@ namespace sogen::fex
             {
                 if (currently_mapped)
                 {
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
                     {
                         g_hvf->sync_page(host_page_addr + rebase, PROT_NONE);
                     }
+#endif
                     void* result =
                         ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                     if (result != host_ptr)
@@ -3169,10 +3195,12 @@ namespace sogen::fex
                     throw std::runtime_error("FEX backend failed to map guest memory at requested address");
                 }
                 this->mapped_host_pages_apple_.insert(host_page_addr);
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (g_hvf != nullptr)
                 {
                     g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective));
                 }
+#endif
                 return;
             }
 
@@ -3180,10 +3208,12 @@ namespace sogen::fex
             {
                 throw std::runtime_error("FEX backend failed to change memory protection");
             }
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
             {
                 g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective));
             }
+#endif
         }
 
         // map_memory's and apply_memory_protection's own fast path. Both callers already called
@@ -3243,10 +3273,12 @@ namespace sogen::fex
                     {
                         throw std::runtime_error("FEX backend failed to change memory protection");
                     }
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
                     {
                         g_hvf->map(cursor + rebase, run_size, hvf_prot);
                     }
+#endif
                 }
                 else
                 {
@@ -3273,10 +3305,12 @@ namespace sogen::fex
                     {
                         this->mapped_host_pages_apple_.insert(host_page);
                     }
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
                     {
                         g_hvf->map(cursor + rebase, run_size, hvf_prot);
                     }
+#endif
                 }
 
                 cursor = run_end;
@@ -3338,10 +3372,12 @@ namespace sogen::fex
                 // !any_slot_present branch leaves it untouched too (a PROT_NONE mmap still owns the
                 // address; only page_shadow_apple_ says whether it's backed), so this batched path
                 // must leave it alone the same way.
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (g_hvf != nullptr)
                 {
                     g_hvf->unmap(cursor + rebase, run_size);
                 }
+#endif
                 void* result = ::mmap(host_ptr, run_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                 if (result != host_ptr)
                 {
@@ -3367,6 +3403,7 @@ namespace sogen::fex
             LogMan::Throw::InstallHandler([](const char* message) { fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message); });
 
 #ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (hvf_requested())
             {
                 auto& vm = hvf::hvf_vm::instance();
@@ -3380,6 +3417,7 @@ namespace sogen::fex
                 FEXCore::Allocator::PagesReplaced = &hvf_pages_replaced_hook;
                 hvf_publish_fexcore_constants();
             }
+#endif
 
             fex_internal_arena::instance().install();
             this->reserve_wow64_host_window();
@@ -3472,7 +3510,7 @@ namespace sogen::fex
 #endif
             this->context_ = FEXCore::Context::Context::CreateNewContext(features);
             this->context_->SetWow64GuestRebaseValue(this->wow64_guest_rebase_);
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
             {
                 this->context_->SetHardwareTSOSupport(true);
@@ -3836,11 +3874,13 @@ namespace sogen::fex
 #ifdef __APPLE__
     void fex_vcpu::start(size_t count)
     {
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
         {
             this->start_hvf(count);
             return;
         }
+#endif
 
         this->emulator_.refresh_mmio_backings();
 
@@ -4394,7 +4434,7 @@ namespace sogen::fex
             return;
         }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
         {
             // Host mprotect has no effect on stage-2 translation - the same protocol needs the HVF
@@ -4420,12 +4460,14 @@ namespace sogen::fex
         this->active_context_ = this->emulator_.context_.get();
 
 #ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
         {
             g_hvf->map(reinterpret_cast<uint64_t>(this->thread_), sizeof(FEXCore::Core::InternalThreadState), PROT_READ | PROT_WRITE);
             this->hvf_shim_thread_pointers(*this->thread_->CurrentFrame);
         }
         else
+#endif
         {
             // See exit_function_link_jit_write_wrapper's doc comment: intercept the plain function-
             // pointer slot JIT-compiled code calls through to patch call sites, so the write into the
@@ -4463,7 +4505,7 @@ namespace sogen::fex
     {
         this->thread32_ = this->emulator_.context32_->CreateThread(0, 0, nullptr);
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
         {
             g_hvf->map(reinterpret_cast<uint64_t>(this->thread32_), sizeof(FEXCore::Core::InternalThreadState), PROT_READ | PROT_WRITE);
@@ -4507,7 +4549,7 @@ namespace sogen::fex
                 throw std::runtime_error("FEX backend failed to make the call-ret stack writable");
             }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
             // The PROT_NONE allocation above is invisible to the VM (the arena mirror skips
             // PROT_NONE commits); only the writable interior gets mapped, so the surrounding guard
             // pages fault inside the vCPU exactly like they do on the host.
@@ -4951,6 +4993,7 @@ namespace sogen::fex
     // above, but guest execution happens inside a Hypervisor.framework vCPU with hardware TSO, and
     // guest faults arrive as VM exits in ordinary thread context instead of POSIX signals.
     // -----------------------------------------------------------------------------------------------
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 
     void fex_vcpu::start_hvf(const size_t count)
     {
@@ -5459,6 +5502,7 @@ namespace sogen::fex
         const auto& cfg = this->emulator_.signal_delegator_->GetConfig();
         vcpu.set_pc(sra_already_spilled ? cfg.ThreadStopHandlerAddress : cfg.ThreadStopHandlerAddressSpillSRA);
     }
+#endif
 
     bool fex_vcpu::dispatch_pending_hook_if_any()
     {
