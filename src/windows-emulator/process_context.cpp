@@ -209,10 +209,48 @@ namespace sogen
         void setup_gdt(x86_64_emulator& emu, memory_manager& memory)
         {
             const auto vcpu_count = emu.vcpu_count();
+            const auto gdt_region_size = static_cast<size_t>(page_align_up(vcpu_count * GDT_LIMIT));
 
             // One GDT page per vCPU (see gdt_base_for_vcpu): the WOW64 FS descriptor holds a per-thread
             // TEB base, so a shared GDT cannot serve WOW64 threads on different vCPUs at the same time.
-            memory.allocate_memory(GDT_ADDR, static_cast<size_t>(page_align_up(vcpu_count * GDT_LIMIT)), memory_permission::read_write);
+            //
+            // GDT_ADDR is a fixed guest address (see its doc comment), so this can fail on a backend
+            // that shares the guest address space with the host process (FEX on Apple) if that exact
+            // address isn't actually available there - a real first-time possibility on hardware whose
+            // VA layout differs from the desktop/Simulator host this constant was chosen against. The
+            // return value used to be discarded here, so a failure silently left the GDT unmapped and
+            // every write below then faulted with a confusing "failed to write guest memory" error far
+            // from the actual cause. Check it and report exactly what (if anything) already occupies
+            // the requested window, so a real allocation failure is diagnosable from the log alone.
+            if (!memory.allocate_memory(GDT_ADDR, gdt_region_size, memory_permission::read_write))
+            {
+                std::ostringstream message;
+                message << "Failed to allocate GDT memory at 0x" << std::hex << GDT_ADDR << " size=0x" << gdt_region_size;
+
+                const auto occupants = emu.reserved_host_ranges_in(GDT_ADDR, gdt_region_size);
+                if (occupants.empty())
+                {
+                    message << " (no host-reserved range reported in that window - the fixed-address host "
+                               "mapping call itself failed, e.g. the address may be outside this process's "
+                               "mappable host VA range)";
+                }
+                else
+                {
+                    message << " (occupied by: ";
+                    for (size_t i = 0; i < occupants.size(); ++i)
+                    {
+                        if (i > 0)
+                        {
+                            message << ", ";
+                        }
+                        message << "0x" << std::hex << occupants[i].address << "-0x" << std::hex
+                                << (occupants[i].address + occupants[i].size);
+                    }
+                    message << ")";
+                }
+
+                throw std::runtime_error(message.str());
+            }
 
             for (size_t i = 0; i < vcpu_count; ++i)
             {
