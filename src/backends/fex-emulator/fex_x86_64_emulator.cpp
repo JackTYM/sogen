@@ -854,15 +854,32 @@ namespace sogen::fex
             ::sigaction(SIGTRAP, &action, nullptr);
         }
 
-        // pthread_jit_write_protect_np does not exist on iOS at all (device or Simulator) - no
-        // per-thread MAP_JIT W^X model applies there the way it does on macOS. Matches the identical
-        // fix already made in deps/FEX's own JITWriteScope (FEXCore/include/FEXCore/Utils/
-        // AllocatorHooks.h): no-op here, since real device write/execute control needs the separate
-        // JIT26 breakpoint-protocol technique and the Simulator needs no protection at all.
+        // pthread_jit_write_protect_np does not exist on real iOS device - no per-thread MAP_JIT
+        // W^X model applies there the way it does on macOS; real device write/execute control needs
+        // the separate JIT26 breakpoint-protocol technique instead. The Simulator is a plain macOS
+        // process (same kernel, same libpthread), so it needs the real toggle exactly like desktop
+        // macOS does - confirmed empirically: skipping it faults the very first JIT write with
+        // EXC_BAD_ACCESS/SIGBUS. The iOS SDK headers mark the symbol `unavailable` for both iOS
+        // targets regardless (it links fine on the Simulator, which really is the host macOS
+        // kernel), so it's resolved via dlsym instead of calling it directly - that sidesteps the
+        // compile-time availability annotation, and naturally no-ops on real device too (dlsym
+        // returns null there, matching the intended no-op). Matches the identical fix in deps/FEX's
+        // own JITWriteScope (FEXCore/include/FEXCore/Utils/AllocatorHooks.h).
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
         void jit_write_protect(const int enabled)
         {
             ::pthread_jit_write_protect_np(enabled);
+        }
+#elif defined(__APPLE__)
+        void jit_write_protect(const int enabled)
+        {
+            using jit_write_protect_np_fn = void (*)(int);
+            static auto* const fn =
+                reinterpret_cast<jit_write_protect_np_fn>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+            if (fn != nullptr)
+            {
+                fn(enabled);
+            }
         }
 #else
         void jit_write_protect(const int /*enabled*/)
@@ -3188,8 +3205,17 @@ namespace sogen::fex
                     throw host_memory_collision{};
                 }
                 ::munmap(host_ptr, host_page_size_apple);
+                // Deliberately not MAP_FIXED: current XNU (confirmed on an iOS 26/macOS 26 Simulator
+                // host) raises a fatal EXC_GUARD (GUARD_TYPE_VIRT_MEMORY/DEALLOC_GAP) for a MAP_FIXED
+                // mmap onto memory that is currently entirely unmapped - which this page just became,
+                // via the munmap right above - instead of an ordinary ENOMEM/EINVAL. A plain hint mmap
+                // only creates memory, never deallocates, so it isn't subject to that guard; the
+                // mach_vm_allocate just above already guarantees nothing else can be racing for this
+                // exact address, so the kernel reliably honors the hint. The result != host_ptr check
+                // below still catches the rare case it doesn't (see reserve_wow64_host_window for the
+                // same reasoning/fix applied first).
                 void* result = ::mmap(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective)),
-                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                 if (result == MAP_FAILED || result != host_ptr)
                 {
                     throw std::runtime_error("FEX backend failed to map guest memory at requested address");
@@ -3295,8 +3321,11 @@ namespace sogen::fex
                         throw host_memory_collision{};
                     }
                     ::munmap(host_ptr, run_size);
-                    void* map_result =
-                        ::mmap(host_ptr, run_size, host_prot, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    // Deliberately not MAP_FIXED - see sync_host_page_apple's identical fix for why a
+                    // MAP_FIXED mmap onto the memory this munmap just freed raises a fatal EXC_GUARD
+                    // (DEALLOC_GAP) on current XNU; the mach_vm_allocate just above already guarantees
+                    // the address is uncontested.
+                    void* map_result = ::mmap(host_ptr, run_size, host_prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                     if (map_result == MAP_FAILED || map_result != host_ptr)
                     {
                         throw std::runtime_error("FEX backend failed to map guest memory at requested address");
@@ -3570,9 +3599,17 @@ namespace sogen::fex
                     continue;
                 }
 
+                // Deliberately not MAP_FIXED: on current XNU (confirmed on an iOS 26/macOS 26 Simulator
+                // host), a MAP_FIXED mmap over an address range that has never been touched - a real gap,
+                // not an existing mapping being replaced - is treated as a "deallocation gap" and raises a
+                // fatal EXC_GUARD (GUARD_TYPE_VIRT_MEMORY/DEALLOC_GAP), not an ordinary ENOMEM/EINVAL. A
+                // plain hint mmap only *creates* memory, never deallocates, so it isn't subject to that
+                // guard; the surrounding candidate having just been confirmed free via mach_vm_region above
+                // means nothing else competes for the address, so the kernel reliably honors the hint
+                // exactly (same reasoning fex_internal_arena's own sub-region placement already relies on
+                // for MAP_JIT). The result != target check below still catches the rare case it doesn't.
                 void* const target = reinterpret_cast<void*>(candidate);
-                void* const result =
-                    ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                void* const result = ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                 if (result != target)
                 {
                     fprintf(stderr, "[FEX backend] failed to reserve wow64 host window at 0x%llx - trying the next candidate\n",
