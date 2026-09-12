@@ -212,6 +212,53 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v7
 
+      - name: Diagnostic - CompPkgSup.dll availability probe
+        shell: pwsh
+        run: |
+          Write-Host "=== OS info ==="
+          Get-ComputerInfo | Select-Object WindowsProductName, OsName, WindowsInstallationType, OsArchitecture | Format-List
+
+          Write-Host "=== System32\CompPkgSup.dll ==="
+          $sysPath = Join-Path $env:WINDIR "System32\CompPkgSup.dll"
+          if (Test-Path $sysPath) {
+            Get-Item $sysPath | Format-List FullName, Length, VersionInfo
+          } else {
+            Write-Host "NOT FOUND: $sysPath"
+          }
+
+          Write-Host "=== SysWOW64\CompPkgSup.dll ==="
+          $sysWowPath = Join-Path $env:WINDIR "SysWOW64\CompPkgSup.dll"
+          if (Test-Path $sysWowPath) {
+            Get-Item $sysWowPath | Format-List FullName, Length, VersionInfo
+          } else {
+            Write-Host "NOT FOUND: $sysWowPath"
+          }
+
+          Write-Host "=== WinSxS search for CompPkgSup.dll ==="
+          Get-ChildItem -Path (Join-Path $env:WINDIR "WinSxS") -Filter "CompPkgSup.dll" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length
+
+          Write-Host "=== Get-WindowsCapability (Media/Component/Codec/Player matches) ==="
+          try {
+            Get-WindowsCapability -Online -ErrorAction Stop |
+              Where-Object { $_.Name -match "Media|Component|Codec|Player" } |
+              Format-Table Name, State -AutoSize
+          } catch {
+            Write-Host "Get-WindowsCapability failed: $_"
+          }
+
+          Write-Host "=== Get-WindowsOptionalFeature (Media matches) ==="
+          try {
+            Get-WindowsOptionalFeature -Online -ErrorAction Stop |
+              Where-Object { $_.FeatureName -match "Media" } |
+              Format-Table FeatureName, State -AutoSize
+          } catch {
+            Write-Host "Get-WindowsOptionalFeature failed: $_"
+          }
+
+          Write-Host "=== dism /online /get-capabilities (full list) ==="
+          dism /online /get-capabilities
+
       - name: Download DirectX Runtime
         run: curl --connect-timeout 20 --max-time 200 --retry 5 --retry-delay 2 --retry-max-time 200 -L -o directx_Jun2010_redist.exe https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe
 
