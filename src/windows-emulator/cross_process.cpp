@@ -71,7 +71,7 @@ namespace sogen
             return STATUS_ACCESS_DENIED;
         }
 
-        return child_target{*record_id, channel};
+        return child_target{.record_id = *record_id, .channel = channel};
     }
 
     std::variant<const process_context::child_process_record*, NTSTATUS> resolve_child_record(const syscall_context& c, const handle h,

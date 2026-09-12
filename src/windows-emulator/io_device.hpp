@@ -131,7 +131,7 @@ namespace sogen
 
         virtual void associate_completion_port(const handle port, const uint64_t key)
         {
-            this->completion_port_ = completion_port_association{port, key};
+            this->completion_port_ = completion_port_association{.port = port, .key = key};
         }
 
         virtual std::optional<completion_port_association> get_completion_port() const
