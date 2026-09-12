@@ -248,7 +248,7 @@ namespace sogen
                 return false;
             }
 
-            const index_type index = target.value.id >> IndexShift;
+            const index_type index = static_cast<index_type>(target.value.id >> IndexShift);
             return this->store_.emplace(index, std::move(value)).second;
         }
 

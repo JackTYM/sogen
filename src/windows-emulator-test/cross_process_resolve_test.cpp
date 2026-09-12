@@ -25,9 +25,9 @@ namespace sogen::test
             }
         };
 
-        constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
-        constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
-        constexpr ACCESS_MASK MAXIMUM_ALLOWED = 0x02000000;
+        constexpr ACCESS_MASK process_vm_read = 0x0010;
+        constexpr ACCESS_MASK process_all_access = 0x001FFFFF;
+        constexpr ACCESS_MASK maximum_allowed = 0x02000000;
 
         syscall_context make_context(windows_emulator& emu)
         {
@@ -40,7 +40,7 @@ namespace sogen::test
         auto emu = create_empty_emulator();
         const auto c = make_context(emu);
 
-        const auto result = resolve_child_target(c, handle{}, PROCESS_VM_READ);
+        const auto result = resolve_child_target(c, handle{}, process_vm_read);
 
         ASSERT_TRUE(std::holds_alternative<NTSTATUS>(result));
         ASSERT_EQ(std::get<NTSTATUS>(result), STATUS_NOT_SUPPORTED);
@@ -52,7 +52,7 @@ namespace sogen::test
         const auto c = make_context(emu);
 
         const auto h = make_pseudo_handle(42, handle_types::process);
-        const auto result = resolve_child_target(c, h, PROCESS_VM_READ);
+        const auto result = resolve_child_target(c, h, process_vm_read);
 
         ASSERT_TRUE(std::holds_alternative<NTSTATUS>(result));
         ASSERT_EQ(std::get<NTSTATUS>(result), STATUS_INVALID_HANDLE);
@@ -63,12 +63,12 @@ namespace sogen::test
         auto emu = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         emu.process.child_processes[7] = record;
 
         const auto c = make_context(emu);
         const auto h = make_pseudo_handle(7, handle_types::process);
-        const auto result = resolve_child_target(c, h, PROCESS_VM_READ);
+        const auto result = resolve_child_target(c, h, process_vm_read);
 
         ASSERT_TRUE(std::holds_alternative<NTSTATUS>(result));
         ASSERT_EQ(std::get<NTSTATUS>(result), STATUS_NOT_SUPPORTED);
@@ -85,7 +85,7 @@ namespace sogen::test
 
         const auto c = make_context(emu);
         const auto h = make_pseudo_handle(7, handle_types::process);
-        const auto result = resolve_child_target(c, h, PROCESS_VM_READ);
+        const auto result = resolve_child_target(c, h, process_vm_read);
 
         ASSERT_TRUE(std::holds_alternative<NTSTATUS>(result));
         ASSERT_EQ(std::get<NTSTATUS>(result), STATUS_ACCESS_DENIED);
@@ -96,14 +96,14 @@ namespace sogen::test
         auto emu = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         emu.process.child_processes[7] = record;
         emu.register_child_control_channel(7, std::make_unique<fake_control_channel>());
         auto* const registered = emu.find_child_control_channel(7);
 
         const auto c = make_context(emu);
         const auto h = make_pseudo_handle(7, handle_types::process);
-        const auto result = resolve_child_target(c, h, PROCESS_VM_READ);
+        const auto result = resolve_child_target(c, h, process_vm_read);
 
         ASSERT_TRUE(std::holds_alternative<child_target>(result));
         const auto& target = std::get<child_target>(result);
@@ -116,14 +116,14 @@ namespace sogen::test
         auto emu = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         emu.process.child_processes[7] = record;
         emu.register_child_control_channel(7, std::make_unique<fake_control_channel>());
         auto* const registered = emu.find_child_control_channel(7);
 
         const auto c = make_context(emu);
         const auto h = make_pseudo_handle(7, handle_types::thread);
-        const auto result = resolve_child_target(c, h, PROCESS_VM_READ);
+        const auto result = resolve_child_target(c, h, process_vm_read);
 
         ASSERT_TRUE(std::holds_alternative<child_target>(result));
         const auto& target = std::get<child_target>(result);
@@ -133,16 +133,16 @@ namespace sogen::test
 
     TEST(CrossProcessTest, ResolveGrantedProcessAccessPassesThroughSpecificMask)
     {
-        ASSERT_EQ(resolve_granted_process_access(PROCESS_VM_READ), PROCESS_VM_READ);
+        ASSERT_EQ(resolve_granted_process_access(process_vm_read), process_vm_read);
     }
 
     TEST(CrossProcessTest, ResolveGrantedProcessAccessMapsMaximumAllowedToAllAccess)
     {
-        ASSERT_EQ(resolve_granted_process_access(MAXIMUM_ALLOWED), PROCESS_ALL_ACCESS);
+        ASSERT_EQ(resolve_granted_process_access(maximum_allowed), process_all_access);
     }
 
     TEST(CrossProcessTest, ResolveGrantedProcessAccessMapsGenericAllToAllAccess)
     {
-        ASSERT_EQ(resolve_granted_process_access(GENERIC_ALL), PROCESS_ALL_ACCESS);
+        ASSERT_EQ(resolve_granted_process_access(GENERIC_ALL), process_all_access);
     }
 } // namespace sogen::test

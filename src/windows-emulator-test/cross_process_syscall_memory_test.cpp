@@ -44,8 +44,8 @@ namespace sogen::test
             }
         };
 
-        constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
-        constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
+        constexpr ACCESS_MASK process_vm_read = 0x0010;
+        constexpr ACCESS_MASK process_all_access = 0x001FFFFF;
 
         syscall_context make_context(windows_emulator& emu)
         {
@@ -124,7 +124,7 @@ namespace sogen::test
         ASSERT_TRUE(child.memory.try_write_memory(child_base, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -170,7 +170,7 @@ namespace sogen::test
         ASSERT_TRUE(parent.memory.try_write_memory(local_buffer, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -221,7 +221,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_VM_READ; // deliberately lacks PROCESS_VM_WRITE|PROCESS_VM_OPERATION (0x0020|0x0008)
+        record.granted_access = process_vm_read; // deliberately lacks PROCESS_VM_WRITE|PROCESS_VM_OPERATION (0x0020|0x0008)
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -244,7 +244,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
 
@@ -270,7 +270,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
 
@@ -313,7 +313,7 @@ namespace sogen::test
         ASSERT_TRUE(child.memory.try_write_memory(child_base, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -361,7 +361,7 @@ namespace sogen::test
         ASSERT_TRUE(parent.memory.try_write_memory(local_buffer, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -410,7 +410,7 @@ namespace sogen::test
         ASSERT_TRUE(parent.memory.try_write_memory(local_buffer, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -452,7 +452,7 @@ namespace sogen::test
         ASSERT_TRUE(child.memory.try_write_memory(child_base, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -504,7 +504,7 @@ namespace sogen::test
         ASSERT_TRUE(child.memory.try_write_memory(child_base, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -554,7 +554,7 @@ namespace sogen::test
         ASSERT_TRUE(parent.memory.try_write_memory(local_buffer, pattern.data(), pattern.size()));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -586,7 +586,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -628,7 +628,7 @@ namespace sogen::test
         ASSERT_NE(candidate_base, 0u);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -671,7 +671,7 @@ namespace sogen::test
         ASSERT_FALSE(child.memory.get_region_info(reserved_base).is_committed);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -709,7 +709,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -742,7 +742,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -802,7 +802,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
 
@@ -839,7 +839,7 @@ namespace sogen::test
         ASSERT_NE(child_base, 0u);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -920,7 +920,7 @@ namespace sogen::test
         ASSERT_TRUE(child.memory.get_region_info(child_base).is_reserved);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -985,7 +985,7 @@ namespace sogen::test
         ASSERT_NE(child_base, 0u);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1047,7 +1047,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1080,7 +1080,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1119,7 +1119,7 @@ namespace sogen::test
         child.memory.set_region_mapped_filename(child_base, u"C:\\Windows\\System32\\ntdll.dll");
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1163,7 +1163,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1192,7 +1192,7 @@ namespace sogen::test
         ASSERT_NE(child_base, 0u);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1232,7 +1232,7 @@ namespace sogen::test
             child.memory.allocate_memory(candidate_base, 0x1000, memory_permission::read_write, false, memory_region_kind::section_image));
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1259,7 +1259,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
 
@@ -1292,7 +1292,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
 
@@ -1321,7 +1321,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
 
@@ -1353,7 +1353,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1383,7 +1383,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1418,7 +1418,7 @@ namespace sogen::test
         child.memory.set_region_mapped_filename(child_base, u"C:\\Windows\\System32\\ntdll.dll");
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -1455,7 +1455,7 @@ namespace sogen::test
         ASSERT_NE(child_base, 0u);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 

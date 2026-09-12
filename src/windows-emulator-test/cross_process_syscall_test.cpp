@@ -30,8 +30,8 @@ namespace sogen::test
             }
         };
 
-        constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
-        constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
+        constexpr ACCESS_MASK process_vm_read = 0x0010;
+        constexpr ACCESS_MASK process_all_access = 0x001FFFFF;
 
         syscall_context make_context(windows_emulator& emu)
         {
@@ -105,7 +105,7 @@ namespace sogen::test
         ASSERT_EQ(child_thread->suspended, 1u);
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -129,7 +129,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_VM_READ; // deliberately lacks PROCESS_SUSPEND_RESUME (0x0800)
+        record.granted_access = process_vm_read; // deliberately lacks PROCESS_SUSPEND_RESUME (0x0800)
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
 
@@ -150,7 +150,7 @@ namespace sogen::test
         auto parent = create_empty_emulator();
 
         process_context::child_process_record record{};
-        record.granted_access = PROCESS_ALL_ACCESS;
+        record.granted_access = process_all_access;
         parent.process.child_processes[7] = record;
         parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
 
