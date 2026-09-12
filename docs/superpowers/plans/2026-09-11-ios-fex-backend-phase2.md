@@ -545,7 +545,7 @@ Expected: full pass, unchanged from before this task. This task's real-device co
 cd deps/FEX
 git add FEXCore/include/FEXCore/Utils/AllocatorHooks.h FEXCore/Source/Interface/Core/JIT/JIT.cpp
 git commit -m "feat(ios): route FEXCore's JIT allocator through JIT26 on real device"
-git push origin HEAD:macos-arm64   # deps/FEX's actual fork branch, NOT "dev"
+git push origin HEAD:main   # deps/FEX's actual fork branch is "main", NOT "dev" or "macos-arm64" (see the note at Task 6's commit step)
 cd ../..
 git add deps/FEX
 git commit -m "chore(deps): bump FEX pin — JIT26-blessed allocator for real iOS device"
