@@ -2431,8 +2431,8 @@ namespace sogen
             auto* device = c.proc.devices.get(file_handle);
             if (!device)
             {
-                constexpr ULONG FSCTL_GET_REPARSE_POINT = 0x900A8;
-                if (fs_control_code == FSCTL_GET_REPARSE_POINT && c.proc.files.get(file_handle))
+                constexpr ULONG fsctl_get_reparse_point = 0x900A8;
+                if (fs_control_code == fsctl_get_reparse_point && c.proc.files.get(file_handle))
                 {
                     // The target is a regular file or directory, not a reparse point. Returning
                     // STATUS_INVALID_HANDLE here makes callers (e.g. path canonicalization) treat

@@ -129,10 +129,10 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;
-            constexpr ACCESS_MASK PROCESS_VM_WRITE = 0x0020;
-            constexpr ACCESS_MASK PROCESS_VM_OPERATION = 0x0008;
-            constexpr ACCESS_MASK PROCESS_QUERY_INFORMATION = 0x0400;
+            constexpr ACCESS_MASK process_vm_read = 0x0010;
+            constexpr ACCESS_MASK process_vm_write = 0x0020;
+            constexpr ACCESS_MASK process_vm_operation = 0x0008;
+            constexpr ACCESS_MASK process_query_information = 0x0400;
 
             // Real call sizes on this feature's target (a sandbox broker) are 4-64 bytes plus one
             // interception buffer of a few KiB, so a fixed 1 MiB boundary - well below the control
@@ -188,7 +188,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                const auto child = resolve_child_target(c, process_handle, PROCESS_QUERY_INFORMATION);
+                const auto child = resolve_child_target(c, process_handle, process_query_information);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -477,7 +477,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_OPERATION);
+                const auto child = resolve_child_target(c, process_handle, process_vm_operation);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -562,7 +562,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_OPERATION);
+                const auto child = resolve_child_target(c, process_handle, process_vm_operation);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -789,7 +789,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_OPERATION);
+                const auto child = resolve_child_target(c, process_handle, process_vm_operation);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -928,7 +928,7 @@ namespace sogen
 
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_READ);
+                const auto child = resolve_child_target(c, process_handle, process_vm_read);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -985,7 +985,7 @@ namespace sogen
 
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                const auto child = resolve_child_target(c, process_handle, PROCESS_VM_WRITE | PROCESS_VM_OPERATION);
+                const auto child = resolve_child_target(c, process_handle, process_vm_write | process_vm_operation);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);

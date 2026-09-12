@@ -16,7 +16,7 @@ namespace sogen
 
         namespace
         {
-            constexpr ACCESS_MASK PROCESS_DUP_HANDLE = 0x0040;
+            constexpr ACCESS_MASK process_dup_handle = 0x0040;
 
             // TargetProcess::Init hands the sandbox's shared pagefile-backed IPC section to a
             // suspended child via DuplicateHandle(cur, shared_section_, child, &out,
@@ -47,7 +47,7 @@ namespace sogen
                     return STATUS_NOT_SUPPORTED;
                 }
 
-                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
+                const auto child = resolve_child_target(c, target_process_handle, process_dup_handle);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -100,7 +100,7 @@ namespace sogen
                     return STATUS_NOT_SUPPORTED;
                 }
 
-                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
+                const auto child = resolve_child_target(c, target_process_handle, process_dup_handle);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);
@@ -144,7 +144,7 @@ namespace sogen
                     return STATUS_NOT_SUPPORTED;
                 }
 
-                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
+                const auto child = resolve_child_target(c, target_process_handle, process_dup_handle);
                 if (std::holds_alternative<NTSTATUS>(child))
                 {
                     return std::get<NTSTATUS>(child);

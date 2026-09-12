@@ -15,9 +15,9 @@ namespace sogen
     {
         namespace
         {
-            constexpr ACCESS_MASK PROCESS_TERMINATE = 0x0001;
-            constexpr ACCESS_MASK PROCESS_QUERY_INFORMATION = 0x0400;
-            constexpr ACCESS_MASK PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+            constexpr ACCESS_MASK process_terminate = 0x0001;
+            constexpr ACCESS_MASK process_query_information = 0x0400;
+            constexpr ACCESS_MASK process_query_limited_information = 0x1000;
 
             // The environment block real ntdll builds (see process_context::setup's construction of
             // RTL_USER_PROCESS_PARAMETERS64.Environment): a sequence of NUL-terminated "name=value"
@@ -215,7 +215,7 @@ namespace sogen
                 // away.
                 if (info_class == ProcessBasicInformation)
                 {
-                    const auto child = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    const auto child = resolve_child_record(c, process_handle, process_query_limited_information);
                     if (std::holds_alternative<NTSTATUS>(child))
                     {
                         return std::get<NTSTATUS>(child);
@@ -268,7 +268,7 @@ namespace sogen
                         // execute_query_wow64_info. Falls through to STATUS_NOT_SUPPORTED below if no
                         // live channel exists to ask (matching this branch's own pre-existing behavior
                         // for every other unresolvable case).
-                        const auto target = resolve_child_target(c, process_handle, PROCESS_QUERY_INFORMATION);
+                        const auto target = resolve_child_target(c, process_handle, process_query_information);
                         if (std::holds_alternative<child_target>(target))
                         {
                             process_control_request request{};
@@ -306,7 +306,7 @@ namespace sogen
                     // PROCESS_QUERY_INFORMATION or PROCESS_QUERY_LIMITED_INFORMATION, so this checks
                     // for the lesser of the two - same reasoning as the ProcessBasicInformation check
                     // above.
-                    const auto record = resolve_child_record(c, process_handle, PROCESS_QUERY_LIMITED_INFORMATION);
+                    const auto record = resolve_child_record(c, process_handle, process_query_limited_information);
                     if (std::holds_alternative<const process_context::child_process_record*>(record))
                     {
                         uint64_t accumulated_cycles = 0;
@@ -910,7 +910,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            const auto child = resolve_child_target(c, process_handle, PROCESS_TERMINATE);
+            const auto child = resolve_child_target(c, process_handle, process_terminate);
             if (std::holds_alternative<NTSTATUS>(child))
             {
                 return std::get<NTSTATUS>(child);

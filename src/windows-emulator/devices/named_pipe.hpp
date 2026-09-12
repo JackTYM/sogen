@@ -6,14 +6,14 @@
 namespace sogen
 {
     // FSCTL_PIPE_PEEK = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 3, METHOD_BUFFERED, FILE_READ_DATA)
-    constexpr ULONG FSCTL_PIPE_PEEK = 0x11400C;
+    constexpr ULONG fsctl_pipe_peek = 0x11400C;
     // FSCTL_PIPE_DISCONNECT = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    constexpr ULONG FSCTL_PIPE_DISCONNECT = 0x110004;
+    constexpr ULONG fsctl_pipe_disconnect = 0x110004;
     // FSCTL_PIPE_LISTEN = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    constexpr ULONG FSCTL_PIPE_LISTEN = 0x110008;
+    constexpr ULONG fsctl_pipe_listen = 0x110008;
     // FSCTL_PIPE_WAIT = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 6, METHOD_BUFFERED, FILE_ANY_ACCESS)
-    constexpr ULONG FSCTL_PIPE_WAIT = 0x110018;
-    constexpr ULONG FILE_PIPE_CONNECTED_STATE = 3;
+    constexpr ULONG fsctl_pipe_wait = 0x110018;
+    constexpr ULONG file_pipe_connected_state = 3;
 
     // Header of FILE_PIPE_PEEK_BUFFER; the peeked data follows immediately after.
     struct file_pipe_peek_buffer
@@ -166,24 +166,24 @@ namespace sogen
                                  static_cast<uint32_t>(c.io_control_code), c.thread().id);
             }
 
-            if (c.io_control_code == FSCTL_PIPE_PEEK)
+            if (c.io_control_code == fsctl_pipe_peek)
             {
                 return this->peek(win_emu, c);
             }
 
-            if (c.io_control_code == FSCTL_PIPE_LISTEN)
+            if (c.io_control_code == fsctl_pipe_listen)
             {
                 return this->listen(win_emu, c);
             }
 
-            if (c.io_control_code == FSCTL_PIPE_DISCONNECT)
+            if (c.io_control_code == fsctl_pipe_disconnect)
             {
                 // DisconnectNamedPipe is synchronous on real Windows -- it never waits for a peer, it just
                 // tears down whatever connection state exists (none, here) immediately.
                 return STATUS_SUCCESS;
             }
 
-            if (c.io_control_code == FSCTL_PIPE_WAIT)
+            if (c.io_control_code == fsctl_pipe_wait)
             {
                 return this->wait(win_emu, c);
             }
@@ -377,7 +377,7 @@ namespace sogen
             }
 
             file_pipe_peek_buffer header{};
-            header.named_pipe_state = FILE_PIPE_CONNECTED_STATE;
+            header.named_pipe_state = file_pipe_connected_state;
             header.read_data_available = static_cast<ULONG>(available);
             header.number_of_messages = 0;
             header.message_length = this->write_queue.empty() ? 0 : static_cast<ULONG>(this->write_queue.front().size());
