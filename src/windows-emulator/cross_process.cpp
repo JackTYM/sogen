@@ -7,8 +7,8 @@ namespace sogen
 {
     namespace
     {
-        constexpr ACCESS_MASK MAXIMUM_ALLOWED = 0x02000000;
-        constexpr ACCESS_MASK PROCESS_ALL_ACCESS = 0x001FFFFF;
+        constexpr ACCESS_MASK maximum_allowed = 0x02000000;
+        constexpr ACCESS_MASK process_all_access = 0x001FFFFF;
 
         // Steps 1-2 shared by resolve_child_target and resolve_child_record: recognizing h as one of
         // the process/thread pseudo handles NtCreateUserProcess mints, then looking up the record it
@@ -41,9 +41,9 @@ namespace sogen
 
     ACCESS_MASK resolve_granted_process_access(const ACCESS_MASK requested_access)
     {
-        if (requested_access == MAXIMUM_ALLOWED || (requested_access & GENERIC_ALL) != 0)
+        if (requested_access == maximum_allowed || (requested_access & GENERIC_ALL) != 0)
         {
-            return PROCESS_ALL_ACCESS;
+            return process_all_access;
         }
 
         return requested_access;

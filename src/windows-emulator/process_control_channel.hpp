@@ -66,9 +66,9 @@ namespace sogen
         void deserialize(utils::buffer_deserializer& buffer)
         {
             buffer.read(this->request_id);
-            uint8_t op{};
-            buffer.read(op);
-            this->op = static_cast<process_control_op>(op);
+            uint8_t raw_op{};
+            buffer.read(raw_op);
+            this->op = static_cast<process_control_op>(raw_op);
             buffer.read(this->address);
             buffer.read(this->size);
             buffer.read(this->allocation_type);
