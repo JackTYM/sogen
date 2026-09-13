@@ -651,11 +651,9 @@ namespace sogen
     struct DCOMPOSITION_FRAME_STATISTICS
     {
         LARGE_INTEGER lastFrameTime;
-        UINT64 currentCompositionFrameId;
-        UINT64 lastConfirmedFrameId;
+        EMU_D3DDDI_RATIONAL currentCompositionRate;
         LARGE_INTEGER currentTime;
         LARGE_INTEGER timeFrequency;
-        UINT64 nextEstimatedFrameId;
         LARGE_INTEGER nextEstimatedFrameTime;
     };
 } // namespace sogen
