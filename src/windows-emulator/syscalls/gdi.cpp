@@ -1483,12 +1483,20 @@ namespace sogen
                 return adapter_info;
             }
 
-            uint64_t infer_warp_allocation_size_from_private_data(const syscall_context& c, const uint64_t private_data,
-                                                                  const uint32_t private_data_size)
+            struct warp_allocation_metadata
+            {
+                uint64_t backing_size{};
+                uint32_t width{};
+                uint32_t height{};
+                uint32_t pitch{};
+            };
+
+            warp_allocation_metadata infer_warp_allocation_metadata_from_private_data(const syscall_context& c, const uint64_t private_data,
+                                                                                      const uint32_t private_data_size)
             {
                 if (private_data == 0 || private_data_size < 0x1C)
                 {
-                    return 0;
+                    return {};
                 }
 
                 const auto kind = c.emu.read_memory<uint32_t>(private_data + 0x00);
@@ -1499,26 +1507,36 @@ namespace sogen
 
                 if (byte_size == 0)
                 {
-                    return 0;
+                    return {};
                 }
 
                 if (kind == 1)
                 {
-                    return width_or_size != 0 && pitch == byte_size ? byte_size : 0;
+                    if (width_or_size == 0 || pitch != byte_size)
+                    {
+                        return {};
+                    }
+
+                    return {.backing_size = byte_size};
                 }
 
                 if (kind == 3)
                 {
                     if (width_or_size == 0 || height == 0 || pitch == 0)
                     {
-                        return 0;
+                        return {};
                     }
 
                     const uint64_t minimum_size = static_cast<uint64_t>(pitch) * height;
-                    return byte_size >= minimum_size ? byte_size : 0;
+                    if (byte_size < minimum_size)
+                    {
+                        return {};
+                    }
+
+                    return {.backing_size = byte_size, .width = width_or_size, .height = height, .pitch = pitch};
                 }
 
-                return 0;
+                return {};
             }
 
             template <typename T>
@@ -4584,10 +4602,12 @@ namespace sogen
                         const emulator_object<EMU_D3DDDI_ALLOCATIONINFO> allocation_info{c.emu, current_info_ptr};
 
                         allocation_info.access([&](EMU_D3DDDI_ALLOCATIONINFO& alloc_info) {
-                            const uint64_t backing_size = infer_warp_allocation_size_from_private_data(c, alloc_info.pPrivateDriverData,
-                                                                                                       alloc_info.PrivateDriverDataSize);
+                            const auto metadata = infer_warp_allocation_metadata_from_private_data(c, alloc_info.pPrivateDriverData,
+                                                                                                   alloc_info.PrivateDriverDataSize);
 
-                            alloc_info.hAllocation = c.proc.dxgk.create_allocation(c.win_emu.memory, create_alloc.hResource, backing_size);
+                            alloc_info.hAllocation =
+                                c.proc.dxgk.create_allocation(c.win_emu.memory, create_alloc.hResource, metadata.backing_size,
+                                                              metadata.width, metadata.height, metadata.pitch);
 
                             const auto* allocation = c.proc.dxgk.get_allocation(alloc_info.hAllocation);
                             const auto actual_size = allocation ? allocation->backing_size : 0ull;
@@ -4954,10 +4974,43 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        // WDDM present. Real on-screen presentation for paravirtualized rendering happens over the
-        // \\.\SogenGpu bridge, not this D3DKMT kernel path.
-        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& /*c*/, const emulator_pointer /*present*/)
+        // Hardware-accelerated rendering presents over the separate \\.\SogenGpu ioctl bridge, but a
+        // software (WARP) device has no such bridge participant: DXGI's blt-model presentation for a
+        // windowed WARP swapchain copies the backbuffer into the DXGK allocation named by hSource and
+        // reaches the screen only through this DDI call.
+        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, const emulator_object<EMU_D3DKMT_PRESENT> present_desc)
         {
+            if (!present_desc)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            present_desc.access([&](const EMU_D3DKMT_PRESENT& present) {
+                constexpr uint32_t k_present_flag_blt = 0x1;
+                if ((present.Flags & k_present_flag_blt) == 0 || present.hWindow == 0)
+                {
+                    return;
+                }
+
+                const auto* allocation = c.proc.dxgk.get_allocation(present.hSource);
+                if (!allocation || allocation->width == 0 || allocation->height == 0 || allocation->backing_memory == 0)
+                {
+                    return;
+                }
+
+                const auto pixels =
+                    c.emu.read_memory(allocation->backing_memory, static_cast<size_t>(allocation->pitch) * allocation->height);
+
+                c.win_emu.ui().present_surface(present.hWindow, ui_surface_desc{.width = static_cast<int>(allocation->width),
+                                                                                .height = static_cast<int>(allocation->height),
+                                                                                .stride = static_cast<int>(allocation->pitch),
+                                                                                .format = ui_surface_format::bgra8,
+                                                                                .pixels = pixels.data()});
+
+                dxgk_info(c, "NtGdiDdDDIPresent: hWindow=0x%llX hSource=0x%X %ux%u", present.hWindow, present.hSource, allocation->width,
+                          allocation->height);
+            });
+
             return STATUS_SUCCESS;
         }
 

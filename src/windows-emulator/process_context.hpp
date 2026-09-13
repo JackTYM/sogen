@@ -286,12 +286,18 @@ namespace sogen
                 uint32_t resource_handle{};
                 uint64_t backing_memory{};
                 uint64_t backing_size{};
+                uint32_t width{};
+                uint32_t height{};
+                uint32_t pitch{};
 
                 void serialize(utils::buffer_serializer& buffer) const
                 {
                     buffer.write(this->resource_handle);
                     buffer.write(this->backing_memory);
                     buffer.write(this->backing_size);
+                    buffer.write(this->width);
+                    buffer.write(this->height);
+                    buffer.write(this->pitch);
                 }
 
                 void deserialize(utils::buffer_deserializer& buffer)
@@ -299,6 +305,9 @@ namespace sogen
                     buffer.read(this->resource_handle);
                     buffer.read(this->backing_memory);
                     buffer.read(this->backing_size);
+                    buffer.read(this->width);
+                    buffer.read(this->height);
+                    buffer.read(this->pitch);
                 }
             };
 
@@ -354,7 +363,8 @@ namespace sogen
                 return ++this->next_resource_handle;
             }
 
-            uint32_t create_allocation(memory_manager& memory, const uint32_t resource_handle, uint64_t backing_size)
+            uint32_t create_allocation(memory_manager& memory, const uint32_t resource_handle, uint64_t backing_size,
+                                       const uint32_t width = 0, const uint32_t height = 0, const uint32_t pitch = 0)
             {
                 if (backing_size == 0)
                 {
@@ -370,6 +380,9 @@ namespace sogen
                     .resource_handle = resource_handle,
                     .backing_memory = backing_memory,
                     .backing_size = aligned_size,
+                    .width = width,
+                    .height = height,
+                    .pitch = pitch,
                 };
 
                 return handle;

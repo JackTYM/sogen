@@ -877,7 +877,7 @@ namespace sogen
         NTSTATUS handle_NtGdiDdDDILock(const syscall_context& c, emulator_object<EMU_D3DKMT_LOCK> lock_desc);
         NTSTATUS handle_NtGdiDdDDIUnlock();
         NTSTATUS handle_NtGdiDdDDISubmitCommand(const syscall_context& c, emulator_pointer submit_command);
-        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, emulator_pointer present);
+        NTSTATUS handle_NtGdiDdDDIPresent(const syscall_context& c, emulator_object<EMU_D3DKMT_PRESENT> present_desc);
         NTSTATUS handle_NtGdiDdDDIGetDisplayModeList(const syscall_context& c,
                                                      emulator_object<EMU_D3DKMT_GETDISPLAYMODELIST> display_mode_list);
         NTSTATUS handle_NtGdiDdDDIGetSharedPrimaryHandle(const syscall_context& c,

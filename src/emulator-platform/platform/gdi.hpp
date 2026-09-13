@@ -502,6 +502,23 @@ namespace sogen
         UINT64 GpuVirtualAddress;
     };
 
+    struct EMU_D3DKMT_PRESENT
+    {
+        UINT32 hDevice;
+        UINT64 hWindow;
+        UINT32 VidPnSourceId;
+        UINT32 hSource;
+        UINT32 hDestination;
+        UINT32 Color;
+        RECT DstRect;
+        RECT SrcRect;
+        UINT32 SubRectCnt;
+        UINT64 pSrcSubRects;
+        UINT32 PresentCount;
+        UINT32 FlipInterval;
+        UINT32 Flags;
+    };
+
     struct EMU_D3DKMT_GETDEVICESTATE
     {
         UINT32 hDevice;
