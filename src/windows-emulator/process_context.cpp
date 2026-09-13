@@ -216,45 +216,67 @@ namespace sogen
             //
             // GDT_ADDR is a fixed guest address (see its doc comment), so this can fail on a backend
             // that shares the guest address space with the host process (FEX on Apple) if that exact
-            // address isn't actually available there - a real first-time possibility on hardware whose
-            // VA layout differs from the desktop/Simulator host this constant was chosen against. The
-            // return value used to be discarded here, so a failure silently left the GDT unmapped and
-            // every write below then faulted with a confusing "failed to write guest memory" error far
-            // from the actual cause. Check it and report exactly what (if anything) already occupies
-            // the requested window, so a real allocation failure is diagnosable from the log alone.
+            // address isn't actually available there - confirmed on real iOS device hardware: the
+            // fixed mach_vm_allocate this requires can fail outright, not merely find the address
+            // occupied. The return value used to be discarded here entirely, so a failure silently
+            // left the GDT unmapped and every write below then faulted with a confusing "failed to
+            // write guest memory" error far from the actual cause.
+            //
+            // Try the fixed address first - every platform where it already works (desktop macOS,
+            // Simulator, Linux, every non-Apple backend) takes exactly the same path as before, with
+            // no behavior change at all. Only on failure, fall back to a dynamically-verified
+            // placement: the same find_free_allocation_base + host-level confirmation machinery
+            // (memory_manager's size-only allocate_memory overload) that already places every guest
+            // module/heap allocation on this exact device - already proven to work there, since
+            // setup_gdt runs after the executable/ntdll are mapped through it. Bounded to start at
+            // DEFAULT_ALLOCATION_ADDRESS_64BIT (4GB) so the pick can never land below it: anything
+            // under 4GB is the WOW64 32-bit guest's own architectural address space (subject to the
+            // FEX backend's guest-VA rebase), which the GDT - a fixed-up, always-64-bit-addressed
+            // construct regardless of process bitness - must never alias into.
+            uint64_t gdt_base_address = GDT_ADDR;
             if (!memory.allocate_memory(GDT_ADDR, gdt_region_size, memory_permission::read_write))
             {
-                std::ostringstream message;
-                message << "Failed to allocate GDT memory at 0x" << std::hex << GDT_ADDR << " size=0x" << gdt_region_size;
+                gdt_base_address =
+                    memory.allocate_memory(gdt_region_size, memory_permission::read_write, false, DEFAULT_ALLOCATION_ADDRESS_64BIT);
 
-                const auto occupants = emu.reserved_host_ranges_in(GDT_ADDR, gdt_region_size);
-                if (occupants.empty())
+                if (gdt_base_address == 0)
                 {
-                    message << " (no host-reserved range reported in that window - the fixed-address host "
-                               "mapping call itself failed, e.g. the address may be outside this process's "
-                               "mappable host VA range)";
-                }
-                else
-                {
-                    message << " (occupied by: ";
-                    for (size_t i = 0; i < occupants.size(); ++i)
+                    std::ostringstream message;
+                    message << "Failed to allocate GDT memory: fixed address 0x" << std::hex << GDT_ADDR << " size=0x" << gdt_region_size;
+
+                    const auto occupants = emu.reserved_host_ranges_in(GDT_ADDR, gdt_region_size);
+                    if (occupants.empty())
                     {
-                        if (i > 0)
-                        {
-                            message << ", ";
-                        }
-                        message << "0x" << std::hex << occupants[i].address << "-0x" << std::hex
-                                << (occupants[i].address + occupants[i].size);
+                        message << " (no host-reserved range reported in that window - the fixed-address host "
+                                   "mapping call itself failed, e.g. the address may be outside this process's "
+                                   "mappable host VA range)";
                     }
-                    message << ")";
-                }
+                    else
+                    {
+                        message << " (occupied by: ";
+                        for (size_t i = 0; i < occupants.size(); ++i)
+                        {
+                            if (i > 0)
+                            {
+                                message << ", ";
+                            }
+                            message << "0x" << std::hex << occupants[i].address << "-0x" << std::hex
+                                    << (occupants[i].address + occupants[i].size);
+                        }
+                        message << ")";
+                    }
 
-                throw std::runtime_error(message.str());
+                    message << "; the dynamically-placed fallback also failed to find any usable window";
+
+                    throw std::runtime_error(message.str());
+                }
             }
+
+            memory.set_gdt_base(gdt_base_address);
 
             for (size_t i = 0; i < vcpu_count; ++i)
             {
-                const auto gdt_base = gdt_base_for_vcpu(i);
+                const auto gdt_base = gdt_base_for_vcpu(memory, i);
 
                 // Index 1 (0x08) - 64-bit kernel code (Ring 0): P=1, DPL=0, S=1, Type=0xA, L=1
                 emu.write_memory<uint64_t>(gdt_base + (1 * sizeof(uint64_t)), 0x00AF9B000000FFFF);
