@@ -95,6 +95,15 @@ namespace sogen
                 type = entry->type;
                 is_signaled = entry->signaled;
             }
+            else if (event_handle.value.is_pseudo)
+            {
+                // Matches observe_object_signal's own rule for a waited-on pseudo event
+                // (emulator_thread.cpp): these stand in for well-known system readiness latches
+                // (WER_PORT_READY, LSA_AUTHENTICATION_INITIALIZED, ...) that sogen never models the
+                // startup of, so they are permanently signaled rather than backed by a handle_store
+                // entry. NtQueryEvent was missing this case, so it reported them as never signaled.
+                is_signaled = true;
+            }
 
             event_information.access([&](EVENT_BASIC_INFORMATION& info) {
                 info.EventType = type;
