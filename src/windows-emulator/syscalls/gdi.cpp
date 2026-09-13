@@ -4192,16 +4192,16 @@ namespace sogen
             switch (query.Type)
             {
             case KMTQAITYPE::KMTQAITYPE_UMDRIVERNAME: {
-                if (query.PrivateDriverDataSize < 520) // MAX_PATH * 2
-                {
-                    return STATUS_BUFFER_TOO_SMALL;
-                }
-
                 struct EMU_D3DKMT_UMDRIVERNAME
                 {
                     uint32_t Version;
                     char16_t UhDriverName[260]; // NOLINT
                 } driver_name{};
+
+                if (query.PrivateDriverDataSize < sizeof(driver_name))
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
 
                 utils::string::copy(driver_name.UhDriverName, u"d3d10warp.dll");
 
@@ -4869,7 +4869,7 @@ namespace sogen
                     current_mode.ScanLineOrdering = 1;
                     current_mode.DisplayOrientation = 1;
                     current_mode.DisplayFixedOutput = 0;
-                    current_mode.Flags = 0;
+                    current_mode.Flags = {};
                 });
             });
 

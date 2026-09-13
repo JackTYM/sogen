@@ -587,6 +587,14 @@ namespace sogen
         UINT32 Denominator;
     };
 
+    struct EMU_D3DKMDT_DISPLAYMODE_FLAGS
+    {
+        UINT32 Bits0;
+        UINT32 Bits1;
+    };
+
+    static_assert(sizeof(EMU_D3DKMDT_DISPLAYMODE_FLAGS) == 8);
+
     struct EMU_D3DKMT_DISPLAYMODE
     {
         UINT32 Width;
@@ -597,8 +605,10 @@ namespace sogen
         UINT32 ScanLineOrdering;
         UINT32 DisplayOrientation;
         UINT32 DisplayFixedOutput;
-        UINT32 Flags;
+        EMU_D3DKMDT_DISPLAYMODE_FLAGS Flags;
     };
+
+    static_assert(sizeof(EMU_D3DKMT_DISPLAYMODE) == 44);
 
     struct EMU_D3DKMT_GETDISPLAYMODELIST
     {
