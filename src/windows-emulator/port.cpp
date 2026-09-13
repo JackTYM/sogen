@@ -7,6 +7,7 @@
 #include "ports/core_messaging_registrar.hpp"
 #include "ports/dns_resolver.hpp"
 #include "ports/lsa_policy_lookup.hpp"
+#include "ports/lsa_sspirpc.hpp"
 #include "ports/service_control.hpp"
 #include "binary_writer.hpp"
 
@@ -58,6 +59,11 @@ namespace sogen
         if (port == u"\\RPC Control\\LSARPC_ENDPOINT" || port == u"\\RPC Control\\lsapolicylookup")
         {
             return create_lsa_policy_lookup_port();
+        }
+
+        if (port == u"\\RPC Control\\lsasspirpc")
+        {
+            return create_lsa_sspirpc_port();
         }
 
         if (port == u"\\RPC Control\\Audiosrv" || port == u"\\RPC Control\\AudioClientRpc" || port == u"\\RPC Control\\AudioSrvServiceRpc")
