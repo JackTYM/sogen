@@ -5274,6 +5274,35 @@ namespace sogen
         {
             return 1;
         }
+
+        NTSTATUS handle_NtDCompositionGetFrameStatistics(const syscall_context& c,
+                                                         const emulator_object<DCOMPOSITION_FRAME_STATISTICS> statistics,
+                                                         const emulator_pointer reserved)
+        {
+            if (!statistics)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto now = c.win_emu.clock().steady_now().time_since_epoch().count();
+            const auto frequency = c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.QpcFrequency; });
+
+            statistics.access([&](DCOMPOSITION_FRAME_STATISTICS& stats) {
+                stats = {};
+                stats.lastFrameTime.QuadPart = now;
+                stats.currentTime.QuadPart = now;
+                stats.timeFrequency.QuadPart = frequency;
+                stats.nextEstimatedFrameTime.QuadPart = now;
+            });
+
+            if (reserved != 0)
+            {
+                constexpr std::array<uint8_t, 32> zeros{};
+                c.emu.write_memory(reserved, zeros.data(), zeros.size());
+            }
+
+            return STATUS_SUCCESS;
+        }
     }
 
 } // namespace sogen

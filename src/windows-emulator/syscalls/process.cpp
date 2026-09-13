@@ -673,7 +673,8 @@ namespace sogen
                 || info_class == ProcessAffinityMask                         //
                 || info_class == ProcessTelemetryCoverage                    //
                 || info_class == ProcessExecuteFlags                         //
-                || info_class == ProcessAltPrefetchParam)
+                || info_class == ProcessAltPrefetchParam                     //
+                || info_class == ProcessMitigationPolicy)
             {
                 return STATUS_SUCCESS;
             }
