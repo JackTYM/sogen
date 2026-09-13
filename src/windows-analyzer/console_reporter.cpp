@@ -268,7 +268,8 @@ namespace sogen
                                              e.execution.rip_module.c_str());
                         },
                         [&](const fast_fail_event& e) {
-                            this->log_.print(color::red, "Process requested fast fail with code %d\n", e.fail_code);
+                            this->log_.print(color::red, "Process requested fast fail with code %d at 0x%" PRIx64 " (%s)\n", e.fail_code,
+                                             e.execution.rip, e.execution.rip_module.c_str());
                         }),
                     event);
             }

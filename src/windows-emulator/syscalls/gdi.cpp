@@ -5297,7 +5297,7 @@ namespace sogen
 
             if (reserved != 0)
             {
-                constexpr std::array<uint8_t, 32> zeros{};
+                constexpr std::array<uint8_t, 16> zeros{};
                 c.emu.write_memory(reserved, zeros.data(), zeros.size());
             }
 
