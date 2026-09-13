@@ -95,6 +95,7 @@
 #include <vector>
 
 #include <utils/object.hpp>
+#include <utils/ios_device_log.hpp>
 
 // FEXCore embedding headers. These are only available when building against a FEX checkout/install;
 // the CMake glue gates this whole target behind SOGEN_ENABLE_FEX so non-ARM builds never reach here.
@@ -3428,8 +3429,13 @@ namespace sogen::fex
         {
             LogMan::Msg::InstallHandler([](LogMan::DebugLevels level, const char* message) {
                 fprintf(stderr, "[FEXCore LogMan] level=%s: %s\n", LogMan::DebugLevelStr(level), message);
+                sogen::utils::log_ios_device_milestone(std::string("[FEXCore LogMan] level=") + LogMan::DebugLevelStr(level) + ": " +
+                                                        message);
             });
-            LogMan::Throw::InstallHandler([](const char* message) { fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message); });
+            LogMan::Throw::InstallHandler([](const char* message) {
+                fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message);
+                sogen::utils::log_ios_device_milestone(std::string("[FEXCore LogMan THROW] ") + message);
+            });
 
 #ifdef __APPLE__
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
