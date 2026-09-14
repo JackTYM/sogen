@@ -20,6 +20,11 @@ namespace sogen
         constexpr size_t MAX_INSTRUCTION_BYTES = 15;
         constexpr uint64_t SYSCALL_INSTRUCTION_SIZE = 2;
 
+        // mojo::IncomingInvitation::AcceptIsolated's RVA in msedge.dll 150.0.7871.187,
+        // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #269).
+        constexpr uint64_t ACCEPT_ISOLATED_RVA = 0xa6bef06;
+        uint64_t g_accept_isolated_trace_va = 0;
+
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
         {
@@ -331,6 +336,43 @@ namespace sogen
                 event.path = mod.module_path.string();
                 event.image_base = mod.image_base;
             });
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_ACCEPT_ISOLATED"))
+            {
+                g_accept_isolated_trace_va = mod.image_base + ACCEPT_ISOLATED_RVA;
+                c.win_emu->log.error("[accept-isolated-trace] msedge.dll loaded at 0x%llx, watching 0x%llx\n",
+                                     static_cast<unsigned long long>(mod.image_base),
+                                     static_cast<unsigned long long>(g_accept_isolated_trace_va));
+            }
+        }
+
+        void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+            const auto rdx = emu.reg<uint64_t>(x86_register::rdx);
+            const auto r8 = emu.reg<uint64_t>(x86_register::r8);
+            const auto r9 = emu.reg<uint64_t>(x86_register::r9);
+
+            uint64_t rdx_pointee[2]{};
+            emu.try_read_memory(rdx, &rdx_pointee, sizeof(rdx_pointee));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[accept-isolated-trace] hit at 0x%llx, rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx "
+                                 "*rdx=[0x%llx, 0x%llx] return=0x%llx (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
+                                 static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
+                                 static_cast<unsigned long long>(r9), static_cast<unsigned long long>(rdx_pointee[0]),
+                                 static_cast<unsigned long long>(rdx_pointee[1]), static_cast<unsigned long long>(return_address),
+                                 caller_mod_name, static_cast<unsigned long long>(caller_offset));
         }
 
         void handle_module_unload(const analysis_context& c, const mapped_module& mod)
@@ -491,6 +533,11 @@ namespace sogen
 
         void handle_instruction(analysis_context& c, const uint64_t address)
         {
+            if (g_accept_isolated_trace_va != 0 && address == g_accept_isolated_trace_va)
+            {
+                trace_accept_isolated_hit(c, address);
+            }
+
             auto& win_emu = *c.win_emu;
             update_import_access(c, address);
 
@@ -746,7 +793,7 @@ namespace sogen
             std::erase_if(c.clicked_dialogs,
                           [&](const auto& entry) { return proc.windows.get(static_cast<hwnd>(entry.first)) == nullptr; });
 
-            const bool trace = dialog_click_trace_enabled();
+            const bool trace = dialog_click_trace_enabled() || std::getenv("SOGEN_TRACE_DIALOG_TITLES_LITE") != nullptr;
             static std::unordered_map<uint64_t, std::string> last_traced_titles;
 
             for (auto& win : proc.windows | std::views::values)
