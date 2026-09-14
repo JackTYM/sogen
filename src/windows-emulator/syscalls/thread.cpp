@@ -415,11 +415,17 @@ namespace sogen
                     return STATUS_BUFFER_OVERFLOW;
                 }
 
+                const auto processor_count = c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
+                const auto affinity_mask = (processor_count >= 64) ? ~0ull : ((1ull << processor_count) - 1);
+
                 const emulator_object<THREAD_BASIC_INFORMATION64> info{c.emu, thread_information};
                 info.access([&](THREAD_BASIC_INFORMATION64& i) {
                     i.ExitStatus = thread->exit_status.value_or(STATUS_PENDING);
                     i.TebBaseAddress = thread->teb64->value();
                     i.ClientId = thread->teb64->read().ClientId;
+                    i.AffinityMask = affinity_mask;
+                    i.Priority = 8; // THREAD_PRIORITY_NORMAL's KPRIORITY value
+                    i.BasePriority = 8;
                 });
 
                 return STATUS_SUCCESS;
