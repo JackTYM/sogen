@@ -458,6 +458,7 @@ namespace sogen
             }
 
             const auto success = *exit_status == STATUS_SUCCESS;
+            win_emu.log.error("Process exit status: 0x%X\n", static_cast<uint32_t>(*exit_status));
             do_post_emulation_work(c);
             win_emu.log.disable_output(false);
             c.emit_summary<run_finished_event>([&](auto& event) {
