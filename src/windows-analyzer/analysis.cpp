@@ -52,9 +52,10 @@ namespace sogen
         }};
         std::array<uint64_t, NODE_CONNECT_TARGETS.size()> g_node_connect_trace_vas{};
 
-        // Delayimp.lib's default delay-load failure hook in msedge.dll 150.0.7871.187,
-        // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270).
-        constexpr uint64_t DELAYLOAD_FAILURE_RVA = 0xbceb0e4;
+        // HandleDelayLoadFailureCommon in msedge.dll 150.0.7871.187, resolved from Microsoft's
+        // own public PDB (see project_solidworks_bringup.md #274; #270's RVA for this was wrong,
+        // resolving to an unrelated BluetoothAdapterWinrt::CreateDevice offset).
+        constexpr uint64_t DELAYLOAD_FAILURE_RVA = 0x8682e93;
         uint64_t g_delayload_failure_trace_va = 0;
 
         template <typename Return, typename... Args>
@@ -461,13 +462,16 @@ namespace sogen
             const auto pdli = emu.reg<uint64_t>(x86_register::rdx);
 
             uint64_t sz_dll_ptr{};
-            uint64_t sz_proc_name_ptr{};
-            uint32_t dw_ordinal{};
+            uint32_t import_by_name{};
+            uint64_t proc_union{};
             uint32_t dw_last_error{};
             emu.try_read_memory(pdli + 0x18, &sz_dll_ptr, sizeof(sz_dll_ptr));
-            emu.try_read_memory(pdli + 0x20, &sz_proc_name_ptr, sizeof(sz_proc_name_ptr));
-            emu.try_read_memory(pdli + 0x28, &dw_ordinal, sizeof(dw_ordinal));
+            emu.try_read_memory(pdli + 0x20, &import_by_name, sizeof(import_by_name));
+            emu.try_read_memory(pdli + 0x28, &proc_union, sizeof(proc_union));
             emu.try_read_memory(pdli + 0x40, &dw_last_error, sizeof(dw_last_error));
+
+            const auto sz_proc_name_ptr = import_by_name ? proc_union : 0;
+            const auto dw_ordinal = import_by_name ? 0u : static_cast<uint32_t>(proc_union);
 
             std::string dll_name;
             std::string proc_name;
