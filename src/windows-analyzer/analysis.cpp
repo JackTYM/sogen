@@ -25,6 +25,31 @@ namespace sogen
         constexpr uint64_t ACCEPT_ISOLATED_RVA = 0xa6bef06;
         uint64_t g_accept_isolated_trace_va = 0;
 
+        struct traced_symbol
+        {
+            const char* name;
+            uint64_t rva;
+        };
+
+        // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
+        // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270).
+        constexpr std::array<traced_symbol, 8> NODE_CONNECT_TARGETS{{
+            {"ipcz::NodeConnector::ConnectNode", 0x1f2e8fc},
+            {"ipcz::NodeConnectorForNonBrokerToBroker::Connect", 0x1f2f2d0},
+            {"ipcz::NodeConnectorForBrokerToNonBroker::Connect", 0x1534cf0},
+            {"ipcz::NodeConnectorForBrokerToBroker::Connect", 0x53acf80},
+            {"ipcz::DriverTransport::Activate", 0x1b62548},
+            {"mojo::core::ipcz_driver::Transport::Activate", 0x1daba10},
+            {"ipcz::NodeConnector::OnTransportError", 0x53acc00},
+            {"ipcz::DriverTransport::NotifyError", 0x3458680},
+        }};
+        std::array<uint64_t, NODE_CONNECT_TARGETS.size()> g_node_connect_trace_vas{};
+
+        // Delayimp.lib's default delay-load failure hook in msedge.dll 150.0.7871.187,
+        // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270).
+        constexpr uint64_t DELAYLOAD_FAILURE_RVA = 0xbceb0e4;
+        uint64_t g_delayload_failure_trace_va = 0;
+
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
         {
@@ -344,6 +369,23 @@ namespace sogen
                                      static_cast<unsigned long long>(mod.image_base),
                                      static_cast<unsigned long long>(g_accept_isolated_trace_va));
             }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NODE_CONNECT"))
+            {
+                for (size_t i = 0; i < NODE_CONNECT_TARGETS.size(); ++i)
+                {
+                    g_node_connect_trace_vas[i] = mod.image_base + NODE_CONNECT_TARGETS[i].rva;
+                    c.win_emu->log.error("[node-connect-trace] watching %s at 0x%llx\n", NODE_CONNECT_TARGETS[i].name,
+                                         static_cast<unsigned long long>(g_node_connect_trace_vas[i]));
+                }
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_DELAYLOAD_FAILURE"))
+            {
+                g_delayload_failure_trace_va = mod.image_base + DELAYLOAD_FAILURE_RVA;
+                c.win_emu->log.error("[delayload-failure-trace] watching HandleDelayLoadFailureCommon at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_delayload_failure_trace_va));
+            }
         }
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
@@ -373,6 +415,86 @@ namespace sogen
                                  static_cast<unsigned long long>(r9), static_cast<unsigned long long>(rdx_pointee[0]),
                                  static_cast<unsigned long long>(rdx_pointee[1]), static_cast<unsigned long long>(return_address),
                                  caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_node_connect_hit(const analysis_context& c, const uint64_t address, const char* name)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+            const auto rdx = emu.reg<uint64_t>(x86_register::rdx);
+            const auto r8 = emu.reg<uint64_t>(x86_register::r8);
+            const auto r9 = emu.reg<uint64_t>(x86_register::r9);
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[node-connect-trace] hit %s at 0x%llx, rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx "
+                                 "return=0x%llx (%s+0x%llx)\n",
+                                 name, static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
+                                 static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
+                                 static_cast<unsigned long long>(r9), static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_delayload_failure_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto dli_notify = emu.reg<uint32_t>(x86_register::ecx);
+            const auto pdli = emu.reg<uint64_t>(x86_register::rdx);
+
+            uint64_t sz_dll_ptr{};
+            uint64_t sz_proc_name_ptr{};
+            uint32_t dw_ordinal{};
+            uint32_t dw_last_error{};
+            emu.try_read_memory(pdli + 0x18, &sz_dll_ptr, sizeof(sz_dll_ptr));
+            emu.try_read_memory(pdli + 0x20, &sz_proc_name_ptr, sizeof(sz_proc_name_ptr));
+            emu.try_read_memory(pdli + 0x28, &dw_ordinal, sizeof(dw_ordinal));
+            emu.try_read_memory(pdli + 0x40, &dw_last_error, sizeof(dw_last_error));
+
+            std::string dll_name;
+            std::string proc_name;
+            try
+            {
+                if (sz_dll_ptr)
+                {
+                    dll_name = read_string<char>(c.win_emu->memory, sz_dll_ptr);
+                }
+            }
+            catch (...)
+            {
+            }
+            try
+            {
+                if (sz_proc_name_ptr)
+                {
+                    proc_name = read_string<char>(c.win_emu->memory, sz_proc_name_ptr);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[delayload-failure-trace] hit at 0x%llx, dliNotify=%u pdli=0x%llx dll=\"%s\" "
+                                 "proc=\"%s\" ordinal=%u lastError=0x%x return=0x%llx (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), dli_notify, static_cast<unsigned long long>(pdli),
+                                 dll_name.c_str(), proc_name.c_str(), dw_ordinal, dw_last_error,
+                                 static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
         }
 
         void handle_module_unload(const analysis_context& c, const mapped_module& mod)
@@ -536,6 +658,19 @@ namespace sogen
             if (g_accept_isolated_trace_va != 0 && address == g_accept_isolated_trace_va)
             {
                 trace_accept_isolated_hit(c, address);
+            }
+
+            for (size_t i = 0; i < g_node_connect_trace_vas.size(); ++i)
+            {
+                if (g_node_connect_trace_vas[i] != 0 && address == g_node_connect_trace_vas[i])
+                {
+                    trace_node_connect_hit(c, address, NODE_CONNECT_TARGETS[i].name);
+                }
+            }
+
+            if (g_delayload_failure_trace_va != 0 && address == g_delayload_failure_trace_va)
+            {
+                trace_delayload_failure_hit(c, address);
             }
 
             auto& win_emu = *c.win_emu;
