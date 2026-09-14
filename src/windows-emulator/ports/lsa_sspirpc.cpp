@@ -90,8 +90,8 @@ namespace sogen
                 const auto name = (options & 0xFFFF) == name_user_principal ? user + u"@" + domain : domain + u"\\" + user;
 
                 write_sspir_security_string_header(writer, name);
-                writer.write<int32_t>(static_cast<int32_t>(name.size()));
                 writer.write_ndr_u16string(name, false);
+                writer.write<int32_t>(static_cast<int32_t>(name.size()));
                 writer.write<int32_t>(0);
 
                 return STATUS_SUCCESS;
