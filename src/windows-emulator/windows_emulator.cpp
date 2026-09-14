@@ -1536,7 +1536,7 @@ namespace sogen
                 // "still room to grow" case left to handle transparently - every hit here is the
                 // terminal one, matching real Windows' MiCheckForUserStackOverflow once the fault lands
                 // within one page of DeallocationStack, which substitutes STATUS_STACK_OVERFLOW instead.
-                this->memory.protect_memory(region.allocation_base, region.length,
+                this->memory.protect_memory(region.start, region.length,
                                             region.permissions & ~(memory_permission_ext::guard | memory_permission_ext::stack_guard));
 
                 if (is_stack_guard)
