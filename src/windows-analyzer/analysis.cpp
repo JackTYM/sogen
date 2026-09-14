@@ -32,8 +32,8 @@ namespace sogen
         };
 
         // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
-        // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270).
-        constexpr std::array<traced_symbol, 8> NODE_CONNECT_TARGETS{{
+        // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270, #272).
+        constexpr std::array<traced_symbol, 15> NODE_CONNECT_TARGETS{{
             {"ipcz::NodeConnector::ConnectNode", 0x1f2e8fc},
             {"ipcz::NodeConnectorForNonBrokerToBroker::Connect", 0x1f2f2d0},
             {"ipcz::NodeConnectorForBrokerToNonBroker::Connect", 0x1534cf0},
@@ -42,6 +42,13 @@ namespace sogen
             {"mojo::core::ipcz_driver::Transport::Activate", 0x1daba10},
             {"ipcz::NodeConnector::OnTransportError", 0x53acc00},
             {"ipcz::DriverTransport::NotifyError", 0x3458680},
+            {"ipcz::DriverTransport::Transmit", 0x21b816c},
+            {"mojo::core::ipcz_driver::Transmit(trampoline)", 0x13b4b60},
+            {"mojo::core::Channel::WriteNextIpczMessage", 0x1450130},
+            {"mojo::core::ChannelWin::Write", 0xab58e0},
+            {"mojo::core::Channel::CreateForIpczDriver", 0x1dabd30},
+            {"mojo::core::ipcz_driver::Transport::GetIOTaskRunner", 0x53a6b10},
+            {"mojo::core::ChannelWin::OnIOCompleted", 0x11a9eb0},
         }};
         std::array<uint64_t, NODE_CONNECT_TARGETS.size()> g_node_connect_trace_vas{};
 
