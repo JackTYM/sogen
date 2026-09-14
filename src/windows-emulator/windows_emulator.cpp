@@ -1528,7 +1528,20 @@ namespace sogen
             auto region = this->memory.get_region_info(address);
             if (region.permissions.is_guarded())
             {
-                const auto is_stack_guard = region.permissions.is_stack_guard();
+                // The stack_guard tag is set once at thread creation on the specific region sogen
+                // allocated as the thread's terminal guard buffer, but a guest legitimately re-arming
+                // PAGE_GUARD there (e.g. crypt32.dll's InternalVerifyStackAvailable calling the
+                // standard _resetstkoflw()-style recovery idiom after catching STATUS_STACK_OVERFLOW)
+                // goes through the ordinary NtProtectVirtualMemory path, which has no way to restore an
+                // sogen-internal tag and also merges the freshly-reprotected page with the adjacent
+                // already-committed stack region, permanently losing it. Real Windows re-evaluates
+                // "is this within one page of DeallocationStack" on every fault rather than consuming a
+                // one-shot flag, so check the thread's actual guard-buffer bounds directly as well,
+                // instead of relying solely on a tag a legitimate guest re-arm can silently strip.
+                auto& thread = vcpu.thread();
+                const auto within_stack_guard_buffer =
+                    thread.stack_guard_size != 0 && address >= (thread.stack_base - thread.stack_guard_size) && address < thread.stack_base;
+                const auto is_stack_guard = region.permissions.is_stack_guard() || within_stack_guard_buffer;
 
                 // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION, matching real
                 // Windows for a guest-requested PAGE_GUARD page. A thread's own stack-reservation guard
