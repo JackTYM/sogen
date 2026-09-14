@@ -1856,7 +1856,7 @@ namespace sogen
 
         NTSTATUS handle_named_pipe_create(const syscall_context& c, const emulator_object<handle>& out_handle,
                                           const std::u16string_view filename, const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes,
-                                          ACCESS_MASK desired_access)
+                                          ACCESS_MASK desired_access, ULONG create_options)
         {
             (void)attributes; // This isn't being consumed atm, suppressing errors
 
@@ -1875,6 +1875,7 @@ namespace sogen
             {
                 pipe_device->name = std::u16string(filename);
                 pipe_device->access = desired_access;
+                pipe_device->is_synchronous_handle = (create_options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0;
             }
 
             const auto handle = c.proc.devices.store(std::move(container));
@@ -1932,7 +1933,7 @@ namespace sogen
 
             if (is_named_pipe_path(filename))
             {
-                return handle_named_pipe_create(c, file_handle, filename, attributes, desired_access);
+                return handle_named_pipe_create(c, file_handle, filename, attributes, desired_access, create_options);
             }
 
             auto printer = utils::finally([&] {
@@ -2386,7 +2387,6 @@ namespace sogen
             (void)desired_access;
             (void)share_access;
             (void)create_disposition;
-            (void)create_options;
 
             const auto attributes = object_attributes.read();
             const auto filename = read_unicode_string(c.emu, attributes.ObjectName);
@@ -2412,6 +2412,7 @@ namespace sogen
                 pipe_device->inbound_quota = inbound_quota;
                 pipe_device->outbound_quota = outbound_quota;
                 pipe_device->default_timeout = default_timeout.read();
+                pipe_device->is_synchronous_handle = (create_options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0;
             }
             else
             {

@@ -61,6 +61,15 @@ namespace sogen
         // server instance -- see windows_emulator::register_named_pipe_server, which this flag gates.
         bool is_server_instance{false};
 
+        // Mirrors the handle's real synchronous-vs-overlapped mode: false iff the creating
+        // NtCreateFile/NtCreateNamedPipeFile's CreateOptions carried neither FILE_SYNCHRONOUS_IO_ALERT nor
+        // FILE_SYNCHRONOUS_IO_NONALERT, the NT-level signature of a Win32 FILE_FLAG_OVERLAPPED handle. Gates
+        // try_deliver_read's park-the-calling-thread behavior -- see there. listen()/wait() don't consult
+        // this: unlike a pended read, they have no delivery path back to the caller's event/APC/IOCP once
+        // the awaited condition is met, only the yield_thread/await_objects replay-on-wake mechanism, so
+        // making them pend without blocking would drop the completion instead of merely deferring it.
+        bool is_synchronous_handle{true};
+
         // Backs a pended FSCTL_PIPE_WAIT (see wait()): parks the calling thread on an event that is
         // signaled once a server instance with the awaited name is registered (see
         // windows_emulator::register_named_pipe_server), whether that happened in this same process or
@@ -148,11 +157,18 @@ namespace sogen
                 e->signaled = false;
             }
 
-            auto& t = ctx.thread();
-            t.await_objects = {this->read_ready_event};
-            t.await_any = false;
-            t.await_time = {};
-            win_emu.yield_thread(*ctx.vcpu, false);
+            // A synchronous handle blocks here, exactly like real Windows: park the calling thread and
+            // replay this call once read_ready_event is signaled (see work()). An overlapped handle must
+            // return STATUS_PENDING to the caller immediately instead -- real completion still happens
+            // later, out of work()/complete_read(), via the caller's event/APC/completion port.
+            if (this->is_synchronous_handle)
+            {
+                auto& t = ctx.thread();
+                t.await_objects = {this->read_ready_event};
+                t.await_any = false;
+                t.await_time = {};
+                win_emu.yield_thread(*ctx.vcpu, false);
+            }
 
             return STATUS_PENDING;
         }
