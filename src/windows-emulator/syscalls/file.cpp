@@ -191,6 +191,16 @@ namespace sogen
                         return STATUS_INVALID_HANDLE;
                     }
 
+                    if (pipe_io_trace_enabled())
+                    {
+                        const auto* pipe = device->get_internal_device<named_pipe>();
+                        c.win_emu.log.info("[pipe-io-trace] NtSetInformationFile(FileCompletionInformation) pipe='%s' port=0x%llx "
+                                           "key=0x%llx tid=%u\n",
+                                           pipe ? u16_to_u8(pipe->name).c_str() : "<non-pipe-device>",
+                                           static_cast<unsigned long long>(info.Port), static_cast<unsigned long long>(info.Key),
+                                           c.thread().id);
+                    }
+
                     device->associate_completion_port(handle{.bits = info.Port}, info.Key);
                 }
 
