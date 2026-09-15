@@ -72,6 +72,13 @@ namespace sogen
         constexpr uint64_t PLATFORM_CHANNEL_CTOR_RVA = 0x1c94708;
         uint64_t g_platform_channel_ctor_trace_va = 0;
 
+        // Entry point of the unexported helper that is PLATFORM_CHANNEL_CTOR_RVA's sole caller,
+        // walked one frame further back to identify what repeatedly allocates and invokes it (see
+        // project_solidworks_bringup.md #279 point 8-9, #280). No PDB symbol resolves exactly to
+        // this address; the nearest preceding public symbol lands on int3 padding, not real code.
+        constexpr uint64_t PLATFORM_CHANNEL_TRACKER_ENTRY_RVA = 0x13ead50;
+        uint64_t g_platform_channel_tracker_entry_trace_va = 0;
+
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
         {
@@ -421,6 +428,10 @@ namespace sogen
                 g_platform_channel_ctor_trace_va = mod.image_base + PLATFORM_CHANNEL_CTOR_RVA;
                 c.win_emu->log.error("[named-pipe-create-trace] watching PlatformChannel::PlatformChannel at 0x%llx\n",
                                      static_cast<unsigned long long>(g_platform_channel_ctor_trace_va));
+
+                g_platform_channel_tracker_entry_trace_va = mod.image_base + PLATFORM_CHANNEL_TRACKER_ENTRY_RVA;
+                c.win_emu->log.error("[named-pipe-create-trace] watching unexported tracker helper at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_platform_channel_tracker_entry_trace_va));
             }
         }
 
@@ -590,6 +601,26 @@ namespace sogen
             c.win_emu->log.error("[named-pipe-create-trace] PlatformChannel ctor hit at 0x%llx, tid=%u return=0x%llx (%s+0x%llx)\n",
                                  static_cast<unsigned long long>(address), c.win_emu->current_thread().id,
                                  static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_platform_channel_tracker_entry_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[named-pipe-create-trace] tracker-entry hit at 0x%llx, this=0x%llx tid=%u return=0x%llx (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
+                                 c.win_emu->current_thread().id, static_cast<unsigned long long>(return_address), caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
         }
 
@@ -777,6 +808,11 @@ namespace sogen
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
             {
                 trace_platform_channel_ctor_hit(c, address);
+            }
+
+            if (g_platform_channel_tracker_entry_trace_va != 0 && address == g_platform_channel_tracker_entry_trace_va)
+            {
+                trace_platform_channel_tracker_entry_hit(c, address);
             }
 
             auto& win_emu = *c.win_emu;
