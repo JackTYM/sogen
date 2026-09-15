@@ -59,6 +59,19 @@ namespace sogen
         constexpr uint64_t DELAYLOAD_FAILURE_RVA = 0x8682e93;
         uint64_t g_delayload_failure_trace_va = 0;
 
+        // CreateNamedPipeW's own export RVA in the shared root's kernelbase.dll (a plain PE export,
+        // resolved directly via its export table -- no PDB needed; see project_solidworks_bringup.md #279).
+        constexpr uint64_t CREATE_NAMED_PIPE_W_RVA = 0x87f20;
+        uint64_t g_create_named_pipe_trace_va = 0;
+
+        // mojo::PlatformChannel::PlatformChannel()'s own RVA in msedge.dll 150.0.7871.187, resolved
+        // from Microsoft's own public PDB by walking one CreateNamedPipeW caller back (see
+        // project_solidworks_bringup.md #279); its constructor body inlines the anonymous-namespace
+        // CreateChannel() helper that issues the CreateNamedPipeW/CreateFileW/ConnectNamedPipe
+        // self-connect sequence.
+        constexpr uint64_t PLATFORM_CHANNEL_CTOR_RVA = 0x1c94708;
+        uint64_t g_platform_channel_ctor_trace_va = 0;
+
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
         {
@@ -395,6 +408,20 @@ namespace sogen
                 c.win_emu->log.error("[delayload-failure-trace] watching HandleDelayLoadFailureCommon at 0x%llx\n",
                                      static_cast<unsigned long long>(g_delayload_failure_trace_va));
             }
+
+            if (mod.name == "kernelbase.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
+            {
+                g_create_named_pipe_trace_va = mod.image_base + CREATE_NAMED_PIPE_W_RVA;
+                c.win_emu->log.error("[named-pipe-create-trace] watching CreateNamedPipeW at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_create_named_pipe_trace_va));
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
+            {
+                g_platform_channel_ctor_trace_va = mod.image_base + PLATFORM_CHANNEL_CTOR_RVA;
+                c.win_emu->log.error("[named-pipe-create-trace] watching PlatformChannel::PlatformChannel at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_platform_channel_ctor_trace_va));
+            }
         }
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
@@ -505,6 +532,63 @@ namespace sogen
                                  "proc=\"%s\" ordinal=%u lastError=0x%x return=0x%llx (%s+0x%llx)\n",
                                  static_cast<unsigned long long>(address), dli_notify, static_cast<unsigned long long>(pdli),
                                  dll_name.c_str(), proc_name.c_str(), dw_ordinal, dw_last_error,
+                                 static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_create_named_pipe_hit(const analysis_context& c, const uint64_t address)
+        {
+            constexpr uint32_t FILE_FLAG_OVERLAPPED = 0x40000000;
+
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto lp_name = emu.reg<uint64_t>(x86_register::rcx);
+            const auto dw_open_mode = emu.reg<uint32_t>(x86_register::edx);
+            const auto dw_pipe_mode = emu.reg<uint32_t>(x86_register::r8d);
+            const auto n_max_instances = emu.reg<uint32_t>(x86_register::r9d);
+
+            std::string name;
+            try
+            {
+                if (lp_name)
+                {
+                    name = u16_to_u8(read_string<char16_t>(c.win_emu->memory, lp_name));
+                }
+            }
+            catch (...)
+            {
+            }
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[named-pipe-create-trace] hit at 0x%llx, name=\"%s\" dwOpenMode=0x%x overlapped=%d dwPipeMode=0x%x "
+                                 "nMaxInstances=%u tid=%u return=0x%llx (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), name.c_str(), dw_open_mode,
+                                 (dw_open_mode & FILE_FLAG_OVERLAPPED) != 0, dw_pipe_mode, n_max_instances, c.win_emu->current_thread().id,
+                                 static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_platform_channel_ctor_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[named-pipe-create-trace] PlatformChannel ctor hit at 0x%llx, tid=%u return=0x%llx (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id,
                                  static_cast<unsigned long long>(return_address), caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
         }
@@ -683,6 +767,16 @@ namespace sogen
             if (g_delayload_failure_trace_va != 0 && address == g_delayload_failure_trace_va)
             {
                 trace_delayload_failure_hit(c, address);
+            }
+
+            if (g_create_named_pipe_trace_va != 0 && address == g_create_named_pipe_trace_va)
+            {
+                trace_create_named_pipe_hit(c, address);
+            }
+
+            if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
+            {
+                trace_platform_channel_ctor_hit(c, address);
             }
 
             auto& win_emu = *c.win_emu;
