@@ -1672,6 +1672,20 @@ namespace sogen::fex
         void rip_sample_init_from_env();
         void rip_sample_capture(uint64_t guest_rip);
         void rip_sample_flush();
+
+        // Device-triage diagnostic (see fex-diag logging elsewhere in this file): confirms whether
+        // handle_fault_signal's non-dispatch-code InterruptFaultPage fallback (the "ordinary C++
+        // code touched the guard page, just skip the single faulting instruction" branch, distinct
+        // from the JIT-block-entry-check case) is ever actually reached on a real device, where a
+        // JIT26 breakpoint-protocol debugger owns the process's exceptions ahead of any in-process
+        // sigaction handler. Same async-signal-safety requirement as rip_sample_capture above - only
+        // atomic stores, no malloc, no libc I/O - logged from ordinary (non-signal) context in
+        // start()'s loop.
+        std::atomic<uint64_t> non_dispatch_fault_skip_count_{0};
+        std::atomic<uint64_t> non_dispatch_fault_skip_last_pc_{0};
+        std::atomic<uint64_t> non_dispatch_fault_skip_last_addr_{0};
+        std::atomic<int> non_dispatch_fault_skip_last_sig_{0};
+        uint64_t non_dispatch_fault_skip_logged_count_{0};
     };
 
     // -----------------------------------------------------------------------------------------------
@@ -4012,6 +4026,20 @@ namespace sogen::fex
                 this->rip_sample_flush();
             }
 
+            if (const auto skip_count = this->non_dispatch_fault_skip_count_.load(std::memory_order_relaxed);
+                skip_count != this->non_dispatch_fault_skip_logged_count_)
+            {
+                this->non_dispatch_fault_skip_logged_count_ = skip_count;
+                char diag[256];
+                std::snprintf(diag, sizeof(diag),
+                              "[fex-diag] handle_fault_signal non-dispatch skip count=%llu last_pc=0x%llx last_addr=0x%llx last_sig=%d",
+                              static_cast<unsigned long long>(skip_count),
+                              static_cast<unsigned long long>(this->non_dispatch_fault_skip_last_pc_.load(std::memory_order_relaxed)),
+                              static_cast<unsigned long long>(this->non_dispatch_fault_skip_last_addr_.load(std::memory_order_relaxed)),
+                              this->non_dispatch_fault_skip_last_sig_.load(std::memory_order_relaxed));
+                sogen::utils::log_ios_device_milestone(diag);
+            }
+
             const bool hook_dispatched = this->dispatch_pending_hook_if_any();
             const bool interrupt_page_unwind = std::exchange(this->interrupt_page_unwind_, false);
 
@@ -5962,6 +5990,11 @@ namespace sogen::fex
                                                    reinterpret_cast<void*>(stop_cfg.ThreadStopHandlerAddressSpillSRA));
                     return true;
                 }
+
+                this->non_dispatch_fault_skip_count_.fetch_add(1, std::memory_order_relaxed);
+                this->non_dispatch_fault_skip_last_pc_.store(fault_pc, std::memory_order_relaxed);
+                this->non_dispatch_fault_skip_last_addr_.store(fault_addr, std::memory_order_relaxed);
+                this->non_dispatch_fault_skip_last_sig_.store(sig, std::memory_order_relaxed);
 
                 arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(fault_pc + 4));
                 return true;
