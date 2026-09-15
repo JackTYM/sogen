@@ -4551,7 +4551,32 @@ namespace sogen::fex
         }
 #endif
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        // A real, attached JIT26 debugger claims every hardware exception before sogen's own
+        // sigaction(SIGSEGV/SIGBUS) handler ever sees it (confirmed against real debugserver source:
+        // MachException::Message::Reply()'s `signal` argument is only honored for
+        // EXC_SOFTWARE/EXC_SOFT_SIGNAL, never for a real EXC_BAD_ACCESS hardware fault), so
+        // handle_fault_signal's InterruptFaultPage handling - and therefore this whole cooperative-
+        // preemption mechanism - can never actually run on real device. Protecting the page here only
+        // produces a fault the debugger has to babysit forever (a tight guest loop re-hits the
+        // same protected page on every iteration's back-edge check, at a full debugger round-trip
+        // each time - see universal.js's data-abort recovery). Skip protecting it at all: every
+        // NeedsPendingInterruptFaultCheck store then just succeeds trivially, at full native speed,
+        // and this vCPU's cooperative stop/quantum-preemption simply never triggers - an accepted,
+        // deliberate tradeoff on real device, the same class as skipping the JIT code-buffer
+        // overflow guard page there (CPUBackend.cpp).
+        static std::atomic<bool> LoggedInterruptFaultPageSkipOnce {false};
+        if (!LoggedInterruptFaultPageSkipOnce.exchange(true, std::memory_order_relaxed))
+        {
+            const char* const msg = "[FEX backend] Skipping InterruptFaultPage protection on real iOS device - "
+                                    "cooperative thread-stop/quantum-preemption via this page will never trigger.";
+            fprintf(stderr, "%s\n", msg);
+            sogen::utils::log_ios_device_milestone(msg);
+        }
+        return;
+#else
         ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_NONE);
+#endif
     }
 
     void fex_vcpu::create_thread()
