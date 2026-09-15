@@ -888,6 +888,16 @@ namespace sogen
         default:
             throw std::runtime_error("Unknown or unsupported execution mode detected");
         }
+
+        // Device-triage diagnostic: a real-device fault has repeatedly landed just above
+        // DEFAULT_ALLOCATION_ADDRESS_64BIT (4GB), where a wow64 process's real 64-bit ntdll/win32u
+        // land unrebased (host VA == guest VA on that backend) - logging every mapped module's
+        // range here lets a captured fault address be checked directly against them.
+        for (const auto& mod : this->modules_ | std::views::values)
+        {
+            logger.info("[module-diag] %s base=0x%llx size=0x%llx\n", mod.name.c_str(), static_cast<unsigned long long>(mod.image_base),
+                        static_cast<unsigned long long>(mod.size_of_image));
+        }
     }
 
     std::optional<uint64_t> module_manager::get_module_load_count_by_path(const windows_path& path)

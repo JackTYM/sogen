@@ -3456,6 +3456,26 @@ namespace sogen::fex
 
             fex_internal_arena::instance().install();
             this->reserve_wow64_host_window();
+
+            // Device-triage diagnostic (see the JIT26-region logging above): a real-device fault
+            // has repeatedly landed just above DEFAULT_ALLOCATION_ADDRESS_64BIT (4GB), where a
+            // wow64 process's real 64-bit ntdll/win32u land unrebased - logging every major host
+            // region boundary this backend itself reserves lets a captured fault address be
+            // checked directly against all of them, not just the JIT26 regions.
+            {
+                uint64_t tid = 0;
+                pthread_threadid_np(nullptr, &tid);
+                char diag[320];
+                std::snprintf(diag, sizeof(diag),
+                              "[fex-diag] tid=0x%llx fex_internal_arena base=0x%llx size=0x%llx wow64_window "
+                              "reserved=%d base=0x%llx size=0x%llx",
+                              static_cast<unsigned long long>(tid),
+                              static_cast<unsigned long long>(fex_internal_arena::instance().base()),
+                              static_cast<unsigned long long>(fex_internal_arena::instance().size()),
+                              this->wow64_host_window_reserved_ ? 1 : 0, static_cast<unsigned long long>(this->wow64_guest_rebase_),
+                              static_cast<unsigned long long>(wow64_guest_address_space_size));
+                sogen::utils::log_ios_device_milestone(diag);
+            }
 #endif
 
             std::set_terminate([]() {
@@ -3965,6 +3985,17 @@ namespace sogen::fex
         {
             auto* const active = this->active_thread_.load();
             ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
+        }
+
+        {
+            uint64_t tid = 0;
+            pthread_threadid_np(nullptr, &tid);
+            char diag[256];
+            std::snprintf(diag, sizeof(diag), "[fex-diag] tid=0x%llx vcpu=%zu entering ExecuteThread active_context=%s thread=%p",
+                          static_cast<unsigned long long>(tid), this->index_,
+                          this->active_context_ == this->emulator_.context_.get() ? "context_" : "context32_",
+                          static_cast<void*>(this->active_thread_.load()));
+            sogen::utils::log_ios_device_milestone(diag);
         }
 
         // ExecuteThread runs the translated guest until the thread is asked to stop (which the
@@ -4503,6 +4534,18 @@ namespace sogen::fex
         this->active_context_ = this->emulator_.context_.get();
 
 #ifdef __APPLE__
+        {
+            uint64_t tid = 0;
+            pthread_threadid_np(nullptr, &tid);
+            char diag[256];
+            std::snprintf(diag, sizeof(diag), "[fex-diag] tid=0x%llx vcpu=%zu created context_ thread=%p staged_rip=0x%llx",
+                          static_cast<unsigned long long>(tid), this->index_, static_cast<void*>(this->thread_),
+                          static_cast<unsigned long long>(this->staged_state_.rip));
+            sogen::utils::log_ios_device_milestone(diag);
+        }
+#endif
+
+#ifdef __APPLE__
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
         {
@@ -4547,6 +4590,17 @@ namespace sogen::fex
     void fex_vcpu::create_thread32()
     {
         this->thread32_ = this->emulator_.context32_->CreateThread(0, 0, nullptr);
+
+#ifdef __APPLE__
+        {
+            uint64_t tid = 0;
+            pthread_threadid_np(nullptr, &tid);
+            char diag[256];
+            std::snprintf(diag, sizeof(diag), "[fex-diag] tid=0x%llx vcpu=%zu created context32_ thread=%p",
+                          static_cast<unsigned long long>(tid), this->index_, static_cast<void*>(this->thread32_));
+            sogen::utils::log_ios_device_milestone(diag);
+        }
+#endif
 
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
