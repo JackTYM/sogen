@@ -79,6 +79,15 @@ namespace sogen
         constexpr uint64_t PLATFORM_CHANNEL_TRACKER_ENTRY_RVA = 0x13ead50;
         uint64_t g_platform_channel_tracker_entry_trace_va = 0;
 
+        // The CFG-dispatched virtual delegate call the tracker helper makes right after
+        // constructing its PlatformChannel (`call qword ptr [rax+0x80]` where
+        // `rax = *(this->[rsi+0x28])`), and the instruction immediately after it -- its
+        // return point. See project_solidworks_bringup.md #280's own recommended next step.
+        constexpr uint64_t PLATFORM_CHANNEL_DELEGATE_CALL_RVA = 0x13eae53;
+        constexpr uint64_t PLATFORM_CHANNEL_DELEGATE_RETURN_RVA = 0x13eae59;
+        uint64_t g_platform_channel_delegate_call_trace_va = 0;
+        uint64_t g_platform_channel_delegate_return_trace_va = 0;
+
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
         {
@@ -432,6 +441,13 @@ namespace sogen
                 g_platform_channel_tracker_entry_trace_va = mod.image_base + PLATFORM_CHANNEL_TRACKER_ENTRY_RVA;
                 c.win_emu->log.error("[named-pipe-create-trace] watching unexported tracker helper at 0x%llx\n",
                                      static_cast<unsigned long long>(g_platform_channel_tracker_entry_trace_va));
+
+                g_platform_channel_delegate_call_trace_va = mod.image_base + PLATFORM_CHANNEL_DELEGATE_CALL_RVA;
+                g_platform_channel_delegate_return_trace_va = mod.image_base + PLATFORM_CHANNEL_DELEGATE_RETURN_RVA;
+                c.win_emu->log.error("[named-pipe-create-trace] watching tracker helper's post-construction delegate call at "
+                                     "0x%llx (return point 0x%llx)\n",
+                                     static_cast<unsigned long long>(g_platform_channel_delegate_call_trace_va),
+                                     static_cast<unsigned long long>(g_platform_channel_delegate_return_trace_va));
             }
         }
 
@@ -624,6 +640,43 @@ namespace sogen
                                  static_cast<unsigned long long>(caller_offset));
         }
 
+        void trace_platform_channel_delegate_call_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+
+            const auto rsi = emu.reg<uint64_t>(x86_register::rsi);
+            const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+            const auto rax = emu.reg<uint64_t>(x86_register::rax);
+
+            const auto* target_mod_name = c.win_emu->mod_manager.find_name(rax);
+            const auto* target_mod = c.win_emu->mod_manager.find_by_address(rax);
+            const auto target_offset = target_mod ? rax - target_mod->image_base : rax;
+
+            c.win_emu->log.error("[named-pipe-create-trace] delegate-call hit at 0x%llx, tracker_this=0x%llx delegate_this=0x%llx "
+                                 "target=0x%llx (%s+0x%llx) tid=%u\n",
+                                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(rsi),
+                                 static_cast<unsigned long long>(rcx), static_cast<unsigned long long>(rax), target_mod_name,
+                                 static_cast<unsigned long long>(target_offset), c.win_emu->current_thread().id);
+        }
+
+        void trace_platform_channel_delegate_return_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+
+            const auto rsi = emu.reg<uint64_t>(x86_register::rsi);
+            const auto rax = emu.reg<uint64_t>(x86_register::rax);
+
+            uint8_t constructed_flag{};
+            uint8_t gate_flag{};
+            emu.try_read_memory(rsi + 0x60, &constructed_flag, sizeof(constructed_flag));
+            emu.try_read_memory(rsi + 0x90, &gate_flag, sizeof(gate_flag));
+
+            c.win_emu->log.error("[named-pipe-create-trace] delegate-call return at 0x%llx, tracker_this=0x%llx return_rax=0x%llx "
+                                 "this+0x60=0x%x this+0x90=0x%x tid=%u\n",
+                                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(rsi),
+                                 static_cast<unsigned long long>(rax), constructed_flag, gate_flag, c.win_emu->current_thread().id);
+        }
+
         void handle_module_unload(const analysis_context& c, const mapped_module& mod)
         {
             c.emit_observation<module_unload_event>([&](auto& event) {
@@ -813,6 +866,16 @@ namespace sogen
             if (g_platform_channel_tracker_entry_trace_va != 0 && address == g_platform_channel_tracker_entry_trace_va)
             {
                 trace_platform_channel_tracker_entry_hit(c, address);
+            }
+
+            if (g_platform_channel_delegate_call_trace_va != 0 && address == g_platform_channel_delegate_call_trace_va)
+            {
+                trace_platform_channel_delegate_call_hit(c, address);
+            }
+
+            if (g_platform_channel_delegate_return_trace_va != 0 && address == g_platform_channel_delegate_return_trace_va)
+            {
+                trace_platform_channel_delegate_return_hit(c, address);
             }
 
             auto& win_emu = *c.win_emu;
