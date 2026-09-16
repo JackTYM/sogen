@@ -2303,8 +2303,7 @@ namespace sogen
         thread->post_message(*this, m);
     }
 
-    void windows_emulator::deliver_mouse_button(const int32_t x, const int32_t y, const uint32_t message,
-                                                 const uint16_t button_data)
+    void windows_emulator::deliver_mouse_button(const int32_t x, const int32_t y, const uint32_t message, const uint16_t button_data)
     {
         const auto target = this->process.foreground_window;
         auto* win = this->process.windows.get(target);
