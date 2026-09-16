@@ -3679,7 +3679,13 @@ namespace sogen
                 return TRUE;
             }
 
-            return c.get_callback_result<uint64_t>();
+            const auto result = c.get_callback_result<uint64_t>();
+            if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && state.message == WM_COMMAND)
+            {
+                c.win_emu.log.error("[sldim-queue-trace] completion_NtUserMessageCall WM_COMMAND WndProc returned result=0x%llx\n",
+                                    static_cast<unsigned long long>(result));
+            }
+            return result;
         }
 
         uint64_t handle_NtUserDispatchMessage(const syscall_context& c, const emulator_object<msg> message)
@@ -3691,6 +3697,14 @@ namespace sogen
 
             const auto m = message.read();
             auto* win = m.window != 0 ? c.proc.windows.get(m.window) : nullptr;
+
+            if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && m.message == WM_COMMAND && m.wParam == 0x464)
+            {
+                c.win_emu.log.error(
+                    "[sldim-queue-trace] NtUserDispatchMessage ENTER WM_COMMAND wParam=0x%llx tid=%u win_found=%d win_tid=%u\n",
+                    static_cast<unsigned long long>(m.wParam), c.vcpu.active_thread->id, win != nullptr, win ? win->thread_id : 0);
+            }
+
             if (m.window != 0 && !win)
             {
                 return 0;
@@ -3698,6 +3712,12 @@ namespace sogen
 
             if (win && win->thread_id != c.vcpu.active_thread->id)
             {
+                if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && m.message == WM_COMMAND && m.wParam == 0x464)
+                {
+                    c.win_emu.log.error("[sldim-queue-trace] NtUserDispatchMessage DROPPED WM_COMMAND wParam=0x%llx ownership mismatch "
+                                        "win_tid=%u caller_tid=%u\n",
+                                        static_cast<unsigned long long>(m.wParam), win->thread_id, c.vcpu.active_thread->id);
+                }
                 return 0;
             }
 
@@ -3723,6 +3743,12 @@ namespace sogen
             if (!win)
             {
                 return 0;
+            }
+
+            if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && m.message == WM_COMMAND && m.wParam == 0x464)
+            {
+                c.win_emu.log.error("[sldim-queue-trace] NtUserDispatchMessage DISPATCHING WM_COMMAND wParam=0x%llx to WndProc=0x%llx\n",
+                                    static_cast<unsigned long long>(m.wParam), static_cast<unsigned long long>(win->wnd_proc));
             }
 
             message_call_state state{};
