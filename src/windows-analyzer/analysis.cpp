@@ -15,6 +15,8 @@
 namespace sogen
 {
 
+    extern uint64_t g_sldim_dispatch_watch_va;
+
     namespace
     {
         constexpr size_t MAX_INSTRUCTION_BYTES = 15;
@@ -105,6 +107,20 @@ namespace sogen
         };
 
         sldim_queue_check_state g_sldim_queue_check_state{};
+
+        // Live localization of the missing DispatchMessage call site for sldim.exe's WM_COMMAND
+        // relay (see project_solidworks_bringup.md #284): g_sldim_dispatch_watch_va is armed by
+        // handle_NtUserGetMessage (src/windows-emulator/syscalls/user.cpp) at the guest's real
+        // post-syscall return RIP the first time it dequeues WM_COMMAND/0x464 on tid 8. Once
+        // execution actually reaches that address, a handful of instructions are disassembled
+        // forward; the first indirect call/jmp found there is armed as a second watch so its real
+        // resolved target can be read live off the CPU once execution reaches it.
+        uint64_t g_sldim_dispatch_indirect_call_va = 0;
+        uint32_t g_sldim_dispatch_indirect_call_hits = 0;
+        bool g_sldim_dispatch_watch_for_exe_entry = false;
+        bool g_sldim_dispatch_indirect_is_jmp = false;
+        uint32_t g_sldim_dispatch_hop_count = 0;
+        constexpr uint32_t SLDIM_DISPATCH_MAX_HOPS = 300;
 
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
@@ -718,6 +734,613 @@ namespace sogen
             }
         }
 
+        std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
+        {
+            switch (reg)
+            {
+            case X86_REG_EAX:
+                return emu.reg<uint32_t>(x86_register::eax);
+            case X86_REG_ECX:
+                return emu.reg<uint32_t>(x86_register::ecx);
+            case X86_REG_EDX:
+                return emu.reg<uint32_t>(x86_register::edx);
+            case X86_REG_EBX:
+                return emu.reg<uint32_t>(x86_register::ebx);
+            case X86_REG_ESP:
+                return emu.reg<uint32_t>(x86_register::esp);
+            case X86_REG_EBP:
+                return emu.reg<uint32_t>(x86_register::ebp);
+            case X86_REG_ESI:
+                return emu.reg<uint32_t>(x86_register::esi);
+            case X86_REG_EDI:
+                return emu.reg<uint32_t>(x86_register::edi);
+            default:
+                uint64_t value{};
+                if (read_x86_register_value(emu, reg, value))
+                {
+                    return value;
+                }
+                return std::nullopt;
+            }
+        }
+
+        std::optional<uint64_t> resolve_indirect_operand_target(x86_64_cpu& emu, const cs_insn& insn)
+        {
+            const auto* detail = insn.detail;
+            if (!detail || detail->x86.op_count == 0)
+            {
+                return std::nullopt;
+            }
+
+            const auto& op = detail->x86.operands[0];
+
+            if (op.type == X86_OP_IMM)
+            {
+                return static_cast<uint64_t>(op.imm);
+            }
+
+            if (op.type == X86_OP_REG)
+            {
+                return read_x86_gp_register(emu, op.reg);
+            }
+
+            if (op.type != X86_OP_MEM)
+            {
+                return std::nullopt;
+            }
+
+            uint64_t address = static_cast<uint64_t>(op.mem.disp);
+
+            if (op.mem.base == X86_REG_RIP)
+            {
+                address += insn.address + insn.size;
+            }
+            else if (op.mem.base != X86_REG_INVALID)
+            {
+                const auto base = read_x86_gp_register(emu, op.mem.base);
+                if (!base)
+                {
+                    return std::nullopt;
+                }
+                address += *base;
+            }
+
+            if (op.mem.index != X86_REG_INVALID)
+            {
+                const auto index = read_x86_gp_register(emu, op.mem.index);
+                if (!index)
+                {
+                    return std::nullopt;
+                }
+                address += *index * static_cast<uint64_t>(op.mem.scale);
+            }
+
+            const auto ptr_size = op.size != 0 ? static_cast<size_t>(op.size) : sizeof(uint32_t);
+            uint64_t target{};
+            if (ptr_size > sizeof(target) || !emu.try_read_memory(address, &target, ptr_size))
+            {
+                return std::nullopt;
+            }
+
+            return target;
+        }
+
+        struct shadow_reg_state
+        {
+            std::map<x86_reg, uint64_t> known;
+            std::set<x86_reg> poisoned;
+        };
+
+        std::optional<uint64_t> shadow_read_reg(x86_64_cpu& emu, const shadow_reg_state& shadow, const x86_reg reg)
+        {
+            if (shadow.poisoned.contains(reg))
+            {
+                return std::nullopt;
+            }
+
+            const auto it = shadow.known.find(reg);
+            if (it != shadow.known.end())
+            {
+                return it->second;
+            }
+
+            return read_x86_gp_register(emu, reg);
+        }
+
+        void shadow_write_reg(shadow_reg_state& shadow, const x86_reg reg, const uint64_t value)
+        {
+            shadow.poisoned.erase(reg);
+            shadow.known[reg] = value;
+        }
+
+        void shadow_poison_reg(shadow_reg_state& shadow, const x86_reg reg)
+        {
+            shadow.known.erase(reg);
+            shadow.poisoned.insert(reg);
+        }
+
+        std::optional<uint64_t> shadow_resolve_mem_address(x86_64_cpu& emu, const shadow_reg_state& shadow, const cs_x86_op& op,
+                                                           const uint64_t next_insn_address)
+        {
+            if (op.type != X86_OP_MEM || op.mem.segment != X86_REG_INVALID)
+            {
+                return std::nullopt;
+            }
+
+            uint64_t address = static_cast<uint64_t>(op.mem.disp);
+
+            if (op.mem.base == X86_REG_RIP)
+            {
+                address += next_insn_address;
+            }
+            else if (op.mem.base != X86_REG_INVALID)
+            {
+                const auto base = shadow_read_reg(emu, shadow, op.mem.base);
+                if (!base)
+                {
+                    return std::nullopt;
+                }
+                address += *base;
+            }
+
+            if (op.mem.index != X86_REG_INVALID)
+            {
+                const auto index = shadow_read_reg(emu, shadow, op.mem.index);
+                if (!index)
+                {
+                    return std::nullopt;
+                }
+                address += *index * static_cast<uint64_t>(op.mem.scale);
+            }
+
+            return address;
+        }
+
+        std::optional<uint64_t> shadow_read_operand(x86_64_cpu& emu, const shadow_reg_state& shadow, const cs_x86_op& op,
+                                                    const size_t default_size, const uint64_t next_insn_address)
+        {
+            if (op.type == X86_OP_REG)
+            {
+                return shadow_read_reg(emu, shadow, op.reg);
+            }
+
+            if (op.type == X86_OP_IMM)
+            {
+                return static_cast<uint64_t>(op.imm);
+            }
+
+            if (op.type == X86_OP_MEM)
+            {
+                const auto addr = shadow_resolve_mem_address(emu, shadow, op, next_insn_address);
+                if (!addr)
+                {
+                    return std::nullopt;
+                }
+
+                uint64_t value{};
+                const auto read_size = op.size != 0 ? static_cast<size_t>(op.size) : default_size;
+                if (read_size > sizeof(value) || !emu.try_read_memory(*addr, &value, read_size))
+                {
+                    return std::nullopt;
+                }
+
+                return value;
+            }
+
+            return std::nullopt;
+        }
+
+        // Chases the guest's real control flow forward, one hop at a time, starting at sldim.exe's
+        // NtUserGetMessage post-syscall return address (see project_solidworks_bringup.md #284/#285).
+        // Each hop is only advanced once execution genuinely reaches it (handle_instruction re-fires this
+        // function at the newly-armed g_sldim_dispatch_watch_va), so a WOW64 far-return's bitness switch is
+        // always observed live rather than guessed. A plain RET/RETF's target is read off the live stack
+        // pointer (adjusted by a simulated push/pop/add/sub delta tracked across this hop), a direct
+        // CALL/JMP's target is read straight out of its immediate operand, and an indirect CALL/JMP hands
+        // off to trace_sldim_dispatch_indirect_call_hit for live register resolution. A conditional branch
+        // is resolved by micro-simulating the hop's own straight-line MOV/LEA/ADD/SUB/XOR-zero chain into a
+        // small shadow register file (falling back to live register/memory reads for anything not yet
+        // written in this hop), then evaluating the TEST/CMP that feeds it; anything not modeled poisons the
+        // destination register so a later use of it correctly aborts resolution instead of guessing.
+        void trace_sldim_dispatch_return_hit(const analysis_context& c, const uint64_t address)
+        {
+            ++g_sldim_dispatch_hop_count;
+
+            auto& emu = c.win_emu->emu();
+            const auto* mod_name = c.win_emu->mod_manager.find_name(address);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(address);
+            const auto offset = mod ? address - mod->image_base : address;
+
+            c.win_emu->log.error("[sldim-dispatch-trace] HOP %u: 0x%llx (%s+0x%llx) tid=%u\n", g_sldim_dispatch_hop_count,
+                                 static_cast<unsigned long long>(address), mod_name, static_cast<unsigned long long>(offset),
+                                 c.win_emu->current_thread().id);
+
+            if (g_sldim_dispatch_hop_count >= SLDIM_DISPATCH_MAX_HOPS)
+            {
+                c.win_emu->log.error("[sldim-dispatch-trace] hop limit reached, stopping chase\n");
+                g_sldim_dispatch_watch_va = 0;
+                return;
+            }
+
+            std::array<uint8_t, 256> code{};
+            if (!emu.try_read_memory(address, code.data(), code.size()))
+            {
+                c.win_emu->log.error("[sldim-dispatch-trace] failed to read guest memory, stopping chase\n");
+                g_sldim_dispatch_watch_va = 0;
+                return;
+            }
+
+            const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
+            disassembler disasm{};
+            const auto handle = disasm.resolve_handle(emu, reg_cs);
+            const auto instructions = disasm.disassemble(emu, reg_cs, code, 25, address);
+
+            const auto bitness = disassembler::get_segment_bitness(emu, reg_cs);
+            const size_t ptr_size = (bitness && *bitness == disassembler::segment_bitness::bit64) ? sizeof(uint64_t) : sizeof(uint32_t);
+            const auto is_stack_pointer_reg = [](const x86_reg reg) {
+                return reg == X86_REG_RSP || reg == X86_REG_ESP || reg == X86_REG_SP;
+            };
+
+            shadow_reg_state shadow{};
+            int64_t rsp_delta = 0;
+            bool rsp_delta_unreliable = false;
+            bool pending_flag_valid = false;
+            bool pending_zero_flag = false;
+            bool pending_carry_valid = false;
+            bool pending_carry_flag = false;
+
+            for (const auto& insn : instructions)
+            {
+                c.win_emu->log.error("[sldim-dispatch-trace]   0x%llx: %s %s\n", static_cast<unsigned long long>(insn.address),
+                                     insn.mnemonic, insn.op_str);
+
+                const bool is_call = cs_insn_group(handle, &insn, CS_GRP_CALL);
+                const bool is_jump = cs_insn_group(handle, &insn, CS_GRP_JUMP);
+                const bool is_ret = cs_insn_group(handle, &insn, CS_GRP_RET);
+                const bool is_unconditional_jump = insn.id == X86_INS_JMP || insn.id == X86_INS_LJMP;
+                const bool is_flag_test = insn.id == X86_INS_TEST || insn.id == X86_INS_CMP;
+
+                if (!is_call && !is_jump && !is_ret)
+                {
+                    const bool is_explicit_rsp_add_sub =
+                        (insn.id == X86_INS_ADD || insn.id == X86_INS_SUB) && insn.detail && insn.detail->x86.op_count == 2 &&
+                        insn.detail->x86.operands[0].type == X86_OP_REG && is_stack_pointer_reg(insn.detail->x86.operands[0].reg) &&
+                        insn.detail->x86.operands[1].type == X86_OP_IMM;
+
+                    if (insn.id == X86_INS_PUSH)
+                    {
+                        rsp_delta -= static_cast<int64_t>(ptr_size);
+                    }
+                    else if (insn.id == X86_INS_POP)
+                    {
+                        rsp_delta += static_cast<int64_t>(ptr_size);
+                    }
+                    else if (is_explicit_rsp_add_sub)
+                    {
+                        const auto imm = insn.detail->x86.operands[1].imm;
+                        rsp_delta += (insn.id == X86_INS_ADD) ? imm : -imm;
+                    }
+                    else if (insn.detail)
+                    {
+                        for (uint8_t i = 0; i < insn.detail->regs_write_count; ++i)
+                        {
+                            if (is_stack_pointer_reg(static_cast<x86_reg>(insn.detail->regs_write[i])))
+                            {
+                                rsp_delta_unreliable = true;
+                            }
+                        }
+                    }
+
+                    const bool has_reg_dest =
+                        insn.detail && insn.detail->x86.op_count >= 1 && insn.detail->x86.operands[0].type == X86_OP_REG;
+                    const auto dest_reg = has_reg_dest ? insn.detail->x86.operands[0].reg : X86_REG_INVALID;
+                    bool handled = false;
+
+                    if (has_reg_dest && insn.id == X86_INS_MOV && insn.detail->x86.op_count == 2)
+                    {
+                        const auto value =
+                            shadow_read_operand(emu, shadow, insn.detail->x86.operands[1], ptr_size, insn.address + insn.size);
+                        if (value)
+                        {
+                            shadow_write_reg(shadow, dest_reg, *value);
+                            handled = true;
+                        }
+                    }
+                    else if (has_reg_dest && insn.id == X86_INS_LEA && insn.detail->x86.op_count == 2 &&
+                             insn.detail->x86.operands[1].type == X86_OP_MEM)
+                    {
+                        const auto addr = shadow_resolve_mem_address(emu, shadow, insn.detail->x86.operands[1], insn.address + insn.size);
+                        if (addr)
+                        {
+                            shadow_write_reg(shadow, dest_reg, *addr);
+                            handled = true;
+                        }
+                    }
+                    else if (has_reg_dest && (insn.id == X86_INS_ADD || insn.id == X86_INS_SUB) && insn.detail->x86.op_count == 2 &&
+                             insn.detail->x86.operands[1].type == X86_OP_IMM && !is_stack_pointer_reg(dest_reg))
+                    {
+                        const auto lhs = shadow_read_reg(emu, shadow, dest_reg);
+                        if (lhs)
+                        {
+                            const auto imm = insn.detail->x86.operands[1].imm;
+                            shadow_write_reg(shadow, dest_reg, (insn.id == X86_INS_ADD) ? (*lhs + imm) : (*lhs - imm));
+                            handled = true;
+                        }
+                    }
+                    else if (has_reg_dest && insn.id == X86_INS_XOR && insn.detail->x86.op_count == 2 &&
+                             insn.detail->x86.operands[1].type == X86_OP_REG && insn.detail->x86.operands[1].reg == dest_reg)
+                    {
+                        shadow_write_reg(shadow, dest_reg, 0);
+                        handled = true;
+                    }
+
+                    if (!handled && insn.detail)
+                    {
+                        for (uint8_t i = 0; i < insn.detail->x86.op_count; ++i)
+                        {
+                            const auto& write_op = insn.detail->x86.operands[i];
+                            if (write_op.type == X86_OP_REG && (write_op.access & CS_AC_WRITE) != 0)
+                            {
+                                shadow_poison_reg(shadow, write_op.reg);
+                            }
+                        }
+
+                        for (uint8_t i = 0; i < insn.detail->regs_write_count; ++i)
+                        {
+                            shadow_poison_reg(shadow, static_cast<x86_reg>(insn.detail->regs_write[i]));
+                        }
+                    }
+                }
+
+                if (is_flag_test && insn.detail && insn.detail->x86.op_count == 2)
+                {
+                    pending_flag_valid = false;
+
+                    const auto lhs = shadow_read_operand(emu, shadow, insn.detail->x86.operands[0], ptr_size, insn.address + insn.size);
+                    const auto rhs = shadow_read_operand(emu, shadow, insn.detail->x86.operands[1], ptr_size, insn.address + insn.size);
+                    if (lhs && rhs)
+                    {
+                        const uint64_t result = (insn.id == X86_INS_TEST) ? (*lhs & *rhs) : (*lhs - *rhs);
+                        pending_zero_flag = result == 0;
+                        pending_flag_valid = true;
+
+                        c.win_emu->log.error("[sldim-dispatch-trace]     (resolved operands: 0x%llx, 0x%llx -> zero=%d)\n",
+                                             static_cast<unsigned long long>(*lhs), static_cast<unsigned long long>(*rhs),
+                                             pending_zero_flag ? 1 : 0);
+                    }
+                }
+
+                const bool is_bit_test =
+                    insn.id == X86_INS_BT || insn.id == X86_INS_BTR || insn.id == X86_INS_BTS || insn.id == X86_INS_BTC;
+
+                if (is_bit_test && insn.detail && insn.detail->x86.op_count == 2)
+                {
+                    pending_carry_valid = false;
+
+                    const auto base = shadow_read_operand(emu, shadow, insn.detail->x86.operands[0], ptr_size, insn.address + insn.size);
+                    const auto bit_index =
+                        shadow_read_operand(emu, shadow, insn.detail->x86.operands[1], ptr_size, insn.address + insn.size);
+                    if (base && bit_index)
+                    {
+                        const auto operand_bits = static_cast<uint64_t>(
+                            (insn.detail->x86.operands[0].size != 0 ? insn.detail->x86.operands[0].size : ptr_size) * 8);
+                        const auto bit = *bit_index % operand_bits;
+                        pending_carry_flag = ((*base >> bit) & 1) != 0;
+                        pending_carry_valid = true;
+
+                        c.win_emu->log.error("[sldim-dispatch-trace]     (resolved bit test: base=0x%llx bit=%llu -> carry=%d)\n",
+                                             static_cast<unsigned long long>(*base), static_cast<unsigned long long>(bit),
+                                             pending_carry_flag ? 1 : 0);
+                    }
+                }
+
+                if (is_ret)
+                {
+                    if (rsp_delta_unreliable)
+                    {
+                        c.win_emu->log.error("[sldim-dispatch-trace]   RET, but an earlier instruction in this hop modified "
+                                             "RSP in an unmodeled way; stopping chase\n");
+                        g_sldim_dispatch_watch_va = 0;
+                        return;
+                    }
+
+                    const auto rsp = static_cast<uint64_t>(static_cast<int64_t>(emu.read_stack_pointer()) + rsp_delta);
+
+                    uint64_t next_addr{};
+                    if (!emu.try_read_memory(rsp, &next_addr, ptr_size))
+                    {
+                        c.win_emu->log.error("[sldim-dispatch-trace]   RET, but failed to read the return address off the "
+                                             "stack; stopping chase\n");
+                        g_sldim_dispatch_watch_va = 0;
+                        return;
+                    }
+
+                    c.win_emu->log.error("[sldim-dispatch-trace]   %s -> next hop 0x%llx (rsp=0x%llx, rsp_delta=%lld, ptr_size=%zu)\n",
+                                         insn.mnemonic, static_cast<unsigned long long>(next_addr), static_cast<unsigned long long>(rsp),
+                                         static_cast<long long>(rsp_delta), ptr_size);
+                    g_sldim_dispatch_watch_va = next_addr;
+                    return;
+                }
+
+                if (!is_call && !is_jump)
+                {
+                    continue;
+                }
+
+                if (!is_unconditional_jump && !is_call)
+                {
+                    std::optional<bool> taken;
+
+                    if (pending_flag_valid && (insn.id == X86_INS_JE || insn.id == X86_INS_JNE) && insn.detail &&
+                        insn.detail->x86.op_count > 0 && insn.detail->x86.operands[0].type == X86_OP_IMM)
+                    {
+                        taken = (insn.id == X86_INS_JE) ? pending_zero_flag : !pending_zero_flag;
+                    }
+                    else if (pending_carry_valid && (insn.id == X86_INS_JB || insn.id == X86_INS_JAE) && insn.detail &&
+                             insn.detail->x86.op_count > 0 && insn.detail->x86.operands[0].type == X86_OP_IMM)
+                    {
+                        taken = (insn.id == X86_INS_JB) ? pending_carry_flag : !pending_carry_flag;
+                    }
+
+                    if (taken)
+                    {
+                        const auto fallthrough = insn.address + insn.size;
+                        const auto branch_target = static_cast<uint64_t>(insn.detail->x86.operands[0].imm);
+                        const auto next_addr = *taken ? branch_target : fallthrough;
+
+                        c.win_emu->log.error("[sldim-dispatch-trace]   conditional branch resolved via micro-simulated operands -> %s "
+                                             "taken=%d, next hop 0x%llx\n",
+                                             insn.mnemonic, *taken ? 1 : 0, static_cast<unsigned long long>(next_addr));
+                        g_sldim_dispatch_watch_va = next_addr;
+                        return;
+                    }
+
+                    c.win_emu->log.error(
+                        "[sldim-dispatch-trace]   conditional branch reached, cannot statically follow it; stopping chase\n");
+                    g_sldim_dispatch_watch_va = 0;
+                    return;
+                }
+
+                const auto has_imm_operand =
+                    insn.detail && insn.detail->x86.op_count > 0 && insn.detail->x86.operands[0].type == X86_OP_IMM;
+                const auto after_call = insn.address + insn.size;
+
+                if (has_imm_operand && is_call)
+                {
+                    const auto target = static_cast<uint64_t>(insn.detail->x86.operands[0].imm);
+                    const auto* target_mod_name = c.win_emu->mod_manager.find_name(target);
+                    const auto* target_mod = c.win_emu->mod_manager.find_by_address(target);
+                    const auto target_offset = target_mod ? target - target_mod->image_base : target;
+                    c.win_emu->log.error("[sldim-dispatch-trace]   CALL DIRECT target=0x%llx (%s+0x%llx), skipping over (assumed to "
+                                         "return) -> next hop 0x%llx\n",
+                                         static_cast<unsigned long long>(target), target_mod_name,
+                                         static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(after_call));
+                    g_sldim_dispatch_watch_va = after_call;
+                    return;
+                }
+
+                if (has_imm_operand)
+                {
+                    const auto target = static_cast<uint64_t>(insn.detail->x86.operands[0].imm);
+                    const auto* target_mod_name = c.win_emu->mod_manager.find_name(target);
+                    const auto* target_mod = c.win_emu->mod_manager.find_by_address(target);
+                    const auto target_offset = target_mod ? target - target_mod->image_base : target;
+                    c.win_emu->log.error("[sldim-dispatch-trace]   JMP DIRECT -> next hop 0x%llx (%s+0x%llx)\n",
+                                         static_cast<unsigned long long>(target), target_mod_name,
+                                         static_cast<unsigned long long>(target_offset));
+                    g_sldim_dispatch_watch_va = target;
+                    return;
+                }
+
+                const bool is_flat_mem_operand =
+                    insn.detail && insn.detail->x86.op_count > 0 && insn.detail->x86.operands[0].type == X86_OP_MEM &&
+                    insn.detail->x86.operands[0].mem.base == X86_REG_INVALID && insn.detail->x86.operands[0].mem.index == X86_REG_INVALID;
+
+                if (is_flat_mem_operand)
+                {
+                    auto iat_target = resolve_indirect_operand_target(emu, insn);
+                    if (iat_target)
+                    {
+                        resolve_jump_target(emu, *iat_target);
+                    }
+
+                    const auto* target_mod_name = iat_target ? c.win_emu->mod_manager.find_name(*iat_target) : "<unresolved>";
+                    const auto* target_mod = iat_target ? c.win_emu->mod_manager.find_by_address(*iat_target) : nullptr;
+
+                    if (target_mod)
+                    {
+                        const auto target_offset = *iat_target - target_mod->image_base;
+                        c.win_emu->log.error("[sldim-dispatch-trace]   %s STATIC (IAT-slot) target=0x%llx (%s+0x%llx), skipping over -> "
+                                             "next hop 0x%llx\n",
+                                             is_call ? "CALL" : "JMP", static_cast<unsigned long long>(*iat_target), target_mod_name,
+                                             static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(after_call));
+                        g_sldim_dispatch_watch_va = is_call ? after_call : *iat_target;
+                        return;
+                    }
+                }
+
+                if (g_sldim_dispatch_indirect_call_va == 0)
+                {
+                    g_sldim_dispatch_indirect_call_va = insn.address;
+                    g_sldim_dispatch_indirect_is_jmp = !is_call;
+                    c.win_emu->log.error("[sldim-dispatch-trace]   INDIRECT %s, arming live register-resolution watch at 0x%llx, chase "
+                                         "will resume at 0x%llx once it returns\n",
+                                         is_call ? "CALL" : "JMP", static_cast<unsigned long long>(insn.address),
+                                         static_cast<unsigned long long>(after_call));
+                }
+
+                g_sldim_dispatch_watch_va = is_call ? after_call : 0;
+                return;
+            }
+
+            c.win_emu->log.error("[sldim-dispatch-trace]   no control transfer found in this window; stopping chase\n");
+            g_sldim_dispatch_watch_va = 0;
+        }
+
+        void trace_sldim_dispatch_indirect_call_hit(const analysis_context& c, const uint64_t address)
+        {
+            if (c.win_emu->current_thread().id != 8)
+            {
+                return;
+            }
+
+            ++g_sldim_dispatch_indirect_call_hits;
+
+            auto& emu = c.win_emu->emu();
+            std::array<uint8_t, MAX_INSTRUCTION_BYTES> code{};
+            if (!emu.try_read_memory(address, code.data(), code.size()))
+            {
+                return;
+            }
+
+            const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
+            disassembler disasm{};
+            const auto instructions = disasm.disassemble(emu, reg_cs, code, 1, address);
+            if (instructions.empty())
+            {
+                return;
+            }
+
+            const auto& insn = instructions[0];
+            auto target = resolve_indirect_operand_target(emu, insn);
+            if (target)
+            {
+                resolve_jump_target(emu, *target);
+            }
+
+            const auto* target_mod_name = target ? c.win_emu->mod_manager.find_name(*target) : "<unresolved>";
+            const auto* target_mod = target ? c.win_emu->mod_manager.find_by_address(*target) : nullptr;
+            const auto target_offset = target_mod ? *target - target_mod->image_base : (target ? *target : 0);
+
+            c.win_emu->log.error("[sldim-dispatch-trace] INDIRECT CALL hit #%u at 0x%llx (%s %s) tid=%u -> target=0x%llx (%s+0x%llx)\n",
+                                 g_sldim_dispatch_indirect_call_hits, static_cast<unsigned long long>(address), insn.mnemonic, insn.op_str,
+                                 c.win_emu->current_thread().id, target ? static_cast<unsigned long long>(*target) : 0ULL, target_mod_name,
+                                 static_cast<unsigned long long>(target_offset));
+
+            if (target)
+            {
+                std::array<uint8_t, 128> target_code{};
+                if (emu.try_read_memory(*target, target_code.data(), target_code.size()))
+                {
+                    const auto target_instructions = disasm.disassemble(emu, reg_cs, target_code, 8, *target);
+                    for (const auto& t_insn : target_instructions)
+                    {
+                        c.win_emu->log.error("[sldim-dispatch-trace]     target: 0x%llx: %s %s\n",
+                                             static_cast<unsigned long long>(t_insn.address), t_insn.mnemonic, t_insn.op_str);
+                    }
+                }
+            }
+
+            if (g_sldim_dispatch_indirect_is_jmp)
+            {
+                c.win_emu->log.error("[sldim-dispatch-trace] indirect JMP (tail call, no return expected) - arming fallback watch for "
+                                     "the next tid=8 instruction inside sldim.exe's own module\n");
+                g_sldim_dispatch_watch_for_exe_entry = true;
+            }
+
+            g_sldim_dispatch_indirect_call_va = 0;
+        }
+
         void handle_module_unload(const analysis_context& c, const mapped_module& mod)
         {
             c.emit_observation<module_unload_event>([&](auto& event) {
@@ -938,6 +1561,27 @@ namespace sogen
                 (g_sldim_queue_check_trace_va_2 != 0 && address == g_sldim_queue_check_trace_va_2))
             {
                 trace_sldim_queue_check_hit(c, address);
+            }
+
+            if (g_sldim_dispatch_watch_va != 0 && address == g_sldim_dispatch_watch_va)
+            {
+                trace_sldim_dispatch_return_hit(c, address);
+            }
+
+            if (g_sldim_dispatch_indirect_call_va != 0 && address == g_sldim_dispatch_indirect_call_va)
+            {
+                trace_sldim_dispatch_indirect_call_hit(c, address);
+            }
+
+            if (g_sldim_dispatch_watch_for_exe_entry && c.win_emu->current_thread().id == 8 &&
+                c.win_emu->mod_manager.executable->contains(address))
+            {
+                g_sldim_dispatch_watch_for_exe_entry = false;
+                const auto* exe = c.win_emu->mod_manager.executable;
+                c.win_emu->log.error("[sldim-dispatch-trace] REACHED sldim.exe's own code at 0x%llx (sldim.exe+0x%llx) after the WOW64 "
+                                     "CPU-transition jump, tid=8, continuing chase\n",
+                                     static_cast<unsigned long long>(address), static_cast<unsigned long long>(address - exe->image_base));
+                trace_sldim_dispatch_return_hit(c, address);
             }
 
             auto& win_emu = *c.win_emu;

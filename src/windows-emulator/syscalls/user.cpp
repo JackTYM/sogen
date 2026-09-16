@@ -13,6 +13,9 @@
 namespace sogen
 {
 
+    uint64_t g_sldim_dispatch_watch_va = 0;
+    uint32_t g_sldim_dispatch_chase_attempts = 0;
+
     namespace
     {
         constexpr ULONG k_thread_state_active_window = 0x1;
@@ -3774,6 +3777,14 @@ namespace sogen
                 {
                     c.win_emu.log.error("[sldim-queue-trace] NtUserGetMessage DEQUEUED WM_COMMAND tid=%u wParam=0x%llx\n", t.id,
                                         static_cast<unsigned long long>(pending_msg->wParam));
+
+                    if (g_sldim_dispatch_watch_va == 0 && g_sldim_dispatch_chase_attempts < 15 && pending_msg->wParam == 0x464 && t.id == 8)
+                    {
+                        ++g_sldim_dispatch_chase_attempts;
+                        g_sldim_dispatch_watch_va = c.emu.read_instruction_pointer() + 2;
+                        c.win_emu.log.error("[sldim-dispatch-trace] chase attempt #%u: armed post-syscall return watch at 0x%llx\n",
+                                            g_sldim_dispatch_chase_attempts, static_cast<unsigned long long>(g_sldim_dispatch_watch_va));
+                    }
                 }
 
                 message.write(*pending_msg);
