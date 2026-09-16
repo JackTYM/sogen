@@ -2280,6 +2280,53 @@ namespace sogen
                                 this->process.raw_keyboard_target);
     }
 
+    void windows_emulator::deliver_mouse_move(const int32_t x, const int32_t y)
+    {
+        const auto target = this->process.foreground_window;
+        auto* win = this->process.windows.get(target);
+        if (!win)
+        {
+            return;
+        }
+
+        auto* thread = get_thread_by_id(this->process, win->thread_id);
+        if (!thread)
+        {
+            return;
+        }
+
+        msg m{};
+        m.window = target;
+        m.message = WM_MOUSEMOVE;
+        m.wParam = 0;
+        m.lParam = static_cast<lparam>((static_cast<uint32_t>(y) << 16) | (static_cast<uint32_t>(x) & 0xFFFFu));
+        thread->post_message(*this, m);
+    }
+
+    void windows_emulator::deliver_mouse_button(const int32_t x, const int32_t y, const uint32_t message,
+                                                 const uint16_t button_data)
+    {
+        const auto target = this->process.foreground_window;
+        auto* win = this->process.windows.get(target);
+        if (!win)
+        {
+            return;
+        }
+
+        auto* thread = get_thread_by_id(this->process, win->thread_id);
+        if (!thread)
+        {
+            return;
+        }
+
+        msg m{};
+        m.window = target;
+        m.message = message;
+        m.wParam = button_data;
+        m.lParam = static_cast<lparam>((static_cast<uint32_t>(y) << 16) | (static_cast<uint32_t>(x) & 0xFFFFu));
+        thread->post_message(*this, m);
+    }
+
     void windows_emulator::handle_ui_event(const ui_event& event)
     {
         const std::scoped_lock lock(this->kernel_lock_);
