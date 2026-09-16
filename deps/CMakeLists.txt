@@ -163,9 +163,12 @@ if(SOGEN_ENABLE_FEX)
     # FEX_IOS_POLL_INTERRUPT switches the JIT's cooperative-preemption check at block entry from
     # the InterruptFaultPage fault trick (dead on real iOS device - a permanently-attached
     # debugger claims every hardware exception before sogen's own signal handler ever sees it) to
-    # a plain polled flag. Real-device only (CMAKE_OSX_SYSROOT "iphoneos") - the Simulator has no
-    # attached-debugger fault problem, so it keeps using the normal InterruptFaultPage mechanism.
-    if(CMAKE_OSX_SYSROOT STREQUAL "iphoneos")
+    # a plain polled flag. Real-device only - the Simulator has no attached-debugger fault
+    # problem, so it keeps using the normal InterruptFaultPage mechanism. By the time this file
+    # runs, CMAKE_OSX_SYSROOT has already been resolved from the toolchain's short SDK name into
+    # the full absolute SDK path, so this must match the resolved path's substring rather than
+    # STREQUAL the short name - see cmake/unicorn-ios-device-jit.cmake for the same trap.
+    if(CMAKE_OSX_SYSROOT MATCHES "iPhoneOS")
       list(APPEND _FEXCORE_IOS_ARGS -DCMAKE_CXX_FLAGS=-DFEX_IOS_POLL_INTERRUPT)
     endif()
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")

@@ -4589,9 +4589,10 @@ namespace sogen::fex
         // at a full debugger round-trip each time - see universal.js's data-abort recovery), so
         // leave it unprotected (every NeedsPendingInterruptFaultCheck store then just succeeds
         // trivially, at full native speed) and use StopRequestFlag instead: an ordinary memory
-        // store, polled by FEX_IOS_POLL_INTERRUPT-gated codegen at JIT block entry (JIT.cpp's
-        // EmitEntryPoint), which has no mprotect/signal dependency and so works unconditionally
-        // here. Cleared at the top of start() on every quantum entry, before ExecuteThread runs.
+        // store, polled by FEX_IOS_POLL_INTERRUPT-gated codegen both at JIT block entry (JIT.cpp's
+        // EmitEntryPoint) and at loop back-edges (CompileCode's two EmitIosPollInterruptCheck call
+        // sites), which has no mprotect/signal dependency and so works unconditionally here.
+        // Cleared at the top of start() on every quantum entry, before ExecuteThread runs.
         static std::atomic<bool> LoggedInterruptFaultPageSkipOnce {false};
         if (!LoggedInterruptFaultPageSkipOnce.exchange(true, std::memory_order_relaxed))
         {
