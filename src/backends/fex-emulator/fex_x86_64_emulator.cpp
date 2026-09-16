@@ -803,6 +803,10 @@ namespace sogen::fex
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        uint64_t guest_signal_dispatch_from_jit(FEXCore::Core::CpuStateFrame* frame);
+#endif
+
         void install_fault_signal_handlers(fex_x86_64_emulator& emulator)
         {
             // Fault routing is process-global (one sigaction handler set, one active-instance
@@ -1535,6 +1539,17 @@ namespace sogen::fex
 
 #ifdef __APPLE__
         bool handle_fault_signal(int sig, siginfo_t* info, void* raw_ucontext);
+
+        // Shared by handle_fault_signal's dispatcher-code tail (a real SIGILL/SIGTRAP/SIGSEGV
+        // signal, uctx already frozen) and, on real iOS device, a direct call from the
+        // GuestSignal_* JIT stubs themselves (no signal, no uctx - see
+        // Pointers.GuestSignalDispatchFunc). Decodes the exception vector FEXCore's Break-op
+        // codegen already staged into frame->SynchronousFaultData, performs a WoW64 gate
+        // crossing if applicable, and otherwise populates pending_fault_dispatch_. Returns the
+        // dispatcher address the caller should transfer control to next (always
+        // ThreadStopHandlerAddress on some engine's Config, since both callers only reach this
+        // after SpillStaticRegs already ran).
+        uint64_t resolve_guest_signal_dispatch_target(FEXCore::Core::CpuStateFrame* frame);
 #endif
 
         std::atomic<bool> stop_requested_{false};
@@ -4730,6 +4745,12 @@ namespace sogen::fex
         }
 #endif
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        // See resolve_guest_signal_dispatch_target's doc comment: on real device, the GuestSignal_*
+        // dispatcher stubs call this directly instead of faulting.
+        this->thread_->CurrentFrame->Pointers.GuestSignalDispatchFunc = reinterpret_cast<uint64_t>(&guest_signal_dispatch_from_jit);
+#endif
+
         // Only publish the new thread once it is actually usable from another thread's point of
         // view: request_thread_stop() (the quantum timer, running concurrently on its own thread)
         // reads active_thread_ and immediately calls g_hvf->protect() on its InterruptFaultPage.
@@ -4773,6 +4794,12 @@ namespace sogen::fex
             g_hvf->map(reinterpret_cast<uint64_t>(this->thread32_), sizeof(FEXCore::Core::InternalThreadState), PROT_READ | PROT_WRITE);
             this->hvf_shim_thread_pointers(*this->thread32_->CurrentFrame);
         }
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        // See resolve_guest_signal_dispatch_target's doc comment: context32_ has its own Dispatcher
+        // (and therefore its own GuestSignal_* stubs), so it needs this set too.
+        this->thread32_->CurrentFrame->Pointers.GuestSignalDispatchFunc = reinterpret_cast<uint64_t>(&guest_signal_dispatch_from_jit);
 #endif
 
         // Real Windows shares one GDT across both bitnesses of a wow64 process - point context32_'s
@@ -6091,6 +6118,56 @@ namespace sogen::fex
                                             static_cast<uint16_t>(src.gregs[detail::greg_rcx]));
     }
 
+    uint64_t fex_vcpu::resolve_guest_signal_dispatch_target(FEXCore::Core::CpuStateFrame* frame)
+    {
+        auto vector = static_cast<int>(frame->SynchronousFaultData.TrapNo);
+
+        constexpr int gp_fault_vector = 13;
+        constexpr uint32_t idt_reference_bit = 0x2;
+        if (vector == gp_fault_vector && (frame->SynchronousFaultData.err_code & idt_reference_bit) != 0)
+        {
+            vector = static_cast<int>(frame->SynchronousFaultData.err_code >> 3);
+        }
+
+        frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
+
+        if (vector == 14)
+        {
+            if (const auto gate = this->emulator_.find_gate_crossing(frame->State.rip))
+            {
+                auto* const source_signal_delegator = (this->active_context_ == this->emulator_.context32_.get())
+                                                          ? this->emulator_.signal_delegator32_.get()
+                                                          : this->emulator_.signal_delegator_.get();
+
+                if (this->perform_gate_crossing(*gate))
+                {
+                    this->pending_fault_dispatch_.kind = pending_fault_kind::gate_crossing;
+                    return source_signal_delegator->GetConfig().ThreadStopHandlerAddress;
+                }
+            }
+
+            const auto err_code = frame->SynchronousFaultData.err_code;
+            const bool is_write = (err_code & 0x2) != 0;
+            const bool is_instr_fetch = (err_code & 0x10) != 0;
+            pending_fault_dispatch dispatch{};
+            dispatch.kind = pending_fault_kind::memory_violation;
+            dispatch.address = frame->State.rip;
+            dispatch.size = 1;
+            dispatch.operation = is_instr_fetch ? memory_operation::exec : is_write ? memory_operation::write : memory_operation::read;
+            dispatch.type = (err_code & 0x1) ? memory_violation_type::protection : memory_violation_type::unmapped;
+            this->pending_fault_dispatch_ = dispatch;
+        }
+        else
+        {
+            pending_fault_dispatch dispatch{};
+            dispatch.kind = pending_fault_kind::interrupt;
+            dispatch.vector = vector;
+            this->pending_fault_dispatch_ = dispatch;
+        }
+
+        return this->emulator_.signal_delegator_->GetConfig().ThreadStopHandlerAddress;
+    }
+
     bool fex_vcpu::handle_fault_signal(int sig, siginfo_t* info, void* raw_ucontext)
     {
         auto* const active_thread = this->active_thread_.load();
@@ -6238,52 +6315,32 @@ namespace sogen::fex
             return false;
         }
 
-        auto vector = static_cast<int>(frame->SynchronousFaultData.TrapNo);
+        const uint64_t target = this->resolve_guest_signal_dispatch_target(frame);
+        arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(target));
+        return true;
+    }
+#endif
 
-        constexpr int gp_fault_vector = 13;
-        constexpr uint32_t idt_reference_bit = 0x2;
-        if (vector == gp_fault_vector && (frame->SynchronousFaultData.err_code & idt_reference_bit) != 0)
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    namespace
+    {
+        // Called directly from the GuestSignal_* JIT stubs (Pointers.GuestSignalDispatchFunc) -
+        // see resolve_guest_signal_dispatch_target's doc comment. Runs on the vCPU's own worker
+        // thread, mid-ExecuteThread, so t_current_vcpu is always set here.
+        uint64_t guest_signal_dispatch_from_jit(FEXCore::Core::CpuStateFrame* frame)
         {
-            vector = static_cast<int>(frame->SynchronousFaultData.err_code >> 3);
-        }
-
-        frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
-
-        pending_fault_dispatch dispatch{};
-        if (vector == 14)
-        {
-            if (const auto gate = this->emulator_.find_gate_crossing(frame->State.rip))
+            static std::atomic<bool> LoggedGuestSignalDispatchFromJITOnce{false};
+            if (!LoggedGuestSignalDispatchFromJITOnce.exchange(true, std::memory_order_relaxed))
             {
-                auto* const source_signal_delegator = (this->active_context_ == this->emulator_.context32_.get())
-                                                          ? this->emulator_.signal_delegator32_.get()
-                                                          : this->emulator_.signal_delegator_.get();
-
-                if (this->perform_gate_crossing(*gate))
-                {
-                    this->pending_fault_dispatch_.kind = pending_fault_kind::gate_crossing;
-                    const auto& stop_cfg = source_signal_delegator->GetConfig();
-                    arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(stop_cfg.ThreadStopHandlerAddress));
-                    return true;
-                }
+                const char* const msg =
+                    "[FEX backend] GuestSignal_* dispatcher stub took the real-device direct-call "
+                    "path (Pointers.GuestSignalDispatchFunc) instead of a hardware fault.";
+                fprintf(stderr, "%s\n", msg);
+                sogen::utils::log_ios_device_milestone(msg);
             }
 
-            const auto err_code = frame->SynchronousFaultData.err_code;
-            const bool is_write = (err_code & 0x2) != 0;
-            const bool is_instr_fetch = (err_code & 0x10) != 0;
-            dispatch.kind = pending_fault_kind::memory_violation;
-            dispatch.address = frame->State.rip;
-            dispatch.size = 1;
-            dispatch.operation = is_instr_fetch ? memory_operation::exec : is_write ? memory_operation::write : memory_operation::read;
-            dispatch.type = (err_code & 0x1) ? memory_violation_type::protection : memory_violation_type::unmapped;
+            return t_current_vcpu->resolve_guest_signal_dispatch_target(frame);
         }
-        else
-        {
-            dispatch.kind = pending_fault_kind::interrupt;
-            dispatch.vector = vector;
-        }
-
-        this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/true);
-        return true;
     }
 #endif
 
