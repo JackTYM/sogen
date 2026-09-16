@@ -78,6 +78,7 @@ namespace sogen
             uint32_t vcpu_count{1};
             std::filesystem::path registry_path{get_current_binary_dir() / "registry"};
             std::filesystem::path emulation_root{};
+            windows_path working_directory{};
             std::unordered_map<windows_path, std::filesystem::path> path_mappings{};
             utils::unordered_insensitive_u16string_map<std::u16string> environment{};
             // Set only on a process spawned by spawn_child_process (NtCreateUserProcess) to carry the
@@ -539,6 +540,7 @@ namespace sogen
 
             application_settings app_settings{
                 .application = std::u8string(args[0].begin(), args[0].end()),
+                .working_directory = options.working_directory,
                 .arguments = parse_arguments(args),
                 .environment = options.environment,
             };
@@ -1064,6 +1066,10 @@ namespace sogen
 #endif
 
             app.add_option("-e,--emulation", options.emulation_root, "Set emulation root path");
+            std::string cwd_arg{};
+            app.add_option("--cwd", cwd_arg,
+                           "Set the launched executable's initial guest working directory (defaults to the "
+                           "executable's own directory)");
             app.add_option("-a,--snapshot", options.dump, "Load snapshot dump from path");
             app.add_option("--minidump", options.minidump_path, "Load minidump from path");
             app.add_option("--report", options.report_path, "Write machine-readable analysis events to a file");
@@ -1169,6 +1175,11 @@ namespace sogen
                 for (const auto& [name, value] : environment)
                 {
                     options.environment[std::u16string(name.begin(), name.end())] = std::u16string(value.begin(), value.end());
+                }
+
+                if (!cwd_arg.empty())
+                {
+                    options.working_directory = windows_path(cwd_arg);
                 }
 
                 const auto application = app.remaining();
