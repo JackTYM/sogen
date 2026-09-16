@@ -155,17 +155,19 @@ if(SOGEN_ENABLE_FEX)
     set(_FEXCORE_BUILD_TARGET "FEXCore")
     set(_FEXCORE_LIB "libFEXCore.a")
     set(_FEXCORE_OSX_ARGS -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
-    # FEX_IOS_POLL_INTERRUPT switches the JIT's cooperative-preemption check at block entry from
-    # the InterruptFaultPage fault trick (dead on real iOS device - a permanently-attached
-    # debugger claims every hardware exception before sogen's own signal handler ever sees it) to
-    # a plain polled flag. Only forwarded here, into FEXCore's own nested configure for the iOS
-    # ExternalProject - the non-iOS FEXCore_shared build below never sees this define.
     set(_FEXCORE_IOS_ARGS
       -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
       -DCMAKE_OSX_SYSROOT=${CMAKE_OSX_SYSROOT}
       -DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}
-      -DCMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}
-      -DCMAKE_CXX_FLAGS=-DFEX_IOS_POLL_INTERRUPT)
+      -DCMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR})
+    # FEX_IOS_POLL_INTERRUPT switches the JIT's cooperative-preemption check at block entry from
+    # the InterruptFaultPage fault trick (dead on real iOS device - a permanently-attached
+    # debugger claims every hardware exception before sogen's own signal handler ever sees it) to
+    # a plain polled flag. Real-device only (CMAKE_OSX_SYSROOT "iphoneos") - the Simulator has no
+    # attached-debugger fault problem, so it keeps using the normal InterruptFaultPage mechanism.
+    if(CMAKE_OSX_SYSROOT STREQUAL "iphoneos")
+      list(APPEND _FEXCORE_IOS_ARGS -DCMAKE_CXX_FLAGS=-DFEX_IOS_POLL_INTERRUPT)
+    endif()
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(_FEXCORE_BUILD_TARGET "FEXCore_shared")
     set(_FEXCORE_LIB "libFEXCore.dylib")

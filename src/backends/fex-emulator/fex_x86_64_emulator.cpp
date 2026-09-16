@@ -4023,7 +4023,7 @@ namespace sogen::fex
         {
             auto* const active = this->active_thread_.load();
             ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
-            active->CurrentFrame->StopRequestFlag = 0;
+            std::atomic_ref<uint32_t>(active->CurrentFrame->StopRequestFlag).store(0, std::memory_order_relaxed);
         }
 
         {
@@ -4080,10 +4080,12 @@ namespace sogen::fex
 
             // A deferred hook or a raced InterruptFaultPage unwind is resuming (no stop pending). If
             // it was a WoW64 gate crossing, active_thread_ was just swapped to the OTHER FEXCore
-            // engine mid-quantum - re-arm the now-active engine's page here (a no-op if already
-            // writable), so it resumes cleanly instead of immediately re-faulting as a spurious stop.
+            // engine mid-quantum - re-arm the now-active engine's page and clear its StopRequestFlag
+            // here (both no-ops if already writable/clear), so it resumes cleanly instead of
+            // immediately re-faulting/re-stopping as spurious on either mechanism.
             auto* const active = this->active_thread_.load();
             ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
+            std::atomic_ref<uint32_t>(active->CurrentFrame->StopRequestFlag).store(0, std::memory_order_relaxed);
         }
     }
 #else
@@ -4598,7 +4600,7 @@ namespace sogen::fex
             fprintf(stderr, "%s\n", msg);
             sogen::utils::log_ios_device_milestone(msg);
         }
-        active->CurrentFrame->StopRequestFlag = 1;
+        std::atomic_ref<uint32_t>(active->CurrentFrame->StopRequestFlag).store(1, std::memory_order_relaxed);
         return;
 #else
         ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_NONE);
