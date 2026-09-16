@@ -4591,9 +4591,11 @@ namespace sogen::fex
             uint64_t tid = 0;
             pthread_threadid_np(nullptr, &tid);
             char diag[256];
-            std::snprintf(diag, sizeof(diag), "[fex-diag] tid=0x%llx vcpu=%zu created context_ thread=%p staged_rip=0x%llx",
+            std::snprintf(diag, sizeof(diag),
+                          "[fex-diag] tid=0x%llx vcpu=%zu created context_ thread=%p staged_rip=0x%llx interrupt_fault_page=%p",
                           static_cast<unsigned long long>(tid), this->index_, static_cast<void*>(this->thread_),
-                          static_cast<unsigned long long>(this->staged_state_.rip));
+                          static_cast<unsigned long long>(this->staged_state_.rip),
+                          static_cast<void*>(this->thread_->InterruptFaultPage));
             sogen::utils::log_ios_device_milestone(diag);
         }
 #endif
@@ -4649,8 +4651,9 @@ namespace sogen::fex
             uint64_t tid = 0;
             pthread_threadid_np(nullptr, &tid);
             char diag[256];
-            std::snprintf(diag, sizeof(diag), "[fex-diag] tid=0x%llx vcpu=%zu created context32_ thread=%p",
-                          static_cast<unsigned long long>(tid), this->index_, static_cast<void*>(this->thread32_));
+            std::snprintf(diag, sizeof(diag), "[fex-diag] tid=0x%llx vcpu=%zu created context32_ thread=%p interrupt_fault_page=%p",
+                          static_cast<unsigned long long>(tid), this->index_, static_cast<void*>(this->thread32_),
+                          static_cast<void*>(this->thread32_->InterruptFaultPage));
             sogen::utils::log_ios_device_milestone(diag);
         }
 #endif
