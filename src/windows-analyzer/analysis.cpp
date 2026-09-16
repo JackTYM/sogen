@@ -100,6 +100,52 @@ namespace sogen
         uint64_t g_sldim_queue_check_trace_va_2 = 0;
         bool g_sldim_queue_check_checked = false;
 
+        // The real CWnd::OnCommand virtual-dispatch call site inside sldim.exe's own CWnd::OnWndMsg
+        // (statically disassembled from the direct-launch cache's own sldim.exe copy this cycle, see
+        // project_solidworks_bringup.md #293): OnWndMsg's WM_COMMAND early branch reads
+        // pWnd's vtable slot +0xf4 into esi, then `call ecx=pWnd; call esi`. Resolving esi live tells
+        // us which module/function actually owns the WM_COMMAND/0x464 handler this whole investigation
+        // has been chasing.
+        constexpr uint64_t SLDIM_ONCOMMAND_CALL_RVA = 0xb86698;
+        uint64_t g_sldim_oncommand_trace_va = 0;
+
+        // sldim.exe's own real OnCommand override (statically resolved this cycle from the call
+        // target of the site above, see project_solidworks_bringup.md #293): right after its own
+        // per-window state lookup (`call 0x406e06`), it branches on `[state+0x94]` and the command ID
+        // to decide whether to relay wParam 0x464 as a private `ON_MESSAGE(0x365, ...)` notification
+        // (carrying wParam = original_id + 0x10000) back to the same window, or to fall through to the
+        // base `CWnd::OnCommand`. This watch captures the live state pointer and the `[state+0x94]`
+        // flag at the exact branch point to determine which path actually executes.
+        constexpr uint64_t SLDIM_ONCOMMAND_BRANCH_RVA = 0xb96f6e;
+        uint64_t g_sldim_oncommand_branch_trace_va = 0;
+
+        // The real base `CWnd::OnCommand`'s own `OnCmdMsg(nID, CN_COMMAND, &info, nullptr)` virtual
+        // dispatch (`call [esi+0xc]` where esi is pWnd's own vtable, resolved this cycle by following
+        // the base-OnCommand fallback path from SLDIM_ONCOMMAND_BRANCH_RVA -- see
+        // project_solidworks_bringup.md #293). This is MFC's real message-map command-routing engine;
+        // resolving its live target identifies which concrete window/document/frame/app object's
+        // vtable actually owns `OnCmdMsg` for this window, one hop before the real ON_COMMAND(0x464,
+        // ...) handler itself.
+        constexpr uint64_t SLDIM_ONCMDMSG_CALL_RVA = 0xb85589;
+        uint64_t g_sldim_oncmdmsg_trace_va = 0;
+
+        // Inside the real `_AfxDispatchCmdMsg`-equivalent message-map walker resolved this cycle
+        // (sldim.exe+0xb80799, see project_solidworks_bringup.md #293): right after its own
+        // `AfxFindMessageEntry`-equivalent lookup call (`call 0x415cc6`) for msg=WM_COMMAND,
+        // nID=wParam, this watch captures the live `eax` result to determine whether a real
+        // ON_COMMAND(0x464, ...) message-map entry is ever actually found for this window/class chain.
+        constexpr uint64_t SLDIM_FINDENTRY_RESULT_RVA = 0xb808c4;
+        uint64_t g_sldim_findentry_trace_va = 0;
+
+        // The real, statically-resolved ON_COMMAND(0x464, ...) handler (found this cycle by reading
+        // the matched AFX_MSGMAP_ENTRY struct directly out of sldim.exe's own .rdata, see
+        // project_solidworks_bringup.md #293): a tiny 5-instruction stub that reads a vtable pointer
+        // out of an embedded sub-object at `this+0xcc` and makes one further virtual call
+        // (`(*[this+0xcc])[1](0)`). This watch resolves that final virtual call's live target -- the
+        // real innermost command-processing code this whole investigation has been chasing.
+        constexpr uint64_t SLDIM_HANDLER_DELEGATE_CALL_RVA = 0x66b76e;
+        uint64_t g_sldim_handler_delegate_trace_va = 0;
+
         struct sldim_queue_check_state
         {
             uint64_t total{0};
@@ -828,6 +874,88 @@ namespace sogen
                                      static_cast<unsigned long long>(g_sldim_queue_check_state.total),
                                      static_cast<unsigned long long>(g_sldim_queue_check_state.nonzero));
             }
+        }
+
+        void trace_sldim_oncommand_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+            const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
+
+            uint32_t w_param{};
+            uint32_t l_param{};
+            emu.try_read_memory(ebp + 0xc, &w_param, sizeof(w_param));
+            emu.try_read_memory(ebp + 0x10, &l_param, sizeof(l_param));
+
+            const auto* target_mod_name = c.win_emu->mod_manager.find_name(esi);
+            const auto* target_mod = c.win_emu->mod_manager.find_by_address(esi);
+            const auto target_offset = target_mod ? esi - target_mod->image_base : esi;
+
+            c.win_emu->log.error(
+                "[sldim-oncommand-trace] hit at 0x%llx tid=%u pWnd=0x%x wParam=0x%x lParam=0x%x OnCommand target=0x%x (%s+0x%llx)\n",
+                static_cast<unsigned long long>(address), c.win_emu->current_thread().id, edi, w_param, l_param, esi, target_mod_name,
+                static_cast<unsigned long long>(target_offset));
+        }
+
+        void trace_sldim_oncommand_branch_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto state_ptr = emu.reg<uint32_t>(x86_register::eax);
+
+            uint32_t flag_94{};
+            const auto flag_read_ok = emu.try_read_memory(state_ptr + 0x94, &flag_94, sizeof(flag_94));
+
+            c.win_emu->log.error("[sldim-oncommand-trace] branch check at 0x%llx tid=%u state=0x%x flag@0x94=0x%x (read_ok=%d)\n",
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, state_ptr, flag_94,
+                                 flag_read_ok ? 1 : 0);
+        }
+
+        void trace_sldim_oncmdmsg_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+            const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint32_t oncmdmsg_target{};
+            const auto read_ok = emu.try_read_memory(esi + 0xc, &oncmdmsg_target, sizeof(oncmdmsg_target));
+
+            const auto* target_mod_name = read_ok ? c.win_emu->mod_manager.find_name(oncmdmsg_target) : "?";
+            const auto* target_mod = read_ok ? c.win_emu->mod_manager.find_by_address(oncmdmsg_target) : nullptr;
+            const auto target_offset = target_mod ? oncmdmsg_target - target_mod->image_base : oncmdmsg_target;
+
+            c.win_emu->log.error(
+                "[sldim-oncommand-trace] OnCmdMsg dispatch at 0x%llx tid=%u this=0x%x vtbl=0x%x OnCmdMsg=0x%x (%s+0x%llx)\n",
+                static_cast<unsigned long long>(address), c.win_emu->current_thread().id, ecx, esi, oncmdmsg_target, target_mod_name,
+                static_cast<unsigned long long>(target_offset));
+        }
+
+        void trace_sldim_findentry_result_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+
+            c.win_emu->log.error("[sldim-oncommand-trace] message-map lookup result at 0x%llx tid=%u found=%d (entry=0x%x)\n",
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, eax != 0, eax);
+        }
+
+        void trace_sldim_handler_delegate_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+
+            uint32_t target{};
+            const auto read_ok = emu.try_read_memory(eax + 4, &target, sizeof(target));
+
+            const auto* target_mod_name = read_ok ? c.win_emu->mod_manager.find_name(target) : "?";
+            const auto* target_mod = read_ok ? c.win_emu->mod_manager.find_by_address(target) : nullptr;
+            const auto target_offset = target_mod ? target - target_mod->image_base : target;
+
+            c.win_emu->log.error(
+                "[sldim-oncommand-trace] handler delegate call at 0x%llx tid=%u subobj=0x%x vtbl=0x%x target=0x%x (%s+0x%llx)\n",
+                static_cast<unsigned long long>(address), c.win_emu->current_thread().id, ecx, eax, target, target_mod_name,
+                static_cast<unsigned long long>(target_offset));
         }
 
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
@@ -1778,10 +1906,22 @@ namespace sogen
                     g_sldim_queue_check_checked = true;
                     g_sldim_queue_check_trace_va_1 = exe->image_base + SLDIM_QUEUE_CHECK_RVA_1;
                     g_sldim_queue_check_trace_va_2 = exe->image_base + SLDIM_QUEUE_CHECK_RVA_2;
-                    c.win_emu->log.error("[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx\n",
-                                         static_cast<unsigned long long>(exe->image_base),
-                                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
-                                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2));
+                    g_sldim_oncommand_trace_va = exe->image_base + SLDIM_ONCOMMAND_CALL_RVA;
+                    g_sldim_oncommand_branch_trace_va = exe->image_base + SLDIM_ONCOMMAND_BRANCH_RVA;
+                    g_sldim_oncmdmsg_trace_va = exe->image_base + SLDIM_ONCMDMSG_CALL_RVA;
+                    g_sldim_findentry_trace_va = exe->image_base + SLDIM_FINDENTRY_RESULT_RVA;
+                    g_sldim_handler_delegate_trace_va = exe->image_base + SLDIM_HANDLER_DELEGATE_CALL_RVA;
+                    c.win_emu->log.error(
+                        "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
+                        "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
+                        "0x%llx\n",
+                        static_cast<unsigned long long>(exe->image_base), static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
+                        static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2),
+                        static_cast<unsigned long long>(g_sldim_oncommand_trace_va),
+                        static_cast<unsigned long long>(g_sldim_oncommand_branch_trace_va),
+                        static_cast<unsigned long long>(g_sldim_oncmdmsg_trace_va),
+                        static_cast<unsigned long long>(g_sldim_findentry_trace_va),
+                        static_cast<unsigned long long>(g_sldim_handler_delegate_trace_va));
                 }
             }
 
@@ -1789,6 +1929,31 @@ namespace sogen
                 (g_sldim_queue_check_trace_va_2 != 0 && address == g_sldim_queue_check_trace_va_2))
             {
                 trace_sldim_queue_check_hit(c, address);
+            }
+
+            if (g_sldim_oncommand_trace_va != 0 && address == g_sldim_oncommand_trace_va)
+            {
+                trace_sldim_oncommand_hit(c, address);
+            }
+
+            if (g_sldim_oncommand_branch_trace_va != 0 && address == g_sldim_oncommand_branch_trace_va)
+            {
+                trace_sldim_oncommand_branch_hit(c, address);
+            }
+
+            if (g_sldim_oncmdmsg_trace_va != 0 && address == g_sldim_oncmdmsg_trace_va)
+            {
+                trace_sldim_oncmdmsg_hit(c, address);
+            }
+
+            if (g_sldim_findentry_trace_va != 0 && address == g_sldim_findentry_trace_va)
+            {
+                trace_sldim_findentry_result_hit(c, address);
+            }
+
+            if (g_sldim_handler_delegate_trace_va != 0 && address == g_sldim_handler_delegate_trace_va)
+            {
+                trace_sldim_handler_delegate_hit(c, address);
             }
 
             if (!g_dispatch_message_w_entry_armed)
