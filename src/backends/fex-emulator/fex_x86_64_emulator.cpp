@@ -498,27 +498,6 @@ namespace sogen::fex
             return prot;
         }
 
-#ifdef __APPLE__
-        // Apple Silicon's kernel categorically refuses simultaneous write+exec on any mapping that
-        // isn't MAP_JIT-backed (mprotect fails outright with EACCES) - unlike Linux, where W^X for
-        // guest memory is advisory at best. This is independent of the 16KB/4KB reconciliation
-        // above: even a single guest region directly requesting RWX hits it, which real PE loaders
-        // do routinely (map .text RWX to patch ASLR relocations, then narrow to RX before the module
-        // ever executes). Favoring write over exec here handles that common, well-defined sequence
-        // correctly; it would be wrong for a page that is genuinely written and executed in the same
-        // window without an intervening apply_memory_protection call, which is not how real PE
-        // loading behaves.
-        int to_prot_apple(const memory_permission permissions)
-        {
-            int prot = to_prot(permissions);
-            if ((prot & PROT_WRITE) && (prot & PROT_EXEC))
-            {
-                prot &= ~PROT_EXEC;
-            }
-            return prot;
-        }
-#endif
-
         // Bit-for-bit reimplementation of FEXCore::Context::ContextImpl::ReconstructCompactedEFLAGS /
         // SetFlagsFromCompactedEFLAGS (FEXCore's Core.cpp), operating directly on a CPUState instead
         // of a live InternalThreadState. FEXCore's originals unconditionally dereference the Thread
@@ -1356,6 +1335,64 @@ namespace sogen::fex
                 return instance().release(addr, length);
             }
         };
+
+        // Apple Silicon's kernel categorically refuses simultaneous write+exec on any mapping that
+        // isn't MAP_JIT-backed (mprotect fails outright with EACCES) - unlike Linux, where W^X for
+        // guest memory is advisory at best. This is independent of the 16KB/4KB reconciliation
+        // above: even a single guest region directly requesting RWX hits it, which real PE loaders
+        // do routinely (map .text RWX to patch ASLR relocations, then narrow to RX before the module
+        // ever executes). Favoring write over exec here handles that common, well-defined sequence
+        // correctly; it would be wrong for a page that is genuinely written and executed in the same
+        // window without an intervening apply_memory_protection call, which is not how real PE
+        // loading behaves.
+        //
+        // On real iOS device, TXM/SPTM additionally refuses any writable/none -> executable host
+        // mprotect transition unless the specific pages were themselves allocated through the JIT26
+        // create+bless handshake (jit26_prepare_region, see cmake/unicorn-ios-device-jit-shim.h and
+        // FEXCore's own AllocatorHooks.h JIT26 wiring) - confirmed live by the EACCES this function's
+        // callers hit otherwise. Every caller of to_prot_apple operates on guest-mapped memory, which
+        // is disjoint by construction from FEXCore's own JIT26-blessed internal arena (registered as
+        // a reserved_host_range so the guest memory manager never places guest memory there) - so on
+        // real device this drops PROT_EXEC unconditionally for that memory. That is safe: FEXCore
+        // never executes host instructions directly out of guest memory. It decodes guest bytes as
+        // plain data (QueryGuestExecutableRange/CheckRangeExecutable enforce the guest's own declared
+        // exec permission purely in software, independent of host protection bits) and emits
+        // translated ARM64 code into its separate, already-JIT26-blessed CodeBuffer - the only memory
+        // that genuinely needs host PROT_EXEC.
+        int to_prot_apple(const memory_permission permissions, [[maybe_unused]] const uint64_t host_address)
+        {
+            int prot = to_prot(permissions);
+            if ((prot & PROT_WRITE) && (prot & PROT_EXEC))
+            {
+                prot &= ~PROT_EXEC;
+            }
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+            if ((prot & PROT_EXEC) != 0)
+            {
+                const auto& arena = fex_internal_arena::instance();
+                const bool in_fex_arena =
+                    arena.active() && host_address >= arena.base() && host_address < arena.base() + arena.size();
+                if (!in_fex_arena)
+                {
+                    prot &= ~PROT_EXEC;
+
+                    static std::atomic<bool> LoggedGuestExecStripOnce{false};
+                    if (!LoggedGuestExecStripOnce.exchange(true, std::memory_order_relaxed))
+                    {
+                        const char* const msg =
+                            "[FEX backend] Stripping host PROT_EXEC for guest-mapped memory outside the FEXCore "
+                            "arena on real iOS device - FEXCore JITs into its own arena buffer and never executes "
+                            "guest memory directly.";
+                        fprintf(stderr, "%s\n", msg);
+                        sogen::utils::log_ios_device_milestone(msg);
+                    }
+                }
+            }
+#endif
+
+            return prot;
+        }
 #endif
 
         // A registered WoW64 bitness mode-switch point (see x86_emulator::register_gate_crossing).
@@ -2750,7 +2787,7 @@ namespace sogen::fex
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
             {
-                g_hvf->map(host_address, size, to_prot_apple(permissions));
+                g_hvf->map(host_address, size, to_prot_apple(permissions, host_address));
             }
 #endif
 #else
@@ -2965,7 +3002,7 @@ namespace sogen::fex
 
                     const size_t run_size = run_end - cursor;
                     void* const host_ptr = reinterpret_cast<void*>(cursor + rebase);
-                    const int hvf_prot = to_prot_apple(effective);
+                    const int hvf_prot = to_prot_apple(effective, reinterpret_cast<uint64_t>(host_ptr));
 
                     if (::mprotect(host_ptr, run_size, to_host_prot_hvf(hvf_prot)) != 0)
                     {
@@ -3021,7 +3058,8 @@ namespace sogen::fex
                     run_end += host_page_size_apple;
                 }
 
-                ::mprotect(reinterpret_cast<void*>(cursor + rebase), run_end - cursor, to_prot_apple(effective | memory_permission::write));
+                ::mprotect(reinterpret_cast<void*>(cursor + rebase), run_end - cursor,
+                           to_prot_apple(effective | memory_permission::write, cursor + rebase));
                 cursor = run_end;
             }
 #else
@@ -3248,7 +3286,8 @@ namespace sogen::fex
                 // exact address, so the kernel reliably honors the hint. The result != host_ptr check
                 // below still catches the rare case it doesn't (see reserve_wow64_host_window for the
                 // same reasoning/fix applied first).
-                void* result = ::mmap(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective)),
+                void* result = ::mmap(host_ptr, host_page_size_apple,
+                                      to_host_prot_hvf(to_prot_apple(effective, reinterpret_cast<uint64_t>(host_ptr))),
                                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                 if (result == MAP_FAILED || result != host_ptr)
                 {
@@ -3258,13 +3297,14 @@ namespace sogen::fex
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
                 if (g_hvf != nullptr)
                 {
-                    g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective));
+                    g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective, host_page_addr + rebase));
                 }
 #endif
                 return;
             }
 
-            if (::mprotect(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective))) != 0)
+            if (::mprotect(host_ptr, host_page_size_apple,
+                           to_host_prot_hvf(to_prot_apple(effective, reinterpret_cast<uint64_t>(host_ptr)))) != 0)
             {
                 const int mprotect_errno = errno;
                 const auto& arena = fex_internal_arena::instance();
@@ -3274,14 +3314,15 @@ namespace sogen::fex
                 snprintf(buf, sizeof(buf),
                          "FEX backend failed to change memory protection: mprotect(host=0x%llx, size=0x%zx, prot=0x%x) failed, "
                          "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
-                         static_cast<unsigned long long>(host_addr), host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective)),
-                         mprotect_errno, strerror(mprotect_errno), static_cast<unsigned>(effective), in_fex_arena ? 1 : 0);
+                         static_cast<unsigned long long>(host_addr), host_page_size_apple,
+                         to_host_prot_hvf(to_prot_apple(effective, host_addr)), mprotect_errno, strerror(mprotect_errno),
+                         static_cast<unsigned>(effective), in_fex_arena ? 1 : 0);
                 throw std::runtime_error(buf);
             }
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
             {
-                g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective));
+                g_hvf->sync_page(host_page_addr + rebase, to_prot_apple(effective, host_page_addr + rebase));
             }
 #endif
         }
@@ -3304,7 +3345,7 @@ namespace sogen::fex
             const uint64_t start = host_page_align_down_apple(range_start);
             const uint64_t end = host_page_align_up_apple(range_end);
 
-            const int hvf_prot = to_prot_apple(permissions);
+            const int hvf_prot = to_prot_apple(permissions, address + rebase_for(this->is_wow64_process_, address));
             const int host_prot = to_host_prot_hvf(hvf_prot);
 
             uint64_t cursor = start;
