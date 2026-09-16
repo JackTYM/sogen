@@ -146,6 +146,35 @@ namespace sogen
         constexpr uint64_t SLDIM_HANDLER_DELEGATE_CALL_RVA = 0x66b76e;
         uint64_t g_sldim_handler_delegate_trace_va = 0;
 
+        // sldim.exe's own real "try-pop one work item" primitive (statically disassembled this
+        // cycle from the direct-launch cache's own sldim.exe copy, see project_solidworks_bringup.md
+        // #294; it is the real body behind the `call sldim.exe+0x418df4` sub-check #293 point 7 left
+        // unresolved). Called with ecx = the registered listener object (read from the outer
+        // notification-dispatcher's own `this+0xc`), it early-returns null if the listener's
+        // `this+0x28` work-queue container is itself null; otherwise it takes a lock (`call
+        // 0x41d8c2` on `this+8`) and, for the arg=false variant polled every iteration, checks the
+        // queue's own item count at `[queue+4]`: <=0 means empty (returns null, which is what makes
+        // the caller `Sleep(1)`), >0 means it pops the head node off a doubly-linked list at
+        // `[queue+0]` and dispatches it via the same `0x421bd4` listener-notify virtual call the
+        // outer function itself uses. This watch fires right after `this` (edi) and the queue
+        // container pointer `[this+0x28]` are both resolved.
+        constexpr uint64_t SLDIM_TRYPOP_ENTRY_RVA = 0x6a318c;
+        uint64_t g_sldim_trypop_entry_trace_va = 0;
+
+        // The queue's own real item-count check inside the try-pop primitive above (`mov
+        // ebx,[eax+4]; test ebx,ebx; jle <empty-path>`, where eax is the queue container read from
+        // `[listener+0x28]`). This is the actual live value the outer WM_COMMAND handler chain's
+        // Sleep(1) polling loop is blocked on: it needs to be seen going above 0 for the self-repost
+        // loop to ever process something instead of sleeping.
+        constexpr uint64_t SLDIM_TRYPOP_COUNT_CHECK_RVA = 0x6a32d5;
+        uint64_t g_sldim_trypop_count_check_trace_va = 0;
+
+        uint64_t g_sldim_trypop_total_hits = 0;
+        uint64_t g_sldim_trypop_count_nonzero_hits = 0;
+        uint64_t g_sldim_trypop_last_queue_ptr = 0;
+        uint64_t g_sldim_trypop_last_count = 0xffffffff;
+        bool g_sldim_trypop_write_watch_armed = false;
+
         struct sldim_queue_check_state
         {
             uint64_t total{0};
@@ -956,6 +985,82 @@ namespace sogen
                 "[sldim-oncommand-trace] handler delegate call at 0x%llx tid=%u subobj=0x%x vtbl=0x%x target=0x%x (%s+0x%llx)\n",
                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, ecx, eax, target, target_mod_name,
                 static_cast<unsigned long long>(target_offset));
+        }
+
+        void trace_sldim_trypop_entry_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+
+            uint32_t queue_ptr{};
+            const auto read_ok = emu.try_read_memory(edi + 0x28, &queue_ptr, sizeof(queue_ptr));
+
+            if (queue_ptr != g_sldim_trypop_last_queue_ptr)
+            {
+                c.win_emu->log.error(
+                    "[sldim-trypop-trace] hit at 0x%llx listener=0x%x queue container [listener+0x28]=0x%x (read_ok=%d) changed "
+                    "from 0x%llx, tid=%u\n",
+                    static_cast<unsigned long long>(address), edi, queue_ptr, read_ok ? 1 : 0,
+                    static_cast<unsigned long long>(g_sldim_trypop_last_queue_ptr), c.win_emu->current_thread().id);
+                g_sldim_trypop_last_queue_ptr = queue_ptr;
+            }
+
+            if (read_ok && queue_ptr != 0 && !g_sldim_trypop_write_watch_armed)
+            {
+                g_sldim_trypop_write_watch_armed = true;
+                const uint64_t count_field_addr = queue_ptr + 4;
+                c.win_emu->log.error("[sldim-trypop-trace] arming a write-watch on the queue count field at 0x%llx\n",
+                                     static_cast<unsigned long long>(count_field_addr));
+
+                emu.hook_memory_write(
+                    count_field_addr, sizeof(uint32_t),
+                    [&c, count_field_addr](cpu_interface&, const uint64_t write_address, const void* value, const size_t size) {
+                        uint32_t new_value{};
+                        memcpy(&new_value, value, std::min(size, sizeof(new_value)));
+
+                        const auto rip = c.win_emu->emu().read_instruction_pointer();
+                        const auto* writer_mod_name = c.win_emu->mod_manager.find_name(rip);
+                        const auto* writer_mod = c.win_emu->mod_manager.find_by_address(rip);
+                        const auto writer_offset = writer_mod ? rip - writer_mod->image_base : rip;
+
+                        c.win_emu->log.error("[sldim-trypop-trace] WRITE to queue count field 0x%llx (at 0x%llx): new_value=%u "
+                                             "size=%zu writer_rip=0x%llx (%s+0x%llx) tid=%u\n",
+                                             static_cast<unsigned long long>(count_field_addr),
+                                             static_cast<unsigned long long>(write_address), new_value, size,
+                                             static_cast<unsigned long long>(rip), writer_mod_name,
+                                             static_cast<unsigned long long>(writer_offset), c.win_emu->current_thread().id);
+                    });
+            }
+        }
+
+        void trace_sldim_trypop_count_check_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+            const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
+
+            ++g_sldim_trypop_total_hits;
+
+            if (static_cast<uint64_t>(ebx) != g_sldim_trypop_last_count)
+            {
+                c.win_emu->log.error("[sldim-trypop-trace] hit at 0x%llx queue=0x%x count=%u changed from %llu at hit#%llu, tid=%u\n",
+                                     static_cast<unsigned long long>(address), eax, ebx,
+                                     static_cast<unsigned long long>(g_sldim_trypop_last_count),
+                                     static_cast<unsigned long long>(g_sldim_trypop_total_hits), c.win_emu->current_thread().id);
+                g_sldim_trypop_last_count = ebx;
+            }
+
+            if (static_cast<int32_t>(ebx) > 0)
+            {
+                ++g_sldim_trypop_count_nonzero_hits;
+            }
+            else if ((g_sldim_trypop_total_hits % 20000) == 0)
+            {
+                c.win_emu->log.error("[sldim-trypop-trace] checkpoint: total=%llu nonzero_count_hits=%llu last_count=%llu\n",
+                                     static_cast<unsigned long long>(g_sldim_trypop_total_hits),
+                                     static_cast<unsigned long long>(g_sldim_trypop_count_nonzero_hits),
+                                     static_cast<unsigned long long>(g_sldim_trypop_last_count));
+            }
         }
 
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
@@ -1911,17 +2016,21 @@ namespace sogen
                     g_sldim_oncmdmsg_trace_va = exe->image_base + SLDIM_ONCMDMSG_CALL_RVA;
                     g_sldim_findentry_trace_va = exe->image_base + SLDIM_FINDENTRY_RESULT_RVA;
                     g_sldim_handler_delegate_trace_va = exe->image_base + SLDIM_HANDLER_DELEGATE_CALL_RVA;
+                    g_sldim_trypop_entry_trace_va = exe->image_base + SLDIM_TRYPOP_ENTRY_RVA;
+                    g_sldim_trypop_count_check_trace_va = exe->image_base + SLDIM_TRYPOP_COUNT_CHECK_RVA;
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
-                        "0x%llx\n",
+                        "0x%llx, trypop entry at 0x%llx, trypop count check at 0x%llx\n",
                         static_cast<unsigned long long>(exe->image_base), static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2),
                         static_cast<unsigned long long>(g_sldim_oncommand_trace_va),
                         static_cast<unsigned long long>(g_sldim_oncommand_branch_trace_va),
                         static_cast<unsigned long long>(g_sldim_oncmdmsg_trace_va),
                         static_cast<unsigned long long>(g_sldim_findentry_trace_va),
-                        static_cast<unsigned long long>(g_sldim_handler_delegate_trace_va));
+                        static_cast<unsigned long long>(g_sldim_handler_delegate_trace_va),
+                        static_cast<unsigned long long>(g_sldim_trypop_entry_trace_va),
+                        static_cast<unsigned long long>(g_sldim_trypop_count_check_trace_va));
                 }
             }
 
@@ -1954,6 +2063,16 @@ namespace sogen
             if (g_sldim_handler_delegate_trace_va != 0 && address == g_sldim_handler_delegate_trace_va)
             {
                 trace_sldim_handler_delegate_hit(c, address);
+            }
+
+            if (g_sldim_trypop_entry_trace_va != 0 && address == g_sldim_trypop_entry_trace_va)
+            {
+                trace_sldim_trypop_entry_hit(c, address);
+            }
+
+            if (g_sldim_trypop_count_check_trace_va != 0 && address == g_sldim_trypop_count_check_trace_va)
+            {
+                trace_sldim_trypop_count_check_hit(c, address);
             }
 
             if (!g_dispatch_message_w_entry_armed)
