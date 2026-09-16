@@ -3669,6 +3669,15 @@ namespace sogen::fex
             if (std::getenv("EMULATOR_FEX_NO_TSO"))
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, "0");
+
+                static std::atomic<bool> LoggedNoTsoOnce{false};
+                if (!LoggedNoTsoOnce.exchange(true, std::memory_order_relaxed))
+                {
+                    const char* const msg = "[FEX backend] EMULATOR_FEX_NO_TSO=1: disabled FEXCore TSO "
+                                             "memory-ordering modeling (CONFIG_TSOENABLED=0).";
+                    fprintf(stderr, "%s\n", msg);
+                    sogen::utils::log_ios_device_milestone(msg);
+                }
             }
             if (std::getenv("EMULATOR_FEX_SMC_NONE"))
             {
