@@ -122,6 +122,33 @@ namespace sogen
         uint32_t g_sldim_dispatch_hop_count = 0;
         constexpr uint32_t SLDIM_DISPATCH_MAX_HOPS = 300;
 
+        // DispatchMessageW's own RVA in the 32-bit (syswow64) user32.dll loaded by sldim.exe under
+        // WOW64, re-resolved and cross-checked against the shared root's own COFF export table this
+        // cycle (see project_solidworks_bringup.md #285/#288). Arms the same generic hop-chase engine
+        // used for the WOW64-return trace, but starting directly at DispatchMessageW's entry instead
+        // of at a post-syscall return address, to trace its real internal control flow. sldim.exe's
+        // own process was observed this cycle to map a 32-bit user32.dll TWICE at two different
+        // addresses (a real NtMapViewOfSection STATUS_IMAGE_NOT_AT_BASE retry dance, not a guess) --
+        // every I386 user32.dll load this process performs is watched, not just the first, so real
+        // execution (not assumption) determines which copy is actually called.
+        constexpr uint64_t DISPATCH_MESSAGE_W_RVA = 0x26510;
+        constexpr size_t DISPATCH_MESSAGE_W_MAX_CANDIDATES = 8;
+        std::array<uint64_t, DISPATCH_MESSAGE_W_MAX_CANDIDATES> g_dispatch_message_w_entry_vas{};
+        size_t g_dispatch_message_w_entry_count = 0;
+        bool g_dispatch_message_w_entry_armed = false;
+
+        // DispatchMessageW's own body (see the SOGEN_TRACE_DISPATCHMESSAGE trace above) is a thin,
+        // unexported hot-patchable wrapper: `mov edi,edi; push ebp; mov ebp,esp; push ecx;
+        // mov ecx,[ebp+8]; xor edx,edx; call user32.dll+0x26530; pop ecx; pop ebp; ret 4` -- its sole
+        // internal call, live-disassembled and confirmed this cycle (project_solidworks_bringup.md
+        // #288), is the real dispatch worker. Hooking this RVA directly (instead of following it via
+        // the generic "skip over calls" chase) is what actually traces DispatchMessageW's real internal
+        // dispatch logic rather than just its own thin prologue/epilogue.
+        constexpr uint64_t DISPATCH_MESSAGE_W_INTERNAL_RVA = 0x26530;
+        std::array<uint64_t, DISPATCH_MESSAGE_W_MAX_CANDIDATES> g_dispatch_message_w_internal_vas{};
+        size_t g_dispatch_message_w_internal_count = 0;
+        bool g_dispatch_message_w_internal_armed = false;
+
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
         {
@@ -457,6 +484,36 @@ namespace sogen
                 g_delayload_failure_trace_va = mod.image_base + DELAYLOAD_FAILURE_RVA;
                 c.win_emu->log.error("[delayload-failure-trace] watching HandleDelayLoadFailureCommon at 0x%llx\n",
                                      static_cast<unsigned long long>(g_delayload_failure_trace_va));
+            }
+
+            if (mod.name == "user32.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
+                (std::getenv("SOGEN_TRACE_DISPATCHMESSAGE") || std::getenv("SOGEN_TRACE_DISPATCHMESSAGE_INTERNAL")))
+            {
+                const auto* exe = c.win_emu->mod_manager.executable;
+                if (exe != nullptr && exe->name == "sldim.exe")
+                {
+                    if (std::getenv("SOGEN_TRACE_DISPATCHMESSAGE") &&
+                        g_dispatch_message_w_entry_count < g_dispatch_message_w_entry_vas.size())
+                    {
+                        const auto va = mod.image_base + DISPATCH_MESSAGE_W_RVA;
+                        g_dispatch_message_w_entry_vas[g_dispatch_message_w_entry_count++] = va;
+                        c.win_emu->log.error("[dispatchmessage-trace] I386 user32.dll #%zu loaded at 0x%llx, watching "
+                                             "DispatchMessageW entry at 0x%llx\n",
+                                             g_dispatch_message_w_entry_count, static_cast<unsigned long long>(mod.image_base),
+                                             static_cast<unsigned long long>(va));
+                    }
+
+                    if (std::getenv("SOGEN_TRACE_DISPATCHMESSAGE_INTERNAL") &&
+                        g_dispatch_message_w_internal_count < g_dispatch_message_w_internal_vas.size())
+                    {
+                        const auto va = mod.image_base + DISPATCH_MESSAGE_W_INTERNAL_RVA;
+                        g_dispatch_message_w_internal_vas[g_dispatch_message_w_internal_count++] = va;
+                        c.win_emu->log.error("[dispatchmessage-trace] I386 user32.dll #%zu loaded at 0x%llx, watching "
+                                             "DispatchMessageW's internal worker at 0x%llx\n",
+                                             g_dispatch_message_w_internal_count, static_cast<unsigned long long>(mod.image_base),
+                                             static_cast<unsigned long long>(va));
+                    }
+                }
             }
 
             if (mod.name == "kernelbase.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
@@ -930,6 +987,54 @@ namespace sogen
             return std::nullopt;
         }
 
+        std::optional<bool> resolve_condition_from_live_eflags(x86_64_cpu& emu, const x86_insn insn_id)
+        {
+            const auto eflags = emu.reg<uint32_t>(x86_register::eflags);
+            const bool cf = (eflags & (1u << 0)) != 0;
+            const bool pf = (eflags & (1u << 2)) != 0;
+            const bool zf = (eflags & (1u << 6)) != 0;
+            const bool sf = (eflags & (1u << 7)) != 0;
+            const bool of = (eflags & (1u << 11)) != 0;
+
+            switch (insn_id)
+            {
+            case X86_INS_JE:
+                return zf;
+            case X86_INS_JNE:
+                return !zf;
+            case X86_INS_JS:
+                return sf;
+            case X86_INS_JNS:
+                return !sf;
+            case X86_INS_JB:
+                return cf;
+            case X86_INS_JAE:
+                return !cf;
+            case X86_INS_JBE:
+                return cf || zf;
+            case X86_INS_JA:
+                return !cf && !zf;
+            case X86_INS_JL:
+                return sf != of;
+            case X86_INS_JGE:
+                return sf == of;
+            case X86_INS_JLE:
+                return zf || (sf != of);
+            case X86_INS_JG:
+                return !zf && (sf == of);
+            case X86_INS_JO:
+                return of;
+            case X86_INS_JNO:
+                return !of;
+            case X86_INS_JP:
+                return pf;
+            case X86_INS_JNP:
+                return !pf;
+            default:
+                return std::nullopt;
+            }
+        }
+
         // Chases the guest's real control flow forward, one hop at a time, starting at sldim.exe's
         // NtUserGetMessage post-syscall return address (see project_solidworks_bringup.md #284/#285).
         // Each hop is only advanced once execution genuinely reaches it (handle_instruction re-fires this
@@ -962,7 +1067,7 @@ namespace sogen
                 return;
             }
 
-            std::array<uint8_t, 256> code{};
+            std::array<uint8_t, 512> code{};
             if (!emu.try_read_memory(address, code.data(), code.size()))
             {
                 c.win_emu->log.error("[sldim-dispatch-trace] failed to read guest memory, stopping chase\n");
@@ -973,7 +1078,7 @@ namespace sogen
             const auto reg_cs = emu.reg<uint16_t>(x86_register::cs);
             disassembler disasm{};
             const auto handle = disasm.resolve_handle(emu, reg_cs);
-            const auto instructions = disasm.disassemble(emu, reg_cs, code, 25, address);
+            const auto instructions = disasm.disassemble(emu, reg_cs, code, 64, address);
 
             const auto bitness = disassembler::get_segment_bitness(emu, reg_cs);
             const size_t ptr_size = (bitness && *bitness == disassembler::segment_bitness::bit64) ? sizeof(uint64_t) : sizeof(uint32_t);
@@ -994,6 +1099,7 @@ namespace sogen
                 c.win_emu->log.error("[sldim-dispatch-trace]   0x%llx: %s %s\n", static_cast<unsigned long long>(insn.address),
                                      insn.mnemonic, insn.op_str);
 
+                const bool is_first_instruction_in_hop = insn.address == address;
                 const bool is_call = cs_insn_group(handle, &insn, CS_GRP_CALL);
                 const bool is_jump = cs_insn_group(handle, &insn, CS_GRP_JUMP);
                 const bool is_ret = cs_insn_group(handle, &insn, CS_GRP_RET);
@@ -1169,17 +1275,24 @@ namespace sogen
 
                 if (!is_unconditional_jump && !is_call)
                 {
-                    std::optional<bool> taken;
+                    const bool has_imm_target =
+                        insn.detail && insn.detail->x86.op_count > 0 && insn.detail->x86.operands[0].type == X86_OP_IMM;
 
-                    if (pending_flag_valid && (insn.id == X86_INS_JE || insn.id == X86_INS_JNE) && insn.detail &&
-                        insn.detail->x86.op_count > 0 && insn.detail->x86.operands[0].type == X86_OP_IMM)
+                    std::optional<bool> taken;
+                    const char* resolution = "micro-simulated operands";
+
+                    if (pending_flag_valid && (insn.id == X86_INS_JE || insn.id == X86_INS_JNE) && has_imm_target)
                     {
                         taken = (insn.id == X86_INS_JE) ? pending_zero_flag : !pending_zero_flag;
                     }
-                    else if (pending_carry_valid && (insn.id == X86_INS_JB || insn.id == X86_INS_JAE) && insn.detail &&
-                             insn.detail->x86.op_count > 0 && insn.detail->x86.operands[0].type == X86_OP_IMM)
+                    else if (pending_carry_valid && (insn.id == X86_INS_JB || insn.id == X86_INS_JAE) && has_imm_target)
                     {
                         taken = (insn.id == X86_INS_JB) ? pending_carry_flag : !pending_carry_flag;
+                    }
+                    else if (is_first_instruction_in_hop && has_imm_target)
+                    {
+                        taken = resolve_condition_from_live_eflags(emu, static_cast<x86_insn>(insn.id));
+                        resolution = "live EFLAGS (genuinely just reached)";
                     }
 
                     if (taken)
@@ -1188,15 +1301,24 @@ namespace sogen
                         const auto branch_target = static_cast<uint64_t>(insn.detail->x86.operands[0].imm);
                         const auto next_addr = *taken ? branch_target : fallthrough;
 
-                        c.win_emu->log.error("[sldim-dispatch-trace]   conditional branch resolved via micro-simulated operands -> %s "
-                                             "taken=%d, next hop 0x%llx\n",
-                                             insn.mnemonic, *taken ? 1 : 0, static_cast<unsigned long long>(next_addr));
+                        c.win_emu->log.error("[sldim-dispatch-trace]   conditional branch resolved via %s -> %s taken=%d, next hop "
+                                             "0x%llx\n",
+                                             resolution, insn.mnemonic, *taken ? 1 : 0, static_cast<unsigned long long>(next_addr));
                         g_sldim_dispatch_watch_va = next_addr;
                         return;
                     }
 
-                    c.win_emu->log.error(
-                        "[sldim-dispatch-trace]   conditional branch reached, cannot statically follow it; stopping chase\n");
+                    if (!is_first_instruction_in_hop)
+                    {
+                        c.win_emu->log.error("[sldim-dispatch-trace]   conditional branch reached mid-hop, cannot statically follow "
+                                             "it -- deferring to when it's genuinely live -> next hop 0x%llx\n",
+                                             static_cast<unsigned long long>(insn.address));
+                        g_sldim_dispatch_watch_va = insn.address;
+                        return;
+                    }
+
+                    c.win_emu->log.error("[sldim-dispatch-trace]   conditional branch reached, unresolvable even live (unsupported "
+                                         "mnemonic or no immediate target); stopping chase\n");
                     g_sldim_dispatch_watch_va = 0;
                     return;
                 }
@@ -1347,6 +1469,12 @@ namespace sogen
                 event.path = mod.module_path.string();
                 event.image_base = mod.image_base;
             });
+
+            if (mod.name == "user32.dll" && std::getenv("SOGEN_TRACE_DISPATCHMESSAGE"))
+            {
+                c.win_emu->log.error("[dispatchmessage-trace] user32.dll UNLOADED at 0x%llx\n",
+                                     static_cast<unsigned long long>(mod.image_base));
+            }
         }
 
         void handle_fast_fail(const analysis_context& c, const uint32_t fail_code)
@@ -1561,6 +1689,48 @@ namespace sogen
                 (g_sldim_queue_check_trace_va_2 != 0 && address == g_sldim_queue_check_trace_va_2))
             {
                 trace_sldim_queue_check_hit(c, address);
+            }
+
+            if (!g_dispatch_message_w_entry_armed)
+            {
+                for (size_t i = 0; i < g_dispatch_message_w_entry_count; ++i)
+                {
+                    if (g_dispatch_message_w_entry_vas[i] != 0 && address == g_dispatch_message_w_entry_vas[i])
+                    {
+                        g_dispatch_message_w_entry_armed = true;
+                        c.win_emu->log.error("[dispatchmessage-trace] REACHED DispatchMessageW's own entry (candidate #%zu) at "
+                                             "0x%llx, tid=%u, starting chase\n",
+                                             i + 1, static_cast<unsigned long long>(address), c.win_emu->current_thread().id);
+                        g_sldim_dispatch_hop_count = 0;
+                        trace_sldim_dispatch_return_hit(c, address);
+                        break;
+                    }
+                }
+            }
+
+            if (!g_dispatch_message_w_internal_armed)
+            {
+                for (size_t i = 0; i < g_dispatch_message_w_internal_count; ++i)
+                {
+                    if (g_dispatch_message_w_internal_vas[i] != 0 && address == g_dispatch_message_w_internal_vas[i])
+                    {
+                        auto& emu = c.win_emu->emu();
+                        const auto lp_msg = emu.reg<uint32_t>(x86_register::ecx);
+                        uint32_t message{};
+                        if (emu.try_read_memory(lp_msg + 4, &message, sizeof(message)) && message == WM_COMMAND)
+                        {
+                            g_dispatch_message_w_internal_armed = true;
+                            c.win_emu->log.error("[dispatchmessage-trace] REACHED DispatchMessageW's internal worker (candidate "
+                                                 "#%zu) at 0x%llx for a WM_COMMAND message (lpMsg=0x%llx), tid=%u, starting "
+                                                 "chase\n",
+                                                 i + 1, static_cast<unsigned long long>(address), static_cast<unsigned long long>(lp_msg),
+                                                 c.win_emu->current_thread().id);
+                            g_sldim_dispatch_hop_count = 0;
+                            trace_sldim_dispatch_return_hit(c, address);
+                        }
+                        break;
+                    }
+                }
             }
 
             if (g_sldim_dispatch_watch_va != 0 && address == g_sldim_dispatch_watch_va)
