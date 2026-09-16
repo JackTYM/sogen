@@ -1064,6 +1064,12 @@ namespace sogen
             c.win_emu.log.log("NtCreateUserProcess: launching child %u: %s\n", record_id, u16_to_u8(image_path).c_str());
             c.win_emu.log.log("NtCreateUserProcess: child %u cmdline: %s\n", record_id, u16_to_u8(command_line).c_str());
 
+            if (std::getenv("SOGEN_TRACE_CHILD_PROCESS_LAUNCH") != nullptr)
+            {
+                c.win_emu.log.log("NtCreateUserProcess: child %u parent: %s\n", record_id,
+                                  c.win_emu.mod_manager.executable ? c.win_emu.mod_manager.executable->name.c_str() : "<unknown>");
+            }
+
             application_settings child_settings{
                 .application = image_windows_path,
                 .working_directory = windows_path{working_directory},
@@ -1073,6 +1079,16 @@ namespace sogen
                 .process_id = child_pid,
                 .start_suspended = (thread_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) != 0,
             };
+
+            if (std::getenv("SOGEN_TRACE_CHILD_PROCESS_LAUNCH") != nullptr)
+            {
+                c.win_emu.log.log("NtCreateUserProcess: child %u cwd: %s\n", record_id, child_settings.working_directory.string().c_str());
+                for (const auto& [key, value] : child_settings.environment)
+                {
+                    c.win_emu.log.log("NtCreateUserProcess: child %u env: %s=%s\n", record_id, u16_to_u8(key).c_str(),
+                                      u16_to_u8(value).c_str());
+                }
+            }
 
             std::vector<inherited_pipe_handle> inherited_pipes{};
             std::vector<inherited_section_handle> inherited_sections{};
@@ -1164,6 +1180,20 @@ namespace sogen
                     .outbound_quota = pipe->outbound_quota,
                     .default_timeout = pipe->default_timeout,
                 });
+            }
+
+            if (std::getenv("SOGEN_TRACE_CHILD_PROCESS_LAUNCH") != nullptr)
+            {
+                c.win_emu.log.log("NtCreateUserProcess: child %u inherited handles: %zu pipes, %zu sections, %zu events\n", record_id,
+                                  inherited_pipes.size(), inherited_sections.size(), inherited_events.size());
+                for (const auto& p : inherited_pipes)
+                {
+                    c.win_emu.log.log("NtCreateUserProcess: child %u inherited pipe: %s\n", record_id, u16_to_u8(p.name).c_str());
+                }
+                for (const auto& e : inherited_events)
+                {
+                    c.win_emu.log.log("NtCreateUserProcess: child %u inherited event: %s\n", record_id, u16_to_u8(e.name).c_str());
+                }
             }
 
             child_process_outcome outcome{};
