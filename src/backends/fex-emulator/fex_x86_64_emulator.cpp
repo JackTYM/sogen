@@ -2844,7 +2844,16 @@ namespace sogen::fex
 #else
                 if (::mprotect(reinterpret_cast<void*>(address), size, to_prot(permissions)) != 0)
                 {
-                    throw std::runtime_error("FEX backend failed to change memory protection");
+                    const int mprotect_errno = errno;
+                    const auto& arena = fex_internal_arena::instance();
+                    const bool in_fex_arena = arena.active() && address >= arena.base() && address < arena.base() + arena.size();
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                             "FEX backend failed to change memory protection: mprotect(addr=0x%llx, size=0x%zx, prot=0x%x) failed, "
+                             "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
+                             static_cast<unsigned long long>(address), size, to_prot(permissions), mprotect_errno,
+                             strerror(mprotect_errno), static_cast<unsigned>(permissions), in_fex_arena ? 1 : 0);
+                    throw std::runtime_error(buf);
                 }
 #endif
 
@@ -2960,7 +2969,17 @@ namespace sogen::fex
 
                     if (::mprotect(host_ptr, run_size, to_host_prot_hvf(hvf_prot)) != 0)
                     {
-                        throw std::runtime_error("FEX backend failed to change memory protection");
+                        const int mprotect_errno = errno;
+                        const auto& arena = fex_internal_arena::instance();
+                        const auto host_addr = reinterpret_cast<uintptr_t>(host_ptr);
+                        const bool in_fex_arena = arena.active() && host_addr >= arena.base() && host_addr < arena.base() + arena.size();
+                        char buf[256];
+                        snprintf(buf, sizeof(buf),
+                                 "FEX backend failed to change memory protection: mprotect(host=0x%llx, size=0x%zx, prot=0x%x) failed, "
+                                 "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
+                                 static_cast<unsigned long long>(host_addr), run_size, to_host_prot_hvf(hvf_prot), mprotect_errno,
+                                 strerror(mprotect_errno), static_cast<unsigned>(effective), in_fex_arena ? 1 : 0);
+                        throw std::runtime_error(buf);
                     }
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
@@ -3247,7 +3266,17 @@ namespace sogen::fex
 
             if (::mprotect(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective))) != 0)
             {
-                throw std::runtime_error("FEX backend failed to change memory protection");
+                const int mprotect_errno = errno;
+                const auto& arena = fex_internal_arena::instance();
+                const auto host_addr = reinterpret_cast<uintptr_t>(host_ptr);
+                const bool in_fex_arena = arena.active() && host_addr >= arena.base() && host_addr < arena.base() + arena.size();
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "FEX backend failed to change memory protection: mprotect(host=0x%llx, size=0x%zx, prot=0x%x) failed, "
+                         "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
+                         static_cast<unsigned long long>(host_addr), host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective)),
+                         mprotect_errno, strerror(mprotect_errno), static_cast<unsigned>(effective), in_fex_arena ? 1 : 0);
+                throw std::runtime_error(buf);
             }
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
             if (g_hvf != nullptr)
@@ -3312,7 +3341,17 @@ namespace sogen::fex
                 {
                     if (::mprotect(host_ptr, run_size, host_prot) != 0)
                     {
-                        throw std::runtime_error("FEX backend failed to change memory protection");
+                        const int mprotect_errno = errno;
+                        const auto& arena = fex_internal_arena::instance();
+                        const auto host_addr = reinterpret_cast<uintptr_t>(host_ptr);
+                        const bool in_fex_arena = arena.active() && host_addr >= arena.base() && host_addr < arena.base() + arena.size();
+                        char buf[256];
+                        snprintf(buf, sizeof(buf),
+                                 "FEX backend failed to change memory protection: mprotect(host=0x%llx, size=0x%zx, prot=0x%x) failed, "
+                                 "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
+                                 static_cast<unsigned long long>(host_addr), run_size, host_prot, mprotect_errno, strerror(mprotect_errno),
+                                 static_cast<unsigned>(permissions), in_fex_arena ? 1 : 0);
+                        throw std::runtime_error(buf);
                     }
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
                     if (g_hvf != nullptr)
