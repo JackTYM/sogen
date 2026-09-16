@@ -120,7 +120,46 @@ namespace sogen
         bool g_sldim_dispatch_watch_for_exe_entry = false;
         bool g_sldim_dispatch_indirect_is_jmp = false;
         uint32_t g_sldim_dispatch_hop_count = 0;
-        constexpr uint32_t SLDIM_DISPATCH_MAX_HOPS = 300;
+        // 300 was enough to reach and disassemble the real message-dispatch logic in every prior
+        // cycle's chase target, but following INTO user32.dll+0x27ac0 (this cycle's own target, see
+        // project_solidworks_bringup.md #289) reveals a genuine, real linear scan of the per-thread
+        // class-info table (a ~0x248-byte-stride walk comparing a fixed class atom) before it ever
+        // reaches the actual WNDPROC-invoking call -- 300 hops is exhausted mid-scan every time.
+        constexpr uint32_t SLDIM_DISPATCH_MAX_HOPS = 20000;
+
+        // user32.dll's real internal message-delivery helper that DispatchMessageW's own internal
+        // worker calls to invoke a window's WNDPROC (`mov ecx,[esi+0xe0]; call user32.dll+0x27ac0`,
+        // live-disassembled in project_solidworks_bringup.md #288 point 8). The generic chase below
+        // always skips over a direct CALL like any other; this one is followed INTO instead. Live
+        // disassembly this cycle (see #289) found 0x27ac0's own real body, after its class-info-table
+        // scan, ends in `mov ecx,esi; call user32.dll+0x47dac` then
+        // `push [ebp+0x18]; push [ebp+0x14]; push edi; push ebx; push esi; call user32.dll+0x47c78` --
+        // 0x47c78's 5-argument shape (hwnd/msg/wParam/lParam-sized) is the real remaining candidate
+        // for the actual per-window WNDPROC-invoking call, so it is followed into as well. Once
+        // inside this chain, any indirect call reached is also followed live (register-resolved),
+        // hop by hop, until execution genuinely lands inside sldim.exe's own image -- the real WNDPROC.
+        constexpr uint64_t WNDPROC_INVOKE_RVA = 0x27ac0;
+        constexpr uint64_t WNDPROC_INVOKE_CALLEE_RVA = 0x47c78;
+
+        // sldim.exe's own real, live-confirmed WNDPROC (found this cycle by following the chain
+        // above): `CWnd::FromHandlePermanent`-style handle-map lookup (`call sldim.exe+0x2257`), a
+        // `pWnd->m_hWnd == hWnd` self-consistency check (`cmp [eax+0x20],esi`), then
+        // `push lParam,wParam,msg,hWnd,pWnd; call sldim.exe+0x153e3` -- the real MFC-shaped
+        // AfxCallWndProc-equivalent dispatcher, i.e. the actual message-map routing this
+        // investigation cares about. Followed into for one more level, same as the user32.dll chain.
+        constexpr uint64_t AFX_CALL_WND_PROC_RVA = 0x153e3;
+
+        // AfxCallWndProc's own real body (`sldim.exe+0xb81996`, reached via the RVA above) saves the
+        // thread state's `m_lastSentMsg` (a 7-dword/28-byte MSG copy at state_obj+0x58, via `rep
+        // movsd`) to a local buffer, overwrites it with the message actually being dispatched, then
+        // does `mov ecx,ebx; call esi` where `esi = [[ebx]+0x114]` -- a real C++ virtual call through
+        // pWnd's own vtable (CFG-checked via `call [_guard_check_icall_fptr]` first) into the real
+        // `CWnd::WindowProc`. This is the one specific call site (not a general call target, since its
+        // target address varies by vtable slot contents) forced to be followed regardless of the
+        // general follow-mode state, so the chase can see what WindowProc itself does with wParam
+        // 0x464 rather than stopping the moment sldim.exe's own image is reached.
+        constexpr uint64_t CWND_WINDOWPROC_VIRTUAL_CALL_SITE_RVA = 0xb81a52;
+        bool g_sldim_dispatch_follow_next_indirect_call = false;
 
         // DispatchMessageW's own RVA in the 32-bit (syswow64) user32.dll loaded by sldim.exe under
         // WOW64, re-resolved and cross-checked against the shared root's own COFF export table this
@@ -1333,6 +1372,26 @@ namespace sogen
                     const auto* target_mod_name = c.win_emu->mod_manager.find_name(target);
                     const auto* target_mod = c.win_emu->mod_manager.find_by_address(target);
                     const auto target_offset = target_mod ? target - target_mod->image_base : target;
+
+                    const bool is_wndproc_invoke_target =
+                        target_mod_name != nullptr &&
+                        ((std::string_view(target_mod_name) == "user32.dll" &&
+                          (target_offset == WNDPROC_INVOKE_RVA || target_offset == WNDPROC_INVOKE_CALLEE_RVA)) ||
+                         (std::string_view(target_mod_name) == "sldim.exe" && target_offset == AFX_CALL_WND_PROC_RVA));
+
+                    if (is_wndproc_invoke_target || g_sldim_dispatch_follow_next_indirect_call)
+                    {
+                        const auto reached_sldim = c.win_emu->mod_manager.executable->contains(target);
+                        c.win_emu->log.error("[sldim-dispatch-trace]   CALL DIRECT target=0x%llx (%s+0x%llx), FOLLOWING INTO it "
+                                             "(real WNDPROC invoke chain, not skipping) -> next hop 0x%llx%s\n",
+                                             static_cast<unsigned long long>(target), target_mod_name,
+                                             static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(target),
+                                             reached_sldim ? " (genuinely reached sldim.exe's own image -- the real WNDPROC)" : "");
+                        g_sldim_dispatch_follow_next_indirect_call = !reached_sldim;
+                        g_sldim_dispatch_watch_va = target;
+                        return;
+                    }
+
                     c.win_emu->log.error("[sldim-dispatch-trace]   CALL DIRECT target=0x%llx (%s+0x%llx), skipping over (assumed to "
                                          "return) -> next hop 0x%llx\n",
                                          static_cast<unsigned long long>(target), target_mod_name,
@@ -1379,6 +1438,47 @@ namespace sogen
                         g_sldim_dispatch_watch_va = is_call ? after_call : *iat_target;
                         return;
                     }
+                }
+
+                const auto* exe = c.win_emu->mod_manager.executable;
+                const bool is_forced_windowproc_virtual_call =
+                    exe != nullptr && insn.address == exe->image_base + CWND_WINDOWPROC_VIRTUAL_CALL_SITE_RVA;
+
+                if (g_sldim_dispatch_follow_next_indirect_call || is_forced_windowproc_virtual_call)
+                {
+                    if (!is_first_instruction_in_hop)
+                    {
+                        c.win_emu->log.error("[sldim-dispatch-trace]   INDIRECT %s reached mid-hop, cannot resolve its live register "
+                                             "operand yet -- deferring to when it's genuinely live -> next hop 0x%llx\n",
+                                             is_call ? "CALL" : "JMP", static_cast<unsigned long long>(insn.address));
+                        g_sldim_dispatch_watch_va = insn.address;
+                        return;
+                    }
+
+                    auto live_target = resolve_indirect_operand_target(emu, insn);
+                    if (live_target)
+                    {
+                        resolve_jump_target(emu, *live_target);
+                        const auto* target_mod_name = c.win_emu->mod_manager.find_name(*live_target);
+                        const auto* target_mod = c.win_emu->mod_manager.find_by_address(*live_target);
+                        const auto target_offset = target_mod ? *live_target - target_mod->image_base : *live_target;
+                        const auto reached_sldim = c.win_emu->mod_manager.executable->contains(*live_target);
+
+                        c.win_emu->log.error("[sldim-dispatch-trace]   INDIRECT %s resolved live -> target=0x%llx (%s+0x%llx), "
+                                             "FOLLOWING INTO it -> next hop 0x%llx%s\n",
+                                             is_call ? "CALL" : "JMP", static_cast<unsigned long long>(*live_target), target_mod_name,
+                                             static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(*live_target),
+                                             reached_sldim ? " (genuinely reached sldim.exe's own image -- the real WNDPROC)" : "");
+
+                        g_sldim_dispatch_follow_next_indirect_call = !reached_sldim;
+                        g_sldim_dispatch_watch_va = *live_target;
+                        return;
+                    }
+
+                    c.win_emu->log.error("[sldim-dispatch-trace]   INDIRECT %s could not be resolved even though genuinely reached "
+                                         "live; falling back to the default skip-and-diagnose behavior\n",
+                                         is_call ? "CALL" : "JMP");
+                    g_sldim_dispatch_follow_next_indirect_call = false;
                 }
 
                 if (g_sldim_dispatch_indirect_call_va == 0)
