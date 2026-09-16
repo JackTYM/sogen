@@ -4015,10 +4015,15 @@ namespace sogen::fex
         this->stop_requested_ = false;
         // Re-arm InterruptFaultPage for this quantum - a prior stop() may have left it protected to
         // force the last quantum's ExecuteThread to return, and it must be writable again before the
-        // JIT's per-block-entry store runs.
+        // JIT's per-block-entry store runs. Also clear StopRequestFlag (the real-device replacement
+        // for that same mechanism, see request_thread_stop's doc comment): this runs on every
+        // quantum entry, whether or not the NT thread running on this vCPU actually changed, so it
+        // catches the case a thread-switch-based clear would miss - the same thread being picked to
+        // continue running right after it was the one that got stopped.
         {
             auto* const active = this->active_thread_.load();
             ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
+            active->CurrentFrame->StopRequestFlag = 0;
         }
 
         {
@@ -4576,23 +4581,24 @@ namespace sogen::fex
         // sigaction(SIGSEGV/SIGBUS) handler ever sees it (confirmed against real debugserver source:
         // MachException::Message::Reply()'s `signal` argument is only honored for
         // EXC_SOFTWARE/EXC_SOFT_SIGNAL, never for a real EXC_BAD_ACCESS hardware fault), so
-        // handle_fault_signal's InterruptFaultPage handling - and therefore this whole cooperative-
-        // preemption mechanism - can never actually run on real device. Protecting the page here only
-        // produces a fault the debugger has to babysit forever (a tight guest loop re-hits the
-        // same protected page on every iteration's back-edge check, at a full debugger round-trip
-        // each time - see universal.js's data-abort recovery). Skip protecting it at all: every
-        // NeedsPendingInterruptFaultCheck store then just succeeds trivially, at full native speed,
-        // and this vCPU's cooperative stop/quantum-preemption simply never triggers - an accepted,
-        // deliberate tradeoff on real device, the same class as skipping the JIT code-buffer
-        // overflow guard page there (CPUBackend.cpp).
+        // handle_fault_signal's InterruptFaultPage handling can never actually run on real device.
+        // Protecting the page here would only produce a fault the debugger has to babysit forever
+        // (a tight guest loop re-hits the same protected page on every iteration's back-edge check,
+        // at a full debugger round-trip each time - see universal.js's data-abort recovery), so
+        // leave it unprotected (every NeedsPendingInterruptFaultCheck store then just succeeds
+        // trivially, at full native speed) and use StopRequestFlag instead: an ordinary memory
+        // store, polled by FEX_IOS_POLL_INTERRUPT-gated codegen at JIT block entry (JIT.cpp's
+        // EmitEntryPoint), which has no mprotect/signal dependency and so works unconditionally
+        // here. Cleared at the top of start() on every quantum entry, before ExecuteThread runs.
         static std::atomic<bool> LoggedInterruptFaultPageSkipOnce {false};
         if (!LoggedInterruptFaultPageSkipOnce.exchange(true, std::memory_order_relaxed))
         {
             const char* const msg = "[FEX backend] Skipping InterruptFaultPage protection on real iOS device - "
-                                    "cooperative thread-stop/quantum-preemption via this page will never trigger.";
+                                    "using StopRequestFlag poll instead.";
             fprintf(stderr, "%s\n", msg);
             sogen::utils::log_ios_device_milestone(msg);
         }
+        active->CurrentFrame->StopRequestFlag = 1;
         return;
 #else
         ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_NONE);
