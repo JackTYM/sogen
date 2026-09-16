@@ -183,6 +183,60 @@ namespace sogen
 
         sldim_queue_check_state g_sldim_queue_check_state{};
 
+        // CMessagingThread's own real constructors and destructor (statically disassembled this
+        // cycle from the direct-launch cache's own sldim.exe copy, see
+        // project_solidworks_bringup.md #295). state_obj+4 -- the "pending command" field
+        // get_pending_command() reads and the self-repost relay polls -- is a raw CMessagingThread*
+        // (confirmed via RTTI: the vtable written at the destructor's own `mov [esi],0x184a734`
+        // resolves to a `.?AVCMessagingThread@@` type descriptor, itself referencing CWinThread as
+        // a base). The 2-arg constructor (`sldim.exe+0xb8abf6`) stores its two arguments into
+        // `this+0x38`/`this+0x34`; the 0-arg constructor (`sldim.exe+0xb8ac42`) zero-initializes the
+        // same two fields. Both watches fire right after the shared SEH-prolog helper returns, at
+        // the `mov esi,ecx` that first captures `this`.
+        constexpr uint64_t SLDIM_CMSGTHREAD_CTOR2_RVA = 0xb8ac02;
+        constexpr uint64_t SLDIM_CMSGTHREAD_CTOR0_RVA = 0xb8ac4e;
+        uint64_t g_sldim_cmsgthread_ctor2_trace_va = 0;
+        uint64_t g_sldim_cmsgthread_ctor0_trace_va = 0;
+
+        // CMessagingThread's own real destructor (`sldim.exe+0xb8ac85`, reached from its scalar
+        // deleting destructor at `sldim.exe+0xb8ad3d` -- itself the class's real vtable slot 1,
+        // `0x4181b0` -- via a thin `jmp` thunk at `0x41d07a`, plus two further direct call sites at
+        // `sldim.exe+0x8c8bed`/`0xb9d430` found this cycle, both inside OTHER classes' own
+        // destructors that call this one as a base-class subobject destructor). This watch fires
+        // right after the destructor's own inline SEH prolog, at the `mov esi,ecx` that first
+        // captures `this` -- i.e. every single invocation of this destructor, regardless of which
+        // caller reached it or whether the field-4 clear below ends up matching.
+        constexpr uint64_t SLDIM_CMSGTHREAD_DTOR_ENTRY_RVA = 0xb8aca8;
+        uint64_t g_sldim_cmsgthread_dtor_entry_trace_va = 0;
+
+        // The destructor's own real "am I the currently-pending command" check (`call
+        // sldim.exe+0x413958` to resolve `state_obj`, then `cmp [eax+4],esi; jne skip; and
+        // [eax+4],0` -- the exact clear site prior findings quoted as `sldim.exe+0xb89cbf`/`f8acbf`,
+        // which is this same instruction's own address under the objdump `.text`-section-relative
+        // labeling convention, 0x1000 off from the image-base-relative RVA this file's own
+        // `exe->image_base + RVA` convention uses everywhere else). This watch fires at the `cmp`
+        // itself, capturing `state_obj` (eax), `this` (esi), and the live `state_obj->field_4` value
+        // to determine whether the match -- and therefore the clear -- actually happens.
+        constexpr uint64_t SLDIM_CMSGTHREAD_DTOR_CHECK_RVA = 0xb8acc4;
+        uint64_t g_sldim_cmsgthread_dtor_check_trace_va = 0;
+
+        uint64_t g_sldim_cmsgthread_ctor_hits = 0;
+        uint64_t g_sldim_cmsgthread_dtor_entry_hits = 0;
+        uint64_t g_sldim_cmsgthread_dtor_match_hits = 0;
+
+        // get_pending_command()'s own real body (`sldim.exe+0xb8af2f`, see project_solidworks_bringup.md
+        // #294): `call sldim.exe+0x413958` resolves `state_obj`, then `mov eax,[eax+4]; ret` reads
+        // field-4. This watch fires at the `mov eax,[eax+4]` itself, where `eax` still holds the
+        // un-dereferenced `state_obj` pointer -- the first time it is seen ON TID 40 (the producer
+        // busy-loop thread #293/#294 already identified; `state_obj` is itself thread-local, so arming
+        // on any other thread's own call would watch a different, unrelated slot), a `hook_memory_write`
+        // is dynamically armed on `state_obj+4` (the same technique #294 used for the trypop queue's own
+        // count field), catching every single write to the "pending command" field regardless of which
+        // code performs it, however rare -- the definitive way to answer where it is actually set/cleared.
+        constexpr uint64_t SLDIM_GET_PENDING_COMMAND_STATE_RVA = 0xb8af34;
+        uint64_t g_sldim_get_pending_command_state_trace_va = 0;
+        bool g_sldim_pending_command_write_watch_armed = false;
+
         // Live localization of the missing DispatchMessage call site for sldim.exe's WM_COMMAND
         // relay (see project_solidworks_bringup.md #284): g_sldim_dispatch_watch_va is armed by
         // handle_NtUserGetMessage (src/windows-emulator/syscalls/user.cpp) at the guest's real
@@ -1061,6 +1115,103 @@ namespace sogen
                                      static_cast<unsigned long long>(g_sldim_trypop_count_nonzero_hits),
                                      static_cast<unsigned long long>(g_sldim_trypop_last_count));
             }
+        }
+
+        void trace_sldim_cmsgthread_ctor_hit(const analysis_context& c, const uint64_t address, const bool two_arg)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            ++g_sldim_cmsgthread_ctor_hits;
+
+            if (two_arg)
+            {
+                const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
+                uint32_t arg1{};
+                uint32_t arg2{};
+                emu.try_read_memory(ebp + 0x8, &arg1, sizeof(arg1));
+                emu.try_read_memory(ebp + 0xc, &arg2, sizeof(arg2));
+
+                c.win_emu->log.error("[sldim-cmsgthread-trace] 2-arg ctor hit at 0x%llx this=0x%x arg1(->+0x38)=0x%x "
+                                     "arg2(->+0x34)=0x%x tid=%u ctor_hits=%llu\n",
+                                     static_cast<unsigned long long>(address), this_ptr, arg1, arg2, c.win_emu->current_thread().id,
+                                     static_cast<unsigned long long>(g_sldim_cmsgthread_ctor_hits));
+            }
+            else
+            {
+                c.win_emu->log.error("[sldim-cmsgthread-trace] 0-arg ctor hit at 0x%llx this=0x%x tid=%u ctor_hits=%llu\n",
+                                     static_cast<unsigned long long>(address), this_ptr, c.win_emu->current_thread().id,
+                                     static_cast<unsigned long long>(g_sldim_cmsgthread_ctor_hits));
+            }
+        }
+
+        void trace_sldim_cmsgthread_dtor_entry_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            ++g_sldim_cmsgthread_dtor_entry_hits;
+
+            c.win_emu->log.error("[sldim-cmsgthread-trace] DESTRUCTOR ENTRY hit at 0x%llx this=0x%x tid=%u dtor_entry_hits=%llu\n",
+                                 static_cast<unsigned long long>(address), this_ptr, c.win_emu->current_thread().id,
+                                 static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_entry_hits));
+        }
+
+        void trace_sldim_cmsgthread_dtor_check_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto state_obj = emu.reg<uint32_t>(x86_register::eax);
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
+
+            uint32_t field4{};
+            const auto read_ok = emu.try_read_memory(state_obj + 4, &field4, sizeof(field4));
+            const auto matches = read_ok && field4 == this_ptr;
+
+            if (matches)
+            {
+                ++g_sldim_cmsgthread_dtor_match_hits;
+            }
+
+            c.win_emu->log.error("[sldim-cmsgthread-trace] DESTRUCTOR CHECK hit at 0x%llx state_obj=0x%x this=0x%x state_obj->field4=0x%x "
+                                 "(read_ok=%d) MATCH=%d tid=%u match_hits=%llu\n",
+                                 static_cast<unsigned long long>(address), state_obj, this_ptr, field4, read_ok ? 1 : 0, matches ? 1 : 0,
+                                 c.win_emu->current_thread().id, static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_match_hits));
+        }
+
+        void trace_sldim_pending_command_state_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto state_obj = emu.reg<uint32_t>(x86_register::eax);
+
+            if (state_obj == 0 || g_sldim_pending_command_write_watch_armed || c.win_emu->current_thread().id != 40)
+            {
+                return;
+            }
+
+            g_sldim_pending_command_write_watch_armed = true;
+            const uint64_t field4_addr = state_obj + 4;
+            c.win_emu->log.error(
+                "[sldim-pendingcmd-trace] hit at 0x%llx, arming a write-watch on state_obj->field4 at 0x%llx (state_obj=0x%x) tid=%u\n",
+                static_cast<unsigned long long>(address), static_cast<unsigned long long>(field4_addr), state_obj,
+                c.win_emu->current_thread().id);
+
+            emu.hook_memory_write(field4_addr, sizeof(uint32_t),
+                                  [&c, field4_addr](cpu_interface&, const uint64_t write_address, const void* value, const size_t size) {
+                                      uint32_t new_value{};
+                                      memcpy(&new_value, value, std::min(size, sizeof(new_value)));
+
+                                      const auto rip = c.win_emu->emu().read_instruction_pointer();
+                                      const auto* writer_mod_name = c.win_emu->mod_manager.find_name(rip);
+                                      const auto* writer_mod = c.win_emu->mod_manager.find_by_address(rip);
+                                      const auto writer_offset = writer_mod ? rip - writer_mod->image_base : rip;
+
+                                      c.win_emu->log.error(
+                                          "[sldim-pendingcmd-trace] WRITE to state_obj->field4 0x%llx (at 0x%llx): new_value=0x%x "
+                                          "size=%zu writer_rip=0x%llx (%s+0x%llx) tid=%u\n",
+                                          static_cast<unsigned long long>(field4_addr), static_cast<unsigned long long>(write_address),
+                                          new_value, size, static_cast<unsigned long long>(rip), writer_mod_name,
+                                          static_cast<unsigned long long>(writer_offset), c.win_emu->current_thread().id);
+                                  });
         }
 
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
@@ -2018,10 +2169,16 @@ namespace sogen
                     g_sldim_handler_delegate_trace_va = exe->image_base + SLDIM_HANDLER_DELEGATE_CALL_RVA;
                     g_sldim_trypop_entry_trace_va = exe->image_base + SLDIM_TRYPOP_ENTRY_RVA;
                     g_sldim_trypop_count_check_trace_va = exe->image_base + SLDIM_TRYPOP_COUNT_CHECK_RVA;
+                    g_sldim_cmsgthread_ctor2_trace_va = exe->image_base + SLDIM_CMSGTHREAD_CTOR2_RVA;
+                    g_sldim_cmsgthread_ctor0_trace_va = exe->image_base + SLDIM_CMSGTHREAD_CTOR0_RVA;
+                    g_sldim_cmsgthread_dtor_entry_trace_va = exe->image_base + SLDIM_CMSGTHREAD_DTOR_ENTRY_RVA;
+                    g_sldim_cmsgthread_dtor_check_trace_va = exe->image_base + SLDIM_CMSGTHREAD_DTOR_CHECK_RVA;
+                    g_sldim_get_pending_command_state_trace_va = exe->image_base + SLDIM_GET_PENDING_COMMAND_STATE_RVA;
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
-                        "0x%llx, trypop entry at 0x%llx, trypop count check at 0x%llx\n",
+                        "0x%llx, trypop entry at 0x%llx, trypop count check at 0x%llx, CMessagingThread ctor2/ctor0 at "
+                        "0x%llx / 0x%llx, dtor entry/check at 0x%llx / 0x%llx, get_pending_command state at 0x%llx\n",
                         static_cast<unsigned long long>(exe->image_base), static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2),
                         static_cast<unsigned long long>(g_sldim_oncommand_trace_va),
@@ -2030,7 +2187,12 @@ namespace sogen
                         static_cast<unsigned long long>(g_sldim_findentry_trace_va),
                         static_cast<unsigned long long>(g_sldim_handler_delegate_trace_va),
                         static_cast<unsigned long long>(g_sldim_trypop_entry_trace_va),
-                        static_cast<unsigned long long>(g_sldim_trypop_count_check_trace_va));
+                        static_cast<unsigned long long>(g_sldim_trypop_count_check_trace_va),
+                        static_cast<unsigned long long>(g_sldim_cmsgthread_ctor2_trace_va),
+                        static_cast<unsigned long long>(g_sldim_cmsgthread_ctor0_trace_va),
+                        static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_entry_trace_va),
+                        static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_check_trace_va),
+                        static_cast<unsigned long long>(g_sldim_get_pending_command_state_trace_va));
                 }
             }
 
@@ -2073,6 +2235,31 @@ namespace sogen
             if (g_sldim_trypop_count_check_trace_va != 0 && address == g_sldim_trypop_count_check_trace_va)
             {
                 trace_sldim_trypop_count_check_hit(c, address);
+            }
+
+            if (g_sldim_cmsgthread_ctor2_trace_va != 0 && address == g_sldim_cmsgthread_ctor2_trace_va)
+            {
+                trace_sldim_cmsgthread_ctor_hit(c, address, true);
+            }
+
+            if (g_sldim_cmsgthread_ctor0_trace_va != 0 && address == g_sldim_cmsgthread_ctor0_trace_va)
+            {
+                trace_sldim_cmsgthread_ctor_hit(c, address, false);
+            }
+
+            if (g_sldim_cmsgthread_dtor_entry_trace_va != 0 && address == g_sldim_cmsgthread_dtor_entry_trace_va)
+            {
+                trace_sldim_cmsgthread_dtor_entry_hit(c, address);
+            }
+
+            if (g_sldim_cmsgthread_dtor_check_trace_va != 0 && address == g_sldim_cmsgthread_dtor_check_trace_va)
+            {
+                trace_sldim_cmsgthread_dtor_check_hit(c, address);
+            }
+
+            if (g_sldim_get_pending_command_state_trace_va != 0 && address == g_sldim_get_pending_command_state_trace_va)
+            {
+                trace_sldim_pending_command_state_hit(c, address);
             }
 
             if (!g_dispatch_message_w_entry_armed)
