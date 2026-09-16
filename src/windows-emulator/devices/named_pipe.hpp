@@ -64,10 +64,10 @@ namespace sogen
         // Mirrors the handle's real synchronous-vs-overlapped mode: false iff the creating
         // NtCreateFile/NtCreateNamedPipeFile's CreateOptions carried neither FILE_SYNCHRONOUS_IO_ALERT nor
         // FILE_SYNCHRONOUS_IO_NONALERT, the NT-level signature of a Win32 FILE_FLAG_OVERLAPPED handle. Gates
-        // try_deliver_read's park-the-calling-thread behavior -- see there. listen()/wait() don't consult
-        // this: unlike a pended read, they have no delivery path back to the caller's event/APC/IOCP once
-        // the awaited condition is met, only the yield_thread/await_objects replay-on-wake mechanism, so
-        // making them pend without blocking would drop the completion instead of merely deferring it.
+        // try_deliver_read's and listen()'s park-the-calling-thread behavior -- see there. wait() still
+        // doesn't consult this: it has no delivery path back to the caller's event/APC/IOCP once the
+        // awaited condition is met, only the yield_thread/await_objects replay-on-wake mechanism, so
+        // making it pend without blocking would drop the completion instead of merely deferring it.
         bool is_synchronous_handle{true};
 
         // Backs a pended FSCTL_PIPE_WAIT (see wait()): parks the calling thread on an event that is
@@ -94,6 +94,14 @@ namespace sogen
         handle read_ready_event{};
         std::optional<io_device_context> pending_read{};
 
+        // Backs an overlapped FSCTL_PIPE_LISTEN (see listen()): unlike a synchronous handle, whose
+        // listening thread parks on listen_event until a client connects, an overlapped handle must
+        // return STATUS_PENDING to the caller immediately and deliver the eventual connect through the
+        // caller's own event/APC/IOCP instead -- the same completion path complete_read() already uses
+        // for a pended read. Captured here so work() can complete it once client_connected is set,
+        // mirroring pending_read's own replay-on-wake pattern.
+        std::optional<io_device_context> pending_listen{};
+
         void create(windows_emulator&, const io_device_creation_data&) override
         {
         }
@@ -110,6 +118,14 @@ namespace sogen
                 {
                     e->signaled = true;
                 }
+            }
+
+            if (this->pending_listen && this->client_connected)
+            {
+                this->client_connected = false;
+                const auto ctx = *this->pending_listen;
+                this->pending_listen.reset();
+                this->complete_listen(win_emu, ctx);
             }
         }
 
@@ -223,6 +239,12 @@ namespace sogen
             {
                 this->client_connected = false;
                 return STATUS_PIPE_CONNECTED;
+            }
+
+            if (!this->is_synchronous_handle)
+            {
+                this->pending_listen = c;
+                return STATUS_PENDING;
             }
 
             if (!this->listen_event.bits)
@@ -365,6 +387,66 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // Completes a deferred overlapped FSCTL_PIPE_LISTEN (see listen()'s pending_listen path) once a
+        // client has connected, exactly like complete_read() does for a pended read: caller-supplied
+        // event, WoW64-aware APC, and an I/O completion port packet if one is associated with this
+        // handle. A real ConnectNamedPipe completion carries no output data, so unlike complete_read()
+        // there is nothing to copy -- only the completion itself (Information = 0).
+        NTSTATUS complete_listen(windows_emulator& win_emu, const io_device_context& ctx)
+        {
+            if (ctx.io_status_block)
+            {
+                IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                block.Information = 0;
+                ctx.io_status_block.write(block);
+            }
+
+            if (ctx.event.bits)
+            {
+                if (auto* e = win_emu.process.events.get(ctx.event))
+                {
+                    e->signaled = true;
+                }
+            }
+
+            if (ctx.apc_routine)
+            {
+                if (win_emu.process.is_wow64_process && ctx.io_status_block)
+                {
+                    constexpr uint32_t status32 = STATUS_SUCCESS;
+                    constexpr uint32_t information32 = 0;
+                    win_emu.emu().write_memory(ctx.io_status_block.value(), &status32, sizeof(status32));
+                    win_emu.emu().write_memory(ctx.io_status_block.value() + sizeof(status32), &information32, sizeof(information32));
+                }
+
+                ctx.thread().pending_apcs.push_back({
+                    .flags = 0,
+                    .apc_routine = ctx.apc_routine,
+                    .apc_argument1 = ctx.apc_context,
+                    .apc_argument2 = ctx.io_status_block.value(),
+                    .apc_argument3 = 0,
+                    .restamp_io_status_block = win_emu.process.is_wow64_process && static_cast<bool>(ctx.io_status_block),
+                    .io_status = static_cast<int32_t>(STATUS_SUCCESS),
+                    .io_information = 0,
+                });
+            }
+
+            if (const auto association = this->get_completion_port())
+            {
+                if (auto* completion = win_emu.process.io_completions.get(association->port))
+                {
+                    io_completion_message message{};
+                    message.key_context = association->key;
+                    message.apc_context = ctx.apc_context;
+                    message.io_status_block.Status = STATUS_SUCCESS;
+                    message.io_status_block.Information = 0;
+                    completion->enqueue(message);
+                }
+            }
+
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS peek(windows_emulator& win_emu, const io_device_context& c)
         {
             constexpr auto header_size = static_cast<ULONG>(sizeof(file_pipe_peek_buffer));
@@ -438,12 +520,30 @@ namespace sogen
     // from a sibling OS process.
     inline void mark_named_pipe_connected(windows_emulator& win_emu, process_context& proc, const std::u16string_view name)
     {
+        static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
+
+        bool matched = false;
         for (auto& entry : proc.devices)
         {
-            if (auto* pipe = entry.second.get_internal_device<named_pipe>(); pipe && pipe->name == name)
+            if (auto* pipe = entry.second.get_internal_device<named_pipe>())
             {
-                pipe->mark_client_connected(win_emu);
+                if (trace_pipe_io)
+                {
+                    win_emu.log.info("[pipe-io-trace] mark_named_pipe_connected candidate pipe='%s' incoming='%s' match=%d\n",
+                                     u16_to_u8(pipe->name).c_str(), u16_to_u8(name).c_str(), pipe->name == name);
+                }
+
+                if (pipe->name == name)
+                {
+                    matched = true;
+                    pipe->mark_client_connected(win_emu);
+                }
             }
+        }
+
+        if (trace_pipe_io && !matched)
+        {
+            win_emu.log.info("[pipe-io-trace] mark_named_pipe_connected NO MATCH for incoming='%s'\n", u16_to_u8(name).c_str());
         }
     }
 

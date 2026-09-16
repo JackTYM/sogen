@@ -966,6 +966,12 @@ namespace sogen
 
     void windows_emulator::broadcast_named_pipe_connect(const std::u16string_view name)
     {
+        if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+        {
+            this->log.info("[pipe-io-trace] broadcast_named_pipe_connect name='%s' peers=%zu\n", u16_to_u8(name).c_str(),
+                           this->pipe_ipc_peers_.size());
+        }
+
         if (this->pipe_ipc_peers_.empty())
         {
             return;
@@ -1000,10 +1006,18 @@ namespace sogen
 
     void windows_emulator::pump_pipe_ipc()
     {
+        static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
+
         for (auto& peer : this->pipe_ipc_peers_)
         {
             while (const auto message = peer->try_receive())
             {
+                if (trace_pipe_io)
+                {
+                    this->log.info("[pipe-io-trace] pump_pipe_ipc received type=%d name='%s'\n", static_cast<int>(message->type),
+                                   u16_to_u8(message->pipe_name).c_str());
+                }
+
                 if (message->type == pipe_ipc_message_type::write)
                 {
                     deliver_bytes_to_named_pipe(this->process, message->pipe_name, message->data, nullptr);
