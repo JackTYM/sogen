@@ -899,6 +899,68 @@ namespace sogen
                                  static_cast<unsigned long long>(caller_offset));
         }
 
+        // Decodes the MSVC x64 RTTI chain (vtable[-1] -> RTTICompleteObjectLocator -> TypeDescriptor)
+        // for a polymorphic object's vtable pointer, exactly the technique project_solidworks_bringup.md
+        // #295 already used successfully to identify CMessagingThread from a raw vtable address -- applied
+        // here to whatever real C++ class the delegate-call's target object (project_solidworks_bringup.md
+        // #279-281) actually is, since its vtable slot resolving to a no-op `ret` left that unresolved.
+        struct rtti_decode_result
+        {
+            std::string type_name;
+            uint64_t vtable_ptr{};
+            uint64_t locator_ptr{};
+            uint32_t type_descriptor_rva{};
+            const char* failed_at = nullptr;
+        };
+
+        rtti_decode_result decode_rtti_type_name(const analysis_context& c, const uint64_t object_ptr)
+        {
+            auto& emu = c.win_emu->emu();
+            rtti_decode_result result{};
+
+            if (!emu.try_read_memory(object_ptr, &result.vtable_ptr, sizeof(result.vtable_ptr)) || result.vtable_ptr == 0)
+            {
+                result.failed_at = "read-vtable-ptr";
+                return result;
+            }
+
+            if (!emu.try_read_memory(result.vtable_ptr - sizeof(uint64_t), &result.locator_ptr, sizeof(result.locator_ptr)) ||
+                result.locator_ptr == 0)
+            {
+                result.failed_at = "read-locator-ptr";
+                return result;
+            }
+
+            if (!emu.try_read_memory(result.locator_ptr + 12, &result.type_descriptor_rva, sizeof(result.type_descriptor_rva)) ||
+                result.type_descriptor_rva == 0)
+            {
+                result.failed_at = "read-type-descriptor-rva";
+                return result;
+            }
+
+            const auto* vtable_mod = c.win_emu->mod_manager.find_by_address(result.vtable_ptr);
+            if (!vtable_mod)
+            {
+                result.failed_at = "resolve-vtable-module";
+                return result;
+            }
+
+            try
+            {
+                result.type_name = read_string<char>(c.win_emu->memory, vtable_mod->image_base + result.type_descriptor_rva + 16);
+                if (result.type_name.empty())
+                {
+                    result.failed_at = "empty-type-name";
+                }
+            }
+            catch (...)
+            {
+                result.failed_at = "read-type-name-threw";
+            }
+
+            return result;
+        }
+
         void trace_platform_channel_delegate_call_hit(const analysis_context& c, const uint64_t address)
         {
             auto& emu = c.win_emu->emu();
@@ -911,10 +973,15 @@ namespace sogen
             const auto* target_mod = c.win_emu->mod_manager.find_by_address(rax);
             const auto target_offset = target_mod ? rax - target_mod->image_base : rax;
 
+            const auto rtti = decode_rtti_type_name(c, rcx);
+
             c.win_emu->log.error("[named-pipe-create-trace] delegate-call hit at 0x%llx, tracker_this=0x%llx delegate_this=0x%llx "
+                                 "delegate_type=\"%s\" rtti_failed_at=\"%s\" delegate_vtable=0x%llx locator=0x%llx type_desc_rva=0x%x "
                                  "target=0x%llx (%s+0x%llx) tid=%u\n",
                                  static_cast<unsigned long long>(address), static_cast<unsigned long long>(rsi),
-                                 static_cast<unsigned long long>(rcx), static_cast<unsigned long long>(rax), target_mod_name,
+                                 static_cast<unsigned long long>(rcx), rtti.type_name.c_str(), rtti.failed_at ? rtti.failed_at : "",
+                                 static_cast<unsigned long long>(rtti.vtable_ptr), static_cast<unsigned long long>(rtti.locator_ptr),
+                                 rtti.type_descriptor_rva, static_cast<unsigned long long>(rax), target_mod_name,
                                  static_cast<unsigned long long>(target_offset), c.win_emu->current_thread().id);
         }
 
