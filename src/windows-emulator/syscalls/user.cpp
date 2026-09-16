@@ -3541,9 +3541,16 @@ namespace sogen
 
             if (win->thread_id != c.vcpu.active_thread->id)
             {
+                if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && msg == WM_COMMAND)
+                {
+                    c.win_emu.log.error(
+                        "[sldim-queue-trace] cross-thread WM_COMMAND: type=0x%x wParam=0x%llx target_tid=%u sender_tid=%u\n", type,
+                        static_cast<unsigned long long>(w_param), win->thread_id, c.vcpu.active_thread->id);
+                }
+
                 // TODO: This is a bit incorrect. We're supposed to wait until the message is received, but this is fine for a first
                 //       minimal version.
-                if (type == FNID_SENDMESSAGECALLBACK)
+                if (type == FNID_SENDMESSAGECALLBACK || type == FNID_SENDMESSAGE)
                 {
                     if (auto* t = c.proc.find_thread_by_id(win->thread_id))
                     {
@@ -3553,6 +3560,13 @@ namespace sogen
                         queued_message.wParam = w_param;
                         queued_message.lParam = l_param;
                         t->post_message(c.win_emu, queued_message);
+
+                        if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && msg == WM_COMMAND)
+                        {
+                            c.win_emu.log.error("[sldim-queue-trace] posted WM_COMMAND, target_tid=%u queue_size=%zu awaiting=%d\n",
+                                                win->thread_id, t->message_queue.size(), t->await_msg.has_value() ? 1 : 0);
+                        }
+
                         return TRUE;
                     }
                 }
@@ -3730,6 +3744,12 @@ namespace sogen
 
             if (auto pending_msg = t.peek_pending_message(c.win_emu, hwnd, msg_filter_min, msg_filter_max, true))
             {
+                if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && pending_msg->message == WM_COMMAND)
+                {
+                    c.win_emu.log.error("[sldim-queue-trace] NtUserGetMessage DEQUEUED WM_COMMAND tid=%u wParam=0x%llx\n", t.id,
+                                        static_cast<unsigned long long>(pending_msg->wParam));
+                }
+
                 message.write(*pending_msg);
                 t.current_message_time = pending_msg->time;
                 set_thread_window_context(c, pending_msg->window);
@@ -3752,6 +3772,12 @@ namespace sogen
 
             if (pending_msg)
             {
+                if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && pending_msg->message == WM_COMMAND)
+                {
+                    c.win_emu.log.error("[sldim-queue-trace] NtUserPeekMessage %s WM_COMMAND tid=%u wParam=0x%llx\n",
+                                        should_remove ? "DEQUEUED" : "PEEKED", t.id, static_cast<unsigned long long>(pending_msg->wParam));
+                }
+
                 message.write(*pending_msg);
                 t.current_message_time = pending_msg->time;
                 set_thread_window_context(c, pending_msg->window);

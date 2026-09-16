@@ -88,6 +88,24 @@ namespace sogen
         uint64_t g_platform_channel_delegate_call_trace_va = 0;
         uint64_t g_platform_channel_delegate_return_trace_va = 0;
 
+        // sldim.exe's own inter-thread command-relay busy-spin, disassembled from a live memory
+        // dump (see project_solidworks_bringup.md #256): the two `test eax, eax` checks right
+        // after each `get_pending_command()` call, where a non-zero eax means the queue held an
+        // item.
+        constexpr uint64_t SLDIM_QUEUE_CHECK_RVA_1 = 0x666325;
+        constexpr uint64_t SLDIM_QUEUE_CHECK_RVA_2 = 0x666339;
+        uint64_t g_sldim_queue_check_trace_va_1 = 0;
+        uint64_t g_sldim_queue_check_trace_va_2 = 0;
+        bool g_sldim_queue_check_checked = false;
+
+        struct sldim_queue_check_state
+        {
+            uint64_t total{0};
+            uint64_t nonzero{0};
+        };
+
+        sldim_queue_check_state g_sldim_queue_check_state{};
+
         template <typename Return, typename... Args>
         std::function<Return(Args...)> make_callback(analysis_context& c, Return (*callback)(analysis_context&, Args...))
         {
@@ -677,6 +695,29 @@ namespace sogen
                                  static_cast<unsigned long long>(rax), constructed_flag, gate_flag, c.win_emu->current_thread().id);
         }
 
+        void trace_sldim_queue_check_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+
+            ++g_sldim_queue_check_state.total;
+
+            if (eax != 0)
+            {
+                ++g_sldim_queue_check_state.nonzero;
+                c.win_emu->log.error("[sldim-queue-trace] QUEUE POPULATED: hit at 0x%llx eax=0x%x tid=%u total=%llu nonzero=%llu\n",
+                                     static_cast<unsigned long long>(address), eax, c.win_emu->current_thread().id,
+                                     static_cast<unsigned long long>(g_sldim_queue_check_state.total),
+                                     static_cast<unsigned long long>(g_sldim_queue_check_state.nonzero));
+            }
+            else if ((g_sldim_queue_check_state.total % 2000000) == 0)
+            {
+                c.win_emu->log.error("[sldim-queue-trace] checkpoint: total=%llu nonzero=%llu\n",
+                                     static_cast<unsigned long long>(g_sldim_queue_check_state.total),
+                                     static_cast<unsigned long long>(g_sldim_queue_check_state.nonzero));
+            }
+        }
+
         void handle_module_unload(const analysis_context& c, const mapped_module& mod)
         {
             c.emit_observation<module_unload_event>([&](auto& event) {
@@ -876,6 +917,27 @@ namespace sogen
             if (g_platform_channel_delegate_return_trace_va != 0 && address == g_platform_channel_delegate_return_trace_va)
             {
                 trace_platform_channel_delegate_return_hit(c, address);
+            }
+
+            if (!g_sldim_queue_check_checked && std::getenv("SOGEN_TRACE_SLDIM_QUEUE"))
+            {
+                const auto* exe = c.win_emu->mod_manager.executable;
+                if (exe != nullptr && exe->name == "sldim.exe")
+                {
+                    g_sldim_queue_check_checked = true;
+                    g_sldim_queue_check_trace_va_1 = exe->image_base + SLDIM_QUEUE_CHECK_RVA_1;
+                    g_sldim_queue_check_trace_va_2 = exe->image_base + SLDIM_QUEUE_CHECK_RVA_2;
+                    c.win_emu->log.error("[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx\n",
+                                         static_cast<unsigned long long>(exe->image_base),
+                                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
+                                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2));
+                }
+            }
+
+            if ((g_sldim_queue_check_trace_va_1 != 0 && address == g_sldim_queue_check_trace_va_1) ||
+                (g_sldim_queue_check_trace_va_2 != 0 && address == g_sldim_queue_check_trace_va_2))
+            {
+                trace_sldim_queue_check_hit(c, address);
             }
 
             auto& win_emu = *c.win_emu;
