@@ -1,0 +1,46 @@
+{
+  "planPath": "docs/superpowers/plans/2026-09-16-ios-localdevvpn.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 1: project.yml -- URL schemes + documented build-variant toggle",
+      "status": "pending",
+      "description": "**Goal:** Register the URL schemes both build variants need, and document (without changing default behavior) exactly how to flip project.yml into the self-signed/LocalDevVPN variant.\n\n**Files:**\n- Modify: tools/sogen-ios/project.yml\n\n**Acceptance Criteria:**\n- [ ] LSApplicationQueriesSchemes includes localdevvpn\n- [ ] CFBundleURLTypes registers the sogenios scheme\n- [ ] TunnelExtension dependency and GCC_PREPROCESSOR_DEFINITIONS unchanged in effective value (comments only)\n- [ ] xcodegen generate succeeds\n\n**Verify:** cd tools/sogen-ios && xcodegen generate -> exits 0, no diff to target dependencies/embedded frameworks\n\n```json:metadata\n{\"files\": [\"tools/sogen-ios/project.yml\"], \"verifyCommand\": \"cd tools/sogen-ios && xcodegen generate\", \"acceptanceCriteria\": [\"LSApplicationQueriesSchemes includes localdevvpn\", \"CFBundleURLTypes registers sogenios scheme\", \"default build behavior unchanged\"], \"modelTier\": \"mechanical\"}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 2: LocalDevVPNManager.swift -- the LocalDevVPN tunnel mechanism",
+      "status": "pending",
+      "description": "**Goal:** A new, self-contained manager that establishes the JIT-grant tunnel via LocalDevVPN's URL-scheme handshake instead of TunnelExtension.\n\n**Files:**\n- Create: tools/sogen-ios/Sources/JIT/LocalDevVPNManager.swift\n\n**Acceptance Criteria:**\n- [ ] Exposes LocalDevVPNResult (.connected/.notInstalled/.failed(String)) and LocalDevVPNManager.ensureConnected(completion:)\n- [ ] Detects not-installed via UIApplication.shared.canOpenURL against localdevvpn:// with zero network attempt\n- [ ] Opens localdevvpn://enable?scheme=sogenios when installed\n- [ ] Exposes LocalDevVPNManager.handleCallback() resolving .connected\n- [ ] 8s timeout resolves .failed(...) instead of hanging forever\n- [ ] Builds cleanly as part of the SogenIOS target\n\n**Verify:** cd tools/sogen-ios && xcodegen generate && xcodebuild -project SogenIOS.xcodeproj -scheme SogenIOS -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build -> ** BUILD SUCCEEDED **\n\n```json:metadata\n{\"files\": [\"tools/sogen-ios/Sources/JIT/LocalDevVPNManager.swift\"], \"verifyCommand\": \"cd tools/sogen-ios && xcodegen generate && xcodebuild -project SogenIOS.xcodeproj -scheme SogenIOS -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build\", \"acceptanceCriteria\": [\"LocalDevVPNResult and ensureConnected exist with correct shape\", \"not-installed short-circuits before any network attempt\", \"8s timeout produces .failed\", \"builds cleanly\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 3: Route the sogenios:// callback",
+      "status": "pending",
+      "blockedBy": [1],
+      "description": "**Goal:** Wire LocalDevVPN's completion callback (sogenios://) to LocalDevVPNManager.handleCallback().\n\n**Files:**\n- Modify: tools/sogen-ios/Sources/SogenApp.swift\n\n**Acceptance Criteria:**\n- [ ] Opening a sogenios:// URL while running calls LocalDevVPNManager.handleCallback()\n- [ ] Any other scheme is ignored, no crash\n- [ ] Builds cleanly\n\n**Verify:** Same build command as Task 2 -> ** BUILD SUCCEEDED **. Full behavioral verification is on-device only (Task 6).\n\n```json:metadata\n{\"files\": [\"tools/sogen-ios/Sources/SogenApp.swift\"], \"verifyCommand\": \"cd tools/sogen-ios && xcodegen generate && xcodebuild -project SogenIOS.xcodeproj -scheme SogenIOS -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build\", \"acceptanceCriteria\": [\"onOpenURL routes sogenios:// to LocalDevVPNManager.handleCallback()\", \"other schemes ignored safely\"], \"modelTier\": \"mechanical\"}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 4: JITGateOrchestrator -- select the tunnel mechanism, richer result type",
+      "status": "pending",
+      "blockedBy": [1],
+      "description": "**Goal:** JITGateOrchestrator.run uses TunnelManager or LocalDevVPNManager based on SOGEN_IOS_USE_LOCALDEVVPN, and reports a three-way JITGateResult instead of today's (Bool, String).\n\n**Files:**\n- Modify: tools/sogen-ios/Sources/JIT/JITGate.swift\n\n**Acceptance Criteria:**\n- [ ] New JITGateResult enum: .success, .tunnelNotInstalled, .failed(String)\n- [ ] run's completion parameter type changes to (JITGateResult) -> Void\n- [ ] Default (flag unset): behavior identical to today except completion type; .tunnelNotInstalled never produced\n- [ ] Flag set: LocalDevVPNManager gates the tunnel step, three-way result mapped per spec\n- [ ] Shared proceedAfterTunnel logic, not duplicated between branches\n- [ ] runXcodeDebuggerBypass's completion type updated to JITGateResult too\n\n**Verify:** Build with flag unset (default) -- expected to fail until Task 5 lands (ContentView still uses old signature); this is expected, not a Task 4 bug. Isolated syntax validity confirmed by Task 5's build.\n\n```json:metadata\n{\"files\": [\"tools/sogen-ios/Sources/JIT/JITGate.swift\"], \"verifyCommand\": \"see Task 5 -- ContentView must be updated in the same pass before a full build succeeds\", \"acceptanceCriteria\": [\"JITGateResult defined with 3 cases\", \"default branch behavior unchanged besides completion type\", \"LocalDevVPN branch maps 3-way result correctly\", \"no duplicated post-tunnel logic\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 5: ContentView -- handle JITGateResult, add the LocalDevVPN install prompt",
+      "status": "pending",
+      "blockedBy": [3],
+      "description": "**Goal:** ContentView.attemptBoot's two completion handlers switch on JITGateResult; a new UI state shows an Install LocalDevVPN / Retry prompt for .tunnelNotInstalled.\n\n**Files:**\n- Modify: tools/sogen-ios/Sources/ContentView.swift\n\n**Acceptance Criteria:**\n- [ ] .success -> startEmulator(with: layer), unchanged from today\n- [ ] .failed(message) -> same on-screen ERROR: line as today, unchanged wording\n- [ ] .tunnelNotInstalled -> new state shows Install LocalDevVPN / Retry buttons\n- [ ] Developer-signed default build's visible behavior is unchanged\n\n**Verify:** cd tools/sogen-ios && xcodegen generate && xcodebuild -project SogenIOS.xcodeproj -scheme SogenIOS -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build -> ** BUILD SUCCEEDED **. Then temporarily flip to the LocalDevVPN variant, confirm it ALSO builds, then revert to default before committing.\n\n```json:metadata\n{\"files\": [\"tools/sogen-ios/Sources/ContentView.swift\"], \"verifyCommand\": \"cd tools/sogen-ios && xcodegen generate && xcodebuild -project SogenIOS.xcodeproj -scheme SogenIOS -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build\", \"acceptanceCriteria\": [\"three-way switch handles all JITGateResult cases\", \"default build behavior unchanged\", \"both build variants compile\", \"project.yml reverted to default state before commit\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "Task 6: Real-device verification (both build variants)",
+      "status": "pending",
+      "blockedBy": [0, 1, 2, 3, 4],
+      "description": "**Goal:** Confirm both build variants actually work on real hardware.\n\n**USER-ORDERED GATE -- NON-SKIPPABLE.** This task was requested by the user in the current conversation. It MUST NOT be closed by walking around it, by declaring it \"verified inline\", or by substituting a cheaper check. Close only after every item in the acceptance criteria has been re-validated independently, with output captured.\n\n**Files:** None (verification only).\n\n**Acceptance Criteria:**\n- [ ] Self-signed build, LocalDevVPN not installed: shows Install/Retry buttons, not a raw ERROR: line\n- [ ] Install LocalDevVPN, tap Retry: tunnel handshake completes, JIT grant proceeds, guest boots to [ngcs] done (all 8 frames)\n- [ ] Developer-signed build: still boots via TunnelExtension unchanged (regression check)\n\n**Verify:** Manual, on-device, for each bullet above. Capture the on-screen log / sogen_log.txt pull for each.\n\n```json:metadata\n{\"userGate\": true, \"tags\": [\"user-gate\"], \"requiresUserSpecification\": false, \"files\": [], \"verifyCommand\": \"manual on-device\", \"acceptanceCriteria\": [\"self-signed build without LocalDevVPN shows Install/Retry prompt, not a raw ERROR: line\", \"installing LocalDevVPN and retrying completes the tunnel handshake and reaches [ngcs] done\", \"developer-signed build still boots via TunnelExtension unchanged\"], \"modelTier\": \"standard\"}\n```"
+    }
+  ],
+  "lastUpdated": "2026-09-16T00:00:00Z"
+}
