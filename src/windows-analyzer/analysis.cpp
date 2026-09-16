@@ -4,6 +4,7 @@
 #include "analysis_reporter.hpp"
 #include "disassembler.hpp"
 #include "windows_emulator.hpp"
+#include <devices/named_pipe.hpp>
 #include <utils/lazy_object.hpp>
 
 #if defined(OS_EMSCRIPTEN) && !defined(SOGEN_EMSCRIPTEN_SUPPORT_NODEJS)
@@ -236,6 +237,15 @@ namespace sogen
         constexpr uint64_t SLDIM_GET_PENDING_COMMAND_STATE_RVA = 0xb8af34;
         uint64_t g_sldim_get_pending_command_state_trace_va = 0;
         bool g_sldim_pending_command_write_watch_armed = false;
+
+        // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
+        // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
+        // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
+        // assumed stable run-to-run) is observed exactly once, at that same FSCTL_PIPE_LISTEN call, and
+        // never again -- this captures whichever tid actually issues it this run and traces everything
+        // that thread does (or fails to do) afterward.
+        bool g_thread_activity_armed = false;
+        uint32_t g_thread_activity_target_tid = 0;
 
         // Live localization of the missing DispatchMessage call site for sldim.exe's WM_COMMAND
         // relay (see project_solidworks_bringup.md #284): g_sldim_dispatch_watch_va is armed by
@@ -542,7 +552,7 @@ namespace sogen
             }
         }
 
-        void handle_ioctrl(const analysis_context& c, const io_device&, const std::u16string_view device_name, const ULONG code)
+        void handle_ioctrl(const analysis_context& c, const io_device& device, const std::u16string_view device_name, const ULONG code)
         {
             if (!c.settings->skip_generic_activity)
             {
@@ -550,6 +560,18 @@ namespace sogen
                     event.device_name = u16_to_u8(device_name);
                     event.code = static_cast<uint32_t>(code);
                 });
+            }
+
+            if (!g_thread_activity_armed && std::getenv("SOGEN_TRACE_THREAD_ACTIVITY") && code == FSCTL_PIPE_LISTEN)
+            {
+                const auto* pipe = dynamic_cast<const named_pipe*>(&device);
+                if (pipe && pipe->name.find(u"mojo.") != std::u16string::npos)
+                {
+                    g_thread_activity_armed = true;
+                    g_thread_activity_target_tid = c.win_emu->current_thread().id;
+                    c.win_emu->log.error("[thread-activity-trace] armed on tid=%u after its own FSCTL_PIPE_LISTEN on pipe='%s'\n",
+                                         g_thread_activity_target_tid, u16_to_u8(pipe->name).c_str());
+                }
             }
         }
 
@@ -601,6 +623,12 @@ namespace sogen
             {
                 c.emit_observation<thread_terminated_event>([&](auto& event) { event.terminated_thread_id = t.id; });
             }
+
+            if (g_thread_activity_armed && t.id == g_thread_activity_target_tid)
+            {
+                c.win_emu->log.error("[thread-activity-trace] tid=%u TERMINATED (exit_status=0x%08X)\n", t.id,
+                                     static_cast<uint32_t>(t.exit_status.value_or(0)));
+            }
         }
 
         void handle_thread_set_name(const analysis_context& c, const emulator_thread& t)
@@ -619,6 +647,12 @@ namespace sogen
                     event.previous_thread_id = current_thread.id;
                     event.next_thread_id = new_thread.id;
                 });
+            }
+
+            if (g_thread_activity_armed &&
+                (current_thread.id == g_thread_activity_target_tid || new_thread.id == g_thread_activity_target_tid))
+            {
+                c.win_emu->log.error("[thread-activity-trace] scheduler switch %u -> %u\n", current_thread.id, new_thread.id);
             }
         }
 
@@ -2525,6 +2559,12 @@ namespace sogen
 
         emulator_callbacks::continuation handle_syscall(analysis_context& c, const uint32_t syscall_id, const std::string_view syscall_name)
         {
+            if (g_thread_activity_armed && c.win_emu->current_thread().id == g_thread_activity_target_tid)
+            {
+                c.win_emu->log.error("[thread-activity-trace] tid=%u syscall %.*s (id=0x%X)\n", g_thread_activity_target_tid,
+                                     STR_VIEW_VA(syscall_name), syscall_id);
+            }
+
             if (c.settings->ignored_functions.contains(syscall_name))
             {
                 return instruction_hook_continuation::run_instruction;

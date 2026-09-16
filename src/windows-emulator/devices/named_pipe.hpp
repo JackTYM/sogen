@@ -122,6 +122,13 @@ namespace sogen
 
             if (this->pending_listen && this->client_connected)
             {
+                if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+                {
+                    win_emu.log.info("[pipe-io-trace] work() completing pending FSCTL_PIPE_LISTEN for pipe='%s', "
+                                     "completion_port=%d\n",
+                                     u16_to_u8(this->name).c_str(), this->get_completion_port().has_value());
+                }
+
                 this->client_connected = false;
                 const auto ctx = *this->pending_listen;
                 this->pending_listen.reset();
@@ -243,6 +250,12 @@ namespace sogen
 
             if (!this->is_synchronous_handle)
             {
+                if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+                {
+                    win_emu.log.info("[pipe-io-trace] listen() pending (overlapped) for pipe='%s' tid=%u, completion_port=%d\n",
+                                     u16_to_u8(this->name).c_str(), c.thread().id, this->get_completion_port().has_value());
+                }
+
                 this->pending_listen = c;
                 return STATUS_PENDING;
             }
