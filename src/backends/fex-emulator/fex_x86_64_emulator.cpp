@@ -3490,6 +3490,26 @@ namespace sogen::fex
                               static_cast<unsigned long long>(wow64_guest_address_space_size));
                 sogen::utils::log_ios_device_milestone(diag);
             }
+
+            // Device-triage diagnostic: FEXCore's Dispatcher reserves ARM64 X28 ("STATE") as the
+            // live CpuStateFrame pointer for whatever guest thread is currently executing, and
+            // DEF_OP(Break) (deps/FEX FEXCore/Source/Interface/Core/JIT/MiscOps.cpp) stores the exact
+            // compile-time-constant Signal/TrapNo/si_code/ErrorRegister for whichever rare x86 opcode
+            // (INT imm8/INTO/INT1/HLT/UD2/INT3) triggered it into CpuStateFrame::SynchronousFaultData
+            // *before* branching into GuestSignal_SIGSEGV/SIGILL/SIGTRAP - and __fastfail (INT 0x29)
+            // specifically passes its FAST_FAIL_* code in ECX/RCX. Both are ordinary guest-readable
+            // memory at a fixed offset from X28, already visible to the debugger's own register dump
+            // in every stop-reply - logging these offsets once lets universal.js compute and read
+            // both addresses directly, with no FEXCore/JIT changes needed, to pin down exactly which
+            // opcode fires and (if it's __fastfail) exactly which corruption it believes it found.
+            {
+                char diag[256];
+                std::snprintf(diag, sizeof(diag),
+                              "[fex-diag] CpuStateFrame layout (offsets from X28/STATE): SynchronousFaultData=0x%zx RCX=0x%zx",
+                              offsetof(FEXCore::Core::CpuStateFrame, SynchronousFaultData),
+                              offsetof(FEXCore::Core::CPUState, gregs) + sizeof(uint64_t) * FEXCore::X86State::REG_RCX);
+                sogen::utils::log_ios_device_milestone(diag);
+            }
 #endif
 
             std::set_terminate([]() {
