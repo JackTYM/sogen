@@ -382,6 +382,23 @@ namespace sogen
         // loaded, unmodified since) to read the real, dynamically-resolved target live.
         constexpr uint64_t EBWV_POST_TASK_VIRTUAL_CALL_RVA = 0x243f2f;
 
+        // The posted closure's own real content, found by dumping the BindStateBase-shaped object
+        // EBWV_POST_TASK_CALL_RVA's own `eax` points to (see project_solidworks_bringup.md's cycle-77
+        // finding): `[eax+0]`=refcount(1), `[eax+4]`=polymorphic_invoke_, `[eax+8]`=destructor_,
+        // `[eax+0xc]`=is_cancelled_ -- all three function-pointer fields live-confirmed (via
+        // SOGEN_TRACE_MODULE_ENTRY) to actually execute on tid=28 shortly after the PostTask call,
+        // in exactly that order (is_cancelled_ check, then polymorphic_invoke_, then destructor_
+        // once the task finishes) -- proving the posted closure genuinely does get popped and run,
+        // not just posted-and-abandoned as #306 could only speculate. `[eax+0x10]`=embeddedbrowser
+        // webview.dll+0x211ce0, the bound functor itself: a thiscall sibling of the WaitCallback
+        // (same `[this+0x24]` gate byte, same class), also live-confirmed executed by tid=28
+        // immediately after polymorphic_invoke_. Its own body loads a delegate object from
+        // `[this+0]`, reads that delegate's own vtable slot 1, and calls it with `[this+0x18]` as
+        // the sole argument -- EBWV_SIGNALER_DELEGATE_DISPATCH_RVA watches that final `call edi`
+        // (edi already loaded with the delegate's real vtable[1] target) to read what it resolves
+        // to live.
+        constexpr uint64_t EBWV_SIGNALER_DELEGATE_DISPATCH_RVA = 0x211d06;
+
         // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305, address
         // corrected by #309): located via an RTTI-string cross-reference walk starting from the local lambda's own
         // TypeDescriptor (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output)
@@ -530,6 +547,7 @@ namespace sogen
         uint64_t g_ebwv_image_base = 0;
         uint64_t g_ebwv_post_task_call_va = 0;
         uint64_t g_ebwv_post_task_virtual_call_va = 0;
+        uint64_t g_ebwv_signaler_delegate_dispatch_va = 0;
 
         bool g_ipcz_connect_watches_armed = false;
         uint64_t g_ipcz_connect_node_wrapper_va = 0;
@@ -838,12 +856,14 @@ namespace sogen
                 g_ebwv_image_base = esi - EBWV_CALLBACK_ENTRY_RVA;
                 g_ebwv_post_task_call_va = g_ebwv_image_base + EBWV_POST_TASK_CALL_RVA;
                 g_ebwv_post_task_virtual_call_va = g_ebwv_image_base + EBWV_POST_TASK_VIRTUAL_CALL_RVA;
+                g_ebwv_signaler_delegate_dispatch_va = g_ebwv_image_base + EBWV_SIGNALER_DELEGATE_DISPATCH_RVA;
 
                 c.win_emu->log.error("[ebwv-posttask-trace] armed against %s image_base=0x%llx: post_task_call=0x%llx "
-                                     "post_task_virtual_call=0x%llx\n",
+                                     "post_task_virtual_call=0x%llx signaler_delegate_dispatch=0x%llx\n",
                                      mod_name, static_cast<unsigned long long>(g_ebwv_image_base),
                                      static_cast<unsigned long long>(g_ebwv_post_task_call_va),
-                                     static_cast<unsigned long long>(g_ebwv_post_task_virtual_call_va));
+                                     static_cast<unsigned long long>(g_ebwv_post_task_virtual_call_va),
+                                     static_cast<unsigned long long>(g_ebwv_signaler_delegate_dispatch_va));
             }
         }
 
@@ -862,6 +882,26 @@ namespace sogen
                 "[ebwv-posttask-trace] tid=%u POST_TASK_CALL task_runner(esi/ecx)=0x%x (%s+0x%llx) context_plus_4(edi)=0x%x "
                 "extracted_value(eax)=0x%x\n",
                 tid, esi, mod_name, static_cast<unsigned long long>(offset), edi, eax);
+
+            // `eax` is the closure's own single BindStateBase*-shaped field (the "two-word object"
+            // #302 described is really one scoped_refptr-shaped field being extracted, plus an
+            // unrelated, always-null local temp whose destructor call is just ordinary RAII
+            // cleanup -- see EBWV_SIGNALER_DELEGATE_DISPATCH_RVA's own comment above for the layout this dump
+            // confirmed). Dumping the first few dwords of the object it points to identifies that
+            // layout live.
+            std::array<uint32_t, 8> bind_state_words{};
+            const bool bind_state_read_ok = eax != 0 && emu.try_read_memory(eax, bind_state_words.data(), sizeof(bind_state_words));
+
+            for (size_t i = 0; bind_state_read_ok && i < bind_state_words.size(); ++i)
+            {
+                const auto word = bind_state_words.at(i);
+                const auto* word_mod_name = c.win_emu->mod_manager.find_name(word);
+                const auto* word_mod = c.win_emu->mod_manager.find_by_address(word);
+                const auto word_offset = word_mod ? word - word_mod->image_base : word;
+
+                c.win_emu->log.error("[ebwv-posttask-trace] tid=%u   bind_state[+0x%zx]=0x%x (%s+0x%llx)\n", tid, i * sizeof(uint32_t),
+                                     word, word_mod_name, static_cast<unsigned long long>(word_offset));
+            }
         }
 
         void trace_ebwv_post_task_virtual_call_hit(const analysis_context& c, const uint32_t tid)
@@ -875,6 +915,22 @@ namespace sogen
 
             c.win_emu->log.error("[ebwv-posttask-trace] tid=%u POST_TASK_VIRTUAL_CALL target=0x%x (%s+0x%llx) about to be invoked\n", tid,
                                  edi, mod_name, static_cast<unsigned long long>(offset));
+        }
+
+        void trace_ebwv_signaler_delegate_dispatch_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+            const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(edi);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(edi);
+            const auto offset = mod ? edi - mod->image_base : edi;
+
+            c.win_emu->log.error("[ebwv-posttask-trace] tid=%u SIGNALER_DELEGATE_DISPATCH delegate(esi)=0x%x arg(ebx)=0x%x target=0x%x "
+                                 "(%s+0x%llx) about to be invoked\n",
+                                 tid, esi, ebx, edi, mod_name, static_cast<unsigned long long>(offset));
         }
 
         void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle,
@@ -3125,6 +3181,11 @@ namespace sogen
                 if (g_ebwv_post_task_virtual_call_va != 0 && address == g_ebwv_post_task_virtual_call_va)
                 {
                     trace_ebwv_post_task_virtual_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_signaler_delegate_dispatch_va != 0 && address == g_ebwv_signaler_delegate_dispatch_va)
+                {
+                    trace_ebwv_signaler_delegate_dispatch_hit(c, c.win_emu->current_thread().id);
                 }
 
                 arm_ipcz_connect_watches(c);
