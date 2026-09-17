@@ -38,6 +38,18 @@ i686-w64-mingw32-g++ \
 
 cp -f "$OUT_ROOT/filesys/c/native-gpu-clear-sample.exe" "$OUT_ROOT/native-gpu-clear-sample.exe"
 
+echo "==> building the mouse-input-test-sample guest PE"
+i686-w64-mingw32-g++ \
+  -O2 -std=c++20 \
+  -static -static-libgcc -static-libstdc++ \
+  -I "$REPO_ROOT/src/dxgk-command-protocol" \
+  "$REPO_ROOT/src/samples/mouse-input-test-sample/mouse-input-test-sample.cpp" \
+  -o "$OUT_ROOT/filesys/c/mouse-input-test-sample.exe" \
+  -luser32 -lgdi32
+
+cp -f "$OUT_ROOT/filesys/c/mouse-input-test-sample.exe" "$OUT_ROOT/mouse-input-test-sample.exe"
+
 echo "==> done"
 du -sh "$OUT_ROOT"
 file "$OUT_ROOT/native-gpu-clear-sample.exe"
+file "$OUT_ROOT/mouse-input-test-sample.exe"
