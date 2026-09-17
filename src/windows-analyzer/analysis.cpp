@@ -417,6 +417,27 @@ namespace sogen
         // the stored completion callback's real target is live.
         constexpr uint64_t EBWV_ENV_COMPLETION_INVOKE_RVA = 0x366c30;
 
+        // +0x366620's own body beyond the argument-validation check (project_solidworks_bringup.md #316):
+        // it calls the real Win32 GetOverlappedResult(HANDLE hFile=[this+4], LPOVERLAPPED lpOverlapped=this+8
+        // (a genuine 0x14-byte OVERLAPPED-shaped region embedded inline, not a separate pointer),
+        // LPDWORD lpNumberOfBytesTransferred=&local, BOOL bWait=FALSE) through the KERNEL32 IAT slot at
+        // 0x1051dfe8, confirmed by `pefile` import-table lookup, not by name-guessing. Its BOOL return in eax
+        // (`test eax,eax; je <fail-path>` immediately after) is the concrete success/failure status this whole
+        // causal chain propagates onward: both the success and failure branches build a small outcome struct and
+        // converge on the exact same `call ecx` to +0x366bfe already watched above (EBWV_ENV_COMPLETION_INVOKE_RVA).
+        // Disassembly of the resolved target that call reaches (+0x366b10's real body, +0x366b2a) shows it does
+        // NOT terminate there: it forwards the outcome struct into ANOTHER call into +0x366bfe (the same shared
+        // helper, nested/recursive, not a second sibling call from +0x366620) which is what actually resolves to
+        // +0x365640 next -- correcting #312's "BOTH ... environment-creation-completion code" framing, which
+        // described the two resolved targets as if they were parallel alternatives from a single call site; they
+        // are in fact a two-level chain (+0x366620 -> +0x366bfe -> +0x366b10 -> (nested) +0x366bfe -> +0x365640).
+        // EBWV_ENV_GETOVERLAPPEDRESULT_CALL_RVA watches the call site itself (esi=`this`, unmodified since entry)
+        // to read the raw handle/overlapped inputs; EBWV_ENV_GETOVERLAPPEDRESULT_RETURN_RVA watches the very next
+        // instruction (eax=the real BOOL result; ebp unmodified by the call, so the bytes-transferred out-param
+        // is still readable at [ebp-0x14]).
+        constexpr uint64_t EBWV_ENV_GETOVERLAPPEDRESULT_CALL_RVA = 0x366652;
+        constexpr uint64_t EBWV_ENV_GETOVERLAPPEDRESULT_RETURN_RVA = 0x366658;
+
         // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305, address
         // corrected by #309): located via an RTTI-string cross-reference walk starting from the local lambda's own
         // TypeDescriptor (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output)
@@ -599,6 +620,8 @@ namespace sogen
         uint64_t g_ebwv_signaler_delegate_dispatch_va = 0;
         uint64_t g_ebwv_env_arg_validate_va = 0;
         uint64_t g_ebwv_env_completion_invoke_va = 0;
+        uint64_t g_ebwv_env_getoverlappedresult_call_va = 0;
+        uint64_t g_ebwv_env_getoverlappedresult_return_va = 0;
 
         bool g_ipcz_connect_watches_armed = false;
         uint64_t g_ipcz_connect_node_wrapper_va = 0;
@@ -924,16 +947,21 @@ namespace sogen
                 g_ebwv_signaler_delegate_dispatch_va = g_ebwv_image_base + EBWV_SIGNALER_DELEGATE_DISPATCH_RVA;
                 g_ebwv_env_arg_validate_va = g_ebwv_image_base + EBWV_ENV_ARG_VALIDATE_RVA;
                 g_ebwv_env_completion_invoke_va = g_ebwv_image_base + EBWV_ENV_COMPLETION_INVOKE_RVA;
+                g_ebwv_env_getoverlappedresult_call_va = g_ebwv_image_base + EBWV_ENV_GETOVERLAPPEDRESULT_CALL_RVA;
+                g_ebwv_env_getoverlappedresult_return_va = g_ebwv_image_base + EBWV_ENV_GETOVERLAPPEDRESULT_RETURN_RVA;
 
                 c.win_emu->log.error("[ebwv-posttask-trace] armed against %s image_base=0x%llx: post_task_call=0x%llx "
                                      "post_task_virtual_call=0x%llx signaler_delegate_dispatch=0x%llx env_arg_validate=0x%llx "
-                                     "env_completion_invoke=0x%llx\n",
+                                     "env_completion_invoke=0x%llx env_getoverlappedresult_call=0x%llx "
+                                     "env_getoverlappedresult_return=0x%llx\n",
                                      mod_name, static_cast<unsigned long long>(g_ebwv_image_base),
                                      static_cast<unsigned long long>(g_ebwv_post_task_call_va),
                                      static_cast<unsigned long long>(g_ebwv_post_task_virtual_call_va),
                                      static_cast<unsigned long long>(g_ebwv_signaler_delegate_dispatch_va),
                                      static_cast<unsigned long long>(g_ebwv_env_arg_validate_va),
-                                     static_cast<unsigned long long>(g_ebwv_env_completion_invoke_va));
+                                     static_cast<unsigned long long>(g_ebwv_env_completion_invoke_va),
+                                     static_cast<unsigned long long>(g_ebwv_env_getoverlappedresult_call_va),
+                                     static_cast<unsigned long long>(g_ebwv_env_getoverlappedresult_return_va));
             }
         }
 
@@ -1023,14 +1051,60 @@ namespace sogen
             const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
             const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
             const auto esi = emu.reg<uint32_t>(x86_register::esi);
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
 
             const auto* mod_name = c.win_emu->mod_manager.find_name(ecx);
             const auto* mod = c.win_emu->mod_manager.find_by_address(ecx);
             const auto offset = mod ? ecx - mod->image_base : ecx;
 
             c.win_emu->log.error("[ebwv-posttask-trace] tid=%u ENV_COMPLETION_INVOKE target=0x%x (%s+0x%llx) closure(ebx)=0x%x "
-                                 "arg(esi)=0x%x about to be invoked\n",
-                                 tid, ecx, mod_name, static_cast<unsigned long long>(offset), ebx, esi);
+                                 "arg(esi)=0x%x esp=0x%x about to be invoked\n",
+                                 tid, ecx, mod_name, static_cast<unsigned long long>(offset), ebx, esi, esp);
+        }
+
+        void trace_ebwv_env_getoverlappedresult_call_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            uint32_t handle = 0;
+            const bool handle_read_ok = emu.try_read_memory(esi + 0x4, &handle, sizeof(handle));
+
+            std::array<uint32_t, 5> overlapped{};
+            const bool overlapped_read_ok = emu.try_read_memory(esi + 0x8, overlapped.data(), sizeof(overlapped));
+
+            c.win_emu->log.error("[ebwv-posttask-trace] tid=%u ENV_GETOVERLAPPEDRESULT_CALL this=0x%x handle(this+4)=0x%x (read_ok=%d) "
+                                 "overlapped(this+8)=[0x%x,0x%x,0x%x,0x%x,0x%x] (read_ok=%d)\n",
+                                 tid, esi, handle, handle_read_ok ? 1 : 0, overlapped[0], overlapped[1], overlapped[2], overlapped[3],
+                                 overlapped[4], overlapped_read_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_env_getoverlappedresult_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+            const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
+
+            uint32_t bytes_transferred = 0;
+            const bool bytes_read_ok = emu.try_read_memory(ebp - 0x14, &bytes_transferred, sizeof(bytes_transferred));
+
+            uint32_t last_error = 0;
+            bool last_error_read_ok = false;
+            auto& thread = c.win_emu->current_thread();
+            if (thread.teb32.has_value())
+            {
+                const auto teb = thread.teb32->try_read();
+                if (teb.has_value())
+                {
+                    last_error = teb->LastErrorValue;
+                    last_error_read_ok = true;
+                }
+            }
+
+            c.win_emu->log.error("[ebwv-posttask-trace] tid=%u ENV_GETOVERLAPPEDRESULT_RETURN result(eax)=0x%x (%s) bytes_transferred=0x%x "
+                                 "(read_ok=%d) last_error=%u (read_ok=%d)\n",
+                                 tid, eax, eax != 0 ? "TRUE/success" : "FALSE/failure", bytes_transferred, bytes_read_ok ? 1 : 0,
+                                 last_error, last_error_read_ok ? 1 : 0);
         }
 
         void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle,
@@ -3296,6 +3370,16 @@ namespace sogen
                 if (g_ebwv_env_completion_invoke_va != 0 && address == g_ebwv_env_completion_invoke_va)
                 {
                     trace_ebwv_env_completion_invoke_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_env_getoverlappedresult_call_va != 0 && address == g_ebwv_env_getoverlappedresult_call_va)
+                {
+                    trace_ebwv_env_getoverlappedresult_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_env_getoverlappedresult_return_va != 0 && address == g_ebwv_env_getoverlappedresult_return_va)
+                {
+                    trace_ebwv_env_getoverlappedresult_return_hit(c, c.win_emu->current_thread().id);
                 }
 
                 arm_ipcz_connect_watches(c);

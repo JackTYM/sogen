@@ -432,6 +432,15 @@ namespace sogen
         // work()'s pending_wait completion (FSCTL_PIPE_WAIT), which needs the identical no-payload shape.
         NTSTATUS complete_listen(windows_emulator& win_emu, const io_device_context& ctx)
         {
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                win_emu.log.info(
+                    "[pipe-io-trace] complete_listen pipe='%s' io_status_block=0x%llx is_wow64=%d apc_routine=0x%llx event=0x%llx\n",
+                    u16_to_u8(this->name).c_str(), static_cast<unsigned long long>(ctx.io_status_block.value()),
+                    win_emu.process.is_wow64_process ? 1 : 0, static_cast<unsigned long long>(ctx.apc_routine),
+                    static_cast<unsigned long long>(ctx.event.bits));
+            }
+
             if (ctx.io_status_block)
             {
                 IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
