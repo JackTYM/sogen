@@ -465,6 +465,37 @@ namespace sogen
         constexpr uint64_t IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_1_RVA = 0x8e41a;
         constexpr uint64_t IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_2_RVA = 0x8e44f;
 
+        // The object whose vtable pointer is +0x43b4ec (WRAPPER_RVA at slot 0) is not IpczAPI, IpczDriver, or
+        // ipcz::Node's own vtable (none of the three, fetched fresh from real ipcz.h/node.h/api_object.h, has
+        // ConnectNode as a virtual method at slot 0 -- IpczAPI declares it at slot 3 behind ~IpczAPI/Close/CreateNode,
+        // IpczDriver never declares it at all, and Node's own vtable is only [~Node, Close, CanSendFrom]). Reading the
+        // table itself (embeddedbrowserwebview.dll+0x43b4ec) shows only 5 live dwords before the next confirmed
+        // vtable anchor at +0x43b500 (also empirically confirmed via its own two `movl $0x1043b500, (%reg)`
+        // constructor stores): [WRAPPER_RVA, a trivial `xor eax,eax; ret 4` stub also reused as a shared default
+        // across many unrelated tables in this module, an MSVC scalar-deleting-destructor thunk, two null/reserved
+        // slots]. The real (non-thunk) constructor is CTOR_RVA (thiscall; stores the vtable pointer, a bool flag
+        // arg, a second arg pointer at this+0x10, and an optional-arg-sourced 24-byte bounded copy at this+0x18,
+        // then zero-initializes a large tail including a mutex at this+0x38). #309's second `movl $0x1043b4ec`
+        // site (formerly assumed to be a second constructor) is DTOR_RVA: it re-stores the same vtable pointer as
+        // its first action, the standard MSVC destructor-entry codegen to un-poison the vtable pointer before
+        // teardown, not a second construction path; SCALAR_DELETING_DTOR_RVA (the table's own slot-2 destructor
+        // thunk) calls DTOR_RVA and then conditionally calls a sized `operator delete`, matching that reading.
+        // CTOR_RVA's *only* static caller in the whole module is FACTORY_RVA, which validates its second argument
+        // as an IpczDriver-shaped struct (`size>=0x38`, all 13 following dwords non-null -- exactly IpczDriver's
+        // real 13-method shape) before constructing. FACTORY_RVA itself has *zero* static callers anywhere in the
+        // module, but its address is embedded as data (function-pointer table index 1 of 16) immediately after
+        // debug strings reading `..\..\mojo\core\channel_win.cc` / `ChannelWin` -- i.e. FACTORY_RVA is one of real
+        // Chromium's `mojo::core::ChannelWin`'s own virtual methods, reachable only via a virtual call through a
+        // live ChannelWin vtable pointer, never a direct call -- explaining the missing static callers and
+        // overturning every prior cycle's IpczAPI/NodeMessageListener framing for this specific table. No
+        // `movl $<ChannelWin's own vtable base>, (%reg)` construction site was found anywhere in the module (a
+        // whole-module search for the table's own base address as an immediate came up empty), so it remains
+        // unconfirmed whether any live ChannelWin object in this build ever actually carries this specific vtable.
+        constexpr uint64_t IPCZ_CHANNEL_WIN_FACTORY_RVA = 0x7d9d0;
+        constexpr uint64_t IPCZ_CONNECT_WRAPPER_CTOR_RVA = 0x845f0;
+        constexpr uint64_t IPCZ_CONNECT_WRAPPER_DTOR_RVA = 0x84724;
+        constexpr uint64_t IPCZ_CONNECT_WRAPPER_SCALAR_DELETING_DTOR_RVA = 0x89580;
+
         // ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect's own entry point (see
         // project_solidworks_bringup.md #305): located the same way, via the local lambda
         // `<lambda_1>@?0??Connect@NodeConnectorForReferrer@...`'s TypeDescriptor. The resolved function is a genuine
@@ -583,6 +614,10 @@ namespace sogen
         uint64_t g_ipcz_connect_node_mutual_recursion_entry_va = 0;
         uint64_t g_ipcz_connect_node_mutual_recursion_site_1_va = 0;
         uint64_t g_ipcz_connect_node_mutual_recursion_site_2_va = 0;
+        uint64_t g_ipcz_channel_win_factory_va = 0;
+        uint64_t g_ipcz_connect_wrapper_ctor_va = 0;
+        uint64_t g_ipcz_connect_wrapper_dtor_va = 0;
+        uint64_t g_ipcz_connect_wrapper_scalar_deleting_dtor_va = 0;
 
         void arm_ipcz_connect_watches(const analysis_context& c)
         {
@@ -616,13 +651,19 @@ namespace sogen
             g_ipcz_connect_node_mutual_recursion_entry_va = ebwv->image_base + IPCZ_CONNECT_NODE_MUTUAL_RECURSION_ENTRY_RVA;
             g_ipcz_connect_node_mutual_recursion_site_1_va = ebwv->image_base + IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_1_RVA;
             g_ipcz_connect_node_mutual_recursion_site_2_va = ebwv->image_base + IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_2_RVA;
+            g_ipcz_channel_win_factory_va = ebwv->image_base + IPCZ_CHANNEL_WIN_FACTORY_RVA;
+            g_ipcz_connect_wrapper_ctor_va = ebwv->image_base + IPCZ_CONNECT_WRAPPER_CTOR_RVA;
+            g_ipcz_connect_wrapper_dtor_va = ebwv->image_base + IPCZ_CONNECT_WRAPPER_DTOR_RVA;
+            g_ipcz_connect_wrapper_scalar_deleting_dtor_va = ebwv->image_base + IPCZ_CONNECT_WRAPPER_SCALAR_DELETING_DTOR_RVA;
 
             c.win_emu->log.error("[ipcz-connect-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx: "
                                  "ConnectNode_wrapper=0x%llx ConnectNode_real_body=0x%llx NodeConnectorForReferrer::Connect=0x%llx "
                                  "NodeConnectorForReferrer::Connect(no-broker-link-branch)=0x%llx NodeLink::ReferNonBroker=0x%llx "
                                  "ConnectNode_internal_caller=0x%llx ConnectNode_internal_caller(gate-taken)=0x%llx "
                                  "ConnectNode_internal_caller(gate-not-taken)=0x%llx flush_site_real=0x%llx flush_site_empty=0x%llx "
-                                 "mutual_recursion_entry=0x%llx mutual_recursion_site_1=0x%llx mutual_recursion_site_2=0x%llx\n",
+                                 "mutual_recursion_entry=0x%llx mutual_recursion_site_1=0x%llx mutual_recursion_site_2=0x%llx "
+                                 "ChannelWin_factory=0x%llx ConnectWrapper_ctor=0x%llx ConnectWrapper_dtor=0x%llx "
+                                 "ConnectWrapper_scalar_deleting_dtor=0x%llx\n",
                                  static_cast<unsigned long long>(ebwv->image_base),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_wrapper_va),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_real_body_va),
@@ -636,7 +677,11 @@ namespace sogen
                                  static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_site_flush_empty_va),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_mutual_recursion_entry_va),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_mutual_recursion_site_1_va),
-                                 static_cast<unsigned long long>(g_ipcz_connect_node_mutual_recursion_site_2_va));
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_mutual_recursion_site_2_va),
+                                 static_cast<unsigned long long>(g_ipcz_channel_win_factory_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_wrapper_ctor_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_wrapper_dtor_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_wrapper_scalar_deleting_dtor_va));
         }
 
         void trace_ipcz_connect_hit(const analysis_context& c, const uint32_t tid, const char* label)
@@ -3332,6 +3377,29 @@ namespace sogen
                 {
                     trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
                                            "ConnectNode internal caller's mutual-recursion call site 2 (+0x8e44f)");
+                }
+
+                if (g_ipcz_channel_win_factory_va != 0 && address == g_ipcz_channel_win_factory_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "mojo::core::ChannelWin virtual method that validates and constructs the "
+                                           "+0x43b4ec wrapper (+0x7d9d0)");
+                }
+
+                if (g_ipcz_connect_wrapper_ctor_va != 0 && address == g_ipcz_connect_wrapper_ctor_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "+0x43b4ec wrapper's real constructor (+0x845f0)");
+                }
+
+                if (g_ipcz_connect_wrapper_dtor_va != 0 && address == g_ipcz_connect_wrapper_dtor_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "+0x43b4ec wrapper's destructor (+0x84724)");
+                }
+
+                if (g_ipcz_connect_wrapper_scalar_deleting_dtor_va != 0 && address == g_ipcz_connect_wrapper_scalar_deleting_dtor_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "+0x43b4ec wrapper's scalar deleting destructor thunk (+0x89580)");
                 }
 
                 arm_start_watching_once_watches(c);
