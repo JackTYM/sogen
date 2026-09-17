@@ -399,6 +399,24 @@ namespace sogen
         // to live.
         constexpr uint64_t EBWV_SIGNALER_DELEGATE_DISPATCH_RVA = 0x211d06;
 
+        // EBWV_SIGNALER_DELEGATE_DISPATCH_RVA's own resolved target (see project_solidworks_bringup.md
+        // cycle-77/#311 finding) is embeddedbrowserwebview.dll+0x366620: it validates its second argument
+        // against a stored id at `this+0x1c` (`cmp eax,[esi+0x1c]`; mismatches fastfail via int3/ud2),
+        // performs a status-shaped indirect call through `[this+4]`, builds outcome arguments, and -- on
+        // both resulting sub-paths -- invokes a `base::OnceCallback`-shaped member stored at `this+0x50`
+        // via the "run and clear stored callback" helper at +0x366bfe. EBWV_ENV_ARG_VALIDATE_RVA watches
+        // the compare itself to confirm live whether the two ever actually mismatch.
+        constexpr uint64_t EBWV_ENV_ARG_VALIDATE_RVA = 0x366639;
+
+        // +0x366bfe's own body: a thiscall that moves a BindStateBase-shaped closure out of `[this+0]`
+        // (nulling the source, the same std::move tell as EBWV_CALLBACK_ENTRY_RVA), reads its own
+        // `polymorphic_invoke_` field from `[closure+4]`, CFG-checks it, and calls it SYNCHRONOUSLY (no
+        // PostTask wrapper involved this time, unlike EBWV_CALLBACK_ENTRY_RVA's own chain) with
+        // (`closure`, `&arg`) -- structurally a `base::OnceCallback<...>::Run()` invocation, not a repost.
+        // EBWV_ENV_COMPLETION_INVOKE_RVA watches the `call ecx` itself (ecx already resolved) to read what
+        // the stored completion callback's real target is live.
+        constexpr uint64_t EBWV_ENV_COMPLETION_INVOKE_RVA = 0x366c30;
+
         // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305, address
         // corrected by #309): located via an RTTI-string cross-reference walk starting from the local lambda's own
         // TypeDescriptor (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output)
@@ -548,6 +566,8 @@ namespace sogen
         uint64_t g_ebwv_post_task_call_va = 0;
         uint64_t g_ebwv_post_task_virtual_call_va = 0;
         uint64_t g_ebwv_signaler_delegate_dispatch_va = 0;
+        uint64_t g_ebwv_env_arg_validate_va = 0;
+        uint64_t g_ebwv_env_completion_invoke_va = 0;
 
         bool g_ipcz_connect_watches_armed = false;
         uint64_t g_ipcz_connect_node_wrapper_va = 0;
@@ -857,13 +877,18 @@ namespace sogen
                 g_ebwv_post_task_call_va = g_ebwv_image_base + EBWV_POST_TASK_CALL_RVA;
                 g_ebwv_post_task_virtual_call_va = g_ebwv_image_base + EBWV_POST_TASK_VIRTUAL_CALL_RVA;
                 g_ebwv_signaler_delegate_dispatch_va = g_ebwv_image_base + EBWV_SIGNALER_DELEGATE_DISPATCH_RVA;
+                g_ebwv_env_arg_validate_va = g_ebwv_image_base + EBWV_ENV_ARG_VALIDATE_RVA;
+                g_ebwv_env_completion_invoke_va = g_ebwv_image_base + EBWV_ENV_COMPLETION_INVOKE_RVA;
 
                 c.win_emu->log.error("[ebwv-posttask-trace] armed against %s image_base=0x%llx: post_task_call=0x%llx "
-                                     "post_task_virtual_call=0x%llx signaler_delegate_dispatch=0x%llx\n",
+                                     "post_task_virtual_call=0x%llx signaler_delegate_dispatch=0x%llx env_arg_validate=0x%llx "
+                                     "env_completion_invoke=0x%llx\n",
                                      mod_name, static_cast<unsigned long long>(g_ebwv_image_base),
                                      static_cast<unsigned long long>(g_ebwv_post_task_call_va),
                                      static_cast<unsigned long long>(g_ebwv_post_task_virtual_call_va),
-                                     static_cast<unsigned long long>(g_ebwv_signaler_delegate_dispatch_va));
+                                     static_cast<unsigned long long>(g_ebwv_signaler_delegate_dispatch_va),
+                                     static_cast<unsigned long long>(g_ebwv_env_arg_validate_va),
+                                     static_cast<unsigned long long>(g_ebwv_env_completion_invoke_va));
             }
         }
 
@@ -931,6 +956,36 @@ namespace sogen
             c.win_emu->log.error("[ebwv-posttask-trace] tid=%u SIGNALER_DELEGATE_DISPATCH delegate(esi)=0x%x arg(ebx)=0x%x target=0x%x "
                                  "(%s+0x%llx) about to be invoked\n",
                                  tid, esi, ebx, edi, mod_name, static_cast<unsigned long long>(offset));
+        }
+
+        void trace_ebwv_env_arg_validate_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            uint32_t expected = 0;
+            const bool read_ok = emu.try_read_memory(esi + 0x1c, &expected, sizeof(expected));
+
+            c.win_emu->log.error(
+                "[ebwv-posttask-trace] tid=%u ENV_ARG_VALIDATE arg(eax)=0x%x expected(this+0x1c)=0x%x (read_ok=%d) -> %s\n", tid, eax,
+                expected, read_ok ? 1 : 0, (read_ok && eax == expected) ? "MATCH (happy path continues)" : "MISMATCH (fastfail path)");
+        }
+
+        void trace_ebwv_env_completion_invoke_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
+            const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(ecx);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(ecx);
+            const auto offset = mod ? ecx - mod->image_base : ecx;
+
+            c.win_emu->log.error("[ebwv-posttask-trace] tid=%u ENV_COMPLETION_INVOKE target=0x%x (%s+0x%llx) closure(ebx)=0x%x "
+                                 "arg(esi)=0x%x about to be invoked\n",
+                                 tid, ecx, mod_name, static_cast<unsigned long long>(offset), ebx, esi);
         }
 
         void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle,
@@ -3186,6 +3241,16 @@ namespace sogen
                 if (g_ebwv_signaler_delegate_dispatch_va != 0 && address == g_ebwv_signaler_delegate_dispatch_va)
                 {
                     trace_ebwv_signaler_delegate_dispatch_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_env_arg_validate_va != 0 && address == g_ebwv_env_arg_validate_va)
+                {
+                    trace_ebwv_env_arg_validate_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_env_completion_invoke_va != 0 && address == g_ebwv_env_completion_invoke_va)
+                {
+                    trace_ebwv_env_completion_invoke_hit(c, c.win_emu->current_thread().id);
                 }
 
                 arm_ipcz_connect_watches(c);
