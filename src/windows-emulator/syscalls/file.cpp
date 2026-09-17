@@ -177,7 +177,7 @@ namespace sogen
                     return STATUS_INVALID_HANDLE;
                 }
 
-                if (info_class == FileCompletionInformation)
+                if (info_class == FileCompletionInformation || info_class == FileReplaceCompletionInformation)
                 {
                     if (length < sizeof(FILE_COMPLETION_INFORMATION))
                     {
@@ -194,8 +194,9 @@ namespace sogen
                     if (pipe_io_trace_enabled())
                     {
                         const auto* pipe = device->get_internal_device<named_pipe>();
-                        c.win_emu.log.info("[pipe-io-trace] NtSetInformationFile(FileCompletionInformation) pipe='%s' port=0x%llx "
-                                           "key=0x%llx tid=%u\n",
+                        c.win_emu.log.info("[pipe-io-trace] NtSetInformationFile(%s) pipe='%s' port=0x%llx key=0x%llx tid=%u\n",
+                                           info_class == FileReplaceCompletionInformation ? "FileReplaceCompletionInformation"
+                                                                                          : "FileCompletionInformation",
                                            pipe ? u16_to_u8(pipe->name).c_str() : "<non-pipe-device>",
                                            static_cast<unsigned long long>(info.Port), static_cast<unsigned long long>(info.Key),
                                            c.thread().id);
@@ -337,7 +338,7 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (info_class == FileCompletionInformation)
+            if (info_class == FileCompletionInformation || info_class == FileReplaceCompletionInformation)
             {
                 if (length < sizeof(FILE_COMPLETION_INFORMATION))
                 {
