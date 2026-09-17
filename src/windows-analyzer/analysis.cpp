@@ -404,6 +404,61 @@ namespace sogen
         // embeddedbrowserwebview.dll+0x8b6cf (`mov ecx, [edi]; call`).
         constexpr uint64_t IPCZ_NODE_CONNECTOR_FOR_REFERRER_CONNECT_RVA = 0x8b570;
 
+        // EBWV_CALLBACK_ENTRY_RVA's own context object (see project_solidworks_bringup.md #302) is
+        // constructed by a generic `RegisterWaitForSingleObject`-wrapping helper (RVA 0x211990,
+        // reached only through a thin thiscall thunk at RVA 0x211970 -- found this cycle via the
+        // only static xref to 0x211c40 itself, confirming the callback is registered exactly once
+        // per watch, with the handle passed as the thunk's own first stack argument). The thunk has
+        // exactly 8 static callers across the whole module -- confirming this is generic,
+        // reused-everywhere infrastructure (matching `base::win::ObjectWatcher::StartWatchingOnce`),
+        // not something exclusive to the bootstrap pipe's own connect/read flow. These watches
+        // record which of the 8 call sites actually arms the wait that this investigation has
+        // already proven fires (see #299-#306), to determine whether it is even related to pipe I/O.
+        constexpr size_t START_WATCHING_ONCE_CALLER_COUNT = 8;
+        constexpr std::array<uint64_t, START_WATCHING_ONCE_CALLER_COUNT> START_WATCHING_ONCE_CALLER_RVAS = {
+            0x11510d, 0x15d539, 0x15dd1b, 0x1725d8, 0x172a58, 0x174239, 0x21109e, 0x36647d};
+
+        bool g_start_watching_once_watches_armed = false;
+        std::array<uint64_t, START_WATCHING_ONCE_CALLER_COUNT> g_start_watching_once_caller_vas{};
+
+        void arm_start_watching_once_watches(const analysis_context& c)
+        {
+            if (g_start_watching_once_watches_armed)
+            {
+                return;
+            }
+
+            const auto* ebwv = c.win_emu->mod_manager.find_by_name("embeddedbrowserwebview.dll");
+            if (!ebwv)
+            {
+                return;
+            }
+
+            g_start_watching_once_watches_armed = true;
+            for (size_t i = 0; i < START_WATCHING_ONCE_CALLER_COUNT; ++i)
+            {
+                g_start_watching_once_caller_vas[i] = ebwv->image_base + START_WATCHING_ONCE_CALLER_RVAS[i];
+            }
+
+            c.win_emu->log.error("[start-watching-once-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx, %zu "
+                                 "candidate caller sites\n",
+                                 static_cast<unsigned long long>(ebwv->image_base), START_WATCHING_ONCE_CALLER_COUNT);
+        }
+
+        void trace_start_watching_once_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+
+            std::array<uint32_t, 3> args{};
+            const bool read_ok = emu.try_read_memory(esp, args.data(), sizeof(args));
+
+            c.win_emu->log.error(
+                "[start-watching-once-trace] tid=%u caller_index=%zu this=0x%x arg0=0x%x arg1=0x%x arg2=0x%x (read_ok=%d)\n", tid,
+                caller_index, ecx, args[0], args[1], args[2], read_ok ? 1 : 0);
+        }
+
         uint64_t g_tpp_worker_wait_return_va = 0;
         uint64_t g_tpp_worker_key_check_va = 0;
         uint64_t g_tpp_worker_ebx_loaded_va = 0;
@@ -2994,6 +3049,16 @@ namespace sogen
                 {
                     trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
                                            "ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect");
+                }
+
+                arm_start_watching_once_watches(c);
+
+                for (size_t i = 0; i < START_WATCHING_ONCE_CALLER_COUNT; ++i)
+                {
+                    if (g_start_watching_once_caller_vas[i] != 0 && address == g_start_watching_once_caller_vas[i])
+                    {
+                        trace_start_watching_once_hit(c, c.win_emu->current_thread().id, i);
+                    }
                 }
 
                 if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
