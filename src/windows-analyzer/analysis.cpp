@@ -259,6 +259,47 @@ namespace sogen
             return tid == g_thread_activity_target_tid || g_thread_activity_extra_tids.contains(tid);
         }
 
+        // Extends the thread-activity trace (which only ever logs syscalls) with the first hit of
+        // every address a traced thread executes inside EmbeddedBrowserWebView.dll/msedge.dll --
+        // used to determine whether a traced thread's post-wake activity (see
+        // project_solidworks_bringup.md #303 point 9) ever re-enters either module's own code, or
+        // stays inside ntdll/kernel32 the whole time. Dedup'd by exact address so repeated
+        // execution of the same code (loops, re-entry) only logs once; capped to bound log growth
+        // over a long-running thread.
+        constexpr size_t MODULE_ENTRY_TRACE_CAP = 60000;
+        std::unordered_set<uint64_t> g_module_entry_traced_addresses{};
+        size_t g_module_entry_trace_hits = 0;
+        bool g_module_entry_trace_cap_logged = false;
+
+        void trace_module_entry_if_new(const analysis_context& c, const uint32_t tid, const uint64_t address)
+        {
+            const auto* mod = c.win_emu->mod_manager.find_by_address(address);
+            if (!mod || (mod->name != "embeddedbrowserwebview.dll" && mod->name != "msedge.dll"))
+            {
+                return;
+            }
+
+            if (!g_module_entry_traced_addresses.insert(address).second)
+            {
+                return;
+            }
+
+            if (g_module_entry_trace_hits >= MODULE_ENTRY_TRACE_CAP)
+            {
+                if (!g_module_entry_trace_cap_logged)
+                {
+                    g_module_entry_trace_cap_logged = true;
+                    c.win_emu->log.error("[module-entry-trace] cap of %zu unique addresses reached, suppressing further hits\n",
+                                         MODULE_ENTRY_TRACE_CAP);
+                }
+                return;
+            }
+
+            ++g_module_entry_trace_hits;
+            c.win_emu->log.error("[module-entry-trace] tid=%u %s+0x%llx\n", tid, mod->name.c_str(),
+                                 static_cast<unsigned long long>(address - mod->image_base));
+        }
+
         // TppWorkerThread's own real body inside the 32-bit ntdll.dll (RVAs against that module's
         // declared image base, confirmed unrelocated live this cycle -- see
         // project_solidworks_bringup.md #300 for the static disassembly this is based on).
@@ -2877,6 +2918,11 @@ namespace sogen
                 if (g_ebwv_post_task_virtual_call_va != 0 && address == g_ebwv_post_task_virtual_call_va)
                 {
                     trace_ebwv_post_task_virtual_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
+                {
+                    trace_module_entry_if_new(c, c.win_emu->current_thread().id, address);
                 }
             }
 
