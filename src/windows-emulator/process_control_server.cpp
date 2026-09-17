@@ -420,6 +420,71 @@ namespace sogen
             response.minted_handle_bits = h.bits;
             response.status = STATUS_SUCCESS;
         }
+
+        // Mirrors execute_adopt_section/execute_adopt_event/execute_adopt_mutant for the opposite
+        // direction: the parent pulling a handle the child already owns back into itself (e.g. a
+        // mojo/sandbox broker pattern where the child hands a section it created back to its broker
+        // via DuplicateHandle). Only describes the object; the caller mints the local handle itself,
+        // the same split responsibility duplicate_section_into_child and friends already use for the
+        // forward direction.
+        void execute_export_handle(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        {
+            const auto h = make_handle(request.address);
+
+            if (h.value.type == handle_types::section)
+            {
+                auto* const source_section = target.process.sections.get(h);
+                if (!source_section || source_section->object->is_image() || !source_section->object->file_name.empty())
+                {
+                    response.status = STATUS_NOT_SUPPORTED;
+                    return;
+                }
+
+                response.exported_object_type = handle_types::section;
+                response.maximum_size = source_section->object->maximum_size;
+                response.page_protection = source_section->object->section_page_protection;
+                response.allocation_attributes = source_section->object->allocation_attributes;
+                response.granted_access = source_section->granted_access;
+                response.payload = source_section->object->backing_storage;
+                response.status = STATUS_SUCCESS;
+                return;
+            }
+
+            if (h.value.type == handle_types::event)
+            {
+                auto* const source_event = target.process.events.get(h);
+                if (!source_event)
+                {
+                    response.status = STATUS_NOT_SUPPORTED;
+                    return;
+                }
+
+                response.exported_object_type = handle_types::event;
+                response.allocation_type = static_cast<uint32_t>(source_event->type);
+                response.page_protection = source_event->signaled ? 1 : 0;
+                response.status = STATUS_SUCCESS;
+                return;
+            }
+
+            if (h.value.type == handle_types::mutant)
+            {
+                auto* const source_mutant = target.process.mutants.get(h);
+                if (!source_mutant)
+                {
+                    response.status = STATUS_NOT_SUPPORTED;
+                    return;
+                }
+
+                response.exported_object_type = handle_types::mutant;
+                response.allocation_type = source_mutant->locked_count;
+                response.size = source_mutant->owning_thread_id;
+                response.page_protection = source_mutant->abandoned ? 1 : 0;
+                response.status = STATUS_SUCCESS;
+                return;
+            }
+
+            response.status = STATUS_NOT_SUPPORTED;
+        }
     }
 
     void execute_process_control_request(windows_emulator& target, const process_control_request& request,
@@ -462,6 +527,9 @@ namespace sogen
             break;
         case process_control_op::adopt_mutant:
             execute_adopt_mutant(target, request, response);
+            break;
+        case process_control_op::export_handle:
+            execute_export_handle(target, request, response);
             break;
         case process_control_op::query_wow64_info:
             execute_query_wow64_info(target, request, response);

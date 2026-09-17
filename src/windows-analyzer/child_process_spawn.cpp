@@ -349,6 +349,13 @@ namespace sogen
             buffer.write(response.old_protection);
             buffer.write(response.previous_suspend_count);
             buffer.write(response.minted_handle_bits);
+            buffer.write(response.exported_object_type);
+            buffer.write(response.allocation_type);
+            buffer.write(response.size);
+            buffer.write(response.maximum_size);
+            buffer.write(response.page_protection);
+            buffer.write(response.allocation_attributes);
+            buffer.write(response.granted_access);
             buffer.write_vector(response.payload);
         }
 
@@ -361,6 +368,13 @@ namespace sogen
             buffer.read(response.old_protection);
             buffer.read(response.previous_suspend_count);
             buffer.read(response.minted_handle_bits);
+            buffer.read(response.exported_object_type);
+            buffer.read(response.allocation_type);
+            buffer.read(response.size);
+            buffer.read(response.maximum_size);
+            buffer.read(response.page_protection);
+            buffer.read(response.allocation_attributes);
+            buffer.read(response.granted_access);
             buffer.read_vector(response.payload);
         }
 

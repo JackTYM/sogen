@@ -626,4 +626,214 @@ namespace sogen::test
 
         ASSERT_EQ(status, STATUS_NOT_SUPPORTED);
     }
+
+    // The reverse direction: a broker pulling a section its own child created back into itself, the
+    // real Chromium/mojo pattern behind the shared-memory-section handoff a live SolidWorksSetup.exe/
+    // WebView2 repro hit (DuplicateHandle(child_handle, h, GetCurrentProcess(), &out, ...)). Mirrors
+    // NtDuplicateObjectSyscallDuplicatesPagefileSectionIntoChild with the roles reversed: the section
+    // lives in the child's own store and the new handle must land in the parent's.
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallDuplicatesPagefileSectionFromChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const std::vector<std::byte> content = {std::byte{'h'}, std::byte{'i'}, std::byte{'!'}};
+        const auto source_handle = child.process.sections.store(make_pagefile_section(content, 0x000F001F));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto source_process = make_pseudo_handle(7, handle_types::process);
+
+        const auto handle_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(handle_out, 0u);
+        const emulator_object<handle> target_handle{parent.memory, handle_out};
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, source_process, source_handle, CURRENT_PROCESS, target_handle, 0, 0,
+                                                               DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+
+        const auto minted = target_handle.read();
+        ASSERT_NE(minted.bits, 0u);
+
+        auto* const parent_section = parent.process.sections.get(minted);
+        ASSERT_NE(parent_section, nullptr);
+        ASSERT_EQ(parent_section->object->backing_storage, content);
+        ASSERT_EQ(parent_section->object->maximum_size, content.size());
+        ASSERT_EQ(parent_section->granted_access, static_cast<ACCESS_MASK>(0x000F001F));
+    }
+
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsImageBackedSectionFromChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        auto image_section = make_pagefile_section({std::byte{1}}, 0x000F001F);
+        image_section.object->allocation_attributes = SEC_IMAGE;
+        const auto source_handle = child.process.sections.store(std::move(image_section));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto source_process = make_pseudo_handle(7, handle_types::process);
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, source_process, source_handle, CURRENT_PROCESS,
+                                                               emulator_object<handle>{parent.memory, 0}, 0, 0, DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_NOT_SUPPORTED);
+    }
+
+    // Mirrors NtDuplicateObjectSyscallDuplicatesEventIntoChild/NtDuplicateObjectSyscallDuplicatesMutantIntoChild
+    // with the roles reversed, for the same event/mutant pair a real sandbox broker exchanges with its
+    // child both ways.
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallDuplicatesEventFromChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        event e{};
+        e.type = SynchronizationEvent;
+        e.signaled = true;
+        const auto source_handle = child.process.events.store(std::move(e));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto source_process = make_pseudo_handle(7, handle_types::process);
+
+        const auto handle_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(handle_out, 0u);
+        const emulator_object<handle> target_handle{parent.memory, handle_out};
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, source_process, source_handle, CURRENT_PROCESS, target_handle, 0, 0,
+                                                               DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+
+        const auto minted = target_handle.read();
+        ASSERT_NE(minted.bits, 0u);
+
+        auto* const parent_event = parent.process.events.get(minted);
+        ASSERT_NE(parent_event, nullptr);
+        ASSERT_EQ(parent_event->type, SynchronizationEvent);
+        ASSERT_TRUE(parent_event->signaled);
+    }
+
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallDuplicatesMutantFromChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        mutant m{};
+        m.locked_count = 1;
+        m.owning_thread_id = 42;
+        const auto source_handle = child.process.mutants.store(std::move(m));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto source_process = make_pseudo_handle(7, handle_types::process);
+
+        const auto handle_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+        ASSERT_NE(handle_out, 0u);
+        const emulator_object<handle> target_handle{parent.memory, handle_out};
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, source_process, source_handle, CURRENT_PROCESS, target_handle, 0, 0,
+                                                               DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_SUCCESS);
+
+        const auto minted = target_handle.read();
+        ASSERT_NE(minted.bits, 0u);
+
+        auto* const parent_mutant = parent.process.mutants.get(minted);
+        ASSERT_NE(parent_mutant, nullptr);
+        ASSERT_EQ(parent_mutant->locked_count, 1u);
+        ASSERT_EQ(parent_mutant->owning_thread_id, 42u);
+        ASSERT_FALSE(parent_mutant->abandoned);
+    }
+
+    // Real Windows' DuplicateHandle has no direct-child-to-child path either without going through a
+    // shared parent - sogen's control channel topology is parent<->child only (no channel between two
+    // children), so this must stay STATUS_NOT_SUPPORTED rather than silently landing in the wrong table.
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsChildToChildSource)
+    {
+        auto parent = create_empty_emulator();
+        auto child_a = create_empty_emulator();
+        auto child_b = create_empty_emulator();
+
+        const auto source_handle = child_a.process.sections.store(make_pagefile_section({std::byte{1}}, 0x000F001F));
+
+        process_context::child_process_record record_a{};
+        record_a.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record_a;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child_a));
+
+        process_context::child_process_record record_b{};
+        record_b.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[9] = record_b;
+        parent.register_child_control_channel(9, std::make_unique<loopback_process_control_channel>(child_b));
+
+        const auto c = make_context(parent);
+        const auto source_process = make_pseudo_handle(7, handle_types::process);
+        const auto target_process = make_pseudo_handle(9, handle_types::process);
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, source_process, source_handle, target_process,
+                                                               emulator_object<handle>{parent.memory, 0}, 0, 0, DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_NOT_SUPPORTED);
+    }
+
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallFromChildDeniesAccessWithoutDupHandleRight)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto source_handle = child.process.sections.store(make_pagefile_section({std::byte{1}}, 0x000F001F));
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_TERMINATE; // deliberately lacks PROCESS_DUP_HANDLE (0x0040)
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+        const auto c = make_context(parent);
+        const auto source_process = make_pseudo_handle(7, handle_types::process);
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, source_process, source_handle, CURRENT_PROCESS,
+                                                               emulator_object<handle>{parent.memory, 0}, 0, 0, DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_ACCESS_DENIED);
+    }
+
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallFromChildReportsProcessIsTerminatingOnDeadChannel)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<fake_control_channel>());
+
+        const auto c = make_context(parent);
+        const auto source_process = make_pseudo_handle(7, handle_types::process);
+        const auto source_handle = make_handle(1, handle_types::section, false);
+
+        const auto status = syscalls::handle_NtDuplicateObject(c, source_process, source_handle, CURRENT_PROCESS,
+                                                               emulator_object<handle>{parent.memory, 0}, 0, 0, DUPLICATE_SAME_ACCESS);
+
+        ASSERT_EQ(status, STATUS_PROCESS_IS_TERMINATING);
+    }
 } // namespace sogen::test

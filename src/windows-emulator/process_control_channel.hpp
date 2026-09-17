@@ -24,6 +24,7 @@ namespace sogen
         query_cycle_time = 10,
         adopt_event = 11,
         adopt_mutant = 12,
+        export_handle = 13,
     };
 
     inline constexpr int process_control_default_timeout_ms = 10000;
@@ -94,6 +95,13 @@ namespace sogen
         uint32_t old_protection{};
         uint32_t previous_suspend_count{};
         uint64_t minted_handle_bits{};
+        uint32_t exported_object_type{};
+        uint32_t allocation_type{};
+        uint64_t size{};
+        uint64_t maximum_size{};
+        uint32_t page_protection{};
+        uint32_t allocation_attributes{};
+        uint32_t granted_access{};
         std::vector<std::byte> payload{};
 
         void serialize(utils::buffer_serializer& buffer) const
@@ -106,6 +114,13 @@ namespace sogen
             buffer.write(this->old_protection);
             buffer.write(this->previous_suspend_count);
             buffer.write(this->minted_handle_bits);
+            buffer.write(this->exported_object_type);
+            buffer.write(this->allocation_type);
+            buffer.write(this->size);
+            buffer.write(this->maximum_size);
+            buffer.write(this->page_protection);
+            buffer.write(this->allocation_attributes);
+            buffer.write(this->granted_access);
             buffer.write_vector(this->payload);
         }
 
@@ -119,6 +134,13 @@ namespace sogen
             buffer.read(this->old_protection);
             buffer.read(this->previous_suspend_count);
             buffer.read(this->minted_handle_bits);
+            buffer.read(this->exported_object_type);
+            buffer.read(this->allocation_type);
+            buffer.read(this->size);
+            buffer.read(this->maximum_size);
+            buffer.read(this->page_protection);
+            buffer.read(this->allocation_attributes);
+            buffer.read(this->granted_access);
             buffer.read_vector(this->payload);
         }
     };

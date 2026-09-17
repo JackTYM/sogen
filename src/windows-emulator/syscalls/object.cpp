@@ -173,6 +173,82 @@ namespace sogen
                 target_handle.write(make_handle(response->minted_handle_bits));
                 return STATUS_SUCCESS;
             }
+
+            // The reverse of duplicate_section_into_child/duplicate_event_into_child/
+            // duplicate_mutant_into_child above: the guest is pulling a handle the CHILD owns back
+            // into itself (e.g. a mojo/sandbox broker receiving a section its child created via
+            // DuplicateHandle(child_handle, h, GetCurrentProcess(), &out, ...)). export_handle asks
+            // the child to describe the object; the new local handle is minted here, in the current
+            // process's own handle store, matching real DuplicateHandle's guarantee that the new
+            // handle always lands in whatever process target_process_handle names.
+            NTSTATUS duplicate_object_from_child(const syscall_context& c, const handle source_process_handle, const handle source_handle,
+                                                 const emulator_object<handle> target_handle, const ACCESS_MASK desired_access,
+                                                 const ULONG options)
+            {
+                const auto child = resolve_child_target(c, source_process_handle, PROCESS_DUP_HANDLE);
+                if (std::holds_alternative<NTSTATUS>(child))
+                {
+                    return std::get<NTSTATUS>(child);
+                }
+
+                const auto& target = std::get<child_target>(child);
+
+                process_control_request request{};
+                request.op = process_control_op::export_handle;
+                request.address = source_handle.bits;
+
+                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                if (!response)
+                {
+                    c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
+                    return STATUS_PROCESS_IS_TERMINATING;
+                }
+
+                if (response->status != STATUS_SUCCESS)
+                {
+                    return static_cast<NTSTATUS>(response->status);
+                }
+
+                const bool same_access = (options & DUPLICATE_SAME_ACCESS) != 0;
+
+                if (response->exported_object_type == handle_types::section)
+                {
+                    if (!same_access && (desired_access & ~response->granted_access) != 0)
+                    {
+                        return STATUS_ACCESS_DENIED;
+                    }
+
+                    auto s =
+                        section::from_pagefile_backing(response->maximum_size, response->page_protection, response->allocation_attributes,
+                                                       same_access ? response->granted_access : desired_access, response->payload);
+
+                    target_handle.write(c.proc.sections.store(std::move(s)));
+                    return STATUS_SUCCESS;
+                }
+
+                if (response->exported_object_type == handle_types::event)
+                {
+                    event e{};
+                    e.type = static_cast<EVENT_TYPE>(response->allocation_type);
+                    e.signaled = response->page_protection != 0;
+
+                    target_handle.write(c.proc.events.store(std::move(e)));
+                    return STATUS_SUCCESS;
+                }
+
+                if (response->exported_object_type == handle_types::mutant)
+                {
+                    mutant m{};
+                    m.locked_count = response->allocation_type;
+                    m.owning_thread_id = static_cast<uint32_t>(response->size);
+                    m.abandoned = response->page_protection != 0;
+
+                    target_handle.write(c.proc.mutants.store(std::move(m)));
+                    return STATUS_SUCCESS;
+                }
+
+                return STATUS_NOT_SUPPORTED;
+            }
         }
 
         NTSTATUS handle_NtClose(const syscall_context& c, const handle h)
@@ -243,12 +319,20 @@ namespace sogen
                                           const handle target_process_handle, const emulator_object<handle> target_handle,
                                           const ACCESS_MASK desired_access, const ULONG /*handle_attributes*/, const ULONG options)
         {
-            if (!c.proc.is_current_process_handle(source_process_handle))
+            const bool source_is_current = c.proc.is_current_process_handle(source_process_handle);
+            const bool target_is_current = c.proc.is_current_process_handle(target_process_handle);
+
+            if (!source_is_current)
             {
-                return STATUS_NOT_SUPPORTED;
+                if (!target_is_current)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                return duplicate_object_from_child(c, source_process_handle, source_handle, target_handle, desired_access, options);
             }
 
-            if (!c.proc.is_current_process_handle(target_process_handle))
+            if (!target_is_current)
             {
                 const auto resolved_for_child = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
                 if (resolved_for_child.value.type == handle_types::event)
