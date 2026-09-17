@@ -28,6 +28,12 @@ namespace sogen
                 return value;
             }
 
+            bool pipe_io_bytes_trace_enabled()
+            {
+                static const bool value = std::getenv("SOGEN_TRACE_PIPE_IO_BYTES") != nullptr;
+                return value;
+            }
+
             bool has_valid_filename_characters(const std::u16string_view path)
             {
                 constexpr std::u16string_view invalid_characters = u"\"<>|*?";
@@ -1545,6 +1551,13 @@ namespace sogen
                     {
                         c.win_emu.log.info("[pipe-io-trace] NtWriteFile pipe='%s' length=%zu tid=%u\n", u16_to_u8(pipe->name).c_str(),
                                            temp_buffer.size(), c.thread().id);
+                    }
+
+                    if (pipe_io_bytes_trace_enabled())
+                    {
+                        c.win_emu.log.info("[pipe-io-bytes-trace] NtWriteFile pipe='%s' length=%zu tid=%u bytes=%s\n",
+                                           u16_to_u8(pipe->name).c_str(), temp_buffer.size(), c.thread().id,
+                                           utils::string::to_hex_string(temp_buffer).c_str());
                     }
 
                     deliver_bytes_to_named_pipe(c.proc, pipe->name, temp_buffer, pipe);
