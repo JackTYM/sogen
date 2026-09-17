@@ -404,6 +404,26 @@ namespace sogen
         // embeddedbrowserwebview.dll+0x8b6cf (`mov ecx, [edi]; call`).
         constexpr uint64_t IPCZ_NODE_CONNECTOR_FOR_REFERRER_CONNECT_RVA = 0x8b570;
 
+        // ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect's own `broker_link_` (this+0x38)
+        // null-check (see project_solidworks_bringup.md #308): disassembly of the already-located Connect
+        // body shows `movl 0x38(%ecx), %eax; testl %eax, %eax; je <no-broker-link branch>` as its very first
+        // real work, matching real ipcz source's `if (!broker_link_) { node_->WaitForBrokerLinkAsync(...); ... }`
+        // exactly. NO_BROKER_LINK_BRANCH_RVA is the branch target taken when broker_link_ is still null (which
+        // constructs a WaitForBrokerLinkAsync callback and returns without ever calling ReferNonBroker) --
+        // watching it (in addition to Connect itself) tells us which of the two branches actually executes,
+        // if Connect is ever reached at all.
+        constexpr uint64_t IPCZ_NODE_CONNECTOR_FOR_REFERRER_NO_BROKER_LINK_BRANCH_RVA = 0x8b5f8;
+
+        // ipcz::NodeLink::ReferNonBroker's own real implementation (see project_solidworks_bringup.md #308):
+        // located by disassembling NodeConnectorForReferrer::Connect's own non-null-broker-link branch, which
+        // ends with a direct (non-virtual, matching real ipcz source's plain member function) call to this
+        // address with ecx=broker_link_. Real ipcz source (node_link.cc) shows it locks a mutex, allocates a
+        // referral_id, stores the completion callback in `pending_referrals_`, builds a `msg::ReferNonBroker`
+        // with the new transport's driver object appended, and calls `Transmit()` on ITS OWN transport (the
+        // already-established broker_link_'s own transport) -- it never activates/reads the new transport
+        // being referred at all, matching the disassembly's own mutex-lock/map-insert/message-build shape.
+        constexpr uint64_t IPCZ_REFER_NON_BROKER_RVA = 0x8d992;
+
         // EBWV_CALLBACK_ENTRY_RVA's own context object (see project_solidworks_bringup.md #302) is
         // constructed by a generic `RegisterWaitForSingleObject`-wrapping helper (RVA 0x211990,
         // reached only through a thin thiscall thunk at RVA 0x211970 -- found this cycle via the
@@ -480,6 +500,8 @@ namespace sogen
         uint64_t g_ipcz_connect_node_wrapper_va = 0;
         uint64_t g_ipcz_connect_node_real_body_va = 0;
         uint64_t g_ipcz_node_connector_for_referrer_connect_va = 0;
+        uint64_t g_ipcz_node_connector_for_referrer_no_broker_link_branch_va = 0;
+        uint64_t g_ipcz_refer_non_broker_va = 0;
 
         void arm_ipcz_connect_watches(const analysis_context& c)
         {
@@ -498,13 +520,19 @@ namespace sogen
             g_ipcz_connect_node_wrapper_va = ebwv->image_base + IPCZ_CONNECT_NODE_WRAPPER_RVA;
             g_ipcz_connect_node_real_body_va = ebwv->image_base + IPCZ_CONNECT_NODE_REAL_BODY_RVA;
             g_ipcz_node_connector_for_referrer_connect_va = ebwv->image_base + IPCZ_NODE_CONNECTOR_FOR_REFERRER_CONNECT_RVA;
+            g_ipcz_node_connector_for_referrer_no_broker_link_branch_va =
+                ebwv->image_base + IPCZ_NODE_CONNECTOR_FOR_REFERRER_NO_BROKER_LINK_BRANCH_RVA;
+            g_ipcz_refer_non_broker_va = ebwv->image_base + IPCZ_REFER_NON_BROKER_RVA;
 
             c.win_emu->log.error("[ipcz-connect-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx: "
-                                 "ConnectNode_wrapper=0x%llx ConnectNode_real_body=0x%llx NodeConnectorForReferrer::Connect=0x%llx\n",
+                                 "ConnectNode_wrapper=0x%llx ConnectNode_real_body=0x%llx NodeConnectorForReferrer::Connect=0x%llx "
+                                 "NodeConnectorForReferrer::Connect(no-broker-link-branch)=0x%llx NodeLink::ReferNonBroker=0x%llx\n",
                                  static_cast<unsigned long long>(ebwv->image_base),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_wrapper_va),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_real_body_va),
-                                 static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_connect_va));
+                                 static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_connect_va),
+                                 static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_no_broker_link_branch_va),
+                                 static_cast<unsigned long long>(g_ipcz_refer_non_broker_va));
         }
 
         void trace_ipcz_connect_hit(const analysis_context& c, const uint32_t tid, const char* label)
@@ -3049,6 +3077,18 @@ namespace sogen
                 {
                     trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
                                            "ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect");
+                }
+
+                if (g_ipcz_node_connector_for_referrer_no_broker_link_branch_va != 0 &&
+                    address == g_ipcz_node_connector_for_referrer_no_broker_link_branch_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect (no-broker-link branch taken)");
+                }
+
+                if (g_ipcz_refer_non_broker_va != 0 && address == g_ipcz_refer_non_broker_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "ipcz::NodeLink::ReferNonBroker");
                 }
 
                 arm_start_watching_once_watches(c);
