@@ -378,6 +378,17 @@ namespace sogen
                 ctx.io_status_block.write(block);
             }
 
+            // Same WOW64 IoStatusBlock-widening gap complete_listen() restamps into ApcContext -- see
+            // there for the full rationale. Unlike complete_listen()'s always-zero completion, a read
+            // carries a real byte count, so information32 is derived from to_copy instead of hardcoded.
+            if (win_emu.process.is_wow64_process && ctx.apc_context)
+            {
+                constexpr uint32_t status32 = STATUS_SUCCESS;
+                const auto information32 = static_cast<uint32_t>(to_copy);
+                win_emu.emu().write_memory(ctx.apc_context, &status32, sizeof(status32));
+                win_emu.emu().write_memory(ctx.apc_context + sizeof(status32), &information32, sizeof(information32));
+            }
+
             if (ctx.event.bits)
             {
                 if (auto* e = win_emu.process.events.get(ctx.event))
