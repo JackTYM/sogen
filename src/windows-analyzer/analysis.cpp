@@ -382,18 +382,39 @@ namespace sogen
         // loaded, unmodified since) to read the real, dynamically-resolved target live.
         constexpr uint64_t EBWV_POST_TASK_VIRTUAL_CALL_RVA = 0x243f2f;
 
-        // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305): located via
-        // an RTTI-string cross-reference walk starting from the local lambda's own TypeDescriptor
-        // (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output) through the
-        // static typeid table it is embedded in, to the code that constructs that table's address. WRAPPER_RVA is a
-        // tiny public thunk (`push ebp; mov ebp,esp; call REAL_BODY_RVA; xor eax,eax; pop ebp; ret`) embedded exactly
-        // once as a raw function-pointer value inside a dense function-pointer array at
-        // embeddedbrowserwebview.dll+0x43a0ec (consistent with an IPC message dispatch table) -- REAL_BODY_RVA is
+        // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305, address
+        // corrected by #309): located via an RTTI-string cross-reference walk starting from the local lambda's own
+        // TypeDescriptor (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output)
+        // through the static typeid table it is embedded in, to the code that constructs that table's address.
+        // WRAPPER_RVA is a tiny public thunk (`push ebp; mov ebp,esp; call REAL_BODY_RVA; xor eax,eax; pop ebp; ret`)
+        // embedded exactly once as a raw function-pointer value at embeddedbrowserwebview.dll+0x43b4ec (#305
+        // reported +0x43a0ec, off by exactly 0x1400 -- the delta between .rdata's own PointerToRawData and
+        // VirtualAddress -- a raw-file-offset-vs-RVA transcription bug, corrected by #309 against direct PE
+        // section-table arithmetic). +0x43b4ec is written as an immediate exactly twice anywhere in the module,
+        // both times as `movl $0x1043b4ec, (%reg)` at an object's offset 0 in a constructor -- the standard MSVC
+        // vtable-pointer-store pattern -- so it is a C++ vtable slot 0, not a manually-indexed message dispatch
+        // table; no code anywhere in the module performs a computed-index load off this address. REAL_BODY_RVA is
         // the actual thiscall implementation (stack-cookie prologue, processes an `absl::Span<uint32_t>` argument,
         // matching the mangled signature `ConnectNode(unsigned int, unsigned int, absl::Span<unsigned int>)`
-        // exactly) and is also called directly from one other internal site (embeddedbrowserwebview.dll+0x85188).
+        // exactly) and is also called directly (devirtualized, never through the vtable) from one other internal
+        // site (embeddedbrowserwebview.dll+0x85188, inside IPCZ_CONNECT_NODE_INTERNAL_CALLER_RVA below).
         constexpr uint64_t IPCZ_CONNECT_NODE_WRAPPER_RVA = 0x847b0;
         constexpr uint64_t IPCZ_CONNECT_NODE_REAL_BODY_RVA = 0x847bc;
+
+        // The sole other call site that reaches ConnectNode's real body, found this cycle (#309) by re-locating
+        // the vtable at +0x43b4ec and searching the whole module for its own address as an operand. Entry point of
+        // the enclosing function (previously unexamined by any prior finding): thiscall, locks a mutex at
+        // this+0x38, looks up an entry in a container at this+0x58 keyed by its own second argument, and --
+        // gated by an equality check against that lookup's result -- either exits early or falls through an
+        // inner loop (stride 0x10) that unconditionally ends in a direct call to REAL_BODY_RVA with ecx=this.
+        // Reached from two call sites inside a "flush pending completions" loop at +0x84c52/+0x84c96 (one firing
+        // with a real dequeued item, one firing with a literal 0/null argument) and, recursively, from two more
+        // call sites inside the function at +0x8e120 (itself called from this function's own inner loop at
+        // +0x85157/+0x85177) -- structurally consistent with being the async completion path that resolves a
+        // previously-registered pending operation (matching #308's NodeLink::ReferNonBroker inserting a
+        // completion callback into pending_referrals_, keyed by referral_id), but not confirmed as that specific
+        // callback by name.
+        constexpr uint64_t IPCZ_CONNECT_NODE_INTERNAL_CALLER_RVA = 0x84f76;
 
         // ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect's own entry point (see
         // project_solidworks_bringup.md #305): located the same way, via the local lambda
@@ -502,6 +523,7 @@ namespace sogen
         uint64_t g_ipcz_node_connector_for_referrer_connect_va = 0;
         uint64_t g_ipcz_node_connector_for_referrer_no_broker_link_branch_va = 0;
         uint64_t g_ipcz_refer_non_broker_va = 0;
+        uint64_t g_ipcz_connect_node_internal_caller_va = 0;
 
         void arm_ipcz_connect_watches(const analysis_context& c)
         {
@@ -523,16 +545,19 @@ namespace sogen
             g_ipcz_node_connector_for_referrer_no_broker_link_branch_va =
                 ebwv->image_base + IPCZ_NODE_CONNECTOR_FOR_REFERRER_NO_BROKER_LINK_BRANCH_RVA;
             g_ipcz_refer_non_broker_va = ebwv->image_base + IPCZ_REFER_NON_BROKER_RVA;
+            g_ipcz_connect_node_internal_caller_va = ebwv->image_base + IPCZ_CONNECT_NODE_INTERNAL_CALLER_RVA;
 
             c.win_emu->log.error("[ipcz-connect-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx: "
                                  "ConnectNode_wrapper=0x%llx ConnectNode_real_body=0x%llx NodeConnectorForReferrer::Connect=0x%llx "
-                                 "NodeConnectorForReferrer::Connect(no-broker-link-branch)=0x%llx NodeLink::ReferNonBroker=0x%llx\n",
+                                 "NodeConnectorForReferrer::Connect(no-broker-link-branch)=0x%llx NodeLink::ReferNonBroker=0x%llx "
+                                 "ConnectNode_internal_caller=0x%llx\n",
                                  static_cast<unsigned long long>(ebwv->image_base),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_wrapper_va),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_real_body_va),
                                  static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_connect_va),
                                  static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_no_broker_link_branch_va),
-                                 static_cast<unsigned long long>(g_ipcz_refer_non_broker_va));
+                                 static_cast<unsigned long long>(g_ipcz_refer_non_broker_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_va));
         }
 
         void trace_ipcz_connect_hit(const analysis_context& c, const uint32_t tid, const char* label)
@@ -3089,6 +3114,11 @@ namespace sogen
                 if (g_ipcz_refer_non_broker_va != 0 && address == g_ipcz_refer_non_broker_va)
                 {
                     trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "ipcz::NodeLink::ReferNonBroker");
+                }
+
+                if (g_ipcz_connect_node_internal_caller_va != 0 && address == g_ipcz_connect_node_internal_caller_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "ConnectNode's internal caller (+0x84f76)");
                 }
 
                 arm_start_watching_once_watches(c);
