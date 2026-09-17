@@ -3981,6 +3981,14 @@ namespace sogen
 
             uint32_t target_thread_id = hwnd != 0 ? win->thread_id : c.thread().id;
 
+            if (std::getenv("SOGEN_TRACE_THREAD_ACTIVITY"))
+            {
+                c.win_emu.log.error("[posttask-hwnd-trace] tid=%u posts msg=0x%x to hwnd=0x%x target_tid=%u wParam=0x%llx "
+                                    "lParam=0x%llx\n",
+                                    c.thread().id, msg, static_cast<uint32_t>(hwnd), target_thread_id,
+                                    static_cast<unsigned long long>(wParam), static_cast<unsigned long long>(lParam));
+            }
+
             if (auto* thread = c.proc.find_thread_by_id(target_thread_id))
             {
                 sogen::msg qmsg{};

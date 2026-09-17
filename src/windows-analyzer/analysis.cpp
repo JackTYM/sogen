@@ -260,12 +260,13 @@ namespace sogen
         }
 
         // Extends the thread-activity trace (which only ever logs syscalls) with the first hit of
-        // every address a traced thread executes inside EmbeddedBrowserWebView.dll/msedge.dll --
-        // used to determine whether a traced thread's post-wake activity (see
-        // project_solidworks_bringup.md #303 point 9) ever re-enters either module's own code, or
-        // stays inside ntdll/kernel32 the whole time. Dedup'd by exact address so repeated
-        // execution of the same code (loops, re-entry) only logs once; capped to bound log growth
-        // over a long-running thread.
+        // every address a traced thread executes inside EmbeddedBrowserWebView.dll/msedge.dll/
+        // sldim.exe -- used to determine whether a traced thread's post-wake activity (see
+        // project_solidworks_bringup.md #303 point 9) ever re-enters one of these modules' own
+        // code, or stays inside ntdll/kernel32 the whole time (sldim.exe added in #326, to check
+        // whether the environment-creation-completion chain ever crosses back into the embedder's
+        // own module). Dedup'd by exact address so repeated execution of the same code (loops,
+        // re-entry) only logs once; capped to bound log growth over a long-running thread.
         constexpr size_t MODULE_ENTRY_TRACE_CAP = 60000;
         std::unordered_set<uint64_t> g_module_entry_traced_addresses{};
         size_t g_module_entry_trace_hits = 0;
@@ -274,7 +275,7 @@ namespace sogen
         void trace_module_entry_if_new(const analysis_context& c, const uint32_t tid, const uint64_t address)
         {
             const auto* mod = c.win_emu->mod_manager.find_by_address(address);
-            if (!mod || (mod->name != "embeddedbrowserwebview.dll" && mod->name != "msedge.dll"))
+            if (!mod || (mod->name != "embeddedbrowserwebview.dll" && mod->name != "msedge.dll" && mod->name != "sldim.exe"))
             {
                 return;
             }
