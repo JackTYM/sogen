@@ -840,7 +840,7 @@ namespace sogen
         }
 
         NTSTATUS handle_NtOpenProcess(const syscall_context& c, const emulator_object<handle> process_handle,
-                                      const ACCESS_MASK /*desired_access*/,
+                                      const ACCESS_MASK desired_access,
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
                                       const emulator_object<CLIENT_ID64> client_id)
         {
@@ -864,6 +864,21 @@ namespace sogen
             {
                 process_handle.write(STEAM_PROCESS_HANDLE);
                 return STATUS_SUCCESS;
+            }
+
+            // A previously-spawned child (NtCreateUserProcess) reopened by its real pid, e.g. a broker
+            // that only learns a child's pid later (GetNamedPipeClientProcessId) rather than retaining
+            // NtCreateUserProcess's own pseudo handle. Mints the same pseudo handle NtCreateUserProcess
+            // itself hands out, so resolve_child_target's cross-process machinery (NtDuplicateObject and
+            // friends) treats it identically regardless of which syscall produced it.
+            for (auto& [record_id, record] : c.proc.child_processes)
+            {
+                if (record.pid == id.UniqueProcess)
+                {
+                    record.granted_access |= resolve_granted_process_access(desired_access);
+                    process_handle.write(make_pseudo_handle(record_id, handle_types::process));
+                    return STATUS_SUCCESS;
+                }
             }
 
             // The emulator hosts a single process; any other pid does not exist.
