@@ -64,10 +64,7 @@ namespace sogen
         // Mirrors the handle's real synchronous-vs-overlapped mode: false iff the creating
         // NtCreateFile/NtCreateNamedPipeFile's CreateOptions carried neither FILE_SYNCHRONOUS_IO_ALERT nor
         // FILE_SYNCHRONOUS_IO_NONALERT, the NT-level signature of a Win32 FILE_FLAG_OVERLAPPED handle. Gates
-        // try_deliver_read's and listen()'s park-the-calling-thread behavior -- see there. wait() still
-        // doesn't consult this: it has no delivery path back to the caller's event/APC/IOCP once the
-        // awaited condition is met, only the yield_thread/await_objects replay-on-wake mechanism, so
-        // making it pend without blocking would drop the completion instead of merely deferring it.
+        // try_deliver_read's, listen()'s, and wait()'s park-the-calling-thread behavior -- see there.
         bool is_synchronous_handle{true};
 
         // Backs a pended FSCTL_PIPE_WAIT (see wait()): parks the calling thread on an event that is
@@ -75,6 +72,11 @@ namespace sogen
         // windows_emulator::register_named_pipe_server), whether that happened in this same process or
         // was forwarded from a sibling OS process over a pipe_ipc_channel.
         handle wait_event{};
+
+        // Backs an overlapped FSCTL_PIPE_WAIT (see wait()): mirrors pending_listen's own replay-on-wake
+        // pattern -- work() completes this once wait_event is signaled, delivering through the caller's
+        // own event/APC/IOCP instead of parking the calling thread.
+        std::optional<io_device_context> pending_wait{};
 
         // Set by a client's NtCreateFile on this same pipe name (see handle_named_pipe_create) when that
         // open happens before this server instance calls FSCTL_PIPE_LISTEN -- the common case for
@@ -135,6 +137,16 @@ namespace sogen
                 const auto ctx = *this->pending_listen;
                 this->pending_listen.reset();
                 this->complete_listen(win_emu, ctx);
+            }
+
+            if (this->pending_wait)
+            {
+                if (const auto* e = win_emu.process.events.get(this->wait_event); e && e->signaled)
+                {
+                    const auto ctx = *this->pending_wait;
+                    this->pending_wait.reset();
+                    this->complete_listen(win_emu, ctx);
+                }
             }
         }
 
@@ -203,8 +215,8 @@ namespace sogen
             static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
             if (trace_pipe_io)
             {
-                win_emu.log.info("[pipe-io-trace] FSCTL pipe='%s' code=0x%X tid=%u\n", u16_to_u8(this->name).c_str(),
-                                 static_cast<uint32_t>(c.io_control_code), c.thread().id);
+                win_emu.log.info("[pipe-io-trace] FSCTL pipe='%s' code=0x%X tid=%u synchronous=%d\n", u16_to_u8(this->name).c_str(),
+                                 static_cast<uint32_t>(c.io_control_code), c.thread().id, this->is_synchronous_handle);
             }
 
             if (c.io_control_code == FSCTL_PIPE_PEEK)
@@ -287,7 +299,9 @@ namespace sogen
         // 14) names the pipe to wait for. A server instance might not exist yet at this point -- e.g. the
         // client racing ahead of the server's own NtCreateNamedPipeFile call -- so this parks the same way
         // listen() does, rather than answering STATUS_SUCCESS unconditionally, matching real Windows
-        // WaitNamedPipeW blocking until a server instance is actually created.
+        // WaitNamedPipeW blocking until a server instance is actually created. An overlapped handle instead
+        // pends (see pending_wait) and is completed later from work(), the same way listen()'s own
+        // pending_listen path is.
         NTSTATUS wait(windows_emulator& win_emu, const io_device_context& c)
         {
             constexpr size_t name_offset = 14;
@@ -320,6 +334,12 @@ namespace sogen
             }
 
             win_emu.register_pipe_wait(target_name, this->wait_event);
+
+            if (!this->is_synchronous_handle)
+            {
+                this->pending_wait = c;
+                return STATUS_PENDING;
+            }
 
             auto& t = c.thread();
             t.await_objects = {this->wait_event};
@@ -408,7 +428,8 @@ namespace sogen
         // client has connected, exactly like complete_read() does for a pended read: caller-supplied
         // event, WoW64-aware APC, and an I/O completion port packet if one is associated with this
         // handle. A real ConnectNamedPipe completion carries no output data, so unlike complete_read()
-        // there is nothing to copy -- only the completion itself (Information = 0).
+        // there is nothing to copy -- only the completion itself (Information = 0). Reused as-is by
+        // work()'s pending_wait completion (FSCTL_PIPE_WAIT), which needs the identical no-payload shape.
         NTSTATUS complete_listen(windows_emulator& win_emu, const io_device_context& ctx)
         {
             if (ctx.io_status_block)
