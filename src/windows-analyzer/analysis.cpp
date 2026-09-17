@@ -265,8 +265,11 @@ namespace sogen
         // project_solidworks_bringup.md #303 point 9) ever re-enters one of these modules' own
         // code, or stays inside ntdll/kernel32 the whole time (sldim.exe added in #326, to check
         // whether the environment-creation-completion chain ever crosses back into the embedder's
-        // own module). Dedup'd by exact address so repeated execution of the same code (loops,
-        // re-entry) only logs once; capped to bound log growth over a long-running thread.
+        // own module). dxgi.dll/d3d11.dll/libglesv2.dll/libegl.dll added in #332 to determine
+        // whether the gpu-process's own DXGK-issuing code runs through the ANGLE/D3D11 graphics
+        // stack instead of msedge.dll directly. Dedup'd by exact address so repeated execution of
+        // the same code (loops, re-entry) only logs once; capped to bound log growth over a
+        // long-running thread.
         //
         // user32.dll/ntdll.dll are also watched (added in #328), but only for a thread already in
         // the traced set (see is_thread_activity_traced_tid below): unlike the three modules above,
@@ -275,7 +278,7 @@ namespace sogen
         // They get their own separate dedup set/cap so the always-on core-module trace (dominated by
         // msedge.dll, which alone reaches tens of thousands of unique addresses within seconds) can't
         // exhaust the budget before a traced thread's narrow window of interest is even reached.
-        constexpr size_t MODULE_ENTRY_TRACE_CAP = 60000;
+        constexpr size_t MODULE_ENTRY_TRACE_CAP = 400000;
         std::unordered_set<uint64_t> g_module_entry_traced_addresses{};
         size_t g_module_entry_trace_hits = 0;
         bool g_module_entry_trace_cap_logged = false;
@@ -285,15 +288,52 @@ namespace sogen
         size_t g_module_entry_trace_extended_hits = 0;
         bool g_module_entry_trace_extended_cap_logged = false;
 
+        constexpr size_t MODULE_CENSUS_CAP = 64;
+        std::unordered_set<std::string> g_module_census_seen_names{};
+        size_t g_module_census_unmapped_hits = 0;
+
+        void trace_module_census_if_new(const analysis_context& c, const uint32_t tid, const uint64_t address, const mapped_module* mod)
+        {
+            if (g_module_census_seen_names.size() >= MODULE_CENSUS_CAP)
+            {
+                return;
+            }
+
+            if (!mod)
+            {
+                if (g_module_census_unmapped_hits < 5)
+                {
+                    ++g_module_census_unmapped_hits;
+                    c.win_emu->log.error("[module-census] tid=%u executed unmapped address 0x%llx\n", tid,
+                                         static_cast<unsigned long long>(address));
+                }
+                return;
+            }
+
+            if (g_module_census_seen_names.insert(mod->name).second)
+            {
+                c.win_emu->log.error("[module-census] tid=%u first execution inside %s (0x%llx+0x%llx)\n", tid, mod->name.c_str(),
+                                     static_cast<unsigned long long>(mod->image_base),
+                                     static_cast<unsigned long long>(address - mod->image_base));
+            }
+        }
+
         void trace_module_entry_if_new(const analysis_context& c, const uint32_t tid, const uint64_t address)
         {
             const auto* mod = c.win_emu->mod_manager.find_by_address(address);
+
+            if (std::getenv("SOGEN_TRACE_MODULE_CENSUS"))
+            {
+                trace_module_census_if_new(c, tid, address, mod);
+            }
+
             if (!mod)
             {
                 return;
             }
 
-            if (mod->name == "embeddedbrowserwebview.dll" || mod->name == "msedge.dll" || mod->name == "sldim.exe")
+            if (mod->name == "embeddedbrowserwebview.dll" || mod->name == "msedge.dll" || mod->name == "sldim.exe" ||
+                mod->name == "dxgi.dll" || mod->name == "d3d11.dll" || mod->name == "libglesv2.dll" || mod->name == "libegl.dll")
             {
                 if (!g_module_entry_traced_addresses.insert(address).second)
                 {
@@ -1756,6 +1796,14 @@ namespace sogen
                 event.path = mod.module_path.string();
                 event.image_base = mod.image_base;
             });
+
+            if (std::getenv("SOGEN_TRACE_MODULE_LOAD"))
+            {
+                c.win_emu->log.error("[module-load-trace] %s loaded at 0x%llx (machine=0x%x, entry=0x%llx, "
+                                     "instruction_precision=%d)\n",
+                                     mod.name.c_str(), static_cast<unsigned long long>(mod.image_base), mod.machine,
+                                     static_cast<unsigned long long>(mod.entry_point), c.win_emu->uses_instruction_precision());
+            }
 
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_ACCEPT_ISOLATED"))
             {
@@ -3687,11 +3735,11 @@ namespace sogen
                         trace_ebwv_connect_named_pipe_hit(c, c.win_emu->current_thread().id, i);
                     }
                 }
+            }
 
-                if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
-                {
-                    trace_module_entry_if_new(c, c.win_emu->current_thread().id, address);
-                }
+            if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
+            {
+                trace_module_entry_if_new(c, c.win_emu->current_thread().id, address);
             }
 
             if (!g_dispatch_message_w_entry_armed)
