@@ -438,6 +438,18 @@ namespace sogen
         constexpr uint64_t EBWV_ENV_GETOVERLAPPEDRESULT_CALL_RVA = 0x366652;
         constexpr uint64_t EBWV_ENV_GETOVERLAPPEDRESULT_RETURN_RVA = 0x366658;
 
+        // Re-disassembly of +0x366620 with fresh eyes (project_solidworks_bringup.md #318) shows the
+        // GetOverlappedResult result DOES change what's delivered onward, just not by skipping the call to
+        // +0x366bfe: both branches converge on the identical `mov ecx,esi; call 0x10366bfe` at +0x3666b2, but
+        // each branch leaves a DIFFERENT 8-byte outcome struct sitting at the top of the stack right before that
+        // call (the ABI +0x366bfe itself expects, per its own `lea esi,[ebp+8]` prologue): the success branch
+        // (+0x36665c..+0x36669f) moves the real environment-pointer field out of `this+4` into it via
+        // CreateWebViewEnvironmentWithOptionsInternal-adjacent helpers (+0x785d0/+0x366dfe/+0x367078); the
+        // failure branch (+0x3666a4..+0x3666b0) just pushes two zero dwords and calls the trivial zeroing ctor
+        // at +0x367064. EBWV_ENV_OUTCOME_INVOKE_ARG_RVA watches the call site itself (esp unmodified since
+        // either branch finished, so [esp]/[esp+4] are exactly the two outcome dwords about to be forwarded).
+        constexpr uint64_t EBWV_ENV_OUTCOME_INVOKE_ARG_RVA = 0x3666b4;
+
         // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305, address
         // corrected by #309): located via an RTTI-string cross-reference walk starting from the local lambda's own
         // TypeDescriptor (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output)
@@ -622,6 +634,7 @@ namespace sogen
         uint64_t g_ebwv_env_completion_invoke_va = 0;
         uint64_t g_ebwv_env_getoverlappedresult_call_va = 0;
         uint64_t g_ebwv_env_getoverlappedresult_return_va = 0;
+        uint64_t g_ebwv_env_outcome_invoke_arg_va = 0;
 
         bool g_ipcz_connect_watches_armed = false;
         uint64_t g_ipcz_connect_node_wrapper_va = 0;
@@ -949,11 +962,12 @@ namespace sogen
                 g_ebwv_env_completion_invoke_va = g_ebwv_image_base + EBWV_ENV_COMPLETION_INVOKE_RVA;
                 g_ebwv_env_getoverlappedresult_call_va = g_ebwv_image_base + EBWV_ENV_GETOVERLAPPEDRESULT_CALL_RVA;
                 g_ebwv_env_getoverlappedresult_return_va = g_ebwv_image_base + EBWV_ENV_GETOVERLAPPEDRESULT_RETURN_RVA;
+                g_ebwv_env_outcome_invoke_arg_va = g_ebwv_image_base + EBWV_ENV_OUTCOME_INVOKE_ARG_RVA;
 
                 c.win_emu->log.error("[ebwv-posttask-trace] armed against %s image_base=0x%llx: post_task_call=0x%llx "
                                      "post_task_virtual_call=0x%llx signaler_delegate_dispatch=0x%llx env_arg_validate=0x%llx "
                                      "env_completion_invoke=0x%llx env_getoverlappedresult_call=0x%llx "
-                                     "env_getoverlappedresult_return=0x%llx\n",
+                                     "env_getoverlappedresult_return=0x%llx env_outcome_invoke_arg=0x%llx\n",
                                      mod_name, static_cast<unsigned long long>(g_ebwv_image_base),
                                      static_cast<unsigned long long>(g_ebwv_post_task_call_va),
                                      static_cast<unsigned long long>(g_ebwv_post_task_virtual_call_va),
@@ -961,7 +975,8 @@ namespace sogen
                                      static_cast<unsigned long long>(g_ebwv_env_arg_validate_va),
                                      static_cast<unsigned long long>(g_ebwv_env_completion_invoke_va),
                                      static_cast<unsigned long long>(g_ebwv_env_getoverlappedresult_call_va),
-                                     static_cast<unsigned long long>(g_ebwv_env_getoverlappedresult_return_va));
+                                     static_cast<unsigned long long>(g_ebwv_env_getoverlappedresult_return_va),
+                                     static_cast<unsigned long long>(g_ebwv_env_outcome_invoke_arg_va));
             }
         }
 
@@ -1105,6 +1120,22 @@ namespace sogen
                                  "(read_ok=%d) last_error=%u (read_ok=%d)\n",
                                  tid, eax, eax != 0 ? "TRUE/success" : "FALSE/failure", bytes_transferred, bytes_read_ok ? 1 : 0,
                                  last_error, last_error_read_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_env_outcome_invoke_arg_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+            const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
+
+            std::array<uint32_t, 2> outcome{};
+            const bool outcome_read_ok = emu.try_read_memory(esp, outcome.data(), sizeof(outcome));
+
+            c.win_emu->log.error("[ebwv-posttask-trace] tid=%u ENV_OUTCOME_INVOKE_ARG closure(ecx)=0x%x outcome@esp=[0x%x,0x%x] "
+                                 "(read_ok=%d) -> %s\n",
+                                 tid, ecx, outcome[0], outcome[1], outcome_read_ok ? 1 : 0,
+                                 (outcome[0] == 0 && outcome[1] == 0) ? "ZEROED (failure-path outcome)"
+                                                                      : "NON-ZERO (success-path outcome)");
         }
 
         void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle,
@@ -3380,6 +3411,11 @@ namespace sogen
                 if (g_ebwv_env_getoverlappedresult_return_va != 0 && address == g_ebwv_env_getoverlappedresult_return_va)
                 {
                     trace_ebwv_env_getoverlappedresult_return_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_env_outcome_invoke_arg_va != 0 && address == g_ebwv_env_outcome_invoke_arg_va)
+                {
+                    trace_ebwv_env_outcome_invoke_arg_hit(c, c.win_emu->current_thread().id);
                 }
 
                 arm_ipcz_connect_watches(c);
