@@ -278,7 +278,7 @@ namespace sogen
         // They get their own separate dedup set/cap so the always-on core-module trace (dominated by
         // msedge.dll, which alone reaches tens of thousands of unique addresses within seconds) can't
         // exhaust the budget before a traced thread's narrow window of interest is even reached.
-        constexpr size_t MODULE_ENTRY_TRACE_CAP = 400000;
+        constexpr size_t MODULE_ENTRY_TRACE_CAP = 1200000;
         std::unordered_set<uint64_t> g_module_entry_traced_addresses{};
         size_t g_module_entry_trace_hits = 0;
         bool g_module_entry_trace_cap_logged = false;
