@@ -267,38 +267,79 @@ namespace sogen
         // whether the environment-creation-completion chain ever crosses back into the embedder's
         // own module). Dedup'd by exact address so repeated execution of the same code (loops,
         // re-entry) only logs once; capped to bound log growth over a long-running thread.
+        //
+        // user32.dll/ntdll.dll are also watched (added in #328), but only for a thread already in
+        // the traced set (see is_thread_activity_traced_tid below): unlike the three modules above,
+        // this function is called for every executed instruction of every thread system-wide (#327),
+        // so watching these two ubiquitous system modules unconditionally would explode the trace.
+        // They get their own separate dedup set/cap so the always-on core-module trace (dominated by
+        // msedge.dll, which alone reaches tens of thousands of unique addresses within seconds) can't
+        // exhaust the budget before a traced thread's narrow window of interest is even reached.
         constexpr size_t MODULE_ENTRY_TRACE_CAP = 60000;
         std::unordered_set<uint64_t> g_module_entry_traced_addresses{};
         size_t g_module_entry_trace_hits = 0;
         bool g_module_entry_trace_cap_logged = false;
 
+        constexpr size_t MODULE_ENTRY_TRACE_EXTENDED_CAP = 60000;
+        std::unordered_set<uint64_t> g_module_entry_traced_extended_addresses{};
+        size_t g_module_entry_trace_extended_hits = 0;
+        bool g_module_entry_trace_extended_cap_logged = false;
+
         void trace_module_entry_if_new(const analysis_context& c, const uint32_t tid, const uint64_t address)
         {
             const auto* mod = c.win_emu->mod_manager.find_by_address(address);
-            if (!mod || (mod->name != "embeddedbrowserwebview.dll" && mod->name != "msedge.dll" && mod->name != "sldim.exe"))
+            if (!mod)
             {
                 return;
             }
 
-            if (!g_module_entry_traced_addresses.insert(address).second)
+            if (mod->name == "embeddedbrowserwebview.dll" || mod->name == "msedge.dll" || mod->name == "sldim.exe")
             {
-                return;
-            }
-
-            if (g_module_entry_trace_hits >= MODULE_ENTRY_TRACE_CAP)
-            {
-                if (!g_module_entry_trace_cap_logged)
+                if (!g_module_entry_traced_addresses.insert(address).second)
                 {
-                    g_module_entry_trace_cap_logged = true;
-                    c.win_emu->log.error("[module-entry-trace] cap of %zu unique addresses reached, suppressing further hits\n",
-                                         MODULE_ENTRY_TRACE_CAP);
+                    return;
                 }
+
+                if (g_module_entry_trace_hits >= MODULE_ENTRY_TRACE_CAP)
+                {
+                    if (!g_module_entry_trace_cap_logged)
+                    {
+                        g_module_entry_trace_cap_logged = true;
+                        c.win_emu->log.error("[module-entry-trace] cap of %zu unique addresses reached, suppressing further hits\n",
+                                             MODULE_ENTRY_TRACE_CAP);
+                    }
+                    return;
+                }
+
+                ++g_module_entry_trace_hits;
+                c.win_emu->log.error("[module-entry-trace] tid=%u %s+0x%llx\n", tid, mod->name.c_str(),
+                                     static_cast<unsigned long long>(address - mod->image_base));
                 return;
             }
 
-            ++g_module_entry_trace_hits;
-            c.win_emu->log.error("[module-entry-trace] tid=%u %s+0x%llx\n", tid, mod->name.c_str(),
-                                 static_cast<unsigned long long>(address - mod->image_base));
+            if ((mod->name == "user32.dll" || mod->name == "ntdll.dll") && is_thread_activity_traced_tid(tid))
+            {
+                if (!g_module_entry_traced_extended_addresses.insert(address).second)
+                {
+                    return;
+                }
+
+                if (g_module_entry_trace_extended_hits >= MODULE_ENTRY_TRACE_EXTENDED_CAP)
+                {
+                    if (!g_module_entry_trace_extended_cap_logged)
+                    {
+                        g_module_entry_trace_extended_cap_logged = true;
+                        c.win_emu->log.error(
+                            "[module-entry-trace] extended cap of %zu unique addresses reached, suppressing further hits\n",
+                            MODULE_ENTRY_TRACE_EXTENDED_CAP);
+                    }
+                    return;
+                }
+
+                ++g_module_entry_trace_extended_hits;
+                c.win_emu->log.error("[module-entry-trace] tid=%u %s+0x%llx\n", tid, mod->name.c_str(),
+                                     static_cast<unsigned long long>(address - mod->image_base));
+            }
         }
 
         // TppWorkerThread's own real body inside the 32-bit ntdll.dll (RVAs against that module's
@@ -1220,6 +1261,34 @@ namespace sogen
                 {
                     trace_worker_factory_thread(c, tid, factory.io_completion_handle, factory.start_routine);
                     return;
+                }
+            }
+        }
+
+        // Dynamically extends the trace to whichever thread owns a real `Chrome_WidgetWin_0` window
+        // (the Chromium/WebView2 content-widget class, see project_solidworks_bringup.md #327) --
+        // deliberately not a hardcoded tid, since #327 found tids are not stable run-to-run. Scanning
+        // proc.windows every event-pump tick (rather than hooking NtUserCreateWindowEx itself) keeps
+        // this entirely within windows-analyzer, matching this file's existing layering.
+        void trace_widget_window_threads(const analysis_context& c)
+        {
+            if (!g_thread_activity_armed)
+            {
+                return;
+            }
+
+            for (const auto& win : c.win_emu->process.windows | std::views::values)
+            {
+                if (win.class_name != u"Chrome_WidgetWin_0")
+                {
+                    continue;
+                }
+
+                if (g_thread_activity_extra_tids.insert(win.thread_id).second)
+                {
+                    c.win_emu->log.error(
+                        "[thread-activity-trace] extending trace to Chrome_WidgetWin_0-owning thread tid=%u (hwnd=0x%llx)\n", win.thread_id,
+                        static_cast<unsigned long long>(win.handle));
                 }
             }
         }
@@ -3913,6 +3982,8 @@ namespace sogen
 
         void handle_event_pump(analysis_context& c)
         {
+            trace_widget_window_threads(c);
+
             if (c.click_dialog_rules.empty())
             {
                 return;
