@@ -174,6 +174,12 @@ namespace sogen
                     c.win_emu.log.info("[pipe-io-trace] NtRemoveIoCompletion first poll of handle=0x%llx tid=%u\n",
                                        static_cast<unsigned long long>(io_completion_handle.bits), c.thread().id);
                 }
+
+                if (std::getenv("SOGEN_TRACE_PIPE_IO_EVERY_POLL"))
+                {
+                    c.win_emu.log.info("[pipe-io-trace] NtRemoveIoCompletion ATTEMPT handle=0x%llx tid=%u\n",
+                                       static_cast<unsigned long long>(io_completion_handle.bits), c.thread().id);
+                }
             }
 
             io_completion_message message{};

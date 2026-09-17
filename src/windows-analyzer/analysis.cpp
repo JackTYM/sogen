@@ -321,6 +321,26 @@ namespace sogen
         // code, or stalls inside ntdll's own bridge.
         constexpr uint64_t TP_WAIT_LEGACY_BRIDGE_CALLBACK_LOADED_RVA = 0x26a19;
 
+        // EmbeddedBrowserWebView.dll's own real callback (ntdll.dll+0x26990's `[edi+0x10]` target,
+        // live-confirmed in project_solidworks_bringup.md #301 as embeddedbrowserwebview.dll+0x211c40)
+        // is itself a small dispatcher, not the real work: static disassembly this cycle (see #302)
+        // against the real 32-bit DLL in the shared root shows it moves a closure-shaped two-word
+        // object out of its context (`[context+0x14]`, either moving the live value or default-
+        // constructing a fresh one depending on a flag at `[context+0x24]`), then calls a
+        // PostTask-shaped wrapper (RVA 0x211caa: `push edi(=context+4); push eax(=extracted value);
+        // call <wrapper>`) passing `ecx=[context+0x20]` (a "task runner"-shaped object) as `this`.
+        // EBWV_POST_TASK_CALL_RVA watches that call site with all three already loaded.
+        constexpr uint64_t EBWV_CALLBACK_ENTRY_RVA = 0x211c40;
+        constexpr uint64_t EBWV_POST_TASK_CALL_RVA = 0x211caa;
+
+        // Inside the PostTask-shaped wrapper (RVA 0x243ed0), the real work is a single virtual
+        // dispatch through the task-runner's own vtable slot 0 (`mov eax,[ecx]; mov edi,[eax];
+        // ...CFG-check edi...; call edi`) with a zeroed 8-byte value in the delay-shaped argument
+        // slot -- structurally a `base::TaskRunner`-style `PostDelayedTask(location, closure, delay=0)`
+        // virtual call. EBWV_POST_TASK_VIRTUAL_CALL_RVA watches the `call edi` itself (edi already
+        // loaded, unmodified since) to read the real, dynamically-resolved target live.
+        constexpr uint64_t EBWV_POST_TASK_VIRTUAL_CALL_RVA = 0x243f2f;
+
         uint64_t g_tpp_worker_wait_return_va = 0;
         uint64_t g_tpp_worker_key_check_va = 0;
         uint64_t g_tpp_worker_ebx_loaded_va = 0;
@@ -334,6 +354,9 @@ namespace sogen
         uint64_t g_tpsetwaitex_entry_va = 0;
         uint64_t g_tpsetwaitex_finalize_clear_va = 0;
         uint64_t g_tp_wait_legacy_bridge_callback_loaded_va = 0;
+        uint64_t g_ebwv_image_base = 0;
+        uint64_t g_ebwv_post_task_call_va = 0;
+        uint64_t g_ebwv_post_task_virtual_call_va = 0;
 
         void arm_tpp_worker_thread_watches(const analysis_context& c)
         {
@@ -561,6 +584,49 @@ namespace sogen
 
             c.win_emu->log.error("[tp-wait-gate-trace] tid=%u LEGACY_BRIDGE_CALLBACK_LOADED target=0x%x (%s+0x%llx) about to be invoked\n",
                                  tid, esi, mod_name, static_cast<unsigned long long>(offset));
+
+            if (g_ebwv_image_base == 0 && offset == EBWV_CALLBACK_ENTRY_RVA)
+            {
+                g_ebwv_image_base = esi - EBWV_CALLBACK_ENTRY_RVA;
+                g_ebwv_post_task_call_va = g_ebwv_image_base + EBWV_POST_TASK_CALL_RVA;
+                g_ebwv_post_task_virtual_call_va = g_ebwv_image_base + EBWV_POST_TASK_VIRTUAL_CALL_RVA;
+
+                c.win_emu->log.error("[ebwv-posttask-trace] armed against %s image_base=0x%llx: post_task_call=0x%llx "
+                                     "post_task_virtual_call=0x%llx\n",
+                                     mod_name, static_cast<unsigned long long>(g_ebwv_image_base),
+                                     static_cast<unsigned long long>(g_ebwv_post_task_call_va),
+                                     static_cast<unsigned long long>(g_ebwv_post_task_virtual_call_va));
+            }
+        }
+
+        void trace_ebwv_post_task_call_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(esi);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(esi);
+            const auto offset = mod ? esi - mod->image_base : esi;
+
+            c.win_emu->log.error(
+                "[ebwv-posttask-trace] tid=%u POST_TASK_CALL task_runner(esi/ecx)=0x%x (%s+0x%llx) context_plus_4(edi)=0x%x "
+                "extracted_value(eax)=0x%x\n",
+                tid, esi, mod_name, static_cast<unsigned long long>(offset), edi, eax);
+        }
+
+        void trace_ebwv_post_task_virtual_call_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(edi);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(edi);
+            const auto offset = mod ? edi - mod->image_base : edi;
+
+            c.win_emu->log.error("[ebwv-posttask-trace] tid=%u POST_TASK_VIRTUAL_CALL target=0x%x (%s+0x%llx) about to be invoked\n", tid,
+                                 edi, mod_name, static_cast<unsigned long long>(offset));
         }
 
         void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle,
@@ -2801,6 +2867,16 @@ namespace sogen
                 if (g_tp_wait_legacy_bridge_callback_loaded_va != 0 && address == g_tp_wait_legacy_bridge_callback_loaded_va)
                 {
                     trace_tp_wait_legacy_bridge_callback_loaded_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_post_task_call_va != 0 && address == g_ebwv_post_task_call_va)
+                {
+                    trace_ebwv_post_task_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_post_task_virtual_call_va != 0 && address == g_ebwv_post_task_virtual_call_va)
+                {
+                    trace_ebwv_post_task_virtual_call_hit(c, c.win_emu->current_thread().id);
                 }
             }
 
