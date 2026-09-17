@@ -2461,6 +2461,15 @@ namespace sogen
                 e->signaled = false;
             }
 
+            if (pipe_io_trace_enabled() && fs_control_code == FSCTL_PIPE_LISTEN)
+            {
+                c.win_emu.log.info("[pipe-io-trace] NtFsControlFile FSCTL_PIPE_LISTEN tid=%u file_handle=0x%llx "
+                                   "io_status_block=0x%llx event=0x%llx apc_routine=0x%llx\n",
+                                   c.thread().id, static_cast<unsigned long long>(file_handle.bits),
+                                   static_cast<unsigned long long>(io_status_block.value()), static_cast<unsigned long long>(event.bits),
+                                   static_cast<unsigned long long>(apc_routine));
+            }
+
             io_device_context context{c.emu};
             context.event = event;
             context.apc_routine = apc_routine;
