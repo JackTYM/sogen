@@ -259,13 +259,191 @@ namespace sogen
             return tid == g_thread_activity_target_tid || g_thread_activity_extra_tids.contains(tid);
         }
 
-        void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle)
+        // TppWorkerThread's own real body inside the 32-bit ntdll.dll (RVAs against that module's
+        // declared image base, confirmed unrelocated live this cycle -- see
+        // project_solidworks_bringup.md #300 for the static disassembly this is based on).
+        // WAIT_RETURN_RVA: right after `call ZwWaitForWorkViaWorkerFactory` returns (eax=status);
+        // KEY_CHECK_RVA: `mov esi, [ebp-0x3c]` -- esi becomes the delivered miniPacket's own
+        // KeyContext, and dispatch branches on whether it is zero; GENERIC_CALL_RVA: the real,
+        // CFG-checked indirect `call ebx` that invokes an application-registered TP callback when
+        // KeyContext is a live TP-object pointer.
+        constexpr uint64_t TPP_WORKER_WAIT_RETURN_RVA = 0x3d008;
+        constexpr uint64_t TPP_WORKER_KEY_CHECK_RVA = 0x3d195;
+        // `mov ebx, [esi+0x20]` -- watch fires on the NEXT instruction (0x3d1df) so ebx is already
+        // loaded, matching this file's own established "hook fires before the watched instruction
+        // executes" convention (see SLDIM_GET_PENDING_COMMAND_STATE_RVA's own comment above).
+        constexpr uint64_t TPP_WORKER_EBX_LOADED_RVA = 0x3d1df;
+        constexpr uint64_t TPP_WORKER_GENERIC_CALL_RVA = 0x3d22c;
+        constexpr uint64_t TPP_WORKER_NO_LOCAL_WORK_HELPER_RETURN_RVA = 0x3d277;
+        constexpr uint64_t TPP_WORKER_RELEASE_OR_LOOP_RVA = 0x3d0bb;
+        // The TP_WAIT-specific sentinel thunk (found live this cycle: `EBX_LOADED` resolves here
+        // for the bootstrap pipe's own delivery) itself calls a second internal helper
+        // (0x2baf9f-0x2b055 RVA chain) that loads the real, application-registered WaitCallback
+        // from the TP_WAIT object at `[edi+0x30]` and CFG-checks/invokes it via `call esi` --
+        // watch fires on the next instruction (0x2b013) so esi already holds the real target.
+        constexpr uint64_t TPP_WAIT_CALLBACK_LOADED_RVA = 0x2b013;
+
+        uint64_t g_tpp_worker_wait_return_va = 0;
+        uint64_t g_tpp_worker_key_check_va = 0;
+        uint64_t g_tpp_worker_ebx_loaded_va = 0;
+        uint64_t g_tpp_worker_generic_call_va = 0;
+        uint64_t g_tpp_worker_no_local_work_helper_return_va = 0;
+        uint64_t g_tpp_worker_release_or_loop_va = 0;
+        uint64_t g_tpp_wait_callback_loaded_va = 0;
+
+        void arm_tpp_worker_thread_watches(const analysis_context& c)
+        {
+            if (g_tpp_worker_wait_return_va != 0)
+            {
+                return;
+            }
+
+            const auto* ntdll32 = c.win_emu->mod_manager.wow64_modules_.ntdll32;
+            if (!ntdll32)
+            {
+                return;
+            }
+
+            g_tpp_worker_wait_return_va = ntdll32->image_base + TPP_WORKER_WAIT_RETURN_RVA;
+            g_tpp_worker_key_check_va = ntdll32->image_base + TPP_WORKER_KEY_CHECK_RVA;
+            g_tpp_worker_ebx_loaded_va = ntdll32->image_base + TPP_WORKER_EBX_LOADED_RVA;
+            g_tpp_worker_generic_call_va = ntdll32->image_base + TPP_WORKER_GENERIC_CALL_RVA;
+            g_tpp_worker_no_local_work_helper_return_va = ntdll32->image_base + TPP_WORKER_NO_LOCAL_WORK_HELPER_RETURN_RVA;
+            g_tpp_worker_release_or_loop_va = ntdll32->image_base + TPP_WORKER_RELEASE_OR_LOOP_RVA;
+            g_tpp_wait_callback_loaded_va = ntdll32->image_base + TPP_WAIT_CALLBACK_LOADED_RVA;
+
+            c.win_emu->log.error(
+                "[tpp-worker-trace] armed against ntdll.dll (32-bit) image_base=0x%llx: wait_return=0x%llx "
+                "key_check=0x%llx ebx_loaded=0x%llx generic_call=0x%llx helper_return=0x%llx release_or_loop=0x%llx "
+                "wait_callback_loaded=0x%llx\n",
+                static_cast<unsigned long long>(ntdll32->image_base), static_cast<unsigned long long>(g_tpp_worker_wait_return_va),
+                static_cast<unsigned long long>(g_tpp_worker_key_check_va), static_cast<unsigned long long>(g_tpp_worker_ebx_loaded_va),
+                static_cast<unsigned long long>(g_tpp_worker_generic_call_va),
+                static_cast<unsigned long long>(g_tpp_worker_no_local_work_helper_return_va),
+                static_cast<unsigned long long>(g_tpp_worker_release_or_loop_va),
+                static_cast<unsigned long long>(g_tpp_wait_callback_loaded_va));
+        }
+
+        void trace_tpp_worker_wait_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto status = emu.reg<uint32_t>(x86_register::eax);
+            const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
+
+            uint32_t mini_packets_ptr = 0;
+            emu.try_read_memory(ebp - 0x11c, &mini_packets_ptr, sizeof(mini_packets_ptr));
+
+            uint32_t packet[4]{};
+            const bool read_ok = mini_packets_ptr != 0 && emu.try_read_memory(mini_packets_ptr, &packet, sizeof(packet));
+
+            c.win_emu->log.error(
+                "[tpp-worker-trace] tid=%u WAIT_RETURN status=0x%x mini_packets_ptr=0x%x key_context=0x%x apc_context=0x%x "
+                "io_status=0x%x io_information=0x%x (read_ok=%d)\n",
+                tid, status, mini_packets_ptr, packet[0], packet[1], packet[2], packet[3], read_ok ? 1 : 0);
+        }
+
+        void trace_tpp_worker_key_check_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(esi);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(esi);
+            const auto offset = mod ? esi - mod->image_base : esi;
+
+            c.win_emu->log.error("[tpp-worker-trace] tid=%u KEY_CHECK esi(key_context)=0x%x -> %s (%s+0x%llx)\n", tid, esi,
+                                 esi == 0 ? "TAKING ESI==0 (no-local-work-helper) PATH" : "TAKING ESI!=0 (fast dispatch) PATH", mod_name,
+                                 static_cast<unsigned long long>(offset));
+        }
+
+        void trace_tpp_worker_ebx_loaded_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            const char* classification = "UNKNOWN (generic/CFG-checked call)";
+            if (ebx == 0x4b2bc180)
+            {
+                classification = "SENTINEL #1 (direct call, no CFG check)";
+            }
+            else if (ebx == 0x4b2bae40)
+            {
+                classification = "SENTINEL #2 (direct call, no CFG check)";
+            }
+            else if (ebx == 0x4b2b8fc0)
+            {
+                classification = "SENTINEL #3 (direct call, no CFG check)";
+            }
+
+            c.win_emu->log.error("[tpp-worker-trace] tid=%u EBX_LOADED tp_object(esi)=0x%x callback_ptr(ebx)=0x%x -> %s\n", tid, esi, ebx,
+                                 classification);
+        }
+
+        void trace_tpp_worker_generic_call_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+
+            uint32_t args[4]{};
+            emu.try_read_memory(esp, &args, sizeof(args));
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(ebx);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(ebx);
+            const auto offset = mod ? ebx - mod->image_base : ebx;
+
+            c.win_emu->log.error("[tpp-worker-trace] tid=%u GENERIC_CALLBACK_DISPATCH target=0x%x (%s+0x%llx) tp_object(esi)=0x%x "
+                                 "args=[0x%x,0x%x,0x%x,0x%x]\n",
+                                 tid, ebx, mod_name, static_cast<unsigned long long>(offset), esi, args[0], args[1], args[2], args[3]);
+        }
+
+        void trace_tpp_worker_no_local_work_helper_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+
+            c.win_emu->log.error("[tpp-worker-trace] tid=%u NO_LOCAL_WORK_HELPER_RETURN eax=0x%x -> %s\n", tid, eax,
+                                 eax == 0 ? "NO WORK FOUND, taking RELEASE_OR_LOOP branch" : "WORK FOUND, continuing dispatch");
+        }
+
+        void trace_tpp_worker_release_or_loop_hit(const analysis_context& c, const uint32_t tid)
+        {
+            c.win_emu->log.error("[tpp-worker-trace] tid=%u RELEASE_OR_LOOP reached (no callback invoked this iteration)\n", tid);
+        }
+
+        void trace_tpp_wait_callback_loaded_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(esi);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(esi);
+            const auto offset = mod ? esi - mod->image_base : esi;
+
+            c.win_emu->log.error(
+                "[tpp-worker-trace] tid=%u REAL_WAIT_CALLBACK tp_wait_object=0x%x callback=0x%x (%s+0x%llx) about to be invoked\n", tid,
+                edi, esi, mod_name, static_cast<unsigned long long>(offset));
+        }
+
+        void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle,
+                                         const uint64_t start_routine)
         {
             if (g_thread_activity_extra_tids.insert(tid).second)
             {
+                const auto* start_mod_name = c.win_emu->mod_manager.find_name(start_routine);
+                const auto* start_mod = c.win_emu->mod_manager.find_by_address(start_routine);
+                const auto start_offset = start_mod ? start_routine - start_mod->image_base : start_routine;
+
                 c.win_emu->log.error(
-                    "[thread-activity-trace] extending trace to worker-factory thread tid=%u (factory io_completion=0x%llx)\n", tid,
-                    static_cast<unsigned long long>(io_completion_handle.bits));
+                    "[thread-activity-trace] extending trace to worker-factory thread tid=%u (factory io_completion=0x%llx) "
+                    "start_routine=0x%llx (%s+0x%llx)\n",
+                    tid, static_cast<unsigned long long>(io_completion_handle.bits), static_cast<unsigned long long>(start_routine),
+                    start_mod_name, static_cast<unsigned long long>(start_offset));
+
+                arm_tpp_worker_thread_watches(c);
             }
         }
 
@@ -276,7 +454,7 @@ namespace sogen
                 (void)factory_id;
                 if (std::ranges::find(factory.worker_threads, thread_handle) != factory.worker_threads.end())
                 {
-                    trace_worker_factory_thread(c, tid, factory.io_completion_handle);
+                    trace_worker_factory_thread(c, tid, factory.io_completion_handle, factory.start_routine);
                     return;
                 }
             }
@@ -295,7 +473,7 @@ namespace sogen
                 {
                     if (const auto* thread = c.win_emu->process.threads.get(thread_handle))
                     {
-                        trace_worker_factory_thread(c, thread->id, factory.io_completion_handle);
+                        trace_worker_factory_thread(c, thread->id, factory.io_completion_handle, factory.start_routine);
                     }
                 }
             }
@@ -2421,6 +2599,44 @@ namespace sogen
             if (g_sldim_get_pending_command_state_trace_va != 0 && address == g_sldim_get_pending_command_state_trace_va)
             {
                 trace_sldim_pending_command_state_hit(c, address);
+            }
+
+            if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))
+            {
+                if (g_tpp_worker_wait_return_va != 0 && address == g_tpp_worker_wait_return_va)
+                {
+                    trace_tpp_worker_wait_return_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpp_worker_key_check_va != 0 && address == g_tpp_worker_key_check_va)
+                {
+                    trace_tpp_worker_key_check_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpp_worker_ebx_loaded_va != 0 && address == g_tpp_worker_ebx_loaded_va)
+                {
+                    trace_tpp_worker_ebx_loaded_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpp_worker_generic_call_va != 0 && address == g_tpp_worker_generic_call_va)
+                {
+                    trace_tpp_worker_generic_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpp_worker_no_local_work_helper_return_va != 0 && address == g_tpp_worker_no_local_work_helper_return_va)
+                {
+                    trace_tpp_worker_no_local_work_helper_return_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpp_worker_release_or_loop_va != 0 && address == g_tpp_worker_release_or_loop_va)
+                {
+                    trace_tpp_worker_release_or_loop_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpp_wait_callback_loaded_va != 0 && address == g_tpp_wait_callback_loaded_va)
+                {
+                    trace_tpp_wait_callback_loaded_hit(c, c.win_emu->current_thread().id);
+                }
             }
 
             if (!g_dispatch_message_w_entry_armed)
