@@ -278,10 +278,48 @@ namespace sogen
         constexpr uint64_t TPP_WORKER_RELEASE_OR_LOOP_RVA = 0x3d0bb;
         // The TP_WAIT-specific sentinel thunk (found live this cycle: `EBX_LOADED` resolves here
         // for the bootstrap pipe's own delivery) itself calls a second internal helper
-        // (0x2baf9f-0x2b055 RVA chain) that loads the real, application-registered WaitCallback
+        // (0x3baf9f-0x3b055 RVA chain) that loads the real, application-registered WaitCallback
         // from the TP_WAIT object at `[edi+0x30]` and CFG-checks/invokes it via `call esi` --
-        // watch fires on the next instruction (0x2b013) so esi already holds the real target.
-        constexpr uint64_t TPP_WAIT_CALLBACK_LOADED_RVA = 0x2b013;
+        // watch fires on the next instruction (0x3b013) so esi already holds the real target.
+        // Corrected this cycle (see project_solidworks_bringup.md #301): the original RVA here
+        // (0x2b013) was off by exactly 0x10000 against the real, disassembly-confirmed address,
+        // so this watch never actually fired in any prior cycle that relied on it.
+        constexpr uint64_t TPP_WAIT_CALLBACK_LOADED_RVA = 0x3b013;
+
+        // The TP_WAIT sentinel thunk's own real gate (see project_solidworks_bringup.md #301):
+        // `mov cl, byte ptr [edi+0x124]` ... `test cl, 1` ... `jne <rearm-instead-of-invoke path>`.
+        // This is a genuinely different field than #300's own "+0xDE" writeup (a transcription slip
+        // against a nested, unrelated helper) -- ground-truth static disassembly this cycle traced
+        // every real access to +0x124 in the module and found exactly three: this gate's own two
+        // reads plus its own unconditional post-dispatch clear (both paths converge on clearing it),
+        // and TpSetWaitEx's own finalization clear. GATE_TEST_RVA watches the `test cl,1` itself (cl
+        // already loaded by the preceding `mov`); REARM_TAKEN_RVA watches the out-of-line re-arm
+        // path's own entry, reached only when bit 0 was set.
+        constexpr uint64_t TP_WAIT_GATE_TEST_RVA = 0x3ae91;
+        constexpr uint64_t TP_WAIT_GATE_REARM_TAKEN_RVA = 0xa13e7;
+
+        // TpAllocWait's own real body (RtlAllocateHeap(..., HEAP_ZERO_MEMORY, 0x128)) is the only
+        // place the TP_WAIT object's storage is ever brought into existence -- watching the
+        // instruction right after the allocation returns (esi = the new object, or 0 on failure)
+        // reads back the +0x124 gate byte directly, to determine whether the real ntdll allocation
+        // path actually hands back zeroed memory the way HEAP_ZERO_MEMORY promises.
+        constexpr uint64_t TP_ALLOC_WAIT_ZERO_CHECK_RVA = 0x36c0d;
+
+        // TpSetWaitEx's own entry (edi = the TP_WAIT object, its first argument) and its own
+        // finalization clear (`and byte ptr [esi+0x124], -4`, reached by both the "nothing to
+        // cancel" fast path and the "cancel completed synchronously" path) -- watching both pins
+        // down exactly when/how often the real re-arm API runs against this specific object, and
+        // what the gate byte held immediately before each finalization clears it.
+        constexpr uint64_t TPSETWAITEX_ENTRY_RVA = 0x3c8cf;
+        constexpr uint64_t TPSETWAITEX_FINALIZE_CLEAR_RVA = 0x3c9ed;
+
+        // The generic legacy-API bridge invoked as the real callback above (ntdll.dll+0x26990,
+        // live-confirmed this cycle) is itself just a shim: it loads the TRUE, deepest
+        // application-supplied `WAITORTIMERCALLBACK` from its own context object's `[edi+0x10]`
+        // and CFG-checks/invokes it via `call esi` -- watching the instruction right after that
+        // load (0x26a19) resolves whether execution genuinely reaches into mojo/Chromium's own
+        // code, or stalls inside ntdll's own bridge.
+        constexpr uint64_t TP_WAIT_LEGACY_BRIDGE_CALLBACK_LOADED_RVA = 0x26a19;
 
         uint64_t g_tpp_worker_wait_return_va = 0;
         uint64_t g_tpp_worker_key_check_va = 0;
@@ -290,6 +328,12 @@ namespace sogen
         uint64_t g_tpp_worker_no_local_work_helper_return_va = 0;
         uint64_t g_tpp_worker_release_or_loop_va = 0;
         uint64_t g_tpp_wait_callback_loaded_va = 0;
+        uint64_t g_tp_wait_gate_test_va = 0;
+        uint64_t g_tp_wait_gate_rearm_taken_va = 0;
+        uint64_t g_tp_alloc_wait_zero_check_va = 0;
+        uint64_t g_tpsetwaitex_entry_va = 0;
+        uint64_t g_tpsetwaitex_finalize_clear_va = 0;
+        uint64_t g_tp_wait_legacy_bridge_callback_loaded_va = 0;
 
         void arm_tpp_worker_thread_watches(const analysis_context& c)
         {
@@ -311,6 +355,12 @@ namespace sogen
             g_tpp_worker_no_local_work_helper_return_va = ntdll32->image_base + TPP_WORKER_NO_LOCAL_WORK_HELPER_RETURN_RVA;
             g_tpp_worker_release_or_loop_va = ntdll32->image_base + TPP_WORKER_RELEASE_OR_LOOP_RVA;
             g_tpp_wait_callback_loaded_va = ntdll32->image_base + TPP_WAIT_CALLBACK_LOADED_RVA;
+            g_tp_wait_gate_test_va = ntdll32->image_base + TP_WAIT_GATE_TEST_RVA;
+            g_tp_wait_gate_rearm_taken_va = ntdll32->image_base + TP_WAIT_GATE_REARM_TAKEN_RVA;
+            g_tp_alloc_wait_zero_check_va = ntdll32->image_base + TP_ALLOC_WAIT_ZERO_CHECK_RVA;
+            g_tpsetwaitex_entry_va = ntdll32->image_base + TPSETWAITEX_ENTRY_RVA;
+            g_tpsetwaitex_finalize_clear_va = ntdll32->image_base + TPSETWAITEX_FINALIZE_CLEAR_RVA;
+            g_tp_wait_legacy_bridge_callback_loaded_va = ntdll32->image_base + TP_WAIT_LEGACY_BRIDGE_CALLBACK_LOADED_RVA;
 
             c.win_emu->log.error(
                 "[tpp-worker-trace] armed against ntdll.dll (32-bit) image_base=0x%llx: wait_return=0x%llx "
@@ -322,6 +372,14 @@ namespace sogen
                 static_cast<unsigned long long>(g_tpp_worker_no_local_work_helper_return_va),
                 static_cast<unsigned long long>(g_tpp_worker_release_or_loop_va),
                 static_cast<unsigned long long>(g_tpp_wait_callback_loaded_va));
+
+            c.win_emu->log.error(
+                "[tp-wait-gate-trace] armed: gate_test=0x%llx rearm_taken=0x%llx alloc_zero_check=0x%llx "
+                "tpsetwaitex_entry=0x%llx tpsetwaitex_finalize_clear=0x%llx legacy_bridge_callback_loaded=0x%llx\n",
+                static_cast<unsigned long long>(g_tp_wait_gate_test_va), static_cast<unsigned long long>(g_tp_wait_gate_rearm_taken_va),
+                static_cast<unsigned long long>(g_tp_alloc_wait_zero_check_va), static_cast<unsigned long long>(g_tpsetwaitex_entry_va),
+                static_cast<unsigned long long>(g_tpsetwaitex_finalize_clear_va),
+                static_cast<unsigned long long>(g_tp_wait_legacy_bridge_callback_loaded_va));
         }
 
         void trace_tpp_worker_wait_return_hit(const analysis_context& c, const uint32_t tid)
@@ -426,6 +484,83 @@ namespace sogen
             c.win_emu->log.error(
                 "[tpp-worker-trace] tid=%u REAL_WAIT_CALLBACK tp_wait_object=0x%x callback=0x%x (%s+0x%llx) about to be invoked\n", tid,
                 edi, esi, mod_name, static_cast<unsigned long long>(offset));
+        }
+
+        void trace_tp_wait_gate_test_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+            const auto ecx = emu.reg<uint32_t>(x86_register::ecx);
+            const auto cl = static_cast<uint8_t>(ecx & 0xff);
+
+            c.win_emu->log.error("[tp-wait-gate-trace] tid=%u GATE_TEST tp_wait_object=0x%x gate_byte(+0x124)=0x%x bit0=%d bit2=%d -> %s\n",
+                                 tid, edi, cl, cl & 1, (cl >> 2) & 1,
+                                 (cl & 1) ? "REARM (real callback SKIPPED)" : "PROCEED (real callback invoked)");
+        }
+
+        void trace_tp_wait_gate_rearm_taken_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+
+            c.win_emu->log.error("[tp-wait-gate-trace] tid=%u REARM_TAKEN tp_wait_object=0x%x (re-arming via TpSetWaitEx-equivalent "
+                                 "instead of invoking the real callback this cycle)\n",
+                                 tid, edi);
+        }
+
+        void trace_tp_alloc_wait_zero_check_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            if (esi == 0)
+            {
+                c.win_emu->log.error("[tp-wait-gate-trace] tid=%u TP_ALLOC_WAIT_ZERO_CHECK allocation failed\n", tid);
+                return;
+            }
+
+            uint8_t gate_byte = 0;
+            const bool read_ok = emu.try_read_memory(esi + 0x124, &gate_byte, sizeof(gate_byte));
+
+            c.win_emu->log.error("[tp-wait-gate-trace] tid=%u TP_ALLOC_WAIT_ZERO_CHECK tp_wait_object=0x%x gate_byte(+0x124)=0x%x "
+                                 "(read_ok=%d) -> %s\n",
+                                 tid, esi, gate_byte, read_ok ? 1 : 0,
+                                 gate_byte == 0 ? "ZEROED as expected" : "NON-ZERO at allocation time");
+        }
+
+        void trace_tpsetwaitex_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto edi = emu.reg<uint32_t>(x86_register::edi);
+
+            c.win_emu->log.error("[tp-wait-gate-trace] tid=%u TPSETWAITEX_ENTRY tp_wait_object=0x%x\n", tid, edi);
+        }
+
+        void trace_tpsetwaitex_finalize_clear_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            uint8_t gate_byte_before = 0;
+            const bool read_ok = esi != 0 && emu.try_read_memory(esi + 0x124, &gate_byte_before, sizeof(gate_byte_before));
+
+            c.win_emu->log.error(
+                "[tp-wait-gate-trace] tid=%u TPSETWAITEX_FINALIZE_CLEAR tp_wait_object=0x%x gate_byte(+0x124)_before_clear=0x%x "
+                "(read_ok=%d)\n",
+                tid, esi, gate_byte_before, read_ok ? 1 : 0);
+        }
+
+        void trace_tp_wait_legacy_bridge_callback_loaded_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            const auto* mod_name = c.win_emu->mod_manager.find_name(esi);
+            const auto* mod = c.win_emu->mod_manager.find_by_address(esi);
+            const auto offset = mod ? esi - mod->image_base : esi;
+
+            c.win_emu->log.error("[tp-wait-gate-trace] tid=%u LEGACY_BRIDGE_CALLBACK_LOADED target=0x%x (%s+0x%llx) about to be invoked\n",
+                                 tid, esi, mod_name, static_cast<unsigned long long>(offset));
         }
 
         void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle,
@@ -2636,6 +2771,36 @@ namespace sogen
                 if (g_tpp_wait_callback_loaded_va != 0 && address == g_tpp_wait_callback_loaded_va)
                 {
                     trace_tpp_wait_callback_loaded_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tp_wait_gate_test_va != 0 && address == g_tp_wait_gate_test_va)
+                {
+                    trace_tp_wait_gate_test_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tp_wait_gate_rearm_taken_va != 0 && address == g_tp_wait_gate_rearm_taken_va)
+                {
+                    trace_tp_wait_gate_rearm_taken_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tp_alloc_wait_zero_check_va != 0 && address == g_tp_alloc_wait_zero_check_va)
+                {
+                    trace_tp_alloc_wait_zero_check_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpsetwaitex_entry_va != 0 && address == g_tpsetwaitex_entry_va)
+                {
+                    trace_tpsetwaitex_entry_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tpsetwaitex_finalize_clear_va != 0 && address == g_tpsetwaitex_finalize_clear_va)
+                {
+                    trace_tpsetwaitex_finalize_clear_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_tp_wait_legacy_bridge_callback_loaded_va != 0 && address == g_tp_wait_legacy_bridge_callback_loaded_va)
+                {
+                    trace_tp_wait_legacy_bridge_callback_loaded_hit(c, c.win_emu->current_thread().id);
                 }
             }
 
