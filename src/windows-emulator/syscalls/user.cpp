@@ -455,6 +455,12 @@ namespace sogen
 
             if (auto* thread = c.proc.find_thread_by_id(win.thread_id))
             {
+                if (std::getenv("SOGEN_TRACE_THREAD_ACTIVITY"))
+                {
+                    c.win_emu.log.error("[wm-paint-trace] queuing WM_PAINT for hwnd=0x%x target_tid=%u\n",
+                                        static_cast<uint32_t>(win.handle), win.thread_id);
+                }
+
                 thread->post_message(c.win_emu, msg{.window = win.handle, .message = WM_PAINT, .wParam = 0, .lParam = 0});
                 win.paint_message_posted = true;
             }

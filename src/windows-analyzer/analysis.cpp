@@ -1075,6 +1075,29 @@ namespace sogen
             }
         }
 
+        // Shared by both hooks below: dumps the first 8 dwords of a BindStateBase-shaped closure
+        // (see project_solidworks_bringup.md's cycle-77 finding for the confirmed layout:
+        // [+0]=refcount, [+4]=polymorphic_invoke_, [+8]=destructor_, [+0xc]=is_cancelled_) so the
+        // closure's real, dynamically-resolved invoke target is visible without a second pass.
+        void dump_bind_state_words(const analysis_context& c, const uint32_t tid, const uint32_t closure)
+        {
+            auto& emu = c.win_emu->emu();
+
+            std::array<uint32_t, 8> bind_state_words{};
+            const bool bind_state_read_ok = closure != 0 && emu.try_read_memory(closure, bind_state_words.data(), sizeof(bind_state_words));
+
+            for (size_t i = 0; bind_state_read_ok && i < bind_state_words.size(); ++i)
+            {
+                const auto word = bind_state_words.at(i);
+                const auto* word_mod_name = c.win_emu->mod_manager.find_name(word);
+                const auto* word_mod = c.win_emu->mod_manager.find_by_address(word);
+                const auto word_offset = word_mod ? word - word_mod->image_base : word;
+
+                c.win_emu->log.error("[ebwv-posttask-trace] tid=%u   bind_state[+0x%zx]=0x%x (%s+0x%llx)\n", tid, i * sizeof(uint32_t),
+                                     word, word_mod_name, static_cast<unsigned long long>(word_offset));
+            }
+        }
+
         void trace_ebwv_post_task_call_hit(const analysis_context& c, const uint32_t tid)
         {
             auto& emu = c.win_emu->emu();
@@ -1097,32 +1120,32 @@ namespace sogen
             // cleanup -- see EBWV_SIGNALER_DELEGATE_DISPATCH_RVA's own comment above for the layout this dump
             // confirmed). Dumping the first few dwords of the object it points to identifies that
             // layout live.
-            std::array<uint32_t, 8> bind_state_words{};
-            const bool bind_state_read_ok = eax != 0 && emu.try_read_memory(eax, bind_state_words.data(), sizeof(bind_state_words));
-
-            for (size_t i = 0; bind_state_read_ok && i < bind_state_words.size(); ++i)
-            {
-                const auto word = bind_state_words.at(i);
-                const auto* word_mod_name = c.win_emu->mod_manager.find_name(word);
-                const auto* word_mod = c.win_emu->mod_manager.find_by_address(word);
-                const auto word_offset = word_mod ? word - word_mod->image_base : word;
-
-                c.win_emu->log.error("[ebwv-posttask-trace] tid=%u   bind_state[+0x%zx]=0x%x (%s+0x%llx)\n", tid, i * sizeof(uint32_t),
-                                     word, word_mod_name, static_cast<unsigned long long>(word_offset));
-            }
+            dump_bind_state_words(c, tid, eax);
         }
 
+        // `ebx` is set once at the PostTask wrapper's own entry (embeddedbrowserwebview.dll+0x243ed0:
+        // `mov ebx, dword ptr [ebp+8]`, the first stack argument at ANY call site into this shared
+        // wrapper, not just EBWV_POST_TASK_CALL_RVA's own specific one) and is never overwritten before
+        // the virtual dispatch at +0x243f2f -- confirmed by re-disassembling the wrapper's full body this
+        // cycle (project_solidworks_bringup.md #329). It therefore holds the SAME BindStateBase-shaped
+        // closure pointer trace_ebwv_post_task_call_hit already knows how to dump, generalized to every
+        // call site that ever reaches this generic dispatcher (the 23x/4-thread `target=+0x2496d0`
+        // firings #328 found included) rather than only the one specific environment-creation call site.
         void trace_ebwv_post_task_virtual_call_hit(const analysis_context& c, const uint32_t tid)
         {
             auto& emu = c.win_emu->emu();
             const auto edi = emu.reg<uint32_t>(x86_register::edi);
+            const auto ebx = emu.reg<uint32_t>(x86_register::ebx);
 
             const auto* mod_name = c.win_emu->mod_manager.find_name(edi);
             const auto* mod = c.win_emu->mod_manager.find_by_address(edi);
             const auto offset = mod ? edi - mod->image_base : edi;
 
-            c.win_emu->log.error("[ebwv-posttask-trace] tid=%u POST_TASK_VIRTUAL_CALL target=0x%x (%s+0x%llx) about to be invoked\n", tid,
-                                 edi, mod_name, static_cast<unsigned long long>(offset));
+            c.win_emu->log.error(
+                "[ebwv-posttask-trace] tid=%u POST_TASK_VIRTUAL_CALL target=0x%x (%s+0x%llx) closure(ebx)=0x%x about to be invoked\n", tid,
+                edi, mod_name, static_cast<unsigned long long>(offset), ebx);
+
+            dump_bind_state_words(c, tid, ebx);
         }
 
         void trace_ebwv_signaler_delegate_dispatch_hit(const analysis_context& c, const uint32_t tid)
