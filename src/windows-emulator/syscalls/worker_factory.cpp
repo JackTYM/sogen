@@ -206,6 +206,17 @@ namespace sogen
             auto [stored_handle, stored_factory] = c.proc.worker_factories.store_and_get(std::move(factory));
             ensure_worker_factory_threads(c, *stored_factory);
             worker_factory_handle.write(stored_handle);
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                c.win_emu.log.info(
+                    "[pipe-io-trace] NtCreateWorkerFactory handle=0x%llx io_completion_param=0x%llx io_completion_stored=0x%llx "
+                    "thread_max=%u worker_threads=%zu tid=%u\n",
+                    static_cast<unsigned long long>(stored_handle.bits), static_cast<unsigned long long>(io_completion_handle.bits),
+                    static_cast<unsigned long long>(stored_factory->io_completion_handle.bits), max_thread_count,
+                    stored_factory->worker_threads.size(), c.thread().id);
+            }
+
             return STATUS_SUCCESS;
         }
 
@@ -245,6 +256,15 @@ namespace sogen
             factory->last_info_class = static_cast<ULONG>(info_class);
             factory->last_info_length = worker_factory_information_length;
             factory->last_info_value = 0;
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                c.win_emu.log.info("[pipe-io-trace] NtSetInformationWorkerFactory handle=0x%llx io_completion=0x%llx info_class=%u "
+                                   "binding_count=%u worker_threads=%zu tid=%u\n",
+                                   static_cast<unsigned long long>(worker_factory_handle.bits),
+                                   static_cast<unsigned long long>(factory->io_completion_handle.bits), static_cast<uint32_t>(info_class),
+                                   factory->binding_count, factory->worker_threads.size(), c.thread().id);
+            }
 
             const emulator_object<LARGE_INTEGER> value_i64{c.emu, worker_factory_information};
             const emulator_object<ULONG> value_u32{c.emu, worker_factory_information};
@@ -309,6 +329,15 @@ namespace sogen
                 }
 
                 ensure_worker_factory_threads(c, *factory);
+
+                if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+                {
+                    c.win_emu.log.info("[pipe-io-trace] NtSetInformationWorkerFactory(BindingCount) handle=0x%llx binding_count=%u "
+                                       "worker_threads_after=%zu tid=%u\n",
+                                       static_cast<unsigned long long>(worker_factory_handle.bits), factory->binding_count,
+                                       factory->worker_threads.size(), c.thread().id);
+                }
+
                 return STATUS_SUCCESS;
             }
 
@@ -452,6 +481,18 @@ namespace sogen
             packets_returned.write_if_valid(removed);
             if (removed > 0)
             {
+                if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+                {
+                    const auto first = mini_packets.read(0);
+                    c.win_emu.log.info(
+                        "[pipe-io-trace] NtWaitForWorkViaWorkerFactory DELIVERED handle=0x%llx io_completion=0x%llx removed=%u "
+                        "key=0x%llx status=0x%X info=0x%llx tid=%u\n",
+                        static_cast<unsigned long long>(worker_factory_handle.bits),
+                        static_cast<unsigned long long>(factory->io_completion_handle.bits), removed,
+                        static_cast<unsigned long long>(first.KeyContext), static_cast<uint32_t>(first.IoStatusBlock.Status),
+                        static_cast<unsigned long long>(first.IoStatusBlock.Information), c.thread().id);
+                }
+
                 return STATUS_SUCCESS;
             }
 
@@ -469,6 +510,15 @@ namespace sogen
             wait.completion_entries_ptr = mini_packets.value();
             wait.entries_removed_ptr = packets_returned.value();
             wait.max_entries = count;
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                c.win_emu.log.info("[pipe-io-trace] NtWaitForWorkViaWorkerFactory PARKING handle=0x%llx factory_io_completion=0x%llx "
+                                   "wait_io_completion=0x%llx tid=%u\n",
+                                   static_cast<unsigned long long>(worker_factory_handle.bits),
+                                   static_cast<unsigned long long>(factory->io_completion_handle.bits),
+                                   static_cast<unsigned long long>(wait.io_completion_handle.bits), c.thread().id);
+            }
 
             if (factory->timeout != 0)
             {

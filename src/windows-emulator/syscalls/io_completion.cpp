@@ -51,7 +51,15 @@ namespace sogen
             completion.name = std::move(name);
             completion.number_of_concurrent_threads = number_of_concurrent_threads;
 
-            io_completion_handle.write(c.proc.io_completions.store(std::move(completion)));
+            const auto new_handle = c.proc.io_completions.store(std::move(completion));
+            io_completion_handle.write(new_handle);
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                c.win_emu.log.info("[pipe-io-trace] NtCreateIoCompletion handle=0x%llx tid=%u\n",
+                                   static_cast<unsigned long long>(new_handle.bits), c.thread().id);
+            }
+
             return STATUS_SUCCESS;
         }
 
@@ -72,6 +80,16 @@ namespace sogen
             message.io_status_block.Information = io_status_information;
 
             completion->enqueue(message);
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                c.win_emu.log.info(
+                    "[pipe-io-trace] NtSetIoCompletion handle=0x%llx key=0x%llx apc_context=0x%llx status=0x%X info=0x%llx tid=%u\n",
+                    static_cast<unsigned long long>(io_completion_handle.bits), static_cast<unsigned long long>(key_context),
+                    static_cast<unsigned long long>(apc_context), static_cast<uint32_t>(io_status),
+                    static_cast<unsigned long long>(io_status_information), c.thread().id);
+            }
+
             return STATUS_SUCCESS;
         }
 
@@ -148,12 +166,32 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                static std::unordered_set<uint64_t> logged_handles{};
+                if (logged_handles.insert(io_completion_handle.bits).second)
+                {
+                    c.win_emu.log.info("[pipe-io-trace] NtRemoveIoCompletion first poll of handle=0x%llx tid=%u\n",
+                                       static_cast<unsigned long long>(io_completion_handle.bits), c.thread().id);
+                }
+            }
+
             io_completion_message message{};
             if (io_completion_wait::dequeue_io_completion_message(c.proc, io_completion_handle, message))
             {
                 key_context.write_if_valid(message.key_context);
                 apc_context.write_if_valid(message.apc_context);
                 io_status_block.write_if_valid(message.io_status_block);
+
+                if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+                {
+                    c.win_emu.log.info(
+                        "[pipe-io-trace] NtRemoveIoCompletion DEQUEUED handle=0x%llx key=0x%llx status=0x%X info=0x%llx tid=%u\n",
+                        static_cast<unsigned long long>(io_completion_handle.bits), static_cast<unsigned long long>(message.key_context),
+                        static_cast<uint32_t>(message.io_status_block.Status),
+                        static_cast<unsigned long long>(message.io_status_block.Information), c.thread().id);
+                }
+
                 return STATUS_SUCCESS;
             }
 
@@ -207,6 +245,16 @@ namespace sogen
             if (!completion)
             {
                 return STATUS_INVALID_HANDLE;
+            }
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                static std::unordered_set<uint64_t> logged_handles{};
+                if (logged_handles.insert(io_completion_handle.bits).second)
+                {
+                    c.win_emu.log.info("[pipe-io-trace] NtRemoveIoCompletionEx first poll of handle=0x%llx tid=%u\n",
+                                       static_cast<unsigned long long>(io_completion_handle.bits), c.thread().id);
+                }
             }
 
             const auto removed =
@@ -308,6 +356,16 @@ namespace sogen
             }
 
             const auto resolved_target_handle = c.proc.resolve_object_pseudo_handle(target_object_handle, c.vcpu.active_thread);
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                c.win_emu.log.info("[pipe-io-trace] NtAssociateWaitCompletionPacket wait_packet=0x%llx io_completion=0x%llx target=0x%llx "
+                                   "target_type=%u tid=%u\n",
+                                   static_cast<unsigned long long>(wait_completion_packet_handle.bits),
+                                   static_cast<unsigned long long>(io_completion_handle.bits),
+                                   static_cast<unsigned long long>(resolved_target_handle.bits),
+                                   static_cast<uint32_t>(resolved_target_handle.value.type), c.thread().id);
+            }
 
             if (!io_completion_wait::is_wait_completion_target_type(resolved_target_handle))
             {

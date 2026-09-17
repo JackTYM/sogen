@@ -247,6 +247,60 @@ namespace sogen
         bool g_thread_activity_armed = false;
         uint32_t g_thread_activity_target_tid = 0;
 
+        // Extends the above: once armed, any subsequently created worker-factory thread (see
+        // src/windows-emulator/syscalls/worker_factory.cpp's ensure_worker_factory_threads) also gets
+        // traced -- the pipe listen's own completion is delivered to it via a wait-completion-packet
+        // rather than the FSCTL_PIPE_LISTEN thread's own NtRemoveIoCompletion polling, so tracing that
+        // thread too is required to see what it does with the delivery.
+        std::unordered_set<uint32_t> g_thread_activity_extra_tids{};
+
+        bool is_thread_activity_traced_tid(const uint32_t tid)
+        {
+            return tid == g_thread_activity_target_tid || g_thread_activity_extra_tids.contains(tid);
+        }
+
+        void trace_worker_factory_thread(const analysis_context& c, const uint32_t tid, const handle io_completion_handle)
+        {
+            if (g_thread_activity_extra_tids.insert(tid).second)
+            {
+                c.win_emu->log.error(
+                    "[thread-activity-trace] extending trace to worker-factory thread tid=%u (factory io_completion=0x%llx)\n", tid,
+                    static_cast<unsigned long long>(io_completion_handle.bits));
+            }
+        }
+
+        void trace_worker_factory_thread_if_new(const analysis_context& c, const handle thread_handle, const uint32_t tid)
+        {
+            for (const auto& [factory_id, factory] : c.win_emu->process.worker_factories)
+            {
+                (void)factory_id;
+                if (std::ranges::find(factory.worker_threads, thread_handle) != factory.worker_threads.end())
+                {
+                    trace_worker_factory_thread(c, tid, factory.io_completion_handle);
+                    return;
+                }
+            }
+        }
+
+        // Called once at arming time (see the FSCTL_PIPE_LISTEN check below): a worker factory's thread
+        // can be created before the pipe listen that arms this whole tracer, so relying solely on
+        // handle_thread_create's own forward-looking check would miss it -- this catches every
+        // worker-factory thread that already exists by the time arming happens.
+        void trace_all_existing_worker_factory_threads(const analysis_context& c)
+        {
+            for (const auto& [factory_id, factory] : c.win_emu->process.worker_factories)
+            {
+                (void)factory_id;
+                for (const auto thread_handle : factory.worker_threads)
+                {
+                    if (const auto* thread = c.win_emu->process.threads.get(thread_handle))
+                    {
+                        trace_worker_factory_thread(c, thread->id, factory.io_completion_handle);
+                    }
+                }
+            }
+        }
+
         // Live localization of the missing DispatchMessage call site for sldim.exe's WM_COMMAND
         // relay (see project_solidworks_bringup.md #284): g_sldim_dispatch_watch_va is armed by
         // handle_NtUserGetMessage (src/windows-emulator/syscalls/user.cpp) at the guest's real
@@ -571,12 +625,18 @@ namespace sogen
                     g_thread_activity_target_tid = c.win_emu->current_thread().id;
                     c.win_emu->log.error("[thread-activity-trace] armed on tid=%u after its own FSCTL_PIPE_LISTEN on pipe='%s'\n",
                                          g_thread_activity_target_tid, u16_to_u8(pipe->name).c_str());
+                    trace_all_existing_worker_factory_threads(c);
                 }
             }
         }
 
-        void handle_thread_create(const analysis_context& c, handle, emulator_thread& t)
+        void handle_thread_create(const analysis_context& c, const handle thread_handle, emulator_thread& t)
         {
+            if (g_thread_activity_armed)
+            {
+                trace_worker_factory_thread_if_new(c, thread_handle, t.id);
+            }
+
             if (c.settings->skip_generic_activity)
             {
                 return;
@@ -624,7 +684,7 @@ namespace sogen
                 c.emit_observation<thread_terminated_event>([&](auto& event) { event.terminated_thread_id = t.id; });
             }
 
-            if (g_thread_activity_armed && t.id == g_thread_activity_target_tid)
+            if (g_thread_activity_armed && is_thread_activity_traced_tid(t.id))
             {
                 c.win_emu->log.error("[thread-activity-trace] tid=%u TERMINATED (exit_status=0x%08X)\n", t.id,
                                      static_cast<uint32_t>(t.exit_status.value_or(0)));
@@ -650,7 +710,7 @@ namespace sogen
             }
 
             if (g_thread_activity_armed &&
-                (current_thread.id == g_thread_activity_target_tid || new_thread.id == g_thread_activity_target_tid))
+                (is_thread_activity_traced_tid(current_thread.id) || is_thread_activity_traced_tid(new_thread.id)))
             {
                 c.win_emu->log.error("[thread-activity-trace] scheduler switch %u -> %u\n", current_thread.id, new_thread.id);
             }
@@ -2559,9 +2619,9 @@ namespace sogen
 
         emulator_callbacks::continuation handle_syscall(analysis_context& c, const uint32_t syscall_id, const std::string_view syscall_name)
         {
-            if (g_thread_activity_armed && c.win_emu->current_thread().id == g_thread_activity_target_tid)
+            if (g_thread_activity_armed && is_thread_activity_traced_tid(c.win_emu->current_thread().id))
             {
-                c.win_emu->log.error("[thread-activity-trace] tid=%u syscall %.*s (id=0x%X)\n", g_thread_activity_target_tid,
+                c.win_emu->log.error("[thread-activity-trace] tid=%u syscall %.*s (id=0x%X)\n", c.win_emu->current_thread().id,
                                      STR_VIEW_VA(syscall_name), syscall_id);
             }
 

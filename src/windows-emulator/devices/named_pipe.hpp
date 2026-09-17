@@ -125,8 +125,10 @@ namespace sogen
                 if (std::getenv("SOGEN_TRACE_PIPE_IO"))
                 {
                     win_emu.log.info("[pipe-io-trace] work() completing pending FSCTL_PIPE_LISTEN for pipe='%s', "
-                                     "completion_port=%d\n",
-                                     u16_to_u8(this->name).c_str(), this->get_completion_port().has_value());
+                                     "completion_port=%d event=0x%llx apc_routine=0x%llx\n",
+                                     u16_to_u8(this->name).c_str(), this->get_completion_port().has_value(),
+                                     static_cast<unsigned long long>(this->pending_listen->event.bits),
+                                     static_cast<unsigned long long>(this->pending_listen->apc_routine));
                 }
 
                 this->client_connected = false;
@@ -252,8 +254,10 @@ namespace sogen
             {
                 if (std::getenv("SOGEN_TRACE_PIPE_IO"))
                 {
-                    win_emu.log.info("[pipe-io-trace] listen() pending (overlapped) for pipe='%s' tid=%u, completion_port=%d\n",
-                                     u16_to_u8(this->name).c_str(), c.thread().id, this->get_completion_port().has_value());
+                    win_emu.log.info("[pipe-io-trace] listen() pending (overlapped) for pipe='%s' tid=%u, completion_port=%d event=0x%llx "
+                                     "apc_routine=0x%llx\n",
+                                     u16_to_u8(this->name).c_str(), c.thread().id, this->get_completion_port().has_value(),
+                                     static_cast<unsigned long long>(c.event.bits), static_cast<unsigned long long>(c.apc_routine));
                 }
 
                 this->pending_listen = c;

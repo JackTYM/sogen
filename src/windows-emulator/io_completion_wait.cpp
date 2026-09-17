@@ -2,6 +2,8 @@
 #include "io_completion_wait.hpp"
 #include "worker_factory_support.hpp"
 
+#include <cstdio>
+
 namespace sogen
 {
 
@@ -239,8 +241,25 @@ namespace sogen
                 return;
             }
 
+            const bool trace = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
+
             for (auto& [packet_id, wait_packet] : process.wait_completion_packets)
             {
+                if (wait_packet.target_object_handle.value.type == handle_types::event &&
+                    wait_packet.io_completion_handle == io_completion_handle)
+                {
+                    if (trace)
+                    {
+                        fprintf(stderr,
+                                "[pipe-io-trace] materialize_signaled_wait_packets io_completion=0x%llx packet=0x%llx associated=%d "
+                                "queued=%d target=0x%llx target_signaled=%d\n",
+                                static_cast<unsigned long long>(io_completion_handle.bits), static_cast<unsigned long long>(packet_id),
+                                wait_packet.associated, wait_packet.queued_completion,
+                                static_cast<unsigned long long>(wait_packet.target_object_handle.bits),
+                                is_wait_completion_target_signaled(process, wait_packet.target_object_handle));
+                    }
+                }
+
                 if (!wait_packet.associated || wait_packet.queued_completion)
                 {
                     continue;

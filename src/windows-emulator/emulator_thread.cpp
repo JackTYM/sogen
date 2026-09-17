@@ -1232,6 +1232,13 @@ namespace sogen
                 if (removed > 0)
                 {
                     emulator_object<ULONG>{*this->memory_ptr, wait.entries_removed_ptr}.write_if_valid(removed);
+
+                    if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+                    {
+                        win_emu.log.info("[pipe-io-trace] is_thread_ready ASYNC-DELIVERED io_completion=0x%llx removed=%u tid=%u\n",
+                                         static_cast<unsigned long long>(wait.io_completion_handle.bits), removed, this->id);
+                    }
+
                     this->mark_as_ready(STATUS_SUCCESS);
                     return true;
                 }
