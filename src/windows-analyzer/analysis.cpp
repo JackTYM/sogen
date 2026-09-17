@@ -382,6 +382,28 @@ namespace sogen
         // loaded, unmodified since) to read the real, dynamically-resolved target live.
         constexpr uint64_t EBWV_POST_TASK_VIRTUAL_CALL_RVA = 0x243f2f;
 
+        // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305): located via
+        // an RTTI-string cross-reference walk starting from the local lambda's own TypeDescriptor
+        // (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output) through the
+        // static typeid table it is embedded in, to the code that constructs that table's address. WRAPPER_RVA is a
+        // tiny public thunk (`push ebp; mov ebp,esp; call REAL_BODY_RVA; xor eax,eax; pop ebp; ret`) embedded exactly
+        // once as a raw function-pointer value inside a dense function-pointer array at
+        // embeddedbrowserwebview.dll+0x43a0ec (consistent with an IPC message dispatch table) -- REAL_BODY_RVA is
+        // the actual thiscall implementation (stack-cookie prologue, processes an `absl::Span<uint32_t>` argument,
+        // matching the mangled signature `ConnectNode(unsigned int, unsigned int, absl::Span<unsigned int>)`
+        // exactly) and is also called directly from one other internal site (embeddedbrowserwebview.dll+0x85188).
+        constexpr uint64_t IPCZ_CONNECT_NODE_WRAPPER_RVA = 0x847b0;
+        constexpr uint64_t IPCZ_CONNECT_NODE_REAL_BODY_RVA = 0x847bc;
+
+        // ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect's own entry point (see
+        // project_solidworks_bringup.md #305): located the same way, via the local lambda
+        // `<lambda_1>@?0??Connect@NodeConnectorForReferrer@...`'s TypeDescriptor. The resolved function is a genuine
+        // thiscall, zero-argument, stack-cookie-protected method (matching the mangled signature's `Connect(void)`
+        // exactly) that is itself embedded exactly once as a raw function-pointer value inside a vtable-shaped array
+        // at embeddedbrowserwebview.dll+0x43a3c8, and is also reached via one direct (devirtualized) call site at
+        // embeddedbrowserwebview.dll+0x8b6cf (`mov ecx, [edi]; call`).
+        constexpr uint64_t IPCZ_NODE_CONNECTOR_FOR_REFERRER_CONNECT_RVA = 0x8b570;
+
         uint64_t g_tpp_worker_wait_return_va = 0;
         uint64_t g_tpp_worker_key_check_va = 0;
         uint64_t g_tpp_worker_ebx_loaded_va = 0;
@@ -398,6 +420,42 @@ namespace sogen
         uint64_t g_ebwv_image_base = 0;
         uint64_t g_ebwv_post_task_call_va = 0;
         uint64_t g_ebwv_post_task_virtual_call_va = 0;
+
+        bool g_ipcz_connect_watches_armed = false;
+        uint64_t g_ipcz_connect_node_wrapper_va = 0;
+        uint64_t g_ipcz_connect_node_real_body_va = 0;
+        uint64_t g_ipcz_node_connector_for_referrer_connect_va = 0;
+
+        void arm_ipcz_connect_watches(const analysis_context& c)
+        {
+            if (g_ipcz_connect_watches_armed)
+            {
+                return;
+            }
+
+            const auto* ebwv = c.win_emu->mod_manager.find_by_name("embeddedbrowserwebview.dll");
+            if (!ebwv)
+            {
+                return;
+            }
+
+            g_ipcz_connect_watches_armed = true;
+            g_ipcz_connect_node_wrapper_va = ebwv->image_base + IPCZ_CONNECT_NODE_WRAPPER_RVA;
+            g_ipcz_connect_node_real_body_va = ebwv->image_base + IPCZ_CONNECT_NODE_REAL_BODY_RVA;
+            g_ipcz_node_connector_for_referrer_connect_va = ebwv->image_base + IPCZ_NODE_CONNECTOR_FOR_REFERRER_CONNECT_RVA;
+
+            c.win_emu->log.error("[ipcz-connect-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx: "
+                                 "ConnectNode_wrapper=0x%llx ConnectNode_real_body=0x%llx NodeConnectorForReferrer::Connect=0x%llx\n",
+                                 static_cast<unsigned long long>(ebwv->image_base),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_wrapper_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_real_body_va),
+                                 static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_connect_va));
+        }
+
+        void trace_ipcz_connect_hit(const analysis_context& c, const uint32_t tid, const char* label)
+        {
+            c.win_emu->log.error("[ipcz-connect-trace] tid=%u REACHED %s\n", tid, label);
+        }
 
         void arm_tpp_worker_thread_watches(const analysis_context& c)
         {
@@ -2918,6 +2976,24 @@ namespace sogen
                 if (g_ebwv_post_task_virtual_call_va != 0 && address == g_ebwv_post_task_virtual_call_va)
                 {
                     trace_ebwv_post_task_virtual_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                arm_ipcz_connect_watches(c);
+
+                if (g_ipcz_connect_node_wrapper_va != 0 && address == g_ipcz_connect_node_wrapper_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "ipcz::Node::ConnectNode (wrapper)");
+                }
+
+                if (g_ipcz_connect_node_real_body_va != 0 && address == g_ipcz_connect_node_real_body_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "ipcz::Node::ConnectNode (real body)");
+                }
+
+                if (g_ipcz_node_connector_for_referrer_connect_va != 0 && address == g_ipcz_node_connector_for_referrer_connect_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect");
                 }
 
                 if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
