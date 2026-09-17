@@ -13,6 +13,10 @@ namespace sogen
     constexpr ULONG FSCTL_PIPE_LISTEN = 0x110008;
     // FSCTL_PIPE_WAIT = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 6, METHOD_BUFFERED, FILE_ANY_ACCESS)
     constexpr ULONG FSCTL_PIPE_WAIT = 0x110018;
+    // FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 12, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    constexpr ULONG FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE = 0x110030;
+    // FSCTL_PIPE_GET_PIPE_ATTRIBUTE = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 10, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    constexpr ULONG FSCTL_PIPE_GET_PIPE_ATTRIBUTE = 0x110028;
     constexpr ULONG FILE_PIPE_CONNECTED_STATE = 3;
 
     // Header of FILE_PIPE_PEEK_BUFFER; the peeked data follows immediately after.
@@ -85,6 +89,16 @@ namespace sogen
         // in that case rather than waiting, since there is nothing left to wait for.
         bool client_connected{false};
 
+        // The connecting client's real Windows PID at the moment client_connected was set. Real NPFS
+        // records this once, at connect time, and never updates it even if the connected handle is
+        // later duplicated/inherited into a different process -- see get_connection_attribute. Known
+        // for both a same-process connect (handle_named_pipe_create's own c.proc.process_id) and a
+        // connect forwarded from a sibling OS process (the sender's own process_id, carried through
+        // pipe_ipc_message::client_process_id -- e.g. the real, live-observed case of mojo's Windows
+        // named-pipe bootstrap channel: server in this process, client connecting from a separately
+        // spawned msedgewebview2.exe process).
+        std::optional<uint32_t> client_process_id{};
+
         // Backs FSCTL_PIPE_LISTEN: parks the listening thread on an event that is signaled once a
         // client actually connects (see mark_client_connected), whether that connect happened in this
         // same process or was forwarded from a sibling OS process over a pipe_ipc_channel.
@@ -155,9 +169,14 @@ namespace sogen
         // sibling OS process (mark_named_pipe_connected). Wakes a thread already parked in
         // FSCTL_PIPE_LISTEN, in addition to the pre-existing synchronous client_connected check listen()
         // itself performs for the case where the client connects before the server ever listens.
-        void mark_client_connected(windows_emulator& win_emu)
+        void mark_client_connected(windows_emulator& win_emu, std::optional<uint32_t> client_pid = std::nullopt)
         {
             this->client_connected = true;
+
+            if (client_pid)
+            {
+                this->client_process_id = client_pid;
+            }
 
             if (this->listen_event.bits)
             {
@@ -241,7 +260,82 @@ namespace sogen
                 return this->wait(win_emu, c);
             }
 
+            if (c.io_control_code == FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE)
+            {
+                return this->get_connection_attribute(win_emu, c);
+            }
+
+            if (c.io_control_code == FSCTL_PIPE_GET_PIPE_ATTRIBUTE)
+            {
+                return this->get_pipe_attribute(win_emu, c);
+            }
+
             win_emu.log.warn("Unsupported named pipe FSCTL: 0x%X\n", static_cast<uint32_t>(c.io_control_code));
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        // GetNamedPipeClientProcessId/GetNamedPipeServerProcessId and their siblings (kernelbase.dll)
+        // pass the requested attribute as a plain (non-Unicode), not necessarily NUL-terminated,
+        // attribute-name string in the input buffer -- e.g. "ClientProcessId".
+        static std::string read_attribute_name(windows_emulator& win_emu, const io_device_context& c)
+        {
+            std::string attribute_name(c.input_buffer_length, '\0');
+            win_emu.emu().read_memory(c.input_buffer, attribute_name.data(), attribute_name.size());
+            while (!attribute_name.empty() && attribute_name.back() == '\0')
+            {
+                attribute_name.pop_back();
+            }
+
+            return attribute_name;
+        }
+
+        // Backs GetNamedPipeClientProcessId/GetNamedPipeClientSessionId. Only ClientProcessId is
+        // implemented -- the one attribute this investigation has observed queried live (mojo's
+        // Windows named-pipe transport, right after a successful WebView2Environment creation); any
+        // other attribute name still reports unsupported rather than fabricating a value never
+        // verified against real behavior.
+        NTSTATUS get_connection_attribute(windows_emulator& win_emu, const io_device_context& c)
+        {
+            if (!c.input_buffer || c.input_buffer_length == 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto attribute_name = read_attribute_name(win_emu, c);
+
+            if (attribute_name == "ClientProcessId" && this->client_process_id && c.output_buffer &&
+                c.output_buffer_length >= sizeof(ULONG))
+            {
+                const ULONG pid = *this->client_process_id;
+                win_emu.emu().write_memory(c.output_buffer, &pid, sizeof(pid));
+                return STATUS_SUCCESS;
+            }
+
+            win_emu.log.warn("Unsupported named pipe connection attribute: '%s'\n", attribute_name.c_str());
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        // Backs GetNamedPipeServerProcessId/GetNamedPipeServerSessionId. Only ServerProcessId is
+        // implemented, for the same reason get_connection_attribute only implements ClientProcessId --
+        // it is always simply this process's own real Windows PID, since it is by construction the
+        // process that owns the server end of its own named_pipe device instances.
+        NTSTATUS get_pipe_attribute(windows_emulator& win_emu, const io_device_context& c)
+        {
+            if (!c.input_buffer || c.input_buffer_length == 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto attribute_name = read_attribute_name(win_emu, c);
+
+            if (attribute_name == "ServerProcessId" && c.output_buffer && c.output_buffer_length >= sizeof(ULONG))
+            {
+                const ULONG pid = win_emu.process.process_id;
+                win_emu.emu().write_memory(c.output_buffer, &pid, sizeof(pid));
+                return STATUS_SUCCESS;
+            }
+
+            win_emu.log.warn("Unsupported named pipe attribute: '%s'\n", attribute_name.c_str());
             return STATUS_NOT_SUPPORTED;
         }
 
@@ -589,9 +683,12 @@ namespace sogen
     }
 
     // Marks every named_pipe instance in proc.devices whose name matches as having a connected client.
-    // Used both for a local client's NtCreateFile (handle_named_pipe_create) and for a connect forwarded
-    // from a sibling OS process.
-    inline void mark_named_pipe_connected(windows_emulator& win_emu, process_context& proc, const std::u16string_view name)
+    // Used both for a local client's NtCreateFile (handle_named_pipe_create, which passes its own
+    // c.proc.process_id as client_pid) and for a connect forwarded from a sibling OS process (which
+    // passes the sender's own PID, carried over the wire in pipe_ipc_message::client_process_id -- see
+    // named_pipe::client_process_id and broadcast_named_pipe_connect).
+    inline void mark_named_pipe_connected(windows_emulator& win_emu, process_context& proc, const std::u16string_view name,
+                                          std::optional<uint32_t> client_pid = std::nullopt)
     {
         static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
 
@@ -609,7 +706,7 @@ namespace sogen
                 if (pipe->name == name)
                 {
                     matched = true;
-                    pipe->mark_client_connected(win_emu);
+                    pipe->mark_client_connected(win_emu, client_pid);
                 }
             }
         }

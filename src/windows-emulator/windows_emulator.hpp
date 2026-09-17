@@ -453,7 +453,7 @@ namespace sogen
         // in a sibling OS process observes it exactly like a same-process peer instance would (see
         // deliver_bytes_to_named_pipe/mark_named_pipe_connected in devices/named_pipe.hpp).
         void broadcast_named_pipe_write(std::u16string_view name, std::string_view data);
-        void broadcast_named_pipe_connect(std::u16string_view name);
+        void broadcast_named_pipe_connect(std::u16string_view name, std::optional<uint32_t> client_process_id = std::nullopt);
         void broadcast_named_pipe_server_created(std::u16string_view name);
 
         // Applies whatever named-pipe traffic has arrived from registered peers since the last call.

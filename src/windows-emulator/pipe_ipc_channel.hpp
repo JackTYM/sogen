@@ -23,6 +23,11 @@ namespace sogen
         pipe_ipc_message_type type{};
         std::u16string pipe_name{};
         std::string data{};
+
+        // The sender's own real Windows PID, set only for a `connect` message (mirrors
+        // named_pipe::client_process_id's own same-process value across the process boundary; see
+        // handle_named_pipe_create/mark_named_pipe_connected).
+        std::optional<uint32_t> client_process_id{};
     };
 
     // Abstracts the transport that forwards named-pipe traffic to a sibling OS process spawned via

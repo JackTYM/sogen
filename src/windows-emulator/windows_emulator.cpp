@@ -964,7 +964,7 @@ namespace sogen
         }
     }
 
-    void windows_emulator::broadcast_named_pipe_connect(const std::u16string_view name)
+    void windows_emulator::broadcast_named_pipe_connect(const std::u16string_view name, const std::optional<uint32_t> client_process_id)
     {
         if (std::getenv("SOGEN_TRACE_PIPE_IO"))
         {
@@ -980,6 +980,7 @@ namespace sogen
         pipe_ipc_message message{};
         message.type = pipe_ipc_message_type::connect;
         message.pipe_name = name;
+        message.client_process_id = client_process_id;
 
         for (auto& peer : this->pipe_ipc_peers_)
         {
@@ -1024,7 +1025,7 @@ namespace sogen
                 }
                 else if (message->type == pipe_ipc_message_type::connect)
                 {
-                    mark_named_pipe_connected(*this, this->process, message->pipe_name);
+                    mark_named_pipe_connected(*this, this->process, message->pipe_name, message->client_process_id);
                 }
                 else if (message->type == pipe_ipc_message_type::server_created)
                 {

@@ -1864,8 +1864,8 @@ namespace sogen
 
             c.win_emu.callbacks.on_generic_access("Creating/opening named pipe", filename);
 
-            mark_named_pipe_connected(c.win_emu, c.proc, filename);
-            c.win_emu.broadcast_named_pipe_connect(filename);
+            mark_named_pipe_connected(c.win_emu, c.proc, filename, c.proc.process_id);
+            c.win_emu.broadcast_named_pipe_connect(filename, c.proc.process_id);
 
             io_device_creation_data data{};
 

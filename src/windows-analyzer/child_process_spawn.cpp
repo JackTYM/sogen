@@ -268,6 +268,7 @@ namespace sogen
                 buffer.write(static_cast<uint8_t>(message.type));
                 buffer.write(message.pipe_name);
                 buffer.write(message.data);
+                buffer.write_optional(message.client_process_id);
                 send_framed(this->fd_, buffer.get_buffer());
             }
 
@@ -287,6 +288,7 @@ namespace sogen
                 message.type = static_cast<pipe_ipc_message_type>(type);
                 deserializer.read(message.pipe_name);
                 deserializer.read(message.data);
+                deserializer.read_optional(message.client_process_id);
 
                 return message;
             }
