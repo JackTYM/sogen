@@ -450,6 +450,15 @@ namespace sogen
         // either branch finished, so [esp]/[esp+4] are exactly the two outcome dwords about to be forwarded).
         constexpr uint64_t EBWV_ENV_OUTCOME_INVOKE_ARG_RVA = 0x3666b4;
 
+        // project_solidworks_bringup.md #319: the 3 real call sites (found via a `pefile` KERNEL32 IAT lookup
+        // for ConnectNamedPipe, address 0x1051deac, then grepping every `call dword ptr [0x1051deac]` in a full
+        // disassembly of the same-MD5 (bd0f2fc3be1e50d311af62801361d5ef) DLL) that issue the ORIGINAL async
+        // FSCTL_PIPE_LISTEN-backing Win32 call, all in the same +0x364000-0x368000 region as the already-known
+        // WaitCallback/GetOverlappedResult chain. Each watches the call site itself (args not yet popped, so
+        // [esp]=hNamedPipe, [esp+4]=lpOverlapped) to read live what OVERLAPPED address is actually submitted.
+        constexpr uint64_t EBWV_CONNECT_NAMED_PIPE_CALL_RVAS[] = {0x3664bd, 0x3673bb, 0x367648};
+        constexpr size_t EBWV_CONNECT_NAMED_PIPE_CALL_COUNT = std::size(EBWV_CONNECT_NAMED_PIPE_CALL_RVAS);
+
         // ipcz::Node::ConnectNode's own real entry point (see project_solidworks_bringup.md #305, address
         // corrected by #309): located via an RTTI-string cross-reference walk starting from the local lambda's own
         // TypeDescriptor (`.?AV<lambda_0>@?0??ConnectNode@Node@ipcz@@...`, surfaced by #304's own `strings` output)
@@ -597,6 +606,50 @@ namespace sogen
             c.win_emu->log.error("[start-watching-once-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx, %zu "
                                  "candidate caller sites\n",
                                  static_cast<unsigned long long>(ebwv->image_base), START_WATCHING_ONCE_CALLER_COUNT);
+        }
+
+        bool g_ebwv_connect_named_pipe_watches_armed = false;
+        std::array<uint64_t, EBWV_CONNECT_NAMED_PIPE_CALL_COUNT> g_ebwv_connect_named_pipe_call_vas{};
+
+        void arm_ebwv_connect_named_pipe_watches(const analysis_context& c)
+        {
+            if (g_ebwv_connect_named_pipe_watches_armed)
+            {
+                return;
+            }
+
+            const auto* ebwv = c.win_emu->mod_manager.find_by_name("embeddedbrowserwebview.dll");
+            if (!ebwv)
+            {
+                return;
+            }
+
+            g_ebwv_connect_named_pipe_watches_armed = true;
+            for (size_t i = 0; i < EBWV_CONNECT_NAMED_PIPE_CALL_COUNT; ++i)
+            {
+                g_ebwv_connect_named_pipe_call_vas[i] = ebwv->image_base + EBWV_CONNECT_NAMED_PIPE_CALL_RVAS[i];
+            }
+
+            c.win_emu->log.error("[connect-named-pipe-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx, %zu "
+                                 "candidate caller sites\n",
+                                 static_cast<unsigned long long>(ebwv->image_base), EBWV_CONNECT_NAMED_PIPE_CALL_COUNT);
+        }
+
+        void trace_ebwv_connect_named_pipe_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+
+            std::array<uint32_t, 2> args{};
+            const bool args_read_ok = emu.try_read_memory(esp, args.data(), sizeof(args));
+
+            uint32_t overlapped_contents_low = 0;
+            const bool overlapped_read_ok = emu.try_read_memory(args[1], &overlapped_contents_low, sizeof(overlapped_contents_low));
+
+            c.win_emu->log.error("[connect-named-pipe-trace] tid=%u caller_index=%zu ConnectNamedPipe(hNamedPipe=0x%x, "
+                                 "lpOverlapped=0x%x) (args_read_ok=%d) lpOverlapped->Internal=0x%x (read_ok=%d)\n",
+                                 tid, caller_index, args[0], args[1], args_read_ok ? 1 : 0, overlapped_contents_low,
+                                 overlapped_read_ok ? 1 : 0);
         }
 
         void trace_start_watching_once_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
@@ -3529,6 +3582,16 @@ namespace sogen
                     if (g_start_watching_once_caller_vas[i] != 0 && address == g_start_watching_once_caller_vas[i])
                     {
                         trace_start_watching_once_hit(c, c.win_emu->current_thread().id, i);
+                    }
+                }
+
+                arm_ebwv_connect_named_pipe_watches(c);
+
+                for (size_t i = 0; i < EBWV_CONNECT_NAMED_PIPE_CALL_COUNT; ++i)
+                {
+                    if (g_ebwv_connect_named_pipe_call_vas[i] != 0 && address == g_ebwv_connect_named_pipe_call_vas[i])
+                    {
+                        trace_ebwv_connect_named_pipe_hit(c, c.win_emu->current_thread().id, i);
                     }
                 }
 

@@ -7,6 +7,7 @@
 #include <charconv>
 #include <iostream>
 #include <utils/finally.hpp>
+#include <utils/string.hpp>
 #include <utils/wildcard.hpp>
 #include "utils/stat.hpp"
 
@@ -2464,10 +2465,33 @@ namespace sogen
             if (pipe_io_trace_enabled() && fs_control_code == FSCTL_PIPE_LISTEN)
             {
                 c.win_emu.log.info("[pipe-io-trace] NtFsControlFile FSCTL_PIPE_LISTEN tid=%u file_handle=0x%llx "
-                                   "io_status_block=0x%llx event=0x%llx apc_routine=0x%llx\n",
+                                   "io_status_block=0x%llx event=0x%llx apc_routine=0x%llx apc_context=0x%llx\n",
                                    c.thread().id, static_cast<unsigned long long>(file_handle.bits),
                                    static_cast<unsigned long long>(io_status_block.value()), static_cast<unsigned long long>(event.bits),
-                                   static_cast<unsigned long long>(apc_routine));
+                                   static_cast<unsigned long long>(apc_routine), static_cast<unsigned long long>(apc_context));
+
+                const auto esp = c.emu.reg<uint32_t>(x86_register::esp);
+
+                uint32_t return_address = 0;
+                const bool return_address_read_ok = c.emu.try_read_memory(esp, &return_address, sizeof(return_address));
+                const auto* return_mod_name = c.win_emu.mod_manager.find_name(return_address);
+                const auto* return_mod = c.win_emu.mod_manager.find_by_address(return_address);
+                const auto return_offset = return_mod ? return_address - return_mod->image_base : return_address;
+
+                std::array<uint32_t, 40> stack_words{};
+                const bool stack_read_ok = c.emu.try_read_memory(esp, stack_words.data(), sizeof(stack_words));
+
+                std::string stack_dump{};
+                for (const auto word : stack_words)
+                {
+                    stack_dump += utils::string::to_hex_number(word) + " ";
+                }
+
+                c.win_emu.log.info("[pipe-io-trace] FSCTL_PIPE_LISTEN caller tid=%u esp=0x%x return_address=0x%x (%s+0x%llx) "
+                                   "(read_ok=%d) stack(esp..)=[%s](read_ok=%d)\n",
+                                   c.thread().id, esp, return_address, return_mod_name ? return_mod_name : "<unknown>",
+                                   static_cast<unsigned long long>(return_offset), return_address_read_ok ? 1 : 0, stack_dump.c_str(),
+                                   stack_read_ok ? 1 : 0);
             }
 
             io_device_context context{c.emu};

@@ -448,6 +448,21 @@ namespace sogen
                 ctx.io_status_block.write(block);
             }
 
+            // Real Windows' WOW64 syscall thunking widens IoStatusBlock into a transient, per-thread
+            // scratch IO_STATUS_BLOCK for the duration of the NtFsControlFile call itself; the write
+            // above lands there, not in memory the guest ever looks at again. ApcContext is left
+            // untouched by that widening -- every Win32 overlapped-I/O wrapper (ConnectNamedPipe,
+            // ReadFile, WriteFile, ...) sets it to the caller's own LPOVERLAPPED, which is also what a
+            // caller polling via GetOverlappedResult (no APC, no I/O completion port) actually reads.
+            // Restamp the real completion there too, since without it that caller never observes it.
+            if (win_emu.process.is_wow64_process && ctx.apc_context)
+            {
+                constexpr uint32_t status32 = STATUS_SUCCESS;
+                constexpr uint32_t information32 = 0;
+                win_emu.emu().write_memory(ctx.apc_context, &status32, sizeof(status32));
+                win_emu.emu().write_memory(ctx.apc_context + sizeof(status32), &information32, sizeof(information32));
+            }
+
             if (ctx.event.bits)
             {
                 if (auto* e = win_emu.process.events.get(ctx.event))
