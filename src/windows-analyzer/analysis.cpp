@@ -401,20 +401,34 @@ namespace sogen
         constexpr uint64_t IPCZ_CONNECT_NODE_WRAPPER_RVA = 0x847b0;
         constexpr uint64_t IPCZ_CONNECT_NODE_REAL_BODY_RVA = 0x847bc;
 
-        // The sole other call site that reaches ConnectNode's real body, found this cycle (#309) by re-locating
-        // the vtable at +0x43b4ec and searching the whole module for its own address as an operand. Entry point of
-        // the enclosing function (previously unexamined by any prior finding): thiscall, locks a mutex at
-        // this+0x38, looks up an entry in a container at this+0x58 keyed by its own second argument, and --
-        // gated by an equality check against that lookup's result -- either exits early or falls through an
-        // inner loop (stride 0x10) that unconditionally ends in a direct call to REAL_BODY_RVA with ecx=this.
-        // Reached from two call sites inside a "flush pending completions" loop at +0x84c52/+0x84c96 (one firing
-        // with a real dequeued item, one firing with a literal 0/null argument) and, recursively, from two more
-        // call sites inside the function at +0x8e120 (itself called from this function's own inner loop at
-        // +0x85157/+0x85177) -- structurally consistent with being the async completion path that resolves a
-        // previously-registered pending operation (matching #308's NodeLink::ReferNonBroker inserting a
-        // completion callback into pending_referrals_, keyed by referral_id), but not confirmed as that specific
-        // callback by name.
+        // The sole other call site that reaches ConnectNode's real body, found by #309 by re-locating the vtable
+        // at +0x43b4ec and searching the whole module for its own address as an operand. Entry point of the
+        // enclosing function: thiscall, locks a mutex at this+0x38, looks up an entry in a container at this+0x58
+        // keyed by its own second argument (EQUALITY_CHECK_NOT_TAKEN_RVA is the early-exit path when that lookup
+        // finds nothing; unrelated to the watches below). If the lookup succeeds, it does a second, separate
+        // equality check (`cmpl %ecx, 0x10(%eax); je EQUALITY_CHECK_TAKEN_RVA`) against the caller-supplied key
+        // (arg at [ebp+8]) -- #309's own "unconditionally ends in a call to ConnectNode" framing is corrected by
+        // this cycle's re-disassembly: EQUALITY_CHECK_TAKEN_RVA's own path branches a THIRD time (this+0x44 vs. a
+        // loop cursor) into either a direct call to REAL_BODY_RVA (ecx=this, no loop iterations pending) or a
+        // stride-0x10 loop over per-entry work (call +0x861c8 per entry) that never itself calls ConnectNode at
+        // all once the loop runs. Reached from two call sites inside a "flush pending completions" loop at
+        // +0x84c52/+0x84c96 (one firing with a real dequeued item, one firing with a literal 0/null argument) and,
+        // recursively, from two more call sites (+0x8e41a/+0x8e44f) inside the function at +0x8e120 (itself called
+        // from this function's own inner loop at +0x85157/+0x85177) -- structurally consistent with being the
+        // async completion path that resolves a previously-registered pending operation (matching #308's
+        // NodeLink::ReferNonBroker inserting a completion callback into pending_referrals_, keyed by
+        // referral_id), but not confirmed as that specific callback by name.
         constexpr uint64_t IPCZ_CONNECT_NODE_INTERNAL_CALLER_RVA = 0x84f76;
+        constexpr uint64_t IPCZ_CONNECT_NODE_INTERNAL_CALLER_EQUALITY_CHECK_TAKEN_RVA = 0x85029;
+        constexpr uint64_t IPCZ_CONNECT_NODE_INTERNAL_CALLER_EQUALITY_CHECK_NOT_TAKEN_RVA = 0x84ff7;
+
+        // The gate function's 4 known direct callers, reconfirmed this cycle by a fresh whole-module grep for
+        // `calll ...0x10084f76` (exactly 4 hits, matching #309's own count with no 5th caller found).
+        constexpr uint64_t IPCZ_CONNECT_NODE_INTERNAL_CALLER_SITE_FLUSH_REAL_RVA = 0x84c52;
+        constexpr uint64_t IPCZ_CONNECT_NODE_INTERNAL_CALLER_SITE_FLUSH_EMPTY_RVA = 0x84c96;
+        constexpr uint64_t IPCZ_CONNECT_NODE_MUTUAL_RECURSION_ENTRY_RVA = 0x8e120;
+        constexpr uint64_t IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_1_RVA = 0x8e41a;
+        constexpr uint64_t IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_2_RVA = 0x8e44f;
 
         // ipcz::(anonymous namespace)::NodeConnectorForReferrer::Connect's own entry point (see
         // project_solidworks_bringup.md #305): located the same way, via the local lambda
@@ -524,6 +538,13 @@ namespace sogen
         uint64_t g_ipcz_node_connector_for_referrer_no_broker_link_branch_va = 0;
         uint64_t g_ipcz_refer_non_broker_va = 0;
         uint64_t g_ipcz_connect_node_internal_caller_va = 0;
+        uint64_t g_ipcz_connect_node_internal_caller_equality_check_taken_va = 0;
+        uint64_t g_ipcz_connect_node_internal_caller_equality_check_not_taken_va = 0;
+        uint64_t g_ipcz_connect_node_internal_caller_site_flush_real_va = 0;
+        uint64_t g_ipcz_connect_node_internal_caller_site_flush_empty_va = 0;
+        uint64_t g_ipcz_connect_node_mutual_recursion_entry_va = 0;
+        uint64_t g_ipcz_connect_node_mutual_recursion_site_1_va = 0;
+        uint64_t g_ipcz_connect_node_mutual_recursion_site_2_va = 0;
 
         void arm_ipcz_connect_watches(const analysis_context& c)
         {
@@ -546,18 +567,38 @@ namespace sogen
                 ebwv->image_base + IPCZ_NODE_CONNECTOR_FOR_REFERRER_NO_BROKER_LINK_BRANCH_RVA;
             g_ipcz_refer_non_broker_va = ebwv->image_base + IPCZ_REFER_NON_BROKER_RVA;
             g_ipcz_connect_node_internal_caller_va = ebwv->image_base + IPCZ_CONNECT_NODE_INTERNAL_CALLER_RVA;
+            g_ipcz_connect_node_internal_caller_equality_check_taken_va =
+                ebwv->image_base + IPCZ_CONNECT_NODE_INTERNAL_CALLER_EQUALITY_CHECK_TAKEN_RVA;
+            g_ipcz_connect_node_internal_caller_equality_check_not_taken_va =
+                ebwv->image_base + IPCZ_CONNECT_NODE_INTERNAL_CALLER_EQUALITY_CHECK_NOT_TAKEN_RVA;
+            g_ipcz_connect_node_internal_caller_site_flush_real_va =
+                ebwv->image_base + IPCZ_CONNECT_NODE_INTERNAL_CALLER_SITE_FLUSH_REAL_RVA;
+            g_ipcz_connect_node_internal_caller_site_flush_empty_va =
+                ebwv->image_base + IPCZ_CONNECT_NODE_INTERNAL_CALLER_SITE_FLUSH_EMPTY_RVA;
+            g_ipcz_connect_node_mutual_recursion_entry_va = ebwv->image_base + IPCZ_CONNECT_NODE_MUTUAL_RECURSION_ENTRY_RVA;
+            g_ipcz_connect_node_mutual_recursion_site_1_va = ebwv->image_base + IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_1_RVA;
+            g_ipcz_connect_node_mutual_recursion_site_2_va = ebwv->image_base + IPCZ_CONNECT_NODE_MUTUAL_RECURSION_SITE_2_RVA;
 
             c.win_emu->log.error("[ipcz-connect-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx: "
                                  "ConnectNode_wrapper=0x%llx ConnectNode_real_body=0x%llx NodeConnectorForReferrer::Connect=0x%llx "
                                  "NodeConnectorForReferrer::Connect(no-broker-link-branch)=0x%llx NodeLink::ReferNonBroker=0x%llx "
-                                 "ConnectNode_internal_caller=0x%llx\n",
+                                 "ConnectNode_internal_caller=0x%llx ConnectNode_internal_caller(gate-taken)=0x%llx "
+                                 "ConnectNode_internal_caller(gate-not-taken)=0x%llx flush_site_real=0x%llx flush_site_empty=0x%llx "
+                                 "mutual_recursion_entry=0x%llx mutual_recursion_site_1=0x%llx mutual_recursion_site_2=0x%llx\n",
                                  static_cast<unsigned long long>(ebwv->image_base),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_wrapper_va),
                                  static_cast<unsigned long long>(g_ipcz_connect_node_real_body_va),
                                  static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_connect_va),
                                  static_cast<unsigned long long>(g_ipcz_node_connector_for_referrer_no_broker_link_branch_va),
                                  static_cast<unsigned long long>(g_ipcz_refer_non_broker_va),
-                                 static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_va));
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_equality_check_taken_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_equality_check_not_taken_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_site_flush_real_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_internal_caller_site_flush_empty_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_mutual_recursion_entry_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_mutual_recursion_site_1_va),
+                                 static_cast<unsigned long long>(g_ipcz_connect_node_mutual_recursion_site_2_va));
         }
 
         void trace_ipcz_connect_hit(const analysis_context& c, const uint32_t tid, const char* label)
@@ -3119,6 +3160,52 @@ namespace sogen
                 if (g_ipcz_connect_node_internal_caller_va != 0 && address == g_ipcz_connect_node_internal_caller_va)
                 {
                     trace_ipcz_connect_hit(c, c.win_emu->current_thread().id, "ConnectNode's internal caller (+0x84f76)");
+                }
+
+                if (g_ipcz_connect_node_internal_caller_equality_check_taken_va != 0 &&
+                    address == g_ipcz_connect_node_internal_caller_equality_check_taken_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ConnectNode's internal caller (+0x84f76) equality check TAKEN (+0x85029)");
+                }
+
+                if (g_ipcz_connect_node_internal_caller_equality_check_not_taken_va != 0 &&
+                    address == g_ipcz_connect_node_internal_caller_equality_check_not_taken_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ConnectNode's internal caller (+0x84f76) equality check NOT TAKEN (+0x84ff7)");
+                }
+
+                if (g_ipcz_connect_node_internal_caller_site_flush_real_va != 0 &&
+                    address == g_ipcz_connect_node_internal_caller_site_flush_real_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ConnectNode internal caller's flush-pending-completions call site, real item (+0x84c52)");
+                }
+
+                if (g_ipcz_connect_node_internal_caller_site_flush_empty_va != 0 &&
+                    address == g_ipcz_connect_node_internal_caller_site_flush_empty_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ConnectNode internal caller's flush-pending-completions call site, empty/null (+0x84c96)");
+                }
+
+                if (g_ipcz_connect_node_mutual_recursion_entry_va != 0 && address == g_ipcz_connect_node_mutual_recursion_entry_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ConnectNode internal caller's mutually-recursive function entry (+0x8e120)");
+                }
+
+                if (g_ipcz_connect_node_mutual_recursion_site_1_va != 0 && address == g_ipcz_connect_node_mutual_recursion_site_1_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ConnectNode internal caller's mutual-recursion call site 1 (+0x8e41a)");
+                }
+
+                if (g_ipcz_connect_node_mutual_recursion_site_2_va != 0 && address == g_ipcz_connect_node_mutual_recursion_site_2_va)
+                {
+                    trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
+                                           "ConnectNode internal caller's mutual-recursion call site 2 (+0x8e44f)");
                 }
 
                 arm_start_watching_once_watches(c);
