@@ -183,8 +183,14 @@ namespace
             std::printf("[mits] WM_LBUTTONUP x=%d y=%d\n", GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_RBUTTONDOWN:
-            std::printf("[mits] WM_RBUTTONDOWN x=%d y=%d\n", GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        {
+            static bool cursor_visible = true;
+            cursor_visible = !cursor_visible;
+            ShowCursor(cursor_visible ? TRUE : FALSE);
+            std::printf("[mits] WM_RBUTTONDOWN x=%d y=%d cursor_visible=%s\n", GET_X_LPARAM(lp), GET_Y_LPARAM(lp),
+                        cursor_visible ? "true" : "false");
             return 0;
+        }
         case WM_RBUTTONUP:
             std::printf("[mits] WM_RBUTTONUP x=%d y=%d\n", GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
