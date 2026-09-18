@@ -673,6 +673,30 @@ namespace sogen
         // being referred at all, matching the disassembly's own mutex-lock/map-insert/message-build shape.
         constexpr uint64_t IPCZ_REFER_NON_BROKER_RVA = 0x8d992;
 
+        // Lazily-resolved DirectComposition wrapper embeddedbrowserwebview.dll builds around
+        // DCompositionCreateDevice2 (x86 EmbeddedBrowserWebView.dll 150.0.4078.105, MD5
+        // bd0f2fc3be1e50d311af62801361d5ef -- statically disassembled this cycle from the shared
+        // root's own copy by finding the sole static xref to the "DCompositionCreateDevice2"
+        // ASCII string; see project_solidworks_bringup.md #338). WRAPPER_ENTRY_RVA is the whole
+        // function's own entry, a double-checked-locking "once" accessor. If the cached function
+        // pointer at +0x1053b684 is unset, it takes the RESOLVE_CALL_RVA branch, which calls a
+        // helper with (L"dcomp.dll", "DCompositionCreateDevice2", &cache) -- real Chromium's own
+        // `ui/gl/direct_composition_support.cc` pattern of a runtime-optional dcomp.dll import. It
+        // then always forwards its own three stack arguments (renderingDevice, iid, ppv -- the
+        // real DCompositionCreateDevice2 signature) into the resolved pointer via an indirect
+        // `call ecx` at INVOKE_CALL_RVA if that pointer is non-null; INVOKE_RETURN_RVA is the
+        // instruction immediately after, where eax holds the real HRESULT. No RTTI/PDB symbol
+        // exists for any of this (this DLL's own RTTI, confirmed present via 262 real MSVC type
+        // descriptors, covers only ICU/perfetto/std -- none of ui/views/aura/compositor/viz).
+        constexpr uint64_t EBWV_DCOMP_DEVICE2_WRAPPER_ENTRY_RVA = 0x17b21a;
+        constexpr uint64_t EBWV_DCOMP_DEVICE2_RESOLVE_CALL_RVA = 0x17b298;
+        constexpr uint64_t EBWV_DCOMP_DEVICE2_INVOKE_CALL_RVA = 0x17b26c;
+        constexpr uint64_t EBWV_DCOMP_DEVICE2_INVOKE_RETURN_RVA = 0x17b26e;
+        uint64_t g_ebwv_dcomp_device2_wrapper_entry_va = 0;
+        uint64_t g_ebwv_dcomp_device2_resolve_call_va = 0;
+        uint64_t g_ebwv_dcomp_device2_invoke_call_va = 0;
+        uint64_t g_ebwv_dcomp_device2_invoke_return_va = 0;
+
         // EBWV_CALLBACK_ENTRY_RVA's own context object (see project_solidworks_bringup.md #302) is
         // constructed by a generic `RegisterWaitForSingleObject`-wrapping helper (RVA 0x211990,
         // reached only through a thin thiscall thunk at RVA 0x211970 -- found this cycle via the
@@ -756,6 +780,40 @@ namespace sogen
                                  "lpOverlapped=0x%x) (args_read_ok=%d) lpOverlapped->Internal=0x%x (read_ok=%d)\n",
                                  tid, caller_index, args[0], args[1], args_read_ok ? 1 : 0, overlapped_contents_low,
                                  overlapped_read_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_dcomp_device2_wrapper_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            c.win_emu->log.error("[dcomp-device2-trace] tid=%u REACHED embeddedbrowserwebview.dll's "
+                                 "DCompositionCreateDevice2 wrapper entry\n",
+                                 tid);
+        }
+
+        void trace_ebwv_dcomp_device2_resolve_call_hit(const analysis_context& c, const uint32_t tid)
+        {
+            c.win_emu->log.error("[dcomp-device2-trace] tid=%u attempting to resolve DCompositionCreateDevice2 via "
+                                 "LoadLibraryW(L\"dcomp.dll\")+GetProcAddress\n",
+                                 tid);
+        }
+
+        void trace_ebwv_dcomp_device2_invoke_call_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto resolved_fn = emu.reg<uint32_t>(x86_register::ecx);
+            const auto rendering_device = emu.reg<uint32_t>(x86_register::ebx);
+            const auto iid_ptr = emu.reg<uint32_t>(x86_register::edi);
+            const auto out_ptr = emu.reg<uint32_t>(x86_register::esi);
+
+            c.win_emu->log.error("[dcomp-device2-trace] tid=%u INVOKING resolved DCompositionCreateDevice2=0x%x "
+                                 "renderingDevice=0x%x iid=0x%x ppv=0x%x\n",
+                                 tid, resolved_fn, rendering_device, iid_ptr, out_ptr);
+        }
+
+        void trace_ebwv_dcomp_device2_invoke_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto hresult = emu.reg<uint32_t>(x86_register::eax);
+            c.win_emu->log.error("[dcomp-device2-trace] tid=%u DCompositionCreateDevice2 returned HRESULT=0x%x\n", tid, hresult);
         }
 
         void trace_start_watching_once_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
@@ -1867,6 +1925,21 @@ namespace sogen
                 g_delayload_failure_trace_va = mod.image_base + DELAYLOAD_FAILURE_RVA;
                 c.win_emu->log.error("[delayload-failure-trace] watching HandleDelayLoadFailureCommon at 0x%llx\n",
                                      static_cast<unsigned long long>(g_delayload_failure_trace_va));
+            }
+
+            if (mod.name == "embeddedbrowserwebview.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
+                std::getenv("SOGEN_TRACE_DCOMP_DEVICE2"))
+            {
+                g_ebwv_dcomp_device2_wrapper_entry_va = mod.image_base + EBWV_DCOMP_DEVICE2_WRAPPER_ENTRY_RVA;
+                g_ebwv_dcomp_device2_resolve_call_va = mod.image_base + EBWV_DCOMP_DEVICE2_RESOLVE_CALL_RVA;
+                g_ebwv_dcomp_device2_invoke_call_va = mod.image_base + EBWV_DCOMP_DEVICE2_INVOKE_CALL_RVA;
+                g_ebwv_dcomp_device2_invoke_return_va = mod.image_base + EBWV_DCOMP_DEVICE2_INVOKE_RETURN_RVA;
+                c.win_emu->log.error("[dcomp-device2-trace] watching embeddedbrowserwebview.dll's DCompositionCreateDevice2 wrapper: "
+                                     "entry=0x%llx resolve_call=0x%llx invoke_call=0x%llx invoke_return=0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_device2_wrapper_entry_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_device2_resolve_call_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_device2_invoke_call_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_device2_invoke_return_va));
             }
 
             if (mod.name == "user32.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
@@ -3790,6 +3863,26 @@ namespace sogen
                 {
                     trace_ipcz_connect_hit(c, c.win_emu->current_thread().id,
                                            "+0x43b4ec wrapper's scalar deleting destructor thunk (+0x89580)");
+                }
+
+                if (g_ebwv_dcomp_device2_wrapper_entry_va != 0 && address == g_ebwv_dcomp_device2_wrapper_entry_va)
+                {
+                    trace_ebwv_dcomp_device2_wrapper_entry_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_dcomp_device2_resolve_call_va != 0 && address == g_ebwv_dcomp_device2_resolve_call_va)
+                {
+                    trace_ebwv_dcomp_device2_resolve_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_dcomp_device2_invoke_call_va != 0 && address == g_ebwv_dcomp_device2_invoke_call_va)
+                {
+                    trace_ebwv_dcomp_device2_invoke_call_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_dcomp_device2_invoke_return_va != 0 && address == g_ebwv_dcomp_device2_invoke_return_va)
+                {
+                    trace_ebwv_dcomp_device2_invoke_return_hit(c, c.win_emu->current_thread().id);
                 }
 
                 arm_start_watching_once_watches(c);
