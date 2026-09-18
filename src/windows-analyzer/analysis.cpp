@@ -56,6 +56,30 @@ namespace sogen
         }};
         std::array<uint64_t, NODE_CONNECT_TARGETS.size()> g_node_connect_trace_vas{};
 
+        // ipcz::NodeConnector::EstablishWaitingRouters's own `cmp rcx, r8` instruction in msedge.dll
+        // 150.0.7871.187 (statically disassembled this cycle from the shared root's own msedge.dll,
+        // cross-checked against the cached PDB's publics dump; see project_solidworks_bringup.md
+        // #335): at this exact point rcx already holds `waiting_routers_.size()` (computed just above
+        // via `(end-begin)>>3` on the vector at `this+0x28`/`this+0x30`) and r8 still holds the
+        // untouched `max_valid_portals` argument (the wire's `num_initial_portals`, passed through
+        // unmodified from `AcceptConnection`) -- the two operands of `std::min` that decide whether
+        // the portal-linking loop (the real, non-inlined `AddRemoteRouterLink` call further down this
+        // same function) ever runs. `EstablishWaitingRouters`/`AcceptConnection` have no public PDB
+        // symbol of their own (ICF-folded away); this RVA was found by walking the direct call site
+        // inside `OnConnectFromBrokerToBroker` (RVA 0x53acc10) one hop deeper.
+        constexpr uint64_t ESTABLISH_WAITING_ROUTERS_CMP_RVA = 0x1dffc99;
+        uint64_t g_establish_waiting_routers_trace_va = 0;
+
+        // The portal-linking loop's own two consequence calls, one hop further down the same
+        // EstablishWaitingRouters body (see project_solidworks_bringup.md #335): confirms live
+        // whether a nonzero min-comparison (above) actually goes on to call these, closing the loop
+        // on the register-level evidence rather than relying on it alone.
+        constexpr std::array<traced_symbol, 2> ROUTER_LINK_TARGETS{{
+            {"ipcz::NodeLink::AddRemoteRouterLink", 0x109aec0},
+            {"ipcz::Router::SetOutwardLink", 0x860658},
+        }};
+        std::array<uint64_t, ROUTER_LINK_TARGETS.size()> g_router_link_trace_vas{};
+
         // HandleDelayLoadFailureCommon in msedge.dll 150.0.7871.187, resolved from Microsoft's
         // own public PDB (see project_solidworks_bringup.md #274; #270's RVA for this was wrong,
         // resolving to an unrelated BluetoothAdapterWinrt::CreateDevice offset).
@@ -1823,6 +1847,21 @@ namespace sogen
                 }
             }
 
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_ESTABLISH_WAITING_ROUTERS"))
+            {
+                g_establish_waiting_routers_trace_va = mod.image_base + ESTABLISH_WAITING_ROUTERS_CMP_RVA;
+                c.win_emu->log.error("[establish-waiting-routers-trace] watching NodeConnector::EstablishWaitingRouters's "
+                                     "min-comparison at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_establish_waiting_routers_trace_va));
+
+                for (size_t i = 0; i < ROUTER_LINK_TARGETS.size(); ++i)
+                {
+                    g_router_link_trace_vas[i] = mod.image_base + ROUTER_LINK_TARGETS[i].rva;
+                    c.win_emu->log.error("[establish-waiting-routers-trace] watching %s at 0x%llx\n", ROUTER_LINK_TARGETS[i].name,
+                                         static_cast<unsigned long long>(g_router_link_trace_vas[i]));
+                }
+            }
+
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_DELAYLOAD_FAILURE"))
             {
                 g_delayload_failure_trace_va = mod.image_base + DELAYLOAD_FAILURE_RVA;
@@ -1937,6 +1976,30 @@ namespace sogen
                                  name, static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
                                  static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
                                  static_cast<unsigned long long>(r9), static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_establish_waiting_routers_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto this_ptr = emu.reg<uint64_t>(x86_register::rbx);
+            const auto waiting_routers_size = emu.reg<uint64_t>(x86_register::rcx);
+            const auto max_valid_portals = emu.reg<uint64_t>(x86_register::r8);
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[establish-waiting-routers-trace] hit at 0x%llx, this=0x%llx "
+                                 "waiting_routers_.size()=%llu max_valid_portals=%llu return=0x%llx (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(this_ptr),
+                                 static_cast<unsigned long long>(waiting_routers_size), static_cast<unsigned long long>(max_valid_portals),
+                                 static_cast<unsigned long long>(return_address), caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
         }
 
@@ -3364,6 +3427,19 @@ namespace sogen
                 if (g_node_connect_trace_vas[i] != 0 && address == g_node_connect_trace_vas[i])
                 {
                     trace_node_connect_hit(c, address, NODE_CONNECT_TARGETS[i].name);
+                }
+            }
+
+            if (g_establish_waiting_routers_trace_va != 0 && address == g_establish_waiting_routers_trace_va)
+            {
+                trace_establish_waiting_routers_hit(c, address);
+            }
+
+            for (size_t i = 0; i < g_router_link_trace_vas.size(); ++i)
+            {
+                if (g_router_link_trace_vas[i] != 0 && address == g_router_link_trace_vas[i])
+                {
+                    trace_node_connect_hit(c, address, ROUTER_LINK_TARGETS[i].name);
                 }
             }
 
