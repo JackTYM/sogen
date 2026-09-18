@@ -751,6 +751,50 @@ namespace sogen
         bool g_ebwv_dcomp_gate_caller_watches_armed = false;
         std::array<uint64_t, EBWV_DCOMP_GATE_CALLER_COUNT> g_ebwv_dcomp_gate_caller_vas{};
 
+        // Gate1's own object-construction function (0x112832, see EBWV_DCOMP_GATE1_ENTRY_RVA above) calls
+        // this lazy-init/cache-lookup helper (RVA 0x2292b0) with (holder-unrelated object, flag=1) right
+        // before one CANDIDATE write to the retry-status object's [0xc0] field, via
+        // GetLastError()+HRESULT_FROM_WIN32 (RVA 0x112a3a-0x112a50, `call dword ptr [GetLastError]` whose
+        // low 16 bits get OR'd with FACILITY_WIN32), taken only when the helper's own `al` return is
+        // false. Live-traced this cycle: the helper always returned true with zero syscalls in 3/3
+        // observations, so this is NOT the write site that produces the real ERROR_TIMEOUT HRESULT --
+        // see EBWV_GATE1_ACCESSOR_RESULT_RVA below for the one that is. This window records every syscall
+        // issued by the same thread between entering the helper and returning, kept for completeness/
+        // future runs where the helper's own al may come back false (see project_solidworks_bringup.md
+        // #340-#341).
+        constexpr uint64_t EBWV_GATE1_LAZY_HELPER_ENTRY_RVA = 0x2292b0;
+        constexpr uint64_t EBWV_GATE1_LAZY_HELPER_RETURN_RVA = 0x112933;
+
+        uint64_t g_ebwv_gate1_lazy_helper_entry_va = 0;
+        uint64_t g_ebwv_gate1_lazy_helper_return_va = 0;
+        bool g_ebwv_gate1_lazy_helper_window_active = false;
+        uint32_t g_ebwv_gate1_lazy_helper_window_tid = 0;
+
+        // The REAL write site for the retry-status object's [0xc0] field (found this cycle, tracing
+        // onward from gate1's own readiness check at 0x100f791a): if the readiness gate passes, gate1's
+        // construction function calls its own real accessor (RVA 0x113022, already named in
+        // EBWV_DCOMP_GATE1_ENTRY_RVA's own comment) on `this` (esi), and stores the accessor's raw HRESULT
+        // return value directly into newobj[0xc0] (RVA 0x112b64: `mov dword ptr [edi+0xc0], eax`
+        // immediately after `call 0x10113022`). The accessor itself (0x10113022) is a once-cached
+        // lookup: on a cache miss it calls a 3-arg trampoline at RVA 0x17b21a with
+        // (0, &IID_c37ea93a-e7aa-450d-b16f-9746cb0407f3, &out) -- that trampoline is a lazily-resolved
+        // (magic-static, `_Init_thread_header`/`_Init_thread_footer`-guarded) LoadLibraryW(L"dcomp.dll")
+        // + GetProcAddress(L"DCompositionCreateDevice2") delegate call, i.e. this whole chain IS a real
+        // call to the actual Win32 `DCompositionCreateDevice2` API -- a different call site than the one
+        // #338/#340 already instrumented (SOGEN_TRACE_DCOMP_DEVICE2, which showed zero hits even after
+        // being un-gated in #340).
+        constexpr uint64_t EBWV_GATE1_ACCESSOR_ENTRY_RVA = 0x113022;
+        constexpr uint64_t EBWV_GATE1_ACCESSOR_RESULT_RVA = 0x112b64;
+        constexpr uint64_t EBWV_GATE1_ACCESSOR_DCOMP_INVOKE_RVA = 0x17b26c;
+        constexpr uint64_t EBWV_GATE1_ACCESSOR_DCOMP_INVOKE_RETURN_RVA = 0x17b26e;
+        constexpr uint64_t EBWV_GATE1_ACCESSOR_DCOMP_RESOLVED_FN_RVA = 0x53b684;
+
+        uint64_t g_ebwv_gate1_accessor_entry_va = 0;
+        uint64_t g_ebwv_gate1_accessor_result_va = 0;
+        uint64_t g_ebwv_gate1_accessor_dcomp_invoke_va = 0;
+        uint64_t g_ebwv_gate1_accessor_dcomp_invoke_return_va = 0;
+        uint64_t g_ebwv_gate1_accessor_dcomp_resolved_fn_va = 0;
+
         // Caller-of-gate1's own retry-on-failure gate (RVA 0x112e00-0x112e34, disassembled this cycle):
         // `edi = ecx[0xc0]` (an HRESULT-shaped status field on the "device-kind holder" object passed
         // in as the caller's own second argument), then `jns` skips the whole retry path if edi >= 0
@@ -986,6 +1030,82 @@ namespace sogen
                                  "holder[0x88] (retry_budget)=%d (read_ok=%d) holder[0xc5]=0x%x (read_ok=%d)\n",
                                  tid, holder, status, static_cast<int32_t>(status) >= 0 ? 1 : 0, flag_c4, flag_c4_ok ? 1 : 0, retry_budget,
                                  retry_budget_ok ? 1 : 0, flag_c5, flag_c5_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_gate1_lazy_helper_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+            uint32_t return_addr = 0;
+            const bool read_ok = emu.try_read_memory(esp, &return_addr, sizeof(return_addr));
+
+            if (!read_ok || return_addr != static_cast<uint32_t>(g_ebwv_gate1_lazy_helper_return_va))
+            {
+                return;
+            }
+
+            g_ebwv_gate1_lazy_helper_window_active = true;
+            g_ebwv_gate1_lazy_helper_window_tid = tid;
+            c.win_emu->log.error("[gate1-lazy-helper-trace] tid=%u ENTERED the lazy-init/cache-lookup helper FROM gate1's own "
+                                 "construction function, watching its syscalls until return\n",
+                                 tid);
+        }
+
+        void trace_ebwv_gate1_lazy_helper_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto al_result = emu.reg<uint8_t>(x86_register::al);
+            c.win_emu->log.error("[gate1-lazy-helper-trace] tid=%u RETURNED from the lazy-init/cache-lookup helper, al(result)=%u\n", tid,
+                                 al_result);
+            g_ebwv_gate1_lazy_helper_window_active = false;
+        }
+
+        void trace_ebwv_gate1_accessor_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint32_t cached_state = 0;
+            const bool read_ok = emu.try_read_memory(this_ptr + 0xa4, &cached_state, sizeof(cached_state));
+
+            c.win_emu->log.error("[gate1-accessor-trace] tid=%u ENTERED gate1's own real accessor, this=0x%x this[0xa4] "
+                                 "(cached-state)=0x%x (read_ok=%d)\n",
+                                 tid, this_ptr, cached_state, read_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_gate1_accessor_dcomp_invoke_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto resolved_fn = emu.reg<uint32_t>(x86_register::ecx);
+            const auto arg0_rendering_device = emu.reg<uint32_t>(x86_register::ebx);
+            const auto arg1_riid = emu.reg<uint32_t>(x86_register::edi);
+            const auto arg2_ppv = emu.reg<uint32_t>(x86_register::esi);
+
+            c.win_emu->log.error("[gate1-accessor-trace] tid=%u INVOKING the resolved DCompositionCreateDevice2=0x%x "
+                                 "renderingDevice=0x%x riid=0x%x ppv=0x%x\n",
+                                 tid, resolved_fn, arg0_rendering_device, arg1_riid, arg2_ppv);
+        }
+
+        void trace_ebwv_gate1_accessor_dcomp_invoke_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto hresult = emu.reg<uint32_t>(x86_register::eax);
+            c.win_emu->log.error("[gate1-accessor-trace] tid=%u DCompositionCreateDevice2 returned HRESULT=0x%x\n", tid, hresult);
+        }
+
+        void trace_ebwv_gate1_accessor_result_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto holder = emu.reg<uint32_t>(x86_register::edi);
+            const auto hresult = emu.reg<uint32_t>(x86_register::eax);
+
+            uint32_t resolved_fn = 0;
+            const bool resolved_fn_ok = g_ebwv_gate1_accessor_dcomp_resolved_fn_va != 0 &&
+                                        emu.try_read_memory(g_ebwv_gate1_accessor_dcomp_resolved_fn_va, &resolved_fn, sizeof(resolved_fn));
+
+            c.win_emu->log.error("[gate1-accessor-trace] tid=%u gate1's real accessor RETURNED, about to store holder[0xc0]: "
+                                 "holder=0x%x hresult=0x%x resolved_dcomp_fn=0x%x (read_ok=%d)\n",
+                                 tid, holder, hresult, resolved_fn, resolved_fn_ok ? 1 : 0);
         }
 
         void trace_start_watching_once_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
@@ -2137,6 +2257,33 @@ namespace sogen
                                      static_cast<unsigned long long>(g_ebwv_dcomp_gate3_entry_va),
                                      static_cast<unsigned long long>(g_ebwv_dcomp_gate3_args_va),
                                      static_cast<unsigned long long>(g_ebwv_dcomp_gate3_result_va));
+            }
+
+            if (mod.name == "embeddedbrowserwebview.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
+                std::getenv("SOGEN_TRACE_GATE1_LAZY_HELPER"))
+            {
+                g_ebwv_gate1_lazy_helper_entry_va = mod.image_base + EBWV_GATE1_LAZY_HELPER_ENTRY_RVA;
+                g_ebwv_gate1_lazy_helper_return_va = mod.image_base + EBWV_GATE1_LAZY_HELPER_RETURN_RVA;
+                c.win_emu->log.error("[gate1-lazy-helper-trace] watching lazy-init/cache-lookup helper: entry=0x%llx return=0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_gate1_lazy_helper_entry_va),
+                                     static_cast<unsigned long long>(g_ebwv_gate1_lazy_helper_return_va));
+            }
+
+            if (mod.name == "embeddedbrowserwebview.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
+                std::getenv("SOGEN_TRACE_GATE1_ACCESSOR"))
+            {
+                g_ebwv_gate1_accessor_entry_va = mod.image_base + EBWV_GATE1_ACCESSOR_ENTRY_RVA;
+                g_ebwv_gate1_accessor_result_va = mod.image_base + EBWV_GATE1_ACCESSOR_RESULT_RVA;
+                g_ebwv_gate1_accessor_dcomp_invoke_va = mod.image_base + EBWV_GATE1_ACCESSOR_DCOMP_INVOKE_RVA;
+                g_ebwv_gate1_accessor_dcomp_invoke_return_va = mod.image_base + EBWV_GATE1_ACCESSOR_DCOMP_INVOKE_RETURN_RVA;
+                g_ebwv_gate1_accessor_dcomp_resolved_fn_va = mod.image_base + EBWV_GATE1_ACCESSOR_DCOMP_RESOLVED_FN_RVA;
+                c.win_emu->log.error("[gate1-accessor-trace] watching gate1's real accessor and its DCompositionCreateDevice2 call chain: "
+                                     "entry=0x%llx result=0x%llx dcomp_invoke=0x%llx dcomp_invoke_return=0x%llx resolved_fn_slot=0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_gate1_accessor_entry_va),
+                                     static_cast<unsigned long long>(g_ebwv_gate1_accessor_result_va),
+                                     static_cast<unsigned long long>(g_ebwv_gate1_accessor_dcomp_invoke_va),
+                                     static_cast<unsigned long long>(g_ebwv_gate1_accessor_dcomp_invoke_return_va),
+                                     static_cast<unsigned long long>(g_ebwv_gate1_accessor_dcomp_resolved_fn_va));
             }
 
             if (mod.name == "user32.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
@@ -4128,6 +4275,36 @@ namespace sogen
                 trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 1, EBWV_DCOMP_GATE1_OFFSET);
             }
 
+            if (g_ebwv_gate1_lazy_helper_entry_va != 0 && address == g_ebwv_gate1_lazy_helper_entry_va)
+            {
+                trace_ebwv_gate1_lazy_helper_entry_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_gate1_lazy_helper_return_va != 0 && address == g_ebwv_gate1_lazy_helper_return_va)
+            {
+                trace_ebwv_gate1_lazy_helper_return_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_gate1_accessor_entry_va != 0 && address == g_ebwv_gate1_accessor_entry_va)
+            {
+                trace_ebwv_gate1_accessor_entry_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_gate1_accessor_dcomp_invoke_va != 0 && address == g_ebwv_gate1_accessor_dcomp_invoke_va)
+            {
+                trace_ebwv_gate1_accessor_dcomp_invoke_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_gate1_accessor_dcomp_invoke_return_va != 0 && address == g_ebwv_gate1_accessor_dcomp_invoke_return_va)
+            {
+                trace_ebwv_gate1_accessor_dcomp_invoke_return_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_gate1_accessor_result_va != 0 && address == g_ebwv_gate1_accessor_result_va)
+            {
+                trace_ebwv_gate1_accessor_result_hit(c, c.win_emu->current_thread().id);
+            }
+
             if (g_ebwv_dcomp_gate2_entry_va != 0 && address == g_ebwv_dcomp_gate2_entry_va)
             {
                 trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 2);
@@ -4378,6 +4555,12 @@ namespace sogen
             {
                 c.win_emu->log.error("[thread-activity-trace] tid=%u syscall %.*s (id=0x%X)\n", c.win_emu->current_thread().id,
                                      STR_VIEW_VA(syscall_name), syscall_id);
+            }
+
+            if (g_ebwv_gate1_lazy_helper_window_active && g_ebwv_gate1_lazy_helper_window_tid == c.win_emu->current_thread().id)
+            {
+                c.win_emu->log.error("[gate1-lazy-helper-trace] tid=%u syscall %.*s (id=0x%X) during lazy-helper window\n",
+                                     c.win_emu->current_thread().id, STR_VIEW_VA(syscall_name), syscall_id);
             }
 
             if (c.settings->ignored_functions.contains(syscall_name))
