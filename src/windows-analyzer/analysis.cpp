@@ -697,6 +697,45 @@ namespace sogen
         uint64_t g_ebwv_dcomp_device2_invoke_call_va = 0;
         uint64_t g_ebwv_dcomp_device2_invoke_return_va = 0;
 
+        // The 3 DComp accessors' own single callers (see project_solidworks_bringup.md #338/#339),
+        // each a per-object method gating device creation on a small "readiness" object that is
+        // freshly allocated and constructed on EVERY call -- not a persistent, asynchronously-updated
+        // field. Its gate byte (checked by 0x100f791a/0x101b96e2/0x101d5c9a, each an identical
+        // `(val - 1) < 2` test) is computed synchronously, in the same call, purely from the caller's
+        // own first stack argument ("other", an options/snapshot struct): caller 1 (whose accessor is
+        // at 0x10113022) computes `other[0x56] != 0 ? 2 : (this[0x58] == 2 ? 1 : 0)`; callers 2 and 3
+        // (accessors at 0x101aab4e/0x101ca9e8) both compute `other[0x35] == 1 ? 2 : 0`. ENTRY_RVA is
+        // each caller's real prologue (the task-given mid-function addresses are not function
+        // boundaries; found via a static call-target scan of the whole .text section). ARGS_RVA is
+        // the first instruction after both `this` and `other` are loaded into registers.
+        // RESULT_RVA is the instruction immediately after the gate-check call returns, where ecx
+        // still holds the freshly-constructed gate object (the check function never clobbers ecx)
+        // and al holds the real bool result.
+        constexpr uint64_t EBWV_DCOMP_GATE1_ENTRY_RVA = 0x112832;
+        constexpr uint64_t EBWV_DCOMP_GATE1_ARGS_RVA = 0x11284d;
+        constexpr uint64_t EBWV_DCOMP_GATE1_RESULT_RVA = 0x112b55;
+        constexpr uint64_t EBWV_DCOMP_GATE1_OFFSET = 0x100;
+
+        constexpr uint64_t EBWV_DCOMP_GATE2_ENTRY_RVA = 0x1aa168;
+        constexpr uint64_t EBWV_DCOMP_GATE2_ARGS_RVA = 0x1aa185;
+        constexpr uint64_t EBWV_DCOMP_GATE2_RESULT_RVA = 0x1aa2b9;
+        constexpr uint64_t EBWV_DCOMP_GATE2_OFFSET = 0xd0;
+
+        constexpr uint64_t EBWV_DCOMP_GATE3_ENTRY_RVA = 0x1ca23a;
+        constexpr uint64_t EBWV_DCOMP_GATE3_ARGS_RVA = 0x1ca257;
+        constexpr uint64_t EBWV_DCOMP_GATE3_RESULT_RVA = 0x1ca382;
+        constexpr uint64_t EBWV_DCOMP_GATE3_OFFSET = 0xb0;
+
+        uint64_t g_ebwv_dcomp_gate1_entry_va = 0;
+        uint64_t g_ebwv_dcomp_gate1_args_va = 0;
+        uint64_t g_ebwv_dcomp_gate1_result_va = 0;
+        uint64_t g_ebwv_dcomp_gate2_entry_va = 0;
+        uint64_t g_ebwv_dcomp_gate2_args_va = 0;
+        uint64_t g_ebwv_dcomp_gate2_result_va = 0;
+        uint64_t g_ebwv_dcomp_gate3_entry_va = 0;
+        uint64_t g_ebwv_dcomp_gate3_args_va = 0;
+        uint64_t g_ebwv_dcomp_gate3_result_va = 0;
+
         // EBWV_CALLBACK_ENTRY_RVA's own context object (see project_solidworks_bringup.md #302) is
         // constructed by a generic `RegisterWaitForSingleObject`-wrapping helper (RVA 0x211990,
         // reached only through a thin thiscall thunk at RVA 0x211970 -- found this cycle via the
@@ -814,6 +853,54 @@ namespace sogen
             auto& emu = c.win_emu->emu();
             const auto hresult = emu.reg<uint32_t>(x86_register::eax);
             c.win_emu->log.error("[dcomp-device2-trace] tid=%u DCompositionCreateDevice2 returned HRESULT=0x%x\n", tid, hresult);
+        }
+
+        void trace_ebwv_dcomp_gate_entry_hit(const analysis_context& c, const uint32_t tid, const int gate_index)
+        {
+            c.win_emu->log.error("[dcomp-gate-trace] tid=%u gate=%d REACHED the true entry of the accessor's caller\n", tid, gate_index);
+        }
+
+        void trace_ebwv_dcomp_gate1_args_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::esi);
+            const auto other_ptr = emu.reg<uint32_t>(x86_register::edi);
+
+            uint8_t other_flag = 0;
+            const bool other_read_ok = emu.try_read_memory(other_ptr + 0x56, &other_flag, sizeof(other_flag));
+            uint32_t this_state = 0;
+            const bool this_read_ok = emu.try_read_memory(this_ptr + 0x58, &this_state, sizeof(this_state));
+
+            c.win_emu->log.error("[dcomp-gate-trace] tid=%u gate=1 this=0x%x other=0x%x other[0x56]=0x%x (read_ok=%d) "
+                                 "this[0x58]=0x%x (read_ok=%d)\n",
+                                 tid, this_ptr, other_ptr, other_flag, other_read_ok ? 1 : 0, this_state, this_read_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_dcomp_gate23_args_hit(const analysis_context& c, const uint32_t tid, const int gate_index)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ebx);
+            const auto other_ptr = emu.reg<uint32_t>(x86_register::edi);
+
+            uint8_t other_flag = 0;
+            const bool other_read_ok = emu.try_read_memory(other_ptr + 0x35, &other_flag, sizeof(other_flag));
+
+            c.win_emu->log.error("[dcomp-gate-trace] tid=%u gate=%d this=0x%x other=0x%x other[0x35]=0x%x (read_ok=%d)\n", tid, gate_index,
+                                 this_ptr, other_ptr, other_flag, other_read_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_dcomp_gate_result_hit(const analysis_context& c, const uint32_t tid, const int gate_index,
+                                              const uint32_t field_offset)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto newobj = emu.reg<uint32_t>(x86_register::ecx);
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+
+            uint32_t field_value = 0;
+            const bool read_ok = emu.try_read_memory(newobj + field_offset, &field_value, sizeof(field_value));
+
+            c.win_emu->log.error("[dcomp-gate-trace] tid=%u gate=%d newobj=0x%x newobj[0x%x]=0x%x (read_ok=%d) gate_pass=%d\n", tid,
+                                 gate_index, newobj, field_offset, field_value, read_ok ? 1 : 0, (eax & 0xff) != 0 ? 1 : 0);
         }
 
         void trace_start_watching_once_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
@@ -1940,6 +2027,31 @@ namespace sogen
                                      static_cast<unsigned long long>(g_ebwv_dcomp_device2_resolve_call_va),
                                      static_cast<unsigned long long>(g_ebwv_dcomp_device2_invoke_call_va),
                                      static_cast<unsigned long long>(g_ebwv_dcomp_device2_invoke_return_va));
+            }
+
+            if (mod.name == "embeddedbrowserwebview.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 && std::getenv("SOGEN_TRACE_DCOMP_GATE"))
+            {
+                g_ebwv_dcomp_gate1_entry_va = mod.image_base + EBWV_DCOMP_GATE1_ENTRY_RVA;
+                g_ebwv_dcomp_gate1_args_va = mod.image_base + EBWV_DCOMP_GATE1_ARGS_RVA;
+                g_ebwv_dcomp_gate1_result_va = mod.image_base + EBWV_DCOMP_GATE1_RESULT_RVA;
+                g_ebwv_dcomp_gate2_entry_va = mod.image_base + EBWV_DCOMP_GATE2_ENTRY_RVA;
+                g_ebwv_dcomp_gate2_args_va = mod.image_base + EBWV_DCOMP_GATE2_ARGS_RVA;
+                g_ebwv_dcomp_gate2_result_va = mod.image_base + EBWV_DCOMP_GATE2_RESULT_RVA;
+                g_ebwv_dcomp_gate3_entry_va = mod.image_base + EBWV_DCOMP_GATE3_ENTRY_RVA;
+                g_ebwv_dcomp_gate3_args_va = mod.image_base + EBWV_DCOMP_GATE3_ARGS_RVA;
+                g_ebwv_dcomp_gate3_result_va = mod.image_base + EBWV_DCOMP_GATE3_RESULT_RVA;
+                c.win_emu->log.error("[dcomp-gate-trace] watching all 3 accessor-caller functions' true entries: gate1_entry=0x%llx "
+                                     "gate1_args=0x%llx gate1_result=0x%llx gate2_entry=0x%llx gate2_args=0x%llx gate2_result=0x%llx "
+                                     "gate3_entry=0x%llx gate3_args=0x%llx gate3_result=0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate1_entry_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate1_args_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate1_result_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate2_entry_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate2_args_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate2_result_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate3_entry_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate3_args_va),
+                                     static_cast<unsigned long long>(g_ebwv_dcomp_gate3_result_va));
             }
 
             if (mod.name == "user32.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
@@ -3883,6 +3995,51 @@ namespace sogen
                 if (g_ebwv_dcomp_device2_invoke_return_va != 0 && address == g_ebwv_dcomp_device2_invoke_return_va)
                 {
                     trace_ebwv_dcomp_device2_invoke_return_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_dcomp_gate1_entry_va != 0 && address == g_ebwv_dcomp_gate1_entry_va)
+                {
+                    trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 1);
+                }
+
+                if (g_ebwv_dcomp_gate1_args_va != 0 && address == g_ebwv_dcomp_gate1_args_va)
+                {
+                    trace_ebwv_dcomp_gate1_args_hit(c, c.win_emu->current_thread().id);
+                }
+
+                if (g_ebwv_dcomp_gate1_result_va != 0 && address == g_ebwv_dcomp_gate1_result_va)
+                {
+                    trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 1, EBWV_DCOMP_GATE1_OFFSET);
+                }
+
+                if (g_ebwv_dcomp_gate2_entry_va != 0 && address == g_ebwv_dcomp_gate2_entry_va)
+                {
+                    trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 2);
+                }
+
+                if (g_ebwv_dcomp_gate2_args_va != 0 && address == g_ebwv_dcomp_gate2_args_va)
+                {
+                    trace_ebwv_dcomp_gate23_args_hit(c, c.win_emu->current_thread().id, 2);
+                }
+
+                if (g_ebwv_dcomp_gate2_result_va != 0 && address == g_ebwv_dcomp_gate2_result_va)
+                {
+                    trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 2, EBWV_DCOMP_GATE2_OFFSET);
+                }
+
+                if (g_ebwv_dcomp_gate3_entry_va != 0 && address == g_ebwv_dcomp_gate3_entry_va)
+                {
+                    trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 3);
+                }
+
+                if (g_ebwv_dcomp_gate3_args_va != 0 && address == g_ebwv_dcomp_gate3_args_va)
+                {
+                    trace_ebwv_dcomp_gate23_args_hit(c, c.win_emu->current_thread().id, 3);
+                }
+
+                if (g_ebwv_dcomp_gate3_result_va != 0 && address == g_ebwv_dcomp_gate3_result_va)
+                {
+                    trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 3, EBWV_DCOMP_GATE3_OFFSET);
                 }
 
                 arm_start_watching_once_watches(c);
