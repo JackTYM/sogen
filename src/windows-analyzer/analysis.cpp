@@ -736,6 +736,62 @@ namespace sogen
         uint64_t g_ebwv_dcomp_gate3_args_va = 0;
         uint64_t g_ebwv_dcomp_gate3_result_va = 0;
 
+        // The 3 gate functions' own real static callers (see project_solidworks_bringup.md #339
+        // point 9 / #340): each gate function has exactly 3 static call sites. The task-given
+        // addresses are call-site addresses inside enclosing functions, not function boundaries --
+        // their true entries were found this cycle via a padding-boundary scan (each candidate sits
+        // immediately after a run of 0xCC alignment bytes, disassembles as a textbook
+        // `push ebp; mov ebp, esp` prologue, and disassembles cleanly, on an instruction boundary,
+        // all the way through to the already-known call site). Index order matches #339's own
+        // listing: [0..2] call gate1, [3..5] call gate2, [6..8] call gate3.
+        constexpr size_t EBWV_DCOMP_GATE_CALLER_COUNT = 9;
+        constexpr std::array<uint64_t, EBWV_DCOMP_GATE_CALLER_COUNT> EBWV_DCOMP_GATE_CALLER_ENTRY_RVAS = {
+            0x112de0, 0x1156f0, 0x115d20, 0x1aa020, 0x1aa8a0, 0x1aa9e0, 0x1ca120, 0x1ca750, 0x1ca880};
+
+        bool g_ebwv_dcomp_gate_caller_watches_armed = false;
+        std::array<uint64_t, EBWV_DCOMP_GATE_CALLER_COUNT> g_ebwv_dcomp_gate_caller_vas{};
+
+        // Caller-of-gate1's own retry-on-failure gate (RVA 0x112e00-0x112e34, disassembled this cycle):
+        // `edi = ecx[0xc0]` (an HRESULT-shaped status field on the "device-kind holder" object passed
+        // in as the caller's own second argument), then `jns` skips the whole retry path if edi >= 0
+        // (SUCCEEDED), else checks `ecx[0xc4] == 0`, then `edi == E_ABORT (0x80004004)`, else decrements
+        // a retry-budget counter at `ecx[0x88]` and forwards the holder object into gate1 again. This VA
+        // is the instruction immediately after the HRESULT load, so ecx/edi are the real live status object
+        // and status code at the point the retry decision is made.
+        constexpr uint64_t EBWV_DCOMP_GATE1_UP1_RETRY_STATUS_RVA = 0x112e06;
+        uint64_t g_ebwv_dcomp_gate1_up1_retry_status_va = 0;
+
+        void arm_ebwv_dcomp_gate_caller_watches(const analysis_context& c)
+        {
+            if (g_ebwv_dcomp_gate_caller_watches_armed)
+            {
+                return;
+            }
+
+            if (!std::getenv("SOGEN_TRACE_DCOMP_GATE_CALLERS"))
+            {
+                return;
+            }
+
+            const auto* ebwv = c.win_emu->mod_manager.find_by_name("embeddedbrowserwebview.dll");
+            if (!ebwv || ebwv->machine != IMAGE_FILE_MACHINE_I386)
+            {
+                return;
+            }
+
+            g_ebwv_dcomp_gate_caller_watches_armed = true;
+            for (size_t i = 0; i < EBWV_DCOMP_GATE_CALLER_COUNT; ++i)
+            {
+                g_ebwv_dcomp_gate_caller_vas[i] = ebwv->image_base + EBWV_DCOMP_GATE_CALLER_ENTRY_RVAS[i];
+            }
+            g_ebwv_dcomp_gate1_up1_retry_status_va = ebwv->image_base + EBWV_DCOMP_GATE1_UP1_RETRY_STATUS_RVA;
+
+            c.win_emu->log.error("[dcomp-gate-caller-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx, %zu "
+                                 "candidate caller-of-gate entries, retry_status_va=0x%llx\n",
+                                 static_cast<unsigned long long>(ebwv->image_base), EBWV_DCOMP_GATE_CALLER_COUNT,
+                                 static_cast<unsigned long long>(g_ebwv_dcomp_gate1_up1_retry_status_va));
+        }
+
         // EBWV_CALLBACK_ENTRY_RVA's own context object (see project_solidworks_bringup.md #302) is
         // constructed by a generic `RegisterWaitForSingleObject`-wrapping helper (RVA 0x211990,
         // reached only through a thin thiscall thunk at RVA 0x211970 -- found this cycle via the
@@ -901,6 +957,35 @@ namespace sogen
 
             c.win_emu->log.error("[dcomp-gate-trace] tid=%u gate=%d newobj=0x%x newobj[0x%x]=0x%x (read_ok=%d) gate_pass=%d\n", tid,
                                  gate_index, newobj, field_offset, field_value, read_ok ? 1 : 0, (eax & 0xff) != 0 ? 1 : 0);
+        }
+
+        void trace_ebwv_dcomp_gate_caller_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
+        {
+            const auto gate_index = (caller_index / 3) + 1;
+            c.win_emu->log.error(
+                "[dcomp-gate-caller-trace] tid=%u caller_index=%zu (caller-of-gate%zu) REACHED the true entry of one of gate%zu's "
+                "3 own static callers\n",
+                tid, caller_index, gate_index, gate_index);
+        }
+
+        void trace_ebwv_dcomp_gate1_up1_retry_status_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto holder = emu.reg<uint32_t>(x86_register::ecx);
+            const auto status = emu.reg<uint32_t>(x86_register::edi);
+
+            uint8_t flag_c4 = 0;
+            const bool flag_c4_ok = emu.try_read_memory(holder + 0xc4, &flag_c4, sizeof(flag_c4));
+            int32_t retry_budget = 0;
+            const bool retry_budget_ok = emu.try_read_memory(holder + 0x88, &retry_budget, sizeof(retry_budget));
+            uint8_t flag_c5 = 0;
+            const bool flag_c5_ok = emu.try_read_memory(holder + 0xc5, &flag_c5, sizeof(flag_c5));
+
+            c.win_emu->log.error("[dcomp-gate-caller-trace] tid=%u caller-of-gate1's own retry gate: holder=0x%x "
+                                 "status(holder[0xc0])=0x%x (SUCCEEDED=%d) holder[0xc4]=0x%x (read_ok=%d) "
+                                 "holder[0x88] (retry_budget)=%d (read_ok=%d) holder[0xc5]=0x%x (read_ok=%d)\n",
+                                 tid, holder, status, static_cast<int32_t>(status) >= 0 ? 1 : 0, flag_c4, flag_c4_ok ? 1 : 0, retry_budget,
+                                 retry_budget_ok ? 1 : 0, flag_c5, flag_c5_ok ? 1 : 0);
         }
 
         void trace_start_watching_once_hit(const analysis_context& c, const uint32_t tid, const size_t caller_index)
@@ -3977,71 +4062,6 @@ namespace sogen
                                            "+0x43b4ec wrapper's scalar deleting destructor thunk (+0x89580)");
                 }
 
-                if (g_ebwv_dcomp_device2_wrapper_entry_va != 0 && address == g_ebwv_dcomp_device2_wrapper_entry_va)
-                {
-                    trace_ebwv_dcomp_device2_wrapper_entry_hit(c, c.win_emu->current_thread().id);
-                }
-
-                if (g_ebwv_dcomp_device2_resolve_call_va != 0 && address == g_ebwv_dcomp_device2_resolve_call_va)
-                {
-                    trace_ebwv_dcomp_device2_resolve_call_hit(c, c.win_emu->current_thread().id);
-                }
-
-                if (g_ebwv_dcomp_device2_invoke_call_va != 0 && address == g_ebwv_dcomp_device2_invoke_call_va)
-                {
-                    trace_ebwv_dcomp_device2_invoke_call_hit(c, c.win_emu->current_thread().id);
-                }
-
-                if (g_ebwv_dcomp_device2_invoke_return_va != 0 && address == g_ebwv_dcomp_device2_invoke_return_va)
-                {
-                    trace_ebwv_dcomp_device2_invoke_return_hit(c, c.win_emu->current_thread().id);
-                }
-
-                if (g_ebwv_dcomp_gate1_entry_va != 0 && address == g_ebwv_dcomp_gate1_entry_va)
-                {
-                    trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 1);
-                }
-
-                if (g_ebwv_dcomp_gate1_args_va != 0 && address == g_ebwv_dcomp_gate1_args_va)
-                {
-                    trace_ebwv_dcomp_gate1_args_hit(c, c.win_emu->current_thread().id);
-                }
-
-                if (g_ebwv_dcomp_gate1_result_va != 0 && address == g_ebwv_dcomp_gate1_result_va)
-                {
-                    trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 1, EBWV_DCOMP_GATE1_OFFSET);
-                }
-
-                if (g_ebwv_dcomp_gate2_entry_va != 0 && address == g_ebwv_dcomp_gate2_entry_va)
-                {
-                    trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 2);
-                }
-
-                if (g_ebwv_dcomp_gate2_args_va != 0 && address == g_ebwv_dcomp_gate2_args_va)
-                {
-                    trace_ebwv_dcomp_gate23_args_hit(c, c.win_emu->current_thread().id, 2);
-                }
-
-                if (g_ebwv_dcomp_gate2_result_va != 0 && address == g_ebwv_dcomp_gate2_result_va)
-                {
-                    trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 2, EBWV_DCOMP_GATE2_OFFSET);
-                }
-
-                if (g_ebwv_dcomp_gate3_entry_va != 0 && address == g_ebwv_dcomp_gate3_entry_va)
-                {
-                    trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 3);
-                }
-
-                if (g_ebwv_dcomp_gate3_args_va != 0 && address == g_ebwv_dcomp_gate3_args_va)
-                {
-                    trace_ebwv_dcomp_gate23_args_hit(c, c.win_emu->current_thread().id, 3);
-                }
-
-                if (g_ebwv_dcomp_gate3_result_va != 0 && address == g_ebwv_dcomp_gate3_result_va)
-                {
-                    trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 3, EBWV_DCOMP_GATE3_OFFSET);
-                }
-
                 arm_start_watching_once_watches(c);
 
                 for (size_t i = 0; i < START_WATCHING_ONCE_CALLER_COUNT; ++i)
@@ -4061,6 +4081,96 @@ namespace sogen
                         trace_ebwv_connect_named_pipe_hit(c, c.win_emu->current_thread().id, i);
                     }
                 }
+            }
+
+            // These DComp-related hit checks (#338/#339/#340) were previously nested inside the
+            // is_thread_activity_traced_tid(...) gate above, the same false-negative-inducing mistake
+            // #332 already found and fixed for trace_module_entry_if_new: that gate only ever contains
+            // the single tid that issued a mojo.-prefixed FSCTL_PIPE_LISTEN (or its worker-factory
+            // extension), which has no relationship to whichever thread actually runs
+            // EmbeddedBrowserWebView.dll's compositor code -- so with SOGEN_TRACE_THREAD_ACTIVITY unset
+            // (the norm for a DComp-focused run), every one of these checks was unconditionally dead,
+            // regardless of whether the watched code itself ran. Moved out here so they fire for
+            // whichever real thread executes the watched address, matching their own arm functions
+            // (which already have no thread-activity requirement).
+            if (g_ebwv_dcomp_device2_wrapper_entry_va != 0 && address == g_ebwv_dcomp_device2_wrapper_entry_va)
+            {
+                trace_ebwv_dcomp_device2_wrapper_entry_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_dcomp_device2_resolve_call_va != 0 && address == g_ebwv_dcomp_device2_resolve_call_va)
+            {
+                trace_ebwv_dcomp_device2_resolve_call_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_dcomp_device2_invoke_call_va != 0 && address == g_ebwv_dcomp_device2_invoke_call_va)
+            {
+                trace_ebwv_dcomp_device2_invoke_call_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_dcomp_device2_invoke_return_va != 0 && address == g_ebwv_dcomp_device2_invoke_return_va)
+            {
+                trace_ebwv_dcomp_device2_invoke_return_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_dcomp_gate1_entry_va != 0 && address == g_ebwv_dcomp_gate1_entry_va)
+            {
+                trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 1);
+            }
+
+            if (g_ebwv_dcomp_gate1_args_va != 0 && address == g_ebwv_dcomp_gate1_args_va)
+            {
+                trace_ebwv_dcomp_gate1_args_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_dcomp_gate1_result_va != 0 && address == g_ebwv_dcomp_gate1_result_va)
+            {
+                trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 1, EBWV_DCOMP_GATE1_OFFSET);
+            }
+
+            if (g_ebwv_dcomp_gate2_entry_va != 0 && address == g_ebwv_dcomp_gate2_entry_va)
+            {
+                trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 2);
+            }
+
+            if (g_ebwv_dcomp_gate2_args_va != 0 && address == g_ebwv_dcomp_gate2_args_va)
+            {
+                trace_ebwv_dcomp_gate23_args_hit(c, c.win_emu->current_thread().id, 2);
+            }
+
+            if (g_ebwv_dcomp_gate2_result_va != 0 && address == g_ebwv_dcomp_gate2_result_va)
+            {
+                trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 2, EBWV_DCOMP_GATE2_OFFSET);
+            }
+
+            if (g_ebwv_dcomp_gate3_entry_va != 0 && address == g_ebwv_dcomp_gate3_entry_va)
+            {
+                trace_ebwv_dcomp_gate_entry_hit(c, c.win_emu->current_thread().id, 3);
+            }
+
+            if (g_ebwv_dcomp_gate3_args_va != 0 && address == g_ebwv_dcomp_gate3_args_va)
+            {
+                trace_ebwv_dcomp_gate23_args_hit(c, c.win_emu->current_thread().id, 3);
+            }
+
+            if (g_ebwv_dcomp_gate3_result_va != 0 && address == g_ebwv_dcomp_gate3_result_va)
+            {
+                trace_ebwv_dcomp_gate_result_hit(c, c.win_emu->current_thread().id, 3, EBWV_DCOMP_GATE3_OFFSET);
+            }
+
+            arm_ebwv_dcomp_gate_caller_watches(c);
+
+            for (size_t i = 0; i < EBWV_DCOMP_GATE_CALLER_COUNT; ++i)
+            {
+                if (g_ebwv_dcomp_gate_caller_vas[i] != 0 && address == g_ebwv_dcomp_gate_caller_vas[i])
+                {
+                    trace_ebwv_dcomp_gate_caller_hit(c, c.win_emu->current_thread().id, i);
+                }
+            }
+
+            if (g_ebwv_dcomp_gate1_up1_retry_status_va != 0 && address == g_ebwv_dcomp_gate1_up1_retry_status_va)
+            {
+                trace_ebwv_dcomp_gate1_up1_retry_status_hit(c, c.win_emu->current_thread().id);
             }
 
             if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
