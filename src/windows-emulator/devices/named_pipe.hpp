@@ -456,6 +456,12 @@ namespace sogen
 
             win_emu.emu().write_memory(ctx.output_buffer, data.data(), to_copy);
 
+            if (std::getenv("SOGEN_TRACE_PIPE_IO_BYTES"))
+            {
+                win_emu.log.info("[pipe-io-bytes-trace] NtReadFile pipe='%s' length=%zu tid=%u bytes=%s\n", u16_to_u8(this->name).c_str(),
+                                 to_copy, ctx.thread().id, utils::string::to_hex_string(data.substr(0, to_copy)).c_str());
+            }
+
             if (to_copy == data.size())
             {
                 this->write_queue.pop_front();
