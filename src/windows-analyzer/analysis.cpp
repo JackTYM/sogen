@@ -958,6 +958,95 @@ namespace sogen
             c.win_emu->log.error("[holder-submit-trace] tid=%u check2 fell back to GetLastError()=%u (0x%x)\n", tid, eax, eax);
         }
 
+        // this[0x58]'s owning class (vtable at embeddedbrowserwebview.dll+0x1043d520, see
+        // project_solidworks_bringup.md #342) exposes it as a genuine external-facing property, not an
+        // internally-computed value: disassembling the vtable's remaining ~22 methods (cycle 109) found a
+        // plain, unconditional getter (RVA 0x112540: `*out = this[0x58]; return S_OK`, or E_POINTER
+        // 0x80004003 if out==nullptr) and setter (RVA 0x112560: `this[0x58] = value; return S_OK`,
+        // unconditionally, no validation). Both take `this` as an explicit first stack argument (not via
+        // ECX) and `ret 8`, confirming real __stdcall/COM calling convention -- i.e. reachable only via
+        // indirect vtable dispatch, not a direct call (a whole-.text E8 scan found zero direct callers of
+        // either). SETTER_ENTRY_RVA/GETTER_ENTRY_RVA watch each method's own entry, before `push ebp` runs,
+        // so `this`/`value`/the return address are still readable directly off the stack.
+        constexpr uint64_t EBWV_PROP58_SETTER_ENTRY_RVA = 0x112560;
+        constexpr uint64_t EBWV_PROP58_GETTER_ENTRY_RVA = 0x112540;
+
+        uint64_t g_ebwv_prop58_setter_entry_va = 0;
+        uint64_t g_ebwv_prop58_getter_entry_va = 0;
+
+        void arm_ebwv_prop58_accessor_watches(const analysis_context& c)
+        {
+            if (g_ebwv_prop58_setter_entry_va != 0)
+            {
+                return;
+            }
+
+            if (!std::getenv("SOGEN_TRACE_PROP58_ACCESSORS"))
+            {
+                return;
+            }
+
+            const auto* ebwv = c.win_emu->mod_manager.find_by_name("embeddedbrowserwebview.dll");
+            if (!ebwv || ebwv->machine != IMAGE_FILE_MACHINE_I386)
+            {
+                return;
+            }
+
+            g_ebwv_prop58_setter_entry_va = ebwv->image_base + EBWV_PROP58_SETTER_ENTRY_RVA;
+            g_ebwv_prop58_getter_entry_va = ebwv->image_base + EBWV_PROP58_GETTER_ENTRY_RVA;
+
+            c.win_emu->log.error("[prop58-accessor-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx: "
+                                 "setter_entry=0x%llx getter_entry=0x%llx\n",
+                                 static_cast<unsigned long long>(ebwv->image_base),
+                                 static_cast<unsigned long long>(g_ebwv_prop58_setter_entry_va),
+                                 static_cast<unsigned long long>(g_ebwv_prop58_getter_entry_va));
+        }
+
+        void trace_ebwv_prop58_setter_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t obj = 0;
+            uint32_t value = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &obj, sizeof(obj));
+            emu.try_read_memory(esp + 8, &value, sizeof(value));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[prop58-accessor-trace] tid=%u SETTER this=0x%x value=0x%x return=0x%x (%s+0x%llx)\n", tid, obj, value,
+                                 return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_prop58_getter_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t obj = 0;
+            uint32_t out_ptr = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &obj, sizeof(obj));
+            emu.try_read_memory(esp + 8, &out_ptr, sizeof(out_ptr));
+
+            uint32_t current_value = 0;
+            const bool value_ok = emu.try_read_memory(static_cast<uint64_t>(obj) + 0x58, &current_value, sizeof(current_value));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[prop58-accessor-trace] tid=%u GETTER this=0x%x out=0x%x current_value=0x%x "
+                                 "(read_ok=%d) return=0x%x (%s+0x%llx)\n",
+                                 tid, obj, out_ptr, current_value, value_ok ? 1 : 0, return_address, caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
         void arm_ebwv_dcomp_gate_caller_watches(const analysis_context& c)
         {
             if (g_ebwv_dcomp_gate_caller_watches_armed)
@@ -4543,6 +4632,18 @@ namespace sogen
             if (g_ebwv_holder_watchdog_dispatch_entry_va != 0 && address == g_ebwv_holder_watchdog_dispatch_entry_va)
             {
                 trace_ebwv_holder_watchdog_dispatch_entry_hit(c, c.win_emu->current_thread().id);
+            }
+
+            arm_ebwv_prop58_accessor_watches(c);
+
+            if (g_ebwv_prop58_setter_entry_va != 0 && address == g_ebwv_prop58_setter_entry_va)
+            {
+                trace_ebwv_prop58_setter_entry_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_prop58_getter_entry_va != 0 && address == g_ebwv_prop58_getter_entry_va)
+            {
+                trace_ebwv_prop58_getter_entry_hit(c, c.win_emu->current_thread().id);
             }
 
             if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
