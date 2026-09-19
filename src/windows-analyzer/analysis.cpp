@@ -4845,8 +4845,20 @@ namespace sogen
             c.emit_observation<rdtscp_event>();
         }
 
+        bool dcomposition_syscall_trace_enabled()
+        {
+            static const bool enabled = std::getenv("SOGEN_TRACE_DCOMPOSITION_SYSCALLS") != nullptr;
+            return enabled;
+        }
+
         emulator_callbacks::continuation handle_syscall(analysis_context& c, const uint32_t syscall_id, const std::string_view syscall_name)
         {
+            if (dcomposition_syscall_trace_enabled() && syscall_name.starts_with("NtDComposition"))
+            {
+                c.win_emu->log.error("[dcomposition-syscall-trace] tid=%u syscall %.*s (id=0x%X)\n", c.win_emu->current_thread().id,
+                                     STR_VIEW_VA(syscall_name), syscall_id);
+            }
+
             if (g_thread_activity_armed && is_thread_activity_traced_tid(c.win_emu->current_thread().id))
             {
                 c.win_emu->log.error("[thread-activity-trace] tid=%u syscall %.*s (id=0x%X)\n", c.win_emu->current_thread().id,
