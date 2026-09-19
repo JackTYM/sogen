@@ -805,6 +805,159 @@ namespace sogen
         constexpr uint64_t EBWV_DCOMP_GATE1_UP1_RETRY_STATUS_RVA = 0x112e06;
         uint64_t g_ebwv_dcomp_gate1_up1_retry_status_va = 0;
 
+        // The holder-object async-submit helper (RVA 0x11f68a, disassembled this cycle -- see
+        // project_solidworks_bringup.md #342): called from gate1_construct_fn's "readiness gate failed"
+        // branch (RVA 0x112cc9-0x112ccb) with (this=newobj[0x38], holder=[ebp+8], &task=[ebp+0xc]).
+        // ENTRY_RVA is past its own prologue where [ebp+8]/[ebp+0xc] are already valid. It makes two
+        // early synchronous sub-calls whose failure return values are each independently stored straight
+        // into holder[0xc0] (RVA 0x11f78d and 0x11f7b9): the first (0x1011e255, a feature/policy-gate
+        // check) returns a hardcoded 0x8007064e on failure; the second (0x1002d9a7, an adapter-preference
+        // check) can return `HRESULT_FROM_WIN32(GetLastError())` on failure, via the SAME reusable
+        // SRW-lock-guarded cache-lookup helper (RVA 0x2292b0) #341 already showed returns true 3/3 times
+        // at a DIFFERENT call site -- this cycle's hooks check whether it also succeeds at THIS call site.
+        constexpr uint64_t EBWV_HOLDER_SUBMIT_ENTRY_RVA = 0x11f6ab;
+        constexpr uint64_t EBWV_HOLDER_SUBMIT_CHECK1_RETURN_RVA = 0x11f6e9;
+        constexpr uint64_t EBWV_HOLDER_SUBMIT_CHECK2_RETURN_RVA = 0x11f715;
+        constexpr uint64_t EBWV_HOLDER_SUBMIT_WRITE1_RVA = 0x11f78d;
+        constexpr uint64_t EBWV_HOLDER_SUBMIT_WRITE2_RVA = 0x11f7b9;
+        constexpr uint64_t EBWV_HOLDER_CHECK2_CACHE_RESULT_RVA = 0x2dab0;
+        constexpr uint64_t EBWV_HOLDER_CHECK2_GETLASTERROR_RETURN_RVA = 0x2db08;
+
+        // A whole-.text literal scan for the exact DWORD 0x800705B4 found exactly 2 occurrences in the
+        // entire 5.6MB module, both inside a generic, reusable "arm a software deadline timer" utility
+        // (RVA 0x171a9a): it builds a delayed-task continuation object with a HARDCODED
+        // `edi[0x18] = 0x800705B4` (RVA 0x172746) and a real function-pointer dispatcher
+        // (`edi[0x10] = 0x10172b60`), then schedules it via what looks like Chromium's own
+        // `PostDelayedTask`-style mechanism, gated on a non-negative timeout duration field. This is NOT
+        // derived from GetLastError()/any Win32 return value anywhere in this construction -- it is Chromium's
+        // own internal software-watchdog timeout policy constant. WATCHDOG_DISPATCH_ENTRY_RVA watches the
+        // callback's own entry (0x172b60) to determine live whether this mechanism ever actually fires
+        // during a real run.
+        constexpr uint64_t EBWV_HOLDER_WATCHDOG_DISPATCH_ENTRY_RVA = 0x172b60;
+        uint64_t g_ebwv_holder_watchdog_dispatch_entry_va = 0;
+
+        uint64_t g_ebwv_holder_submit_entry_va = 0;
+        uint64_t g_ebwv_holder_submit_check1_return_va = 0;
+        uint64_t g_ebwv_holder_submit_check2_return_va = 0;
+        uint64_t g_ebwv_holder_submit_write1_va = 0;
+        uint64_t g_ebwv_holder_submit_write2_va = 0;
+        uint64_t g_ebwv_holder_check2_cache_result_va = 0;
+        uint64_t g_ebwv_holder_check2_getlasterror_return_va = 0;
+
+        void arm_ebwv_holder_submit_watches(const analysis_context& c)
+        {
+            if (g_ebwv_holder_submit_entry_va != 0)
+            {
+                return;
+            }
+
+            if (!std::getenv("SOGEN_TRACE_HOLDER_SUBMIT"))
+            {
+                return;
+            }
+
+            const auto* ebwv = c.win_emu->mod_manager.find_by_name("embeddedbrowserwebview.dll");
+            if (!ebwv || ebwv->machine != IMAGE_FILE_MACHINE_I386)
+            {
+                return;
+            }
+
+            g_ebwv_holder_submit_entry_va = ebwv->image_base + EBWV_HOLDER_SUBMIT_ENTRY_RVA;
+            g_ebwv_holder_submit_check1_return_va = ebwv->image_base + EBWV_HOLDER_SUBMIT_CHECK1_RETURN_RVA;
+            g_ebwv_holder_submit_check2_return_va = ebwv->image_base + EBWV_HOLDER_SUBMIT_CHECK2_RETURN_RVA;
+            g_ebwv_holder_submit_write1_va = ebwv->image_base + EBWV_HOLDER_SUBMIT_WRITE1_RVA;
+            g_ebwv_holder_submit_write2_va = ebwv->image_base + EBWV_HOLDER_SUBMIT_WRITE2_RVA;
+            g_ebwv_holder_check2_cache_result_va = ebwv->image_base + EBWV_HOLDER_CHECK2_CACHE_RESULT_RVA;
+            g_ebwv_holder_check2_getlasterror_return_va = ebwv->image_base + EBWV_HOLDER_CHECK2_GETLASTERROR_RETURN_RVA;
+            g_ebwv_holder_watchdog_dispatch_entry_va = ebwv->image_base + EBWV_HOLDER_WATCHDOG_DISPATCH_ENTRY_RVA;
+
+            c.win_emu->log.error("[holder-submit-trace] armed against embeddedbrowserwebview.dll image_base=0x%llx: "
+                                 "entry=0x%llx check1_return=0x%llx check2_return=0x%llx write1=0x%llx write2=0x%llx "
+                                 "check2_cache_result=0x%llx check2_getlasterror_return=0x%llx watchdog_dispatch_entry=0x%llx\n",
+                                 static_cast<unsigned long long>(ebwv->image_base),
+                                 static_cast<unsigned long long>(g_ebwv_holder_submit_entry_va),
+                                 static_cast<unsigned long long>(g_ebwv_holder_submit_check1_return_va),
+                                 static_cast<unsigned long long>(g_ebwv_holder_submit_check2_return_va),
+                                 static_cast<unsigned long long>(g_ebwv_holder_submit_write1_va),
+                                 static_cast<unsigned long long>(g_ebwv_holder_submit_write2_va),
+                                 static_cast<unsigned long long>(g_ebwv_holder_check2_cache_result_va),
+                                 static_cast<unsigned long long>(g_ebwv_holder_check2_getlasterror_return_va),
+                                 static_cast<unsigned long long>(g_ebwv_holder_watchdog_dispatch_entry_va));
+        }
+
+        void trace_ebwv_holder_watchdog_dispatch_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto continuation = emu.reg<uint32_t>(x86_register::ecx);
+            uint32_t stored_hresult = 0;
+            const bool ok = emu.try_read_memory(continuation + 0x18, &stored_hresult, sizeof(stored_hresult));
+            c.win_emu->log.error("[holder-submit-trace] tid=%u WATCHDOG FIRED: continuation=0x%x stored_hresult=0x%x (read_ok=%d)\n", tid,
+                                 continuation, stored_hresult, ok ? 1 : 0);
+        }
+
+        void trace_ebwv_holder_submit_entry_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
+            uint32_t holder = 0;
+            uint32_t task = 0;
+            emu.try_read_memory(ebp + 8, &holder, sizeof(holder));
+            emu.try_read_memory(ebp + 0xc, &task, sizeof(task));
+            uint32_t holder_c0 = 0;
+            const bool c0_ok = emu.try_read_memory(holder + 0xc0, &holder_c0, sizeof(holder_c0));
+            c.win_emu->log.error("[holder-submit-trace] tid=%u ENTERED async-submit helper holder=0x%x task=0x%x "
+                                 "holder[0xc0]=0x%x (read_ok=%d)\n",
+                                 tid, holder, task, holder_c0, c0_ok ? 1 : 0);
+        }
+
+        void trace_ebwv_holder_submit_check1_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+            c.win_emu->log.error("[holder-submit-trace] tid=%u check1 (0x1011e255) returned 0x%x (failed=%d)\n", tid, eax,
+                                 static_cast<int32_t>(eax) < 0 ? 1 : 0);
+        }
+
+        void trace_ebwv_holder_submit_check2_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+            c.win_emu->log.error("[holder-submit-trace] tid=%u check2 (0x1002d9a7) returned 0x%x (failed=%d)\n", tid, eax,
+                                 static_cast<int32_t>(eax) < 0 ? 1 : 0);
+        }
+
+        void trace_ebwv_holder_submit_write1_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto holder = emu.reg<uint32_t>(x86_register::eax);
+            const auto value = emu.reg<uint32_t>(x86_register::edi);
+            c.win_emu->log.error("[holder-submit-trace] tid=%u WRITE1: holder=0x%x holder[0xc0] <- 0x%x (from check1)\n", tid, holder,
+                                 value);
+        }
+
+        void trace_ebwv_holder_submit_write2_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto holder = emu.reg<uint32_t>(x86_register::ebx);
+            const auto value = emu.reg<uint32_t>(x86_register::eax);
+            c.win_emu->log.error("[holder-submit-trace] tid=%u WRITE2: holder=0x%x holder[0xc0] <- 0x%x (from check2)\n", tid, holder,
+                                 value);
+        }
+
+        void trace_ebwv_holder_check2_cache_result_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto al = emu.reg<uint8_t>(x86_register::al);
+            c.win_emu->log.error("[holder-submit-trace] tid=%u check2's own cache-lookup helper (0x2292b0) returned al=%d\n", tid, al);
+        }
+
+        void trace_ebwv_holder_check2_getlasterror_return_hit(const analysis_context& c, const uint32_t tid)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+            c.win_emu->log.error("[holder-submit-trace] tid=%u check2 fell back to GetLastError()=%u (0x%x)\n", tid, eax, eax);
+        }
+
         void arm_ebwv_dcomp_gate_caller_watches(const analysis_context& c)
         {
             if (g_ebwv_dcomp_gate_caller_watches_armed)
@@ -4348,6 +4501,48 @@ namespace sogen
             if (g_ebwv_dcomp_gate1_up1_retry_status_va != 0 && address == g_ebwv_dcomp_gate1_up1_retry_status_va)
             {
                 trace_ebwv_dcomp_gate1_up1_retry_status_hit(c, c.win_emu->current_thread().id);
+            }
+
+            arm_ebwv_holder_submit_watches(c);
+
+            if (g_ebwv_holder_submit_entry_va != 0 && address == g_ebwv_holder_submit_entry_va)
+            {
+                trace_ebwv_holder_submit_entry_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_holder_submit_check1_return_va != 0 && address == g_ebwv_holder_submit_check1_return_va)
+            {
+                trace_ebwv_holder_submit_check1_return_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_holder_submit_check2_return_va != 0 && address == g_ebwv_holder_submit_check2_return_va)
+            {
+                trace_ebwv_holder_submit_check2_return_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_holder_submit_write1_va != 0 && address == g_ebwv_holder_submit_write1_va)
+            {
+                trace_ebwv_holder_submit_write1_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_holder_submit_write2_va != 0 && address == g_ebwv_holder_submit_write2_va)
+            {
+                trace_ebwv_holder_submit_write2_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_holder_check2_cache_result_va != 0 && address == g_ebwv_holder_check2_cache_result_va)
+            {
+                trace_ebwv_holder_check2_cache_result_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_holder_check2_getlasterror_return_va != 0 && address == g_ebwv_holder_check2_getlasterror_return_va)
+            {
+                trace_ebwv_holder_check2_getlasterror_return_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (g_ebwv_holder_watchdog_dispatch_entry_va != 0 && address == g_ebwv_holder_watchdog_dispatch_entry_va)
+            {
+                trace_ebwv_holder_watchdog_dispatch_entry_hit(c, c.win_emu->current_thread().id);
             }
 
             if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
