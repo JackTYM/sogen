@@ -481,6 +481,7 @@ namespace sogen
 
             win_emu.pump_pipe_ipc();
             win_emu.pump_process_control_server();
+            win_emu.pump_child_exit_notifications();
 
             auto& devices = win_emu.process.devices;
 
@@ -1045,6 +1046,38 @@ namespace sogen
         if (this->process_control_server_)
         {
             pump_process_control(*this, *this->process_control_server_);
+        }
+    }
+
+    void windows_emulator::notify_own_exit(const std::optional<NTSTATUS> exit_status)
+    {
+        if (!this->process_control_server_)
+        {
+            return;
+        }
+
+        this->process_control_server_->notify_exit(static_cast<int32_t>(exit_status.value_or(STATUS_UNSUCCESSFUL)));
+    }
+
+    void windows_emulator::pump_child_exit_notifications()
+    {
+        for (auto it = this->child_control_channels_.begin(); it != this->child_control_channels_.end();)
+        {
+            const auto exit_status = it->second ? it->second->try_receive_exit_notification() : std::nullopt;
+
+            if (!exit_status.has_value())
+            {
+                ++it;
+                continue;
+            }
+
+            const auto record = this->process.child_processes.find(it->first);
+            if (record != this->process.child_processes.end() && record->second.exit_status == STATUS_PENDING)
+            {
+                record->second.exit_status = static_cast<NTSTATUS>(*exit_status);
+            }
+
+            it = this->child_control_channels_.erase(it);
         }
     }
 

@@ -56,6 +56,15 @@ namespace sogen::test
             {
             }
 
+            void notify_exit(int32_t /*exit_status*/) override
+            {
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                return std::nullopt;
+            }
+
           private:
             windows_emulator* peer_{};
             uint64_t next_request_id_{1};
@@ -99,6 +108,15 @@ namespace sogen::test
             {
             }
 
+            void notify_exit(int32_t /*exit_status*/) override
+            {
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                return std::nullopt;
+            }
+
           private:
             windows_emulator* peer_{};
         };
@@ -128,6 +146,15 @@ namespace sogen::test
             void respond(const process_control_response& response) override
             {
                 this->responses.push_back(response);
+            }
+
+            void notify_exit(int32_t /*exit_status*/) override
+            {
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                return std::nullopt;
             }
 
             std::vector<process_control_request> pending{};

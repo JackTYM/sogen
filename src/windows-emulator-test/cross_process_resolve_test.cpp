@@ -23,6 +23,15 @@ namespace sogen::test
             void respond(const process_control_response&) override
             {
             }
+
+            void notify_exit(int32_t /*exit_status*/) override
+            {
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                return std::nullopt;
+            }
         };
 
         constexpr ACCESS_MASK PROCESS_VM_READ = 0x0010;

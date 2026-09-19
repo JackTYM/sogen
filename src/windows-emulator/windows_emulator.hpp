@@ -474,6 +474,22 @@ namespace sogen
         // child with zero runnable threads still services its parent's requests.
         void pump_process_control_server();
 
+        // Called by main.cpp right before this process's own execution ends, for every exit path
+        // (clean self-terminate, an uncaught exception, GDB detach, ...) - a no-op unless this
+        // process was itself spawned as a child (process_control_server_ is set). Reports
+        // exit_status to the parent over the same channel process_control_server_ listens on, so
+        // its child_process_record stops reporting STATUS_PENDING forever - see
+        // pump_child_exit_notifications and process_context::child_process_record.
+        void notify_own_exit(std::optional<NTSTATUS> exit_status);
+
+        // Drains any exit_notification a spawned child has sent since the last call (see
+        // process_control_channel::notify_exit/notify_own_exit) and applies it to the matching
+        // still-pending entry in process_context::child_processes, so observe_object_signal
+        // (emulator_thread.cpp) sees the child's process handle as signaled - the same path a
+        // remote NtTerminateProcess already updates. Called once per scheduler tick
+        // (perform_context_switch_work), alongside pump_pipe_ipc/pump_process_control_server.
+        void pump_child_exit_notifications();
+
         // Records short_name (see devices/named_pipe.hpp's pipe_short_name) as a known-existing named
         // pipe server instance and wakes every thread currently parked in FSCTL_PIPE_WAIT for it (see
         // devices/named_pipe.hpp's wait()). Called both for a local NtCreateNamedPipeFile and for a

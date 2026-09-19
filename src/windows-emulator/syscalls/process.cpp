@@ -1234,8 +1234,8 @@ namespace sogen
             record.pid = child_pid;
             // The child now runs as an independent, real host OS process rather than being run to
             // completion synchronously before this syscall returns - its real exit status isn't known
-            // yet, and only becomes known through a remote NtTerminateProcess (see child_process_record
-            // in process_context.hpp); a child that exits or crashes on its own is never observed.
+            // yet (see child_process_record in process_context.hpp for how it eventually becomes known,
+            // whether through a remote NtTerminateProcess or the child's own exit notification).
             record.exit_status = STATUS_PENDING;
             record.granted_access = resolve_granted_process_access(process_desired_access);
 

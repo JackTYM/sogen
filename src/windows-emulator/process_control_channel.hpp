@@ -169,6 +169,16 @@ namespace sogen
         virtual std::optional<process_control_request> try_receive() = 0;
 
         virtual void respond(const process_control_response& response) = 0;
+
+        // Fire-and-forget, child side: sent exactly once, over this same channel, right before the
+        // child's own host process is about to end (see windows_emulator::notify_own_exit) - a
+        // child that exits or crashes on its own is otherwise never observed by its parent (see
+        // process_context::child_process_record). Never awaits a reply.
+        virtual void notify_exit(int32_t exit_status) = 0;
+
+        // Non-blocking, parent side: returns the exit status a child reported via notify_exit,
+        // once it has arrived, or std::nullopt if none has arrived yet.
+        virtual std::optional<int32_t> try_receive_exit_notification() = 0;
     };
 
 } // namespace sogen

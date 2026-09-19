@@ -741,6 +741,8 @@ namespace sogen
 
             context.win_emu = win_emu.get();
 
+            const auto notify_parent_of_own_exit = utils::finally([&] { win_emu->notify_own_exit(win_emu->process.exit_status); });
+
             child_process_spawn_config spawn_config{};
             if (supports_child_process_spawning())
             {

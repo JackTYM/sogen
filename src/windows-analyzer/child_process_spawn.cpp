@@ -302,6 +302,7 @@ namespace sogen
         {
             request = 0,
             response = 1,
+            exit_notification = 2,
         };
 
         void write_process_control_request_body(utils::buffer_serializer& buffer, const process_control_request& request)
@@ -430,6 +431,15 @@ namespace sogen
                 uint8_t kind{};
                 deserializer.read(kind);
 
+                if (static_cast<process_control_frame_kind>(kind) == process_control_frame_kind::exit_notification)
+                {
+                    int32_t exit_status{};
+                    deserializer.read(exit_status);
+                    this->pending_exit_status_ = exit_status;
+                    this->dead_ = true;
+                    return std::nullopt;
+                }
+
                 uint64_t response_id{};
                 deserializer.read(response_id);
 
@@ -477,10 +487,55 @@ namespace sogen
                 send_framed(this->fd_, buffer.get_buffer());
             }
 
+            void notify_exit(const int32_t exit_status) override
+            {
+                utils::buffer_serializer buffer{};
+                buffer.write(static_cast<uint8_t>(process_control_frame_kind::exit_notification));
+                buffer.write(exit_status);
+
+                send_framed(this->fd_, buffer.get_buffer());
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                if (this->pending_exit_status_.has_value())
+                {
+                    const auto exit_status = *this->pending_exit_status_;
+                    this->pending_exit_status_.reset();
+                    return exit_status;
+                }
+
+                if (this->dead_)
+                {
+                    return std::nullopt;
+                }
+
+                auto raw = recv_framed(this->fd_, 0);
+                if (!raw)
+                {
+                    return std::nullopt;
+                }
+
+                utils::buffer_deserializer deserializer{*raw};
+
+                uint8_t kind{};
+                deserializer.read(kind);
+
+                if (static_cast<process_control_frame_kind>(kind) != process_control_frame_kind::exit_notification)
+                {
+                    return std::nullopt;
+                }
+
+                int32_t exit_status{};
+                deserializer.read(exit_status);
+                return exit_status;
+            }
+
           private:
             int fd_{-1};
             uint64_t next_request_id_{1};
             bool dead_{false};
+            std::optional<int32_t> pending_exit_status_{};
         };
 #endif
 

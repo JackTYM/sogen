@@ -34,6 +34,59 @@ namespace sogen::test
             void respond(const process_control_response&) override
             {
             }
+
+            void notify_exit(int32_t /*exit_status*/) override
+            {
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                return std::nullopt;
+            }
+        };
+
+        // A channel double for pump_child_exit_notifications: reports a canned exit status exactly
+        // once, then goes quiet - matching notify_exit's own fire-and-forget, once-only contract.
+        class notifying_process_control_channel final : public process_control_channel
+        {
+          public:
+            explicit notifying_process_control_channel(const int32_t exit_status)
+                : pending_(exit_status)
+            {
+            }
+
+            std::optional<process_control_response> request(const process_control_request&, int /*timeout_ms*/) override
+            {
+                return std::nullopt;
+            }
+
+            std::optional<process_control_request> try_receive() override
+            {
+                return std::nullopt;
+            }
+
+            void respond(const process_control_response&) override
+            {
+            }
+
+            void notify_exit(int32_t /*exit_status*/) override
+            {
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                if (!this->pending_.has_value())
+                {
+                    return std::nullopt;
+                }
+
+                const auto exit_status = *this->pending_;
+                this->pending_.reset();
+                return exit_status;
+            }
+
+          private:
+            std::optional<int32_t> pending_{};
         };
 
         constexpr ACCESS_MASK PROCESS_TERMINATE = 0x0001;
@@ -90,6 +143,15 @@ namespace sogen::test
             {
             }
 
+            void notify_exit(int32_t /*exit_status*/) override
+            {
+            }
+
+            std::optional<int32_t> try_receive_exit_notification() override
+            {
+                return std::nullopt;
+            }
+
           private:
             windows_emulator* peer_{};
             uint64_t next_request_id_{1};
@@ -124,6 +186,49 @@ namespace sogen::test
         ASSERT_TERMINATED_WITH_STATUS(child, 0x1234);
         ASSERT_EQ(parent.process.child_processes.at(7).exit_status, 0x1234);
         ASSERT_EQ(parent.find_child_control_channel(7), nullptr);
+    }
+
+    // A child that exits or crashes on its own (rather than being remotely terminated via
+    // NtTerminateProcess) reports its real exit status exactly once, over the same
+    // process_control_channel, via notify_exit (see windows_emulator::notify_own_exit, called from
+    // main.cpp for every exit path). pump_child_exit_notifications is what applies that self-report
+    // to the parent's own child_process_record - the same exit_status field observe_object_signal
+    // (emulator_thread.cpp) and NtQueryInformationProcess's ProcessBasicInformation branch both read.
+    // Before this existed, such a child's exit_status stayed STATUS_PENDING forever.
+    TEST(CrossProcessTest, PumpChildExitNotificationsAppliesSelfReportedExitStatus)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.pid = 0x1234;
+        record.exit_status = STATUS_PENDING;
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<notifying_process_control_channel>(STATUS_SUCCESS));
+
+        parent.pump_child_exit_notifications();
+
+        ASSERT_EQ(parent.process.child_processes.at(7).exit_status, STATUS_SUCCESS);
+        ASSERT_EQ(parent.find_child_control_channel(7), nullptr);
+    }
+
+    // A remote NtTerminateProcess that already resolved the record (exit_status no longer
+    // STATUS_PENDING) must win over a self-reported notification that happens to arrive afterward -
+    // the first exit status observed is the real one; nothing should overwrite it.
+    TEST(CrossProcessTest, PumpChildExitNotificationsDoesNotOverwriteAnAlreadyResolvedRecord)
+    {
+        auto parent = create_empty_emulator();
+
+        process_context::child_process_record record{};
+        record.pid = 0x1234;
+        record.exit_status = 0x1234;
+        record.granted_access = PROCESS_ALL_ACCESS;
+        parent.process.child_processes[7] = record;
+        parent.register_child_control_channel(7, std::make_unique<notifying_process_control_channel>(STATUS_SUCCESS));
+
+        parent.pump_child_exit_notifications();
+
+        ASSERT_EQ(parent.process.child_processes.at(7).exit_status, 0x1234);
     }
 
     TEST(CrossProcessTest, NtTerminateProcessSyscallDeniesAccessWithoutTerminateRight)
