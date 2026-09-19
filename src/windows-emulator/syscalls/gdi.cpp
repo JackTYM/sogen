@@ -4278,7 +4278,8 @@ namespace sogen
                 return write_query_adapter_info(c, query, flip_queue_info);
             }
 
-            case KMTQAITYPE::KMTQAITYPE_DRIVERVERSION: {
+            case KMTQAITYPE::KMTQAITYPE_DRIVERVERSION:
+            case KMTQAITYPE::KMTQAITYPE_DRIVERVERSION_RENDER: {
                 return write_query_adapter_info(c, query, 3200);
             }
 
@@ -4344,6 +4345,23 @@ namespace sogen
             case KMTQAITYPE::KMTQAITYPE_QUERY_ADAPTER_UNIQUE_GUID: {
                 GUID unique_guid = k_dxgk_adapter_guid;
                 return write_query_adapter_info(c, query, unique_guid);
+            }
+
+            case KMTQAITYPE::KMTQAITYPE_DRIVER_DESCRIPTION_RENDER: {
+                struct EMU_D3DKMT_DRIVER_DESCRIPTION
+                {
+                    char16_t DriverDescription[4096]; // NOLINT
+                } driver_description{};
+
+                if (query.PrivateDriverDataSize < sizeof(driver_description))
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                utils::string::copy(driver_description.DriverDescription, u"Microsoft RemoteFX Graphics Device");
+
+                c.emu.write_memory(query.pPrivateDriverData, &driver_description, sizeof(driver_description));
+                return STATUS_SUCCESS;
             }
 
             case KMTQAITYPE::KMTQAITYPE_QUERYREGISTRY: {
