@@ -17,6 +17,32 @@ namespace sogen
                 response.try_write(ResponseAbort);
             }
 
+            if (getenv("SOGEN_DIAG382"))
+            {
+                c.win_emu.log.error("NtRaiseHardError: status=0x%X num_params=%u params=0x%llX\n", error_status, number_of_parameters,
+                                    static_cast<unsigned long long>(parameters));
+                for (ULONG i = 0; i < number_of_parameters && i < 4; ++i)
+                {
+                    uint64_t param_value = 0;
+                    if (!c.emu.try_read_memory(parameters + i * sizeof(uint64_t), &param_value, sizeof(param_value)))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        const auto message =
+                            read_unicode_string(c.emu, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, param_value});
+                        c.win_emu.log.error("  param[%u] as UNICODE_STRING: %s\n", i, u16_to_u8(message).c_str());
+                    }
+                    catch (...)
+                    {
+                        c.win_emu.log.error("  param[%u] raw=0x%llX (not a readable UNICODE_STRING)\n", i,
+                                            static_cast<unsigned long long>(param_value));
+                    }
+                }
+            }
+
             if (error_status & STATUS_SERVICE_NOTIFICATION && number_of_parameters >= 3)
             {
                 std::array<uint64_t, 3> params = {0, 0, 0};
