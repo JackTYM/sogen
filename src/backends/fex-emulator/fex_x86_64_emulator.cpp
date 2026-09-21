@@ -504,6 +504,57 @@ namespace sogen::fex
             }
             return prot;
         }
+
+        // Places a fresh anonymous mapping at exactly `target`, never replacing anything already
+        // there. Unlike posix mmap(MAP_FIXED) - which the BSD mmap syscall always pairs with
+        // VM_FLAGS_OVERWRITE (bsd/kern/kern_mman.c) and which therefore deletes-then-inserts over the
+        // target range before placing the new mapping - plain VM_FLAGS_FIXED skips that delete step
+        // and just fails cleanly with KERN_NO_SPACE/KERN_MEMORY_PRESENT if any part of the range isn't
+        // free. That distinction matters here: the delete step raises a fatal, uncatchable EXC_GUARD
+        // (GUARD_TYPE_VIRT_MEMORY / kGUARD_EXC_DEALLOC_GAP, osfmk/vm/vm_map.c's vm_map_delete()) the
+        // moment any part of the deleted range turns out to be unmapped - which every genuinely
+        // first-touch placement in this backend guarantees, since the whole point of placing one is
+        // that nothing is there yet.
+        kern_return_t map_fixed_anonymous_apple(void* target, size_t size, vm_prot_t cur_protection, vm_prot_t max_protection)
+        {
+            auto placed = reinterpret_cast<mach_vm_address_t>(target);
+            const kern_return_t result = mach_vm_map(mach_task_self(), &placed, size, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE,
+                                                     cur_protection, max_protection, VM_INHERIT_DEFAULT);
+            if (result == KERN_SUCCESS && reinterpret_cast<void*>(placed) != target)
+            {
+                mach_vm_deallocate(mach_task_self(), placed, size);
+                return KERN_NO_SPACE;
+            }
+            return result;
+        }
+
+        // Like map_fixed_anonymous_apple, but for callers where `target` may legitimately already be
+        // covered by a reservation this backend itself made earlier - e.g. a page inside the wow64
+        // host window's up-front PROT_NONE placeholder (reserve_wow64_host_window), which every wow64
+        // guest page commit lands inside without sogen's own per-page bookkeeping having claimed it
+        // yet. Tries the plain, gap-checked placement first; only on KERN_NO_SPACE/KERN_MEMORY_PRESENT
+        // - meaning something is already mapped there in full, so no gap exists - does it retry with
+        // VM_FLAGS_OVERWRITE, which is safe precisely because that first call just proved there is no
+        // gap for vm_map_delete() to trip on.
+        kern_return_t map_fixed_anonymous_apple_replace(void* target, size_t size, vm_prot_t cur_protection, vm_prot_t max_protection)
+        {
+            const kern_return_t result = map_fixed_anonymous_apple(target, size, cur_protection, max_protection);
+            if (result != KERN_NO_SPACE && result != KERN_MEMORY_PRESENT)
+            {
+                return result;
+            }
+
+            auto placed = reinterpret_cast<mach_vm_address_t>(target);
+            const kern_return_t overwrite_result =
+                mach_vm_map(mach_task_self(), &placed, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MEMORY_OBJECT_NULL, 0, FALSE,
+                            cur_protection, max_protection, VM_INHERIT_DEFAULT);
+            if (overwrite_result == KERN_SUCCESS && reinterpret_cast<void*>(placed) != target)
+            {
+                mach_vm_deallocate(mach_task_self(), placed, size);
+                return KERN_NO_SPACE;
+            }
+            return overwrite_result;
+        }
 #endif
 
         // Bit-for-bit reimplementation of FEXCore::Context::ContextImpl::ReconstructCompactedEFLAGS /
@@ -1772,18 +1823,15 @@ namespace sogen::fex
                     continue;
                 }
 
-                void* const target = reinterpret_cast<void*>(candidate);
-                void* const result =
-                    ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                if (result != target)
+                const kern_return_t map_result = map_fixed_anonymous_apple(reinterpret_cast<void*>(candidate),
+                                                                           wow64_guest_address_space_size, VM_PROT_NONE, VM_PROT_NONE);
+                if (map_result != KERN_SUCCESS)
                 {
-                    // A racer claimed this exact candidate between our probe and our mmap - move on.
-                    fprintf(stderr, "[FEX backend] failed to reserve wow64 host window at 0x%llx - trying the next candidate\n",
-                            static_cast<unsigned long long>(candidate));
-                    if (result != MAP_FAILED)
-                    {
-                        ::munmap(result, wow64_guest_address_space_size);
-                    }
+                    // A racer claimed this exact candidate between our probe and our mach_vm_map - move on.
+                    fprintf(stderr,
+                            "[FEX backend] failed to reserve wow64 host window at 0x%llx (kern_return=%d) - trying "
+                            "the next candidate\n",
+                            static_cast<unsigned long long>(candidate), map_result);
                     candidate += wow64_guest_address_space_size;
                     continue;
                 }
@@ -2241,11 +2289,10 @@ namespace sogen::fex
 #ifdef __APPLE__
             const auto rebase = rebase_for(this->is_wow64_process_, address);
             host_backing_size = host_page_align_up_apple(size);
-            void* result = ::mmap(reinterpret_cast<void*>(address + rebase), host_backing_size, PROT_READ | PROT_WRITE,
-                                  MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-            if (result != MAP_FAILED && result == reinterpret_cast<void*>(address + rebase))
+            void* const target = reinterpret_cast<void*>(address + rebase);
+            if (map_fixed_anonymous_apple_replace(target, host_backing_size, VM_PROT_READ | VM_PROT_WRITE, VM_PROT_ALL) == KERN_SUCCESS)
             {
-                host_backing = result;
+                host_backing = target;
             }
 #endif
 
@@ -2330,9 +2377,9 @@ namespace sogen::fex
                 // See wow64_guest_rebase's doc comment - host_page is a guest address here
                 // (mapped_host_pages_apple_ stays keyed by it), the real host mmap target is rebased.
                 const auto rebase = rebase_for(this->is_wow64_process_, host_page);
-                void* result = ::mmap(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple, PROT_NONE,
-                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                if (result == MAP_FAILED || result != reinterpret_cast<void*>(host_page + rebase))
+                const kern_return_t map_result = map_fixed_anonymous_apple_replace(reinterpret_cast<void*>(host_page + rebase),
+                                                                                   host_page_size_apple, VM_PROT_NONE, VM_PROT_ALL);
+                if (map_result != KERN_SUCCESS)
                 {
                     throw std::runtime_error("FEX backend failed to reserve guest address range at the host level");
                 }
@@ -2818,9 +2865,9 @@ namespace sogen::fex
 
             if (!currently_mapped)
             {
-                void* result = ::mmap(host_ptr, host_page_size_apple, to_prot_apple(effective),
-                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                if (result == MAP_FAILED || result != host_ptr)
+                const kern_return_t map_result = map_fixed_anonymous_apple_replace(
+                    host_ptr, host_page_size_apple, static_cast<vm_prot_t>(to_prot_apple(effective)), VM_PROT_ALL);
+                if (map_result != KERN_SUCCESS)
                 {
                     throw std::runtime_error("FEX backend failed to map guest memory at requested address");
                 }
