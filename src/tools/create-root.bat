@@ -193,6 +193,7 @@ CALL :collect WINSPOOL.DRV
 CALL :collect wintrust.dll
 CALL :collect wintypes.dll
 CALL :collect WINUSB.DLL
+CALL :collect wkscli.dll
 CALL :collect wlanapi.dll
 CALL :collect wldap32.dll
 CALL :collect wow64.dll
