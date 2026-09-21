@@ -3118,10 +3118,11 @@ namespace sogen
                 if (window_trace_enabled())
                 {
                     c.win_emu.log.error(
-                        "[window-trace] CreateWindowEx OK hwnd=0x%llx class='%s' top_level=%d visible=%d id=0x%llx text='%s' tid=%u\n",
+                        "[window-trace] CreateWindowEx OK hwnd=0x%llx class='%s' top_level=%d visible=%d id=0x%llx text='%s' "
+                        "x=%d y=%d width=%d height=%d tid=%u\n",
                         static_cast<unsigned long long>(handle.bits), u16_to_u8(cls_name).c_str(), !has_child_parent,
                         (style & WS_VISIBLE) != 0, has_child_parent ? static_cast<unsigned long long>(menu) : 0ULL,
-                        u16_to_u8(win.name).c_str(), c.thread().id);
+                        u16_to_u8(win.name).c_str(), x, y, width, height, c.thread().id);
                 }
 
                 if (has_child_parent && parent_win && (style & WS_VISIBLE) != 0)
