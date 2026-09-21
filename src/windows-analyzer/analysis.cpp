@@ -281,6 +281,28 @@ namespace sogen
         uint64_t g_ebwv_on_pointer_event_i386_trace_va = 0;
         uint64_t g_ebwv_process_window_message_i386_trace_va = 0;
 
+        // embedded_browser_webview_current::ClientWindow::{CreateClientVisual, ConnectToHostWinCompVisual}'s
+        // own real, private PDB-resolved RVAs in embeddedbrowserwebview.dll's 32-bit build (see
+        // project_solidworks_bringup.md #374 point 3, which already located these two symbols' names in
+        // the PDB's private-symbol dump for module client_window.obj but not their RVAs, and #377).
+        // Each RVA is resolved from the PDB's own S_LPROC32 `addr = segment:offset` field (segment 1's
+        // 0x1000 virtual address, cross-validated in #371/#373/#375) and independently disassembly-confirmed
+        // as a real __thiscall function entry. CreateClientVisual takes one stack argument beyond `this`
+        // (confirmed via its own `retl $0x4` epilogue) -- a device/visual-factory COM pointer whose
+        // vtable slot 7 it calls to create a new IDCompositionVisual-family object, stored into
+        // `this+0x1c` and traced via a telemetry call labeled "WebView2_ClientVisual_CreateVisual"
+        // (a real, human-readable string literal read directly from the DLL's own .rdata, not inferred).
+        // ConnectToHostWinCompVisual takes no stack arguments beyond `this` (confirmed via its own bare
+        // `retl` epilogue) and, per the same telemetry-string technique, makes real interop calls labeled
+        // "WebView2_WinComp_AsCompositionObject" and "WebView2_WinComp_GetCompositor" against COM pointers
+        // held in `this+0x14`/`this+0x18` -- disassembly additionally confirms a direct, unambiguous call
+        // from ConnectToHostWinCompVisual into CreateClientVisual itself (`call 0x100ef0ae` at file offset
+        // 0x100ef91f), so the two are a real, structurally-linked caller/callee pair, not just siblings.
+        constexpr uint64_t EBWV_CREATE_CLIENT_VISUAL_I386_RVA = 0xef0ae;
+        constexpr uint64_t EBWV_CONNECT_TO_HOST_WINCOMP_VISUAL_I386_RVA = 0xef5fc;
+        uint64_t g_ebwv_create_client_visual_i386_trace_va = 0;
+        uint64_t g_ebwv_connect_to_host_wincomp_visual_i386_trace_va = 0;
+
         // ShowWindow/ShowWindowAsync/SetWindowPos's own export RVAs in the shared root's 32-bit
         // (SysWOW64) user32.dll, resolved via pefile's export table and cross-checked against
         // llvm-objdump -p's own export listing (exact match) -- see project_solidworks_bringup.md
@@ -2891,6 +2913,14 @@ namespace sogen
                 g_ebwv_process_window_message_i386_trace_va = mod.image_base + EBWV_PROCESS_WINDOW_MESSAGE_I386_RVA;
                 c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ClientWindowWin32::_ProcessWindowMessage at 0x%llx\n",
                                      static_cast<unsigned long long>(g_ebwv_process_window_message_i386_trace_va));
+
+                g_ebwv_create_client_visual_i386_trace_va = mod.image_base + EBWV_CREATE_CLIENT_VISUAL_I386_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ClientWindow::CreateClientVisual at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_create_client_visual_i386_trace_va));
+
+                g_ebwv_connect_to_host_wincomp_visual_i386_trace_va = mod.image_base + EBWV_CONNECT_TO_HOST_WINCOMP_VISUAL_I386_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ClientWindow::ConnectToHostWinCompVisual at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_connect_to_host_wincomp_visual_i386_trace_va));
             }
 
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
@@ -3431,6 +3461,46 @@ namespace sogen
                                  static_cast<unsigned long long>(address), this_ptr, hwnd, msg, wparam, lparam,
                                  c.win_emu->current_thread().id, return_address, caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_create_client_visual_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint32_t return_address = 0;
+            uint32_t device_arg = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &device_arg, sizeof(device_arg));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 ClientWindow::CreateClientVisual at 0x%llx, "
+                                 "this=0x%x device_arg=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), this_ptr, device_arg, c.win_emu->current_thread().id,
+                                 return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_connect_to_host_wincomp_visual_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint32_t return_address = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 ClientWindow::ConnectToHostWinCompVisual at 0x%llx, "
+                                 "this=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), this_ptr, c.win_emu->current_thread().id, return_address,
+                                 caller_mod_name, static_cast<unsigned long long>(caller_offset));
         }
 
         void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
@@ -4894,6 +4964,16 @@ namespace sogen
             if (g_ebwv_process_window_message_i386_trace_va != 0 && address == g_ebwv_process_window_message_i386_trace_va)
             {
                 trace_ebwv_process_window_message_i386_hit(c, address);
+            }
+
+            if (g_ebwv_create_client_visual_i386_trace_va != 0 && address == g_ebwv_create_client_visual_i386_trace_va)
+            {
+                trace_ebwv_create_client_visual_i386_hit(c, address);
+            }
+
+            if (g_ebwv_connect_to_host_wincomp_visual_i386_trace_va != 0 && address == g_ebwv_connect_to_host_wincomp_visual_i386_trace_va)
+            {
+                trace_ebwv_connect_to_host_wincomp_visual_i386_hit(c, address);
             }
 
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
