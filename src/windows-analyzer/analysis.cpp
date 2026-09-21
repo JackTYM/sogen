@@ -96,7 +96,19 @@ namespace sogen
         // characterized in `EmbeddedBrowserWebView.dll`. Combined with the still-never-committed
         // `ui::Compositor`/`VizMain` chain RVAs from #336/#357/#358 (re-resolved and cross-validated
         // against those findings' own cited values this cycle) to test both threads in one run.
-        constexpr std::array<traced_symbol, 16> EBWV_COMPOSITOR_CHAIN_TARGETS{{
+        // #368 walked the exact call site into gfx::WindowImpl::Init() that #337 left unresolved
+        // (its nearest PDB public symbol landed 250 bytes short) back to a real function prologue
+        // (int3 padding at msedge.dll+0x1771101, prologue at +0x1771102) and matched it byte-for-byte
+        // against real, fetched Chromium source (ui/gfx/win/singleton_hwnd.cc): it is
+        // gfx::SingletonHwnd::SingletonHwnd(), a legitimate always-hidden message-only singleton with
+        // no compositor by design, not part of the widget/compositor chain. No PDB symbol exists for
+        // it, so it is watched here by its raw RVA. A whole-.text call-site scan for the same target
+        // also turned up two real calls inside views::HWNDMessageHandlerHeadless::Init (the headless
+        // stand-in HWNDMessageHandler::Create() substitutes when display::Screen::Get()->IsHeadless()
+        // -- itself never seen to hold in a live #368 run, no child cmdline ever carried --headless)
+        // -- a second, so-far-unwatched candidate source for the never-shown top-level
+        // Chrome_WidgetWin_0 window #336/#337/#367 already found.
+        constexpr std::array<traced_symbol, 18> EBWV_COMPOSITOR_CHAIN_TARGETS{{
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::EmbeddedBrowserNativeWidgetAura", 0xf2d19fe},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::InitNativeWidget", 0xf2d33e0},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::GetDcompDevice", 0xf2d2200},
@@ -113,6 +125,8 @@ namespace sogen
             {"viz::VizMainImpl::CreateGpuService", 0x34df5f0},
             {"viz::VizMainImpl::CreateFrameSinkManager", 0x350df90},
             {"viz::FrameSinkManagerImpl::CreateRootCompositorFrameSink", 0x350eae0},
+            {"gfx::SingletonHwnd::SingletonHwnd", 0x1771102},
+            {"views::HWNDMessageHandlerHeadless::Init", 0xa3e5490},
         }};
         std::array<uint64_t, EBWV_COMPOSITOR_CHAIN_TARGETS.size()> g_ebwv_compositor_chain_trace_vas{};
 
