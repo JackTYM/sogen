@@ -303,6 +303,24 @@ namespace sogen
         uint64_t g_ebwv_create_client_visual_i386_trace_va = 0;
         uint64_t g_ebwv_connect_to_host_wincomp_visual_i386_trace_va = 0;
 
+        // embedded_browser_webview_current::internal::EBWebViewEnvironment::CreateCoreWebView2Controller's
+        // own real, public-PDB-resolved RVA in embeddedbrowserwebview.dll's 32-bit build (S_PUB32 `addr`
+        // field, segment 1's 0x1000 virtual address, cross-validated in #371/#373/#375/#377, plus an
+        // independent disassembly re-check confirming a real, tightly-packed __stdcall COM-method entry:
+        // `push ebp; mov esp,ebp; push ebx; push edi; push esi`, [ebp+8]=this, [ebp+0xc]=parentWindow,
+        // [ebp+0x10]=handler, `retl $0xc`). This is the real entry point behind the public WebView2 API
+        // `ICoreWebView2Environment::CreateCoreWebView2Controller(HWND, ICoreWebView2CreateCoreWebView2Con
+        // trollerCompletedHandler*)` -- the async controller-creation call this whole investigation's
+        // avenue-2 pivot (project_solidworks_bringup.md #380/#381) needs to observe directly, rather than
+        // continuing to infer readiness from HWND-level symptoms. `handler` is a COM interface pointer
+        // implemented by the guest (sldim.exe) itself; its completion method
+        // (`ICoreWebView2CreateCoreWebView2ControllerCompletedHandler::Invoke(HRESULT, ICoreWebView2Cont
+        // roller*)`) sits at vtable slot 3 (past IUnknown's QueryInterface/AddRef/Release), resolved live
+        // at the call site below rather than statically, since it is implemented outside this DLL.
+        constexpr uint64_t EBWV_CREATE_CORE_WEBVIEW2_CONTROLLER_I386_RVA = 0x112150;
+        uint64_t g_ebwv_create_controller_i386_trace_va = 0;
+        uint64_t g_ebwv_controller_completed_handler_invoke_va = 0;
+
         // ShowWindow/ShowWindowAsync/SetWindowPos's own export RVAs in the shared root's 32-bit
         // (SysWOW64) user32.dll, resolved via pefile's export table and cross-checked against
         // llvm-objdump -p's own export listing (exact match) -- see project_solidworks_bringup.md
@@ -2921,6 +2939,11 @@ namespace sogen
                 g_ebwv_connect_to_host_wincomp_visual_i386_trace_va = mod.image_base + EBWV_CONNECT_TO_HOST_WINCOMP_VISUAL_I386_RVA;
                 c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ClientWindow::ConnectToHostWinCompVisual at 0x%llx\n",
                                      static_cast<unsigned long long>(g_ebwv_connect_to_host_wincomp_visual_i386_trace_va));
+
+                g_ebwv_create_controller_i386_trace_va = mod.image_base + EBWV_CREATE_CORE_WEBVIEW2_CONTROLLER_I386_RVA;
+                c.win_emu->log.error(
+                    "[create-window-ex-caller-trace] watching I386 EBWebViewEnvironment::CreateCoreWebView2Controller at 0x%llx\n",
+                    static_cast<unsigned long long>(g_ebwv_create_controller_i386_trace_va));
             }
 
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
@@ -3501,6 +3524,72 @@ namespace sogen
                                  "this=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
                                  static_cast<unsigned long long>(address), this_ptr, c.win_emu->current_thread().id, return_address,
                                  caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_create_controller_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t this_ptr = 0;
+            uint32_t hwnd_arg = 0;
+            uint32_t handler_arg = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &this_ptr, sizeof(this_ptr));
+            emu.try_read_memory(esp + 8, &hwnd_arg, sizeof(hwnd_arg));
+            emu.try_read_memory(esp + 0xc, &handler_arg, sizeof(handler_arg));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            uint32_t handler_vtable = 0;
+            uint32_t invoke_target = 0;
+            const bool have_handler_vtable =
+                handler_arg != 0 && emu.try_read_memory(handler_arg, &handler_vtable, sizeof(handler_vtable)) && handler_vtable != 0 &&
+                emu.try_read_memory(handler_vtable + 3 * 4, &invoke_target, sizeof(invoke_target));
+
+            if (have_handler_vtable && invoke_target != 0)
+            {
+                g_ebwv_controller_completed_handler_invoke_va = invoke_target;
+            }
+
+            const auto* invoke_mod_name = have_handler_vtable ? c.win_emu->mod_manager.find_name(invoke_target) : nullptr;
+            const auto* invoke_mod = have_handler_vtable ? c.win_emu->mod_manager.find_by_address(invoke_target) : nullptr;
+            const auto invoke_offset = invoke_mod ? invoke_target - invoke_mod->image_base : invoke_target;
+
+            c.win_emu->log.error(
+                "[create-window-ex-caller-trace] hit I386 EBWebViewEnvironment::CreateCoreWebView2Controller at 0x%llx, "
+                "this=0x%x hwnd=0x%x handler=0x%x handler_vtable=0x%x invoke_target=0x%x (%s+0x%llx) tid=%u return=0x%x (%s+0x%llx)\n",
+                static_cast<unsigned long long>(address), this_ptr, hwnd_arg, handler_arg, handler_vtable, invoke_target, invoke_mod_name,
+                static_cast<unsigned long long>(invoke_offset), c.win_emu->current_thread().id, return_address, caller_mod_name,
+                static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_controller_completed_invoke_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t this_ptr = 0;
+            uint32_t hresult_arg = 0;
+            uint32_t controller_arg = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &this_ptr, sizeof(this_ptr));
+            emu.try_read_memory(esp + 8, &hresult_arg, sizeof(hresult_arg));
+            emu.try_read_memory(esp + 0xc, &controller_arg, sizeof(controller_arg));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 CreateCoreWebView2ControllerCompletedHandler::Invoke at 0x%llx, "
+                                 "this=0x%x hresult=0x%x controller=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), this_ptr, hresult_arg, controller_arg,
+                                 c.win_emu->current_thread().id, return_address, caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
         }
 
         void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
@@ -4974,6 +5063,16 @@ namespace sogen
             if (g_ebwv_connect_to_host_wincomp_visual_i386_trace_va != 0 && address == g_ebwv_connect_to_host_wincomp_visual_i386_trace_va)
             {
                 trace_ebwv_connect_to_host_wincomp_visual_i386_hit(c, address);
+            }
+
+            if (g_ebwv_create_controller_i386_trace_va != 0 && address == g_ebwv_create_controller_i386_trace_va)
+            {
+                trace_ebwv_create_controller_i386_hit(c, address);
+            }
+
+            if (g_ebwv_controller_completed_handler_invoke_va != 0 && address == g_ebwv_controller_completed_handler_invoke_va)
+            {
+                trace_ebwv_controller_completed_invoke_hit(c, address);
             }
 
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
