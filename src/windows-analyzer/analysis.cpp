@@ -4,6 +4,7 @@
 #include "analysis_reporter.hpp"
 #include "disassembler.hpp"
 #include "windows_emulator.hpp"
+#include <algorithm>
 #include <devices/named_pipe.hpp>
 #include <utils/lazy_object.hpp>
 
@@ -342,6 +343,17 @@ namespace sogen
         // the real elapsed time until CreateCoreWebView2ControllerCompletedHandler::Invoke fires (see
         // project_solidworks_bringup.md #387/#388).
         std::optional<std::chrono::steady_clock::time_point> g_ebwv_runtime_class_initialize_time{};
+
+        // Per-generation syscall-interval wall-clock profiling (project_solidworks_bringup.md #392):
+        // a fresh re-exec'd child analyzer process (one gpu-process/utility-process generation, see
+        // #182/#195/#389) gets its own copy of these globals, so no cross-generation bleed is possible.
+        // g_syscall_timing_process_start fires at static initialization, close to this process's real
+        // start, and doubles as the "spawn -> first instruction" reference point.
+        const std::chrono::steady_clock::time_point g_syscall_timing_process_start = std::chrono::steady_clock::now();
+        std::optional<std::chrono::steady_clock::time_point> g_syscall_timing_last_call{};
+        std::string g_syscall_timing_last_name{};
+        std::unordered_map<std::string, std::pair<uint64_t, double>> g_syscall_timing_totals{};
+        std::optional<std::chrono::steady_clock::time_point> g_syscall_timing_gdi_create_device_time{};
 
         // ShowWindow/ShowWindowAsync/SetWindowPos's own export RVAs in the shared root's 32-bit
         // (SysWOW64) user32.dll, resolved via pefile's export table and cross-checked against
@@ -3679,6 +3691,81 @@ namespace sogen
                                  return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
         }
 
+        bool syscall_timing_trace_enabled()
+        {
+            static const bool enabled = std::getenv("SOGEN_TRACE_SYSCALL_TIMING") != nullptr;
+            return enabled;
+        }
+
+        // On a single vCPU, the wall-clock interval since the previous syscall dispatch covers both
+        // that previous syscall's own handler execution AND every guest instruction run before this
+        // new syscall trap - it measures "how expensive was everything caused by that syscall", the
+        // same coarse-but-decisive granularity finding #388 used to attribute time to gpu-process
+        // generations rather than individual instructions.
+        void trace_syscall_timing_hit(const analysis_context& c, const std::string_view syscall_name)
+        {
+            const auto now = std::chrono::steady_clock::now();
+
+            if (g_syscall_timing_last_call.has_value())
+            {
+                const auto elapsed_ms = std::chrono::duration<double, std::milli>(now - *g_syscall_timing_last_call).count();
+                auto& bucket = g_syscall_timing_totals[g_syscall_timing_last_name];
+                bucket.first += 1;
+                bucket.second += elapsed_ms;
+            }
+            else
+            {
+                const auto startup_ms = std::chrono::duration<double, std::milli>(now - g_syscall_timing_process_start).count();
+                c.win_emu->log.error("[syscall-timing-trace] process_start_to_first_syscall_ms=%.1f first_syscall=%.*s\n", startup_ms,
+                                     STR_VIEW_VA(syscall_name));
+            }
+
+            if (syscall_name == "NtGdiDdDDICreateDevice" && !g_syscall_timing_gdi_create_device_time.has_value())
+            {
+                g_syscall_timing_gdi_create_device_time = now;
+            }
+
+            g_syscall_timing_last_call = now;
+            g_syscall_timing_last_name = std::string(syscall_name);
+        }
+
+        void dump_syscall_timing_summary_impl(const analysis_context& c)
+        {
+            if (!g_syscall_timing_last_call.has_value())
+            {
+                return;
+            }
+
+            const auto generation_total_ms =
+                std::chrono::duration<double, std::milli>(*g_syscall_timing_last_call - g_syscall_timing_process_start).count();
+            c.win_emu->log.error("[syscall-timing-trace] generation process_start_to_last_syscall_ms=%.1f distinct_syscalls=%zu\n",
+                                 generation_total_ms, g_syscall_timing_totals.size());
+
+            if (g_syscall_timing_gdi_create_device_time.has_value())
+            {
+                const auto gdi_to_exit_ms =
+                    std::chrono::duration<double, std::milli>(*g_syscall_timing_last_call - *g_syscall_timing_gdi_create_device_time)
+                        .count();
+                c.win_emu->log.error("[syscall-timing-trace] NtGdiDdDDICreateDevice_to_last_syscall_ms=%.1f\n", gdi_to_exit_ms);
+            }
+            else
+            {
+                c.win_emu->log.error("[syscall-timing-trace] NtGdiDdDDICreateDevice never observed in this generation\n");
+            }
+
+            std::vector<std::pair<std::string, std::pair<uint64_t, double>>> entries(g_syscall_timing_totals.begin(),
+                                                                                     g_syscall_timing_totals.end());
+            std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+
+            for (const auto& [name, stats] : entries)
+            {
+                const auto [count, total_ms] = stats;
+                c.win_emu->log.error("[syscall-timing-trace] %-42s count=%-8llu total_ms=%-10.1f avg_ms=%.3f pct=%.1f%%\n", name.c_str(),
+                                     static_cast<unsigned long long>(count), total_ms, total_ms / static_cast<double>(count),
+                                     generation_total_ms > 0.0 ? (total_ms / generation_total_ms * 100.0) : 0.0);
+            }
+        }
+
         void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
         {
             auto& emu = c.win_emu->emu();
@@ -5920,6 +6007,11 @@ namespace sogen
 
         emulator_callbacks::continuation handle_syscall(analysis_context& c, const uint32_t syscall_id, const std::string_view syscall_name)
         {
+            if (syscall_timing_trace_enabled())
+            {
+                trace_syscall_timing_hit(c, syscall_name);
+            }
+
             if (dcomposition_syscall_trace_enabled() && syscall_name.starts_with("NtDComposition"))
             {
                 c.win_emu->log.error("[dcomposition-syscall-trace] tid=%u syscall %.*s (id=0x%X)\n", c.win_emu->current_thread().id,
@@ -6370,6 +6462,14 @@ namespace sogen
         cb.on_fast_fail = make_callback(c, handle_fast_fail);
 
         watch_import_table(c);
+    }
+
+    void dump_syscall_timing_summary(const analysis_context& c)
+    {
+        if (syscall_timing_trace_enabled())
+        {
+            dump_syscall_timing_summary_impl(c);
+        }
     }
 
     std::optional<mapped_module*> get_module_if_interesting(module_manager& manager, const string_set& modules, const uint64_t address)

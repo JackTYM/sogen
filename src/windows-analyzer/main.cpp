@@ -335,6 +335,8 @@ namespace sogen
 
         void do_post_emulation_work(const analysis_context& c)
         {
+            dump_syscall_timing_summary(c);
+
             if (c.settings->instruction_summary)
             {
                 c.emit_summary<instruction_summary_event>([&](auto& event) { event.entries = build_instruction_summary(c); });
