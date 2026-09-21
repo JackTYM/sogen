@@ -127,7 +127,16 @@ namespace sogen
         // HWNDMessageHandler::Create -- disassembly-confirmed here too (both direct calls land exactly on
         // the RVAs below). Both are watched to see whether the chain is entered at all above the
         // already-confirmed-dead HWNDMessageHandler::Create.
-        constexpr std::array<traced_symbol, 23> EBWV_COMPOSITOR_CHAIN_TARGETS{{
+        // #370 found DesktopWindowTreeHostWin::Init/BrowserDesktopWindowTreeHostWin::Init never fire
+        // either. Per real Chromium source (ui/views/widget/widget.cc, ui/views/widget/desktop_aura/
+        // desktop_native_widget_aura.cc) the real caller chain one level higher is
+        // views::Widget::Init -> native_widget_->InitNativeWidget() -> desktop_window_tree_host_->Init(),
+        // both calls virtual (no direct rel32 target to cross-check), so both new RVAs below are
+        // resolved from the cached PDB's publics stream (segment 1 offset + the .text section's own
+        // 0x1000 virtual address, cross-validated exactly against 4 already-known-correct RVAs in this
+        // array) and independently confirmed via disassembly as real function prologues at those exact
+        // addresses (one directly following a ret, the other following int3 alignment padding).
+        constexpr std::array<traced_symbol, 25> EBWV_COMPOSITOR_CHAIN_TARGETS{{
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::EmbeddedBrowserNativeWidgetAura", 0xf2d19fe},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::InitNativeWidget", 0xf2d33e0},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::GetDcompDevice", 0xf2d2200},
@@ -151,6 +160,8 @@ namespace sogen
             {"gfx::WindowImpl::Init", 0x2cdf868},
             {"views::DesktopWindowTreeHostWin::Init", 0x3075ea0},
             {"BrowserDesktopWindowTreeHostWin::Init", 0x3075c80},
+            {"views::Widget::Init", 0x2a44a6c},
+            {"views::DesktopNativeWidgetAura::InitNativeWidget", 0x2fc9d90},
         }};
         std::array<uint64_t, EBWV_COMPOSITOR_CHAIN_TARGETS.size()> g_ebwv_compositor_chain_trace_vas{};
 
