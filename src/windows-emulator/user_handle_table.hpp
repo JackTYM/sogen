@@ -171,7 +171,7 @@ namespace sogen
         void set_owner(const uint32_t index, const uint64_t owner)
         {
             const emulator_object<USER_HANDLEENTRY> handle_table_obj(*memory_, handle_table_addr_);
-            handle_table_obj.access([&](USER_HANDLEENTRY& entry) { entry.pOwner = owner; }, index);
+            handle_table_obj.access([&](USER_HANDLEENTRY& entry) { entry.pOwner = owner; }, handle_index_to_ahe_slot(index));
         }
 
         void free_index(uint32_t index)

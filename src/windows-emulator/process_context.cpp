@@ -1191,8 +1191,8 @@ namespace sogen
             if (auto* desktop = this->windows.get(this->default_desktop_window_handle))
             {
                 desktop->thread_id = thread_id;
+                this->user_handles.set_owner(static_cast<uint32_t>(this->default_desktop_window_handle.value.id), thread_id);
             }
-            this->user_handles.set_owner(static_cast<uint32_t>(this->default_desktop_window_handle.value.id), thread_id);
         }
 
         this->callbacks_->on_thread_create(h, *thr);
