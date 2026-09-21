@@ -236,30 +236,6 @@ namespace sogen
         }
     };
 
-    // A kernel handle to hand to the receiver of an LRPC reply via an ALPC HANDLE message attribute. NDR
-    // [system_handle] members (e.g. the shared render section in SYSTEM_AUDIO_STREAM) are transferred this
-    // way: the wire carries a handle index, the real handle rides in the message attributes.
-    struct alpc_reply_handle
-    {
-        uint64_t handle{};
-        uint32_t object_type{};
-        uint32_t desired_access{};
-
-        void serialize(utils::buffer_serializer& buffer) const
-        {
-            buffer.write(handle);
-            buffer.write(object_type);
-            buffer.write(desired_access);
-        }
-
-        void deserialize(utils::buffer_deserializer& buffer)
-        {
-            buffer.read(handle);
-            buffer.read(object_type);
-            buffer.read(desired_access);
-        }
-    };
-
     struct lpc_request_result
     {
         struct reply_in_place_t

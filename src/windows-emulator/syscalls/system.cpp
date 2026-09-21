@@ -320,7 +320,7 @@ namespace sogen
             using Traits = EmulatorTraits<Emu64>;
             using proc_t = SYSTEM_BASICPROCESS_INFORMATION<Traits>;
 
-            uint64_t process_id = process_context::process_id;
+            uint64_t process_id = c.proc.process_id;
 
             if (c.vcpu.active_thread && c.vcpu.active_thread->teb64)
             {
