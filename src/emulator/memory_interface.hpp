@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "memory_permission.hpp"
+#include <platform/compiler.hpp>
 
 namespace sogen
 {
@@ -19,6 +20,30 @@ namespace sogen
     {
         uint64_t address;
         size_t size;
+    };
+
+    // Thrown by map_memory (or reserve_guest_address_range) when a backend sharing the guest
+    // address space with the host process (FEX on Apple Silicon: guest VA == host VA) finds the
+    // target range genuinely occupied by a foreign host mapping at the moment it tries to claim it
+    // at the host OS level - a TOCTOU race against the caller's earlier free-space probe, which a
+    // backend detects by making the claim itself atomic (fail rather than silently overwrite).
+    // Callers placing guest memory at a caller-chosen address (a module's preferred image base, a
+    // relocation retry) should catch this and treat it exactly like an ordinary placement failure -
+    // pick a different address - rather than as a fatal error. Backends with an independent guest
+    // address space never throw this.
+    //
+    // EXPORT_SYMBOL is required, not decorative: backends (FEX) build as their own dynamically
+    // loaded shared library, compiled with -fvisibility=hidden by default. A hidden-visibility
+    // type's RTTI is private to the library that defines it, so a throw from within the FEX dylib
+    // would NOT be caught by a catch (const host_memory_collision&) compiled into the main
+    // executable/another library - the two sides would disagree on the type's identity and the
+    // exception would silently fall through to a broader catch (const std::exception&) instead.
+    struct EXPORT_SYMBOL host_memory_collision : std::runtime_error
+    {
+        host_memory_collision()
+            : std::runtime_error("Guest memory range is occupied by a foreign host mapping")
+        {
+        }
     };
 
     class memory_manager;
@@ -86,10 +111,18 @@ namespace sogen
         // the host address space with the guest (see reserved_host_ranges) can claim the same range at
         // the host OS level immediately. Without this, a reserved-but-uncommitted range is invisible to
         // the host allocator, so nothing stops an unconstrained host allocation (e.g. a JIT code buffer)
-        // from landing there before the guest range is actually committed. No-op for backends with an
-        // independent guest address space (the default).
-        virtual void reserve_guest_address_range(uint64_t /*address*/, size_t /*size*/)
+        // from landing there before the guest range is actually committed. No-op (returns true) for
+        // backends with an independent guest address space (the default).
+        //
+        // The caller has already confirmed [address, address + size) looks free via a host-level probe,
+        // but that confirm and this claim are necessarily two separate calls - a foreign host allocation
+        // (system malloc, another thread's stack, a driver's own allocation) can land in the gap between
+        // them. A backend must make the claim itself atomic (fail rather than silently overwrite an
+        // intervening foreign mapping) and return false on such a collision so the caller can re-pick a
+        // different address instead of corrupting whatever is there.
+        virtual bool reserve_guest_address_range(uint64_t /*address*/, size_t /*size*/)
         {
+            return true;
         }
 
         // Counterpart to reserve_guest_address_range: called by the memory manager once a guest range

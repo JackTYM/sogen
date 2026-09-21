@@ -4,6 +4,7 @@
 #include "cpu_context.hpp"
 
 #include <utils/io.hpp>
+#include <utils/string.hpp>
 #include <utils/timer.hpp>
 #include <utils/finally.hpp>
 #include <utils/lazy_object.hpp>
@@ -25,6 +26,24 @@ namespace sogen
 
     namespace
     {
+        // TEMPDIAG: remove before finalizing. Dumps every thread's wait-state fields once the
+        // idle loop has been spinning for a while with nothing ready, so a captured freeze
+        // explains itself in the log instead of requiring live debugger inspection.
+        void dump_thread_wait_states_diag(process_context& process, const vcpu_context& vcpu)
+        {
+            fprintf(stderr, "[SCHED_DIAG] idle spin, this vcpu's active_thread=%p\n", static_cast<void*>(vcpu.active_thread));
+            for (auto& [h, thread] : process.threads)
+            {
+                fprintf(stderr,
+                        "[SCHED_DIAG] thread id=%u terminated=%d suspended=%u waiting_for_alert=%d alerted=%d "
+                        "await_objects=%zu await_msg_mask=%d await_time=%d await_host_condition=%d await_io_completion=%d\n",
+                        thread.id, thread.is_terminated() ? 1 : 0, thread.suspended, thread.waiting_for_alert ? 1 : 0,
+                        thread.alerted ? 1 : 0, thread.await_objects.size(), thread.await_msg_mask.has_value() ? 1 : 0,
+                        thread.await_time.has_value() ? 1 : 0, thread.await_host_condition ? 1 : 0,
+                        thread.await_io_completion.has_value() ? 1 : 0);
+            }
+        }
+
         void adjust_working_directory(application_settings& app_settings)
         {
             if (!app_settings.working_directory.empty())
@@ -1130,8 +1149,20 @@ namespace sogen
 
         const auto needed_switch = vcpu.switch_thread.exchange(false);
 
+        static thread_local int idle_spin_count = 0;
+        static const bool sched_diag = std::getenv("EMULATOR_SCHED_DIAG") != nullptr;
+
         while (!switch_to_next_thread(*this, vcpu))
         {
+            if (sched_diag)
+            {
+                ++idle_spin_count;
+                if (idle_spin_count == 500 || idle_spin_count == 2000 || idle_spin_count == 5000)
+                {
+                    dump_thread_wait_states_diag(this->process, vcpu);
+                }
+            }
+
             if (this->vcpu_count_ > 1 && vcpu.active_thread)
             {
                 // Nothing runnable for this vCPU: detach the stale thread so another
@@ -1177,6 +1208,7 @@ namespace sogen
             }
         }
 
+        idle_spin_count = 0;
         return true;
     }
 
@@ -1636,6 +1668,74 @@ namespace sogen
                                         static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
                                         mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
                     }
+
+                    if (std::getenv("EMULATOR_NPC_DIAG"))
+                    {
+                        auto& t = vcpu.thread();
+                        fprintf(stderr,
+                                "[NPC_DIAG] thread_id=%u vcpu_index=%zu sp=0x%x eax=0x%llx ecx=0x%llx edx=0x%llx ebx=0x%llx "
+                                "ebp=0x%llx esi=0x%llx edi=0x%llx\n",
+                                t.id, cpu.index(), sp, static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::eax)),
+                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::ecx)),
+                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::edx)),
+                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::ebx)),
+                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::ebp)),
+                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::esi)),
+                                static_cast<unsigned long long>(acting.reg<uint32_t>(x86_register::edi)));
+                        for (int off = -16; off <= 32; off += 4)
+                        {
+                            uint32_t slot = 0;
+                            if (acting.try_read_memory(static_cast<uint64_t>(sp + off), &slot, sizeof(slot)))
+                            {
+                                fprintf(stderr, "[NPC_DIAG]   [sp%+d] = 0x%08x\n", off, slot);
+                            }
+                        }
+                    }
+                }
+
+                if (this->callbacks.on_generic_activity)
+                {
+                    const auto& regions = this->memory.get_reserved_regions();
+                    auto next = regions.upper_bound(address);
+                    std::string neighborhood{};
+                    if (next != regions.begin())
+                    {
+                        const auto prev = std::prev(next);
+                        neighborhood += utils::string::va("prev_region=0x%" PRIx64 "+0x%zx kind=%u", prev->first, prev->second.length,
+                                                          static_cast<uint32_t>(prev->second.kind));
+                    }
+                    if (next != regions.end())
+                    {
+                        neighborhood += utils::string::va("%snext_region=0x%" PRIx64 "+0x%zx kind=%u", neighborhood.empty() ? "" : " ",
+                                                          next->first, next->second.length, static_cast<uint32_t>(next->second.kind));
+                    }
+
+                    const auto ebp = acting.reg<uint64_t>(x86_register::rbp);
+                    uint32_t stack_args[3]{};
+                    acting.try_read_memory(ebp + 8, stack_args, sizeof(stack_args));
+
+                    // For a wild ret/call the frame is already popped, so ebp is useless - the smashed
+                    // frame's remnants still sit around esp ([esp-4] = the popped return address,
+                    // [esp..] = the previous frame's arguments), which is what identifies the caller.
+                    const auto esp = acting.reg<uint64_t>(x86_register::rsp);
+                    std::string stack_window{};
+                    for (int64_t offset = -16; offset <= 40; offset += 4)
+                    {
+                        uint32_t slot = 0;
+                        if (acting.try_read_memory(esp + offset, &slot, sizeof(slot)))
+                        {
+                            stack_window += utils::string::va(" %08x", slot);
+                        }
+                        else
+                        {
+                            stack_window += " ????????";
+                        }
+                    }
+
+                    this->callbacks.on_generic_activity(utils::string::va(
+                        "Memory violation context: addr=0x%" PRIx64 " %s ebp=0x%" PRIx64 " [ebp+8]=0x%x [ebp+c]=0x%x [ebp+10]=0x%x"
+                        " esp=0x%" PRIx64 " stack[esp-16..esp+40]=%s",
+                        address, neighborhood.c_str(), ebp, stack_args[0], stack_args[1], stack_args[2], esp, stack_window.c_str()));
                 }
 
                 this->callbacks.on_memory_violate(address, size, operation, type);
@@ -1788,6 +1888,7 @@ namespace sogen
             while (active_workers.load() > 0)
             {
                 this->ui_backend_->pump_events();
+                this->callbacks.on_event_pump();
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
 

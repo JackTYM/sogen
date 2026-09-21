@@ -1,5 +1,9 @@
 #include "std_include.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+
 #include "analysis.hpp"
 #include "analysis_reporter.hpp"
 #include "disassembler.hpp"
@@ -6137,7 +6141,7 @@ namespace sogen
             return text;
         }
 
-        void handle_event_pump(analysis_context& c)
+        void handle_dialog_auto_click(analysis_context& c)
         {
             trace_widget_window_threads(c);
 
@@ -6291,6 +6295,156 @@ namespace sogen
             }
         }
 
+        window* find_input_target_window(process_context& proc)
+        {
+            const auto desktop = proc.default_desktop_window_handle.bits;
+            window* best = nullptr;
+            int64_t best_area = -1;
+
+            for (auto& win : proc.windows | std::views::values)
+            {
+                if (win.handle == desktop || win.is_dialog() || (win.style & WS_VISIBLE) == 0 || win.thread_id == 0 ||
+                    (win.parent_handle != 0 && win.parent_handle != desktop))
+                {
+                    continue;
+                }
+
+                const auto area = static_cast<int64_t>(win.client_width()) * win.client_height();
+                if (area > best_area)
+                {
+                    best_area = area;
+                    best = &win;
+                }
+            }
+
+            return best;
+        }
+
+        uint64_t make_key_lparam(const input_action& action, const bool key_up)
+        {
+            uint64_t lparam = 1;
+            lparam |= static_cast<uint64_t>(action.scan) << 16;
+
+            if (action.extended)
+            {
+                lparam |= 1ull << 24;
+            }
+
+            if (key_up)
+            {
+                lparam |= (1ull << 30) | (1ull << 31);
+            }
+
+            return lparam;
+        }
+
+        void send_synthetic_ui_event(analysis_context& c, const hwnd window, const uint32_t message, const uint64_t wparam,
+                                     const uint64_t lparam)
+        {
+            c.win_emu->handle_ui_event(ui_event{.window = window, .message = message, .wParam = wparam, .lParam = lparam});
+        }
+
+        void handle_input_script(analysis_context& c)
+        {
+            if (c.input_script_pos >= c.input_script.size())
+            {
+                return;
+            }
+
+            auto& proc = c.win_emu->process;
+            const auto now = std::chrono::steady_clock::now();
+
+            if (!c.input_script_deadline)
+            {
+                const auto* target = find_input_target_window(proc);
+                if (!target)
+                {
+                    return;
+                }
+
+                c.input_script_deadline = now;
+                c.win_emu->log.info("Input script armed on window %llx ('%s')\n", static_cast<unsigned long long>(target->handle),
+                                    u16_to_u8(target->name).c_str());
+            }
+
+            while (c.input_script_pos < c.input_script.size() && now >= *c.input_script_deadline)
+            {
+                const auto& action = c.input_script[c.input_script_pos];
+
+                if (action.type == input_action::kind::wait)
+                {
+                    *c.input_script_deadline += std::chrono::milliseconds(action.delay_ms);
+                    ++c.input_script_pos;
+                    continue;
+                }
+
+                auto* target = find_input_target_window(proc);
+                if (!target)
+                {
+                    return;
+                }
+
+                if (c.input_target_window != target->handle)
+                {
+                    send_synthetic_ui_event(c, target->handle, WM_SETFOCUS, 0, 0);
+                    send_synthetic_ui_event(c, target->handle, WM_ACTIVATE, WA_ACTIVE, 0);
+                    c.input_target_window = target->handle;
+                }
+
+                const auto to_client = [](const float value, const bool normalized, const int32_t extent) {
+                    const auto max_coord = std::max(0, extent - 1);
+                    const auto raw =
+                        normalized ? static_cast<int>(std::lround(value * static_cast<float>(extent))) : static_cast<int>(value);
+                    return std::clamp(raw, 0, max_coord);
+                };
+
+                const auto client_x = to_client(action.x, action.normalized, target->client_width());
+                const auto client_y = to_client(action.y, action.normalized, target->client_height());
+                const auto point = (static_cast<uint64_t>(static_cast<uint16_t>(client_y)) << 16) | static_cast<uint16_t>(client_x);
+
+                switch (action.type)
+                {
+                case input_action::kind::mouse_move:
+                    send_synthetic_ui_event(c, target->handle, WM_MOUSEMOVE, 0, point);
+                    c.win_emu->log.info("Input script: mouse move to (%d, %d)\n", client_x, client_y);
+                    break;
+                case input_action::kind::button_down:
+                    send_synthetic_ui_event(c, target->handle, WM_LBUTTONDOWN, MK_LBUTTON, point);
+                    c.win_emu->log.info("Input script: left button down at (%d, %d)\n", client_x, client_y);
+                    break;
+                case input_action::kind::button_up:
+                    send_synthetic_ui_event(c, target->handle, WM_LBUTTONUP, 0, point);
+                    c.win_emu->log.info("Input script: left button up at (%d, %d)\n", client_x, client_y);
+                    break;
+                case input_action::kind::key_down:
+                    send_synthetic_ui_event(c, target->handle, WM_KEYDOWN, action.vk, make_key_lparam(action, false));
+                    c.win_emu->log.info("Input script: key down 0x%x\n", action.vk);
+                    break;
+                case input_action::kind::key_up:
+                    send_synthetic_ui_event(c, target->handle, WM_KEYUP, action.vk, make_key_lparam(action, true));
+                    c.win_emu->log.info("Input script: key up 0x%x\n", action.vk);
+                    break;
+                case input_action::kind::send_text:
+                    for (const char ch : action.text)
+                    {
+                        send_synthetic_ui_event(c, target->handle, WM_CHAR, static_cast<uint8_t>(ch), 0);
+                    }
+                    c.win_emu->log.info("Input script: text '%s'\n", action.text.c_str());
+                    break;
+                case input_action::kind::wait:
+                    break;
+                }
+
+                ++c.input_script_pos;
+            }
+        }
+
+        void handle_event_pump(analysis_context& c)
+        {
+            handle_dialog_auto_click(c);
+            handle_input_script(c);
+        }
+
         void handle_stdout(analysis_context& c, const std::string_view data)
         {
             c.emit_observation<stdout_chunk_event>([&](auto& event) { event.data = std::string(data); });
@@ -6372,6 +6526,229 @@ namespace sogen
                 c.accessed_imports.push_back(std::move(access));
             });
         }
+
+        std::string_view trim(std::string_view text)
+        {
+            while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
+            {
+                text.remove_prefix(1);
+            }
+            while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+            {
+                text.remove_suffix(1);
+            }
+            return text;
+        }
+
+        std::vector<std::string> split_string(const std::string_view text, const char separator)
+        {
+            std::vector<std::string> parts{};
+            size_t start = 0;
+            while (start <= text.size())
+            {
+                const auto end = text.find(separator, start);
+                if (end == std::string_view::npos)
+                {
+                    parts.emplace_back(text.substr(start));
+                    break;
+                }
+
+                parts.emplace_back(text.substr(start, end - start));
+                start = end + 1;
+            }
+            return parts;
+        }
+
+        struct key_spec
+        {
+            uint16_t vk{};
+            uint8_t scan{};
+            bool extended{};
+        };
+
+        std::optional<key_spec> lookup_key(std::string name)
+        {
+            std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            static const std::unordered_map<std::string, key_spec> named_keys{
+                {"enter", {VK_RETURN, 0x1C, false}},   {"return", {VK_RETURN, 0x1C, false}}, {"esc", {VK_ESCAPE, 0x01, false}},
+                {"escape", {VK_ESCAPE, 0x01, false}},  {"space", {VK_SPACE, 0x39, false}},   {"tab", {VK_TAB, 0x0F, false}},
+                {"backspace", {VK_BACK, 0x0E, false}}, {"up", {VK_UP, 0x48, true}},          {"down", {VK_DOWN, 0x50, true}},
+                {"left", {VK_LEFT, 0x4B, true}},       {"right", {VK_RIGHT, 0x4D, true}},    {"pgup", {VK_PRIOR, 0x49, true}},
+                {"pgdn", {VK_NEXT, 0x51, true}},       {"home", {VK_HOME, 0x47, true}},      {"end", {VK_END, 0x4F, true}},
+                {"grave", {VK_OEM_3, 0x29, false}},    {"tilde", {VK_OEM_3, 0x29, false}},
+            };
+
+            if (const auto entry = named_keys.find(name); entry != named_keys.end())
+            {
+                return entry->second;
+            }
+
+            if (name.size() >= 2 && name.size() <= 3 && name[0] == 'f' && std::isdigit(static_cast<unsigned char>(name[1])))
+            {
+                const auto number = std::stoul(name.substr(1));
+                if (number >= 1 && number <= 12)
+                {
+                    static constexpr std::array<uint8_t, 12> function_scans{0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40,
+                                                                            0x41, 0x42, 0x43, 0x44, 0x57, 0x58};
+                    return key_spec{static_cast<uint16_t>(VK_F1 + number - 1), function_scans[number - 1], false};
+                }
+                return std::nullopt;
+            }
+
+            if (name.size() == 1)
+            {
+                const char c = name[0];
+                if (c >= 'a' && c <= 'z')
+                {
+                    static constexpr std::array<uint8_t, 26> letter_scans{0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17,
+                                                                          0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13,
+                                                                          0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C};
+                    return key_spec{static_cast<uint16_t>(std::toupper(static_cast<unsigned char>(c))),
+                                    letter_scans[static_cast<size_t>(c - 'a')], false};
+                }
+                if (c >= '0' && c <= '9')
+                {
+                    const auto scan = c == '0' ? uint8_t{0x0B} : static_cast<uint8_t>(0x02 + (c - '1'));
+                    return key_spec{static_cast<uint16_t>(c), scan, false};
+                }
+                return std::nullopt;
+            }
+
+            if (name.starts_with("0x"))
+            {
+                const auto vk = std::stoul(name, nullptr, 16);
+                if (vk > 0 && vk <= 0xFF)
+                {
+                    return key_spec{static_cast<uint16_t>(vk), 0, false};
+                }
+            }
+
+            return std::nullopt;
+        }
+    }
+
+    std::vector<input_action> parse_input_script(const std::string_view script)
+    {
+        constexpr uint32_t press_duration_ms = 80;
+        std::vector<input_action> actions{};
+
+        for (const auto& part : split_string(script, ';'))
+        {
+            const auto token = trim(part);
+            if (token.empty())
+            {
+                continue;
+            }
+
+            const auto fail = [&]() -> void { throw std::runtime_error("Invalid input script action: " + std::string(token)); };
+
+            const auto fields = split_string(token, ':');
+            const auto& op = fields[0];
+
+            const auto parse_delay = [&](const std::string& text) {
+                try
+                {
+                    return static_cast<uint32_t>(std::stoul(text));
+                }
+                catch (const std::exception&)
+                {
+                    fail();
+                    return uint32_t{};
+                }
+            };
+
+            const auto parse_point = [&](input_action& action) {
+                try
+                {
+                    action.normalized = fields[1].find('.') != std::string::npos || fields[2].find('.') != std::string::npos;
+                    action.x = std::stof(fields[1]);
+                    action.y = std::stof(fields[2]);
+                }
+                catch (const std::exception&)
+                {
+                    fail();
+                }
+            };
+
+            const auto parse_key = [&](input_action& action) {
+                const auto key = fields.size() == 2 ? lookup_key(fields[1]) : std::nullopt;
+                if (!key)
+                {
+                    fail();
+                    return;
+                }
+                action.vk = key->vk;
+                action.scan = key->scan;
+                action.extended = key->extended;
+            };
+
+            input_action action{};
+
+            if (op == "wait" && fields.size() == 2)
+            {
+                action.type = input_action::kind::wait;
+                action.delay_ms = parse_delay(fields[1]);
+                actions.push_back(action);
+            }
+            else if (op == "move" && fields.size() == 3)
+            {
+                action.type = input_action::kind::mouse_move;
+                parse_point(action);
+                actions.push_back(action);
+            }
+            else if (op == "click" && fields.size() == 3)
+            {
+                parse_point(action);
+
+                action.type = input_action::kind::mouse_move;
+                actions.push_back(action);
+
+                action.type = input_action::kind::button_down;
+                actions.push_back(action);
+
+                actions.push_back({.type = input_action::kind::wait, .delay_ms = press_duration_ms});
+
+                action.type = input_action::kind::button_up;
+                actions.push_back(action);
+            }
+            else if (op == "key")
+            {
+                parse_key(action);
+
+                action.type = input_action::kind::key_down;
+                actions.push_back(action);
+
+                actions.push_back({.type = input_action::kind::wait, .delay_ms = press_duration_ms});
+
+                action.type = input_action::kind::key_up;
+                actions.push_back(action);
+            }
+            else if (op == "keydown")
+            {
+                parse_key(action);
+                action.type = input_action::kind::key_down;
+                actions.push_back(action);
+            }
+            else if (op == "keyup")
+            {
+                parse_key(action);
+                action.type = input_action::kind::key_up;
+                actions.push_back(action);
+            }
+            else if (op == "text" && fields.size() >= 2)
+            {
+                action.type = input_action::kind::send_text;
+                action.text = std::string(token.substr(op.size() + 1));
+                actions.push_back(action);
+            }
+            else
+            {
+                fail();
+            }
+        }
+
+        return actions;
     }
 
     event_header analysis_context::make_event_header() const

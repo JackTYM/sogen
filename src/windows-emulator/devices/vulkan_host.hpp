@@ -179,6 +179,10 @@ namespace sogen
         int32_t map_memory(uint64_t device, uint64_t memory, void*& out_host_pointer, uint64_t& out_size);
         // Unmaps a mapping previously returned by map_memory.
         void unmap_memory(uint64_t device, uint64_t memory);
+        // Whether this VkDeviceMemory's backing type reports VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        // per the memory type flags resolved at allocate_memory time. false (including for an
+        // unknown memory id) is the safe default - it means "flush explicitly".
+        bool is_memory_host_coherent(uint64_t memory) const;
 
         // A VkImageSubresourceRange as plain integers (this header stays free of Vulkan types).
         struct subresource_range

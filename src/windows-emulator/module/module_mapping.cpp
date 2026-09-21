@@ -543,6 +543,23 @@ namespace sogen
                     throw std::runtime_error("Failed to protect mapped module memory");
                 }
             }
+            catch (const host_memory_collision&)
+            {
+                // The target base looked free when picked, but a foreign host mapping (system malloc,
+                // another thread's stack, a driver's own allocation) claimed part of it before this
+                // module's own memory operations could - see host_memory_collision's doc comment. This
+                // is exactly the kind of placement failure the caller's relocation-retry loop (and the
+                // is_relocatable/preferred-base fallback) already handles, so surface it the same way as
+                // an ordinary false return instead of letting it terminate the process.
+                memory.release_memory(binary.image_base, 0);
+
+                binary.sections.clear();
+                binary.exports.clear();
+                binary.imports.clear();
+                binary.imported_modules.clear();
+                binary.address_names.clear();
+                return false;
+            }
             catch (...)
             {
                 memory.release_memory(binary.image_base, 0);

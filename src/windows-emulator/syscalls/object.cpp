@@ -4,6 +4,8 @@
 #include "../syscall_utils.hpp"
 #include "../cross_process.hpp"
 
+#include <utils/string.hpp>
+
 namespace sogen
 {
 

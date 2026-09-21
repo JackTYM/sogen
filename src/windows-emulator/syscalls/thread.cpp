@@ -357,19 +357,53 @@ namespace sogen
 
             if (info_class == ThreadTebInformation)
             {
+                // A 32-bit WOW64 caller (e.g. wow64.dll's exception-preparation code, executing as
+                // 32-bit guest code) passes THREAD_TEB_INFORMATION32 (12 bytes: a 32-bit
+                // TebInformation pointer), not the 64-bit THREAD_TEB_INFORMATION (16 bytes) this
+                // handler used to assume unconditionally - rejecting every such call with
+                // STATUS_BUFFER_OVERFLOW, which wow64.dll's caller treats as fatal. Every WOW64
+                // syscall crosses into the 64-bit engine to be dispatched, so CS is always the
+                // 64-bit selector here regardless of the original caller's bitness - the only
+                // reliable signal for which layout the caller actually built is the length it
+                // passed, matching how real Windows itself discriminates this ambiguous class.
+                const bool caller_is_32bit = c.proc.is_wow64_process && thread_information_length < sizeof(THREAD_TEB_INFORMATION);
+
                 if (return_length)
                 {
-                    return_length.write(sizeof(THREAD_TEB_INFORMATION));
+                    return_length.write(caller_is_32bit ? sizeof(THREAD_TEB_INFORMATION32) : sizeof(THREAD_TEB_INFORMATION));
                 }
 
-                if (thread_information_length < sizeof(THREAD_TEB_INFORMATION))
+                uint64_t teb_information{};
+                uint32_t teb_offset{};
+                uint32_t bytes_to_read{};
+
+                if (caller_is_32bit)
                 {
-                    return STATUS_BUFFER_OVERFLOW;
+                    if (thread_information_length < sizeof(THREAD_TEB_INFORMATION32))
+                    {
+                        return STATUS_BUFFER_OVERFLOW;
+                    }
+
+                    const auto teb_info = c.emu.read_memory<THREAD_TEB_INFORMATION32>(thread_information);
+                    teb_information = teb_info.TebInformation;
+                    teb_offset = teb_info.TebOffset;
+                    bytes_to_read = teb_info.BytesToRead;
+                }
+                else
+                {
+                    if (thread_information_length < sizeof(THREAD_TEB_INFORMATION))
+                    {
+                        return STATUS_BUFFER_OVERFLOW;
+                    }
+
+                    const auto teb_info = c.emu.read_memory<THREAD_TEB_INFORMATION>(thread_information);
+                    teb_information = teb_info.TebInformation;
+                    teb_offset = teb_info.TebOffset;
+                    bytes_to_read = teb_info.BytesToRead;
                 }
 
-                const auto teb_info = c.emu.read_memory<THREAD_TEB_INFORMATION>(thread_information);
-                const auto data = c.emu.read_memory(thread->teb64->value() + teb_info.TebOffset, teb_info.BytesToRead);
-                c.emu.write_memory(teb_info.TebInformation, data.data(), data.size());
+                const auto data = c.emu.read_memory(thread->teb64->value() + teb_offset, bytes_to_read);
+                c.emu.write_memory(teb_information, data.data(), data.size());
 
                 return STATUS_SUCCESS;
             }
@@ -405,9 +439,33 @@ namespace sogen
 
             if (info_class == ThreadBasicInformation)
             {
+                // Same bitness ambiguity as ThreadTebInformation above: a 32-bit WOW64 caller
+                // passes the smaller THREAD_BASIC_INFORMATION32 (28 bytes), not the 64-bit
+                // THREAD_BASIC_INFORMATION64 (44 bytes) this handler used to assume unconditionally.
+                const bool caller_is_32bit = c.proc.is_wow64_process && thread_information_length < sizeof(THREAD_BASIC_INFORMATION64);
+
                 if (return_length)
                 {
-                    return_length.write(sizeof(THREAD_BASIC_INFORMATION64));
+                    return_length.write(caller_is_32bit ? sizeof(THREAD_BASIC_INFORMATION32) : sizeof(THREAD_BASIC_INFORMATION64));
+                }
+
+                if (caller_is_32bit)
+                {
+                    if (thread_information_length < sizeof(THREAD_BASIC_INFORMATION32))
+                    {
+                        return STATUS_BUFFER_OVERFLOW;
+                    }
+
+                    const emulator_object<THREAD_BASIC_INFORMATION32> info{c.emu, thread_information};
+                    info.access([&](THREAD_BASIC_INFORMATION32& i) {
+                        i.ExitStatus = thread->exit_status.value_or(STATUS_PENDING);
+                        i.TebBaseAddress = static_cast<uint32_t>(thread->teb64->value());
+                        const auto client_id = thread->teb64->read().ClientId;
+                        i.ClientId.UniqueProcess = static_cast<uint32_t>(client_id.UniqueProcess);
+                        i.ClientId.UniqueThread = static_cast<uint32_t>(client_id.UniqueThread);
+                    });
+
+                    return STATUS_SUCCESS;
                 }
 
                 if (thread_information_length < sizeof(THREAD_BASIC_INFORMATION64))

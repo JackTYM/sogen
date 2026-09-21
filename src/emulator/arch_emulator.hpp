@@ -171,6 +171,18 @@ namespace sogen
         {
             return *this;
         }
+
+        // A vCPU worker thread's own OS-chosen default stack is ordinary host memory, placed by the
+        // OS wherever it likes - harmless for backends whose guest memory is genuinely separate from
+        // the host's own address space (WHP/KVM/Unicorn), but for a backend where guest VA == host VA
+        // (FEX), a second (or third, ...) worker thread's stack can coincidentally land on an address
+        // the guest program itself is about to use, corrupting whichever one loses the race. Lets such
+        // a backend hand back a pre-reserved, host-only stack region for a given vCPU index instead of
+        // the OS's default placement; the default (false) means "no special handling needed."
+        virtual bool reserve_worker_thread_stack(size_t /*vcpu_index*/, void*& /*stack_base*/, size_t& /*stack_size*/)
+        {
+            return false;
+        }
     };
 
     template <typename Traits>

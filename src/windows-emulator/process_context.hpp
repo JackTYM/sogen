@@ -746,6 +746,7 @@ namespace sogen
 
         std::vector<audio_render_stream> audio_render_streams{};
         std::vector<handle> audio_render_events{};
+        uint64_t next_audio_tick_ns{}; // steady-clock ns; throttles the tick to real time instead of switch count
 
         // Extended parameters from last NtMapViewOfSectionEx call
         // These can be used by other syscalls like NtAllocateVirtualMemoryEx

@@ -4,6 +4,7 @@
 #include "../memory_manager.hpp"
 
 #include <utils/io.hpp>
+#include <utils/string.hpp>
 
 namespace sogen
 {
@@ -182,6 +183,33 @@ namespace sogen
                     ucs.Buffer = ucs.Buffer - obj_address;
                 });
             }
+
+            // find_free_host_allocation_base already retries internally against a stale pick (a foreign
+            // host mapping landing in the gap since the last scan), but the fixed-address allocate_memory
+            // call below can still fail on a genuine collision the pick itself couldn't foresee (a
+            // backend sharing the guest address space with the host process makes its claim atomic - see
+            // host_memory_collision's doc comment). Retrying with a fresh pick here, instead of ignoring
+            // the return value, mirrors handle_NtAllocateVirtualMemoryEx's own auto-placement retry.
+            uint64_t allocate_pagefile_section(const syscall_context& c, const uint64_t size)
+            {
+                constexpr int max_attempts = 8;
+                for (int attempt = 0; attempt < max_attempts; ++attempt)
+                {
+                    const auto address = c.win_emu.memory.find_free_host_allocation_base(size, 0);
+                    if (!address)
+                    {
+                        break;
+                    }
+
+                    if (c.win_emu.memory.allocate_memory(address, size, memory_permission::read_write, false,
+                                                         memory_region_kind::pagefile_section_view))
+                    {
+                        return address;
+                    }
+                }
+
+                return 0;
+            }
         }
 
         NTSTATUS handle_NtCreateSection(const syscall_context& c, const emulator_object<handle> section_handle,
@@ -255,9 +283,12 @@ namespace sogen
             {
                 constexpr auto shared_section_size = 0x10000;
 
-                const auto address = c.win_emu.memory.find_free_allocation_base(shared_section_size);
-                c.win_emu.memory.allocate_memory(address, shared_section_size, memory_permission::read_write, false,
-                                                 memory_region_kind::pagefile_section_view);
+                const auto address = allocate_pagefile_section(c, shared_section_size);
+                if (!address)
+                {
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+
                 c.proc.shared_section_address = address;
                 c.proc.shared_section_size = shared_section_size;
 
@@ -269,9 +300,12 @@ namespace sogen
             {
                 constexpr auto dbwin_buffer_section_size = 0x1000;
 
-                const auto address = c.win_emu.memory.find_free_allocation_base(dbwin_buffer_section_size);
-                c.win_emu.memory.allocate_memory(address, dbwin_buffer_section_size, memory_permission::read_write, false,
-                                                 memory_region_kind::pagefile_section_view);
+                const auto address = allocate_pagefile_section(c, dbwin_buffer_section_size);
+                if (!address)
+                {
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+
                 c.proc.dbwin_buffer = address;
                 c.proc.dbwin_buffer_size = dbwin_buffer_section_size;
 
@@ -542,6 +576,12 @@ namespace sogen
             if (view_size)
             {
                 view_size.write(aligned_size);
+            }
+
+            if (c.win_emu.callbacks.on_generic_activity)
+            {
+                c.win_emu.callbacks.on_generic_activity(
+                    utils::string::va("File section view mapped: base=0x%" PRIx64 " size=0x%zx", address, aligned_size));
             }
 
             base_address.write(address);
