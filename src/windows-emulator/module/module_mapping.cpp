@@ -77,17 +77,45 @@ namespace sogen
             const auto ordinals = buffer.as<WORD>(export_directory.AddressOfNameOrdinals);
             const auto functions = buffer.as<DWORD>(export_directory.AddressOfFunctions);
 
-            binary.exports.reserve(names_count);
+            binary.exports.reserve(function_count);
 
+            std::unordered_map<WORD, DWORD> name_index_by_ordinal{};
+            name_index_by_ordinal.reserve(names_count);
             for (DWORD i = 0; i < names_count; i++)
             {
                 const auto ordinal = ordinals.get(i);
+                if (ordinal >= function_count)
+                {
+                    return;
+                }
+
+                name_index_by_ordinal[ordinal] = i;
+            }
+
+            // AddressOfNames covers only part of AddressOfFunctions: exports without a name-table entry
+            // are still real exports and need a symbol.
+            for (DWORD ordinal = 0; ordinal < function_count; ordinal++)
+            {
+                const auto rva = functions.get(ordinal);
+                if (rva == 0)
+                {
+                    continue; // Unused ordinal slot.
+                }
 
                 exported_symbol symbol{};
                 symbol.ordinal = export_directory.Base + ordinal;
-                symbol.rva = functions.get(ordinal);
+                symbol.rva = rva;
                 symbol.address = binary.image_base + symbol.rva;
-                symbol.name = buffer.as_string(names.get(i));
+
+                const auto name_index = name_index_by_ordinal.find(static_cast<WORD>(ordinal));
+                if (name_index != name_index_by_ordinal.end())
+                {
+                    symbol.name = buffer.as_string(names.get(name_index->second));
+                }
+                else
+                {
+                    symbol.name = "#" + std::to_string(symbol.ordinal);
+                }
 
                 binary.exports.push_back(std::move(symbol));
             }
@@ -223,22 +251,47 @@ namespace sogen
                 return;
             }
 
-            binary.exports.reserve(names_count);
+            binary.exports.reserve(function_count);
 
+            std::unordered_map<WORD, DWORD> name_index_by_ordinal{};
+            name_index_by_ordinal.reserve(names_count);
             for (DWORD i = 0; i < names_count; i++)
             {
                 const auto ordinal =
                     read_mapped_object<WORD>(memory, binary.image_base + export_directory.AddressOfNameOrdinals + i * sizeof(WORD));
+                if (ordinal >= function_count)
+                {
+                    return;
+                }
+
+                name_index_by_ordinal[ordinal] = i;
+            }
+
+            for (DWORD ordinal = 0; ordinal < function_count; ordinal++)
+            {
                 const auto function_rva =
                     read_mapped_object<DWORD>(memory, binary.image_base + export_directory.AddressOfFunctions + ordinal * sizeof(DWORD));
-                const auto name_rva =
-                    read_mapped_object<DWORD>(memory, binary.image_base + export_directory.AddressOfNames + i * sizeof(DWORD));
+                if (function_rva == 0)
+                {
+                    continue; // Unused ordinal slot.
+                }
 
                 exported_symbol symbol{};
                 symbol.ordinal = export_directory.Base + ordinal;
                 symbol.rva = function_rva;
                 symbol.address = binary.image_base + symbol.rva;
-                symbol.name = read_mapped_string(memory, binary.image_base + name_rva);
+
+                const auto name_index = name_index_by_ordinal.find(static_cast<WORD>(ordinal));
+                if (name_index != name_index_by_ordinal.end())
+                {
+                    const auto name_rva = read_mapped_object<DWORD>(memory, binary.image_base + export_directory.AddressOfNames +
+                                                                                name_index->second * sizeof(DWORD));
+                    symbol.name = read_mapped_string(memory, binary.image_base + name_rva);
+                }
+                else
+                {
+                    symbol.name = "#" + std::to_string(symbol.ordinal);
+                }
 
                 binary.exports.push_back(std::move(symbol));
             }
