@@ -176,6 +176,29 @@ namespace sogen
         constexpr uint64_t CREATE_NAMED_PIPE_W_RVA = 0x87f20;
         uint64_t g_create_named_pipe_trace_va = 0;
 
+        // CreateWindowExW/A's own export RVAs in the shared root's (64-bit, system32) user32.dll --
+        // plain PE exports, resolved directly via its export table and cross-checked via disassembly
+        // (both start with int3 padding then a real MSVC prologue); see project_solidworks_bringup.md
+        // #372. #369-#371 exhausted every named, specific Chromium widget-construction function down
+        // to Widget::Init with zero hits; hooking CreateWindowEx* at its own entry instead answers what
+        // ACTUALLY creates each top-level window, independent of which (possibly still-unnamed) function
+        // calls it. Per #370's own already-validated technique, [rsp] at a function's own entry is
+        // ABI-guaranteed to be the real, immediate caller -- unlike a multi-frame scan from the syscall
+        // dispatcher's own frame, which #370 point 2 found unreliable (stale stack data).
+        constexpr uint64_t CREATE_WINDOW_EX_W_RVA = 0x8140;
+        constexpr uint64_t CREATE_WINDOW_EX_A_RVA = 0x46f0;
+        uint64_t g_create_window_ex_w_trace_va = 0;
+        uint64_t g_create_window_ex_a_trace_va = 0;
+
+        // NtUserCreateWindowEx's own export RVA in the shared root's (64-bit) win32u.dll -- the raw
+        // syscall stub CreateWindowExW itself calls. Watched alongside CREATE_WINDOW_EX_W/A_RVA above
+        // to catch any caller that imports win32u.dll directly and issues the syscall without going
+        // through user32.dll's public wrapper at all (see project_solidworks_bringup.md #372, which
+        // found exactly such a case: the real nested Chrome_WidgetWin_0 child window parented inside
+        // the HtmlDialog surface never hits CreateWindowExW's own entry).
+        constexpr uint64_t NT_USER_CREATE_WINDOW_EX_RVA = 0x1eb0;
+        uint64_t g_nt_user_create_window_ex_trace_va = 0;
+
         // mojo::PlatformChannel::PlatformChannel()'s own RVA in msedge.dll 150.0.7871.187, resolved
         // from Microsoft's own public PDB by walking one CreateNamedPipeW caller back (see
         // project_solidworks_bringup.md #279); its constructor body inlines the anonymous-namespace
@@ -2701,6 +2724,22 @@ namespace sogen
                                      static_cast<unsigned long long>(g_create_named_pipe_trace_va));
             }
 
+            if (mod.name == "user32.dll" && mod.machine == IMAGE_FILE_MACHINE_AMD64 && std::getenv("SOGEN_TRACE_CREATE_WINDOW_CALLER"))
+            {
+                g_create_window_ex_w_trace_va = mod.image_base + CREATE_WINDOW_EX_W_RVA;
+                g_create_window_ex_a_trace_va = mod.image_base + CREATE_WINDOW_EX_A_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching CreateWindowExW at 0x%llx, CreateWindowExA at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_create_window_ex_w_trace_va),
+                                     static_cast<unsigned long long>(g_create_window_ex_a_trace_va));
+            }
+
+            if (mod.name == "win32u.dll" && mod.machine == IMAGE_FILE_MACHINE_AMD64 && std::getenv("SOGEN_TRACE_CREATE_WINDOW_CALLER"))
+            {
+                g_nt_user_create_window_ex_trace_va = mod.image_base + NT_USER_CREATE_WINDOW_EX_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching NtUserCreateWindowEx at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_nt_user_create_window_ex_trace_va));
+            }
+
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
             {
                 g_platform_channel_ctor_trace_va = mod.image_base + PLATFORM_CHANNEL_CTOR_RVA;
@@ -2892,6 +2931,73 @@ namespace sogen
                                  static_cast<unsigned long long>(address), name.c_str(), dw_open_mode,
                                  (dw_open_mode & FILE_FLAG_OVERLAPPED) != 0, dw_pipe_mode, n_max_instances, c.win_emu->current_thread().id,
                                  static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address, const bool is_wide)
+        {
+            constexpr uint32_t ws_child = 0x40000000;
+            constexpr uint32_t ws_popup = 0x80000000;
+
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto ex_style = emu.reg<uint32_t>(x86_register::ecx);
+            const auto lp_class_name = emu.reg<uint64_t>(x86_register::rdx);
+            const auto style = emu.reg<uint32_t>(x86_register::r9d);
+            const auto has_child_parent = (style & ws_child) != 0 && (style & ws_popup) == 0;
+
+            std::string class_name;
+            try
+            {
+                if (lp_class_name != 0 && lp_class_name >= 0x10000)
+                {
+                    class_name = is_wide ? u16_to_u8(read_string<char16_t>(c.win_emu->memory, lp_class_name))
+                                         : read_string<char>(c.win_emu->memory, lp_class_name);
+                }
+                else
+                {
+                    class_name = "atom:0x" + utils::string::to_hex_number(static_cast<uint32_t>(lp_class_name));
+                }
+            }
+            catch (...)
+            {
+            }
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit %s at 0x%llx, class=\"%s\" ex_style=0x%x style=0x%x "
+                                 "top_level=%d tid=%u return=0x%llx (%s+0x%llx)\n",
+                                 is_wide ? "CreateWindowExW" : "CreateWindowExA", static_cast<unsigned long long>(address),
+                                 class_name.c_str(), ex_style, style, !has_child_parent, c.win_emu->current_thread().id,
+                                 static_cast<unsigned long long>(return_address), caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto rsp = emu.read_stack_pointer();
+
+            uint64_t return_address{};
+            emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+            const auto ex_style = emu.reg<uint32_t>(x86_register::ecx);
+            const auto lp_class_name_obj = emu.reg<uint64_t>(x86_register::rdx);
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit NtUserCreateWindowEx at 0x%llx, ex_style=0x%x "
+                                 "class_name_obj=0x%llx tid=%u return=0x%llx (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), ex_style, static_cast<unsigned long long>(lp_class_name_obj),
+                                 c.win_emu->current_thread().id, static_cast<unsigned long long>(return_address), caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
         }
 
@@ -4254,6 +4360,21 @@ namespace sogen
             if (g_create_named_pipe_trace_va != 0 && address == g_create_named_pipe_trace_va)
             {
                 trace_create_named_pipe_hit(c, address);
+            }
+
+            if (g_create_window_ex_w_trace_va != 0 && address == g_create_window_ex_w_trace_va)
+            {
+                trace_create_window_ex_caller_hit(c, address, true);
+            }
+
+            if (g_create_window_ex_a_trace_va != 0 && address == g_create_window_ex_a_trace_va)
+            {
+                trace_create_window_ex_caller_hit(c, address, false);
+            }
+
+            if (g_nt_user_create_window_ex_trace_va != 0 && address == g_nt_user_create_window_ex_trace_va)
+            {
+                trace_nt_user_create_window_ex_caller_hit(c, address);
             }
 
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
