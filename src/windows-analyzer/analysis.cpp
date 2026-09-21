@@ -108,7 +108,14 @@ namespace sogen
         // -- itself never seen to hold in a live #368 run, no child cmdline ever carried --headless)
         // -- a second, so-far-unwatched candidate source for the never-shown top-level
         // Chrome_WidgetWin_0 window #336/#337/#367 already found.
-        constexpr std::array<traced_symbol, 18> EBWV_COMPOSITOR_CHAIN_TARGETS{{
+        // #369 found live evidence that gfx::SingletonHwnd::SingletonHwnd()'s own WindowImpl::Init(NULL,
+        // Rect()) call reproduces every observed attribute of the "never-shown top-level Chrome_WidgetWin_0"
+        // window (#336/#337/#367) purely from WindowImpl's generic class-name-counter and
+        // parent-less-default-style logic (kBaseClassName + registered_count_, kWindowDefaultStyle =
+        // WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN = 0x02cf0000), with no subclass-specific styling involved.
+        // HWNDMessageHandler::Create/Init (the real, non-headless browser-window path, RVAs from #337/#368)
+        // are added here to directly test whether that path ever executes at all in the same capture.
+        constexpr std::array<traced_symbol, 20> EBWV_COMPOSITOR_CHAIN_TARGETS{{
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::EmbeddedBrowserNativeWidgetAura", 0xf2d19fe},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::InitNativeWidget", 0xf2d33e0},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::GetDcompDevice", 0xf2d2200},
@@ -127,6 +134,8 @@ namespace sogen
             {"viz::FrameSinkManagerImpl::CreateRootCompositorFrameSink", 0x350eae0},
             {"gfx::SingletonHwnd::SingletonHwnd", 0x1771102},
             {"views::HWNDMessageHandlerHeadless::Init", 0xa3e5490},
+            {"views::HWNDMessageHandler::Create", 0x3076210},
+            {"views::HWNDMessageHandler::Init", 0x31221c0},
         }};
         std::array<uint64_t, EBWV_COMPOSITOR_CHAIN_TARGETS.size()> g_ebwv_compositor_chain_trace_vas{};
 
