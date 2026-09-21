@@ -115,7 +115,12 @@ namespace sogen
         // WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN = 0x02cf0000), with no subclass-specific styling involved.
         // HWNDMessageHandler::Create/Init (the real, non-headless browser-window path, RVAs from #337/#368)
         // are added here to directly test whether that path ever executes at all in the same capture.
-        constexpr std::array<traced_symbol, 20> EBWV_COMPOSITOR_CHAIN_TARGETS{{
+        // gfx::WindowImpl::Init itself is added here too: this hook's own handler (trace_node_connect_hit)
+        // reads [rsp] at the watched address, which at a function's own entry is ABI-guaranteed to be the
+        // real, immediate return address -- a definitive, single-frame answer to which of its 15 known
+        // call sites (#368) -- SingletonHwnd::SingletonHwnd, HWNDMessageHandler::Init, or one of the
+        // other 13 -- issues each live call.
+        constexpr std::array<traced_symbol, 21> EBWV_COMPOSITOR_CHAIN_TARGETS{{
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::EmbeddedBrowserNativeWidgetAura", 0xf2d19fe},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::InitNativeWidget", 0xf2d33e0},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::GetDcompDevice", 0xf2d2200},
@@ -136,6 +141,7 @@ namespace sogen
             {"views::HWNDMessageHandlerHeadless::Init", 0xa3e5490},
             {"views::HWNDMessageHandler::Create", 0x3076210},
             {"views::HWNDMessageHandler::Init", 0x31221c0},
+            {"gfx::WindowImpl::Init", 0x2cdf868},
         }};
         std::array<uint64_t, EBWV_COMPOSITOR_CHAIN_TARGETS.size()> g_ebwv_compositor_chain_trace_vas{};
 
