@@ -263,6 +263,8 @@ namespace sogen
 
                 const auto info = c.emu.read_memory<FILE_DISPOSITION_INFORMATION>(file_information);
 
+                c.win_emu.callbacks.on_generic_access(info.DeleteFile ? "Marking for deletion" : "Clearing deletion marker", f->name);
+
                 f->handle.defer_delete(info.DeleteFile ? c.win_emu.file_sys.translate(f->name) : std::filesystem::path{});
 
                 return STATUS_SUCCESS;
@@ -282,6 +284,8 @@ namespace sogen
                 {
                     return STATUS_ACCESS_DENIED;
                 }
+
+                c.win_emu.callbacks.on_generic_access(wants_delete ? "Marking for deletion" : "Clearing deletion marker", f->name);
 
                 f->handle.defer_delete(wants_delete ? c.win_emu.file_sys.translate(f->name) : std::filesystem::path{});
 
@@ -2140,6 +2144,7 @@ namespace sogen
 
             if (create_options & FILE_DELETE_ON_CLOSE)
             {
+                c.win_emu.callbacks.on_generic_access("Marking for deletion", f.name);
                 f.handle.defer_delete(host_path);
             }
 
