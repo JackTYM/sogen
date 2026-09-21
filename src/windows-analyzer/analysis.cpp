@@ -199,6 +199,39 @@ namespace sogen
         constexpr uint64_t NT_USER_CREATE_WINDOW_EX_RVA = 0x1eb0;
         uint64_t g_nt_user_create_window_ex_trace_va = 0;
 
+        // CreateWindowExW/A's own export RVAs in the shared root's 32-bit (SysWOW64) user32.dll --
+        // the nested Chrome_WidgetWin_0 window from #372 turned out to be created by
+        // embeddedbrowserwebview.dll's own 32-bit build, running inside sldim.exe itself (see
+        // project_solidworks_bringup.md #373), so the 64-bit hooks above never see it: a WoW64
+        // thread's syscall is dispatched through wow64cpu.dll's TurboDispatch gate crossing
+        // (module_manager.cpp's wow64_run_simulated_code/wow64cpu_dispatch registration), never
+        // through the native win32u.dll export at all. Watching the 32-bit CreateWindowExW/A entry
+        // instead catches the real 32-bit caller directly, before any WoW64 transition happens.
+        constexpr uint64_t CREATE_WINDOW_EX_W_I386_RVA = 0x2a8f0;
+        constexpr uint64_t CREATE_WINDOW_EX_A_I386_RVA = 0x422b0;
+        uint64_t g_create_window_ex_w_i386_trace_va = 0;
+        uint64_t g_create_window_ex_a_i386_trace_va = 0;
+
+        // gfx::WindowImpl::Init()'s own entry RVA in embeddedbrowserwebview.dll's own 32-bit build --
+        // the caller the 32-bit CreateWindowExW hook above resolved for the nested Chrome_WidgetWin_0
+        // window (see project_solidworks_bringup.md #373): embeddedbrowserwebview.dll statically
+        // links its own copy of Chromium's ui/gfx/win/window_impl.cc, and the caller RVA landed 0x144
+        // bytes past this function's own entry, matching the exact call-site offset #369/#370 already
+        // found for msedge.dll's separate copy of the same function. Watching Init's own entry (not
+        // just where its internal CreateWindowEx call returns to) resolves ITS caller in turn.
+        constexpr uint64_t EBWV_WINDOW_IMPL_INIT_I386_RVA = 0x371d82;
+        uint64_t g_ebwv_window_impl_init_i386_trace_va = 0;
+
+        // embedded_browser_webview_current::internal::ClientWindowWin32::InitInternalWindow()'s own
+        // entry RVA in embeddedbrowserwebview.dll's 32-bit build -- the real, disassembly-confirmed
+        // caller of gfx::WindowImpl::Init above (both its own hard-coded style write, 0x46010000 at
+        // this+0x44, and its own `call 0x10371d82` at file offset 0xf198f, land exactly on the
+        // observed hits; see project_solidworks_bringup.md #373). This is a WebView2-specific window
+        // class, not part of Chromium's generic Views widget stack #369-#371 already proved dead;
+        // watching its own entry resolves who constructs it in turn.
+        constexpr uint64_t EBWV_CLIENT_WINDOW_INIT_INTERNAL_I386_RVA = 0xf1880;
+        uint64_t g_ebwv_client_window_init_internal_i386_trace_va = 0;
+
         // mojo::PlatformChannel::PlatformChannel()'s own RVA in msedge.dll 150.0.7871.187, resolved
         // from Microsoft's own public PDB by walking one CreateNamedPipeW caller back (see
         // project_solidworks_bringup.md #279); its constructor body inlines the anonymous-namespace
@@ -2740,6 +2773,27 @@ namespace sogen
                                      static_cast<unsigned long long>(g_nt_user_create_window_ex_trace_va));
             }
 
+            if (mod.name == "user32.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 && std::getenv("SOGEN_TRACE_CREATE_WINDOW_CALLER"))
+            {
+                g_create_window_ex_w_i386_trace_va = mod.image_base + CREATE_WINDOW_EX_W_I386_RVA;
+                g_create_window_ex_a_i386_trace_va = mod.image_base + CREATE_WINDOW_EX_A_I386_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 CreateWindowExW at 0x%llx, CreateWindowExA at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_create_window_ex_w_i386_trace_va),
+                                     static_cast<unsigned long long>(g_create_window_ex_a_i386_trace_va));
+            }
+
+            if (mod.name == "embeddedbrowserwebview.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
+                std::getenv("SOGEN_TRACE_CREATE_WINDOW_CALLER"))
+            {
+                g_ebwv_window_impl_init_i386_trace_va = mod.image_base + EBWV_WINDOW_IMPL_INIT_I386_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 gfx::WindowImpl::Init at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_window_impl_init_i386_trace_va));
+
+                g_ebwv_client_window_init_internal_i386_trace_va = mod.image_base + EBWV_CLIENT_WINDOW_INIT_INTERNAL_I386_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ClientWindowWin32::InitInternalWindow at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_client_window_init_internal_i386_trace_va));
+            }
+
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
             {
                 g_platform_channel_ctor_trace_va = mod.image_base + PLATFORM_CHANNEL_CTOR_RVA;
@@ -2977,6 +3031,94 @@ namespace sogen
                                  class_name.c_str(), ex_style, style, !has_child_parent, c.win_emu->current_thread().id,
                                  static_cast<unsigned long long>(return_address), caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_create_window_ex_i386_caller_hit(const analysis_context& c, const uint64_t address, const bool is_wide)
+        {
+            constexpr uint32_t ws_child = 0x40000000;
+            constexpr uint32_t ws_popup = 0x80000000;
+
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t ex_style = 0;
+            uint32_t lp_class_name = 0;
+            uint32_t style = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &ex_style, sizeof(ex_style));
+            emu.try_read_memory(esp + 8, &lp_class_name, sizeof(lp_class_name));
+            emu.try_read_memory(esp + 16, &style, sizeof(style));
+            const auto has_child_parent = (style & ws_child) != 0 && (style & ws_popup) == 0;
+
+            std::string class_name;
+            try
+            {
+                if (lp_class_name != 0 && lp_class_name >= 0x10000)
+                {
+                    class_name = is_wide ? u16_to_u8(read_string<char16_t>(c.win_emu->memory, lp_class_name))
+                                         : read_string<char>(c.win_emu->memory, lp_class_name);
+                }
+                else
+                {
+                    class_name = "atom:0x" + utils::string::to_hex_number(lp_class_name);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 %s at 0x%llx, class=\"%s\" ex_style=0x%x style=0x%x "
+                                 "top_level=%d tid=%u return=0x%x (%s+0x%llx)\n",
+                                 is_wide ? "CreateWindowExW" : "CreateWindowExA", static_cast<unsigned long long>(address),
+                                 class_name.c_str(), ex_style, style, !has_child_parent, c.win_emu->current_thread().id, return_address,
+                                 caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_window_impl_init_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t hwnd_parent = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &hwnd_parent, sizeof(hwnd_parent));
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 gfx::WindowImpl::Init at 0x%llx, this=0x%x parent=0x%x "
+                                 "tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), this_ptr, hwnd_parent, c.win_emu->current_thread().id,
+                                 return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_client_window_init_internal_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t hwnd_arg = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &hwnd_arg, sizeof(hwnd_arg));
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 ClientWindowWin32::InitInternalWindow at 0x%llx, this=0x%x "
+                                 "hwnd_arg=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), this_ptr, hwnd_arg, c.win_emu->current_thread().id,
+                                 return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
         }
 
         void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
@@ -4377,6 +4519,26 @@ namespace sogen
                 trace_nt_user_create_window_ex_caller_hit(c, address);
             }
 
+            if (g_create_window_ex_w_i386_trace_va != 0 && address == g_create_window_ex_w_i386_trace_va)
+            {
+                trace_create_window_ex_i386_caller_hit(c, address, true);
+            }
+
+            if (g_create_window_ex_a_i386_trace_va != 0 && address == g_create_window_ex_a_i386_trace_va)
+            {
+                trace_create_window_ex_i386_caller_hit(c, address, false);
+            }
+
+            if (g_ebwv_window_impl_init_i386_trace_va != 0 && address == g_ebwv_window_impl_init_i386_trace_va)
+            {
+                trace_ebwv_window_impl_init_i386_hit(c, address);
+            }
+
+            if (g_ebwv_client_window_init_internal_i386_trace_va != 0 && address == g_ebwv_client_window_init_internal_i386_trace_va)
+            {
+                trace_ebwv_client_window_init_internal_i386_hit(c, address);
+            }
+
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
             {
                 trace_platform_channel_ctor_hit(c, address);
@@ -5547,6 +5709,17 @@ namespace sogen
         (void)cb.on_module_load.add(make_callback(c, handle_module_load));
         (void)cb.on_module_unload.add(make_callback(c, handle_module_unload));
         (void)cb.on_section_first_execution.add(make_callback(c, handle_section_first_execution));
+
+        // For a --child-ipc-fd re-exec'd child process, setup_process_if_necessary() (main.cpp) has
+        // already mapped win32u.dll before this function runs, so its own on_module_load event fired
+        // too early for the callback just registered above to observe -- unlike the top-level process,
+        // where win32u.dll is mapped later, inside start(). Re-run the same handler manually for any
+        // module that was already mapped by the time analysis callbacks came online (see
+        // project_solidworks_bringup.md #373).
+        if (c.win_emu->mod_manager.win32u)
+        {
+            handle_module_load(c, *c.win_emu->mod_manager.win32u);
+        }
 
         cb.on_thread_create = make_callback(c, handle_thread_create);
         cb.on_thread_terminated = make_callback(c, handle_thread_terminated);
