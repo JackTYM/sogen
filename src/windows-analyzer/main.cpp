@@ -704,7 +704,9 @@ namespace sogen
                     win_emu->log.set_prefix("[pid " + std::to_string(::getpid()) + "] ");
 #endif
 
-                    utils::file_handle::pin_for_process_lifetime(win_emu->file_sys.translate(child_application));
+                    const auto child_application_host_path = win_emu->file_sys.translate(child_application);
+                    utils::file_handle::pin_for_process_lifetime(child_application_host_path);
+                    utils::file_handle::pin_image_directory_for_process_lifetime(child_application_host_path);
 
                     for (const auto& inherited : child_bootstrap->inherited_pipes)
                     {

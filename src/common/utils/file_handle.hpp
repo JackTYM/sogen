@@ -191,6 +191,30 @@ namespace sogen
 #endif
             }
 
+            // Real Windows' DLL search order always checks the directory a process was launched
+            // from before anything else, so a freshly-spawned process's own dependencies typically
+            // sit right next to its main image - pin_for_process_lifetime alone only protects that
+            // main image itself, leaving those sibling dependencies unprotected against the same
+            // concurrently running sibling/parent's deferred-delete. Real hardware gets away with
+            // this because a native process reaches its own early LoadLibrary calls long before a
+            // disk-bound cleanup loop gets around to deleting dozens of files; under emulation the
+            // relative cost of interpreting a process's startup instructions versus running a
+            // cleanup loop's syscalls is reversed, so the same race that never resolves badly on
+            // real hardware reliably does here without this.
+            static void pin_image_directory_for_process_lifetime(const std::filesystem::path& image_path)
+            {
+                std::error_code ec{};
+                const auto directory = image_path.parent_path();
+
+                for (const auto& entry : std::filesystem::directory_iterator(directory, ec))
+                {
+                    if (entry.is_regular_file(ec))
+                    {
+                        pin_for_process_lifetime(entry.path());
+                    }
+                }
+            }
+
             void serialize(utils::buffer_serializer& buffer) const
             {
                 buffer.write(this->tell());

@@ -823,6 +823,38 @@ namespace sogen
             }
         }
 
+        void trace_process_handle_wait(const syscall_context& c, const handle resolved, const emulator_object<LARGE_INTEGER> timeout)
+        {
+            if (resolved.value.type != handle_types::process)
+            {
+                return;
+            }
+
+            std::string detail{};
+
+            if (resolved == GUEST_PROCESS_HANDLE)
+            {
+                detail = "target=own-process";
+            }
+            else
+            {
+                const auto child = c.proc.child_processes.find(resolved.value.id);
+                detail = child != c.proc.child_processes.end() ? "target_pid=" + std::to_string(child->second.pid)
+                                                               : "target=unknown-record-" + std::to_string(resolved.value.id);
+            }
+
+            if (timeout.value())
+            {
+                detail += " timeout_100ns=" + std::to_string(timeout.read().QuadPart);
+            }
+            else
+            {
+                detail += " timeout=infinite";
+            }
+
+            c.win_emu.callbacks.on_generic_access("Waiting on process handle", std::u16string(detail.begin(), detail.end()));
+        }
+
         NTSTATUS handle_NtCompareObjects(const syscall_context& c, const handle first, const handle second)
         {
             const auto first_resolved = c.proc.resolve_object_pseudo_handle(first, c.vcpu.active_thread);
@@ -928,6 +960,7 @@ namespace sogen
                     return validation_status;
                 }
 
+                trace_process_handle_wait(c, h, timeout);
                 wait_handles.push_back(h);
             }
 
@@ -989,6 +1022,7 @@ namespace sogen
                     return validation_status;
                 }
 
+                trace_process_handle_wait(c, *h, timeout);
                 wait_handles.push_back(*h);
             }
 
@@ -1017,6 +1051,8 @@ namespace sogen
             auto& t = c.thread();
             t.await_objects = {resolved_handle};
             t.await_any = false;
+
+            trace_process_handle_wait(c, resolved_handle, timeout);
 
             if (timeout.value() && !t.await_time.has_value())
             {
