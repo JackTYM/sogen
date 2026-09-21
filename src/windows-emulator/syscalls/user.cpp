@@ -4623,6 +4623,13 @@ namespace sogen
                 return 0;
             }
 
+            if (window_trace_enabled())
+            {
+                c.win_emu.log.error("[window-trace] SetWindowLong hwnd=0x%llx class='%s' nIndex=%d dwNewLong=0x%llx tid=%u\n",
+                                    static_cast<unsigned long long>(hWnd.bits), u16_to_u8(win->class_name).c_str(), nIndex,
+                                    static_cast<unsigned long long>(dwNewLong), c.thread().id);
+            }
+
             emulator_pointer oldValue = 0;
 
             win->guest.access([&](USER_WINDOW& guest_win) {
