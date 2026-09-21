@@ -247,6 +247,17 @@ namespace sogen
         constexpr uint64_t EBWV_READ_ENV_VAR_I386_RVA = 0xeafac;
         uint64_t g_ebwv_read_env_var_i386_trace_va = 0;
 
+        // `ClientWindow::Initialize()`'s own `test al, al` right after a THIRD vtable dispatch (through
+        // a member sub-object at `this+4`, not `this` itself), disassembly-confirmed at file offset
+        // 0xee8ea (see project_solidworks_bringup.md #374): if this check is false, `Initialize()`
+        // branches straight to its shared error-cleanup label, bypassing the
+        // WEBVIEW2_EDGEVIEW_VISUAL_HOSTING_HELPER_HWND-reading block above entirely -- before the two
+        // earlier checks (InitInternalWindow's own HRESULT, confirmed always non-negative live) can be
+        // the gate. Watching AL at this exact instruction (unmodified by `test`) answers whether that gate
+        // is the reason the env-var block is never reached.
+        constexpr uint64_t EBWV_CLIENT_WINDOW_INIT_GATE_I386_RVA = 0xee8ea;
+        uint64_t g_ebwv_client_window_init_gate_i386_trace_va = 0;
+
         // mojo::PlatformChannel::PlatformChannel()'s own RVA in msedge.dll 150.0.7871.187, resolved
         // from Microsoft's own public PDB by walking one CreateNamedPipeW caller back (see
         // project_solidworks_bringup.md #279); its constructor body inlines the anonymous-namespace
@@ -2811,6 +2822,11 @@ namespace sogen
                 g_ebwv_read_env_var_i386_trace_va = mod.image_base + EBWV_READ_ENV_VAR_I386_RVA;
                 c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ReadEnvironmentVariable at 0x%llx\n",
                                      static_cast<unsigned long long>(g_ebwv_read_env_var_i386_trace_va));
+
+                g_ebwv_client_window_init_gate_i386_trace_va = mod.image_base + EBWV_CLIENT_WINDOW_INIT_GATE_I386_RVA;
+                c.win_emu->log.error(
+                    "[create-window-ex-caller-trace] watching I386 ClientWindow::Initialize's visual-hosting gate at 0x%llx\n",
+                    static_cast<unsigned long long>(g_ebwv_client_window_init_gate_i386_trace_va));
             }
 
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
@@ -3172,6 +3188,30 @@ namespace sogen
                                  "tid=%u return=0x%x (%s+0x%llx)\n",
                                  static_cast<unsigned long long>(address), name.c_str(), out_ptr, c.win_emu->current_thread().id,
                                  return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_client_window_init_gate_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto al = emu.reg<uint8_t>(x86_register::al);
+            const auto esi = emu.reg<uint32_t>(x86_register::esi);
+
+            uint32_t sub_object_ptr = 0;
+            emu.try_read_memory(esi + 4, &sub_object_ptr, sizeof(sub_object_ptr));
+
+            uint32_t vtable_ptr = 0;
+            uint32_t slot_target = 0;
+            emu.try_read_memory(sub_object_ptr, &vtable_ptr, sizeof(vtable_ptr));
+            emu.try_read_memory(vtable_ptr + 0x44, &slot_target, sizeof(slot_target));
+
+            const auto* target_mod_name = c.win_emu->mod_manager.find_name(slot_target);
+            const auto* target_mod = c.win_emu->mod_manager.find_by_address(slot_target);
+            const auto target_offset = target_mod ? slot_target - target_mod->image_base : slot_target;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 ClientWindow::Initialize visual-hosting gate at 0x%llx, "
+                                 "al=%u this=0x%x sub_object@this+4=0x%x vtable=0x%x slot0x44=0x%x (%s+0x%llx) tid=%u\n",
+                                 static_cast<unsigned long long>(address), al, esi, sub_object_ptr, vtable_ptr, slot_target,
+                                 target_mod_name, static_cast<unsigned long long>(target_offset), c.win_emu->current_thread().id);
         }
 
         void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
@@ -4595,6 +4635,11 @@ namespace sogen
             if (g_ebwv_read_env_var_i386_trace_va != 0 && address == g_ebwv_read_env_var_i386_trace_va)
             {
                 trace_ebwv_read_env_var_i386_hit(c, address);
+            }
+
+            if (g_ebwv_client_window_init_gate_i386_trace_va != 0 && address == g_ebwv_client_window_init_gate_i386_trace_va)
+            {
+                trace_ebwv_client_window_init_gate_i386_hit(c, address);
             }
 
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
