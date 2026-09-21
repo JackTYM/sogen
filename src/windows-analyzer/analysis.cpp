@@ -321,6 +321,23 @@ namespace sogen
         uint64_t g_ebwv_create_controller_i386_trace_va = 0;
         uint64_t g_ebwv_controller_completed_handler_invoke_va = 0;
 
+        // `CreateCoreWebView2Controller`'s own real callee, `EBWebViewEnvironment::CreateCoreWebView2Con
+        // trollerWithOptions(HWND, ICoreWebView2ControllerOptions*, ICoreWebView2CreateCoreWebView2Contro
+        // llerCompletedHandler*)`, is what actually runs under Windowed hosting (project_solidworks_bring
+        // up.md #378 already showed the DirectComposition/`this[0x58]` gate found by #338-#343 is Visual-
+        // hosting-only dead code for this app). Disassembly this cycle (#387) confirms `WithOptions` never
+        // touches `this+0x58`; instead it builds a `WebViewCreationParams` (carrying the handler wrapped in
+        // a `base::OnceCallback<void(HRESULT, Controller*)>`) and calls a real, unexported, PDB-symbol-less
+        // helper (S_PUB32 nearest-symbol misattributes it as inside `CreateCoreWebView2CompositionControl
+        // ler`, a false positive of the same class already documented in #269/#270/#338) which itself calls
+        // `EmbeddedBrowserWebView::RuntimeClassInitialize` -- the real "start creating the browser-backed
+        // WebView object" entry point. Both RVAs are PDB-`.text`-boundary-confirmed real `__thiscall`
+        // function entries (`int3` padding immediately precedes each).
+        constexpr uint64_t EBWV_CREATE_CONTROLLER_PARAMS_HELPER_I386_RVA = 0x112832;
+        constexpr uint64_t EBWV_WEBVIEW_RUNTIME_CLASS_INITIALIZE_I386_RVA = 0x11f68a;
+        uint64_t g_ebwv_create_controller_params_helper_i386_trace_va = 0;
+        uint64_t g_ebwv_webview_runtime_class_initialize_i386_trace_va = 0;
+
         // ShowWindow/ShowWindowAsync/SetWindowPos's own export RVAs in the shared root's 32-bit
         // (SysWOW64) user32.dll, resolved via pefile's export table and cross-checked against
         // llvm-objdump -p's own export listing (exact match) -- see project_solidworks_bringup.md
@@ -2944,6 +2961,16 @@ namespace sogen
                 c.win_emu->log.error(
                     "[create-window-ex-caller-trace] watching I386 EBWebViewEnvironment::CreateCoreWebView2Controller at 0x%llx\n",
                     static_cast<unsigned long long>(g_ebwv_create_controller_i386_trace_va));
+
+                g_ebwv_create_controller_params_helper_i386_trace_va = mod.image_base + EBWV_CREATE_CONTROLLER_PARAMS_HELPER_I386_RVA;
+                c.win_emu->log.error(
+                    "[create-window-ex-caller-trace] watching I386 CreateCoreWebView2ControllerWithOptions' params helper at 0x%llx\n",
+                    static_cast<unsigned long long>(g_ebwv_create_controller_params_helper_i386_trace_va));
+
+                g_ebwv_webview_runtime_class_initialize_i386_trace_va = mod.image_base + EBWV_WEBVIEW_RUNTIME_CLASS_INITIALIZE_I386_RVA;
+                c.win_emu->log.error(
+                    "[create-window-ex-caller-trace] watching I386 EmbeddedBrowserWebView::RuntimeClassInitialize at 0x%llx\n",
+                    static_cast<unsigned long long>(g_ebwv_webview_runtime_class_initialize_i386_trace_va));
             }
 
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
@@ -3590,6 +3617,51 @@ namespace sogen
                                  static_cast<unsigned long long>(address), this_ptr, hresult_arg, controller_arg,
                                  c.win_emu->current_thread().id, return_address, caller_mod_name,
                                  static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_create_controller_params_helper_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint32_t return_address = 0;
+            uint32_t arg0 = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &arg0, sizeof(arg0));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error(
+                "[create-window-ex-caller-trace] hit I386 CreateCoreWebView2ControllerWithOptions' params helper at 0x%llx, "
+                "this=0x%x arg0=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                static_cast<unsigned long long>(address), this_ptr, arg0, c.win_emu->current_thread().id, return_address, caller_mod_name,
+                static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_webview_runtime_class_initialize_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint32_t return_address = 0;
+            uint32_t arg0 = 0;
+            uint32_t arg1 = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &arg0, sizeof(arg0));
+            emu.try_read_memory(esp + 8, &arg1, sizeof(arg1));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 EmbeddedBrowserWebView::RuntimeClassInitialize at 0x%llx, "
+                                 "this=0x%x arg0=0x%x arg1=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), this_ptr, arg0, arg1, c.win_emu->current_thread().id,
+                                 return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
         }
 
         void trace_nt_user_create_window_ex_caller_hit(const analysis_context& c, const uint64_t address)
@@ -5073,6 +5145,18 @@ namespace sogen
             if (g_ebwv_controller_completed_handler_invoke_va != 0 && address == g_ebwv_controller_completed_handler_invoke_va)
             {
                 trace_ebwv_controller_completed_invoke_hit(c, address);
+            }
+
+            if (g_ebwv_create_controller_params_helper_i386_trace_va != 0 &&
+                address == g_ebwv_create_controller_params_helper_i386_trace_va)
+            {
+                trace_ebwv_create_controller_params_helper_i386_hit(c, address);
+            }
+
+            if (g_ebwv_webview_runtime_class_initialize_i386_trace_va != 0 &&
+                address == g_ebwv_webview_runtime_class_initialize_i386_trace_va)
+            {
+                trace_ebwv_webview_runtime_class_initialize_i386_hit(c, address);
             }
 
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
