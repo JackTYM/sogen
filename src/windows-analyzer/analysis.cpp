@@ -80,6 +80,42 @@ namespace sogen
         }};
         std::array<uint64_t, ROUTER_LINK_TARGETS.size()> g_router_link_trace_vas{};
 
+        // WebView2's own real widget/compositor classes in msedge.dll 150.0.4078.105, resolved from
+        // Microsoft's own public PDB (see project_solidworks_bringup.md #366): #336/#337 found that
+        // `ui::Compositor`'s constructor and the generic `views::NativeWidgetAura`/
+        // `views::DesktopNativeWidgetAura` chain are never entered for the WebView2 host window, and
+        // guessed the window instead goes through a bare `gfx::WindowImpl::Init()`. The PDB's own
+        // `embedded_browser::` namespace shows this guess was incomplete: WebView2 ships its own
+        // parallel `embedded_browser::EmbeddedBrowserNativeWidgetAura`/
+        // `embedded_browser::EmbeddedBrowserDesktopWindowTreeHostWin`/
+        // `embedded_browser::EmbeddedBrowserFrameAura` widget classes (never checked by #336/#337,
+        // which only watched the generic `views::`-namespace symbols), and
+        // `EmbeddedBrowserNativeWidgetAura` additionally exposes `GetDcompDevice`/
+        // `ConnectToClientVisualWindow` methods -- a plausible, previously-unexamined bridge to the
+        // embedder-side `this[0x58]`/`DCompositionCreateDevice2` mechanism #338-#365 already
+        // characterized in `EmbeddedBrowserWebView.dll`. Combined with the still-never-committed
+        // `ui::Compositor`/`VizMain` chain RVAs from #336/#357/#358 (re-resolved and cross-validated
+        // against those findings' own cited values this cycle) to test both threads in one run.
+        constexpr std::array<traced_symbol, 16> EBWV_COMPOSITOR_CHAIN_TARGETS{{
+            {"embedded_browser::EmbeddedBrowserNativeWidgetAura::EmbeddedBrowserNativeWidgetAura", 0xf2d19fe},
+            {"embedded_browser::EmbeddedBrowserNativeWidgetAura::InitNativeWidget", 0xf2d33e0},
+            {"embedded_browser::EmbeddedBrowserNativeWidgetAura::GetDcompDevice", 0xf2d2200},
+            {"embedded_browser::EmbeddedBrowserNativeWidgetAura::ConnectToClientVisualWindow", 0xf2d2a48},
+            {"embedded_browser::EmbeddedBrowserDesktopWindowTreeHostWin::EmbeddedBrowserDesktopWindowTreeHostWin", 0xf2d7620},
+            {"embedded_browser::EmbeddedBrowserDesktopWindowTreeHostWin::SetCapture", 0xf2d7ee0},
+            {"embedded_browser::EmbeddedBrowserMainDesktopWindowTreeHostWin::EmbeddedBrowserMainDesktopWindowTreeHostWin", 0xf2d45fa},
+            {"embedded_browser::EmbeddedBrowserFrameAura::EmbeddedBrowserFrameAura", 0xf2d54c2},
+            {"embedded_browser::EmbeddedBrowserFrameAura::OnHostResized", 0xf2d7060},
+            {"ui::Compositor::Compositor", 0x3077772},
+            {"ui::Compositor::SetAcceleratedWidget", 0x307630e},
+            {"ui::Compositor::RequestNewLayerTreeFrameSink", 0x2f5d260},
+            {"viz::VizMainImpl::Bind", 0x350b6ce},
+            {"viz::VizMainImpl::CreateGpuService", 0x34df5f0},
+            {"viz::VizMainImpl::CreateFrameSinkManager", 0x350df90},
+            {"viz::FrameSinkManagerImpl::CreateRootCompositorFrameSink", 0x350eae0},
+        }};
+        std::array<uint64_t, EBWV_COMPOSITOR_CHAIN_TARGETS.size()> g_ebwv_compositor_chain_trace_vas{};
+
         // HandleDelayLoadFailureCommon in msedge.dll 150.0.7871.187, resolved from Microsoft's
         // own public PDB (see project_solidworks_bringup.md #274; #270's RVA for this was wrong,
         // resolving to an unrelated BluetoothAdapterWinrt::CreateDevice offset).
@@ -2480,6 +2516,16 @@ namespace sogen
                 }
             }
 
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EBWV_COMPOSITOR_CHAIN"))
+            {
+                for (size_t i = 0; i < EBWV_COMPOSITOR_CHAIN_TARGETS.size(); ++i)
+                {
+                    g_ebwv_compositor_chain_trace_vas[i] = mod.image_base + EBWV_COMPOSITOR_CHAIN_TARGETS[i].rva;
+                    c.win_emu->log.error("[ebwv-compositor-chain-trace] watching %s at 0x%llx\n", EBWV_COMPOSITOR_CHAIN_TARGETS[i].name,
+                                         static_cast<unsigned long long>(g_ebwv_compositor_chain_trace_vas[i]));
+                }
+            }
+
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_ESTABLISH_WAITING_ROUTERS"))
             {
                 g_establish_waiting_routers_trace_va = mod.image_base + ESTABLISH_WAITING_ROUTERS_CMP_RVA;
@@ -4140,6 +4186,14 @@ namespace sogen
                 if (g_router_link_trace_vas[i] != 0 && address == g_router_link_trace_vas[i])
                 {
                     trace_node_connect_hit(c, address, ROUTER_LINK_TARGETS[i].name);
+                }
+            }
+
+            for (size_t i = 0; i < g_ebwv_compositor_chain_trace_vas.size(); ++i)
+            {
+                if (g_ebwv_compositor_chain_trace_vas[i] != 0 && address == g_ebwv_compositor_chain_trace_vas[i])
+                {
+                    trace_node_connect_hit(c, address, EBWV_COMPOSITOR_CHAIN_TARGETS[i].name);
                 }
             }
 
