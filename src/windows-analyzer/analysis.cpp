@@ -281,6 +281,22 @@ namespace sogen
         uint64_t g_ebwv_on_pointer_event_i386_trace_va = 0;
         uint64_t g_ebwv_process_window_message_i386_trace_va = 0;
 
+        // ShowWindow/ShowWindowAsync/SetWindowPos's own export RVAs in the shared root's 32-bit
+        // (SysWOW64) user32.dll, resolved via pefile's export table and cross-checked against
+        // llvm-objdump -p's own export listing (exact match) -- see project_solidworks_bringup.md
+        // #375: the nested Chrome_WidgetWin_0/ClientWindowWin32 window is created with style
+        // 0x46010000, which has no WS_VISIBLE bit, and #375 left open whether the guest ever calls
+        // one of these to make it visible. Each entry is a hot-patch-style `jmp [iat_slot]` stub (not
+        // a full prologue), matching the exact shape #372 already found for CreateWindowExW/A's own
+        // entries in this same DLL -- hooking the entry itself still captures the real, immediate
+        // caller via [esp], regardless of what the stub jumps to internally.
+        constexpr uint64_t SHOW_WINDOW_I386_RVA = 0x494b0;
+        constexpr uint64_t SHOW_WINDOW_ASYNC_I386_RVA = 0x494c0;
+        constexpr uint64_t SET_WINDOW_POS_I386_RVA = 0x49440;
+        uint64_t g_show_window_i386_trace_va = 0;
+        uint64_t g_show_window_async_i386_trace_va = 0;
+        uint64_t g_set_window_pos_i386_trace_va = 0;
+
         // mojo::PlatformChannel::PlatformChannel()'s own RVA in msedge.dll 150.0.7871.187, resolved
         // from Microsoft's own public PDB by walking one CreateNamedPipeW caller back (see
         // project_solidworks_bringup.md #279); its constructor body inlines the anonymous-namespace
@@ -2829,6 +2845,15 @@ namespace sogen
                 c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 CreateWindowExW at 0x%llx, CreateWindowExA at 0x%llx\n",
                                      static_cast<unsigned long long>(g_create_window_ex_w_i386_trace_va),
                                      static_cast<unsigned long long>(g_create_window_ex_a_i386_trace_va));
+
+                g_show_window_i386_trace_va = mod.image_base + SHOW_WINDOW_I386_RVA;
+                g_show_window_async_i386_trace_va = mod.image_base + SHOW_WINDOW_ASYNC_I386_RVA;
+                g_set_window_pos_i386_trace_va = mod.image_base + SET_WINDOW_POS_I386_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ShowWindow at 0x%llx, ShowWindowAsync at 0x%llx, "
+                                     "SetWindowPos at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_show_window_i386_trace_va),
+                                     static_cast<unsigned long long>(g_show_window_async_i386_trace_va),
+                                     static_cast<unsigned long long>(g_set_window_pos_i386_trace_va));
             }
 
             if (mod.name == "embeddedbrowserwebview.dll" && mod.machine == IMAGE_FILE_MACHINE_I386 &&
@@ -3151,6 +3176,62 @@ namespace sogen
                                  is_wide ? "CreateWindowExW" : "CreateWindowExA", static_cast<unsigned long long>(address),
                                  class_name.c_str(), ex_style, style, !has_child_parent, c.win_emu->current_thread().id, return_address,
                                  caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_show_window_i386_caller_hit(const analysis_context& c, const uint64_t address, const bool is_async)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t hwnd = 0;
+            int32_t cmd_show = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &hwnd, sizeof(hwnd));
+            emu.try_read_memory(esp + 8, &cmd_show, sizeof(cmd_show));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 %s at 0x%llx, hwnd=0x%x cmd_show=%d tid=%u "
+                                 "return=0x%x (%s+0x%llx)\n",
+                                 is_async ? "ShowWindowAsync" : "ShowWindow", static_cast<unsigned long long>(address), hwnd, cmd_show,
+                                 c.win_emu->current_thread().id, return_address, caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_set_window_pos_i386_caller_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t hwnd = 0;
+            uint32_t hwnd_insert_after = 0;
+            int32_t x = 0;
+            int32_t y = 0;
+            int32_t cx = 0;
+            int32_t cy = 0;
+            uint32_t flags = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &hwnd, sizeof(hwnd));
+            emu.try_read_memory(esp + 8, &hwnd_insert_after, sizeof(hwnd_insert_after));
+            emu.try_read_memory(esp + 0xc, &x, sizeof(x));
+            emu.try_read_memory(esp + 0x10, &y, sizeof(y));
+            emu.try_read_memory(esp + 0x14, &cx, sizeof(cx));
+            emu.try_read_memory(esp + 0x18, &cy, sizeof(cy));
+            emu.try_read_memory(esp + 0x1c, &flags, sizeof(flags));
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 SetWindowPos at 0x%llx, hwnd=0x%x "
+                                 "hwndInsertAfter=0x%x x=%d y=%d cx=%d cy=%d flags=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), hwnd, hwnd_insert_after, x, y, cx, cy, flags,
+                                 c.win_emu->current_thread().id, return_address, caller_mod_name,
+                                 static_cast<unsigned long long>(caller_offset));
         }
 
         void trace_ebwv_window_impl_init_i386_hit(const analysis_context& c, const uint64_t address)
@@ -4758,6 +4839,21 @@ namespace sogen
             if (g_create_window_ex_a_i386_trace_va != 0 && address == g_create_window_ex_a_i386_trace_va)
             {
                 trace_create_window_ex_i386_caller_hit(c, address, false);
+            }
+
+            if (g_show_window_i386_trace_va != 0 && address == g_show_window_i386_trace_va)
+            {
+                trace_show_window_i386_caller_hit(c, address, false);
+            }
+
+            if (g_show_window_async_i386_trace_va != 0 && address == g_show_window_async_i386_trace_va)
+            {
+                trace_show_window_i386_caller_hit(c, address, true);
+            }
+
+            if (g_set_window_pos_i386_trace_va != 0 && address == g_set_window_pos_i386_trace_va)
+            {
+                trace_set_window_pos_i386_caller_hit(c, address);
             }
 
             if (g_ebwv_window_impl_init_i386_trace_va != 0 && address == g_ebwv_window_impl_init_i386_trace_va)

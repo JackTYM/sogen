@@ -4439,6 +4439,13 @@ namespace sogen
             const auto new_height = (flags & SWP_NOSIZE) ? win->height : cy;
             const auto repaint = (flags & SWP_NOREDRAW) == 0;
 
+            if (window_trace_enabled())
+            {
+                c.win_emu.log.error("[window-trace] SetWindowPos hwnd=0x%llx class='%s' flags=0x%x host_surface=%d tid=%u\n",
+                                    static_cast<unsigned long long>(hWnd), u16_to_u8(win->class_name).c_str(), flags,
+                                    win->host_surface_window, c.thread().id);
+            }
+
             update_window_geometry(c, *win, new_x, new_y, new_width, new_height, repaint);
 
             if ((flags & SWP_HIDEWINDOW) != 0)
