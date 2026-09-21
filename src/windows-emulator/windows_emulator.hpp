@@ -20,6 +20,7 @@
 #include "pipe_ipc_channel.hpp"
 #include "process_control_channel.hpp"
 #include <platform/ui_backend.hpp>
+#include <platform/audio_backend.hpp>
 
 namespace sogen
 {
@@ -306,6 +307,7 @@ namespace sogen
         std::unique_ptr<network::dns_lookup> dns_lookup{};
         std::unique_ptr<network::socket_factory> socket_factory{};
         std::unique_ptr<ui_backend> ui{};
+        std::unique_ptr<audio_backend> audio{};
     };
 
     // Per-vCPU scheduler state: the guest thread a virtual CPU is currently executing
@@ -338,6 +340,7 @@ namespace sogen
         std::unique_ptr<network::dns_lookup> dns_lookup_{};
         std::unique_ptr<network::socket_factory> socket_factory_{};
         std::unique_ptr<ui_backend> ui_backend_{};
+        std::unique_ptr<audio_backend> audio_backend_{};
         bool setup_completed_{false};
 
         // One entry per sibling OS process this process is directly connected to (its parent, if it was
@@ -519,6 +522,16 @@ namespace sogen
             return *this->ui_backend_;
         }
 
+        audio_backend& audio()
+        {
+            return *this->audio_backend_;
+        }
+
+        const audio_backend& audio() const
+        {
+            return *this->audio_backend_;
+        }
+
         void handle_ui_event(const ui_event& event);
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);
         void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags, uint16_t button_data = 0);
@@ -610,6 +623,12 @@ namespace sogen
         // Prints BEL contention stats when SOGEN_LOCK_PROFILE is set (see kernel_lock).
         void dump_lock_profile();
 
+        // Signal a guest event from a host-owned thread (e.g. the audio render thread). The handle is resolved
+        // under the kernel lock, so it cannot race a concurrent close on an emulator thread; a handle the guest
+        // has already closed is simply ignored. Returns false without signaling if the lock is busy -- callers
+        // here drive periodic work and can retry, and blocking would stall them behind long kernel operations.
+        bool try_signal_guest_event(handle event_handle);
+
         uint64_t get_executed_instructions() const
         {
             return this->executed_instructions_;
@@ -618,6 +637,11 @@ namespace sogen
         bool uses_instruction_precision() const
         {
             return this->instruction_precision_;
+        }
+
+        bool uses_relative_time() const
+        {
+            return this->use_relative_time_;
         }
 
         uint32_t vcpu_count() const

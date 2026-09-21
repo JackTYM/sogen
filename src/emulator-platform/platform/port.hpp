@@ -77,6 +77,15 @@ namespace sogen
 #define ALPC_MESSAGE_DIRECT_ATTRIBUTE   0x04000000
 
     template <typename Traits>
+    struct ALPC_HANDLE_ATTR
+    {
+        ULONG Flags;
+        typename Traits::HANDLE Handle;
+        ULONG ObjectType;
+        ULONG DesiredAccess; // GrantedAccess on receive
+    };
+
+    template <typename Traits>
     struct PORT_DATA_ENTRY
     {
         Traits::PVOID Base;

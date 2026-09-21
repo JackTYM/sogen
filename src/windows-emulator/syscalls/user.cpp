@@ -137,6 +137,7 @@ namespace sogen
             {
                 EMU_MINMAXINFO point5;
                 EMU_WINDOWPOS window_pos;
+                EMU_WINDOWPOS32 window_pos32;
             } data{};
 
             pointer xParam{};
@@ -374,6 +375,12 @@ namespace sogen
             set_thread_window_context(c, active_handle, active_window_ptr);
         }
 
+        bool is_application_active(const syscall_context& c)
+        {
+            const auto* foreground = c.proc.windows.get(c.proc.foreground_window);
+            return foreground != nullptr && !foreground->message_only;
+        }
+
         void set_user_handle_owner(const syscall_context& c, const handle h, const uint64_t owner)
         {
             if (owner == 0)
@@ -446,23 +453,120 @@ namespace sogen
             }
         }
 
-        void queue_window_paint(const syscall_context& c, window& win)
+        std::optional<EMU_WINDOWPOS> read_window_pos_callback_output(const syscall_context& c)
         {
-            if (win.paint_message_posted)
+            const auto& result = c.get_callback_result_object();
+            if (result.output == 0)
             {
-                return;
+                return std::nullopt;
             }
 
-            if (auto* thread = c.proc.find_thread_by_id(win.thread_id))
+            if (c.proc.is_wow64_process)
             {
-                if (std::getenv("SOGEN_TRACE_THREAD_ACTIVITY"))
+                if (result.output_size < sizeof(EMU_WINDOWPOS32))
                 {
-                    c.win_emu.log.error("[wm-paint-trace] queuing WM_PAINT for hwnd=0x%x target_tid=%u\n",
-                                        static_cast<uint32_t>(win.handle), win.thread_id);
+                    return std::nullopt;
                 }
 
-                thread->post_message(c.win_emu, msg{.window = win.handle, .message = WM_PAINT, .wParam = 0, .lParam = 0});
-                win.paint_message_posted = true;
+                EMU_WINDOWPOS32 position{};
+                if (!c.win_emu.memory.try_read_memory(result.output, &position, sizeof(position)))
+                {
+                    return std::nullopt;
+                }
+
+                return EMU_WINDOWPOS{
+                    .hwnd = position.hwnd,
+                    .hwndInsertAfter = position.hwndInsertAfter,
+                    .x = position.x,
+                    .y = position.y,
+                    .cx = position.cx,
+                    .cy = position.cy,
+                    .flags = position.flags,
+                };
+            }
+
+            if (result.output_size < sizeof(EMU_WINDOWPOS))
+            {
+                return std::nullopt;
+            }
+
+            EMU_WINDOWPOS position{};
+            if (!c.win_emu.memory.try_read_memory(result.output, &position, sizeof(position)))
+            {
+                return std::nullopt;
+            }
+            return position;
+        }
+
+        void complete_window_position_change(const syscall_context& c, window& win, const uint64_t window_pos_address,
+                                             emulator_stack_allocation& changed_window_pos_alloc, std::vector<qmsg>& message_queue,
+                                             const bool update_changed_window_position)
+        {
+            EMU_WINDOWPOS position{};
+            c.emu.read_memory(window_pos_address, &position, sizeof(position));
+            if (const auto callback_position = read_window_pos_callback_output(c))
+            {
+                position = *callback_position;
+                c.emu.write_memory(window_pos_address, &position, sizeof(position));
+            }
+
+            const auto x = (position.flags & SWP_NOMOVE) != 0 ? win.x : position.x;
+            const auto y = (position.flags & SWP_NOMOVE) != 0 ? win.y : position.y;
+            const auto width = (position.flags & SWP_NOSIZE) != 0 ? win.width : position.cx;
+            const auto height = (position.flags & SWP_NOSIZE) != 0 ? win.height : position.cy;
+            update_window_geometry(c, win, x, y, width, height, false);
+
+            EMU_WINDOWPOS changed_position{
+                .hwnd = position.hwnd,
+                .hwndInsertAfter = position.hwndInsertAfter,
+                .x = win.x,
+                .y = win.y,
+                .cx = win.width,
+                .cy = win.height,
+                .flags = position.flags,
+            };
+            if ((position.flags & SWP_NOMOVE) != 0)
+            {
+                changed_position.flags |= SWP_NOCLIENTMOVE;
+            }
+            if ((position.flags & SWP_NOSIZE) != 0)
+            {
+                changed_position.flags |= SWP_NOCLIENTSIZE;
+            }
+
+            if (changed_window_pos_alloc)
+            {
+                if (!update_changed_window_position)
+                {
+                    EMU_WINDOWPOS previous_changed_position{};
+                    c.emu.read_memory(changed_window_pos_alloc.address(), &previous_changed_position, sizeof(previous_changed_position));
+                    changed_position.hwnd = previous_changed_position.hwnd;
+                    changed_position.hwndInsertAfter = previous_changed_position.hwndInsertAfter;
+                    changed_position.flags = previous_changed_position.flags;
+                }
+                c.emu.write_memory(changed_window_pos_alloc.address(), &changed_position, sizeof(changed_position));
+            }
+            else
+            {
+                changed_window_pos_alloc = c.emu.push_stack(changed_position);
+            }
+
+            for (auto& message : message_queue)
+            {
+                switch (message.message)
+                {
+                case WM_WINDOWPOSCHANGED:
+                    message.lParam = changed_window_pos_alloc.address();
+                    break;
+                case WM_MOVE:
+                    message.lParam = static_cast<uint64_t>(((win.y & 0xFFFF) << 16) | (win.x & 0xFFFF));
+                    break;
+                case WM_SIZE:
+                    message.lParam = static_cast<uint64_t>(((win.client_height() & 0xFFFF) << 16) | (win.client_width() & 0xFFFF));
+                    break;
+                default:
+                    break;
+                }
             }
         }
 
@@ -512,7 +616,25 @@ namespace sogen
                 c.win_emu.ui().invalidate(win.handle, update_rect);
             }
 
-            queue_window_paint(c, win);
+            if (c.proc.is_window_effectively_visible(win.handle))
+            {
+                if (auto* thread = c.proc.find_thread_by_id(win.thread_id))
+                {
+                    thread->queue_status_changed_bits |= QS_PAINT;
+                }
+            }
+        }
+
+        void set_internal_paint_pending(const syscall_context& c, window& win, const bool pending)
+        {
+            win.internal_paint_pending = pending;
+            if (pending && c.proc.is_window_effectively_visible(win.handle))
+            {
+                if (auto* thread = c.proc.find_thread_by_id(win.thread_id))
+                {
+                    thread->queue_status_changed_bits |= QS_PAINT;
+                }
+            }
         }
 
         // Invalidate a window together with its visible descendant controls. Used when a window
@@ -789,7 +911,6 @@ namespace sogen
         void validate_window(window& win)
         {
             win.update_pending = false;
-            win.paint_message_posted = false;
             win.erase_pending = false;
             win.update_rect = {};
         }
@@ -880,7 +1001,24 @@ namespace sogen
                 {
                     if (message == WM_WINDOWPOSCHANGING)
                     {
-                        c.emu.read_memory(l_param, &args.data.window_pos, sizeof(args.data.window_pos));
+                        EMU_WINDOWPOS window_pos{};
+                        c.emu.read_memory(l_param, &window_pos, sizeof(window_pos));
+                        if (c.proc.is_wow64_process)
+                        {
+                            args.data.window_pos32 = {
+                                .hwnd = static_cast<uint32_t>(window_pos.hwnd),
+                                .hwndInsertAfter = static_cast<uint32_t>(window_pos.hwndInsertAfter),
+                                .x = window_pos.x,
+                                .y = window_pos.y,
+                                .cx = window_pos.cx,
+                                .cy = window_pos.cy,
+                                .flags = window_pos.flags,
+                            };
+                        }
+                        else
+                        {
+                            args.data.window_pos = window_pos;
+                        }
                     }
                     else
                     {
@@ -2077,7 +2215,7 @@ namespace sogen
 
         hdc handle_NtUserBeginPaint(const syscall_context& c, const hwnd window, const emulator_object<EMU_PAINTSTRUCT> paint_struct)
         {
-            const auto* win = c.proc.windows.get(window);
+            auto* win = c.proc.windows.get(window);
             if (!win)
             {
                 return 0;
@@ -2094,12 +2232,14 @@ namespace sogen
                 EMU_PAINTSTRUCT ps{};
                 ps.paint_hdc = dc;
                 ps.fErase = win->erase_pending ? TRUE : FALSE;
-                ps.rcPaint = win->update_pending ? win->update_rect : get_client_rect(*win);
+                ps.rcPaint = win->update_pending ? win->update_rect : RECT{};
                 ps.fRestore = FALSE;
                 ps.fIncUpdate = FALSE;
                 paint_struct.write(ps);
             }
 
+            validate_window(*win);
+            win->internal_paint_pending = false;
             return dc;
         }
 
@@ -2135,7 +2275,6 @@ namespace sogen
                 (void)handle_NtGdiDeleteObjectApp(c, static_cast<uint32_t>(ps.paint_hdc));
             }
 
-            validate_window(*win);
             return TRUE;
         }
 
@@ -2966,6 +3105,9 @@ namespace sogen
             win.height = height;
             win.thread_id = c.thread().id;
             win.handle = handle.bits;
+            win.message_only = is_message_only;
+            // Record the owning thread in the shared handle entry so client-side GetWindowThreadProcessId works.
+            c.proc.user_handles.set_owner(static_cast<uint32_t>(handle.value.id), win.thread_id);
             if (!is_message_only)
             {
                 win.parent_handle = has_child_parent ? parent : c.proc.default_desktop_window_handle.bits;
@@ -3153,6 +3295,7 @@ namespace sogen
 
             window_create_state state{};
             state.handle = handle.bits;
+            state.parent_handle = has_child_parent && parent_win ? parent_win->handle : 0;
 
             EMU_CREATESTRUCT cs{};
             cs.lpCreateParams = l_param;
@@ -3181,8 +3324,13 @@ namespace sogen
                 {.message = WM_CREATE, .wParam = 0, .lParam = state.create_struct_alloc.address()},
                 {.message = WM_NCCALCSIZE, .wParam = 0, .lParam = state.window_rect_alloc.address()},
                 {.message = WM_NCCREATE, .wParam = 0, .lParam = state.create_struct_alloc.address()},
-                {.message = WM_GETMINMAXINFO, .wParam = 0, .lParam = state.min_max_info_alloc.address()},
             };
+            const bool notify_parent = has_child_parent && (ex_style & WS_EX_NOPARENTNOTIFY) == 0;
+            const auto parent_notify_wparam = static_cast<uint64_t>(WM_CREATE) | (static_cast<uint64_t>(menu & 0xFFFF) << 16);
+            if (!has_child_parent)
+            {
+                state.message_queue.push_back({.message = WM_GETMINMAXINFO, .wParam = 0, .lParam = state.min_max_info_alloc.address()});
+            }
 
             if ((style & WS_VISIBLE) != 0)
             {
@@ -3193,31 +3341,78 @@ namespace sogen
                     c.proc.set_foreground_window(handle.bits);
                 }
 
-                EMU_WINDOWPOS wp{};
-                wp.hwnd = handle.bits;
-                wp.hwndInsertAfter = 0;
-                wp.x = x;
-                wp.y = y;
-                wp.cx = width;
-                wp.cy = height;
-                wp.flags = SWP_SHOWWINDOW;
-                state.window_pos_alloc = c.emu.push_stack(wp);
-
                 const auto move_lparam = static_cast<uint64_t>(((y & 0xFFFF) << 16) | (x & 0xFFFF));
-                const auto size_lparam = static_cast<uint64_t>(((height & 0xFFFF) << 16) | (width & 0xFFFF));
+                const auto size_lparam = static_cast<uint64_t>(((win.client_height() & 0xFFFF) << 16) | (win.client_width() & 0xFFFF));
 
-                const std::initializer_list<qmsg> sw_messages = {
-                    {.message = WM_MOVE, .wParam = 0, .lParam = move_lparam},
-                    {.message = WM_SIZE, .wParam = 0, .lParam = size_lparam},
-                    {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = state.window_pos_alloc.address()},
-                    {.message = WM_SETFOCUS, .wParam = 0, .lParam = 0},
-                    {.message = WM_ACTIVATE, .wParam = 1, .lParam = 0},
-                    {.message = WM_NCACTIVATE, .wParam = 1, .lParam = 0},
-                    {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
-                    {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
-                    {.message = WM_SHOWWINDOW, .wParam = 1, .lParam = 0},
-                };
-                state.message_queue.insert(state.message_queue.begin(), sw_messages);
+                if (has_child_parent)
+                {
+                    std::vector<qmsg> child_messages{{.message = WM_SHOWWINDOW, .wParam = TRUE, .lParam = 0}};
+                    if (notify_parent)
+                    {
+                        child_messages.push_back({.message = WM_PARENTNOTIFY, .wParam = parent_notify_wparam, .lParam = handle.bits});
+                    }
+                    child_messages.push_back({.message = WM_MOVE, .wParam = 0, .lParam = move_lparam});
+                    child_messages.push_back({.message = WM_SIZE, .wParam = 0, .lParam = size_lparam});
+                    state.message_queue.insert(state.message_queue.begin(), child_messages.begin(), child_messages.end());
+                }
+                else
+                {
+                    const EMU_WINDOWPOS show_position{
+                        .hwnd = handle.bits,
+                        .hwndInsertAfter = 0,
+                        .x = 0,
+                        .y = 0,
+                        .cx = 0,
+                        .cy = 0,
+                        .flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                    };
+                    const EMU_WINDOWPOS activation_position{
+                        .hwnd = handle.bits,
+                        .hwndInsertAfter = 0,
+                        .x = 0,
+                        .y = 0,
+                        .cx = 0,
+                        .cy = 0,
+                        .flags = SWP_NOMOVE | SWP_NOSIZE,
+                    };
+                    const EMU_WINDOWPOS changed_position{
+                        .hwnd = handle.bits,
+                        .hwndInsertAfter = 0,
+                        .x = x,
+                        .y = y,
+                        .cx = width,
+                        .cy = height,
+                        .flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE,
+                    };
+                    state.window_pos_alloc = c.emu.push_stack(show_position);
+                    state.activation_window_pos_alloc = c.emu.push_stack(activation_position);
+                    state.changed_window_pos_alloc = c.emu.push_stack(changed_position);
+
+                    std::vector<qmsg> show_messages = {
+                        {.message = WM_MOVE, .wParam = 0, .lParam = move_lparam},
+                        {.message = WM_SIZE, .wParam = 0, .lParam = size_lparam},
+                        {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = 0},
+                        {.message = WM_SETFOCUS, .wParam = 0, .lParam = 0},
+                        {.message = WM_ACTIVATE, .wParam = 1, .lParam = 0},
+                        {.message = WM_NCACTIVATE, .wParam = 1, .lParam = 0},
+                    };
+                    if (!is_message_only && !is_application_active(c))
+                    {
+                        show_messages.push_back({.message = WM_ACTIVATEAPP, .wParam = TRUE, .lParam = 0});
+                    }
+                    const std::initializer_list<qmsg> position_messages = {
+                        {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.activation_window_pos_alloc.address()},
+                        {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
+                        {.message = WM_SHOWWINDOW, .wParam = 1, .lParam = 0},
+                    };
+                    show_messages.insert(show_messages.end(), position_messages);
+                    state.message_queue.insert(state.message_queue.begin(), show_messages.begin(), show_messages.end());
+                }
+            }
+            else if (notify_parent)
+            {
+                state.message_queue.insert(state.message_queue.begin(),
+                                           {.message = WM_PARENTNOTIFY, .wParam = parent_notify_wparam, .lParam = handle.bits});
             }
 
             if (c.win_emu.callbacks.on_generic_activity)
@@ -3258,7 +3453,35 @@ namespace sogen
                                              const DWORD /*flags*/, const pointer /*acbi_buffer*/)
         {
             auto& s = c.get_completion_state<window_create_state>();
-            const auto* win = c.proc.windows.get(s.handle);
+            auto* win = c.proc.windows.get(s.handle);
+
+            const auto release_window_create_allocations = [&] {
+                if (s.window_pos_alloc)
+                {
+                    c.emu.pop_stack(s.changed_window_pos_alloc);
+                    c.emu.pop_stack(s.activation_window_pos_alloc);
+                    c.emu.pop_stack(s.window_pos_alloc);
+                }
+
+                c.emu.pop_stack(s.min_max_info_alloc);
+                c.emu.pop_stack(s.window_rect_alloc);
+                c.emu.pop_stack(s.create_struct_alloc);
+            };
+
+            if (!win)
+            {
+                release_window_create_allocations();
+                return 0;
+            }
+
+            if (s.pending_window_pos_address != 0)
+            {
+                const bool activation_position =
+                    s.activation_window_pos_alloc && s.pending_window_pos_address == s.activation_window_pos_alloc.address();
+                complete_window_position_change(c, *win, s.pending_window_pos_address, s.changed_window_pos_alloc, s.message_queue,
+                                                !activation_position);
+                s.pending_window_pos_address = 0;
+            }
 
             if (s.cbt_hook_pending)
             {
@@ -3269,18 +3492,27 @@ namespace sogen
 
             if (!s.message_queue.empty())
             {
+                const auto& next = s.message_queue.back();
+                if (next.message == WM_PARENTNOTIFY)
+                {
+                    const auto* parent_win = c.proc.windows.get(s.parent_handle);
+                    if (parent_win)
+                    {
+                        dispatch_next_message(c, callback_id::NtUserCreateWindowEx, std::move(s), *parent_win, s.message_queue);
+                        return {};
+                    }
+                    s.message_queue.pop_back();
+                }
+                else if (next.message == WM_WINDOWPOSCHANGING)
+                {
+                    s.pending_window_pos_address = next.lParam;
+                }
+
                 dispatch_next_message(c, callback_id::NtUserCreateWindowEx, std::move(s), *win, s.message_queue);
                 return {};
             }
 
-            if (s.window_pos_alloc)
-            {
-                c.emu.pop_stack(s.window_pos_alloc);
-            }
-
-            c.emu.pop_stack(s.min_max_info_alloc);
-            c.emu.pop_stack(s.window_rect_alloc);
-            c.emu.pop_stack(s.create_struct_alloc);
+            release_window_create_allocations();
 
             return s.handle;
         }
@@ -3312,6 +3544,19 @@ namespace sogen
         BOOL completion_NtUserDestroyWindow(const syscall_context& c, const hwnd /*window*/)
         {
             auto& s = c.get_completion_state<window_destroy_state>();
+            if (!s.frames.empty())
+            {
+                auto& frame = s.frames.back();
+                if (frame.pending_window_pos_address != 0)
+                {
+                    if (auto* win = c.proc.windows.get(frame.handle))
+                    {
+                        complete_window_position_change(c, *win, frame.pending_window_pos_address, frame.changed_window_pos_alloc,
+                                                        frame.message_queue, true);
+                    }
+                    frame.pending_window_pos_address = 0;
+                }
+            }
             return advance_window_destroy(c, s);
         }
 
@@ -3429,6 +3674,7 @@ namespace sogen
 
             const bool want_visible = (cmd_show != 0); // SW_HIDE
             const bool was_visible = (win->style & WS_VISIBLE) != 0;
+            const bool activate_window = cmd_show != SW_SHOWNOACTIVATE && cmd_show != SW_SHOWMINNOACTIVE && cmd_show != SW_SHOWNA;
 
             if (want_visible == was_visible)
             {
@@ -3438,15 +3684,28 @@ namespace sogen
             window_show_state state{};
             state.was_visible = was_visible;
 
-            EMU_WINDOWPOS wp{};
-            wp.hwnd = hwnd;
-            wp.hwndInsertAfter = 0;
-            wp.x = win->x;
-            wp.y = win->y;
-            wp.cx = win->width;
-            wp.cy = win->height;
-            wp.flags = want_visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
-            state.window_pos_alloc = c.emu.push_stack(wp);
+            const auto visibility_flags = static_cast<uint32_t>(want_visible ? SWP_SHOWWINDOW | (activate_window ? 0 : SWP_NOACTIVATE)
+                                                                             : SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
+            const EMU_WINDOWPOS changing_position{
+                .hwnd = hwnd,
+                .hwndInsertAfter = 0,
+                .x = 0,
+                .y = 0,
+                .cx = 0,
+                .cy = 0,
+                .flags = SWP_NOMOVE | SWP_NOSIZE | visibility_flags,
+            };
+            const EMU_WINDOWPOS changed_position{
+                .hwnd = hwnd,
+                .hwndInsertAfter = 0,
+                .x = win->x,
+                .y = win->y,
+                .cx = win->width,
+                .cy = win->height,
+                .flags = SWP_NOMOVE | SWP_NOSIZE | visibility_flags | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE,
+            };
+            state.window_pos_alloc = c.emu.push_stack(changing_position);
+            state.changed_window_pos_alloc = c.emu.push_stack(changed_position);
 
             if (window_trace_enabled())
             {
@@ -3473,19 +3732,46 @@ namespace sogen
                 }
 
                 const auto move_lparam = static_cast<uint64_t>(((win->y & 0xFFFF) << 16) | (win->x & 0xFFFF));
-                const auto size_lparam = static_cast<uint64_t>(((win->height & 0xFFFF) << 16) | (win->width & 0xFFFF));
+                const auto size_lparam = static_cast<uint64_t>(((win->client_height() & 0xFFFF) << 16) | (win->client_width() & 0xFFFF));
 
                 state.message_queue = {
                     {.message = WM_MOVE, .wParam = 0, .lParam = move_lparam},
                     {.message = WM_SIZE, .wParam = 0, .lParam = size_lparam},
-                    {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = state.window_pos_alloc.address()},
-                    {.message = WM_SETFOCUS, .wParam = 0, .lParam = 0},
-                    {.message = WM_ACTIVATE, .wParam = 1, .lParam = 0},
-                    {.message = WM_NCACTIVATE, .wParam = TRUE, .lParam = 0},
-                    {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
+                    {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = 0},
+                };
+
+                if (activate_window)
+                {
+                    const EMU_WINDOWPOS activation_position{
+                        .hwnd = hwnd,
+                        .hwndInsertAfter = 0,
+                        .x = 0,
+                        .y = 0,
+                        .cx = 0,
+                        .cy = 0,
+                        .flags = SWP_NOMOVE | SWP_NOSIZE,
+                    };
+                    state.activation_window_pos_alloc = c.emu.push_stack(activation_position);
+
+                    state.message_queue.push_back({.message = WM_SETFOCUS, .wParam = 0, .lParam = 0});
+                    state.message_queue.push_back({.message = WM_ACTIVATE, .wParam = 1, .lParam = 0});
+                    state.message_queue.push_back({.message = WM_NCACTIVATE, .wParam = TRUE, .lParam = 0});
+                    if (!win->message_only && !is_application_active(c))
+                    {
+                        state.message_queue.push_back({.message = WM_ACTIVATEAPP, .wParam = TRUE, .lParam = 0});
+                    }
+                    state.message_queue.push_back({
+                        .message = WM_WINDOWPOSCHANGING,
+                        .wParam = 0,
+                        .lParam = state.activation_window_pos_alloc.address(),
+                    });
+                }
+
+                const std::initializer_list<qmsg> show_messages = {
                     {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
                     {.message = WM_SHOWWINDOW, .wParam = TRUE, .lParam = 0},
                 };
+                state.message_queue.insert(state.message_queue.end(), show_messages);
 
                 win->style |= WS_VISIBLE;
             }
@@ -3495,7 +3781,7 @@ namespace sogen
                     {.message = WM_KILLFOCUS, .wParam = 0, .lParam = 0},
                     {.message = WM_ACTIVATE, .wParam = 0, .lParam = 0},
                     {.message = WM_NCACTIVATE, .wParam = FALSE, .lParam = 0},
-                    {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = state.window_pos_alloc.address()},
+                    {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = 0},
                     {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
                     {.message = WM_SHOWWINDOW, .wParam = FALSE, .lParam = 0},
                 };
@@ -3521,14 +3807,34 @@ namespace sogen
         BOOL completion_NtUserShowWindow(const syscall_context& c, const hwnd hwnd, const LONG /*cmd_show*/)
         {
             auto& s = c.get_completion_state<window_show_state>();
-            const auto* win = c.proc.windows.get(hwnd);
+            auto* win = c.proc.windows.get(hwnd);
+
+            if (s.pending_window_pos_address != 0)
+            {
+                const bool activation_position =
+                    s.activation_window_pos_alloc && s.pending_window_pos_address == s.activation_window_pos_alloc.address();
+                complete_window_position_change(c, *win, s.pending_window_pos_address, s.changed_window_pos_alloc, s.message_queue,
+                                                !activation_position);
+                s.pending_window_pos_address = 0;
+            }
 
             if (!s.message_queue.empty())
             {
+                const auto& next = s.message_queue.back();
+                if (next.message == WM_WINDOWPOSCHANGING)
+                {
+                    s.pending_window_pos_address = next.lParam;
+                }
+
                 dispatch_next_message(c, callback_id::NtUserShowWindow, std::move(s), *win, s.message_queue);
                 return {};
             }
 
+            if (s.activation_window_pos_alloc)
+            {
+                c.emu.pop_stack(s.activation_window_pos_alloc);
+            }
+            c.emu.pop_stack(s.changed_window_pos_alloc);
             c.emu.pop_stack(s.window_pos_alloc);
 
             return s.was_visible ? TRUE : FALSE;
@@ -3650,7 +3956,6 @@ namespace sogen
                 {
                     (void)handle_NtGdiFlush(c);
                     present_existing_guest_window_surface(c, *win);
-                    validate_window(*win);
                 }
             }
 
@@ -3892,6 +4197,11 @@ namespace sogen
 
         void collect_pending_paint_tree(const syscall_context& c, window& win, std::vector<uint64_t>& order)
         {
+            if (!c.proc.is_window_effectively_visible(win.handle))
+            {
+                return;
+            }
+
             if (win.update_pending && win.thread_id == c.vcpu.active_thread->id)
             {
                 order.push_back(static_cast<uint64_t>(win.handle));
@@ -3900,7 +4210,7 @@ namespace sogen
             for (auto& [index, child] : c.proc.windows)
             {
                 (void)index;
-                if (child.parent_handle == win.handle && (child.style & WS_VISIBLE) != 0)
+                if (child.parent_handle == win.handle)
                 {
                     collect_pending_paint_tree(c, child, order);
                 }
@@ -3913,8 +4223,6 @@ namespace sogen
             {
                 if (auto* win = c.proc.windows.get(static_cast<hwnd>(state.pending.back())))
                 {
-                    // Painting continues asynchronously through completion_NtUserUpdateWindow; the guest is
-                    // suspended here, so this immediate return value is unused (matches handle_NtUserShowWindow).
                     dispatch_window_message(c, callback_id::NtUserUpdateWindow, std::move(state), *win, WM_PAINT);
                     return {};
                 }
@@ -3931,16 +4239,8 @@ namespace sogen
                 return FALSE;
             }
 
-            // UpdateWindow paints synchronously, bypassing the message queue. Apps such as the open-iw5 splash
-            // rely on this to display content without running a message loop, so a merely queued WM_PAINT would
-            // never be pumped. Dispatch WM_PAINT now to the window and its invalid visible child controls.
-            // Cross-thread windows cannot be painted on this thread, so fall back to posting the paint.
             if (win->thread_id != c.vcpu.active_thread->id)
             {
-                if (win->update_pending)
-                {
-                    queue_window_paint(c, *win);
-                }
                 return TRUE;
             }
 
@@ -3970,7 +4270,6 @@ namespace sogen
                 {
                     (void)handle_NtGdiFlush(c);
                     present_existing_guest_window_surface(c, *win);
-                    validate_window(*win);
                 }
             }
 
@@ -4824,7 +5123,7 @@ namespace sogen
                 validate_window(*win);
             }
 
-            if ((flags & (RDW_INVALIDATE | RDW_INTERNALPAINT)) != 0)
+            if ((flags & RDW_INVALIDATE) != 0)
             {
                 std::optional<RECT> rect{};
                 if (update_rect)
@@ -4835,9 +5134,14 @@ namespace sogen
                 invalidate_window(c, *win, rect, (flags & RDW_ERASE) != 0 && (flags & RDW_NOERASE) == 0);
             }
 
+            if ((flags & RDW_INTERNALPAINT) != 0)
+            {
+                set_internal_paint_pending(c, *win, true);
+            }
+
             if ((flags & RDW_NOINTERNALPAINT) != 0)
             {
-                win->paint_message_posted = false;
+                set_internal_paint_pending(c, *win, false);
             }
 
             return TRUE;

@@ -105,14 +105,25 @@ namespace sogen
         template <typename T>
         T read_memory(const uint64_t address) const
         {
+            static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable!");
             T value{};
             this->read_memory(address, &value, sizeof(value));
             return value;
         }
 
         template <typename T>
+        T read_memory(const uint64_t address, const size_t size) const
+        {
+            static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable!");
+            T value{};
+            this->read_memory(address, &value, std::min(size, sizeof(T)));
+            return value;
+        }
+
+        template <typename T>
         T read_memory(const void* address) const
         {
+            static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable!");
             return this->read_memory<T>(reinterpret_cast<uint64_t>(address));
         }
 
@@ -134,12 +145,14 @@ namespace sogen
         template <typename T>
         void write_memory(const uint64_t address, const T& value)
         {
+            static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable!");
             this->write_memory(address, &value, sizeof(value));
         }
 
         template <typename T>
         void write_memory(void* address, const T& value)
         {
+            static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable!");
             this->write_memory(reinterpret_cast<uint64_t>(address), &value, sizeof(value));
         }
 
