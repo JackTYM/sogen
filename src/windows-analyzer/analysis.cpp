@@ -338,6 +338,11 @@ namespace sogen
         uint64_t g_ebwv_create_controller_params_helper_i386_trace_va = 0;
         uint64_t g_ebwv_webview_runtime_class_initialize_i386_trace_va = 0;
 
+        // Host wall-clock timestamp of the most recent RuntimeClassInitialize hit, used to measure
+        // the real elapsed time until CreateCoreWebView2ControllerCompletedHandler::Invoke fires (see
+        // project_solidworks_bringup.md #387/#388).
+        std::optional<std::chrono::steady_clock::time_point> g_ebwv_runtime_class_initialize_time{};
+
         // ShowWindow/ShowWindowAsync/SetWindowPos's own export RVAs in the shared root's 32-bit
         // (SysWOW64) user32.dll, resolved via pefile's export table and cross-checked against
         // llvm-objdump -p's own export listing (exact match) -- see project_solidworks_bringup.md
@@ -3612,11 +3617,19 @@ namespace sogen
             const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
             const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
 
+            double elapsed_since_runtime_class_initialize_ms = -1.0;
+            if (g_ebwv_runtime_class_initialize_time.has_value())
+            {
+                const auto elapsed = std::chrono::steady_clock::now() - *g_ebwv_runtime_class_initialize_time;
+                elapsed_since_runtime_class_initialize_ms = std::chrono::duration<double, std::milli>(elapsed).count();
+            }
+
             c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 CreateCoreWebView2ControllerCompletedHandler::Invoke at 0x%llx, "
-                                 "this=0x%x hresult=0x%x controller=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
+                                 "this=0x%x hresult=0x%x controller=0x%x tid=%u return=0x%x (%s+0x%llx) "
+                                 "elapsed_since_runtime_class_initialize_ms=%.1f\n",
                                  static_cast<unsigned long long>(address), this_ptr, hresult_arg, controller_arg,
                                  c.win_emu->current_thread().id, return_address, caller_mod_name,
-                                 static_cast<unsigned long long>(caller_offset));
+                                 static_cast<unsigned long long>(caller_offset), elapsed_since_runtime_class_initialize_ms);
         }
 
         void trace_ebwv_create_controller_params_helper_i386_hit(const analysis_context& c, const uint64_t address)
@@ -3657,6 +3670,8 @@ namespace sogen
             const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
             const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
             const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            g_ebwv_runtime_class_initialize_time = std::chrono::steady_clock::now();
 
             c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 EmbeddedBrowserWebView::RuntimeClassInitialize at 0x%llx, "
                                  "this=0x%x arg0=0x%x arg1=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
