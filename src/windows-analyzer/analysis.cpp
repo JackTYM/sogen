@@ -1047,6 +1047,47 @@ namespace sogen
                                  static_cast<unsigned long long>(caller_offset));
         }
 
+        // Detects a same-thread code-flow boundary crossing between msedge.dll and
+        // embeddedbrowserwebview.dll (either architecture): tracks, per tid, the last of these
+        // two modules that thread's own instruction stream actually entered, and logs any
+        // change. Unlike trace_module_entry_if_new's shared MODULE_ENTRY_TRACE_CAP (which
+        // sldim.exe's own code alone can exhaust before this pair ever gets a turn), this has
+        // its own small, dedicated budget since real crossings are expected to be rare, not
+        // per-instruction-volume.
+        constexpr size_t EBWV_MSEDGE_XMODULE_TRACE_CAP = 500;
+        std::unordered_map<uint32_t, std::string> g_ebwv_msedge_xmodule_last{};
+        size_t g_ebwv_msedge_xmodule_hits = 0;
+
+        void trace_ebwv_msedge_xmodule_crossing(const analysis_context& c, const uint32_t tid, const uint64_t address)
+        {
+            const auto* mod = c.win_emu->mod_manager.find_by_address(address);
+            if (!mod || (mod->name != "msedge.dll" && mod->name != "embeddedbrowserwebview.dll"))
+            {
+                return;
+            }
+
+            const std::string label = mod->name + (mod->machine == IMAGE_FILE_MACHINE_I386 ? " (x86)" : " (x64)");
+
+            auto it = g_ebwv_msedge_xmodule_last.find(tid);
+            if (g_ebwv_msedge_xmodule_hits < EBWV_MSEDGE_XMODULE_TRACE_CAP)
+            {
+                if (it == g_ebwv_msedge_xmodule_last.end())
+                {
+                    ++g_ebwv_msedge_xmodule_hits;
+                    c.win_emu->log.error("[ebwv-msedge-xmodule-trace] tid=%u FIRST ENTRY into %s at %s+0x%llx\n", tid, label.c_str(),
+                                         mod->name.c_str(), static_cast<unsigned long long>(address - mod->image_base));
+                }
+                else if (it->second != label)
+                {
+                    ++g_ebwv_msedge_xmodule_hits;
+                    c.win_emu->log.error("[ebwv-msedge-xmodule-trace] tid=%u CROSSING: %s -> %s at %s+0x%llx\n", tid, it->second.c_str(),
+                                         label.c_str(), mod->name.c_str(), static_cast<unsigned long long>(address - mod->image_base));
+                }
+            }
+
+            g_ebwv_msedge_xmodule_last[tid] = label;
+        }
+
         void arm_ebwv_dcomp_gate_caller_watches(const analysis_context& c)
         {
             if (g_ebwv_dcomp_gate_caller_watches_armed)
@@ -4644,6 +4685,11 @@ namespace sogen
             if (g_ebwv_prop58_getter_entry_va != 0 && address == g_ebwv_prop58_getter_entry_va)
             {
                 trace_ebwv_prop58_getter_entry_hit(c, c.win_emu->current_thread().id);
+            }
+
+            if (std::getenv("SOGEN_TRACE_EBWV_MSEDGE_XMODULE"))
+            {
+                trace_ebwv_msedge_xmodule_crossing(c, c.win_emu->current_thread().id, address);
             }
 
             if (std::getenv("SOGEN_TRACE_MODULE_ENTRY"))
