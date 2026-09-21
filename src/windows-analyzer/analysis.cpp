@@ -232,6 +232,21 @@ namespace sogen
         constexpr uint64_t EBWV_CLIENT_WINDOW_INIT_INTERNAL_I386_RVA = 0xf1880;
         uint64_t g_ebwv_client_window_init_internal_i386_trace_va = 0;
 
+        // embeddedbrowserwebview.dll's own free function `bool ReadEnvironmentVariable(const wchar_t*
+        // name, SimpleString* out)`, resolved and disassembly-confirmed from the DLL's own public PDB
+        // (see project_solidworks_bringup.md #374): `ClientWindow::Initialize()` calls it, past its
+        // `InitInternalWindow` call, with the literal name `WEBVIEW2_EDGEVIEW_VISUAL_HOSTING_HELPER_HWND`.
+        // If the variable is present and its value parses as a nonzero `base::StringToUint`, that value
+        // is used directly as the `parent` HWND argument to a SECOND `gfx::WindowImpl::Init` call (for a
+        // separate `ClientVisualWindow` object, not `ClientWindowWin32`) -- otherwise that second window
+        // is created parent-less, exactly like the always-hidden `SingletonHwnd` case #369/#370 already
+        // proved benign. This is the real WebView2 mechanism for handing a DirectComposition visual
+        // hosting HWND across the client/browser process boundary; watching it directly (rather than only
+        // inferring presence/absence from the existing WindowImpl::Init hook's `parent=` field) confirms
+        // whether the variable is ever queried at all and what name it's queried under.
+        constexpr uint64_t EBWV_READ_ENV_VAR_I386_RVA = 0xeafac;
+        uint64_t g_ebwv_read_env_var_i386_trace_va = 0;
+
         // mojo::PlatformChannel::PlatformChannel()'s own RVA in msedge.dll 150.0.7871.187, resolved
         // from Microsoft's own public PDB by walking one CreateNamedPipeW caller back (see
         // project_solidworks_bringup.md #279); its constructor body inlines the anonymous-namespace
@@ -2792,6 +2807,10 @@ namespace sogen
                 g_ebwv_client_window_init_internal_i386_trace_va = mod.image_base + EBWV_CLIENT_WINDOW_INIT_INTERNAL_I386_RVA;
                 c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ClientWindowWin32::InitInternalWindow at 0x%llx\n",
                                      static_cast<unsigned long long>(g_ebwv_client_window_init_internal_i386_trace_va));
+
+                g_ebwv_read_env_var_i386_trace_va = mod.image_base + EBWV_READ_ENV_VAR_I386_RVA;
+                c.win_emu->log.error("[create-window-ex-caller-trace] watching I386 ReadEnvironmentVariable at 0x%llx\n",
+                                     static_cast<unsigned long long>(g_ebwv_read_env_var_i386_trace_va));
             }
 
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_NAMED_PIPE_CREATE"))
@@ -3118,6 +3137,40 @@ namespace sogen
             c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 ClientWindowWin32::InitInternalWindow at 0x%llx, this=0x%x "
                                  "hwnd_arg=0x%x tid=%u return=0x%x (%s+0x%llx)\n",
                                  static_cast<unsigned long long>(address), this_ptr, hwnd_arg, c.win_emu->current_thread().id,
+                                 return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
+        }
+
+        void trace_ebwv_read_env_var_i386_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.read_stack_pointer();
+
+            uint32_t return_address = 0;
+            uint32_t name_ptr = 0;
+            uint32_t out_ptr = 0;
+            emu.try_read_memory(esp, &return_address, sizeof(return_address));
+            emu.try_read_memory(esp + 4, &name_ptr, sizeof(name_ptr));
+            emu.try_read_memory(esp + 8, &out_ptr, sizeof(out_ptr));
+
+            std::string name;
+            try
+            {
+                if (name_ptr != 0)
+                {
+                    name = u16_to_u8(read_string<char16_t>(c.win_emu->memory, name_ptr));
+                }
+            }
+            catch (...)
+            {
+            }
+
+            const auto* caller_mod_name = c.win_emu->mod_manager.find_name(return_address);
+            const auto* caller_mod = c.win_emu->mod_manager.find_by_address(return_address);
+            const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+            c.win_emu->log.error("[create-window-ex-caller-trace] hit I386 ReadEnvironmentVariable at 0x%llx, name=\"%s\" out=0x%x "
+                                 "tid=%u return=0x%x (%s+0x%llx)\n",
+                                 static_cast<unsigned long long>(address), name.c_str(), out_ptr, c.win_emu->current_thread().id,
                                  return_address, caller_mod_name, static_cast<unsigned long long>(caller_offset));
         }
 
@@ -4537,6 +4590,11 @@ namespace sogen
             if (g_ebwv_client_window_init_internal_i386_trace_va != 0 && address == g_ebwv_client_window_init_internal_i386_trace_va)
             {
                 trace_ebwv_client_window_init_internal_i386_hit(c, address);
+            }
+
+            if (g_ebwv_read_env_var_i386_trace_va != 0 && address == g_ebwv_read_env_var_i386_trace_va)
+            {
+                trace_ebwv_read_env_var_i386_hit(c, address);
             }
 
             if (g_platform_channel_ctor_trace_va != 0 && address == g_platform_channel_ctor_trace_va)
