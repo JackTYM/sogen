@@ -119,8 +119,15 @@ namespace sogen
         // reads [rsp] at the watched address, which at a function's own entry is ABI-guaranteed to be the
         // real, immediate return address -- a definitive, single-frame answer to which of its 15 known
         // call sites (#368) -- SingletonHwnd::SingletonHwnd, HWNDMessageHandler::Init, or one of the
-        // other 13 -- issues each live call.
-        constexpr std::array<traced_symbol, 21> EBWV_COMPOSITOR_CHAIN_TARGETS{{
+        // other 13 -- issues each live call. #370 confirmed live that WindowImpl::Init's return address
+        // for the hwnd=0x6800024 window lands inside SingletonHwnd::SingletonHwnd, closing that thread,
+        // and per real Chromium source (chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc,
+        // ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc) the real (non-headless) browser
+        // window path is BrowserDesktopWindowTreeHostWin::Init -> DesktopWindowTreeHostWin::Init ->
+        // HWNDMessageHandler::Create -- disassembly-confirmed here too (both direct calls land exactly on
+        // the RVAs below). Both are watched to see whether the chain is entered at all above the
+        // already-confirmed-dead HWNDMessageHandler::Create.
+        constexpr std::array<traced_symbol, 23> EBWV_COMPOSITOR_CHAIN_TARGETS{{
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::EmbeddedBrowserNativeWidgetAura", 0xf2d19fe},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::InitNativeWidget", 0xf2d33e0},
             {"embedded_browser::EmbeddedBrowserNativeWidgetAura::GetDcompDevice", 0xf2d2200},
@@ -142,6 +149,8 @@ namespace sogen
             {"views::HWNDMessageHandler::Create", 0x3076210},
             {"views::HWNDMessageHandler::Init", 0x31221c0},
             {"gfx::WindowImpl::Init", 0x2cdf868},
+            {"views::DesktopWindowTreeHostWin::Init", 0x3075ea0},
+            {"BrowserDesktopWindowTreeHostWin::Init", 0x3075c80},
         }};
         std::array<uint64_t, EBWV_COMPOSITOR_CHAIN_TARGETS.size()> g_ebwv_compositor_chain_trace_vas{};
 
