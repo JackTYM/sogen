@@ -64,15 +64,21 @@ namespace sogen
     struct job_object : ref_counted_object
     {
         std::u16string name{};
+        bool kill_on_close{false};
+        std::vector<uint32_t> assigned_child_record_ids{};
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
+            buffer.write(this->kill_on_close);
+            buffer.write_vector(this->assigned_child_record_ids);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->name);
+            buffer.read(this->kill_on_close);
+            buffer.read_vector(this->assigned_child_record_ids);
         }
     };
 

@@ -287,6 +287,36 @@ namespace sogen
                 }
             }
 
+            if (value.type == handle_types::job)
+            {
+                auto* job = c.proc.jobs.get(h);
+
+                // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (see handle_NtSetInformationJobObject) is a real
+                // NT behaviour that fires on the last handle closing, not on any explicit terminate
+                // call - a sandbox broker relying on it to reap a child it's done with never issues
+                // NtTerminateProcess against that child at all.
+                if (job && job->ref_count == 1 && job->kill_on_close)
+                {
+                    for (const auto record_id : job->assigned_child_record_ids)
+                    {
+                        const auto child_it = c.proc.child_processes.find(record_id);
+                        if (child_it == c.proc.child_processes.end() || child_it->second.exit_status != STATUS_PENDING)
+                        {
+                            continue;
+                        }
+
+                        auto* channel = c.win_emu.find_child_control_channel(record_id);
+                        if (channel)
+                        {
+                            channel->force_kill();
+                        }
+
+                        child_it->second.exit_status = STATUS_SUCCESS;
+                        c.win_emu.drop_child_control_channel(record_id);
+                    }
+                }
+            }
+
             if (value.type == handle_types::file)
             {
                 auto* file = c.proc.files.get(h);
