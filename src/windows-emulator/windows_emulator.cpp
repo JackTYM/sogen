@@ -2282,7 +2282,7 @@ namespace sogen
 
     void windows_emulator::deliver_mouse_move(const int32_t x, const int32_t y)
     {
-        const auto target = this->process.foreground_window;
+        const auto target = this->process.resolve_foreground_window();
         auto* win = this->process.windows.get(target);
         if (!win)
         {
@@ -2305,7 +2305,7 @@ namespace sogen
 
     void windows_emulator::deliver_mouse_button(const int32_t x, const int32_t y, const uint32_t message, const uint16_t button_data)
     {
-        const auto target = this->process.foreground_window;
+        const auto target = this->process.resolve_foreground_window();
         auto* win = this->process.windows.get(target);
         if (!win)
         {

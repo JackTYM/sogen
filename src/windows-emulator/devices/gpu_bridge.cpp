@@ -3230,7 +3230,7 @@ namespace sogen
             // on-screen presentation goes through a separate, driver-opaque kernel path, same as
             // handle_NtGdiDdDDIPresent's own EMU_D3DKMT_PRESENT::hWindow, which our d3d9_host resources
             // never participate in since they bypass the DXGK allocation system entirely). Mirrors
-            // syscalls/user.cpp's own find_foreground_window fallback (process.foreground_window is
+            // process_context::resolve_foreground_window's own fallback (process.foreground_window is
             // only ever set by a real host-side activation/focus event, which a freshly-created,
             // never-clicked window won't have received yet): prefer the last-interacted-with window,
             // falling back to any visible top-level window so a freshly-created single-window app like

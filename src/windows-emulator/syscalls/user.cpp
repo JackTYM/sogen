@@ -4669,30 +4669,9 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        hwnd find_foreground_window(const syscall_context& c)
-        {
-            // Prefer the window the user last interacted with, if it still exists.
-            if (c.proc.foreground_window != 0 && c.proc.windows.get(c.proc.foreground_window) != nullptr)
-            {
-                return c.proc.foreground_window;
-            }
-
-            // Otherwise fall back to any visible top-level window so a freshly-created game window is
-            // considered foreground before the first mouse event arrives (games gate input on this).
-            for (const auto& [index, win] : c.proc.windows)
-            {
-                if (win.parent_handle == 0 && (win.style & WS_VISIBLE) != 0)
-                {
-                    return win.handle;
-                }
-            }
-
-            return 0;
-        }
-
         hwnd handle_NtUserGetForegroundWindow(const syscall_context& c)
         {
-            return find_foreground_window(c);
+            return c.proc.resolve_foreground_window();
         }
 
         hwnd handle_NtUserSetFocus(const syscall_context& c, const hwnd hwnd)

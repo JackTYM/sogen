@@ -1183,6 +1183,31 @@ namespace sogen
         return current == nullptr;
     }
 
+    hwnd process_context::resolve_foreground_window() const
+    {
+        // Prefer the window the user last interacted with, if it still exists.
+        if (this->foreground_window != 0 && this->windows.get(this->foreground_window) != nullptr)
+        {
+            return this->foreground_window;
+        }
+
+        // Otherwise fall back to any visible top-level window so a freshly-created game window is
+        // considered foreground before the first mouse event arrives (games gate input on this).
+        // foreground_window itself is only ever set by handle_ui_event(), the host-input-queue
+        // processor a desktop build's SDL loop drives -- backends with no such queue (e.g. the iOS
+        // app, which delivers input through ios_ui_backend's own queue instead) never call it, so
+        // foreground_window stays 0 for the guest's entire lifetime without this fallback.
+        for (const auto& [index, win] : this->windows)
+        {
+            if (win.parent_handle == 0 && (win.style & WS_VISIBLE) != 0)
+            {
+                return win.handle;
+            }
+        }
+
+        return 0;
+    }
+
     // NOLINTNEXTLINE(cert-dcl50-cpp,readability-convert-member-functions-to-static)
     bool process_context::is_current_process_handle(const handle handle) const
     {
