@@ -201,7 +201,18 @@ namespace sogen
                 return;
             }
 
+            const bool trace_all_syscalls = std::getenv("SOGEN_TRACE_ALL_SYSCALLS") != nullptr;
+            const auto trace_pid = context.process_id;
+            const auto trace_tid = c.thread().id;
+
             entry->second.handler(c);
+
+            if (trace_all_syscalls)
+            {
+                fprintf(stderr, "[ALL_SYSCALLS] pid=%u tid=%u %s -> 0x%llx\n", trace_pid, trace_tid, entry->second.name.c_str(),
+                        static_cast<unsigned long long>(emu.reg<uint64_t>(x86_register::rax)));
+                fflush(stderr);
+            }
 
             dispatch_callback(win_emu, entry->second.name);
         }

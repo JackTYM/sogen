@@ -980,6 +980,11 @@ namespace sogen
                         c.thread().id, static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
                         rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL, static_cast<unsigned long long>(rsp),
                         static_cast<unsigned int>(exit_status));
+                for (const auto& mod : c.win_emu.mod_manager.modules() | std::views::values)
+                {
+                    fprintf(stderr, "  [MODULE] %s base=0x%llx size=0x%llx\n", mod.name.c_str(),
+                            static_cast<unsigned long long>(mod.image_base), static_cast<unsigned long long>(mod.size_of_image));
+                }
                 for (uint64_t i = 0; i < 64; ++i)
                 {
                     uint64_t value{};
@@ -988,9 +993,14 @@ namespace sogen
                         break;
                     }
                     const auto* mod = c.win_emu.mod_manager.find_by_address(value);
-                    fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s%s%s\n", static_cast<unsigned long long>(i * 8),
-                            static_cast<unsigned long long>(value), mod ? mod->name.c_str() : "", mod ? "+0x" : "",
-                            mod ? std::to_string(value - mod->image_base).c_str() : "");
+                    char mod_suffix[128] = {};
+                    if (mod)
+                    {
+                        snprintf(mod_suffix, sizeof(mod_suffix), "%s+0x%llx", mod->name.c_str(),
+                                 static_cast<unsigned long long>(value - mod->image_base));
+                    }
+                    fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s\n", static_cast<unsigned long long>(i * 8),
+                            static_cast<unsigned long long>(value), mod_suffix);
                 }
                 fflush(stderr);
             }
