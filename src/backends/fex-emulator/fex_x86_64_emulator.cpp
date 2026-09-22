@@ -1216,6 +1216,7 @@ namespace sogen::fex
         {
             void* allocation_base = nullptr;
             size_t allocation_size = 0;
+            uint64_t code_buffer_generation = 0;
         };
 
       public:
@@ -1594,8 +1595,22 @@ namespace sogen::fex
             std::memcpy(&state, src, sizeof(FEXCore::Core::CPUState));
             state.L1Pointer = l1_pointer;
             state.L1Mask = l1_mask;
-            this->ensure_callret_buffer(state);
+            this->ensure_callret_buffer(thread, state);
             thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
+
+            // FEXCore bumps CodeBufferGeneration whenever it discards a Context's code buffers; every
+            // return address this snapshot's shadow stack still holds points into the discarded buffer,
+            // so reset it rather than resume on stale entries. Tracked per buffer (one per logical guest
+            // thread per engine) against that engine's own counter - a WoW64 process's two Contexts
+            // discard their buffers independently.
+            auto& buffer = this->callret_buffers_.at(state._pad1);
+            if (buffer.code_buffer_generation != thread->CodeBufferGeneration)
+            {
+                constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+                FEXCore::Allocator::VirtualDontNeed(thread->CallRetStackBase, callret_stack_size);
+                state.callret_sp = state._pad1 + callret_stack_size / 4;
+                buffer.code_buffer_generation = thread->CodeBufferGeneration;
+            }
         }
 
         void restore_registers(const std::vector<std::byte>& register_data) override
@@ -4792,7 +4807,7 @@ namespace sogen::fex
         // == 0), recording it in state._pad1 (round-tripped by save/restore). Does NOT touch any
         // InternalThreadState::CallRetStackBase - callers point the right engine's field at the buffer
         // themselves (ensure_callret_stack for a named engine; restore_state_into per restored engine).
-        void ensure_callret_buffer(FEXCore::Core::CPUState& state)
+        void ensure_callret_buffer(FEXCore::Core::InternalThreadState* thread, FEXCore::Core::CPUState& state)
         {
             if (state._pad1 == 0)
             {
@@ -4827,6 +4842,7 @@ namespace sogen::fex
                 this->callret_buffers_.emplace(state._pad1, callret_buffer_record{
                                                                 .allocation_base = alloc_base,
                                                                 .allocation_size = callret_alloc_size,
+                                                                .code_buffer_generation = thread->CodeBufferGeneration,
                                                             });
             }
         }
@@ -4834,7 +4850,7 @@ namespace sogen::fex
         // Ensures the given engine's call-ret buffer exists and points its CallRetStackBase at it.
         void ensure_callret_stack(FEXCore::Core::InternalThreadState* thread, FEXCore::Core::CPUState& state)
         {
-            this->ensure_callret_buffer(state);
+            this->ensure_callret_buffer(thread, state);
             thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
         }
 
