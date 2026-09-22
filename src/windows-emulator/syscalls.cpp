@@ -1118,19 +1118,43 @@ namespace sogen
         }
 
         NTSTATUS handle_NtQueryInformationJobObject(const syscall_context& c, const handle job_handle,
-                                                    const uint32_t /*job_object_information_class*/, const uint64_t job_object_information,
+                                                    const uint32_t job_object_information_class, const uint64_t job_object_information,
                                                     const uint32_t job_object_information_length,
                                                     const emulator_object<uint32_t> return_length)
         {
-            if (job_handle.value.type != handle_types::job || !c.proc.jobs.get(job_handle))
+            auto* job = c.proc.jobs.get(job_handle);
+            if (job_handle.value.type != handle_types::job || !job)
             {
                 return STATUS_INVALID_HANDLE;
+            }
+
+            if (std::getenv("SOGEN_DEBUG_JOB_OBJECT_INFO") != nullptr)
+            {
+                fprintf(stderr, "[JOB_OBJECT_QUERY] class=%u length=%u\n", job_object_information_class, job_object_information_length);
+                fflush(stderr);
             }
 
             // Defensive zero-fill stub: doesn't model per-info-class output sizes yet.
             if (job_object_information != 0 && job_object_information_length != 0)
             {
                 c.emu.set_memory(job_object_information, 0, job_object_information_length);
+            }
+
+            // Guest code (e.g. sandbox::Job::SetActiveProcessLimit) queries the current
+            // LimitFlags, ORs in one more bit, and writes the whole struct back via
+            // NtSetInformationJobObject - a real Windows read-modify-write pattern. Leaving
+            // LimitFlags zeroed here would silently drop every previously-set limit (including
+            // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) from that write-back.
+            constexpr uint32_t job_object_basic_limit_information_class = 2;
+            constexpr uint32_t job_object_extended_limit_information_class = 9;
+            constexpr size_t job_object_limit_flags_offset = 16;
+
+            const bool carries_limit_flags = job_object_information_class == job_object_basic_limit_information_class ||
+                                             job_object_information_class == job_object_extended_limit_information_class;
+
+            if (carries_limit_flags && job_object_information_length >= job_object_limit_flags_offset + sizeof(uint32_t))
+            {
+                c.emu.write_memory(job_object_information + job_object_limit_flags_offset, job->limit_flags);
             }
 
             if (return_length)

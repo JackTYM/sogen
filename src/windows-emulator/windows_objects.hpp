@@ -65,12 +65,14 @@ namespace sogen
     {
         std::u16string name{};
         bool kill_on_close{false};
+        uint32_t limit_flags{0};
         std::vector<uint32_t> assigned_child_record_ids{};
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
             buffer.write(this->kill_on_close);
+            buffer.write(this->limit_flags);
             buffer.write_vector(this->assigned_child_record_ids);
         }
 
@@ -78,6 +80,7 @@ namespace sogen
         {
             buffer.read(this->name);
             buffer.read(this->kill_on_close);
+            buffer.read(this->limit_flags);
             buffer.read_vector(this->assigned_child_record_ids);
         }
     };

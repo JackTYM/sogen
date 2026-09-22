@@ -100,6 +100,15 @@ namespace sogen
                 uint32_t limit_flags{};
                 c.emu.read_memory(job_object_information + JOB_OBJECT_LIMIT_FLAGS_OFFSET, &limit_flags, sizeof(limit_flags));
 
+                if (std::getenv("SOGEN_DEBUG_JOB_OBJECT_INFO") != nullptr)
+                {
+                    fprintf(stderr, "[JOB_OBJECT_SET] class=%u length=%u limit_flags=0x%x\n", job_object_information_class,
+                            job_object_information_length, limit_flags);
+                    fflush(stderr);
+                }
+
+                job->limit_flags = limit_flags;
+
                 if ((limit_flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) != 0)
                 {
                     job->kill_on_close = true;
