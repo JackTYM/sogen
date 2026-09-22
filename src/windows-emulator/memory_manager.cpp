@@ -37,6 +37,8 @@ namespace sogen
             }
         }
 
+        constexpr size_t MAX_COALESCED_COMMIT_REGION_SIZE = 2ULL * 1024 * 1024;
+
         void merge_regions(memory_manager::committed_region_map& regions)
         {
             for (auto i = regions.begin(); i != regions.end();)
@@ -602,7 +604,89 @@ namespace sogen
         uint64_t last_region_start{};
         const committed_region* last_region{nullptr};
 
+        // Seeded from whatever already-committed sub-region directly precedes this call's own
+        // [address, end) range (not just sub-regions touched by THIS call's own split above) - the
+        // dominant real-world pattern this coalescing is meant to catch is a reservation grown by many
+        // SEPARATE commit_memory calls (one guest syscall per small increment), where each call's own
+        // [address, end) never overlaps anything pre-existing at all.
+        const auto preceding = committed_regions.upper_bound(address);
+        if (preceding != committed_regions.begin())
+        {
+            const auto candidate = std::prev(preceding);
+            if (candidate->first + candidate->second.length == address)
+            {
+                last_region_start = candidate->first;
+                last_region = &candidate->second;
+            }
+        }
+
         const auto effective_permission = this->get_effective_permissions(permissions);
+
+        // A freshly-committed range that directly abuts an already-committed, identically-permissioned
+        // sub-region is mapped as one bigger host region instead of a separate one. merge_regions below
+        // only unifies the bookkeeping map, not the underlying host mapping - Unicorn never merges two
+        // independently-mapped regions back together on its own (its flatview simplifier only merges
+        // ranges that already share the same MemoryRegion object) - so a guest that grows a reservation
+        // through many small commits (a common pattern for on-demand-growable heaps/arenas) would
+        // otherwise leave one permanently-tracked Unicorn region per commit, and Unicorn's own
+        // topology-rebuild cost on every subsequent map/unmap/protect call scales with the total region
+        // count. The merge is capped (MAX_COALESCED_COMMIT_REGION_SIZE) because unmapping to remap the
+        // combined range forgets the existing bytes, requiring a read-back/write-back copy whose cost
+        // would otherwise grow unbounded along an indefinitely-extended chain.
+        const auto map_committed_range = [&](const uint64_t map_start, const size_t map_length) -> bool {
+            if (last_region && last_region_start + last_region->length == map_start && last_region->permissions == permissions &&
+                last_region->length + map_length <= MAX_COALESCED_COMMIT_REGION_SIZE)
+            {
+                const auto merged_start = last_region_start;
+                const auto old_length = last_region->length;
+                const auto merged_length = old_length + map_length;
+
+                std::vector<std::byte> preserved(old_length);
+                this->read_memory(merged_start, preserved.data(), old_length);
+                this->unmap_memory(merged_start, old_length);
+
+                try
+                {
+                    this->map_memory(merged_start, merged_length, effective_permission);
+                }
+                catch (const host_memory_collision&)
+                {
+                    this->map_memory(merged_start, old_length, effective_permission);
+                    this->write_memory(merged_start, preserved.data(), old_length);
+                    return false;
+                }
+
+                this->write_memory(merged_start, preserved.data(), old_length);
+
+                committed_regions[merged_start] = committed_region{
+                    .length = merged_length,
+                    .permissions = permissions,
+                };
+
+                return true;
+            }
+
+            // A host_memory_collision here means map_memory's atomic host-level claim found the
+            // target genuinely occupied by a foreign mapping (see the exception's doc comment) -
+            // bail out rather than let it propagate as an unhandled exception. The caller
+            // (try_map_module_at_current_base) already rolls back and its own caller already
+            // retries at a different address on any commit_memory/commit_image_memory failure.
+            try
+            {
+                this->map_memory(map_start, map_length, effective_permission);
+            }
+            catch (const host_memory_collision&)
+            {
+                return false;
+            }
+
+            committed_regions[map_start] = committed_region{
+                .length = map_length,
+                .permissions = permissions,
+            };
+
+            return true;
+        };
 
         for (auto& sub_region : committed_regions)
         {
@@ -617,25 +701,9 @@ namespace sogen
                 const auto map_start = last_region ? (last_region_start + last_region->length) : address;
                 const auto map_length = sub_region.first - map_start;
 
-                if (map_length > 0)
+                if (map_length > 0 && !map_committed_range(map_start, static_cast<size_t>(map_length)))
                 {
-                    // A host_memory_collision here means map_memory's atomic host-level claim found the
-                    // target genuinely occupied by a foreign mapping (see the exception's doc comment) -
-                    // bail out rather than let it propagate as an unhandled exception. The caller
-                    // (try_map_module_at_current_base) already rolls back and its own caller already
-                    // retries at a different address on any commit_memory/commit_image_memory failure.
-                    try
-                    {
-                        this->map_memory(map_start, static_cast<size_t>(map_length), effective_permission);
-                    }
-                    catch (const host_memory_collision&)
-                    {
-                        return false;
-                    }
-                    committed_regions[map_start] = committed_region{
-                        .length = static_cast<size_t>(map_length),
-                        .permissions = permissions,
-                    };
+                    return false;
                 }
 
                 // Update protection for existing committed region when re-committing
@@ -652,19 +720,10 @@ namespace sogen
             const auto map_start = last_region ? (last_region_start + last_region->length) : address;
             const auto map_length = end - map_start;
 
-            // See the identical try/catch above.
-            try
-            {
-                this->map_memory(map_start, static_cast<size_t>(map_length), effective_permission);
-            }
-            catch (const host_memory_collision&)
+            if (!map_committed_range(map_start, static_cast<size_t>(map_length)))
             {
                 return false;
             }
-            committed_regions[map_start] = committed_region{
-                .length = static_cast<size_t>(map_length),
-                .permissions = permissions,
-            };
         }
 
         merge_regions(committed_regions);

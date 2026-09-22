@@ -37,7 +37,7 @@ namespace sogen::unicorn
         }
 
         template <typename F>
-        void trace_memory_call(uc_engine* uc, const char* operation, const size_t size, F&& call)
+        void trace_memory_call(uc_engine* uc, const char* operation, const uint64_t address, const size_t size, F&& call)
         {
             if (!memory_timing_trace_enabled())
             {
@@ -51,7 +51,8 @@ namespace sogen::unicorn
             call();
 
             const auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-            fprintf(stderr, "[mem-timing] %s regions_before=%u size=%zu elapsed_ms=%.3f\n", operation, region_count, size, elapsed_ms);
+            fprintf(stderr, "[mem-timing] %s regions_before=%u address=0x%llx size=%zu elapsed_ms=%.3f\n", operation, region_count,
+                    static_cast<unsigned long long>(address), size, elapsed_ms);
         }
 
         static_assert(static_cast<uint32_t>(memory_permission::none) == UC_PROT_NONE);
@@ -419,18 +420,19 @@ namespace sogen::unicorn
 
             void map_memory(const uint64_t address, const size_t size, memory_permission permissions) override
             {
-                uce(uc_mem_map(*this, address, size, static_cast<uint32_t>(permissions)));
+                trace_memory_call(*this, "map_memory", address, size,
+                                  [&] { uce(uc_mem_map(*this, address, size, static_cast<uint32_t>(permissions))); });
             }
 
             void map_host_memory(const uint64_t address, const size_t size, void* host_pointer, memory_permission permissions) override
             {
-                trace_memory_call(*this, "map_host_memory", size,
+                trace_memory_call(*this, "map_host_memory", address, size,
                                   [&] { uce(uc_mem_map_ptr(*this, address, size, static_cast<uint32_t>(permissions), host_pointer)); });
             }
 
             void unmap_memory(const uint64_t address, const size_t size) override
             {
-                trace_memory_call(*this, "unmap_memory", size, [&] { uce(uc_mem_unmap(*this, address, size)); });
+                trace_memory_call(*this, "unmap_memory", address, size, [&] { uce(uc_mem_unmap(*this, address, size)); });
 
                 const auto mmio_entry = this->mmio_.find(address);
                 if (mmio_entry != this->mmio_.end())
@@ -461,7 +463,7 @@ namespace sogen::unicorn
 
             void apply_memory_protection(const uint64_t address, const size_t size, memory_permission permissions) override
             {
-                trace_memory_call(*this, "apply_memory_protection", size,
+                trace_memory_call(*this, "apply_memory_protection", address, size,
                                   [&] { uce(uc_mem_protect(*this, address, size, static_cast<uint32_t>(permissions))); });
             }
 
