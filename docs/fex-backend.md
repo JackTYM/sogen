@@ -14,13 +14,22 @@ backend's behavior, and has been validated against ~40 pre-existing sample execu
 pipes, sockets, timers, file/directory I/O, GUI dialogs, DXGK harnesses, and 32-bit WoW64 binaries)
 with every remaining discrepancy traced to a backend-agnostic gap (an unimplemented syscall, or a
 missing staged system-DLL export) rather than a difference between this backend and the existing
-one. Android/AArch64 is now a functional target for native 64-bit guests and currently requires a
-4KB host page; WoW64 has not been validated there. Other AArch64 Linux hosts have build coverage
-only and are not expected to run.
+one. That full walk was last done in July 2026, on a macOS build predating the Apple security update
+described under "32-bit guest memory rebase" below; this round re-confirmed `test-sample.exe` and
+the full `windows-emulator-test` suite (which exercises most of the same surface: process/thread
+introspection, sections, tokens, the registry, and more) still pass on the current macOS build with
+that fix in place, but did not re-walk the complete ~40-sample list. Android/AArch64 is now a
+functional target for native 64-bit guests and currently requires a 4KB host page; WoW64 has not
+been validated there. Other AArch64 Linux hosts have build coverage only and are not expected to
+run.
 
-**32-bit WoW64 processes are supported on Darwin** (see "WoW64 support" below): a real 32-bit guest
-process runs against a second, lazily-created 32-bit FEXCore Context, with state marshaled across
-the bitness-switch trampoline on every crossing.
+**32-bit WoW64 processes are supported on Darwin, live-verified end to end** (see "WoW64 support"
+below): a real 32-bit guest process runs against a second, lazily-created 32-bit FEXCore Context,
+with state marshaled across the bitness-switch trampoline on every crossing.
+`wow64-test-sample.exe` completes under `--backend fex` on Apple Silicon, printing
+`wow64-test-sample: ok` and exiting 0 — confirmed repeatedly this session after the Mach VM fix
+described under "32-bit guest memory rebase" below. This is one sample, not the broader ~40-sample
+walk above; no other pre-existing sample has been re-validated specifically under WoW64.
 
 ### Performance
 
@@ -30,7 +39,9 @@ backend measured roughly **129x less wall-clock time** than the Unicorn backend 
 the CPU, versus per-block interpretation. A mixed, syscall-heavy smoke-test workload showed a
 smaller but still substantial ~27-30x gap. Expect the larger multiplier to dominate for CPU-bound
 guest workloads (game logic, physics, scripting) and the smaller one where I/O/syscall dispatch is a
-significant fraction of runtime.
+significant fraction of runtime. Measured in July 2026, on the same pre-update macOS build as the
+sample walk above; not re-measured this round. Unaffected by the WoW64 host-window fix below either
+way, since that workload is a native 64-bit process and never reaches WoW64-only code.
 
 ## Security / address-space model
 
@@ -119,6 +130,26 @@ fetch — computed at an address below 4GB is transparently rebased to a fixed o
 runtime IR `Select` rather than a compile-time-constant add (since a 64-bit-mode Context's addresses
 aren't confined to a fixed range the way a 32-bit-mode Context's are). This is a strict no-op for any
 Context that doesn't opt in, so it does not affect the existing 64-bit-only Linux/macOS path.
+
+The rebased-to host window itself is claimed up front, on Apple, by `reserve_wow64_host_window()`,
+carved into per-allocation ranges by `claim_host_range()`, backed by `map_mmio()` for an MMIO region
+landing inside it, and re-protected across a decommit/recommit by `remap_host_claim()`. All four go
+through the Mach VM API (`mach_vm_map`/`mach_vm_allocate`/`mach_vm_deallocate`), not the BSD
+`mmap`/`munmap` used for every other host allocation in this file: a macOS 26.6.2 security update
+added `EXC_GUARD`/`DEALLOC_GAP` enforcement to the BSD `mmap`/`munmap` syscall path for `MAP_FIXED`
+requests landing in this window, delivering an uncatchable `SIGKILL`, while the equivalent Mach VM
+calls targeting the same addresses/sizes succeed cleanly (see "Fixes found during bring-up and
+review" below). `remap_host_claim()` is hardened unconditionally on Apple, not only inside this
+window: `reserve_wow64_host_window()` runs unconditionally for every guest (wow64 or not, see its
+own call site's doc comment) and steers this backend's own allocations away from this specific
+window regardless of bitness, so this window itself is not reachable by a plain 64-bit guest's own
+claims - but the security update's wording ("certain host address windows", plural) does not say
+this is the only guarded range on the system, and `remap_host_claim()` is shared, unconditional code
+for every claimed range on either bitness. The window's whole-span release at emulator teardown is
+skipped entirely rather than moved to `mach_vm_deallocate`, since releasing it in one call after
+per-range `claim_host_range()` calls have fragmented it is confirmed to trip the same guard on the
+deallocation side; the address space is leaked instead, for the lifetime of the process, matching
+`fex_internal_arena`'s own existing precedent for its own reservation.
 
 ### `wow64cpu.dll`'s real dispatch convention
 
@@ -216,6 +247,28 @@ host page.
 
 ## Fixes found during bring-up and review
 
+- **A macOS 26.6.2 security update made the wow64 host window's BSD `mmap`/`munmap` reservation
+  fatal.** The update added `EXC_GUARD`/`DEALLOC_GAP` enforcement to the BSD `mmap`/`munmap` syscall
+  path for `MAP_FIXED` requests landing in the address window `reserve_wow64_host_window()` uses,
+  delivering an uncatchable `SIGKILL` no in-process handler can intercept — confirmed directly, at
+  exactly the address this backend's default candidate uses. The equivalent Mach VM calls
+  (`mach_vm_map`/`mach_vm_allocate`) targeting the identical address/size were confirmed to succeed
+  cleanly side by side in the same process, so every call site that can target this window now goes
+  through those instead: `reserve_wow64_host_window()` itself, `claim_host_range()`, `map_mmio()`
+  (an MMIO region's real backing, when it lands inside the window), and `remap_host_claim()`
+  (re-protecting an already-claimed range across a decommit/recommit, e.g. from
+  `sync_host_page_apple`) — the last of these hardened unconditionally on Apple, not only inside
+  this window, since it is shared, bitness-independent code and the security update's own wording
+  ("certain host address windows", plural) does not guarantee this is the only guarded range on the
+  system (see "32-bit guest memory rebase" above for why a plain 64-bit guest's own claims cannot
+  reach this specific window today, and why that does not make hardening the other three sites
+  optional). The window's whole-span release at teardown is skipped entirely rather than moved to
+  `mach_vm_deallocate`, since releasing it in one call after per-range `claim_host_range()` claims
+  have fragmented it is confirmed to trip the same guard on the deallocation side; leaked instead,
+  matching `fex_internal_arena`'s own existing precedent. Live-verified repeatedly across all of the
+  above: `wow64-test-sample.exe` now runs to completion under `--backend fex` on Apple Silicon,
+  printing `wow64-test-sample: ok` and exiting 0, and the full `windows-emulator-test` suite remains
+  at 69/69.
 - **Host-reserved-address-space tracking under Apple's `mmap(MAP_FIXED)` semantics.** Two real
   memory-safety bugs: an MMIO-region-insertion path could violate the host-reserved overlap-tracking
   invariant (undetected until a `mmap(MAP_FIXED)` failure crashed the analyzer), and a
