@@ -1273,6 +1273,7 @@ namespace sogen::fex
         bool handle_callret_stack_fault(ucontext_t* uctx, uint64_t fault_addr) const;
         bool handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr);
         bool host_pc_in_any_dispatcher(uint64_t pc) const;
+        FEXCore::SignalDelegator* active_signal_delegator() const;
 
         // See pending_fault_kind's doc comment (declared here, used by dispatch_pending_hook_if_any/
         // defer_hook_dispatch below): memory_violation_hooks_/interrupt_hooks_ callbacks are shared,
@@ -4055,6 +4056,17 @@ namespace sogen::fex
         return false;
     }
 
+    // context_/context32_ each own an independently JIT-compiled dispatcher (ThreadStopHandlerAddress
+    // and friends live at different host addresses per context), so redirecting a fault into "the"
+    // stop handler must pick the delegator matching whichever context actually faulted - see the same
+    // active_context_-keyed selection already done for the vector==14 gate-crossing case below.
+    FEXCore::SignalDelegator* fex_vcpu::active_signal_delegator() const
+    {
+        return (this->active_context_ == this->emulator_.context32_.get()) //
+                   ? this->emulator_.signal_delegator32_.get()
+                   : this->emulator_.signal_delegator_.get();
+    }
+
     bool fex_vcpu::dispatch_pending_hook_if_any()
     {
         const pending_fault_dispatch dispatch = this->pending_fault_dispatch_;
@@ -4085,7 +4097,7 @@ namespace sogen::fex
     void fex_vcpu::defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled)
     {
         this->pending_fault_dispatch_ = dispatch;
-        const auto& cfg = this->emulator_.signal_delegator_->GetConfig();
+        const auto& cfg = this->active_signal_delegator()->GetConfig();
         const auto target = sra_already_spilled ? cfg.ThreadStopHandlerAddress : cfg.ThreadStopHandlerAddressSpillSRA;
         arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(target));
     }
@@ -4407,7 +4419,7 @@ namespace sogen::fex
                 {
                     active_thread->CurrentFrame->State.rip = this->active_context_->RestoreRIPFromHostPC(active_thread, fault_pc);
                     this->interrupt_page_unwind_ = true;
-                    const auto& stop_cfg = this->emulator_.signal_delegator_->GetConfig();
+                    const auto& stop_cfg = this->active_signal_delegator()->GetConfig();
                     arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss,
                                                    reinterpret_cast<void*>(stop_cfg.ThreadStopHandlerAddressSpillSRA));
                     return true;
