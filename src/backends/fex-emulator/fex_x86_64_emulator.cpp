@@ -3339,6 +3339,21 @@ namespace sogen::fex
         state.L1Pointer = l1_pointer;
         state.L1Mask = l1_mask;
         state.segment_arrays[0] = segment_array_0;
+
+        // InlineJITBlockHeader is a raw host pointer to the currently-executing JIT block's own
+        // header (set by Arm64JITCore::EmitEntryPoint's `str TMP1, STATE, ...InlineJITBlockHeader`
+        // at every block's entry), read back by FEXCore's own RestoreRIPFromHostPC/GetFrameBlockInfo
+        // to reconstruct RIP and locate block metadata during synchronous fault handling. The
+        // snapshot's value describes whichever block was live when this thread was last descheduled -
+        // a host code-buffer address that FEXCore's own ClearCodeCache/CheckCodeBufferUpdate may have
+        // since freed or rotated away from, exactly the staleness class callret_sp is dropped for
+        // below. Left in place, a fault handled before this thread's next block entry re-establishes
+        // it (EmitEntryPoint runs unconditionally on every dispatch) would dereference a dangling
+        // host pointer into the JIT code buffer. FEXCore treats a null InlineJITBlockHeader as "no
+        // block info available" and falls back to Frame->State.rip (just restored above), so zeroing
+        // it here is always safe.
+        state.InlineJITBlockHeader = 0;
+
         this->ensure_callret_buffer(state);
         thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
 
