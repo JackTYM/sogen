@@ -1264,18 +1264,34 @@ namespace sogen::fex
 #ifdef __APPLE__
                 if (rebase != 0 && this->wow64_host_window_reserved_)
                 {
-                    // Covered by the whole-window munmap below.
+                    // Never released - see the wow64 window comment below, right after this loop.
                     continue;
                 }
-#endif
+                ::mach_vm_deallocate(mach_task_self(), address + rebase, size);
+#else
                 ::munmap(reinterpret_cast<void*>(address + rebase), size);
+#endif
             }
 
 #ifdef __APPLE__
-            if (this->wow64_host_window_reserved_)
-            {
-                ::munmap(reinterpret_cast<void*>(this->wow64_guest_rebase_), wow64_guest_address_space_size);
-            }
+            // Deliberately never released, unlike every other claim above - confirmed via direct
+            // testing that releasing it CAN itself trigger the same kernel guard reserve_wow64_host_
+            // window()'s doc comment describes (EXC_GUARD/DEALLOC_GAP - the "DEALLOC_GAP" half is
+            // exactly this: the guard's own name is about deallocation, not just reservation). It
+            // reproduces only after this window has actually been used for a while: a fresh reserve-
+            // then-immediately-release of the same range is fine, but by process exit this window has
+            // typically been carved into many separate mappings by claim_host_range()'s VM_FLAGS_
+            // OVERWRITE calls (every module section, every guest VirtualAlloc/VirtualFree in 32-bit
+            // mode) - releasing the original whole-window span in one call, across all of that internal
+            // fragmentation, is what the kernel's deallocation guard is confirmed to catch. There is no
+            // partial-release scheme that avoids this without tracking every fragment individually
+            // (which claimed_host_ranges_ already does above for everything outside this window, at
+            // the cost of one guard-worthy operation per fragment instead of one for the whole window -
+            // not obviously safer, and not worth the complexity here). This is exactly what
+            // fex_internal_arena::instance() already does for its own 4GB reservation (see its "Arena
+            // VA is never returned to the OS" comment) - both are one-time, address-space-only
+            // (PROT_NONE, no physical memory) reservations that live for exactly this process's
+            // lifetime anyway, so leaking the VA costs nothing a process exit doesn't already reclaim.
 #endif
 
             if (g_active_emulator == this)
@@ -1813,6 +1829,17 @@ namespace sogen::fex
         // (unchanged, existing detect-and-retry behavior) if every candidate is exhausted - this can
         // only ever improve on that baseline, never regress it.
         //
+        // Reserves via mach_vm_map(), not the BSD mmap() syscall used everywhere else in this file for
+        // ordinary (non-wow64-window) host allocations. A macOS 26.6.2 security update (build 25G83,
+        // Aug 2026) added EXC_GUARD/DEALLOC_GAP enforcement specifically to the BSD mmap() entry point
+        // for MAP_FIXED requests landing in certain host address windows - delivering an uncatchable
+        // SIGKILL no in-process handler can intercept, confirmed directly on this machine at exactly
+        // the address this function's default candidate uses. mach_vm_map() targeting the identical
+        // address/size was confirmed, side by side in the same process, to succeed cleanly every time -
+        // the guard is specific to the BSD syscall path, not the underlying Mach VM subsystem mmap() is
+        // itself implemented on top of. Do not "simplify" this back to mmap(): it looks equivalent and
+        // reintroduces the crash on any host running this or a later macOS security update.
+        //
         // Deliberately NOT surfaced as a "reserved" range via reserved_host_ranges()/
         // reserved_host_ranges_in() (contrast with fex_internal_arena, which IS surfaced there) -
         // unlike the arena, this window IS guest address space; guest memory is meant to live here.
@@ -1866,17 +1893,18 @@ namespace sogen::fex
                     continue;
                 }
 
-                void* const target = reinterpret_cast<void*>(candidate);
-                void* const result =
-                    ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                if (result != target)
+                mach_vm_address_t reserved_addr = candidate;
+                const kern_return_t reserve_result =
+                    ::mach_vm_map(mach_task_self(), &reserved_addr, wow64_guest_address_space_size, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL,
+                                  0, FALSE, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_DEFAULT);
+                if (reserve_result != KERN_SUCCESS || reserved_addr != candidate)
                 {
-                    // A racer claimed this exact candidate between our probe and our mmap - move on.
+                    // A racer claimed this exact candidate between our probe and our reservation - move on.
                     fprintf(stderr, "[FEX backend] failed to reserve wow64 host window at 0x%llx - trying the next candidate\n",
                             static_cast<unsigned long long>(candidate));
-                    if (result != MAP_FAILED)
+                    if (reserve_result == KERN_SUCCESS)
                     {
-                        ::munmap(result, wow64_guest_address_space_size);
+                        ::mach_vm_deallocate(mach_task_self(), reserved_addr, wow64_guest_address_space_size);
                     }
                     candidate += wow64_guest_address_space_size;
                     continue;
@@ -2723,7 +2751,17 @@ namespace sogen::fex
             const uint64_t host_address = address + rebase;
 #ifdef __APPLE__
             mach_vm_address_t target = host_address;
-            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, size, VM_FLAGS_FIXED);
+            // Plain VM_FLAGS_FIXED requires the target to be completely unmapped, unlike BSD
+            // mmap(MAP_FIXED) - it fails with KERN_NO_SPACE rather than silently replacing an existing
+            // mapping. reserve_wow64_host_window() already placed a real PROT_NONE Mach mapping across
+            // the whole window an in-range address lives in (see its doc comment), so claiming a
+            // sub-range here needs VM_FLAGS_OVERWRITE to take it from underneath that placeholder.
+            // Scoped to addresses actually inside our own already-verified-safe window: everywhere else,
+            // a genuine foreign occupant still fails loudly via plain VM_FLAGS_FIXED instead of silently
+            // overwriting memory this backend does not own.
+            const int allocate_flags =
+                rebase != 0 && this->wow64_host_window_reserved_ ? VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE : VM_FLAGS_FIXED;
+            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, size, allocate_flags);
             if (result != KERN_SUCCESS || target != host_address)
             {
                 throw std::runtime_error("FEX backend failed to reserve guest address range at the host level");
