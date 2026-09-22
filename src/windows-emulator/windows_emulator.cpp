@@ -18,6 +18,7 @@
 #include "memory_permission_ext.hpp"
 #include "devices/named_pipe.hpp"
 #include "process_control_server.hpp"
+#include "address_utils.hpp"
 
 namespace sogen
 {
@@ -1630,16 +1631,35 @@ namespace sogen
                 // one-shot flag, so check the thread's actual guard-buffer bounds directly as well,
                 // instead of relying solely on a tag a legitimate guest re-arm can silently strip.
                 auto& thread = vcpu.thread();
+                constexpr uint64_t page_size = 0x1000;
+                const auto deallocation_stack = thread.stack_base - thread.stack_guard_size;
                 const auto within_stack_guard_buffer =
-                    thread.stack_guard_size != 0 && address >= (thread.stack_base - thread.stack_guard_size) && address < thread.stack_base;
-                const auto is_stack_guard = region.permissions.is_stack_guard() || within_stack_guard_buffer;
+                    thread.stack_guard_size != 0 && address >= deallocation_stack && address < thread.stack_base;
+
+                // stack_guard_size is a whole ALLOCATION_GRANULARITY (64 KiB) buffer, not a single
+                // page: real Windows only ever treats a fault as terminal (STATUS_STACK_OVERFLOW) when
+                // it lands within one page of DeallocationStack (MiCheckForUserStackOverflow); every
+                // other guard-page hit above that is grown silently, with zero exception delivered to
+                // the guest. Collapsing the whole buffer into "always terminal" delivered a fatal
+                // STATUS_STACK_OVERFLOW on the very first touch - observed live as a real guest retry
+                // loop (crypt32.dll's InternalVerifyStackAvailable, called repeatedly by its own,
+                // legitimate recursive caller) hitting the identical "no room" verdict every time,
+                // because sogen's model never actually grew, unlike the real Windows behavior the
+                // retry loop's own author relied on.
+                const auto at_true_bottom = within_stack_guard_buffer && address < deallocation_stack + page_size;
+                const auto is_stack_guard = region.permissions.is_stack_guard() || at_true_bottom;
+
+                if (within_stack_guard_buffer && !at_true_bottom)
+                {
+                    const auto touched_page = page_align_down(address, page_size);
+                    this->memory.protect_memory(touched_page, page_size,
+                                                region.permissions & ~(memory_permission_ext::guard | memory_permission_ext::stack_guard));
+                    return memory_violation_continuation::restart;
+                }
 
                 // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION, matching real
-                // Windows for a guest-requested PAGE_GUARD page. A thread's own stack-reservation guard
-                // buffer is different: sogen pre-commits the whole reservation upfront, so there is no
-                // "still room to grow" case left to handle transparently - every hit here is the
-                // terminal one, matching real Windows' MiCheckForUserStackOverflow once the fault lands
-                // within one page of DeallocationStack, which substitutes STATUS_STACK_OVERFLOW instead.
+                // Windows for a guest-requested PAGE_GUARD page, or STATUS_STACK_OVERFLOW once the
+                // fault has genuinely reached the last page before DeallocationStack.
                 this->memory.protect_memory(region.start, region.length,
                                             region.permissions & ~(memory_permission_ext::guard | memory_permission_ext::stack_guard));
 
