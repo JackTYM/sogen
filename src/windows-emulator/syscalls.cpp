@@ -1064,7 +1064,7 @@ namespace sogen
 
         NTSTATUS handle_NtQueryInformationJobObject()
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_INVALID_INFO_CLASS;
         }
 
         NTSTATUS handle_NtCreateUserProcess()
