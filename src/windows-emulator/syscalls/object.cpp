@@ -887,6 +887,57 @@ namespace sogen
             c.win_emu.callbacks.on_generic_access("Waiting on process handle", std::u16string(detail.begin(), detail.end()));
         }
 
+        void trace_wait_target(const syscall_context& c, const handle resolved, const emulator_object<LARGE_INTEGER> timeout)
+        {
+            static const bool enabled = std::getenv("SOGEN_TRACE_WAIT_TARGETS") != nullptr;
+            if (!enabled)
+            {
+                return;
+            }
+
+            std::u16string object_name{};
+
+            switch (resolved.value.type)
+            {
+            case handle_types::event:
+                if (const auto* e = c.proc.events.get(resolved))
+                {
+                    object_name = e->name;
+                }
+                break;
+            case handle_types::mutant:
+                if (const auto* m = c.proc.mutants.get(resolved))
+                {
+                    object_name = m->name;
+                }
+                break;
+            case handle_types::semaphore:
+                if (const auto* s = c.proc.semaphores.get(resolved))
+                {
+                    object_name = s->name;
+                }
+                break;
+            default:
+                break;
+            }
+
+            const auto type_name = get_type_name(static_cast<handle_types::type>(resolved.value.type));
+            const auto name_u8 = object_name.empty() ? std::string("<unnamed>") : u16_to_u8(object_name);
+
+            if (timeout.value())
+            {
+                const auto quad_part = timeout.read().QuadPart;
+                const auto requested_ms = quad_part < 0 ? static_cast<double>(-quad_part) / 10000.0 : -1.0;
+                c.win_emu.log.error("[wait-target-trace] tid=%u type=%s name=%s timeout=finite requested_ms=%.1f\n", c.thread().id,
+                                    u16_to_u8(type_name).c_str(), name_u8.c_str(), requested_ms);
+            }
+            else
+            {
+                c.win_emu.log.error("[wait-target-trace] tid=%u type=%s name=%s timeout=infinite\n", c.thread().id,
+                                    u16_to_u8(type_name).c_str(), name_u8.c_str());
+            }
+        }
+
         NTSTATUS handle_NtCompareObjects(const syscall_context& c, const handle first, const handle second)
         {
             const auto first_resolved = c.proc.resolve_object_pseudo_handle(first, c.vcpu.active_thread);
@@ -1085,6 +1136,7 @@ namespace sogen
             t.await_any = false;
 
             trace_process_handle_wait(c, resolved_handle, timeout);
+            trace_wait_target(c, resolved_handle, timeout);
 
             if (timeout.value() && !t.await_time.has_value())
             {
