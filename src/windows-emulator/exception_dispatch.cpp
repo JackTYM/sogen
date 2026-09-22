@@ -305,6 +305,33 @@ namespace sogen
             fflush(stderr);
         }
 
+        // Opt-in post-mortem aid for a real access violation: dumps the incoming argument registers
+        // and a short stack window (module-resolved) so the caller of the faulting function can be
+        // identified without a live debugger session.
+        if (status == STATUS_ACCESS_VIOLATION && std::getenv("SOGEN_DEBUG_AV_CALLER_STACK"))
+        {
+            const auto* rip_mod = win_emu.mod_manager.find_by_address(ctx.Rip);
+            fprintf(stderr, "[AV_CALLER] tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx\n", thread.id,
+                    static_cast<unsigned long long>(ctx.Rip), rip_mod ? rip_mod->name.c_str() : "?",
+                    rip_mod ? static_cast<unsigned long long>(ctx.Rip - rip_mod->image_base) : 0ULL,
+                    static_cast<unsigned long long>(ctx.Rsp), static_cast<unsigned long long>(ctx.Rcx),
+                    static_cast<unsigned long long>(ctx.Rdx), static_cast<unsigned long long>(ctx.R8),
+                    static_cast<unsigned long long>(ctx.R9));
+            for (uint64_t i = 0; i < 64; ++i)
+            {
+                uint64_t value{};
+                if (!win_emu.memory.try_read_memory(ctx.Rsp + (i * 8), &value, sizeof(value)))
+                {
+                    break;
+                }
+                const auto* mod = win_emu.mod_manager.find_by_address(value);
+                fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s%s%s\n", static_cast<unsigned long long>(i * 8),
+                        static_cast<unsigned long long>(value), mod ? mod->name.c_str() : "", mod ? "+0x" : "",
+                        mod ? std::to_string(value - mod->image_base).c_str() : "");
+            }
+            fflush(stderr);
+        }
+
         exception_record record{};
         memset(&record, 0, sizeof(record));
         record.ExceptionCode = status;
