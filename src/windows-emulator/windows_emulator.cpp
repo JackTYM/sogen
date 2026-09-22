@@ -1386,6 +1386,7 @@ namespace sogen
     bool windows_emulator::try_warm_kernelbase_nls_cache_breakpoint(vcpu_context& vcpu, const uint64_t address)
     {
         auto& thread = vcpu.thread();
+        static const bool trace_nls_warmup = std::getenv("SOGEN_TRACE_NLS_WARMUP") != nullptr;
 
         if (address == 0 || address != this->process.kernelbase_nls_cache_breakpoint_address)
         {
@@ -1406,6 +1407,13 @@ namespace sogen
                 });
             }
 
+            if (trace_nls_warmup)
+            {
+                fprintf(stderr, "[NLS_WARMUP] tid=%u pid=%u warm-up call completed, NlsCache placeholder=0x%llx\n", thread.id,
+                        this->process.process_id, static_cast<unsigned long long>(this->process.kernelbase_nls_process_local_cache));
+                fflush(stderr);
+            }
+
             this->disarm_kernelbase_nls_cache_breakpoint();
             return true;
         }
@@ -1416,6 +1424,12 @@ namespace sogen
             // zw_callback_return) reached the address this function is temporarily watching for the
             // warm-up's own sentinel. Resume it as if the patch was never there - the warm-up's own
             // completion is still pending and stays armed for its actual owner.
+            if (trace_nls_warmup)
+            {
+                fprintf(stderr, "[NLS_WARMUP] tid=%u pid=%u BYSTANDER hit watched addr 0x%llx while warm-up in flight\n", thread.id,
+                        this->process.process_id, static_cast<unsigned long long>(address));
+                fflush(stderr);
+            }
             vcpu.cpu.reg(x86_register::rip, address);
             return true;
         }
@@ -1431,6 +1445,13 @@ namespace sogen
             {
                 this->process.kernelbase_dllmain_return_address = real_return_address;
                 this->arm_kernelbase_nls_cache_breakpoint(real_return_address);
+            }
+
+            if (trace_nls_warmup)
+            {
+                fprintf(stderr, "[NLS_WARMUP] tid=%u pid=%u hit kernelbase.dll entry point, real_return_address=0x%llx\n", thread.id,
+                        this->process.process_id, static_cast<unsigned long long>(real_return_address));
+                fflush(stderr);
             }
 
             this->process.kernelbase_entry_point = 0;
@@ -1450,6 +1471,13 @@ namespace sogen
             this->process.kernelbase_nls_cache_warming = true;
             invoke_guest_function(thread, vcpu.cpu, this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
             this->arm_kernelbase_nls_cache_breakpoint(this->process.zw_callback_return);
+
+            if (trace_nls_warmup)
+            {
+                fprintf(stderr, "[NLS_WARMUP] tid=%u pid=%u kernelbase.dll DllMain returned, invoking GetUserDefaultLCID warm-up\n",
+                        thread.id, this->process.process_id);
+                fflush(stderr);
+            }
         }
 
         return true;
@@ -1589,6 +1617,14 @@ namespace sogen
                 mod.entry_point != 0)
             {
                 this->arm_kernelbase_nls_cache_breakpoint(mod.entry_point);
+
+                if (std::getenv("SOGEN_TRACE_NLS_WARMUP"))
+                {
+                    fprintf(stderr, "[NLS_WARMUP] pid=%u armed entry-point breakpoint at 0x%llx (process.kernelbase_entry_point=0x%llx)\n",
+                            this->process.process_id, static_cast<unsigned long long>(mod.entry_point),
+                            static_cast<unsigned long long>(this->process.kernelbase_entry_point));
+                    fflush(stderr);
+                }
             }
         });
 
