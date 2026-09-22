@@ -213,6 +213,12 @@ namespace sogen::test
             return map_module_from_data<std::uint64_t>(memory, file_data, "test.dll", windows_path{"C:\\test.dll"});
         }
 
+        mapped_module map_from_file_image_at(memory_manager& memory, const std::vector<std::byte>& image, const uint64_t relocation_base)
+        {
+            const std::span file_data{image.data(), k_size_of_headers + k_section_size};
+            return map_module_from_data<std::uint64_t>(memory, file_data, "test.dll", windows_path{"C:\\test.dll"}, relocation_base);
+        }
+
         mapped_module map_from_mapped_image(memory_manager& memory, const std::vector<std::byte>& image)
         {
             const auto base = memory.allocate_memory(k_image_base, k_size_of_image, memory_permission::read_write);
@@ -357,5 +363,19 @@ namespace sogen::test
         const auto binary = map_from_file_image(memory, build_image(options));
 
         EXPECT_TRUE(binary.exports.empty());
+    }
+
+    TEST(ModuleRelocationTest, DoesNotSilentlyRelocateAwayFromARequiredBase)
+    {
+        page_memory backend{};
+        memory_manager memory{backend};
+        const auto image = build_image({});
+
+        // Occupies the caller-required base the way a second view of an already-loaded image collides
+        // with the first view's own allocation: try_map_module_at_current_base must fail here, while
+        // find_free_host_allocation_base can still find a different, genuinely free address elsewhere.
+        ASSERT_TRUE(memory.allocate_memory(k_image_base, k_size_of_image, memory_permission::read_write));
+
+        EXPECT_THROW(map_from_file_image_at(memory, image, k_image_base), std::runtime_error);
     }
 } // namespace sogen::test
