@@ -17,6 +17,8 @@ namespace sogen
     constexpr ULONG FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE = 0x110030;
     // FSCTL_PIPE_GET_PIPE_ATTRIBUTE = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 10, METHOD_BUFFERED, FILE_ANY_ACCESS)
     constexpr ULONG FSCTL_PIPE_GET_PIPE_ATTRIBUTE = 0x110028;
+    // FSCTL_PIPE_TRANSCEIVE = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 5, METHOD_NEITHER, FILE_READ_DATA | FILE_WRITE_DATA)
+    constexpr ULONG FSCTL_PIPE_TRANSCEIVE = 0x11C017;
     constexpr ULONG FILE_PIPE_CONNECTED_STATE = 3;
 
     // Header of FILE_PIPE_PEEK_BUFFER; the peeked data follows immediately after.
@@ -45,6 +47,11 @@ namespace sogen
 
         return full_name;
     }
+
+    class named_pipe;
+
+    void deliver_bytes_to_named_pipe(process_context& proc, std::u16string_view name, std::string_view data,
+                                     const named_pipe* exclude_self);
 
     class named_pipe : public io_device
     {
@@ -268,6 +275,11 @@ namespace sogen
             if (c.io_control_code == FSCTL_PIPE_GET_PIPE_ATTRIBUTE)
             {
                 return this->get_pipe_attribute(win_emu, c);
+            }
+
+            if (c.io_control_code == FSCTL_PIPE_TRANSCEIVE)
+            {
+                return this->transceive(win_emu, c);
             }
 
             win_emu.log.warn("Unsupported named pipe FSCTL: 0x%X\n", static_cast<uint32_t>(c.io_control_code));
@@ -667,6 +679,34 @@ namespace sogen
             }
 
             return available > data.size() ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+        }
+
+        // Backs TransactNamedPipe: an atomic write of the input buffer to the peer instance immediately
+        // followed by a read of its reply into the output buffer, used by mojo's Windows named-pipe
+        // transport (and classic Windows RPC over named pipes) for a synchronous request/response
+        // round trip without a separate WriteFile+ReadFile pair. Reuses the exact same delivery and
+        // read-completion paths NtWriteFile and NtReadFile already go through, so the two halves stay
+        // consistent with an ordinary write followed by a read on the same pipe.
+        NTSTATUS transceive(windows_emulator& win_emu, const io_device_context& c)
+        {
+            if (!c.input_buffer || c.input_buffer_length == 0 || !c.output_buffer)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            std::string data(c.input_buffer_length, '\0');
+            win_emu.emu().read_memory(c.input_buffer, data.data(), data.size());
+
+            if (std::getenv("SOGEN_TRACE_PIPE_IO_BYTES"))
+            {
+                win_emu.log.info("[pipe-io-bytes-trace] FSCTL_PIPE_TRANSCEIVE pipe='%s' length=%zu tid=%u bytes=%s\n",
+                                 u16_to_u8(this->name).c_str(), data.size(), c.thread().id, utils::string::to_hex_string(data).c_str());
+            }
+
+            deliver_bytes_to_named_pipe(win_emu.process, this->name, data, this);
+            win_emu.broadcast_named_pipe_write(this->name, data);
+
+            return this->try_deliver_read(win_emu, c);
         }
     };
 
