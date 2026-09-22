@@ -2738,6 +2738,10 @@ namespace sogen::fex
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_HOSTFEATURES, "enablelrcpc2");
             }
+            if (std::getenv("EMULATOR_FEX_BLOCK_JIT_NAMING"))
+            {
+                FEXCore::Config::Set(FEXCore::Config::CONFIG_BLOCKJITNAMING, "1");
+            }
 
 #ifdef __APPLE__
             const FEXCore::HostFeatures features = fetch_host_features_apple();
