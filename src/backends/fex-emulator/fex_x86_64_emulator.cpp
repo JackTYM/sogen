@@ -1421,10 +1421,13 @@ namespace sogen::fex
                 ::munmap(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple);
             }
 
-            if (this->wow64_host_window_reserved_)
-            {
-                ::munmap(reinterpret_cast<void*>(this->wow64_guest_rebase_), wow64_guest_address_space_size);
-            }
+            // Deliberately not released: a single munmap/mach_vm_deallocate over the whole
+            // wow64_guest_address_space_size span raises a fatal EXC_GUARD (DEALLOC_GAP) once the
+            // window has been fragmented by real per-page sub-claims (module loads, VirtualAlloc/
+            // VirtualFree) over the process's lifetime, the same guard class fixed for the
+            // reservation/claim paths above. Matches fex_internal_arena's own precedent
+            // (process-lifetime leak, reclaimed by the OS at process exit) rather than the
+            // per-page loop above, which only unmaps pages outside this window.
 
             if (g_active_emulator == this)
             {
@@ -1621,12 +1624,23 @@ namespace sogen::fex
         {
             if (!this->try_read_memory(address, data, size))
             {
-                throw std::runtime_error("Failed to read FEX guest memory");
+                char buf[128];
+                snprintf(buf, sizeof(buf), "Failed to read FEX guest memory at 0x%llx size=0x%zx wow64=%d",
+                         static_cast<unsigned long long>(address), size, this->is_wow64_process_ ? 1 : 0);
+                throw std::runtime_error(buf);
             }
         }
 
+        // Every other reader of regions_ (QueryGuestExecutableRange, handle_general_memory_violation,
+        // etc.) takes tables_mutex_ - this one used to be the sole exception. FEXCore's own JIT compile
+        // path calls back into this function from outside the syscall-dispatch thread (e.g. resolving a
+        // TLS/segment read while translating a block), so an unlocked is_range_mapped here could observe
+        // a torn std::map mid-mutation from a concurrent map_memory/unmap_memory/apply_memory_protection
+        // (all under a unique_lock) and spuriously report already-mapped guest memory as unmapped.
         bool try_read_memory(uint64_t address, void* data, size_t size) const override
         {
+            const std::shared_lock lock(this->tables_mutex_);
+
             if (!this->is_range_mapped(address, size))
             {
                 return false;
