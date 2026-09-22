@@ -10,6 +10,7 @@
 #include "windows_emulator.hpp"
 #include <algorithm>
 #include <devices/named_pipe.hpp>
+#include <syscalls/wait_trace.hpp>
 #include <utils/lazy_object.hpp>
 
 #if defined(OS_EMSCRIPTEN) && !defined(SOGEN_EMSCRIPTEN_SUPPORT_NODEJS)
@@ -6015,6 +6016,8 @@ namespace sogen
             {
                 trace_syscall_timing_hit(c, syscall_name);
             }
+
+            syscalls::record_syscall_dispatch(c.win_emu->current_thread().id, syscall_name.data());
 
             if (dcomposition_syscall_trace_enabled() && syscall_name.starts_with("NtDComposition"))
             {
