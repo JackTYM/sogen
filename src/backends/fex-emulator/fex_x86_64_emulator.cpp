@@ -858,8 +858,7 @@ namespace sogen::fex
         void jit_write_protect(const int enabled)
         {
             using jit_write_protect_np_fn = void (*)(int);
-            static auto* const fn =
-                reinterpret_cast<jit_write_protect_np_fn>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+            static auto* const fn = reinterpret_cast<jit_write_protect_np_fn>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
             if (fn != nullptr)
             {
                 fn(enabled);
@@ -1375,8 +1374,7 @@ namespace sogen::fex
             if ((prot & PROT_EXEC) != 0)
             {
                 const auto& arena = fex_internal_arena::instance();
-                const bool in_fex_arena =
-                    arena.active() && host_address >= arena.base() && host_address < arena.base() + arena.size();
+                const bool in_fex_arena = arena.active() && host_address >= arena.base() && host_address < arena.base() + arena.size();
                 if (!in_fex_arena)
                 {
                     prot &= ~PROT_EXEC;
@@ -1384,10 +1382,9 @@ namespace sogen::fex
                     static std::atomic<bool> LoggedGuestExecStripOnce{false};
                     if (!LoggedGuestExecStripOnce.exchange(true, std::memory_order_relaxed))
                     {
-                        const char* const msg =
-                            "[FEX backend] Stripping host PROT_EXEC for guest-mapped memory outside the FEXCore "
-                            "arena on real iOS device - FEXCore JITs into its own arena buffer and never executes "
-                            "guest memory directly.";
+                        const char* const msg = "[FEX backend] Stripping host PROT_EXEC for guest-mapped memory outside the FEXCore "
+                                                "arena on real iOS device - FEXCore JITs into its own arena buffer and never executes "
+                                                "guest memory directly.";
                         fprintf(stderr, "%s\n", msg);
                         sogen::utils::log_ios_device_milestone(msg);
                     }
@@ -1716,6 +1713,7 @@ namespace sogen::fex
             uint64_t t_ns;
             uint64_t rip;
         };
+
         static constexpr size_t rip_sample_capacity_ = 4096;
         bool rip_sample_enabled_ = false;
         int rip_sample_fd_ = -1;
@@ -2741,7 +2739,24 @@ namespace sogen::fex
                     // this placeholder), so a later claim attempt for it would incorrectly believe it
                     // needs a fresh mach_vm_allocate, which then correctly (but uselessly) fails since
                     // the page really is still ours, throwing a false-positive host_memory_collision.
-                    ::mmap(host_ptr, run_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    //
+                    // Not mmap(MAP_FIXED, ...) (confirmed crashing on an iOS 26/macOS 26 Simulator
+                    // host): sync_host_pages_covering_apple's currently_mapped branch reaches wow64
+                    // pages via a plain mprotect (never a fresh allocation), so a page this backend
+                    // still calls "placeholder" by address range alone can genuinely hold real
+                    // guest-written content. Re-mmapping such a run with MAP_FIXED replaces a range
+                    // XNU still treats as an untouched gap under the covers - the exact
+                    // GUARD_TYPE_VIRT_MEMORY/DEALLOC_GAP EXC_GUARD reserve_wow64_host_window's own
+                    // comment already documents, just triggered here instead of at window creation.
+                    // madvise(MADV_FREE) discards that content (so a later real claim here still gets
+                    // a zero-filled page, matching VirtualAlloc's guarantee) and mprotect(PROT_NONE)
+                    // revokes access - neither call ever creates or removes a mapping, so neither is
+                    // subject to that guard.
+                    ::madvise(host_ptr, run_size, MADV_FREE);
+                    if (::mprotect(host_ptr, run_size, PROT_NONE) != 0)
+                    {
+                        throw std::runtime_error("FEX backend failed to re-arm a wow64 window placeholder page");
+                    }
                     it = run_it;
                 }
                 else
@@ -2847,7 +2862,7 @@ namespace sogen::fex
             {
                 const std::unique_lock lock(this->tables_mutex_);
 
-                if (std::erase_if(this->mmio_regions_, [address](const mmio_region& region) {
+                if (std::erase_if(this->mmio_regions_, [this, address](const mmio_region& region) {
                         if (region.address != address)
                         {
                             return false;
@@ -2864,7 +2879,29 @@ namespace sogen::fex
                             {
                                 ::munmap(region.host_backing_alias, region.host_backing_size);
                             }
-                            ::munmap(region.host_backing, region.host_backing_size);
+#ifdef __APPLE__
+                            if (this->wow64_host_window_reserved_ && rebase_for(this->is_wow64_process_, region.address) != 0)
+                            {
+                                // map_mmio MAP_FIXED this region's host_backing directly into the
+                                // up-front-reserved wow64 window (see its "KUSD-collision fix" comment) -
+                                // it is not a standalone host allocation, it overwrote a slice of the
+                                // single window-wide mmap that release_guest_address_range's placeholder
+                                // branch still assumes covers this address (mapped_host_pages_apple_ is
+                                // never told otherwise). An ordinary munmap here would carve a genuine hole
+                                // into that reservation rather than merely changing its protection; a later
+                                // placeholder-rearm run that coalesces through this address then hits a real
+                                // gap and madvise/mprotect fail with EINVAL/ENOMEM (confirmed via a
+                                // Simulator repro tearing down a KUSD region inside a wow64 process). Re-arm
+                                // the placeholder in place instead, exactly like release_guest_address_range's
+                                // own placeholder branch, so the window stays one contiguous mapping.
+                                ::madvise(region.host_backing, region.host_backing_size, MADV_FREE);
+                                ::mprotect(region.host_backing, region.host_backing_size, PROT_NONE);
+                            }
+                            else
+#endif
+                            {
+                                ::munmap(region.host_backing, region.host_backing_size);
+                            }
                         }
                         return true;
                     }))
@@ -2903,8 +2940,8 @@ namespace sogen::fex
                     snprintf(buf, sizeof(buf),
                              "FEX backend failed to change memory protection: mprotect(addr=0x%llx, size=0x%zx, prot=0x%x) failed, "
                              "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
-                             static_cast<unsigned long long>(address), size, to_prot(permissions), mprotect_errno,
-                             strerror(mprotect_errno), static_cast<unsigned>(permissions), in_fex_arena ? 1 : 0);
+                             static_cast<unsigned long long>(address), size, to_prot(permissions), mprotect_errno, strerror(mprotect_errno),
+                             static_cast<unsigned>(permissions), in_fex_arena ? 1 : 0);
                     throw std::runtime_error(buf);
                 }
 #endif
@@ -3301,9 +3338,9 @@ namespace sogen::fex
                 // exact address, so the kernel reliably honors the hint. The result != host_ptr check
                 // below still catches the rare case it doesn't (see reserve_wow64_host_window for the
                 // same reasoning/fix applied first).
-                void* result = ::mmap(host_ptr, host_page_size_apple,
-                                      to_host_prot_hvf(to_prot_apple(effective, reinterpret_cast<uint64_t>(host_ptr))),
-                                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                void* result =
+                    ::mmap(host_ptr, host_page_size_apple, to_host_prot_hvf(to_prot_apple(effective, reinterpret_cast<uint64_t>(host_ptr))),
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                 if (result == MAP_FAILED || result != host_ptr)
                 {
                     throw std::runtime_error("FEX backend failed to map guest memory at requested address");
@@ -3539,7 +3576,7 @@ namespace sogen::fex
             LogMan::Msg::InstallHandler([](LogMan::DebugLevels level, const char* message) {
                 fprintf(stderr, "[FEXCore LogMan] level=%s: %s\n", LogMan::DebugLevelStr(level), message);
                 sogen::utils::log_ios_device_milestone(std::string("[FEXCore LogMan] level=") + LogMan::DebugLevelStr(level) + ": " +
-                                                        message);
+                                                       message);
             });
             LogMan::Throw::InstallHandler([](const char* message) {
                 fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message);
@@ -3578,8 +3615,7 @@ namespace sogen::fex
                 std::snprintf(diag, sizeof(diag),
                               "[fex-diag] tid=0x%llx fex_internal_arena base=0x%llx size=0x%llx wow64_window "
                               "reserved=%d base=0x%llx size=0x%llx",
-                              static_cast<unsigned long long>(tid),
-                              static_cast<unsigned long long>(fex_internal_arena::instance().base()),
+                              static_cast<unsigned long long>(tid), static_cast<unsigned long long>(fex_internal_arena::instance().base()),
                               static_cast<unsigned long long>(fex_internal_arena::instance().size()),
                               this->wow64_host_window_reserved_ ? 1 : 0, static_cast<unsigned long long>(this->wow64_guest_rebase_),
                               static_cast<unsigned long long>(wow64_guest_address_space_size));
@@ -3664,8 +3700,7 @@ namespace sogen::fex
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
             }
-            FEXCore::Config::Set(FEXCore::Config::CONFIG_X87REDUCEDPRECISION,
-                                  std::getenv("EMULATOR_FEX_X87_FULL_PRECISION") ? "0" : "1");
+            FEXCore::Config::Set(FEXCore::Config::CONFIG_X87REDUCEDPRECISION, std::getenv("EMULATOR_FEX_X87_FULL_PRECISION") ? "0" : "1");
             if (std::getenv("EMULATOR_FEX_NO_TSO"))
             {
                 FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, "0");
@@ -3674,7 +3709,7 @@ namespace sogen::fex
                 if (!LoggedNoTsoOnce.exchange(true, std::memory_order_relaxed))
                 {
                     const char* const msg = "[FEX backend] EMULATOR_FEX_NO_TSO=1: disabled FEXCore TSO "
-                                             "memory-ordering modeling (CONFIG_TSOENABLED=0).";
+                                            "memory-ordering modeling (CONFIG_TSOENABLED=0).";
                     fprintf(stderr, "%s\n", msg);
                     sogen::utils::log_ios_device_milestone(msg);
                 }
@@ -4006,8 +4041,7 @@ namespace sogen::fex
             // Opened once here (ordinary start()-time code, never signal context) so capture()/flush()
             // never need fopen/fclose. O_APPEND: multiple vCPUs (or this vCPU's own repeated opens across
             // a hypothetical restart) share one file safely without needing a cross-instance lock.
-            this->rip_sample_fd_ =
-                ::open(log_path != nullptr ? log_path : "/tmp/fex_rip_sample.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            this->rip_sample_fd_ = ::open(log_path != nullptr ? log_path : "/tmp/fex_rip_sample.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
             this->rip_sample_enabled_ = this->rip_sample_fd_ >= 0;
         }
     }
@@ -4697,7 +4731,7 @@ namespace sogen::fex
         // EmitEntryPoint) and at loop back-edges (CompileCode's two EmitIosPollInterruptCheck call
         // sites), which has no mprotect/signal dependency and so works unconditionally here.
         // Cleared at the top of start() on every quantum entry, before ExecuteThread runs.
-        static std::atomic<bool> LoggedInterruptFaultPageSkipOnce {false};
+        static std::atomic<bool> LoggedInterruptFaultPageSkipOnce{false};
         if (!LoggedInterruptFaultPageSkipOnce.exchange(true, std::memory_order_relaxed))
         {
             const char* const msg = "[FEX backend] Skipping InterruptFaultPage protection on real iOS device - "
@@ -4727,8 +4761,7 @@ namespace sogen::fex
             std::snprintf(diag, sizeof(diag),
                           "[fex-diag] tid=0x%llx vcpu=%zu created context_ thread=%p staged_rip=0x%llx interrupt_fault_page=%p",
                           static_cast<unsigned long long>(tid), this->index_, static_cast<void*>(this->thread_),
-                          static_cast<unsigned long long>(this->staged_state_.rip),
-                          static_cast<void*>(this->thread_->InterruptFaultPage));
+                          static_cast<unsigned long long>(this->staged_state_.rip), static_cast<void*>(this->thread_->InterruptFaultPage));
             sogen::utils::log_ios_device_milestone(diag);
         }
 #endif
@@ -6341,9 +6374,8 @@ namespace sogen::fex
             static std::atomic<bool> LoggedGuestSignalDispatchFromJITOnce{false};
             if (!LoggedGuestSignalDispatchFromJITOnce.exchange(true, std::memory_order_relaxed))
             {
-                const char* const msg =
-                    "[FEX backend] GuestSignal_* dispatcher stub took the real-device direct-call "
-                    "path (Pointers.GuestSignalDispatchFunc) instead of a hardware fault.";
+                const char* const msg = "[FEX backend] GuestSignal_* dispatcher stub took the real-device direct-call "
+                                        "path (Pointers.GuestSignalDispatchFunc) instead of a hardware fault.";
                 fprintf(stderr, "%s\n", msg);
                 sogen::utils::log_ios_device_milestone(msg);
             }
