@@ -266,24 +266,30 @@ namespace sogen
 
         const auto effective_permission = this->get_effective_permissions(permissions);
 
-        for (auto& sub_region : committed_regions)
+        for (auto sub_region = committed_regions.lower_bound(address); sub_region != committed_regions.end() && sub_region->first < end;)
         {
-            if (sub_region.first >= end)
+            if (!old_first_permissions.has_value())
             {
-                break;
+                old_first_permissions = sub_region->second.permissions;
             }
 
-            const auto sub_region_end = sub_region.first + sub_region.second.length;
-            if (sub_region.first >= address && sub_region_end <= end)
-            {
-                if (!old_first_permissions.has_value())
-                {
-                    old_first_permissions = sub_region.second.permissions;
-                }
+            const auto run_start = sub_region->first;
+            auto run_end = run_start + sub_region->second.length;
+            sub_region->second.permissions = permissions;
 
-                this->apply_memory_protection(sub_region.first, sub_region.second.length, effective_permission);
-                sub_region.second.permissions = permissions;
+            auto next = sub_region;
+            std::advance(next, 1);
+
+            while (next != committed_regions.end() && next->first == run_end && next->first < end)
+            {
+                run_end = next->first + next->second.length;
+                next->second.permissions = permissions;
+                std::advance(next, 1);
             }
+
+            this->apply_memory_protection(run_start, run_end - run_start, effective_permission);
+
+            sub_region = next;
         }
 
         if (old_permissions)
