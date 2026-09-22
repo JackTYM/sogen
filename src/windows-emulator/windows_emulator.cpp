@@ -24,6 +24,7 @@ namespace sogen
 {
     constexpr auto MAX_INSTRUCTIONS_PER_TIME_SLICE = 0x20000;
     constexpr auto MAX_BASIC_BLOCKS_PER_TIME_SLICE = 0x8000;
+    constexpr uint32_t MAX_PENDING_GUEST_CALL_DEFERRED_PREEMPTIONS = 100;
 
     namespace
     {
@@ -1149,6 +1150,28 @@ namespace sogen
         this->kernel_lock_.assert_held();
 
         const auto needed_switch = vcpu.switch_thread.exchange(false);
+
+        // guest_function_call.hpp's invoke_guest_function redirects a thread's own instruction
+        // stream into a real guest function and expects to observe the result once it returns to
+        // its sentinel address, without another thread running in between and reading state the
+        // call is still populating (e.g. try_warm_kernelbase_nls_cache_breakpoint's NLS-cache
+        // warm-up). A fairness/timer preemption (this vcpu's own time slice, or the periodic
+        // interrupt_thread used on backends without instruction precision) knows nothing about
+        // that invariant and would otherwise switch to another ready thread mid-call. Defer such a
+        // preemption while the call is in flight and the thread stays genuinely ready - a real
+        // block (a wait the call itself enters) still switches away normally. Bounded so a call
+        // that unexpectedly never reaches its sentinel cannot hang the vCPU forever; falling back
+        // to the pre-existing racy scheduling behavior here is never worse than never having
+        // deferred at all.
+        if (needed_switch && vcpu.active_thread && vcpu.active_thread->pending_guest_call.has_value() &&
+            vcpu.active_thread->is_thread_ready(*this))
+        {
+            auto& pending_call = *vcpu.active_thread->pending_guest_call;
+            if (++pending_call.deferred_preemptions <= MAX_PENDING_GUEST_CALL_DEFERRED_PREEMPTIONS)
+            {
+                return true;
+            }
+        }
 
         static thread_local int idle_spin_count = 0;
         static const bool sched_diag = std::getenv("EMULATOR_SCHED_DIAG") != nullptr;

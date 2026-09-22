@@ -244,6 +244,11 @@ namespace sogen
     {
         uint64_t sentinel_address{};
         callback_frame saved_state;
+
+        // How many times windows_emulator::perform_thread_switch has deferred a fairness/timer
+        // preemption to let this call keep running instead of switching to another thread. See
+        // perform_thread_switch's own comment for why this exists and why it is bounded.
+        uint32_t deferred_preemptions{};
     };
 
     class emulator_process : public ref_counted_object
