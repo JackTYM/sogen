@@ -598,6 +598,20 @@ namespace sogen
         // meaningless across a snapshot boundary.
         uint64_t kernelbase_nls_cache_breakpoint_address{};
         std::byte kernelbase_nls_cache_breakpoint_original_byte{};
+        // Guest address of ntdll64's exported RtlQueryPerformanceCounter, permanently patched with
+        // 0xCC once resolved (see windows_emulator::arm_rtl_query_performance_counter_trap). Its
+        // real user-mode "bypass" fast path reads several KUSER_SHARED_DATA fields at their raw,
+        // unrebased address - always unbacked by real memory on a Mach-O host, see
+        // fex_x86_64_emulator's mmio_region doc comment - before ever reaching an RDTSCP this
+        // backend doesn't support either (see that backend's SupportsCPUIndexInTPIDRRO comment), so
+        // every call was paying multiple guaranteed hardware faults. Unlike
+        // kernelbase_nls_cache_breakpoint_address, this one is never disarmed: the function is
+        // called repeatedly for the whole process lifetime, and every hit is answered directly
+        // from kusd_mmio's own clock (windows_emulator::try_service_rtl_query_performance_counter)
+        // instead of ever letting the real body run. 0 = not armed. Not serialized, same reasoning
+        // as kernelbase_nls_cache_breakpoint_address - re-armed on module load, and FEX snapshots
+        // don't persist guest memory contents yet anyway (see that backend's serialize_state).
+        uint64_t rtl_query_performance_counter_trap{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};

@@ -782,6 +782,9 @@ namespace sogen
         bool try_warm_kernelbase_nls_cache_breakpoint(vcpu_context& vcpu, uint64_t address);
         void begin_kernelbase_nls_cache_warmup(vcpu_context& vcpu);
 
+        void arm_rtl_query_performance_counter_trap(uint64_t address);
+        bool try_service_rtl_query_performance_counter(vcpu_context& vcpu, uint64_t address) const;
+
         bool uses_section_first_execution_hooks() const;
         void clear_section_first_execution_hooks();
         void install_section_first_execution_hook(const mapped_module& mod, size_t section_index);

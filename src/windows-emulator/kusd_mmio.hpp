@@ -52,6 +52,12 @@ namespace sogen
 
         void setup(const windows_version_manager& version, const fake_environment_config& fake_env, bool is_wow64_process);
 
+        // The exact value handle_NtQueryPerformanceCounter's syscall handler returns (see its own
+        // doc comment) - kept in sync so a host-side short-circuit of RtlQueryPerformanceCounter's
+        // user-mode fast path (fex_x86_64_emulator's rtl_query_performance_counter gate crossing)
+        // observes the same counter the syscall path would.
+        int64_t performance_counter_value() const;
+
       private:
         memory_manager* memory_{};
         utils::clock* clock_{};

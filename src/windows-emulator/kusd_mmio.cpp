@@ -206,6 +206,11 @@ namespace sogen
         return KUSD_ADDRESS;
     }
 
+    int64_t kusd_mmio::performance_counter_value() const
+    {
+        return this->clock_->steady_now().time_since_epoch().count();
+    }
+
     void kusd_mmio::update()
     {
         const auto time = this->clock_->system_now();

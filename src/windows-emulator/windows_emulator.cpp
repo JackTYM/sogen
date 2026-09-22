@@ -1414,6 +1414,44 @@ namespace sogen
         this->process.kernelbase_nls_cache_breakpoint_address = 0;
     }
 
+    void windows_emulator::arm_rtl_query_performance_counter_trap(const uint64_t address)
+    {
+        constexpr std::byte int3{0xCC};
+        if (this->emu().try_write_memory(address, &int3, sizeof(int3)))
+        {
+            this->process.rtl_query_performance_counter_trap = address;
+        }
+    }
+
+    bool windows_emulator::try_service_rtl_query_performance_counter(vcpu_context& vcpu, const uint64_t address) const
+    {
+        if (address == 0 || address != this->process.rtl_query_performance_counter_trap)
+        {
+            return false;
+        }
+
+        auto& acting = vcpu.cpu;
+        const auto counter_ptr = acting.reg<uint64_t>(x86_register::rcx);
+        const auto rsp = acting.read_stack_pointer();
+
+        uint64_t return_address = 0;
+        if (!acting.try_read_memory(rsp, &return_address, sizeof(return_address)))
+        {
+            return false;
+        }
+
+        const int64_t counter_value = this->process.kusd.performance_counter_value();
+        if (counter_ptr != 0)
+        {
+            acting.try_write_memory(counter_ptr, &counter_value, sizeof(counter_value));
+        }
+
+        acting.reg(x86_register::rax, uint64_t{1});
+        acting.reg(x86_register::rsp, rsp + sizeof(return_address));
+        acting.reg(x86_register::rip, return_address);
+        return true;
+    }
+
     bool windows_emulator::try_warm_kernelbase_nls_cache_breakpoint(vcpu_context& vcpu, const uint64_t address)
     {
         auto& thread = vcpu.thread();
@@ -1686,6 +1724,24 @@ namespace sogen
             }
         });
 
+        // See rtl_query_performance_counter_trap's doc comment: ntdll64 is mapped once, synchronously,
+        // before this process ever runs guest code, so its own real export address is known the
+        // moment it loads - no need for the multi-stage DllMain-return tracking kernelbase.dll's
+        // hook above needs. IMAGE_FILE_MACHINE_AMD64-gated for the same reason as that hook: a WoW64
+        // process maps both a native 64-bit ntdll.dll (system32) and a 32-bit one (syswow64), both
+        // named "ntdll.dll", and only the native 64-bit copy's RtlQueryPerformanceCounter is ever
+        // reachable from unrebased, always-unbacked-on-this-host KUSER_SHARED_DATA accesses.
+        this->callbacks.on_module_load.add([this](mapped_module& mod) {
+            if (!this->uses_instruction_precision() && mod.name == "ntdll.dll" && mod.machine == IMAGE_FILE_MACHINE_AMD64)
+            {
+                const auto address = mod.find_export("RtlQueryPerformanceCounter");
+                if (address != 0)
+                {
+                    this->arm_rtl_query_performance_counter_trap(address);
+                }
+            }
+        });
+
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
             const auto hooks = this->section_first_execution_hooks_.extract(mod.image_base);
             if (hooks)
@@ -1773,6 +1829,11 @@ namespace sogen
             case 3: {
                 const auto real_bp_address = acting.read_instruction_pointer() - (acting.reports_breakpoint_rip_past_instruction() ? 1 : 0);
                 if (!this->uses_instruction_precision() && this->try_warm_kernelbase_nls_cache_breakpoint(vcpu, real_bp_address))
+                {
+                    return;
+                }
+
+                if (!this->uses_instruction_precision() && this->try_service_rtl_query_performance_counter(vcpu, real_bp_address))
                 {
                     return;
                 }
