@@ -1197,9 +1197,22 @@ namespace sogen
         // processor a desktop build's SDL loop drives -- backends with no such queue (e.g. the iOS
         // app, which delivers input through ios_ui_backend's own queue instead) never call it, so
         // foreground_window stays 0 for the guest's entire lifetime without this fallback.
+        //
+        // A real top-level window's parent_handle is the desktop's handle, not 0 (see
+        // handle_NtUserCreateWindowEx: non-child windows get default_desktop_window_handle as their
+        // parent) - only the desktop itself has parent_handle == 0. So "top-level" here means either
+        // value. That alone isn't enough to exclude every non-application window though: the
+        // synthetic shell windows sogen creates for compatibility (the desktop itself, and a
+        // "Progman" stand-in) are also visible top-level windows, but neither is ever given a real
+        // guest-code wndproc - routing input to one of them makes DispatchMessage silently no-op
+        // (confirmed live: an iOS touch delivered a genuine WM_MOUSEMOVE/WM_LBUTTONDOWN into one of
+        // their queues, GetMessage returned it correctly since it matched the same owning "thread",
+        // but nothing ever printed because that window's wnd_proc is 0). A real application window
+        // always has one - DispatchMessage itself depends on it - so require it here too.
         for (const auto& [index, win] : this->windows)
         {
-            if (win.parent_handle == 0 && (win.style & WS_VISIBLE) != 0)
+            const bool is_top_level = win.parent_handle == 0 || win.parent_handle == this->default_desktop_window_handle.bits;
+            if (win.wnd_proc != 0 && is_top_level && (win.style & WS_VISIBLE) != 0)
             {
                 return win.handle;
             }
