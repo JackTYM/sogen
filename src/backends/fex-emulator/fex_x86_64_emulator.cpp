@@ -2359,11 +2359,26 @@ namespace sogen::fex
 #ifdef __APPLE__
             const auto rebase = rebase_for(this->is_wow64_process_, address);
             host_backing_size = host_page_align_up_apple(size);
-            void* result = ::mmap(reinterpret_cast<void*>(address + rebase), host_backing_size, PROT_READ | PROT_WRITE,
-                                  MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-            if (result != MAP_FAILED && result == reinterpret_cast<void*>(address + rebase))
+            const uint64_t host_address = address + rebase;
+
+            // Same EXC_GUARD/DEALLOC_GAP hazard reserve_wow64_host_window()'s doc comment describes for
+            // BSD mmap(MAP_FIXED) in this window - go through the Mach VM API instead, with the same
+            // VM_FLAGS_OVERWRITE-inside-our-own-window exception claim_host_range() uses, since an MMIO
+            // region backing a wow64 guest's rebased address can land inside that window's placeholder.
+            mach_vm_address_t target = host_address;
+            const int allocate_flags =
+                rebase != 0 && this->wow64_host_window_reserved_ ? VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE : VM_FLAGS_FIXED;
+            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, host_backing_size, allocate_flags);
+            if (result == KERN_SUCCESS && target == host_address)
             {
-                host_backing = result;
+                if (::mprotect(reinterpret_cast<void*>(host_address), host_backing_size, PROT_READ | PROT_WRITE) == 0)
+                {
+                    host_backing = reinterpret_cast<void*>(host_address);
+                }
+                else
+                {
+                    ::mach_vm_deallocate(mach_task_self(), target, host_backing_size);
+                }
             }
 #endif
 
@@ -2795,12 +2810,26 @@ namespace sogen::fex
 
             const auto rebase = rebase_for(this->is_wow64_process_, address);
             const uint64_t host_address = address + rebase;
+#ifdef __APPLE__
+            // Same EXC_GUARD/DEALLOC_GAP hazard as claim_host_range() for BSD mmap(MAP_FIXED) - this
+            // always replaces an already-claimed range, so VM_FLAGS_OVERWRITE is unconditional here
+            // (unlike claim_host_range()'s first-claim case, which only needs it inside the wow64
+            // window's own placeholder).
+            mach_vm_address_t target = host_address;
+            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+            if (result != KERN_SUCCESS || target != host_address ||
+                ::mprotect(reinterpret_cast<void*>(host_address), size, protection) != 0)
+            {
+                throw std::runtime_error("FEX backend failed to replace a claimed host range");
+            }
+#else
             void* result = ::mmap(reinterpret_cast<void*>(host_address), size, protection,
                                   MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
             if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
             {
                 throw std::runtime_error("FEX backend failed to replace a claimed host range");
             }
+#endif
         }
 #endif
 
