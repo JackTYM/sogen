@@ -1079,6 +1079,21 @@ namespace sogen
                 {
                     this->register_named_pipe_server(pipe_short_name(message->pipe_name));
                 }
+
+                // pipe_ipc_peers_ mirrors the process spawn tree (one entry for this process's own
+                // parent, plus one per child it spawned - see the member's doc comment), so relaying
+                // to every OTHER entry floods the message across the whole tree without looping back:
+                // each edge is walked at most once per hop, and a tree has no cycles to re-visit. Two
+                // siblings (e.g. a crash handler and a network-service child of the same browser
+                // process) only share a common parent, not a direct link, so without this they could
+                // never reach each other at all.
+                for (auto& other_peer : this->pipe_ipc_peers_)
+                {
+                    if (other_peer != peer)
+                    {
+                        other_peer->send(*message);
+                    }
+                }
             }
         }
     }

@@ -629,7 +629,9 @@ namespace sogen
         {
             if (!is_relocatable && relocation_base == 0)
             {
-                throw std::runtime_error("Memory range not allocatable");
+                throw std::runtime_error("Memory range not allocatable for " + binary.module_path.string() + " at preferred base 0x" +
+                                         utils::string::to_hex_number(binary.image_base) +
+                                         " (size=" + std::to_string(binary.size_of_image) + ", non-relocatable)");
             }
 
             // 32-bit (WOW64) modules must stay below 4 GB; native modules use the 64-bit arena. An
@@ -654,6 +656,7 @@ namespace sogen
             // terminates rather than spinning.
             constexpr int max_host_relocation_retries = 8;
             bool mapped = false;
+            int attempts_made = 0;
             // The free-pick retry loop only makes sense when the caller left the target address up to
             // us (relocation_base == 0) - if the caller specified a real target (mapping a view of an
             // already-loaded image at that image's own base, so the view's internal absolute pointers
@@ -663,6 +666,7 @@ namespace sogen
             {
                 for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
                 {
+                    attempts_made = attempt + 1;
                     binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start, highest_address);
                     if (!binary.image_base)
                     {
@@ -682,7 +686,10 @@ namespace sogen
                             !try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
                                                             relocation_base ? relocation_base : binary.image_base)))
             {
-                throw std::runtime_error("Memory range not allocatable");
+                throw std::runtime_error("Memory range not allocatable for " + binary.module_path.string() +
+                                         " (size=" + std::to_string(image_size) + ", last tried base=0x" +
+                                         utils::string::to_hex_number(binary.image_base) + ", attempts=" + std::to_string(attempts_made) +
+                                         ")");
             }
         }
 
