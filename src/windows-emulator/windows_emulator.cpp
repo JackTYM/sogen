@@ -1352,6 +1352,109 @@ namespace sogen
         this->process.kernelbase_entry_point = 0;
     }
 
+    void windows_emulator::arm_kernelbase_nls_cache_breakpoint(const uint64_t address)
+    {
+        std::byte original{};
+        if (!this->emu().try_read_memory(address, &original, sizeof(original)))
+        {
+            return;
+        }
+
+        constexpr std::byte int3{0xCC};
+        if (!this->emu().try_write_memory(address, &int3, sizeof(int3)))
+        {
+            return;
+        }
+
+        this->process.kernelbase_nls_cache_breakpoint_address = address;
+        this->process.kernelbase_nls_cache_breakpoint_original_byte = original;
+    }
+
+    void windows_emulator::disarm_kernelbase_nls_cache_breakpoint()
+    {
+        if (this->process.kernelbase_nls_cache_breakpoint_address == 0)
+        {
+            return;
+        }
+
+        this->emu().try_write_memory(this->process.kernelbase_nls_cache_breakpoint_address,
+                                     &this->process.kernelbase_nls_cache_breakpoint_original_byte,
+                                     sizeof(this->process.kernelbase_nls_cache_breakpoint_original_byte));
+        this->process.kernelbase_nls_cache_breakpoint_address = 0;
+    }
+
+    bool windows_emulator::try_warm_kernelbase_nls_cache_breakpoint(vcpu_context& vcpu, const uint64_t address)
+    {
+        auto& thread = vcpu.thread();
+
+        if (address == 0 || address != this->process.kernelbase_nls_cache_breakpoint_address)
+        {
+            return false;
+        }
+
+        if (try_complete_guest_function(vcpu, address))
+        {
+            this->process.kernelbase_nls_cache_warming = false;
+
+            if (thread.teb64.has_value())
+            {
+                thread.teb64->access([&](TEB64& teb) {
+                    if (teb.NlsCache == 0)
+                    {
+                        teb.NlsCache = this->process.kernelbase_nls_process_local_cache;
+                    }
+                });
+            }
+
+            this->disarm_kernelbase_nls_cache_breakpoint();
+            return true;
+        }
+
+        if (address != this->process.kernelbase_entry_point && address != this->process.kernelbase_dllmain_return_address)
+        {
+            // Some other guest thread (e.g. a real KiUserCallbackDispatcher round trip through
+            // zw_callback_return) reached the address this function is temporarily watching for the
+            // warm-up's own sentinel. Resume it as if the patch was never there - the warm-up's own
+            // completion is still pending and stays armed for its actual owner.
+            vcpu.cpu.reg(x86_register::rip, address);
+            return true;
+        }
+
+        this->disarm_kernelbase_nls_cache_breakpoint();
+        vcpu.cpu.reg(x86_register::rip, address);
+
+        if (address == this->process.kernelbase_entry_point)
+        {
+            uint64_t real_return_address = 0;
+            if (vcpu.cpu.try_read_memory(vcpu.cpu.read_stack_pointer(), &real_return_address, sizeof(real_return_address)) &&
+                real_return_address != 0)
+            {
+                this->process.kernelbase_dllmain_return_address = real_return_address;
+                this->arm_kernelbase_nls_cache_breakpoint(real_return_address);
+            }
+
+            this->process.kernelbase_entry_point = 0;
+            return true;
+        }
+
+        this->process.kernelbase_nls_cache_warmed = true;
+        this->process.kernelbase_dllmain_return_address = 0;
+
+        if (this->process.kernelbase_get_user_default_lcid != 0)
+        {
+            if (thread.teb64.has_value())
+            {
+                thread.teb64->access([](TEB64& teb) { teb.NlsCache = 0; });
+            }
+
+            this->process.kernelbase_nls_cache_warming = true;
+            invoke_guest_function(thread, vcpu.cpu, this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
+            this->arm_kernelbase_nls_cache_breakpoint(this->process.zw_callback_return);
+        }
+
+        return true;
+    }
+
     bool windows_emulator::uses_section_first_execution_hooks() const
     {
         return !this->emu().supports_global_memory_execution_hooks();
@@ -1470,6 +1573,25 @@ namespace sogen
             }
         });
 
+        // try_warm_kernelbase_nls_cache relies on uses_instruction_precision()'s host hook to reach
+        // kernelbase.dll's DllMain entry/return - unavailable on FEX/KVM/WHP (see
+        // kernelbase_nls_cache_breakpoint_address's doc comment). Arm the breakpoint-based
+        // equivalent's first stage here instead, the moment kernelbase.dll's real entry point is
+        // known, well before the loader ever calls it. IMAGE_FILE_MACHINE_AMD64-gated: a WoW64
+        // process maps both the native 64-bit kernelbase.dll (system32) and a 32-bit one
+        // (syswow64), both named "kernelbase.dll" - this mechanism tracks only one patched address
+        // at a time (kernelbase_nls_cache_breakpoint_address), and the crash it targets is in the
+        // native 64-bit copy (TEB64.NlsCache), so the 32-bit one must never arm it: doing so would
+        // silently overwrite the tracked address without restoring the first patch, leaving a
+        // permanently un-restored 0xCC in the 64-bit copy's own entry point.
+        this->callbacks.on_module_load.add([this](mapped_module& mod) {
+            if (!this->uses_instruction_precision() && mod.name == "kernelbase.dll" && mod.machine == IMAGE_FILE_MACHINE_AMD64 &&
+                mod.entry_point != 0)
+            {
+                this->arm_kernelbase_nls_cache_breakpoint(mod.entry_point);
+            }
+        });
+
         this->callbacks.on_module_unload.add([this](mapped_module& mod) {
             const auto hooks = this->section_first_execution_hooks_.extract(mod.image_base);
             if (hooks)
@@ -1554,10 +1676,17 @@ namespace sogen
                 this->callbacks.on_suspicious_activity("Singlestep");
                 dispatch_single_step(*this, vcpu);
                 return;
-            case 3:
+            case 3: {
+                const auto real_bp_address = acting.read_instruction_pointer() - (acting.reports_breakpoint_rip_past_instruction() ? 1 : 0);
+                if (!this->uses_instruction_precision() && this->try_warm_kernelbase_nls_cache_breakpoint(vcpu, real_bp_address))
+                {
+                    return;
+                }
+
                 this->callbacks.on_suspicious_activity("Breakpoint");
                 dispatch_breakpoint(*this, vcpu);
                 return;
+            }
             case 6:
                 this->callbacks.on_suspicious_activity("Illegal instruction");
                 dispatch_illegal_instruction_violation(*this, vcpu);

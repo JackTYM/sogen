@@ -776,6 +776,9 @@ namespace sogen
         void on_instruction_execution(vcpu_context& vcpu, uint64_t address);
         void on_basic_block_execution(vcpu_context& vcpu, const basic_block& block);
         void try_warm_kernelbase_nls_cache(vcpu_context& vcpu, uint64_t address);
+        void arm_kernelbase_nls_cache_breakpoint(uint64_t address);
+        void disarm_kernelbase_nls_cache_breakpoint();
+        bool try_warm_kernelbase_nls_cache_breakpoint(vcpu_context& vcpu, uint64_t address);
 
         bool uses_section_first_execution_hooks() const;
         void clear_section_first_execution_hooks();

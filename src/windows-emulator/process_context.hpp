@@ -583,6 +583,21 @@ namespace sogen
         uint64_t kernelbase_entry_point{};
         uint64_t kernelbase_get_user_default_lcid{};
         uint64_t kernelbase_dllmain_return_address{};
+        // Guest address currently holding a temporary 0xCC byte, used by
+        // windows_emulator::try_warm_kernelbase_nls_cache_breakpoint to reach the same three points
+        // (DllMain entry, DllMain return, GetUserDefaultLCID-call completion) as
+        // try_warm_kernelbase_nls_cache above, but via a real guest int3 instead of an
+        // instruction-precision host hook: uses_instruction_precision() is only ever true for
+        // Unicorn (see supports_instruction_counting) - FEX/KVM/WHP run guest code natively and
+        // expose no per-instruction or per-address execution hook at all (their hook_memory_execution
+        // overloads are no-ops, kept only for API compatibility), so on those backends
+        // try_warm_kernelbase_nls_cache's own host hook never fires and 5b3fd9d5's warm-up never
+        // runs. A software breakpoint uses only real x86 semantics (STATUS_BREAKPOINT delivery,
+        // already proven to work identically on every backend) instead. 0 = no patch currently
+        // installed. Not serialized: host-side bookkeeping for an in-flight guest-code patch,
+        // meaningless across a snapshot boundary.
+        uint64_t kernelbase_nls_cache_breakpoint_address{};
+        std::byte kernelbase_nls_cache_breakpoint_original_byte{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};
