@@ -33,7 +33,8 @@ namespace sogen
         // explains itself in the log instead of requiring live debugger inspection.
         void dump_thread_wait_states_diag(process_context& process, const vcpu_context& vcpu)
         {
-            fprintf(stderr, "[SCHED_DIAG] idle spin, this vcpu's active_thread=%p\n", static_cast<void*>(vcpu.active_thread));
+            fprintf(stderr, "[SCHED_DIAG] active_thread=%p id=%u\n", static_cast<void*>(vcpu.active_thread),
+                    vcpu.active_thread ? vcpu.active_thread->id : 0);
             for (auto& [h, thread] : process.threads)
             {
                 fprintf(stderr,
@@ -1181,6 +1182,13 @@ namespace sogen
 
         const auto needed_switch = vcpu.switch_thread.exchange(false);
 
+        static const bool sched_diag = std::getenv("EMULATOR_SCHED_DIAG") != nullptr;
+
+        if (sched_diag && needed_switch)
+        {
+            dump_thread_wait_states_diag(this->process, vcpu);
+        }
+
         // guest_function_call.hpp's invoke_guest_function redirects a thread's own instruction
         // stream into a real guest function and expects to observe the result once it returns to
         // its sentinel address, without another thread running in between and reading state the
@@ -1204,7 +1212,6 @@ namespace sogen
         }
 
         static thread_local int idle_spin_count = 0;
-        static const bool sched_diag = std::getenv("EMULATOR_SCHED_DIAG") != nullptr;
 
         while (!switch_to_next_thread(*this, vcpu))
         {
@@ -1260,6 +1267,11 @@ namespace sogen
                 vcpu.switch_thread = needed_switch;
                 return false;
             }
+        }
+
+        if (sched_diag && needed_switch)
+        {
+            fprintf(stderr, "[SCHED_DIAG] quantum tick switched to thread id=%u\n", vcpu.active_thread ? vcpu.active_thread->id : 0);
         }
 
         idle_spin_count = 0;
