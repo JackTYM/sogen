@@ -198,6 +198,8 @@ namespace sogen
         std::atomic<std::uint64_t> layout_version_{0};
         std::uint64_t default_allocation_address_{0x100000000ULL};
         bool dep_enabled_{true};
+        // Addresses reserved by reserve_host_memory_ranges() so far, so reset_host_memory_ranges can
+        // release the previous set before asking the backend for a fresh one.
         std::vector<uint64_t> host_reserved_addresses_{};
 
         void map_mmio(uint64_t address, size_t size, mmio_read_callback read_cb, mmio_write_callback write_cb) final;

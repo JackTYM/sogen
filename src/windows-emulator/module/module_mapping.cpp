@@ -384,6 +384,7 @@ namespace sogen
 
                 relocation_offset += relocation.SizeOfBlock;
 
+                // Read every entry descriptor for this block in one guest read instead of one per entry.
                 entries.resize(entry_count);
                 if (entry_count > 0)
                 {
@@ -600,43 +601,54 @@ namespace sogen
                 throw std::runtime_error("Memory range not allocatable");
             }
 
-            // The ceiling is explicit because an unbounded search can pick a base above 4 GB for a
-            // 32-bit module once the low arena fills; WOW64 pointer marshaling then truncates it to 32
-            // bits, aliasing the module onto whatever unrelated allocation sits at the truncated address.
+            // 32-bit (WOW64) modules must stay below 4 GB; native modules use the 64-bit arena. An
+            // unbounded search can pick a base above 4GB for a 32-bit module once the low arena fills,
+            // and guest/WOW64 pointer marshaling then truncates it to 32 bits, aliasing it onto
+            // whatever unrelated low allocation sits at the truncated address - so cap explicitly.
             const bool needs_below_4gb = force_wow64cpu_32bit_va || is_32bit;
             const uint64_t fallback_start = needs_below_4gb ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
             const uint64_t highest_address = needs_below_4gb ? below_4gb_ceiling : MAX_ALLOCATION_ADDRESS;
             const auto image_size = static_cast<size_t>(binary.size_of_image);
 
-            // The preferred base was taken, so relocate. On backends sharing the address space with the
-            // guest (FEX on Apple Silicon), a foreign host mapping can occupy a VA sogen still believes
-            // is free, and a single pick would fail the map outright even though other addresses are
-            // available. A failed try_map_module_at_current_base records the intruding host range via the
-            // fixed-address allocate_memory's windowed rescan, so re-picking steps past it; bounded so an
-            // exhausted address space terminates rather than spins.
+            // The preferred base was taken, so relocate. find_free_host_allocation_base picks a base and
+            // confirms it is actually free at the host level, not merely per sogen's own bookkeeping. That
+            // matters on backends sharing the guest address space with the host process (FEX on Apple
+            // Silicon: guest VA == host VA), where a foreign host mapping (a lazily-loaded dylib, a thread
+            // stack, ASLR-placed anything) can occupy a VA sogen still believes is free - a single pick
+            // would then fail the map outright even though other addresses are available. The loop below
+            // re-picks past such a collision instead: a failed try_map_module_at_current_base has already
+            // recorded the intruding host range (via the fixed-address allocate_memory's windowed rescan),
+            // so the next pick steps past it. Bounded so a genuinely exhausted address space still
+            // terminates rather than spinning.
             constexpr int max_host_relocation_retries = 8;
             bool mapped = false;
-            // Also applies when the caller passed a relocation_base: that only expresses a preferred
-            // target (e.g. mapping another view of an already-loaded image at its current base), not a
-            // hard requirement - real Windows itself falls back to relocating such a view elsewhere and
-            // reports STATUS_IMAGE_NOT_AT_BASE rather than failing the map outright.
-            for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
+            // The free-pick retry loop only makes sense when the caller left the target address up to
+            // us (relocation_base == 0) - if the caller specified a real target (mapping a view of an
+            // already-loaded image at that image's own base, so the view's internal absolute pointers
+            // stay correct), picking a different free host address instead would silently relocate the
+            // view away from where the caller actually needs it.
+            if (relocation_base == 0)
             {
-                binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start, highest_address);
-                if (!binary.image_base)
+                for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
                 {
-                    break;
-                }
+                    binary.image_base = memory.find_free_host_allocation_base(image_size, fallback_start, highest_address);
+                    if (!binary.image_base)
+                    {
+                        break;
+                    }
 
-                if (try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
-                                                   binary.image_base))
-                {
-                    mapped = true;
-                    break;
+                    if (try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
+                                                       binary.image_base))
+                    {
+                        mapped = true;
+                        break;
+                    }
                 }
             }
 
-            if (!mapped)
+            if (!mapped && (!binary.image_base ||
+                            !try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
+                                                            relocation_base ? relocation_base : binary.image_base)))
             {
                 throw std::runtime_error("Memory range not allocatable");
             }

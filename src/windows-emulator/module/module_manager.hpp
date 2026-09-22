@@ -165,6 +165,22 @@ namespace sogen
             return current_execution_mode_ == execution_mode::wow64_32bit;
         }
 
+        // The actual guest addresses install_wow64_heaven_gate placed the trampoline code page and
+        // stack at. Usually wow64::heaven_gate::kCodeBase/kStackTop (the preferred fixed addresses),
+        // but can differ if that fixed spot was already claimed by a foreign host mapping on a backend
+        // sharing the guest address space with the host process (FEX on Apple Silicon) - see
+        // install_wow64_heaven_gate's doc comment. exception_dispatch.cpp reads these instead of the
+        // compile-time constants so it always targets wherever the gate actually ended up.
+        uint64_t wow64_heaven_gate_code_base() const
+        {
+            return wow64_heaven_gate_code_base_;
+        }
+
+        uint64_t wow64_heaven_gate_stack_top() const
+        {
+            return wow64_heaven_gate_stack_top_;
+        }
+
         // TODO: These should be properly encapsulated. A good mechanism for quick module access is needed.
         mapped_module* executable{};
         mapped_module* ntdll{};
@@ -191,6 +207,11 @@ namespace sogen
         mapping_strategy_factory strategy_factory_;
         execution_mode current_execution_mode_ = execution_mode::unknown;
 
+        // Set by install_wow64_heaven_gate to wherever it actually placed the gate; 0 until then (never
+        // read before that runs on a wow64 process). See the accessors' doc comment above.
+        uint64_t wow64_heaven_gate_code_base_{};
+        uint64_t wow64_heaven_gate_stack_top_{};
+
         mapped_module* map_module_core(const pe_detection_result& detection_result, const std::function<mapped_module()>& mapper,
                                        const logger& logger, bool is_static);
 
@@ -198,10 +219,11 @@ namespace sogen
 
         void load_native_64bit_modules(const windows_path& executable_path, const windows_path& ntdll_path, const windows_path& win32u_path,
                                        const logger& logger);
-        void load_wow64_modules(const windows_path& executable_path, const windows_path& ntdll_path, const windows_path& win32u_path,
-                                const windows_path& ntdll32_path, windows_version_manager& version, const logger& logger);
+        void load_wow64_modules(x86_64_emulator& emu, const windows_path& executable_path, const windows_path& ntdll_path,
+                                const windows_path& win32u_path, const windows_path& ntdll32_path, windows_version_manager& version,
+                                const logger& logger);
 
-        void install_wow64_heaven_gate(const logger& logger);
+        void install_wow64_heaven_gate(x86_64_emulator& emu, const logger& logger);
 
         module_map::iterator get_module(const uint64_t address)
         {

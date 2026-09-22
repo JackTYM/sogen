@@ -56,6 +56,5 @@
 	shallow = true
 [submodule "deps/FEX"]
 	path = deps/FEX
-	url = https://github.com/momo5502/FEX.git
+	url = https://github.com/JackTYM/FEX.git
 	shallow = true
-    branch = macos-arm64
