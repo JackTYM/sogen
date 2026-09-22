@@ -14,6 +14,15 @@ namespace sogen
     struct completion_state;
     struct process_context;
 
+    // Thrown by emulator_thread's constructor when a guest memory allocation it needs (stack, GS
+    // segment/TEB, ...) fails - distinguishable from an ordinary std::runtime_error so a syscall
+    // handler can catch specifically this and return a clean NTSTATUS (e.g. STATUS_NO_MEMORY)
+    // instead of the generic syscall-exception path, which tears down the whole emulation.
+    struct thread_allocation_failure : std::runtime_error
+    {
+        using std::runtime_error::runtime_error;
+    };
+
     struct user_timer_key
     {
         sogen::hwnd hwnd{};

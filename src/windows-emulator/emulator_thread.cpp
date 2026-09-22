@@ -449,6 +449,10 @@ namespace sogen
 
             const auto stack_region_base =
                 memory.allocate_memory(static_cast<size_t>(this->stack_size + this->stack_guard_size), memory_permission::read_write);
+            if (!stack_region_base)
+            {
+                throw thread_allocation_failure("Failed to allocate thread stack memory");
+            }
             this->stack_base = stack_region_base + this->stack_guard_size;
 
             // Real Windows keeps a guard region below every thread stack's reservation, so code that
@@ -463,9 +467,15 @@ namespace sogen
                 stack_region_base, static_cast<size_t>(this->stack_guard_size),
                 nt_memory_permission{memory_permission::read_write, memory_permission_ext::guard | memory_permission_ext::stack_guard});
 
+            const auto gs_segment_base = memory.allocate_memory(GS_SEGMENT_SIZE, memory_permission::read_write);
+            if (!gs_segment_base)
+            {
+                throw thread_allocation_failure("Failed to allocate GS segment memory for a new thread");
+            }
+
             this->gs_segment = emulator_allocator{
                 memory,
-                memory.allocate_memory(GS_SEGMENT_SIZE, memory_permission::read_write),
+                gs_segment_base,
                 GS_SEGMENT_SIZE,
             };
 
@@ -529,9 +539,15 @@ namespace sogen
             static_cast<size_t>((required_gs_size > GS_SEGMENT_SIZE) ? page_align_up(required_gs_size) : GS_SEGMENT_SIZE);
 
         // Allocate GS segment to hold both TEB32 and TEB64 for WOW64 process
+        const auto gs_segment_base = memory.allocate_memory(actual_gs_size, memory_permission::read_write);
+        if (!gs_segment_base)
+        {
+            throw thread_allocation_failure("Failed to allocate GS segment memory for a new WOW64 thread");
+        }
+
         this->gs_segment = emulator_allocator{
             memory,
-            memory.allocate_memory(actual_gs_size, memory_permission::read_write),
+            gs_segment_base,
             actual_gs_size,
         };
 
@@ -555,8 +571,7 @@ namespace sogen
 
         if (!this->stack_base || !memory.allocate_memory(this->stack_base, WOW64_NATIVE_STACK_SIZE, memory_permission::read_write))
         {
-            throw std::runtime_error("Failed to allocate native stack + WOW64_CPURESERVED memory region");
-            return;
+            throw thread_allocation_failure("Failed to allocate native stack + WOW64_CPURESERVED memory region");
         }
 
         const uint64_t wow64_cpureserved_base = this->stack_base + this->stack_size - sizeof(WOW64_CPURESERVED) - 0x1030;
@@ -616,6 +631,10 @@ namespace sogen
 
         // Allocate dynamic 32-bit stack for WOW64 thread
         this->wow64_stack_base = memory.allocate_memory(static_cast<size_t>(this->wow64_stack_size.value()), memory_permission::read_write);
+        if (!this->wow64_stack_base.value())
+        {
+            throw thread_allocation_failure("Failed to allocate WOW64 32-bit stack memory");
+        }
 
         // Create and initialize 32-bit TEB for WOW64
         // According to WinDbg: 32-bit TEB = 64-bit TEB + WowTebOffset (0x2000)

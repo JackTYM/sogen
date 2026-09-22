@@ -1237,7 +1237,15 @@ namespace sogen
             actual_stack_size = std::max(stack_size, actual_stack_size);
             actual_stack_size = align_up(actual_stack_size, ALLOCATION_GRANULARITY);
 
-            const auto h = c.proc.create_thread(c.win_emu.memory, start_routine, argument, actual_stack_size, create_flags);
+            handle h{};
+            try
+            {
+                h = c.proc.create_thread(c.win_emu.memory, start_routine, argument, actual_stack_size, create_flags);
+            }
+            catch (const thread_allocation_failure&)
+            {
+                return STATUS_NO_MEMORY;
+            }
 
             thread_handle.write(h);
 
