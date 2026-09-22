@@ -268,6 +268,15 @@ namespace sogen
 
         const auto effective_permission = this->get_effective_permissions(permissions);
 
+        // A re-protect that lands the touched range back on the same permission as the region
+        // directly preceding it splits that preceding region at the Unicorn level (apply_memory_protection
+        // -> uc_mem_protect -> split_region) without ever re-merging it, exactly like commit_memory's own
+        // case above - the guest-visible permission ends up uniform across both, but Unicorn keeps tracking
+        // them as separate regions forever, paying its per-region topology-rebuild cost on every later call.
+        // Only the FIRST run of a call can border something from before `address`; later runs start after a
+        // gap inside [address, end) and have nothing outside this call's own range to coalesce with.
+        bool first_run = true;
+
         for (auto sub_region = committed_regions.lower_bound(address); sub_region != committed_regions.end() && sub_region->first < end;)
         {
             if (!old_first_permissions.has_value())
@@ -289,8 +298,56 @@ namespace sogen
                 std::advance(next, 1);
             }
 
-            this->apply_memory_protection(run_start, run_end - run_start, effective_permission);
+            bool coalesced = false;
 
+            if (first_run && run_start == address && sub_region != committed_regions.begin())
+            {
+                const auto preceding = std::prev(sub_region);
+                const auto run_length = run_end - run_start;
+
+                if (preceding->first + preceding->second.length == run_start && preceding->second.permissions == permissions &&
+                    preceding->second.length + run_length <= MAX_COALESCED_COMMIT_REGION_SIZE)
+                {
+                    const auto merged_start = preceding->first;
+                    const auto preceding_length = preceding->second.length;
+                    const auto merged_length = preceding_length + run_length;
+
+                    std::vector<std::byte> preserved(merged_length);
+                    this->read_memory(merged_start, preserved.data(), merged_length);
+                    this->unmap_memory(merged_start, merged_length);
+
+                    try
+                    {
+                        this->map_memory(merged_start, merged_length, effective_permission);
+                        this->write_memory(merged_start, preserved.data(), merged_length);
+
+                        committed_regions.erase(preceding, next);
+                        committed_regions[merged_start] = committed_region{
+                            .length = merged_length,
+                            .permissions = permissions,
+                        };
+
+                        coalesced = true;
+                    }
+                    catch (const host_memory_collision&)
+                    {
+                        this->map_memory(merged_start, preceding_length, effective_permission);
+                        this->write_memory(merged_start, preserved.data(), preceding_length);
+
+                        this->map_memory(run_start, run_length, effective_permission);
+                        this->write_memory(run_start, preserved.data() + preceding_length, run_length);
+
+                        coalesced = true;
+                    }
+                }
+            }
+
+            if (!coalesced)
+            {
+                this->apply_memory_protection(run_start, run_end - run_start, effective_permission);
+            }
+
+            first_run = false;
             sub_region = next;
         }
 
