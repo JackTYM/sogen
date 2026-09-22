@@ -3,6 +3,7 @@
 #include "../cpu_context.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "wait_trace.hpp"
 
 namespace sogen
 {
@@ -29,6 +30,19 @@ namespace sogen
             if (previous_count)
             {
                 previous_count.write(static_cast<LONG>(old_count));
+            }
+
+            if (succeeded)
+            {
+                record_object_signal(mutant_handle, c.thread().id, "NtReleaseMutant");
+
+                for (auto& thread : c.proc.threads | std::views::values)
+                {
+                    if (std::ranges::find(thread.await_objects, mutant_handle) != thread.await_objects.end())
+                    {
+                        (void)thread.is_thread_ready(c.win_emu);
+                    }
+                }
             }
 
             return succeeded ? STATUS_SUCCESS : STATUS_MUTANT_NOT_OWNED;

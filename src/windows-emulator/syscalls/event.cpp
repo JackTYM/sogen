@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "wait_trace.hpp"
 
 namespace sogen
 {
@@ -33,6 +34,22 @@ namespace sogen
             }
 
             entry->signaled = true;
+            record_object_signal(make_handle(handle), c.thread().id, "NtSetEvent");
+
+            // The cooperative scheduler only re-evaluates a parked thread's readiness at a context
+            // switch, so without this, a waiter isn't picked up until whatever the signaling thread
+            // happens to do next (its own next blocking syscall, or the idle poll) - real, measured
+            // delay on the order of tens to hundreds of milliseconds for a thread that keeps running
+            // a while after signaling. Wake matching waiters immediately instead.
+            const auto event_handle = make_handle(handle);
+            for (auto& thread : c.proc.threads | std::views::values)
+            {
+                if (std::ranges::find(thread.await_objects, event_handle) != thread.await_objects.end())
+                {
+                    (void)thread.is_thread_ready(c.win_emu);
+                }
+            }
+
             return STATUS_SUCCESS;
         }
 
@@ -56,6 +73,8 @@ namespace sogen
             entry->signaled = true;
 
             const auto event_handle = make_handle(handle);
+            record_object_signal(event_handle, c.thread().id, "NtPulseEvent");
+
             for (auto& thread : c.proc.threads | std::views::values)
             {
                 if (std::ranges::find(thread.await_objects, event_handle) != thread.await_objects.end())

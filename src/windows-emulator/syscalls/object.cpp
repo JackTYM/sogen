@@ -3,6 +3,7 @@
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
 #include "../cross_process.hpp"
+#include "wait_trace.hpp"
 
 #include <utils/string.hpp>
 
@@ -1137,6 +1138,7 @@ namespace sogen
 
             trace_process_handle_wait(c, resolved_handle, timeout);
             trace_wait_target(c, resolved_handle, timeout);
+            record_wait_start(resolved_handle, c.thread().id);
 
             if (timeout.value() && !t.await_time.has_value())
             {

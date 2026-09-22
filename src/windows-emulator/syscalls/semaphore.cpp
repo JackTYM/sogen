@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
+#include "wait_trace.hpp"
 
 namespace sogen
 {
@@ -62,6 +63,19 @@ namespace sogen
             if (previous_count)
             {
                 previous_count.write(static_cast<LONG>(old_count));
+            }
+
+            if (succeeded)
+            {
+                record_object_signal(semaphore_handle, c.thread().id, "NtReleaseSemaphore");
+
+                for (auto& thread : c.proc.threads | std::views::values)
+                {
+                    if (std::ranges::find(thread.await_objects, semaphore_handle) != thread.await_objects.end())
+                    {
+                        (void)thread.is_thread_ready(c.win_emu);
+                    }
+                }
             }
 
             return succeeded ? STATUS_SUCCESS : STATUS_SEMAPHORE_LIMIT_EXCEEDED;

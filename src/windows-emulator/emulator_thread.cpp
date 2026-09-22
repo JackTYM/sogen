@@ -5,6 +5,7 @@
 #include "process_context.hpp"
 #include "io_completion_wait.hpp"
 #include "syscall_utils.hpp"
+#include "syscalls/wait_trace.hpp"
 
 namespace sogen
 {
@@ -1219,6 +1220,8 @@ namespace sogen
 
             if (!this->await_any && all_signaled && (!this->await_msg_mask.has_value() || message_ready))
             {
+                const bool was_object_wait = !this->await_objects.empty();
+
                 for (const auto& obj : this->await_objects)
                 {
                     const auto consumed_state = consume_object_signal(process, obj, this->id);
@@ -1229,10 +1232,27 @@ namespace sogen
                 }
 
                 this->mark_as_ready(abandoned_index.has_value() ? (STATUS_ABANDONED_WAIT_0 + *abandoned_index) : STATUS_SUCCESS);
+
+                if (was_object_wait)
+                {
+                    syscalls::report_wait_resolution(win_emu, this->id, false);
+                }
+
                 return true;
             }
 
-            return complete_if_timed_out(STATUS_TIMEOUT);
+            const bool was_object_wait = !this->await_objects.empty();
+            if (complete_if_timed_out(STATUS_TIMEOUT))
+            {
+                if (was_object_wait)
+                {
+                    syscalls::report_wait_resolution(win_emu, this->id, true);
+                }
+
+                return true;
+            }
+
+            return false;
         }
 
         if (this->await_time.has_value())
