@@ -2226,12 +2226,25 @@ namespace sogen::fex
             const uint64_t host_address = address + rebase;
 
 #ifdef __APPLE__
+            // Same EXC_GUARD hazard as map_fixed_anonymous_apple (see its doc comment): try the plain,
+            // gap-checked remap first, and only fall back to VM_FLAGS_OVERWRITE if that proves the
+            // range is already fully covered (KERN_NO_SPACE/KERN_MEMORY_PRESENT), which rules out the
+            // unmapped gap that trips vm_map_delete()'s guard.
             mach_vm_address_t target_address = host_address;
             vm_prot_t cur_protection = VM_PROT_NONE;
             vm_prot_t max_protection = VM_PROT_NONE;
-            const kern_return_t result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-                                                         mach_task_self(), reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE,
-                                                         &cur_protection, &max_protection, VM_INHERIT_NONE);
+            kern_return_t result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED, mach_task_self(),
+                                                   reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection,
+                                                   &max_protection, VM_INHERIT_NONE);
+            if (result == KERN_NO_SPACE || result == KERN_MEMORY_PRESENT)
+            {
+                target_address = host_address;
+                cur_protection = VM_PROT_NONE;
+                max_protection = VM_PROT_NONE;
+                result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                                         reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection, &max_protection,
+                                         VM_INHERIT_NONE);
+            }
             if (result != KERN_SUCCESS || target_address != host_address)
             {
                 throw std::runtime_error("FEX backend failed to alias host memory into the guest");
@@ -2595,12 +2608,16 @@ namespace sogen::fex
 
             if (!currently_mapped)
             {
-                // Bug 4 fix: claim via mach_vm_allocate(VM_FLAGS_FIXED) without VM_FLAGS_OVERWRITE
-                // first, so a foreign mapping placed here by another vCPU's concurrent syscall
-                // between an earlier probe and this claim is detected instead of silently destroyed
-                // - then map the real content over the now-guaranteed-free page. Every page inside
-                // the up-front-reserved wow64 window is pre-registered in mapped_host_pages_apple_
-                // (see reserve_wow64_host_window), so currently_mapped is already true there and this
+                // Claim via mach_vm_allocate(VM_FLAGS_FIXED) without VM_FLAGS_OVERWRITE, so a foreign
+                // mapping placed here by another vCPU's concurrent syscall between an earlier probe
+                // and this claim is detected instead of silently destroyed. mach_vm_allocate already
+                // creates the mapping on success (unlike a bare probe), so the final permissions are
+                // applied with mprotect on that same mapping rather than unmapping and re-mapping it -
+                // the intervening unmapped gap a remap would create is exactly what trips macOS's
+                // fatal EXC_GUARD (GUARD_TYPE_VIRT_MEMORY / kGUARD_EXC_DEALLOC_GAP) on the very next
+                // MAP_FIXED call, see map_fixed_anonymous_apple's doc comment. Every page inside the
+                // up-front-reserved wow64 window is pre-registered in mapped_host_pages_apple_ (see
+                // reserve_wow64_host_window), so currently_mapped is already true there and this
                 // branch is only ever reached for a genuinely fresh page outside that window.
                 mach_vm_address_t target = host_page_addr + rebase;
                 const kern_return_t probe_result = ::mach_vm_allocate(mach_task_self(), &target, host_page_size_apple, VM_FLAGS_FIXED);
@@ -2608,10 +2625,7 @@ namespace sogen::fex
                 {
                     throw host_memory_collision{};
                 }
-                ::munmap(host_ptr, host_page_size_apple);
-                void* result = ::mmap(host_ptr, host_page_size_apple, to_prot_apple(effective),
-                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                if (result == MAP_FAILED || result != host_ptr)
+                if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
                 {
                     throw std::runtime_error("FEX backend failed to map guest memory at requested address");
                 }
@@ -2785,17 +2799,14 @@ namespace sogen::fex
                     continue;
                 }
 
-                void* const target = reinterpret_cast<void*>(candidate);
-                void* const result =
-                    ::mmap(target, wow64_guest_address_space_size, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                if (result != target)
+                const kern_return_t map_result = map_fixed_anonymous_apple(reinterpret_cast<void*>(candidate),
+                                                                           wow64_guest_address_space_size, VM_PROT_NONE, VM_PROT_ALL);
+                if (map_result != KERN_SUCCESS)
                 {
-                    fprintf(stderr, "[FEX backend] failed to reserve wow64 host window at 0x%llx - trying the next candidate\n",
-                            static_cast<unsigned long long>(candidate));
-                    if (result != MAP_FAILED)
-                    {
-                        ::munmap(result, wow64_guest_address_space_size);
-                    }
+                    fprintf(stderr,
+                            "[FEX backend] failed to reserve wow64 host window at 0x%llx (kern_return=%d) - trying "
+                            "the next candidate\n",
+                            static_cast<unsigned long long>(candidate), map_result);
                     candidate += wow64_guest_address_space_size;
                     continue;
                 }
