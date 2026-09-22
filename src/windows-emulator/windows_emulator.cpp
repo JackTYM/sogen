@@ -644,12 +644,27 @@ namespace sogen
                 thread.restore(emu);
             }
 
+            const auto is_first_setup = !thread.setup_done;
             thread.setup_if_necessary(emu, context);
 
             if (can_dispatch_apcs && !has_pending_status)
             {
                 thread.mark_as_ready(STATUS_USER_APC);
                 dispatch_next_apc(win_emu, vcpu, thread);
+            }
+            else if (is_first_setup)
+            {
+                // Only right here, immediately after setup_registers() has just placed this thread at
+                // its own real, freshly-assigned entry state (never yet handed to a live cpu.start()
+                // call) is it safe to redirect through a real guest call the same way the process-wide
+                // warm-up does from a genuine int3 trap - see try_warm_kernelbase_nls_cache_for_thread's
+                // own doc comment for why every thread needs this done for itself. Doing the same thing
+                // later, against an already-running thread's mid-execution resumption point, corrupted
+                // its restored state instead (live-observed: a real thread crashing on a stale ntdll
+                // .data address shortly after resuming) - FEX's own per-thread JIT state is only known
+                // safe to redirect via a real trap taken from inside an active cpu.start() call, which a
+                // thread's first-ever activation trivially satisfies since nothing has run for it yet.
+                win_emu.try_warm_kernelbase_nls_cache_for_thread(vcpu);
             }
 
             thread.apc_alertable = false;
@@ -1347,14 +1362,7 @@ namespace sogen
 
             if (this->process.kernelbase_get_user_default_lcid != 0)
             {
-                auto& thread = vcpu.thread();
-                if (thread.teb64.has_value())
-                {
-                    thread.teb64->access([](TEB64& teb) { teb.NlsCache = 0; });
-                }
-
-                this->process.kernelbase_nls_cache_warming = true;
-                invoke_guest_function(thread, vcpu.cpu, this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
+                this->begin_kernelbase_nls_cache_warmup(vcpu);
             }
 
             return;
@@ -1486,14 +1494,7 @@ namespace sogen
 
         if (this->process.kernelbase_get_user_default_lcid != 0)
         {
-            if (thread.teb64.has_value())
-            {
-                thread.teb64->access([](TEB64& teb) { teb.NlsCache = 0; });
-            }
-
-            this->process.kernelbase_nls_cache_warming = true;
-            invoke_guest_function(thread, vcpu.cpu, this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
-            this->arm_kernelbase_nls_cache_breakpoint(this->process.zw_callback_return);
+            this->begin_kernelbase_nls_cache_warmup(vcpu);
 
             if (trace_nls_warmup)
             {
@@ -1504,6 +1505,40 @@ namespace sogen
         }
 
         return true;
+    }
+
+    void windows_emulator::begin_kernelbase_nls_cache_warmup(vcpu_context& vcpu)
+    {
+        auto& thread = vcpu.thread();
+
+        thread.kernelbase_nls_cache_warmed_individually = true;
+
+        if (thread.teb64.has_value())
+        {
+            thread.teb64->access([](TEB64& teb) { teb.NlsCache = 0; });
+        }
+
+        this->process.kernelbase_nls_cache_warming = true;
+        invoke_guest_function(thread, vcpu.cpu, this->process.zw_callback_return, this->process.kernelbase_get_user_default_lcid);
+
+        if (!this->uses_instruction_precision())
+        {
+            this->arm_kernelbase_nls_cache_breakpoint(this->process.zw_callback_return);
+        }
+    }
+
+    void windows_emulator::try_warm_kernelbase_nls_cache_for_thread(vcpu_context& vcpu)
+    {
+        auto& thread = vcpu.thread();
+
+        if (thread.kernelbase_nls_cache_warmed_individually || !this->process.kernelbase_nls_cache_warmed ||
+            this->process.kernelbase_nls_cache_warming || this->process.kernelbase_nls_cache_breakpoint_address != 0 ||
+            this->process.kernelbase_get_user_default_lcid == 0)
+        {
+            return;
+        }
+
+        this->begin_kernelbase_nls_cache_warmup(vcpu);
     }
 
     bool windows_emulator::uses_section_first_execution_hooks() const

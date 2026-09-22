@@ -729,6 +729,7 @@ namespace sogen
         bool perform_thread_switch(vcpu_context& vcpu, std::unique_lock<kernel_lock>& lock);
         bool perform_thread_switch(vcpu_context& vcpu);
         bool activate_thread(vcpu_context& vcpu, uint32_t id);
+        void try_warm_kernelbase_nls_cache_for_thread(vcpu_context& vcpu);
 
       private:
         bool use_relative_time_{false}; // TODO: Get rid of that
@@ -779,6 +780,7 @@ namespace sogen
         void arm_kernelbase_nls_cache_breakpoint(uint64_t address);
         void disarm_kernelbase_nls_cache_breakpoint();
         bool try_warm_kernelbase_nls_cache_breakpoint(vcpu_context& vcpu, uint64_t address);
+        void begin_kernelbase_nls_cache_warmup(vcpu_context& vcpu);
 
         bool uses_section_first_execution_hooks() const;
         void clear_section_first_execution_hooks();

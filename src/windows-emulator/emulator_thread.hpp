@@ -334,6 +334,18 @@ namespace sogen
         // handful of guest instructions and is never expected to straddle a snapshot boundary.
         std::optional<pending_guest_function_call> pending_guest_call{};
 
+        // Set once windows_emulator::try_warm_kernelbase_nls_cache_for_thread has run this thread's
+        // own real GetUserDefaultLCID call. kernelbase.dll's internal cache resolver only ever
+        // populates a genuine per-thread heap block reachable through the calling thread's OWN
+        // TEB.NlsCache - never process_context::kernelbase_nls_process_local_cache itself, which
+        // every new thread's TEB.NlsCache otherwise starts out pointing at as a shared placeholder
+        // (see resolve_nls_cache's doc comment in emulator_thread.cpp) - so the one-time,
+        // process-wide warm-up only ever benefits the single thread that happened to run it. Not
+        // serialized, for the same reason as process_context::kernelbase_nls_cache_warmed: always
+        // re-derived to false, so a thread whose real per-thread cache already exists at
+        // snapshot-restore time simply gets warmed again (a harmless extra guest heap allocation).
+        bool kernelbase_nls_cache_warmed_individually{false};
+
         bool apc_alertable{false};
         std::vector<pending_apc> pending_apcs{};
 
