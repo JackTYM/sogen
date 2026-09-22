@@ -1252,7 +1252,7 @@ namespace sogen::fex
         void create_thread32();
         void ensure_callret_buffer(FEXCore::Core::CPUState& state);
         void ensure_callret_stack(FEXCore::Core::CPUState& state);
-        void restore_state_into(FEXCore::Core::InternalThreadState* thread, const std::byte* src);
+        void restore_state_into(FEXCore::Core::InternalThreadState* thread, FEXCore::Context::Context* context, const std::byte* src);
         void mark_executable_range(uint64_t address, size_t size, memory_permission permissions);
         void invalidate_code_range_in(FEXCore::Context::Context* context, FEXCore::Core::InternalThreadState* thread, uint64_t address,
                                       size_t size) const;
@@ -3313,16 +3313,37 @@ namespace sogen::fex
             std::memcpy(data.data() + kWow64SnapshotHeader, &this->thread_->CurrentFrame->State, sizeof(FEXCore::Core::CPUState));
             std::memcpy(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState), &this->thread32_->CurrentFrame->State,
                         sizeof(FEXCore::Core::CPUState));
+
+            // See restore_state_into's InlineJITBlockHeader comment: a parked thread's saved header
+            // is a host pointer into whatever CodeBuffer generation was current when it stopped,
+            // which FEXCore's own bookkeeping may free once some OTHER logical thread sharing this
+            // engine compiles enough new code to rotate past it. Retain that exact buffer for as long
+            // as this snapshot might still be resumed from; restore_state_into releases it again.
+            if (this->thread_->CurrentFrame->State.InlineJITBlockHeader != 0)
+            {
+                this->emulator_.context_->RetainCodeBufferAt(this->thread_->CurrentFrame->State.InlineJITBlockHeader);
+            }
+            if (this->thread32_->CurrentFrame->State.InlineJITBlockHeader != 0)
+            {
+                this->emulator_.context32_->RetainCodeBufferAt(this->thread32_->CurrentFrame->State.InlineJITBlockHeader);
+            }
+
             return data;
         }
 
         const auto& state = this->cpu_state();
         std::vector<std::byte> data(sizeof(FEXCore::Core::CPUState));
         std::memcpy(data.data(), &state, sizeof(state));
+
+        if (state.InlineJITBlockHeader != 0 && this->active_context_ != nullptr)
+        {
+            this->active_context_->RetainCodeBufferAt(state.InlineJITBlockHeader);
+        }
+
         return data;
     }
 
-    void fex_vcpu::restore_state_into(FEXCore::Core::InternalThreadState* thread, const std::byte* src)
+    void fex_vcpu::restore_state_into(FEXCore::Core::InternalThreadState* thread, FEXCore::Context::Context* context, const std::byte* src)
     {
         auto& state = thread->CurrentFrame->State;
         const auto l1_pointer = state.L1Pointer;
@@ -3343,15 +3364,19 @@ namespace sogen::fex
         // InlineJITBlockHeader is a raw host pointer to the currently-executing JIT block's own
         // header (set by Arm64JITCore::EmitEntryPoint's `str TMP1, STATE, ...InlineJITBlockHeader`
         // at every block's entry), read back by FEXCore's own RestoreRIPFromHostPC/GetFrameBlockInfo
-        // to reconstruct RIP and locate block metadata during synchronous fault handling. The
-        // snapshot's value describes whichever block was live when this thread was last descheduled -
-        // a host code-buffer address that FEXCore's own ClearCodeCache/CheckCodeBufferUpdate may have
-        // since freed or rotated away from, exactly the staleness class callret_sp is dropped for
-        // below. Left in place, a fault handled before this thread's next block entry re-establishes
-        // it (EmitEntryPoint runs unconditionally on every dispatch) would dereference a dangling
-        // host pointer into the JIT code buffer. FEXCore treats a null InlineJITBlockHeader as "no
-        // block info available" and falls back to Frame->State.rip (just restored above), so zeroing
-        // it here is always safe.
+        // to reconstruct RIP and locate block metadata during synchronous fault handling. It is the
+        // wrong block for a resumed thread about to dispatch fresh from Frame->State.rip (just
+        // restored above) - EmitEntryPoint re-establishes a correct value unconditionally on the
+        // very next dispatch, and FEXCore treats a null InlineJITBlockHeader as "no block info
+        // available" and falls back to State.rip in the meantime, so zeroing it here is always safe.
+        // save_registers retained the CodeBuffer this snapshot's own value points into (see its own
+        // comment) specifically so it survives until here even if some OTHER logical thread sharing
+        // this engine rotated FEXCore's CurrentCodeBuffer past it in the meantime; release that
+        // retention now that this thread is resuming and no longer needs it kept alive on its behalf.
+        if (state.InlineJITBlockHeader != 0 && context != nullptr)
+        {
+            context->ReleaseCodeBufferAt(state.InlineJITBlockHeader);
+        }
         state.InlineJITBlockHeader = 0;
 
         this->ensure_callret_buffer(state);
@@ -3387,8 +3412,9 @@ namespace sogen::fex
             }
             uint64_t active_is_32 = 0;
             std::memcpy(&active_is_32, register_data.data(), sizeof(active_is_32));
-            this->restore_state_into(this->thread_, register_data.data() + kWow64SnapshotHeader);
-            this->restore_state_into(this->thread32_, register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
+            this->restore_state_into(this->thread_, this->emulator_.context_.get(), register_data.data() + kWow64SnapshotHeader);
+            this->restore_state_into(this->thread32_, this->emulator_.context32_.get(),
+                                     register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
             if (active_is_32)
             {
                 this->active_context_ = this->emulator_.context32_.get();
@@ -3432,7 +3458,7 @@ namespace sogen::fex
             this->active_thread_ = this->thread_;
         }
 
-        this->restore_state_into(this->active_thread_.load(), register_data.data());
+        this->restore_state_into(this->active_thread_.load(), this->active_context_, register_data.data());
     }
 
     void fex_vcpu::set_segment_base(x86_register base, pointer_type value)
