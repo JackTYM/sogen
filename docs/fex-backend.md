@@ -3,12 +3,34 @@
 The FEX-Emu emulator backend (`sogen::fex`). A standalone backend that mirrors the structure of the
 other backends, selected at runtime via `EMULATOR_FEX=1`. Its functional targets are **macOS on Apple
 Silicon** and **Android on AArch64** — [FEX](https://fex-emu.com) only JITs x86/x86-64 to ARM64.
+32-bit WoW64 guests are additionally supported on the macOS/Apple Silicon target (see "WoW64 support"
+below).
 
 ## Status
 
 Working on Darwin/Apple Silicon: `test-sample.exe` runs to completion, matching the Unicorn
-backend's behavior. Android/AArch64 is now a functional target and currently requires a 4KB host
-page. Other AArch64 Linux hosts have build coverage only and are not expected to run.
+backend's behavior, and has been validated against ~40 pre-existing sample executables
+(process/thread introspection, synchronization primitives, sections, security tokens, the registry,
+pipes, sockets, timers, file/directory I/O, GUI dialogs, DXGK harnesses, and 32-bit WoW64 binaries)
+with every remaining discrepancy traced to a backend-agnostic gap (an unimplemented syscall, or a
+missing staged system-DLL export) rather than a difference between this backend and the existing
+one. Android/AArch64 is now a functional target for native 64-bit guests and currently requires a
+4KB host page; WoW64 has not been validated there. Other AArch64 Linux hosts have build coverage
+only and are not expected to run.
+
+**32-bit WoW64 processes are supported on Darwin** (see "WoW64 support" below): a real 32-bit guest
+process runs against a second, lazily-created 32-bit FEXCore Context, with state marshaled across
+the bitness-switch trampoline on every crossing.
+
+### Performance
+
+On a pure compute-bound workload (a tight ALU loop with no syscalls beyond timestamping), this
+backend measured roughly **129x less wall-clock time** than the Unicorn backend on the same host
+(~3.4s vs. ~439s for 2 billion loop iterations) — JIT-compiled native ARM64 code running directly on
+the CPU, versus per-block interpretation. A mixed, syscall-heavy smoke-test workload showed a
+smaller but still substantial ~27-30x gap. Expect the larger multiplier to dominate for CPU-bound
+guest workloads (game logic, physics, scripting) and the smaller one where I/O/syscall dispatch is a
+significant fraction of runtime.
 
 ## Security / address-space model
 
@@ -17,7 +39,8 @@ Unicorn/Icicle (a fully software-simulated guest address space, sandboxed from t
 construction) or KVM/WHP (real hardware virtualization, a genuinely separate guest physical address
 space), FEX is an in-process JIT: it translates x86/x86-64 to ARM64 and executes the result directly
 inside this process, treating guest virtual addresses as host virtual addresses (a 1:1 mapping,
-`guest VA == host VA`). Concretely:
+`guest VA == host VA`, subject to the WoW64 guest-memory rebase described below for 32-bit
+processes). Concretely:
 
 - `map_memory()` is a real `mmap(MAP_FIXED)` at the guest address; `read_memory()`/`write_memory()`
   are a direct host `memcpy` once the range is known to be mapped — there is no page-table or bounds
@@ -44,7 +67,70 @@ inside this process, treating guest virtual addresses as host virtual addresses 
   sogen's memory manager. On Apple, the backend separately installs FEXCore allocator hooks that
   steer FEXCore's own anonymous internal mappings into a dedicated 4GiB host-reserved arena, keeping
   them out of guest allocation ranges. This is still only a collision mitigation, not isolation.
-  WoW64/32-bit processes remain unsupported by this backend.
+- A 32-bit WoW64 guest's whole architectural address space would otherwise sit inside Apple Silicon's
+  mandatory, unmappable 4GB `__PAGEZERO` (see "32-bit guest memory rebase" below) — the rebase is what
+  makes `guest VA == host VA` viable at all for that case.
+
+## WoW64 support
+
+FEXCore is fixed-bitness per `Context` — a single `Context` cannot execute both 64-bit and 32-bit
+code. A WoW64 process genuinely starts execution in real 64-bit ntdll code (the thread-init thunk),
+crosses into 32-bit code at the x86 "heaven's gate" bitness switch, and crosses back on every syscall
+return and kernel callback. This backend models that with **two FEXCore Contexts per WoW64 process**
+— a 64-bit one (handling the real 64-bit ntdll/wow64*.dll code) and a 32-bit one (handling the
+guest's own 32-bit image and its 32-bit ntdll) — switching which one is "active" at each gate
+crossing.
+
+### Gate-crossing interception
+
+The bitness-switch trampoline is intercepted via the same generic non-executable-range mechanism
+FEXCore already uses for synthetic page faults: the trampoline's guest address range is marked
+non-executable, so reaching it raises a controlled synthetic `#PF` before any of its bytes are ever
+JIT-compiled, which the backend catches and handles by marshaling state between the two Contexts
+directly (rather than letting either Context attempt to decode/execute the other bitness's code).
+
+State marshaling across a crossing needs to be careful about more than a naive whole-`CPUState` copy:
+each Context's `CPUState` also carries FEXCore-internal JIT bookkeeping (SRA-mapped GPRs, the call-ret
+shadow-stack pointer, the JIT lookup-cache pointer) interleaved with genuinely-architectural x86 state
+(GPRs, XMM, x87, EFLAGS, segment selectors). A correct crossing copies the architectural state and
+leaves each Context's own JIT bookkeeping alone.
+
+### Translation-cache invalidation across contexts
+
+`write_memory()`/`unmap_memory()` invalidate FEX's translation cache for the affected range in the
+**currently-active** Context only. `unmap_memory()` additionally invalidates the inactive Context
+(`invalidate_code_range(..., include_inactive_contexts=true)`), since the Context active at unmap
+time does not necessarily match the Context whose cached translations cover the unmapped range.
+Known limitation: 32-bit guest code that self-patches via a syscall-serviced `write_memory` (e.g.
+`NtWriteVirtualMemory`) — which runs while the 64-bit engine is active — can leave stale 32-bit JIT
+translations cached. This gap is deliberate: extending inactive-Context invalidation to every write
+would repeatedly delink the live 32-bit Context's blocks and risks livelocking it, given how frequent
+ordinary syscall-time writes are.
+
+### 32-bit guest memory rebase
+
+Apple Silicon enforces a mandatory, unshrinkable 4GB `__PAGEZERO` for every 64-bit process, making
+the entire low 4GB of host address space permanently unmappable. This conflicts directly with this
+project's guest-VA-equals-host-VA memory model for a 32-bit guest, whose whole architectural address
+space lives in that exact range. The fix is a FEXCore-side, per-Context, runtime-conditional address
+rebase (a `CONFIG_WOW64GUESTREBASE` option and `Context::SetNeedsWow64GuestRebase` API in the
+`deps/FEX` submodule): when enabled on a Context, every real memory access — data or instruction
+fetch — computed at an address below 4GB is transparently rebased to a fixed offset above it, via a
+runtime IR `Select` rather than a compile-time-constant add (since a 64-bit-mode Context's addresses
+aren't confined to a fixed range the way a 32-bit-mode Context's are). This is a strict no-op for any
+Context that doesn't opt in, so it does not affect the existing 64-bit-only Linux/macOS path.
+
+### `wow64cpu.dll`'s real dispatch convention
+
+The real `TurboDispatchJumpAddressStart` mechanism inside `wow64cpu.dll` — the genuine syscall-return
+dispatch table a real WoW64 process uses — has a documented calling convention (an index derived
+from the high word of `EAX`, dispatched through a jump table `wow64cpu.dll` builds at init, against a
+CPU-area `CONTEXT` block holding the 32-bit register file). The reverse (32→64) gate crossing decodes
+this convention, marshals state, and resumes real 64-bit execution at `TurboDispatchJumpAddressEnd` —
+the generic dispatch continuation, whose genuine `wow64cpu.dll`/`wow64.dll` code
+(`Wow64SystemServiceEx`) then services the syscall. Only the turbo-thunk fast-path itself (the
+`jmp [r15+rcx*8]` jump-table dispatch into per-service turbo thunks) is never taken; the crossing
+always forces the generic path.
 
 ## Architecture
 
@@ -53,24 +139,42 @@ inside this process, treating guest virtual addresses as host virtual addresses 
   described above.
 - `fex_x86_64_common.hpp` — register classification (`classify_gpr` and friends) mapping
   `x86_register` to FEXCore's `CPUState`.
+- `fex_x86_64_marshal.hpp` — the architectural-state marshaling helper used at WoW64 gate crossings
+  (factored out because it is shared by the two call sites that need it,
+  `enter_wow64_32bit_from_run_simulated_code` and `perform_bitness_switch`).
 - Guest `syscall` instructions route back to sogen through a `FEXCore::HLE::SyscallHandler`, which
   invokes the registered syscall instruction-hook — the same mechanism the Windows emulation layer
   uses for every backend.
 - The fine-grained `hook_memory_read/write/execution/range_execution` and `hook_basic_block` hooks
   are accepted for API compatibility but never fire, exactly like the KVM backend: guest code runs
   natively, so there is no per-access/per-instruction instrumentation point short of single-stepping.
-- `deps/FEX` is pinned to a personal fork (`github.com/JackTYM/FEX`), not upstream FEX-Emu directly —
-  carries a 10-submodule removal (376MB trim) and a couple of small Darwin-portability/opdispatch
-  patches; see the fork's own commit history for the exact list. **Pinning to a fork means these
-  patches don't automatically track upstream FEX-Emu security fixes** — periodically rebasing onto a
-  newer upstream release is a maintenance cost worth weighing.
+- `deps/FEX` is **unchanged by this branch**: it stays on `origin/main`'s own pin,
+  `github.com/momo5502/FEX` (branch `macos-arm64`) at `ff4f18b2`. (`origin/main`'s own text here said
+  `github.com/JackTYM/FEX`, which was already stale before this branch — `.gitmodules` has pointed at
+  `momo5502/FEX` since that fork was created.) An earlier revision of this work repointed the
+  submodule at `github.com/JackTYM/FEX` @ `efa89c99`, on the assumption that
+  `momo5502/FEX` lacked the `CONFIG_WOW64GUESTREBASE` option and the
+  `Context::SetWow64GuestRebaseValue`/`SetNeedsWow64GuestRebase` API this WoW64 support depends on.
+  That assumption was wrong and the submodule change has been dropped. `momo5502/FEX` is a fork
+  *of* `JackTYM/FEX` (GitHub reports `parent = JackTYM/FEX`, `source = FEX-Emu/FEX`), not a
+  competing one: `efa89c99` is an ancestor of `momo5502/FEX`'s `macos-arm64` tip, and was in fact
+  `origin/main`'s own `deps/FEX` pin before two dependabot bumps moved it to `e6975e6f` and then
+  `ff4f18b2` (which only adds Android host support on top). The full WoW64 rebase API is present in
+  the pinned commit (`FEXCore/include/FEXCore/Core/Context.h`,
+  `FEXCore/Source/Interface/Core/{Addressing.h,Frontend.cpp,OpcodeDispatcher.h}`), and this branch
+  builds, passes `windows-emulator-test` and passes the WoW64 live smoke test against it unmodified.
+  Pinning to a fork at all still means its patches don't automatically track upstream FEX-Emu
+  security fixes; periodically rebasing onto a newer upstream release remains a maintenance cost
+  worth weighing, but that applies equally to `origin/main` today and is not something this branch
+  changes.
 
 ## Build & test
 
 No special setup needed, unlike the KVM backend (which requires a Docker-on-Windows workaround to
-build or run at all): from an ARM64 Clang host (Apple Silicon macOS or ARM64 Linux), the ordinary
-`cmake --preset=release` picks this backend up automatically once `deps/FEX` is checked out (see the
-root `CMakeLists.txt` gate). Run with `EMULATOR_FEX=1`. Android currently requires a 4KB host page.
+build or run at all): from an ARM64 Clang host (Apple Silicon macOS, ARM64 Linux, or Android), the
+ordinary `cmake --preset=release` picks this backend up automatically once `deps/FEX` is checked out
+(see the root `CMakeLists.txt` gate). Run with `EMULATOR_FEX=1`. Android currently requires a 4KB
+host page.
 
 ## Known limitations
 
@@ -79,6 +183,8 @@ root `CMakeLists.txt` gate). Run with `EMULATOR_FEX=1`. Android currently requir
   memory can therefore surface as an unhandled host signal instead of a guest
   `STATUS_ACCESS_VIOLATION`, while an unmapped plain store reaches the guest with the operation marked
   as a read. Android avoids this specific misclassification by using the kernel-provided ESR WnR bit.
+  This affects any guest that deliberately writes to read-only memory and catches the resulting
+  exception (packers/DRM protections do this routinely).
 - **`sync_host_page_apple`'s permission union can strip `PROT_EXEC` or over-grant write access near
   PE section boundaries.** Guest permissions are tracked per-4KB shadow slot but applied per-16KB
   Apple host page (four slots share one host page); when slots sharing a host page disagree, the
@@ -96,6 +202,17 @@ root `CMakeLists.txt` gate). Run with `EMULATOR_FEX=1`. Android currently requir
 - **A smaller, same-bug-class gap remains:** `commit_memory` guards against committing into
   `section_kind`/`host_reserved` regions but has no equivalent guard for a guest probing directly into
   other backends' reserved ranges.
+- **`comctl32.dll`-linked apps** (e.g. a bundled calculator sample) fail identically on both this
+  backend and Unicorn due to a staged `comctl32.dll` build that doesn't export the ordinals the
+  sample binaries were linked against. This is a staged-asset version mismatch, not a code bug, and
+  is not fixable without staging a different `comctl32.dll`.
+- **`wow64cpu.dll`'s turbo-table fast-path is bypassed.** The reverse (32→64) gate crossing does
+  execute real `wow64cpu.dll` 64-bit dispatch code: after marshaling state, it resumes at the real
+  `TurboDispatchJumpAddressEnd`, whose genuine code path (through `Wow64SystemServiceEx` in
+  `wow64.dll`) services every 32-bit syscall. What is *not* executed is only the turbo-thunk
+  fast-path at `TurboDispatchJumpAddressStart` (`jmp [r15+rcx*8]` through the per-service jump
+  table) — the crossing always forces the generic dispatch continuation instead of selecting a
+  specialized turbo thunk.
 
 ## Fixes found during bring-up and review
 

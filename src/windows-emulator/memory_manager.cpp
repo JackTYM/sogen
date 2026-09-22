@@ -511,6 +511,12 @@ namespace sogen
 
     void memory_manager::reset_host_memory_ranges()
     {
+        // Unlike reserve_host_memory_ranges (safe to call frequently, only ever adds), this releases
+        // every previously-tracked host_reserved range first - needed only when the backend's answer
+        // can genuinely change, not for routine re-scanning. Calling this from a hot path would
+        // double the syscall count of every dynamic allocation for no benefit and momentarily
+        // un-reserve everything, widening the race window against anything else in the process that
+        // maps host memory concurrently - so this must stay a rare, explicit call.
         for (const auto addr : this->host_reserved_addresses_)
         {
             this->release_memory(addr, 0);

@@ -46,11 +46,65 @@ namespace sogen
         virtual pointer_type get_segment_base(register_type base) = 0;
         virtual void load_gdt(pointer_type address, uint32_t limit) = 0;
 
+        // Add new virtuals at the end of this class so the vtable slots of existing methods never
+        // move; this keeps separately built backends (fex-emulator, kvm-emulator, ... can each be
+        // built as their own shared library) ABI-compatible with existing callers.
+        //
         // Called once before any module is mapped. Backends running on real x86-64 hardware ignore
         // this; the CPU switches to compatibility mode on the CS load alone. FEXCore compiles for a
-        // fixed bitness and only stands up the 64-bit context, so it uses this to reject a WoW64
-        // process up front instead of mis-decoding its first block as 64-bit code.
+        // fixed bitness and only stands up the 64-bit context, so it uses this to know, as early as
+        // possible, whether it needs to stand up a second, 32-bit-mode context.
         virtual void notify_process_bitness(bool /*is_wow64_process*/)
+        {
+        }
+
+        // Identifies which real WoW64 CPU-mode-switch mechanism lives at a registered gate-crossing
+        // range, so a JIT backend knows which calling convention to decode when guest execution
+        // reaches it (see register_gate_crossing).
+        enum class gate_crossing_kind
+        {
+            // sogen's own synthetic heaven's-gate trampoline (wow64_heaven_gate.hpp, kCodeBase): a
+            // 19-byte push/iretq sequence with the convention RAX=target RIP, RBX=target RSP,
+            // RCX=target CS, RDX=target SS, current RFLAGS carried through. Used by
+            // exception_dispatch.cpp to deliver a 64-bit exception to a thread currently running
+            // 32-bit code.
+            heaven_gate,
+            // The real wow64cpu.dll turbo-thunk dispatcher (its TurboDispatchJumpAddressStart export:
+            // `mov ecx,eax; shr ecx,0x10; jmp [r15+rcx*8]`). Its convention (EAX dispatch index, r15
+            // jump-table base populated by BTCpuProcessInit) differs from the heaven's-gate one - see
+            // perform_gate_crossing.
+            wow64cpu_dispatch,
+            // The real wow64cpu.dll forward (64->32) transition function RunSimulatedCode (RVA
+            // 0x1650, called in a loop by BTCpuSimulate). Its `mov gs, cx` at RVA 0x16c7 is the exact
+            // instruction FEXCore's fixed-bitness 64-bit JIT cannot compile, so this entry is
+            // registered as a gate and intercepted before those bytes are ever compiled; the WoW64
+            // CPU-area register block is decoded directly into the 32-bit Context instead - see
+            // perform_gate_crossing.
+            wow64_run_simulated_code,
+            // wow64cpu.dll's own BTCpuProcessInit writes this into a dedicated, freshly-r-x'd page: a
+            // bare `jmp far 0x33:<same page + a few bytes>` (opcode 0xEA, undefined in 64-bit long
+            // mode). This is the real Wow64Transition entry point for this ntdll32/wow64cpu.dll build
+            // combination - the 32-bit syscall stub's `call fs:[0xC0]` lands directly here with the
+            // syscall number/args already live - so despite the different encoding, reaching it is
+            // handled identically to wow64cpu_dispatch's thunk. See perform_gate_crossing.
+            far_jmp_bitness_switch,
+        };
+
+        // Registers [address, address+size) as a WoW64 bitness gate crossing: a JIT backend
+        // intercepts guest execution reaching it (its range is inherently non-executable to the JIT)
+        // and marshals the CPU register file into its other-bitness Context and switches which one is
+        // executing - the observable effect of the real hardware CS-segment mode switch that native
+        // backends (KVM/Unicorn/WHP) perform transparently, hence the no-op default here.
+        virtual void register_gate_crossing(pointer_type /*address*/, size_t /*size*/, gate_crossing_kind /*kind*/)
+        {
+        }
+
+        // Tells a JIT backend wow64cpu.dll's real TurboDispatchJumpAddressEnd export address - the
+        // generic 64-bit dispatch continuation a reverse (32->64) wow64cpu_dispatch gate crossing
+        // resumes execution at. This can't be derived from a fixed RVA offset - it differs across
+        // wow64cpu.dll builds/OS versions - so the caller resolves it from the real export table and
+        // hands the address over directly. A no-op on native-execution backends.
+        virtual void set_wow64_turbo_dispatch_end(pointer_type /*address*/)
         {
         }
     };
