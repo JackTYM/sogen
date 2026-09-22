@@ -106,6 +106,27 @@ shadow-stack pointer, the JIT lookup-cache pointer) interleaved with genuinely-a
 (GPRs, XMM, x87, EFLAGS, segment selectors). A correct crossing copies the architectural state and
 leaves each Context's own JIT bookkeeping alone.
 
+#### Which engine is live: `active_context_` / `active_thread_`
+
+A crossing flips `active_context_`/`active_thread_` — the pointers naming which of the two fixed
+Context/thread pairs is executing right now — from inside `handle_fault_signal`, a real
+kernel-delivered signal handler. Both are `std::atomic`, for two independent reasons:
+
+- The C++ abstract machine has no control-flow edge for signal delivery, so a plain member could be
+  cached across the opaque `ExecuteThread()` call and `start()`'s resume loop would re-enter the
+  *pre*-crossing engine. This is the same hazard `interrupt_page_unwind_` is atomic for.
+- `request_thread_stop()` reads `active_thread_` from the quantum-timer thread (see
+  `is_stop_thread_safe()`) while the vCPU thread runs guest code with the kernel lock released — a
+  genuine cross-thread access, not just a signal-handler one.
+
+Every write happens on the vCPU thread, so that thread's own reads need atomicity but not ordering
+and go through `active_context()`/`active_thread()`, which load `memory_order_relaxed`. The stores
+are `memory_order_release` and `request_thread_stop()`'s single load is `memory_order_acquire`, so
+the one cross-thread reader also observes the `InternalThreadState` the pointer names fully
+constructed. `request_thread_stop()` loads once into a local rather than re-reading between its null
+check and its `mprotect`: a crossing on the vCPU thread in that window would otherwise protect one
+engine's `InterruptFaultPage` after having tested the other's.
+
 ### Translation-cache invalidation across contexts
 
 `write_memory()`/`unmap_memory()` invalidate FEX's translation cache for the affected range in the
@@ -283,6 +304,13 @@ host page.
 - **`InterruptFaultPage` unwind atomicity.** A raced interrupt-fault-page unwind (the mechanism this
   backend uses to interrupt JIT-compiled code) could be misread as a fatal stop by `start()`'s run
   loop under concurrent access; tagged and re-armed instead of terminating.
+- **`active_thread_`/`active_context_` data race.** Both were plain pointers written from inside the
+  real signal handler and read from the quantum-timer thread by `request_thread_stop()`. Now
+  `std::atomic`, with the ordering and single-load rules described under "Which engine is live"
+  above. `create_thread32()` also no longer briefly publishes `thread32_` as the active engine just
+  to set up its call-ret stack — `ensure_callret_stack()` takes the engine explicitly instead, which
+  removes the window in which a cross-thread `stop()` could have protected the wrong engine's
+  `InterruptFaultPage`.
 - **`int 2Dh` (the Windows debug-service trap) resumed at the wrong address.** FEXCore only reports
   RIP already past the trapping instruction for real `INT3`/`INT1` (`SetRIPToNext` in FEXCore's
   `OpcodeDispatcher.cpp`); a generic `INT n` this backend can't dispatch directly (remapped from a

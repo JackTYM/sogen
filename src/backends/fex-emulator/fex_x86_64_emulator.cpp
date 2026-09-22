@@ -1344,7 +1344,7 @@ namespace sogen::fex
                 throw std::runtime_error("FEX backend does not support exact instruction counts yet");
             }
 
-            if (this->active_thread_ == nullptr)
+            if (this->active_thread() == nullptr)
             {
                 this->create_thread();
             }
@@ -1353,7 +1353,8 @@ namespace sogen::fex
             // Re-arm InterruptFaultPage for this quantum - see request_thread_stop's doc comment; a
             // prior stop() may have left it protected to force the last quantum's ExecuteThread to
             // return, and it must be writable again before the JIT's per-block-entry store runs.
-            ::mprotect(this->active_thread_->InterruptFaultPage, sizeof(this->active_thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+            ::mprotect(this->active_thread()->InterruptFaultPage, sizeof(this->active_thread()->InterruptFaultPage),
+                       PROT_READ | PROT_WRITE);
 
             // ExecuteThread runs the translated guest until the thread is asked to stop (which the
             // syscall bridge does when a hook calls stop()), or the guest faults/exits.
@@ -1364,7 +1365,7 @@ namespace sogen::fex
             // restarts from CurrentFrame->State.rip, which the hook is free to have redirected.
             for (;;)
             {
-                this->active_context_->ExecuteThread(this->active_thread_);
+                this->active_context()->ExecuteThread(this->active_thread());
 
                 const bool hook_dispatched = this->dispatch_pending_hook_if_any();
                 const bool interrupt_page_unwind = this->interrupt_page_unwind_.exchange(false);
@@ -1394,11 +1395,11 @@ namespace sogen::fex
                 // resumes cleanly. This also covers a same-engine InterruptFaultPage-unwind resume,
                 // since active_thread_ is unchanged there and re-arming an already-writable page is a
                 // no-op.
-                ::mprotect(this->active_thread_->InterruptFaultPage, sizeof(this->active_thread_->InterruptFaultPage),
+                ::mprotect(this->active_thread()->InterruptFaultPage, sizeof(this->active_thread()->InterruptFaultPage),
                            PROT_READ | PROT_WRITE);
             }
 #else
-            this->active_context_->ExecuteThread(this->active_thread_);
+            this->active_context()->ExecuteThread(this->active_thread());
 #endif
         }
 
@@ -1426,7 +1427,7 @@ namespace sogen::fex
                 // r8-r15 from there so dispatch_exception's CONTEXT64 (consumed by ntdll!
                 // KiUserExceptionDispatcher -> wow64!Wow64PrepareForException) carries the real values.
                 const FEXCore::Core::CPUState& gpr_state =
-                    (this->is_wow64_process_ && this->active_thread_ == this->thread32_ && this->thread_ != nullptr &&
+                    (this->is_wow64_process_ && this->active_thread() == this->thread32_ && this->thread_ != nullptr &&
                      mapping.gpr.index >= detail::greg_r8 && mapping.gpr.index <= detail::greg_r8 + 7)
                         ? this->thread_->CurrentFrame->State
                         : state;
@@ -1566,7 +1567,7 @@ namespace sogen::fex
             if (this->is_wow64_process_ && this->thread32_ != nullptr && this->thread_ != nullptr)
             {
                 std::vector<std::byte> data(wow64_snapshot_size());
-                const uint64_t active_is_32 = (this->active_context_ == this->context32_.get()) ? 1 : 0;
+                const uint64_t active_is_32 = (this->active_context() == this->context32_.get()) ? 1 : 0;
                 std::memcpy(data.data(), &active_is_32, sizeof(active_is_32));
                 std::memcpy(data.data() + kWow64SnapshotHeader, &this->thread_->CurrentFrame->State, sizeof(FEXCore::Core::CPUState));
                 std::memcpy(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState), &this->thread32_->CurrentFrame->State,
@@ -1621,13 +1622,13 @@ namespace sogen::fex
                 this->restore_state_into(this->thread32_, register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
                 if (active_is_32)
                 {
-                    this->active_context_ = this->context32_.get();
-                    this->active_thread_ = this->thread32_;
+                    this->active_context_.store(this->context32_.get(), std::memory_order_release);
+                    this->active_thread_.store(this->thread32_, std::memory_order_release);
                 }
                 else
                 {
-                    this->active_context_ = this->context_.get();
-                    this->active_thread_ = this->thread_;
+                    this->active_context_.store(this->context_.get(), std::memory_order_release);
+                    this->active_thread_.store(this->thread_, std::memory_order_release);
                 }
                 return;
             }
@@ -1637,7 +1638,7 @@ namespace sogen::fex
                 throw std::runtime_error("FEX register snapshot has unexpected size");
             }
 
-            if (this->active_thread_ == nullptr)
+            if (this->active_thread() == nullptr)
             {
                 // No thread yet: writing into staged_state_, which create_thread() will seed the
                 // real thread from (including installing L1Pointer/L1Mask/callret_sp correctly
@@ -1659,16 +1660,16 @@ namespace sogen::fex
                 {
                     this->create_thread32();
                 }
-                this->active_context_ = this->context32_.get();
-                this->active_thread_ = this->thread32_;
+                this->active_context_.store(this->context32_.get(), std::memory_order_release);
+                this->active_thread_.store(this->thread32_, std::memory_order_release);
             }
             else
             {
-                this->active_context_ = this->context_.get();
-                this->active_thread_ = this->thread_;
+                this->active_context_.store(this->context_.get(), std::memory_order_release);
+                this->active_thread_.store(this->thread_, std::memory_order_release);
             }
 
-            this->restore_state_into(this->active_thread_, register_data.data());
+            this->restore_state_into(this->active_thread(), register_data.data());
         }
 
         bool has_violation() const override
@@ -3250,7 +3251,7 @@ namespace sogen::fex
             // see their doc comment. Execution always begins on the 64-bit engine (even a wow64
             // process starts in real 64-bit ntdll code), so initialize it to context_ here, once,
             // right after construction.
-            this->active_context_ = this->context_.get();
+            this->active_context_.store(this->context_.get(), std::memory_order_release);
 
             this->syscall_handler_ = std::make_unique<fex_syscall_handler>(*this);
             this->context_->SetSyscallHandler(this->syscall_handler_.get());
@@ -3327,15 +3328,9 @@ namespace sogen::fex
             this->thread32_->CurrentFrame->State.segment_arrays[0] =
                 reinterpret_cast<FEXCore::Core::CPUState::gdt_segment*>(this->gdt_base_ + rebase);
 
-            // ensure_callret_stack writes into whatever this->active_thread_ currently is (see its
-            // doc comment) - temporarily point it at the new thread32_ engine so it gets its own
-            // private call-ret stack set up correctly, then restore whatever was active before.
-            // thread32_ doesn't actually become the active engine until the gate-crossing handler
-            // flips active_thread_/active_context_ itself, right after marshaling state into it.
-            auto* const previously_active_thread = this->active_thread_;
-            this->active_thread_ = this->thread32_;
-            this->ensure_callret_stack(this->thread32_->CurrentFrame->State);
-            this->active_thread_ = previously_active_thread;
+            // thread32_ does not become the active engine here - the gate-crossing handler flips
+            // active_thread_/active_context_ itself, right after marshaling state into it.
+            this->ensure_callret_stack(this->thread32_, this->thread32_->CurrentFrame->State);
         }
 
         // A registered WoW64 bitness mode-switch point (see x86_emulator::register_gate_crossing).
@@ -3538,8 +3533,8 @@ namespace sogen::fex
             state64.gregs[14] = state64.gregs[detail::greg_rsp];                          // r14 = 64-bit frame
             state64.gregs[15] = (gate.address & ~static_cast<uint64_t>(0xFFFF)) + 0x36d0; // r15 = turbo table
 
-            this->active_context_ = this->context32_.get();
-            this->active_thread_ = this->thread32_;
+            this->active_context_.store(this->context32_.get(), std::memory_order_release);
+            this->active_thread_.store(this->thread32_, std::memory_order_release);
             return true;
         }
 
@@ -3591,7 +3586,7 @@ namespace sogen::fex
 
             // Source: the 32-bit engine that reached the thunk (SRA already spilled - this is a
             // controlled synthetic #PF). Its live register file is the syscall's argument context.
-            const auto& src32 = this->active_thread_->CurrentFrame->State;
+            const auto& src32 = this->active_thread()->CurrentFrame->State;
             const uint32_t eax = static_cast<uint32_t>(src32.gregs[detail::greg_rax]);
             const uint32_t ecx = static_cast<uint32_t>(src32.gregs[detail::greg_rcx]);
             const uint32_t edx = static_cast<uint32_t>(src32.gregs[detail::greg_rdx]);
@@ -3667,8 +3662,8 @@ namespace sogen::fex
             dst64.gregs[13] = block;                          // R13 = CONTEXT block
             dst64.gregs[15] = jump_table;                     // R15 = turbo-thunk jump table
 
-            this->active_context_ = this->context_.get();
-            this->active_thread_ = this->thread_;
+            this->active_context_.store(this->context_.get(), std::memory_order_release);
+            this->active_thread_.store(this->thread_, std::memory_order_release);
 
             return true;
         }
@@ -3684,7 +3679,7 @@ namespace sogen::fex
         // decoding the `jmp far` instruction's own immediate operand instead).
         bool perform_bitness_switch(const uint64_t target_rip, const uint64_t target_rsp, const uint16_t target_cs)
         {
-            const auto& src = this->active_thread_->CurrentFrame->State;
+            const auto& src = this->active_thread()->CurrentFrame->State;
             const bool target_is_64bit = (target_cs == wow64_user_code_selector_64bit);
 
             FEXCore::Context::Context* dst_context = nullptr;
@@ -3793,8 +3788,8 @@ namespace sogen::fex
             dst.rip = target_rip;
             dst.gregs[detail::greg_rsp] = target_rsp;
 
-            this->active_context_ = dst_context;
-            this->active_thread_ = dst_thread;
+            this->active_context_.store(dst_context, std::memory_order_release);
+            this->active_thread_.store(dst_thread, std::memory_order_release);
             return true;
         }
 
@@ -3851,7 +3846,7 @@ namespace sogen::fex
             // cross-checked against exception_dispatch.cpp which drives it programmatically) - the
             // trampoline's final iretq consumes RIP<-RAX, CS<-RCX, RFLAGS<-(pushfq), RSP<-RBX, SS<-RDX,
             // leaving the GPRs otherwise intact.
-            const auto& src = this->active_thread_->CurrentFrame->State;
+            const auto& src = this->active_thread()->CurrentFrame->State;
             return this->perform_bitness_switch(src.gregs[detail::greg_rax], src.gregs[detail::greg_rbx],
                                                 static_cast<uint16_t>(src.gregs[detail::greg_rcx]));
         }
@@ -4209,11 +4204,12 @@ namespace sogen::fex
         // for any fault outside the callret allocation.
         bool handle_callret_stack_fault(ucontext_t* uctx, uint64_t fault_addr) const
         {
-            if (this->active_thread_ == nullptr || this->active_thread_->CallRetStackBase == nullptr)
+            auto* const thread = this->active_thread();
+            if (thread == nullptr || thread->CallRetStackBase == nullptr)
             {
                 return false;
             }
-            const auto base = reinterpret_cast<uint64_t>(this->active_thread_->CallRetStackBase);
+            const auto base = reinterpret_cast<uint64_t>(thread->CallRetStackBase);
             const auto host_page = static_cast<uint64_t>(::getpagesize());
             constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
             if (fault_addr < base - host_page || fault_addr >= base + callret_stack_size + host_page)
@@ -4291,9 +4287,10 @@ namespace sogen::fex
             // suspend-time ReconstructThreadState and the InterruptFaultPage cooperative-stop path use);
             // the host PC is squarely inside a compiled block here, so this resolves accurately. Guard on
             // a non-zero result so a failed reconstruction never zeroes a usable stale rip.
-            if (const uint64_t recon_rip = this->active_context_->RestoreRIPFromHostPC(this->active_thread_, pc))
+            auto* const thread = this->active_thread();
+            if (const uint64_t recon_rip = this->active_context()->RestoreRIPFromHostPC(thread, pc))
             {
-                this->active_thread_->CurrentFrame->State.rip = recon_rip;
+                thread->CurrentFrame->State.rip = recon_rip;
             }
 
             pending_fault_dispatch dispatch{};
@@ -4311,7 +4308,7 @@ namespace sogen::fex
 
         bool handle_fault_signal(int sig, siginfo_t* info, void* raw_ucontext)
         {
-            if (this->active_thread_ == nullptr)
+            if (this->active_thread() == nullptr)
             {
                 return false;
             }
@@ -4334,17 +4331,17 @@ namespace sogen::fex
                 // whatever the resulting nonsense exception dispatch touches downstream. Checking this
                 // first, before any signal/si_code-specific branch, means every InterruptFaultPage
                 // fault is caught here regardless of how Darwin classifies it.
+                auto* const faulting_thread = this->active_thread();
 #ifdef __ANDROID__
-                const auto interrupt_page_addr = get_untagged_pointer_address(this->active_thread_->InterruptFaultPage);
+                const auto interrupt_page_addr = get_untagged_pointer_address(faulting_thread->InterruptFaultPage);
 #else
-                const auto interrupt_page_addr = reinterpret_cast<uint64_t>(this->active_thread_->InterruptFaultPage);
+                const auto interrupt_page_addr = reinterpret_cast<uint64_t>(faulting_thread->InterruptFaultPage);
 #endif
-                if (fault_addr >= interrupt_page_addr &&
-                    fault_addr < interrupt_page_addr + sizeof(this->active_thread_->InterruptFaultPage))
+                if (fault_addr >= interrupt_page_addr && fault_addr < interrupt_page_addr + sizeof(faulting_thread->InterruptFaultPage))
                 {
                     const auto fault_pc = get_host_pc(uctx);
-                    const bool is_dispatch_code =
-                        this->active_context_ && this->active_context_->IsAddressInCodeBuffer(this->active_thread_, fault_pc);
+                    auto* const context = this->active_context();
+                    const bool is_dispatch_code = context && context->IsAddressInCodeBuffer(faulting_thread, fault_pc);
 
                     // ExitFunctionLinkerAddress's OWN epilogue (EmitSignalGuardedRegion's closing
                     // sequence, Dispatcher.cpp) also writes to InterruptFaultPage from inside the
@@ -4382,8 +4379,7 @@ namespace sogen::fex
                         // RestoreRIPFromHostPC + SRA spill). Both halves are required: without the rip
                         // reconstruction resume lands on the stale instruction; without the SRA spill it
                         // resumes with stale registers.
-                        this->active_thread_->CurrentFrame->State.rip =
-                            this->active_context_->RestoreRIPFromHostPC(this->active_thread_, fault_pc);
+                        faulting_thread->CurrentFrame->State.rip = context->RestoreRIPFromHostPC(faulting_thread, fault_pc);
                         this->interrupt_page_unwind_ = true;
                         const auto& stop_cfg = this->signal_delegator_->GetConfig();
                         set_host_pc(uctx, stop_cfg.ThreadStopHandlerAddressSpillSRA);
@@ -4506,8 +4502,9 @@ namespace sogen::fex
                 // BUS_ADRALN is Darwin's own alignment-fault si_code; Android/Linux never reports it
                 // this way, so both this and the general BUS_ADRALN dispatch below are Apple-only.
 #ifdef __APPLE__
-                if (sig == SIGBUS && info->si_code == BUS_ADRALN && this->active_context_ &&
-                    this->active_context_->IsAddressInCodeBuffer(this->active_thread_, fault_addr))
+                auto* const codebuffer_context = this->active_context();
+                if (sig == SIGBUS && info->si_code == BUS_ADRALN && codebuffer_context &&
+                    codebuffer_context->IsAddressInCodeBuffer(faulting_thread, fault_addr))
                 {
                     auto& retry_count = jit_write_protect_retry_count_for(fault_addr);
                     constexpr int max_write_protect_retries = 4;
@@ -4555,7 +4552,8 @@ namespace sogen::fex
             if (sig == SIGSEGV || sig == SIGBUS)
 #endif
             {
-                const auto guard_page = this->active_thread_->JITGuardPage;
+                auto* const faulting_thread = this->active_thread();
+                const auto guard_page = faulting_thread->JITGuardPage;
                 const auto fault_addr = reinterpret_cast<uintptr_t>(info->si_addr);
                 if (guard_page != 0 && fault_addr >= guard_page && fault_addr < guard_page + FEXCore::Utils::FEX_HOST_PAGE_SIZE)
                 {
@@ -4571,8 +4569,8 @@ namespace sogen::fex
                     {
                         return false;
                     }
-                    FEXCore::UncheckedLongJump::ManuallyLoadJumpBuf(this->active_thread_->RestartJump,
-                                                                    this->active_thread_->JITGuardOverflowArgument, gprs, fprs, pc_ptr);
+                    FEXCore::UncheckedLongJump::ManuallyLoadJumpBuf(faulting_thread->RestartJump, faulting_thread->JITGuardOverflowArgument,
+                                                                    gprs, fprs, pc_ptr);
                     return true;
                 }
 
@@ -4593,7 +4591,8 @@ namespace sogen::fex
                 // write-protect race at all - e.g. a genuine branch-to-null (pc==fault_addr==0) would
                 // be retried this way before falling through as unhandled, even though toggling JIT
                 // write-protection has nothing to do with a null pointer.
-                if (this->active_context_ && this->active_context_->IsAddressInCodeBuffer(this->active_thread_, fault_addr))
+                auto* const codebuffer_context = this->active_context();
+                if (codebuffer_context && codebuffer_context->IsAddressInCodeBuffer(faulting_thread, fault_addr))
                 {
                     const auto fault_addr_u64 = reinterpret_cast<uint64_t>(info->si_addr);
                     auto& retry_count = jit_write_protect_retry_count_for(fault_addr_u64);
@@ -4627,8 +4626,8 @@ namespace sogen::fex
                 // genuinely inside a live JIT code buffer (the public IsAddressInCodeBuffer API) -
                 // otherwise this is a real host bug elsewhere that we have no business trying to
                 // interpret as guest state; the signal handler wrapper below logs and re-raises it.
-                if ((sig == SIGSEGV || sig == SIGBUS) && this->active_context_ &&
-                    this->active_context_->IsAddressInCodeBuffer(this->active_thread_, pc) &&
+                auto* const context = this->active_context();
+                if ((sig == SIGSEGV || sig == SIGBUS) && context && context->IsAddressInCodeBuffer(this->active_thread(), pc) &&
                     this->handle_general_memory_violation(uctx, reinterpret_cast<uint64_t>(info->si_addr)))
                 {
                     return true;
@@ -4637,7 +4636,7 @@ namespace sogen::fex
                 return false;
             }
 
-            auto* frame = this->active_thread_->CurrentFrame;
+            auto* frame = this->active_thread()->CurrentFrame;
             if (!frame->SynchronousFaultData.FaultToTopAndGeneratedException)
             {
                 return false;
@@ -4686,8 +4685,9 @@ namespace sogen::fex
                     // ExecuteThread that must unwind belongs to the source Context, so it has to
                     // return through that Context's own ThreadStopHandlerAddress. Using the
                     // destination's would re-enter the wrong dispatcher.
-                    auto* const source_signal_delegator =
-                        (this->active_context_ == this->context32_.get()) ? this->signal_delegator32_.get() : this->signal_delegator_.get();
+                    auto* const source_signal_delegator = (this->active_context() == this->context32_.get())
+                                                              ? this->signal_delegator32_.get()
+                                                              : this->signal_delegator_.get();
 
                     if (this->perform_gate_crossing(*gate))
                     {
@@ -4742,12 +4742,12 @@ namespace sogen::fex
             // active_context_/active_thread_ start out equal to context_/thread_ - see their doc
             // comment - execution always begins on the 64-bit engine, so reflect the newly-created
             // thread as the active one right away.
-            this->active_thread_ = this->thread_;
+            this->active_thread_.store(this->thread_, std::memory_order_release);
 
             // FEXCore's core does not set up the call-ret shadow stack; on Linux that is embedder glue
             // in ThreadManager::CreateThread, replicated here. Without it the first x86 CALL in compiled
             // code dereferences a null callret_sp and crashes.
-            this->ensure_callret_stack(this->thread_->CurrentFrame->State);
+            this->ensure_callret_stack(this->thread_, this->thread_->CurrentFrame->State);
 
 #ifdef __APPLE__
             // See exit_function_link_jit_write_wrapper: the call-site patch must happen with this
@@ -4791,7 +4791,7 @@ namespace sogen::fex
         // Allocates this logical thread's private call-ret shadow-stack buffer on first use (state._pad1
         // == 0), recording it in state._pad1 (round-tripped by save/restore). Does NOT touch any
         // InternalThreadState::CallRetStackBase - callers point the right engine's field at the buffer
-        // themselves (ensure_callret_stack for the active engine; restore_state_into per restored engine).
+        // themselves (ensure_callret_stack for a named engine; restore_state_into per restored engine).
         void ensure_callret_buffer(FEXCore::Core::CPUState& state)
         {
             if (state._pad1 == 0)
@@ -4831,12 +4831,11 @@ namespace sogen::fex
             }
         }
 
-        // Ensures the active engine's call-ret buffer exists and points CallRetStackBase at it. Kept for
-        // create_thread/create_thread32 and any path that sets up the currently-active engine.
-        void ensure_callret_stack(FEXCore::Core::CPUState& state)
+        // Ensures the given engine's call-ret buffer exists and points its CallRetStackBase at it.
+        void ensure_callret_stack(FEXCore::Core::InternalThreadState* thread, FEXCore::Core::CPUState& state)
         {
             this->ensure_callret_buffer(state);
-            this->active_thread_->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
+            thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
         }
 
         // CPUState is owned by the thread frame once a thread exists. Before the thread is created we
@@ -4844,18 +4843,20 @@ namespace sogen::fex
         // context; create_thread() seeds the real thread from it.
         FEXCore::Core::CPUState& cpu_state()
         {
-            if (this->active_thread_ != nullptr)
+            auto* const thread = this->active_thread();
+            if (thread != nullptr)
             {
-                return this->active_thread_->CurrentFrame->State; // TODO(fex): confirm field path for the FEX version.
+                return thread->CurrentFrame->State; // TODO(fex): confirm field path for the FEX version.
             }
             return this->staged_state_;
         }
 
         const FEXCore::Core::CPUState& cpu_state() const
         {
-            if (this->active_thread_ != nullptr)
+            auto* const thread = this->active_thread();
+            if (thread != nullptr)
             {
-                return this->active_thread_->CurrentFrame->State;
+                return thread->CurrentFrame->State;
             }
             return this->staged_state_;
         }
@@ -4865,19 +4866,21 @@ namespace sogen::fex
             // FEXCore's ReconstructCompactedEFLAGS requires a live thread (it dereferences Thread to
             // reach CurrentFrame->State); before create_thread(), fall back to the local
             // reimplementation operating on the staged CPUState directly (see reconstruct_compacted_eflags).
-            if (this->active_thread_ != nullptr)
+            auto* const thread = this->active_thread();
+            if (thread != nullptr)
             {
                 // At rest (not in JIT) WasInJIT=false and the host GPR/PSTATE inputs are unused.
-                return this->active_context_->ReconstructCompactedEFLAGS(this->active_thread_, /*WasInJIT=*/false, nullptr, 0);
+                return this->active_context()->ReconstructCompactedEFLAGS(thread, /*WasInJIT=*/false, nullptr, 0);
             }
             return reconstruct_compacted_eflags(this->staged_state_);
         }
 
         void write_rflags(uint64_t rflags)
         {
-            if (this->active_thread_ != nullptr)
+            auto* const thread = this->active_thread();
+            if (thread != nullptr)
             {
-                this->active_context_->SetFlagsFromCompactedEFLAGS(this->active_thread_, static_cast<uint32_t>(rflags));
+                this->active_context()->SetFlagsFromCompactedEFLAGS(thread, static_cast<uint32_t>(rflags));
                 return;
             }
             set_flags_from_compacted_eflags(this->staged_state_, static_cast<uint32_t>(rflags));
@@ -4937,9 +4940,10 @@ namespace sogen::fex
 
         void mark_executable_range(uint64_t address, size_t size, memory_permission permissions)
         {
-            if (this->active_thread_ != nullptr && (permissions & memory_permission::exec) != memory_permission::none)
+            auto* const thread = this->active_thread();
+            if (thread != nullptr && (permissions & memory_permission::exec) != memory_permission::none)
             {
-                this->syscall_handler_->MarkGuestExecutableRange(this->active_thread_, address, size);
+                this->syscall_handler_->MarkGuestExecutableRange(thread, address, size);
             }
         }
 
@@ -4978,13 +4982,14 @@ namespace sogen::fex
         // from an address (an unmap), not on ordinary protection changes: see the WoW64 note below.
         void invalidate_code_range(uint64_t address, size_t size, bool include_inactive_contexts = false) const
         {
-            if (!this->active_context_)
+            auto* const context = this->active_context();
+            if (!context)
             {
                 return;
             }
 
             // Invalidate the currently-active context exactly as before.
-            this->invalidate_code_range_in(this->active_context_, this->active_thread_, address, size);
+            this->invalidate_code_range_in(context, this->active_thread(), address, size);
 
             // A WoW64 process runs two independent FEXCore contexts - context_ (64-bit) and context32_
             // (32-bit) - each with its own translation cache and code buffers. An unmap of 32-bit guest
@@ -4996,7 +5001,7 @@ namespace sogen::fex
             // inactive context's cache for the range too.
             // Only unmaps request this - doing it on every protection change would repeatedly
             // delink the live 32-bit context's blocks from the inactive side and livelock it.
-            if (include_inactive_contexts && this->context32_.get() != nullptr && this->context32_.get() != this->active_context_ &&
+            if (include_inactive_contexts && this->context32_.get() != nullptr && this->context32_.get() != context &&
                 this->thread32_ != nullptr)
             {
                 this->invalidate_code_range_in(this->context32_.get(), this->thread32_, address, size);
@@ -5013,12 +5018,21 @@ namespace sogen::fex
             // block entry fault, landing in handle_fault_signal, which redirects any fault on
             // InterruptFaultPage into FEXCore's own ThreadStopHandlerAddress instead of resuming
             // (it does not consult stop_requested_ for that).
-            if (this->active_thread_ == nullptr)
+            //
+            // This is the only reader of active_thread_ that can run on a thread other than the one
+            // that writes it, so it is also the only one that must load it exactly once: the emulation
+            // thread can perform a gate crossing between a null check and a dereference, which would
+            // protect the page of an engine that is no longer the one about to re-enter the JIT.
+            // Protecting the engine that was active when the stop was requested is the intended
+            // behaviour; protecting a torn mix of the two is not. Acquire pairs with the release
+            // stores so the InternalThreadState this names is fully constructed as seen from here.
+            auto* const thread = this->active_thread_.load(std::memory_order_acquire);
+            if (thread == nullptr)
             {
                 return;
             }
 
-            ::mprotect(this->active_thread_->InterruptFaultPage, sizeof(this->active_thread_->InterruptFaultPage), PROT_NONE);
+            ::mprotect(thread->InterruptFaultPage, sizeof(thread->InterruptFaultPage), PROT_NONE);
         }
 
         emulator_hook* make_hook()
@@ -5037,8 +5051,32 @@ namespace sogen::fex
         // what every JIT-operation call site below actually uses. context_/thread_ and context32_/
         // thread32_ (declared further below) are the two fixed, named instances;
         // active_context_/active_thread_ is which *one* of them is live right now.
-        FEXCore::Context::Context* active_context_ = nullptr;
-        FEXCore::Core::InternalThreadState* active_thread_ = nullptr;
+        //
+        // Atomic for two independent reasons. The gate crossings write them from inside
+        // handle_fault_signal, a real kernel-delivered signal handler, and the C++ abstract machine has
+        // no control-flow edge for that: a plain member could be cached across the opaque
+        // ExecuteThread() call, so start()'s resume loop would re-enter the pre-crossing engine (the
+        // same hazard interrupt_page_unwind_ documents). Separately, request_thread_stop() reads
+        // active_thread_ from the quantum-timer thread while this thread runs guest code with the
+        // kernel lock released (see is_stop_thread_safe), which is a genuine cross-thread access.
+        //
+        // Every write happens on the emulation thread, so the emulation thread's own reads need
+        // atomicity but not ordering and use memory_order_relaxed (the accessors below). The stores are
+        // memory_order_release and request_thread_stop's single load is memory_order_acquire, so that
+        // one cross-thread reader also sees the InternalThreadState the pointer names fully constructed.
+        std::atomic<FEXCore::Context::Context*> active_context_{nullptr};
+        std::atomic<FEXCore::Core::InternalThreadState*> active_thread_{nullptr};
+
+        FEXCore::Context::Context* active_context() const
+        {
+            return this->active_context_.load(std::memory_order_relaxed);
+        }
+
+        FEXCore::Core::InternalThreadState* active_thread() const
+        {
+            return this->active_thread_.load(std::memory_order_relaxed);
+        }
+
         // Set once via notify_process_bitness(), before any thread is created (see that override's
         // doc comment) - gates every guest-memory-touching method's wow64_guest_rebase application
         // below (needed for the 32-bit executable/ntdll32 modules regardless of which FEXCore::Context
