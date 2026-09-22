@@ -838,10 +838,6 @@ namespace sogen
 
     void process_context::deserialize(utils::buffer_deserializer& buffer, emulator_thread*& active_thread)
     {
-        // The lead-byte-table patch lives in guest memory and reverts with it, so it must be re-resolved
-        // after any restore.
-        this->nls_lead_byte_info_table_resolved.reset();
-
         buffer.read_vector(this->sid);
         buffer.read(this->shared_section_address);
         buffer.read(this->shared_section_size);
