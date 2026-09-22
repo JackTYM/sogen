@@ -73,7 +73,9 @@ namespace sogen
     // options.child_control_fd on the child side, both ends of the second socketpair
     // spawn_child_process opens for the process_control_channel protocol) as a
     // process_control_channel. Takes ownership of fd - it is closed when the returned channel is
-    // destroyed.
-    std::unique_ptr<process_control_channel> create_fd_process_control_channel(int fd);
+    // destroyed. host_pid backs force_kill() - pass child_process_outcome::host_pid on the parent
+    // side, or leave it at -1 on the child side, which has no child of its own to kill through
+    // this channel.
+    std::unique_ptr<process_control_channel> create_fd_process_control_channel(int fd, int host_pid = -1);
 
 } // namespace sogen

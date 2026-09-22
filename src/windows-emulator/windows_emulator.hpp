@@ -171,6 +171,13 @@ namespace sogen
         // traffic. Only meaningful when success is true; -1 if this platform doesn't support child
         // process spawning at all.
         int control_fd{-1};
+
+        // The real host OS process id backing this child (fork()'s return value in the parent) -
+        // unrelated to child_process_record::pid, which is a synthetic guest pid. Lets a caller
+        // force_kill() the real process even after its process_control_channel has poisoned itself
+        // on a timeout. Only meaningful when success is true; -1 if this platform doesn't support
+        // child process spawning at all.
+        int host_pid{-1};
     };
 
     struct emulator_callbacks : module_manager::callbacks, process_context::callbacks

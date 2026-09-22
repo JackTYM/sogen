@@ -250,9 +250,11 @@ namespace sogen::test
         ASSERT_NOT_TERMINATED(child);
     }
 
-    // fake_control_channel's request() always returns nullopt, simulating a dead/unresponsive channel.
-    // The parent's own record must be left untouched (still STATUS_PENDING) since nothing confirms the
-    // requested exit code was ever actually observed by the target.
+    // fake_control_channel's request() always returns nullopt, simulating a dead/unresponsive channel -
+    // which, unlike every other cross-process op, NtTerminateProcess can't just treat as "already gone
+    // and confirmed": a child stuck in a long host-side operation poisons its channel via the very same
+    // timeout, so the handler force_kill()s the target and records the requested exit code itself
+    // rather than leaving the record dangling at STATUS_PENDING forever.
     TEST(CrossProcessTest, NtTerminateProcessSyscallReportsProcessIsTerminatingOnDeadChannel)
     {
         auto parent = create_empty_emulator();
@@ -269,7 +271,8 @@ namespace sogen::test
         const auto status = syscalls::handle_NtTerminateProcess(c, h, 0x1234);
 
         ASSERT_EQ(status, STATUS_PROCESS_IS_TERMINATING);
-        ASSERT_EQ(parent.process.child_processes.at(7).exit_status, STATUS_PENDING);
+        ASSERT_EQ(parent.process.child_processes.at(7).exit_status, 0x1234);
+        ASSERT_EQ(parent.find_child_control_channel(7), nullptr);
     }
 
     TEST(CrossProcessTest, NtQueryInformationProcessSyscallReturnsBasicInformationForLiveChild)

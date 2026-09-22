@@ -766,7 +766,8 @@ namespace sogen
                     }
                     if (outcome.success && outcome.control_fd >= 0)
                     {
-                        win_emu_ptr->register_child_control_channel(record_id, create_fd_process_control_channel(outcome.control_fd));
+                        win_emu_ptr->register_child_control_channel(
+                            record_id, create_fd_process_control_channel(outcome.control_fd, outcome.host_pid));
                     }
                     return outcome;
                 };

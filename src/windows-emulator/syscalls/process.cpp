@@ -966,12 +966,17 @@ namespace sogen
             const auto response = target.channel->request(request, process_control_default_timeout_ms);
             if (!response)
             {
-                // Treated the same as every other cross-process op's dead-channel case
-                // (STATUS_PROCESS_IS_TERMINATING), for consistency - and it happens to be an accurate
-                // description here too: the channel only ever dies because the child's host process
-                // already exited (crash, or a previous terminate this parent doesn't know succeeded),
-                // so the target is, in fact, terminating or gone.
-                c.win_emu.log.error("NtTerminateProcess: control channel to child %u is dead/unresponsive\n", target.record_id);
+                // Unlike every other cross-process op's dead-channel case, this one can't just
+                // assume the channel poisoned itself because the child already exited - a child
+                // stuck in a long host-side operation poisons the channel via the same timeout, but
+                // is still very much alive and burning a host CPU core. Since the caller explicitly
+                // asked for this process to be gone, force_kill() makes that true rather than merely
+                // assumed, whichever case this was.
+                c.win_emu.log.error("NtTerminateProcess: control channel to child %u is dead/unresponsive, force-killing\n",
+                                    target.record_id);
+                target.channel->force_kill();
+                c.proc.child_processes.at(target.record_id).exit_status = exit_status;
+                c.win_emu.drop_child_control_channel(target.record_id);
                 return STATUS_PROCESS_IS_TERMINATING;
             }
 

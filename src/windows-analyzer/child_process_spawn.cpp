@@ -383,8 +383,9 @@ namespace sogen
         class fd_process_control_channel final : public process_control_channel
         {
           public:
-            explicit fd_process_control_channel(const int fd)
-                : fd_(fd)
+            explicit fd_process_control_channel(const int fd, const int host_pid = -1)
+                : fd_(fd),
+                  host_pid_(host_pid)
             {
             }
 
@@ -531,8 +532,17 @@ namespace sogen
                 return exit_status;
             }
 
+            void force_kill() override
+            {
+                if (this->host_pid_ >= 0)
+                {
+                    ::kill(this->host_pid_, SIGKILL);
+                }
+            }
+
           private:
             int fd_{-1};
+            int host_pid_{-1};
             uint64_t next_request_id_{1};
             bool dead_{false};
             std::optional<int32_t> pending_exit_status_{};
@@ -697,6 +707,7 @@ namespace sogen
         {
             outcome.ipc_fd = parent_fd;
             outcome.control_fd = parent_control_fd;
+            outcome.host_pid = static_cast<int>(pid);
         }
         else
         {
@@ -757,12 +768,13 @@ namespace sogen
 #endif
     }
 
-    std::unique_ptr<process_control_channel> create_fd_process_control_channel(const int fd)
+    std::unique_ptr<process_control_channel> create_fd_process_control_channel(const int fd, const int host_pid)
     {
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
-        return std::make_unique<fd_process_control_channel>(fd);
+        return std::make_unique<fd_process_control_channel>(fd, host_pid);
 #else
         (void)fd;
+        (void)host_pid;
         return nullptr;
 #endif
     }

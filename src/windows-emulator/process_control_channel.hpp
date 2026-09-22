@@ -179,6 +179,16 @@ namespace sogen
         // Non-blocking, parent side: returns the exit status a child reported via notify_exit,
         // once it has arrived, or std::nullopt if none has arrived yet.
         virtual std::optional<int32_t> try_receive_exit_notification() = 0;
+
+        // Parent side: forcibly ends the real host OS process behind this channel, for callers
+        // that can no longer assume a poisoned (see request()) channel means the child already
+        // exited - a child stuck in a long host-side operation poisons its channel via a timeout
+        // exactly like a genuinely dead one does, so a caller that needs the process gone (rather
+        // than merely unresponsive) must ask explicitly rather than infer it. A no-op default for
+        // implementations with no real host process to kill (e.g. in tests).
+        virtual void force_kill()
+        {
+        }
     };
 
 } // namespace sogen
