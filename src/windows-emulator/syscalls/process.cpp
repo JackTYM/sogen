@@ -19,6 +19,12 @@ namespace sogen
             constexpr ACCESS_MASK PROCESS_QUERY_INFORMATION = 0x0400;
             constexpr ACCESS_MASK PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
+            uint64_t spawn_race_timing_now_us()
+            {
+                return static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            }
+
             // The environment block real ntdll builds (see process_context::setup's construction of
             // RTL_USER_PROCESS_PARAMETERS64.Environment): a sequence of NUL-terminated "name=value"
             // UTF-16 strings, terminated by an empty string (double NUL). Entries starting with '=' are
@@ -959,6 +965,36 @@ namespace sogen
 
             const auto& target = std::get<child_target>(child);
 
+            if (std::getenv("SOGEN_TRACE_SPAWN_RACE_TIMING") != nullptr)
+            {
+                c.win_emu.log.log("SpawnRaceTiming: child %u terminate_dispatch_us=%" PRIu64 "\n", target.record_id,
+                                  spawn_race_timing_now_us());
+            }
+
+            if (std::getenv("SOGEN_DEBUG_TERMINATE_CALLER_STACK") != nullptr)
+            {
+                const auto rip = c.emu.read_instruction_pointer();
+                const auto rsp = c.emu.read_stack_pointer();
+                const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+                fprintf(stderr, "[TERMINATE_CALLER] child=%u tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx exit_status=0x%x\n", target.record_id,
+                        c.thread().id, static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                        rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL, static_cast<unsigned long long>(rsp),
+                        static_cast<unsigned int>(exit_status));
+                for (uint64_t i = 0; i < 64; ++i)
+                {
+                    uint64_t value{};
+                    if (!c.win_emu.memory.try_read_memory(rsp + (i * 8), &value, sizeof(value)))
+                    {
+                        break;
+                    }
+                    const auto* mod = c.win_emu.mod_manager.find_by_address(value);
+                    fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s%s%s\n", static_cast<unsigned long long>(i * 8),
+                            static_cast<unsigned long long>(value), mod ? mod->name.c_str() : "", mod ? "+0x" : "",
+                            mod ? std::to_string(value - mod->image_base).c_str() : "");
+                }
+                fflush(stderr);
+            }
+
             process_control_request request{};
             request.op = process_control_op::terminate;
             request.exit_status = static_cast<int32_t>(exit_status);
@@ -1241,6 +1277,12 @@ namespace sogen
                 }
             }
 
+            const auto trace_spawn_race_timing = std::getenv("SOGEN_TRACE_SPAWN_RACE_TIMING") != nullptr;
+            if (trace_spawn_race_timing)
+            {
+                c.win_emu.log.log("SpawnRaceTiming: child %u spawn_dispatch_us=%" PRIu64 "\n", record_id, spawn_race_timing_now_us());
+            }
+
             child_process_outcome outcome{};
             try
             {
@@ -1249,8 +1291,19 @@ namespace sogen
             }
             catch (const std::exception& e)
             {
+                if (trace_spawn_race_timing)
+                {
+                    c.win_emu.log.log("SpawnRaceTiming: child %u spawn_ready_us=%" PRIu64 " success=0\n", record_id,
+                                      spawn_race_timing_now_us());
+                }
                 c.win_emu.log.error("NtCreateUserProcess: failed to spawn child %u: %s\n", record_id, e.what());
                 return STATUS_UNSUCCESSFUL;
+            }
+
+            if (trace_spawn_race_timing)
+            {
+                c.win_emu.log.log("SpawnRaceTiming: child %u spawn_ready_us=%" PRIu64 " success=%d\n", record_id,
+                                  spawn_race_timing_now_us(), outcome.success ? 1 : 0);
             }
 
             if (!outcome.success)
