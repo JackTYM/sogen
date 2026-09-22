@@ -1212,6 +1212,15 @@ namespace sogen
                     auto* section = c.proc.sections.get(src_handle);
                     if (!section || section->object->is_image() || !section->object->file_name.empty())
                     {
+                        if (std::getenv("SOGEN_DEBUG_SECTION_INHERIT") != nullptr)
+                        {
+                            c.win_emu.log.log("NtCreateUserProcess: child %u: inherited section handle 0x%" PRIx64
+                                              " skip reason: missing=%d is_image=%d file_name=%s\n",
+                                              record_id, static_cast<uint64_t>(src_handle.bits), section == nullptr,
+                                              section ? section->object->is_image() : false,
+                                              section ? u16_to_u8(section->object->file_name).c_str() : "<n/a>");
+                        }
+
                         c.win_emu.log.log("NtCreateUserProcess: child %u: inherited section handle 0x%" PRIx64
                                           " is missing, image-backed or file-backed, skipping\n",
                                           record_id, static_cast<uint64_t>(src_handle.bits));
