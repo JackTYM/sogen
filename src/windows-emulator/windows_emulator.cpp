@@ -2326,6 +2326,107 @@ namespace sogen
         thread->post_message(*this, m);
     }
 
+    namespace
+    {
+        uint32_t pack_key_lparam(const uint8_t scan_code, const bool extended, const bool alt_context, const bool was_down,
+                                 const bool key_up)
+        {
+            uint32_t bits = 1;                              // bits 0-15: repeat count (no repeat tracking, always 1)
+            bits |= static_cast<uint32_t>(scan_code) << 16; // bits 16-23: scan code
+            if (extended)
+            {
+                bits |= 1u << 24; // bit 24: extended key
+            }
+            if (alt_context)
+            {
+                bits |= 1u << 29; // bit 29: ALT/syskey context
+            }
+            if (was_down)
+            {
+                bits |= 1u << 30; // bit 30: previous key state
+            }
+            if (key_up)
+            {
+                bits |= 1u << 31; // bit 31: transition state, set on release
+            }
+            return bits;
+        }
+    }
+
+    void windows_emulator::deliver_key_down(const uint16_t vk, const uint8_t scan_code, const bool extended, const bool was_down,
+                                            const bool alt_context)
+    {
+        const auto target = this->process.resolve_foreground_window();
+        auto* win = this->process.windows.get(target);
+        if (!win)
+        {
+            return;
+        }
+
+        auto* thread = get_thread_by_id(this->process, win->thread_id);
+        if (!thread)
+        {
+            return;
+        }
+
+        const bool is_syskey = vk == VK_MENU || vk == VK_F10 || alt_context;
+
+        msg m{};
+        m.window = target;
+        m.message = is_syskey ? WM_SYSKEYDOWN : WM_KEYDOWN;
+        m.wParam = vk;
+        m.lParam = static_cast<lparam>(pack_key_lparam(scan_code, extended, alt_context, was_down, false));
+        thread->post_message(*this, m);
+    }
+
+    void windows_emulator::deliver_key_up(const uint16_t vk, const uint8_t scan_code, const bool extended, const bool alt_context)
+    {
+        const auto target = this->process.resolve_foreground_window();
+        auto* win = this->process.windows.get(target);
+        if (!win)
+        {
+            return;
+        }
+
+        auto* thread = get_thread_by_id(this->process, win->thread_id);
+        if (!thread)
+        {
+            return;
+        }
+
+        const bool is_syskey = vk == VK_MENU || vk == VK_F10 || alt_context;
+
+        msg m{};
+        m.window = target;
+        m.message = is_syskey ? WM_SYSKEYUP : WM_KEYUP;
+        m.wParam = vk;
+        m.lParam = static_cast<lparam>(pack_key_lparam(scan_code, extended, alt_context, true, true));
+        thread->post_message(*this, m);
+    }
+
+    void windows_emulator::deliver_char(const uint16_t utf16_char)
+    {
+        const auto target = this->process.resolve_foreground_window();
+        auto* win = this->process.windows.get(target);
+        if (!win)
+        {
+            return;
+        }
+
+        auto* thread = get_thread_by_id(this->process, win->thread_id);
+        if (!thread)
+        {
+            return;
+        }
+
+        msg m{};
+        m.window = target;
+        m.message = WM_CHAR;
+        m.wParam = utf16_char;
+        m.lParam = 0;
+        thread->post_message(*this, m);
+    }
+
     void windows_emulator::handle_ui_event(const ui_event& event)
     {
         const std::scoped_lock lock(this->kernel_lock_);

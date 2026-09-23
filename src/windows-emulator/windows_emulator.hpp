@@ -256,6 +256,21 @@ namespace sogen
         void deliver_mouse_move(int32_t x, int32_t y);
         void deliver_mouse_button(int32_t x, int32_t y, uint32_t message, uint16_t button_data = 0);
 
+        // Standard keyboard messages (WM_KEYDOWN/WM_KEYUP/WM_SYSKEYDOWN/WM_SYSKEYUP, real vk/scan
+        // code in wParam/lParam) for guests that listen for ordinary keyboard input rather than
+        // WM_INPUT. lParam bit-packing matches the real Windows layout (see sdl_ui_backend.cpp's
+        // map_sdl_scancode for the desktop-backend reference this mirrors): bits 0-15 repeat
+        // count, bits 16-23 scan code, bit 24 extended key, bit 29 ALT/syskey context, bit 30
+        // previous key state, bit 31 transition state (set on release). Same threading constraint
+        // as deliver_mouse_move: callers must not invoke this off the emulator thread.
+        void deliver_key_down(uint16_t vk, uint8_t scan_code, bool extended, bool was_down, bool alt_context);
+        void deliver_key_up(uint16_t vk, uint8_t scan_code, bool extended, bool alt_context);
+
+        // WM_CHAR (real UTF-16 code unit in wParam). On real Windows this is normally derived
+        // from WM_KEYDOWN by the guest's own TranslateMessage call; this exists only for the iOS
+        // software keyboard, which has no corresponding WM_KEYDOWN to translate from.
+        void deliver_char(uint16_t utf16_char);
+
         // Observer convenience for external consumers (gdb stub, analyzer, python
         // bindings) and legacy paths that don't thread a vcpu_context through. Resolves
         // to the vCPU whose handler is currently running: all handler/observer code runs
