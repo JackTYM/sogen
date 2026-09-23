@@ -1408,26 +1408,27 @@ namespace sogen
                 uint64_t rva;
                 uint64_t resolved_addr;
                 const char* name;
+                bool dump_channel_win_state;
             };
 
             static mojo_write_path_site sites[] = {
-                {0x1bf3d20ULL, 0, "Connector::Accept"},
-                {0x10c0ddeULL, 0, "Connector::AcceptAndGetResult"},
-                {0x51b3fbULL, 0, "MojoWriteMessage"},
-                {0x1469eb0ULL, 0, "SyncContext::OnChannelOpened"},
-                {0x1469fa0ULL, 0, "Context::OnChannelOpened"},
-                {0x2902f5cULL, 0, "Channel::Connect"},
-                {0x290323aULL, 0, "MessagePipeReader::FinishInitializationOnIOThread"},
-                {0x2903400ULL, 0, "mojom::ChannelProxy::SetPeerPid"},
-                {0x860658ULL, 0, "Router::SetOutwardLink"},
-                {0x1097694ULL, 0, "Router::Flush"},
-                {0x109c9d0ULL, 0, "Router::AcceptRouteClosureFrom"},
-                {0x81c660ULL, 0, "RemoteRouterLink::AcceptParcel"},
-                {0x10a16d0ULL, 0, "LocalRouterLink::AcceptParcel"},
-                {0x81f168ULL, 0, "NodeLink::Transmit"},
-                {0xab58e0ULL, 0, "ChannelWin::Write"},
-                {0x1c07620ULL, 0, "MessagePumpForIO::RegisterIOHandler"},
-                {0x1c075e0ULL, 0, "CurrentIOThread::RegisterIOHandler"},
+                {0x1bf3d20ULL, 0, "Connector::Accept", false},
+                {0x10c0ddeULL, 0, "Connector::AcceptAndGetResult", false},
+                {0x51b3fbULL, 0, "MojoWriteMessage", false},
+                {0x1469eb0ULL, 0, "SyncContext::OnChannelOpened", false},
+                {0x1469fa0ULL, 0, "Context::OnChannelOpened", false},
+                {0x2902f5cULL, 0, "Channel::Connect", false},
+                {0x290323aULL, 0, "MessagePipeReader::FinishInitializationOnIOThread", false},
+                {0x2903400ULL, 0, "mojom::ChannelProxy::SetPeerPid", false},
+                {0x860658ULL, 0, "Router::SetOutwardLink", false},
+                {0x1097694ULL, 0, "Router::Flush", false},
+                {0x109c9d0ULL, 0, "Router::AcceptRouteClosureFrom", false},
+                {0x81c660ULL, 0, "RemoteRouterLink::AcceptParcel", false},
+                {0x10a16d0ULL, 0, "LocalRouterLink::AcceptParcel", false},
+                {0x81f168ULL, 0, "NodeLink::Transmit", false},
+                {0xab58e0ULL, 0, "ChannelWin::Write", true},
+                {0x1c07620ULL, 0, "MessagePumpForIO::RegisterIOHandler", false},
+                {0x1c075e0ULL, 0, "CurrentIOThread::RegisterIOHandler", false},
             };
 
             static bool resolved_mojo_write_path_addrs = false;
@@ -1455,6 +1456,35 @@ namespace sogen
                         fprintf(stderr, "[MOJO_WRITE_PATH] pid=%d guest_pid=%u tid=%u site=%s rip=0x%llx this=0x%llx arg1=0x%llx\n",
                                 ::getpid(), this->process.process_id, thread.id, site.name, static_cast<unsigned long long>(address),
                                 static_cast<unsigned long long>(rcx), static_cast<unsigned long long>(rdx));
+
+                        if (site.dump_channel_win_state)
+                        {
+                            uint64_t outgoing_begin{};
+                            uint64_t outgoing_end{};
+                            uint8_t delay_writes{};
+                            uint8_t reject_writes{};
+                            uint8_t is_write_pending{};
+
+                            const auto ok = vcpu.cpu.try_read_memory(rcx + 0x110, &outgoing_begin, sizeof(outgoing_begin)) &&
+                                            vcpu.cpu.try_read_memory(rcx + 0x118, &outgoing_end, sizeof(outgoing_end)) &&
+                                            vcpu.cpu.try_read_memory(rcx + 0x120, &delay_writes, sizeof(delay_writes)) &&
+                                            vcpu.cpu.try_read_memory(rcx + 0x121, &reject_writes, sizeof(reject_writes)) &&
+                                            vcpu.cpu.try_read_memory(rcx + 0x122, &is_write_pending, sizeof(is_write_pending));
+
+                            if (ok)
+                            {
+                                fprintf(stderr,
+                                        "[MOJO_WRITE_PATH]   ChannelWin state: outgoing_begin=0x%llx outgoing_end=0x%llx "
+                                        "queue_empty=%d delay_writes=%d reject_writes=%d is_write_pending=%d\n",
+                                        static_cast<unsigned long long>(outgoing_begin), static_cast<unsigned long long>(outgoing_end),
+                                        outgoing_begin == outgoing_end, delay_writes != 0, reject_writes != 0, is_write_pending != 0);
+                            }
+                            else
+                            {
+                                fprintf(stderr, "[MOJO_WRITE_PATH]   ChannelWin state: memory read failed\n");
+                            }
+                        }
+
                         break;
                     }
                 }

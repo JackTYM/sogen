@@ -244,6 +244,76 @@ namespace sogen
             return STATUS_PENDING;
         }
 
+        // Completes an NtWriteFile against this pipe exactly like complete_read() does for a read:
+        // caller-supplied event, WoW64-aware APC, and (independent of both) an I/O completion port
+        // packet if one is associated with this handle. The bytes themselves are already delivered to
+        // the peer instance's write_queue by the caller (deliver_bytes_to_named_pipe) before this runs --
+        // this only signals completion of the write on the writer's own handle, which is what
+        // MessagePumpForIO::OnIOCompleted (a real overlapped WriteFile always posts a completion packet,
+        // synchronous or not, unless FILE_SKIP_COMPLETION_PORT_ON_SUCCESS is set) waits on.
+        NTSTATUS complete_write(windows_emulator& win_emu, const io_device_context& ctx, const size_t bytes_written)
+        {
+            if (ctx.io_status_block)
+            {
+                IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
+                block.Information = static_cast<uint32_t>(bytes_written);
+                ctx.io_status_block.write(block);
+            }
+
+            if (win_emu.process.is_wow64_process && ctx.apc_context)
+            {
+                constexpr uint32_t status32 = STATUS_SUCCESS;
+                const auto information32 = static_cast<uint32_t>(bytes_written);
+                win_emu.emu().write_memory(ctx.apc_context, &status32, sizeof(status32));
+                win_emu.emu().write_memory(ctx.apc_context + sizeof(status32), &information32, sizeof(information32));
+            }
+
+            if (ctx.event.bits)
+            {
+                if (auto* e = win_emu.process.events.get(ctx.event))
+                {
+                    e->signaled = true;
+                }
+            }
+
+            if (ctx.apc_routine)
+            {
+                if (win_emu.process.is_wow64_process && ctx.io_status_block)
+                {
+                    constexpr uint32_t status32 = STATUS_SUCCESS;
+                    const auto information32 = static_cast<uint32_t>(bytes_written);
+                    win_emu.emu().write_memory(ctx.io_status_block.value(), &status32, sizeof(status32));
+                    win_emu.emu().write_memory(ctx.io_status_block.value() + sizeof(status32), &information32, sizeof(information32));
+                }
+
+                ctx.thread().pending_apcs.push_back({
+                    .flags = 0,
+                    .apc_routine = ctx.apc_routine,
+                    .apc_argument1 = ctx.apc_context,
+                    .apc_argument2 = ctx.io_status_block.value(),
+                    .apc_argument3 = 0,
+                    .restamp_io_status_block = win_emu.process.is_wow64_process && static_cast<bool>(ctx.io_status_block),
+                    .io_status = static_cast<int32_t>(STATUS_SUCCESS),
+                    .io_information = static_cast<uint32_t>(bytes_written),
+                });
+            }
+
+            if (const auto association = this->get_completion_port())
+            {
+                if (auto* completion = win_emu.process.io_completions.get(association->port))
+                {
+                    io_completion_message message{};
+                    message.key_context = association->key;
+                    message.apc_context = ctx.apc_context;
+                    message.io_status_block.Status = STATUS_SUCCESS;
+                    message.io_status_block.Information = static_cast<uint32_t>(bytes_written);
+                    completion->enqueue(message);
+                }
+            }
+
+            return STATUS_SUCCESS;
+        }
+
         NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override
         {
             static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;

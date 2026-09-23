@@ -1558,8 +1558,8 @@ namespace sogen
             return status;
         }
 
-        NTSTATUS handle_NtWriteFile(const syscall_context& c, const handle file_handle, const uint64_t /*event*/,
-                                    const uint64_t /*apc_routine*/, const uint64_t /*apc_context*/,
+        NTSTATUS handle_NtWriteFile(const syscall_context& c, const handle file_handle, const uint64_t event, const uint64_t apc_routine,
+                                    const uint64_t apc_context,
                                     const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block, const uint64_t buffer,
                                     const ULONG length, const emulator_object<LARGE_INTEGER> byte_offset,
                                     const emulator_object<ULONG> /*key*/)
@@ -1615,14 +1615,14 @@ namespace sogen
                     deliver_bytes_to_named_pipe(c.proc, pipe->name, temp_buffer, pipe);
                     c.win_emu.broadcast_named_pipe_write(pipe->name, temp_buffer);
 
-                    if (io_status_block)
-                    {
-                        IO_STATUS_BLOCK<EmulatorTraits<Emu64>> block{};
-                        block.Information = static_cast<ULONG>(temp_buffer.size());
-                        io_status_block.write(block);
-                    }
+                    io_device_context ctx{c.emu};
+                    ctx.event = handle{.bits = event};
+                    ctx.apc_routine = apc_routine;
+                    ctx.apc_context = apc_context;
+                    ctx.io_status_block = io_status_block;
+                    ctx.vcpu = &c.vcpu;
 
-                    return STATUS_SUCCESS;
+                    return pipe->complete_write(c.win_emu, ctx, temp_buffer.size());
                 }
             }
 
