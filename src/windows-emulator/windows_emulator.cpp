@@ -1400,6 +1400,37 @@ namespace sogen
             this->track_section_first_execution(address);
         }
 
+        static const bool trace_mojo_write_path = std::getenv("SOGEN_TRACE_MOJO_WRITE_PATH") != nullptr;
+        if (trace_mojo_write_path)
+        {
+            static uint64_t connector_accept_addr = 0;
+            static uint64_t accept_and_get_result_addr = 0;
+            static uint64_t mojo_write_message_addr = 0;
+            static bool resolved_mojo_write_path_addrs = false;
+
+            if (!resolved_mojo_write_path_addrs)
+            {
+                const auto* mod = this->mod_manager.find_by_name("msedge.dll");
+                if (mod)
+                {
+                    connector_accept_addr = mod->image_base + 0x1bf3d20ULL;
+                    accept_and_get_result_addr = mod->image_base + 0x10c0ddeULL;
+                    mojo_write_message_addr = mod->image_base + 0x51b3fbULL;
+                    resolved_mojo_write_path_addrs = true;
+                }
+            }
+
+            if (resolved_mojo_write_path_addrs &&
+                (address == connector_accept_addr || address == accept_and_get_result_addr || address == mojo_write_message_addr))
+            {
+                const char* site = address == connector_accept_addr        ? "Connector::Accept"
+                                   : address == accept_and_get_result_addr ? "Connector::AcceptAndGetResult"
+                                                                           : "MojoWriteMessage";
+                fprintf(stderr, "[MOJO_WRITE_PATH] pid=%d guest_pid=%u tid=%u site=%s rip=0x%llx\n", ::getpid(), this->process.process_id,
+                        thread.id, site, static_cast<unsigned long long>(address));
+            }
+        }
+
         this->callbacks.on_instruction(address);
     }
 
