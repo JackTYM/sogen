@@ -180,6 +180,26 @@ namespace sogen
             this->default_allocation_address_ = address;
         }
 
+        // The base guest address of process_context's per-vCPU GDT pages (see
+        // process_context.hpp's gdt_base_for_vcpu). Resolved exactly once by setup_gdt - normally
+        // the fixed GDT_ADDR, but a backend sharing the guest address space with the host process
+        // (FEX on Apple) can fail to actually claim that fixed address on hardware whose VA layout
+        // differs from the desktop/Simulator host it was chosen against, in which case setup_gdt
+        // falls back to a dynamically-verified placement and records the address it actually used
+        // here. Lives on memory_manager (mirroring default_allocation_address_ just above) so
+        // gdt_base_for_vcpu's callers - including emulator_thread::refresh_execution_context, a
+        // const hot-path accessor with no process_context reference of its own, only its existing
+        // memory_manager pointer - can read the resolved value without a signature change.
+        std::uint64_t get_gdt_base() const
+        {
+            return this->gdt_base_;
+        }
+
+        void set_gdt_base(std::uint64_t address)
+        {
+            this->gdt_base_ = address;
+        }
+
         void serialize_memory_state(utils::buffer_serializer& buffer, bool is_snapshot) const;
         void deserialize_memory_state(utils::buffer_deserializer& buffer, bool is_snapshot);
 
@@ -197,6 +217,7 @@ namespace sogen
         reserved_region_map reserved_regions_{};
         std::atomic<std::uint64_t> layout_version_{0};
         std::uint64_t default_allocation_address_{0x100000000ULL};
+        std::uint64_t gdt_base_{0};
         bool dep_enabled_{true};
         std::vector<uint64_t> host_reserved_addresses_{};
 
