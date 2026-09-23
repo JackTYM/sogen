@@ -1246,7 +1246,7 @@ namespace sogen
             if (sched_diag)
             {
                 ++idle_spin_count;
-                if (idle_spin_count == 500 || idle_spin_count == 2000 || idle_spin_count == 5000)
+                if (idle_spin_count == 500 || idle_spin_count == 2000 || idle_spin_count % 1000 == 0)
                 {
                     dump_thread_wait_states_diag(this->process, vcpu);
                 }

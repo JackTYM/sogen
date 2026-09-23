@@ -210,6 +210,12 @@ namespace sogen
 
             this->pending_read = ctx;
 
+            if (std::getenv("SOGEN_TRACE_PIPE_IO_BYTES"))
+            {
+                win_emu.log.info("[pipe-io-bytes-trace] try_deliver_read PENDING pipe='%s' tid=%u is_synchronous_handle=%d\n",
+                                 u16_to_u8(this->name).c_str(), ctx.thread().id, this->is_synchronous_handle ? 1 : 0);
+            }
+
             if (!this->read_ready_event.bits)
             {
                 event e{};
