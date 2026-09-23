@@ -881,6 +881,13 @@ namespace sogen
 
             const auto id = client_id.read();
 
+            const bool trace_open_process = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
+            if (trace_open_process)
+            {
+                c.win_emu.log.info("[open-process-trace] host_pid=%d self_pid=%u target_pid=%llu\n", ::getpid(), c.proc.process_id,
+                                   static_cast<unsigned long long>(id.UniqueProcess));
+            }
+
             // The guest opening its own pid resolves to the real guest process handle.
             if (id.UniqueProcess == c.proc.process_id)
             {
@@ -909,6 +916,35 @@ namespace sogen
                     process_handle.write(make_pseudo_handle(record_id, handle_types::process));
                     return STATUS_SUCCESS;
                 }
+            }
+
+            // A live sibling process somewhere else in the spawn tree (e.g. two Chromium child
+            // processes registering with the same crash-reporting broker, none of which spawned any of
+            // the others - see windows_emulator::broadcast_process_alive). There is no control channel
+            // to it (only a direct parent/child link carries one), so this mints a channel-less
+            // child_process_record purely so the handle resolves as a known, real process: any later
+            // cross-process operation against it (NtDuplicateObject and friends, via resolve_child_target)
+            // correctly reports STATUS_NOT_SUPPORTED for lack of a channel, exactly like a
+            // snapshot-restored child whose channel was never serialized.
+            if (c.win_emu.is_known_sibling_pid(id.UniqueProcess))
+            {
+                const auto record_id = c.proc.next_child_record_id++;
+
+                process_context::child_process_record record{};
+                record.pid = id.UniqueProcess;
+                record.exit_status = STATUS_PENDING;
+                record.granted_access = resolve_granted_process_access(desired_access);
+                c.proc.child_processes[record_id] = record;
+
+                process_handle.write(make_pseudo_handle(record_id, handle_types::process));
+                return STATUS_SUCCESS;
+            }
+
+            if (trace_open_process)
+            {
+                c.win_emu.log.info(
+                    "[open-process-trace] host_pid=%d target_pid=%llu -> STATUS_INVALID_CID (not self, not a known child/sibling)\n",
+                    ::getpid(), static_cast<unsigned long long>(id.UniqueProcess));
             }
 
             // The emulator hosts a single process; any other pid does not exist.
@@ -1419,6 +1455,7 @@ namespace sogen
             });
 
             c.proc.child_processes[record_id] = record;
+            c.win_emu.broadcast_process_alive(child_pid);
 
             return STATUS_SUCCESS;
         }

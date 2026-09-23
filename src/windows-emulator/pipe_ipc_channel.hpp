@@ -11,22 +11,25 @@ namespace sogen
         write = 0,
         connect = 1,
         server_created = 2,
+        process_alive = 3,
     };
 
     // A single forwarded named-pipe event: bytes written on the sender's end (delivered verbatim
     // to any same-named pipe instance on the receiving end), a client-connect notification
     // (mirrors the same-process client_connected/listen_event handshake across the process
-    // boundary), or a server instance being created (mirrors the same-process
-    // known-server/wait_event handshake -- see windows_emulator::register_named_pipe_server).
+    // boundary), a server instance being created (mirrors the same-process
+    // known-server/wait_event handshake -- see windows_emulator::register_named_pipe_server), or a
+    // newly-spawned guest pid becoming known (see windows_emulator::broadcast_process_alive).
     struct pipe_ipc_message
     {
         pipe_ipc_message_type type{};
         std::u16string pipe_name{};
         std::string data{};
 
-        // The sender's own real Windows PID, set only for a `connect` message (mirrors
+        // The sender's own real Windows PID for a `connect` message (mirrors
         // named_pipe::client_process_id's own same-process value across the process boundary; see
-        // handle_named_pipe_create/mark_named_pipe_connected).
+        // handle_named_pipe_create/mark_named_pipe_connected), or the newly-spawned pid being
+        // announced for a `process_alive` message.
         std::optional<uint32_t> client_process_id{};
     };
 

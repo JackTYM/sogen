@@ -1054,6 +1054,30 @@ namespace sogen
         }
     }
 
+    void windows_emulator::broadcast_process_alive(const uint32_t pid)
+    {
+        this->known_sibling_pids_.insert(pid);
+
+        if (this->pipe_ipc_peers_.empty())
+        {
+            return;
+        }
+
+        pipe_ipc_message message{};
+        message.type = pipe_ipc_message_type::process_alive;
+        message.client_process_id = pid;
+
+        for (auto& peer : this->pipe_ipc_peers_)
+        {
+            peer->send(message);
+        }
+    }
+
+    bool windows_emulator::is_known_sibling_pid(const uint32_t pid) const
+    {
+        return this->known_sibling_pids_.contains(pid);
+    }
+
     void windows_emulator::pump_pipe_ipc()
     {
         static const bool trace_pipe_io = std::getenv("SOGEN_TRACE_PIPE_IO") != nullptr;
@@ -1079,6 +1103,10 @@ namespace sogen
                 else if (message->type == pipe_ipc_message_type::server_created)
                 {
                     this->register_named_pipe_server(pipe_short_name(message->pipe_name));
+                }
+                else if (message->type == pipe_ipc_message_type::process_alive && message->client_process_id)
+                {
+                    this->known_sibling_pids_.insert(*message->client_process_id);
                 }
 
                 // pipe_ipc_peers_ mirrors the process spawn tree (one entry for this process's own

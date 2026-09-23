@@ -377,6 +377,13 @@ namespace sogen
         // keyed by the short pipe name they're waiting for. Woken by register_named_pipe_server.
         std::multimap<std::u16string, handle, utils::insensitive_u16string_less> pending_pipe_waits_{};
 
+        // Guest pids of every live process anywhere in the spawn tree that this process has learned
+        // about via a process_alive broadcast (see broadcast_process_alive/pump_pipe_ipc), whether
+        // spawned by this process, its parent, or a sibling several hops away. Lets handle_NtOpenProcess
+        // resolve a sibling pid it never spawned itself (e.g. a crash-reporting broker registering every
+        // Chromium child process by pid, not just its own children) - see is_known_sibling_pid.
+        std::set<uint32_t> known_sibling_pids_{};
+
       public:
         const std::filesystem::path emulation_root{};
         const fake_environment_config fake_env{};
@@ -465,6 +472,14 @@ namespace sogen
         void broadcast_named_pipe_write(std::u16string_view name, std::string_view data);
         void broadcast_named_pipe_connect(std::u16string_view name, std::optional<uint32_t> client_process_id = std::nullopt);
         void broadcast_named_pipe_server_created(std::u16string_view name);
+
+        // Announces a newly-spawned guest pid (handle_NtCreateUserProcess) to every peer, which relays
+        // it on to the rest of the tree exactly like broadcast_named_pipe_server_created's own
+        // known-server announcement (see pump_pipe_ipc's generic relay loop). is_known_sibling_pid then
+        // answers whether a given pid is a live process somewhere in the tree, for handle_NtOpenProcess's
+        // sibling-pid fallback.
+        void broadcast_process_alive(uint32_t pid);
+        bool is_known_sibling_pid(uint32_t pid) const;
 
         // Applies whatever named-pipe traffic has arrived from registered peers since the last call.
         // Called once per scheduler tick (perform_context_switch_work), the same cadence as io_device's
