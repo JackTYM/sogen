@@ -42,12 +42,21 @@
 #endif
 
 #ifdef __APPLE__
+#include <TargetConditionals.h>
 #include <sys/sysctl.h>
 #include <mach/mach.h>
+#if TARGET_OS_IPHONE
+#include "ios_mach_vm_compat.hpp"
+#else
 #include <mach/mach_vm.h>
+#endif
 #include <mach/arm/thread_status.h>
 #include <libkern/OSCacheControl.h>
+#if TARGET_OS_IPHONE
+#include "ios_libproc_compat.hpp"
+#else
 #include <libproc.h>
+#endif
 #endif
 
 #include <atomic>
@@ -841,6 +850,22 @@ namespace sogen::fex
 #endif
 
 #ifdef __APPLE__
+        // pthread_jit_write_protect_np does not exist on iOS at all (device or Simulator) - no
+        // per-thread MAP_JIT W^X model applies there the way it does on macOS. Matches the identical
+        // fix already made in deps/FEX's own JITWriteScope (FEXCore/include/FEXCore/Utils/
+        // AllocatorHooks.h): no-op here, since real device write/execute control needs the separate
+        // JIT26 breakpoint-protocol technique and the Simulator needs no protection at all.
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+        void jit_write_protect(const int enabled)
+        {
+            ::pthread_jit_write_protect_np(enabled);
+        }
+#else
+        void jit_write_protect(const int /*enabled*/)
+        {
+        }
+#endif
+
         // Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call site once its target
         // block is known, writing straight into a MAP_JIT code buffer without a JITWriteScope, because
         // it is written for Linux, which has no per-thread W^X state. Pointers.ExitFunctionLink is a
@@ -856,9 +881,9 @@ namespace sogen::fex
             // pthread_jit_write_protect_np is per-thread and exclusive with execute permission on this
             // thread's MAP_JIT pages: leaving it disabled past this call would fault the next guest
             // instruction fetch on this thread, not just widen an otherwise-harmless window.
-            ::pthread_jit_write_protect_np(0);
+            jit_write_protect(0);
             const uint64_t result = real(frame, record);
-            ::pthread_jit_write_protect_np(1);
+            jit_write_protect(1);
             return result;
         }
 
@@ -3034,7 +3059,7 @@ namespace sogen::fex
                     const auto host_pc = get_host_pc(uctx);
                     if (fault_addr == host_pc && this->host_pc_in_dispatcher(host_pc))
                     {
-                        ::pthread_jit_write_protect_np(1);
+                        jit_write_protect(1);
                         return true;
                     }
                 }
@@ -3083,7 +3108,7 @@ namespace sogen::fex
                     if (retry_count < max_write_protect_retries)
                     {
                         ++retry_count;
-                        ::pthread_jit_write_protect_np(0);
+                        jit_write_protect(0);
                         return true;
                     }
                 }
@@ -3149,7 +3174,7 @@ namespace sogen::fex
                         ++retry_count;
                         const uint64_t faulting_pc = get_host_pc(uctx);
                         const bool is_instruction_fetch = (faulting_pc == fault_addr_u64);
-                        ::pthread_jit_write_protect_np(is_instruction_fetch ? 1 : 0);
+                        jit_write_protect(is_instruction_fetch ? 1 : 0);
                         return true;
                     }
                 }
@@ -3433,20 +3458,16 @@ namespace sogen::fex
             // CompileBlock's shared lock deadlocks permanently the first time this runs.
             std::unique_lock lock(context->GetCodeInvalidationMutex());
 
-#ifdef __APPLE__
             // Invalidating a range can synchronously delink already-linked call sites (AddBlockLink's
             // delinker callbacks), writing into a MAP_JIT buffer - the same per-thread write-protect
             // requirement as exit_function_link_jit_write_wrapper.
-            ::pthread_jit_write_protect_np(0);
-#endif
+            jit_write_protect(0);
             context->InvalidateCodeBuffersCodeRange(address, size);
             if (thread != nullptr)
             {
                 context->InvalidateThreadCachedCodeRange(thread, address, size);
             }
-#ifdef __APPLE__
-            ::pthread_jit_write_protect_np(1);
-#endif
+            jit_write_protect(1);
         }
 
         void invalidate_code_range(uint64_t address, size_t size) const
