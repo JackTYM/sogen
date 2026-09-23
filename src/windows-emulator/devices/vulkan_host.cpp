@@ -30,6 +30,9 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #endif
 
 namespace sogen
@@ -96,7 +99,13 @@ namespace sogen
             ::dlclose(handle);
         }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        // iOS ships no Vulkan loader, and dlopen() by leaf name never searches an app bundle, so
+        // MoltenVK is linked statically into the embedding app instead (see the -force_load in
+        // tools/sogen-ios/project.yml). A null path makes dlopen() return the main executable's
+        // own handle, which is where vkGetInstanceProcAddr then resolves from.
+        constexpr std::array<const char*, 1> vulkan_loader_names{nullptr};
+#elif defined(__APPLE__)
         constexpr std::array<const char*, 3> vulkan_loader_names{"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib"};
 #else
         constexpr std::array<const char*, 2> vulkan_loader_names{"libvulkan.so.1", "libvulkan.so"};

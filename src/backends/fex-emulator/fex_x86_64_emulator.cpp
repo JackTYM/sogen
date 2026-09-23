@@ -850,15 +850,32 @@ namespace sogen::fex
 #endif
 
 #ifdef __APPLE__
-        // pthread_jit_write_protect_np does not exist on iOS at all (device or Simulator) - no
-        // per-thread MAP_JIT W^X model applies there the way it does on macOS. Matches the identical
-        // fix already made in deps/FEX's own JITWriteScope (FEXCore/include/FEXCore/Utils/
-        // AllocatorHooks.h): no-op here, since real device write/execute control needs the separate
-        // JIT26 breakpoint-protocol technique and the Simulator needs no protection at all.
+        // pthread_jit_write_protect_np does not exist on real iOS device - no per-thread MAP_JIT
+        // W^X model applies there the way it does on macOS; real device write/execute control needs
+        // the separate JIT26 breakpoint-protocol technique instead. The Simulator is a plain macOS
+        // process (same kernel, same libpthread), so it needs the real toggle exactly like desktop
+        // macOS does - confirmed empirically: skipping it faults the very first JIT write with
+        // EXC_BAD_ACCESS/SIGBUS. The iOS SDK headers mark the symbol `unavailable` for both iOS
+        // targets regardless (it links fine on the Simulator, which really is the host macOS
+        // kernel), so it's resolved via dlsym instead of calling it directly - that sidesteps the
+        // compile-time availability annotation, and naturally no-ops on real device too (dlsym
+        // returns null there, matching the intended no-op). Matches the identical fix in deps/FEX's
+        // own JITWriteScope (FEXCore/include/FEXCore/Utils/AllocatorHooks.h).
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
         void jit_write_protect(const int enabled)
         {
             ::pthread_jit_write_protect_np(enabled);
+        }
+#elif defined(__APPLE__)
+        void jit_write_protect(const int enabled)
+        {
+            using jit_write_protect_np_fn = void (*)(int);
+            static auto* const fn =
+                reinterpret_cast<jit_write_protect_np_fn>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+            if (fn != nullptr)
+            {
+                fn(enabled);
+            }
         }
 #else
         void jit_write_protect(const int /*enabled*/)
