@@ -1940,6 +1940,12 @@ namespace sogen
 
             filename = resolve_volume_device_path(resolve_system_root_path(c, std::move(filename)));
 
+            if (pipe_io_trace_enabled())
+            {
+                c.win_emu.log.info("[pipe-io-trace] NtCreateFile pid=%u tid=%u path='%s'\n", c.proc.process_id, c.thread().id,
+                                   u16_to_u8(filename).c_str());
+            }
+
             // Handle console output device
             if (filename_upper == u"\\??\\CONOUT$" || filename_upper == u"\\DEVICE\\CONOUT$" || filename_upper == u"CONOUT$" ||
                 filename_upper == u"\\??\\CON" || filename_upper == u"\\DEVICE\\CONSOLE" || filename_upper == u"CON")

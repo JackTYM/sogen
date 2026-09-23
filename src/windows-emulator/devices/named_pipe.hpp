@@ -19,6 +19,8 @@ namespace sogen
     constexpr ULONG FSCTL_PIPE_GET_PIPE_ATTRIBUTE = 0x110028;
     // FSCTL_PIPE_TRANSCEIVE = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 5, METHOD_NEITHER, FILE_READ_DATA | FILE_WRITE_DATA)
     constexpr ULONG FSCTL_PIPE_TRANSCEIVE = 0x11C017;
+    // FSCTL_PIPE_IMPERSONATE = CTL_CODE(FILE_DEVICE_NAMED_PIPE, 7, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    constexpr ULONG FSCTL_PIPE_IMPERSONATE = 0x11001C;
     constexpr ULONG FILE_PIPE_CONNECTED_STATE = 3;
 
     // Header of FILE_PIPE_PEEK_BUFFER; the peeked data follows immediately after.
@@ -280,6 +282,18 @@ namespace sogen
             if (c.io_control_code == FSCTL_PIPE_TRANSCEIVE)
             {
                 return this->transceive(win_emu, c);
+            }
+
+            // ImpersonateNamedPipeClient (e.g. crashpad's ExceptionHandlerServer, verifying a
+            // connecting child's identity before trusting its registration request) requires this to
+            // succeed - a real server thread already has SeImpersonatePrivilege on its own connected
+            // pipe. This codebase has no per-thread impersonation-context model (see
+            // NtSetInformationThread's ThreadImpersonationToken case), so there is nothing to actually
+            // switch the calling thread into; reporting success is the only observable behavior a
+            // caller here can check.
+            if (c.io_control_code == FSCTL_PIPE_IMPERSONATE)
+            {
+                return STATUS_SUCCESS;
             }
 
             win_emu.log.warn("Unsupported named pipe FSCTL: 0x%X\n", static_cast<uint32_t>(c.io_control_code));

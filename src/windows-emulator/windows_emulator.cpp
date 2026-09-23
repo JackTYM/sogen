@@ -33,8 +33,8 @@ namespace sogen
         // explains itself in the log instead of requiring live debugger inspection.
         void dump_thread_wait_states_diag(process_context& process, const vcpu_context& vcpu)
         {
-            fprintf(stderr, "[SCHED_DIAG] active_thread=%p id=%u\n", static_cast<void*>(vcpu.active_thread),
-                    vcpu.active_thread ? vcpu.active_thread->id : 0);
+            fprintf(stderr, "[SCHED_DIAG] pid=%d guest_pid=%u active_thread=%p id=%u\n", ::getpid(), process.process_id,
+                    static_cast<void*>(vcpu.active_thread), vcpu.active_thread ? vcpu.active_thread->id : 0);
             for (auto& [h, thread] : process.threads)
             {
                 fprintf(stderr,
