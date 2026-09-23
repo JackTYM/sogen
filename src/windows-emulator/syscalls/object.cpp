@@ -298,12 +298,24 @@ namespace sogen
                 // NtTerminateProcess against that child at all.
                 if (job && job->ref_count == 1 && job->kill_on_close)
                 {
+                    static const bool trace_job_kill = std::getenv("SOGEN_TRACE_JOB_KILL") != nullptr;
+                    if (trace_job_kill)
+                    {
+                        c.win_emu.log.error("[job-kill-trace] last handle closed on kill-on-close job, assigned_children=%zu\n",
+                                            job->assigned_child_record_ids.size());
+                    }
+
                     for (const auto record_id : job->assigned_child_record_ids)
                     {
                         const auto child_it = c.proc.child_processes.find(record_id);
                         if (child_it == c.proc.child_processes.end() || child_it->second.exit_status != STATUS_PENDING)
                         {
                             continue;
+                        }
+
+                        if (trace_job_kill)
+                        {
+                            c.win_emu.log.error("[job-kill-trace] force-killing child record_id=%u\n", record_id);
                         }
 
                         auto* channel = c.win_emu.find_child_control_channel(record_id);
