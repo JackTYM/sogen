@@ -1464,6 +1464,39 @@ namespace sogen
                                            u16_to_u8(pipe->name).c_str(), length, pipe->write_queue.size(), c.thread().id);
                     }
 
+                    if (pipe->write_queue.size() > 0 && pipe->name.find(u"mojo.") != std::u16string::npos &&
+                        std::getenv("SOGEN_TRACE_PIPE_IO_CALLER_STACK") != nullptr)
+                    {
+                        const auto rip = c.emu.read_instruction_pointer();
+                        const auto rsp = c.emu.read_stack_pointer();
+                        const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+                        fprintf(stderr,
+                                "[PIPE_IO_CALLER_STACK] pid=%d guest_pid=%u tid=%u site=NtReadFile pipe='%s' rip=0x%llx (%s+0x%llx) "
+                                "rsp=0x%llx\n",
+                                ::getpid(), c.proc.process_id, c.thread().id, u16_to_u8(pipe->name).c_str(),
+                                static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                                rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL,
+                                static_cast<unsigned long long>(rsp));
+                        for (uint64_t i = 0; i < 384; ++i)
+                        {
+                            uint64_t value{};
+                            if (!c.win_emu.memory.try_read_memory(rsp + (i * 8), &value, sizeof(value)))
+                            {
+                                break;
+                            }
+                            const auto* mod = c.win_emu.mod_manager.find_by_address(value);
+                            char mod_suffix[128] = {};
+                            if (mod)
+                            {
+                                snprintf(mod_suffix, sizeof(mod_suffix), "%s+0x%llx", mod->name.c_str(),
+                                         static_cast<unsigned long long>(value - mod->image_base));
+                            }
+                            fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s\n", static_cast<unsigned long long>(i * 8),
+                                    static_cast<unsigned long long>(value), mod_suffix);
+                        }
+                        fflush(stderr);
+                    }
+
                     io_device_context ctx{c.emu};
                     ctx.event = handle{.bits = event};
                     ctx.apc_routine = apc_routine;
