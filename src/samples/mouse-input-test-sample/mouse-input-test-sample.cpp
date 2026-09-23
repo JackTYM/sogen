@@ -204,6 +204,22 @@ namespace
             }
             return 0;
         }
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            std::printf("[mits] %s vk=0x%02X scan=0x%02X extended=%d was_down=%d\n",
+                        msg == WM_SYSKEYDOWN ? "WM_SYSKEYDOWN" : "WM_KEYDOWN", static_cast<unsigned>(wp),
+                        static_cast<unsigned>((lp >> 16) & 0xFF), static_cast<int>((lp >> 24) & 1),
+                        static_cast<int>((lp >> 30) & 1));
+            return 0;
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+            std::printf("[mits] %s vk=0x%02X scan=0x%02X extended=%d\n",
+                        msg == WM_SYSKEYUP ? "WM_SYSKEYUP" : "WM_KEYUP", static_cast<unsigned>(wp),
+                        static_cast<unsigned>((lp >> 16) & 0xFF), static_cast<int>((lp >> 24) & 1));
+            return 0;
+        case WM_CHAR:
+            std::printf("[mits] WM_CHAR ch=0x%04X\n", static_cast<unsigned>(wp));
+            return 0;
         case WM_INPUT:
         {
             UINT size = sizeof(RAWINPUT);
