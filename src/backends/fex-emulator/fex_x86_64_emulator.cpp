@@ -82,6 +82,7 @@
 
 #include <utils/object.hpp>
 #include <utils/io.hpp>
+#include <utils/ios_device_log.hpp>
 
 // FEXCore embedding headers. These are only available when building against a FEX checkout/install;
 // the CMake glue gates this whole target behind SOGEN_ENABLE_FEX so non-ARM builds never reach here.
@@ -560,23 +561,6 @@ namespace sogen::fex
             return prot;
         }
 
-#ifdef __APPLE__
-        // Apple Silicon's kernel refuses simultaneous write+exec on any non-MAP_JIT mapping (mprotect
-        // fails with EACCES), unlike Linux where guest W^X is advisory. Real PE loaders hit this
-        // routinely: map .text RWX to apply relocations, then narrow to RX before executing. Favoring
-        // write handles that sequence; it would be wrong for a page genuinely written and executed in
-        // the same window without an intervening apply_memory_protection call, which PE loading is not.
-        int to_prot_apple(const memory_permission permissions)
-        {
-            int prot = to_prot(permissions);
-            if ((prot & PROT_WRITE) && (prot & PROT_EXEC))
-            {
-                prot &= ~PROT_EXEC;
-            }
-            return prot;
-        }
-#endif
-
         // Bit-for-bit reimplementation of FEXCore::Context::ContextImpl::ReconstructCompactedEFLAGS /
         // SetFlagsFromCompactedEFLAGS (FEXCore's Core.cpp), operating directly on a CPUState instead
         // of a live InternalThreadState. FEXCore's originals unconditionally dereference the Thread
@@ -807,6 +791,10 @@ namespace sogen::fex
         fex_x86_64_emulator* g_active_emulator = nullptr;
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        uint64_t guest_signal_dispatch_from_jit(FEXCore::Core::CpuStateFrame* frame);
+#endif
 
         // FEXCore's Break stubs use SIGILL for HLT/UDF and SIGTRAP for BRK, including x86 INT3, so both
         // must reach the same host-fault dispatcher as SIGSEGV/SIGBUS.
@@ -1095,6 +1083,62 @@ namespace sogen::fex
                 return instance().release(addr, length);
             }
         };
+
+        // Apple Silicon's kernel categorically refuses simultaneous write+exec on any mapping that
+        // isn't MAP_JIT-backed (mprotect fails outright with EACCES) - unlike Linux, where W^X for
+        // guest memory is advisory at best. This is independent of the 16KB/4KB reconciliation
+        // above: even a single guest region directly requesting RWX hits it, which real PE loaders
+        // do routinely (map .text RWX to patch ASLR relocations, then narrow to RX before the module
+        // ever executes). Favoring write over exec here handles that common, well-defined sequence
+        // correctly; it would be wrong for a page that is genuinely written and executed in the same
+        // window without an intervening apply_memory_protection call, which is not how real PE
+        // loading behaves.
+        //
+        // On real iOS device, TXM/SPTM additionally refuses any writable/none -> executable host
+        // mprotect transition unless the specific pages were themselves allocated through the JIT26
+        // create+bless handshake - confirmed live by the EACCES this function's callers hit
+        // otherwise. Every caller of to_prot_apple operates on guest-mapped memory, which is disjoint
+        // by construction from FEXCore's own JIT26-blessed internal arena - so on real device this
+        // drops PROT_EXEC unconditionally for that memory. That is safe: FEXCore never executes host
+        // instructions directly out of guest memory. It decodes guest bytes as plain data
+        // (QueryGuestExecutableRange enforces the guest's own declared exec permission purely in
+        // software, independent of host protection bits) and emits translated ARM64 code into its
+        // separate, already-JIT26-blessed CodeBuffer - the only memory that genuinely needs host
+        // PROT_EXEC.
+        int to_prot_apple(const memory_permission permissions, [[maybe_unused]] const uint64_t host_address)
+        {
+            int prot = to_prot(permissions);
+            if ((prot & PROT_WRITE) && (prot & PROT_EXEC))
+            {
+                prot &= ~PROT_EXEC;
+            }
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+            if ((prot & PROT_EXEC) != 0)
+            {
+                const auto& arena = fex_internal_arena::instance();
+                const bool in_fex_arena =
+                    arena.active() && host_address >= arena.base() && host_address < arena.base() + arena.size();
+                if (!in_fex_arena)
+                {
+                    prot &= ~PROT_EXEC;
+
+                    static std::atomic<bool> LoggedGuestExecStripOnce{false};
+                    if (!LoggedGuestExecStripOnce.exchange(true, std::memory_order_relaxed))
+                    {
+                        const char* const msg =
+                            "[FEX backend] Stripping host PROT_EXEC for guest-mapped memory outside the FEXCore "
+                            "arena on real iOS device - FEXCore JITs into its own arena buffer and never executes "
+                            "guest memory directly.";
+                        fprintf(stderr, "%s\n", msg);
+                        sogen::utils::log_ios_device_milestone(msg);
+                    }
+                }
+            }
+#endif
+
+            return prot;
+        }
 #endif
 
 #ifdef __ANDROID__
@@ -1240,10 +1284,15 @@ namespace sogen::fex
             }
 
             this->stop_requested_ = false;
-            // Re-arm InterruptFaultPage for this quantum - see request_thread_stop's doc comment; a
-            // prior stop() may have left it protected to force the last quantum's ExecuteThread to
-            // return, and it must be writable again before the JIT's per-block-entry store runs.
+            // Re-arm InterruptFaultPage for this quantum - a prior stop() may have left it protected to
+            // force the last quantum's ExecuteThread to return, and it must be writable again before the
+            // JIT's per-block-entry store runs. Also clear StopRequestFlag (the real-device replacement
+            // for that same mechanism, see request_thread_stop's doc comment): this runs on every
+            // quantum entry, whether or not the NT thread running on this vCPU actually changed, so it
+            // catches the case a thread-switch-based clear would miss - the same thread being picked to
+            // continue running right after it was the one that got stopped.
             ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+            std::atomic_ref<uint32_t>(this->thread_->CurrentFrame->StopRequestFlag).store(0, std::memory_order_relaxed);
 
             // ExecuteThread runs the translated guest until the thread is asked to stop (which the
             // syscall bridge does when a hook calls stop()), or the guest faults/exits.
@@ -1273,7 +1322,11 @@ namespace sogen::fex
 
                 if (interrupt_page_unwind)
                 {
+                    // Also clear StopRequestFlag here (both no-ops if already writable/clear), so this
+                    // thread resumes cleanly instead of immediately re-faulting/re-stopping as spurious
+                    // on either mechanism.
                     ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
+                    std::atomic_ref<uint32_t>(this->thread_->CurrentFrame->StopRequestFlag).store(0, std::memory_order_relaxed);
                 }
             }
 #else
@@ -2103,7 +2156,16 @@ namespace sogen::fex
 #else
             if (::mprotect(reinterpret_cast<void*>(address), size, to_prot(permissions)) != 0)
             {
-                throw std::runtime_error("FEX backend failed to change memory protection");
+                const int mprotect_errno = errno;
+                const auto& arena = fex_internal_arena::instance();
+                const bool in_fex_arena = arena.active() && address >= arena.base() && address < arena.base() + arena.size();
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "FEX backend failed to change memory protection: mprotect(addr=0x%llx, size=0x%zx, prot=0x%x) failed, "
+                         "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
+                         static_cast<unsigned long long>(address), size, to_prot(permissions), mprotect_errno, strerror(mprotect_errno),
+                         static_cast<unsigned>(permissions), in_fex_arena ? 1 : 0);
+                throw std::runtime_error(buf);
             }
 #endif
 
@@ -2289,7 +2351,8 @@ namespace sogen::fex
                         effective = effective | it->second;
                     }
                 }
-                ::mprotect(reinterpret_cast<void*>(host_page), host_page_size_apple, to_prot_apple(effective | memory_permission::write));
+                ::mprotect(reinterpret_cast<void*>(host_page), host_page_size_apple,
+                          to_prot_apple(effective | memory_permission::write, host_page));
             }
 #else
             // The range can span several regions_ entries with different declared permissions, so
@@ -2506,9 +2569,20 @@ namespace sogen::fex
                 this->claim_host_range(host_page_addr, host_page_size_apple);
             }
 
-            if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
+            const auto host_addr_val = reinterpret_cast<uint64_t>(host_ptr);
+            if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective, host_addr_val)) != 0)
             {
-                throw std::runtime_error("FEX backend failed to change memory protection");
+                const int mprotect_errno = errno;
+                const auto& arena = fex_internal_arena::instance();
+                const auto host_addr = reinterpret_cast<uintptr_t>(host_ptr);
+                const bool in_fex_arena = arena.active() && host_addr >= arena.base() && host_addr < arena.base() + arena.size();
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "FEX backend failed to change memory protection: mprotect(host=0x%llx, size=0x%zx, prot=0x%x) failed, "
+                         "errno=%d (%s), permission=0x%x, in_fex_arena=%d",
+                         static_cast<unsigned long long>(host_addr), host_page_size_apple, to_prot_apple(effective, host_addr_val),
+                         mprotect_errno, strerror(mprotect_errno), static_cast<unsigned>(effective), in_fex_arena ? 1 : 0);
+                throw std::runtime_error(buf);
             }
         }
 
@@ -2532,8 +2606,13 @@ namespace sogen::fex
             // so every internal FEXCore assertion failure crashes with no indication of what failed.
             LogMan::Msg::InstallHandler([](LogMan::DebugLevels level, const char* message) {
                 fprintf(stderr, "[FEXCore LogMan] level=%s: %s\n", LogMan::DebugLevelStr(level), message);
+                sogen::utils::log_ios_device_milestone(std::string("[FEXCore LogMan] level=") + LogMan::DebugLevelStr(level) + ": " +
+                                                        message);
             });
-            LogMan::Throw::InstallHandler([](const char* message) { fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message); });
+            LogMan::Throw::InstallHandler([](const char* message) {
+                fprintf(stderr, "[FEXCore LogMan THROW] %s\n", message);
+                sogen::utils::log_ios_device_milestone(std::string("[FEXCore LogMan THROW] ") + message);
+            });
 
 #ifdef __APPLE__
             // Must happen before the first FEXCore-internal allocation (CreateNewContext allocates the
@@ -3204,6 +3283,21 @@ namespace sogen::fex
                 return false;
             }
 
+            const uint64_t target = this->resolve_guest_signal_dispatch_target(frame);
+            set_host_pc(uctx, target);
+            return true;
+        }
+
+        // Shared by handle_fault_signal's dispatcher-code tail (a real SIGILL/SIGTRAP/SIGSEGV
+        // signal, uctx already frozen) and, on real iOS device, a direct call from the
+        // GuestSignal_* JIT stubs themselves (no signal, no uctx - see
+        // Pointers.GuestSignalDispatchFunc). Decodes the exception vector FEXCore's Break-op
+        // codegen already staged into frame->SynchronousFaultData and populates
+        // pending_fault_dispatch_. Returns the dispatcher address the caller should transfer
+        // control to next (always ThreadStopHandlerAddress, since both callers only reach this
+        // after SpillStaticRegs already ran).
+        uint64_t resolve_guest_signal_dispatch_target(FEXCore::Core::CpuStateFrame* frame)
+        {
             // FEXCore's IR "Break" op raises this both for x86 conditions with a compile-time-known trap
             // vector (HLT/UD2/INT3/INT1/INTO/unhandled INT N) and for its own synthetic #PF (NoExecOp,
             // when QueryGuestExecutableRange reports an address is not executable), so vector 14 needs
@@ -3258,10 +3352,8 @@ namespace sogen::fex
                 dispatch.vector = vector;
             }
 
-            // SRA is already spilled: this is FEXCore's own controlled synthetic-exception/Break-op
-            // path, not an arbitrary interruption of live JIT code.
-            this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/true);
-            return true;
+            this->pending_fault_dispatch_ = dispatch;
+            return this->signal_delegator_->GetConfig().ThreadStopHandlerAddress;
         }
 #endif
 
@@ -3282,6 +3374,12 @@ namespace sogen::fex
             // thread's JIT write-protection disabled.
             g_original_exit_function_link = this->thread_->CurrentFrame->Pointers.ExitFunctionLink;
             this->thread_->CurrentFrame->Pointers.ExitFunctionLink = reinterpret_cast<uint64_t>(&exit_function_link_jit_write_wrapper);
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+            // See resolve_guest_signal_dispatch_target's doc comment: on real device, the
+            // GuestSignal_* dispatcher stubs call this directly instead of faulting.
+            this->thread_->CurrentFrame->Pointers.GuestSignalDispatchFunc = reinterpret_cast<uint64_t>(&guest_signal_dispatch_from_jit);
 #endif
         }
 
@@ -3487,7 +3585,34 @@ namespace sogen::fex
                 return;
             }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+            // A real, attached JIT26 debugger claims every hardware exception before sogen's own
+            // sigaction(SIGSEGV/SIGBUS) handler ever sees it (confirmed against real debugserver source:
+            // MachException::Message::Reply()'s `signal` argument is only honored for
+            // EXC_SOFTWARE/EXC_SOFT_SIGNAL, never for a real EXC_BAD_ACCESS hardware fault), so
+            // handle_fault_signal's InterruptFaultPage handling can never actually run on real device.
+            // Protecting the page here would only produce a fault the debugger has to babysit forever
+            // (a tight guest loop re-hits the same protected page on every iteration's back-edge check,
+            // at a full debugger round-trip each time), so leave it unprotected (every
+            // NeedsPendingInterruptFaultCheck store then just succeeds trivially, at full native speed)
+            // and use StopRequestFlag instead: an ordinary memory store, polled by
+            // FEX_IOS_POLL_INTERRUPT-gated codegen both at JIT block entry (JIT.cpp's EmitEntryPoint)
+            // and at loop back-edges (CompileCode's two EmitIosPollInterruptCheck call sites), which
+            // has no mprotect/signal dependency and so works unconditionally here. Cleared at the top
+            // of start() on every quantum entry, before ExecuteThread runs.
+            static std::atomic<bool> LoggedInterruptFaultPageSkipOnce{false};
+            if (!LoggedInterruptFaultPageSkipOnce.exchange(true, std::memory_order_relaxed))
+            {
+                const char* const msg = "[FEX backend] Skipping InterruptFaultPage protection on real iOS device - "
+                                        "using StopRequestFlag poll instead.";
+                fprintf(stderr, "%s\n", msg);
+                sogen::utils::log_ios_device_milestone(msg);
+            }
+            std::atomic_ref<uint32_t>(this->thread_->CurrentFrame->StopRequestFlag).store(1, std::memory_order_relaxed);
+            return;
+#else
             ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_NONE);
+#endif
         }
 
         emulator_hook* make_hook()
@@ -3669,6 +3794,25 @@ namespace sogen::fex
             ::sigaction(sig, &default_action, nullptr);
             ::raise(sig);
         }
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        // Called directly from the GuestSignal_* JIT stubs (Pointers.GuestSignalDispatchFunc) -
+        // see resolve_guest_signal_dispatch_target's doc comment. Runs on the vCPU's own worker
+        // thread, mid-ExecuteThread, so g_active_emulator is always set here.
+        uint64_t guest_signal_dispatch_from_jit(FEXCore::Core::CpuStateFrame* frame)
+        {
+            static std::atomic<bool> LoggedGuestSignalDispatchFromJITOnce{false};
+            if (!LoggedGuestSignalDispatchFromJITOnce.exchange(true, std::memory_order_relaxed))
+            {
+                const char* const msg = "[FEX backend] GuestSignal_* dispatcher stub took the real-device direct-call "
+                                        "path (Pointers.GuestSignalDispatchFunc) instead of a hardware fault.";
+                fprintf(stderr, "%s\n", msg);
+                sogen::utils::log_ios_device_milestone(msg);
+            }
+
+            return g_active_emulator->resolve_guest_signal_dispatch_target(frame);
+        }
+#endif
     } // namespace
 #endif
 
