@@ -1348,6 +1348,7 @@ namespace sogen
                     .inbound_quota = pipe->inbound_quota,
                     .outbound_quota = pipe->outbound_quota,
                     .default_timeout = pipe->default_timeout,
+                    .is_synchronous_handle = pipe->is_synchronous_handle,
                 });
             }
 

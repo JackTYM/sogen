@@ -46,6 +46,7 @@ namespace sogen
         ULONG inbound_quota{};
         ULONG outbound_quota{};
         LARGE_INTEGER default_timeout{};
+        bool is_synchronous_handle{true};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -59,6 +60,7 @@ namespace sogen
             buffer.write(this->inbound_quota);
             buffer.write(this->outbound_quota);
             buffer.write(this->default_timeout);
+            buffer.write(this->is_synchronous_handle);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -73,6 +75,7 @@ namespace sogen
             buffer.read(this->inbound_quota);
             buffer.read(this->outbound_quota);
             buffer.read(this->default_timeout);
+            buffer.read(this->is_synchronous_handle);
         }
     };
 
