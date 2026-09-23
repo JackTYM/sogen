@@ -9,6 +9,7 @@
 #include <address_utils.hpp>
 
 #include <cstring>
+#include <ranges>
 
 namespace sogen
 {
@@ -22,6 +23,21 @@ namespace sogen
 
             response.payload = std::move(data);
             response.status = transfer_status(transferred, request.size);
+
+            if (response.status != STATUS_SUCCESS && std::getenv("SOGEN_DEBUG_XPROC_READ_FAILURE") != nullptr)
+            {
+                fprintf(stderr, "[XPROC_READ_FAILURE] address=0x%llx size=0x%llx transferred=0x%zx status=0x%x\n",
+                        static_cast<unsigned long long>(request.address), static_cast<unsigned long long>(request.size), transferred,
+                        static_cast<unsigned int>(response.status));
+
+                for (const auto& mod : target.mod_manager.modules() | std::views::values)
+                {
+                    fprintf(stderr, "[XPROC_READ_FAILURE]   [MODULE] %s base=0x%llx size=0x%llx\n", mod.name.c_str(),
+                            static_cast<unsigned long long>(mod.image_base), static_cast<unsigned long long>(mod.size_of_image));
+                }
+
+                fflush(stderr);
+            }
         }
 
         void execute_write_memory(windows_emulator& target, const process_control_request& request, process_control_response& response)

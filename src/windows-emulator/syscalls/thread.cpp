@@ -935,7 +935,7 @@ namespace sogen
                 process_control_request request{};
                 request.op = process_control_op::resume_thread;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtResumeThread: control channel to child %u is dead/unresponsive\n", target.record_id);

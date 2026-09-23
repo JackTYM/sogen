@@ -2,6 +2,7 @@
 #include "module_mapping.hpp"
 #include <address_utils.hpp>
 #include <algorithm>
+#include <cctype>
 
 #include <utils/io.hpp>
 #include <utils/buffer_accessor.hpp>
@@ -17,6 +18,54 @@ namespace sogen
 
     namespace
     {
+        // Real Windows guarantees every process in a boot session maps a given system DLL (ntdll,
+        // kernel32, kernelbase, ...) at the identical base, via a one-time "known DLL" rebase table
+        // smss.exe computes once at boot. Sogen ships these DLLs unrebased, and several of them
+        // (ntdll.dll, kernel32.dll, kernelbase.dll, win32u.dll, combase.dll, ucrtbase.dll, rpcrt4.dll,
+        // bcryptprimitives.dll - all confirmed via their own PE headers) default to the identical MSVC
+        // linker preferred ImageBase 0x180000000, so only the first one mapped in a given process keeps
+        // it; every other one falls through to find_free_host_allocation_base, whose result depends on
+        // host-level state (module mapping order, sizes of everything already loaded, ASLR-placed host
+        // allocations under FEX's shared guest/host VA model on Apple Silicon) that is not guaranteed to
+        // match between two independently-forked processes. That silently breaks any cross-process
+        // operation assuming a shared base for the same DLL - concretely, Chromium's sandbox broker
+        // resolves a syscall stub address in its own loaded ntdll and writes/reads it verbatim against a
+        // spawned child (sandbox::InitializeInterceptions/PatchNtdll), which fails outright if the
+        // child's ntdll landed at a different base, aborting SpawnTarget and killing the child.
+        //
+        // deterministic_relocation_candidate derives a candidate base purely from the module's own
+        // (lower-cased) name, so the same DLL always gets the same candidate in every process,
+        // regardless of load order or host state. It is tried before the existing, host-state-dependent
+        // fallback below, which remains as-is as the safety net for a genuine collision at that
+        // candidate - e.g. two module names hashing into the same slot within one process's own module
+        // set (a real, if unlikely, risk with a real-world process loading 60-80+ modules; the slot
+        // count below is sized generously, via the birthday bound, to keep that collision rare).
+        constexpr uint64_t deterministic_relocation_arena_base = 0x200000000ULL;
+        constexpr uint64_t deterministic_relocation_slot_size = 0x1000000ULL;
+        constexpr uint64_t deterministic_relocation_slot_count = 0x100000ULL;
+
+        uint64_t fnv1a_hash(const std::string_view text)
+        {
+            uint64_t hash = 0xcbf29ce484222325ULL;
+            for (const unsigned char c : text)
+            {
+                hash ^= c;
+                hash *= 0x100000001b3ULL;
+            }
+
+            return hash;
+        }
+
+        uint64_t deterministic_relocation_candidate(const std::string& module_name)
+        {
+            std::string lower_name(module_name.size(), '\0');
+            std::transform(module_name.begin(), module_name.end(), lower_name.begin(),
+                           [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            const auto slot = fnv1a_hash(lower_name) % deterministic_relocation_slot_count;
+            return deterministic_relocation_arena_base + slot * deterministic_relocation_slot_size;
+        }
+
         bool must_map_module_below_4gb(const std::string& module_name, const PEMachineType machine, const uint64_t image_base)
         {
             if (machine != PEMachineType::AMD64)
@@ -657,12 +706,28 @@ namespace sogen
             constexpr int max_host_relocation_retries = 8;
             bool mapped = false;
             int attempts_made = 0;
+
+            // See deterministic_relocation_candidate's own comment above: try the name-derived,
+            // process-independent candidate first, for exactly the case real Windows itself keeps
+            // stable (a native, relocatable module whose preferred base collided with something else in
+            // this specific process). Scoped to the native 64-bit arena only - the below-4GB path serves
+            // 32-bit/WOW64 modules, a different, denser address range this fix does not touch.
+            if (relocation_base == 0 && !needs_below_4gb)
+            {
+                binary.image_base = deterministic_relocation_candidate(binary.name);
+                if (try_map_module_at_current_base(memory, binary, buffer, nt_headers, nt_headers_offset, optional_header,
+                                                   binary.image_base))
+                {
+                    mapped = true;
+                }
+            }
+
             // The free-pick retry loop only makes sense when the caller left the target address up to
             // us (relocation_base == 0) - if the caller specified a real target (mapping a view of an
             // already-loaded image at that image's own base, so the view's internal absolute pointers
             // stay correct), picking a different free host address instead would silently relocate the
             // view away from where the caller actually needs it.
-            if (relocation_base == 0)
+            if (!mapped && relocation_base == 0)
             {
                 for (int attempt = 0; attempt <= max_host_relocation_retries; ++attempt)
                 {

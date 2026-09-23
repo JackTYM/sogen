@@ -230,7 +230,7 @@ namespace sogen
                 request.address = base_address;
                 request.info_class = info_class;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtQueryVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
@@ -500,7 +500,7 @@ namespace sogen
                 request.size = aligned_length;
                 request.protection = protection;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtProtectVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
@@ -590,7 +590,7 @@ namespace sogen
                 request.allocation_type = allocation_type;
                 request.protection = page_protection;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtAllocateVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
@@ -803,7 +803,7 @@ namespace sogen
                 request.size = bytes_to_allocate.read();
                 request.free_type = free_type;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtFreeVirtualMemory: control channel to child %u is dead/unresponsive\n", target.record_id);
@@ -943,7 +943,7 @@ namespace sogen
                         request.address = static_cast<uint64_t>(base_address) + offset;
                         request.size = chunk_size;
 
-                        const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                        const auto response = send_process_control_request(c, target, request);
                         if (!response)
                         {
                             c.win_emu.log.error("NtReadVirtualMemory: control channel to child %u is dead/unresponsive\n",
@@ -1004,7 +1004,7 @@ namespace sogen
                         request.address = static_cast<uint64_t>(base_address) + offset;
                         request.payload = std::move(data);
 
-                        const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                        const auto response = send_process_control_request(c, target, request);
                         if (!response)
                         {
                             c.win_emu.log.error("NtWriteVirtualMemory: control channel to child %u is dead/unresponsive\n",

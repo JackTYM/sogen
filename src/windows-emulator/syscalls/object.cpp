@@ -72,7 +72,7 @@ namespace sogen
                 request.granted_access = same_access ? source_section->granted_access : desired_access;
                 request.payload = source_section->object->backing_storage;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
@@ -116,7 +116,7 @@ namespace sogen
                 request.allocation_type = static_cast<uint32_t>(source_event->type);
                 request.page_protection = source_event->signaled ? 1 : 0;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
@@ -161,7 +161,7 @@ namespace sogen
                 request.size = source_mutant->owning_thread_id;
                 request.page_protection = source_mutant->abandoned ? 1 : 0;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
@@ -200,7 +200,7 @@ namespace sogen
                 request.op = process_control_op::export_handle;
                 request.address = source_handle.bits;
 
-                const auto response = target.channel->request(request, process_control_default_timeout_ms);
+                const auto response = send_process_control_request(c, target, request);
                 if (!response)
                 {
                     c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);

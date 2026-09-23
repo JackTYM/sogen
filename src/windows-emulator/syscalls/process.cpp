@@ -280,8 +280,7 @@ namespace sogen
                             process_control_request request{};
                             request.op = process_control_op::query_wow64_info;
 
-                            const auto response =
-                                std::get<child_target>(target).channel->request(request, process_control_default_timeout_ms);
+                            const auto response = send_process_control_request(c, std::get<child_target>(target), request);
                             if (response && response->status == STATUS_SUCCESS)
                             {
                                 return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(
@@ -323,7 +322,7 @@ namespace sogen
                             process_control_request request{};
                             request.op = process_control_op::query_cycle_time;
 
-                            const auto response = channel->request(request, process_control_default_timeout_ms);
+                            const auto response = send_process_control_request(c, child_target{process_handle.value.id, channel}, request);
                             if (response && response->status == STATUS_SUCCESS)
                             {
                                 accumulated_cycles = response->bytes_written;
@@ -1009,7 +1008,7 @@ namespace sogen
             request.op = process_control_op::terminate;
             request.exit_status = static_cast<int32_t>(exit_status);
 
-            const auto response = target.channel->request(request, process_control_default_timeout_ms);
+            const auto response = send_process_control_request(c, target, request);
             if (!response)
             {
                 // Unlike every other cross-process op's dead-channel case, this one can't just

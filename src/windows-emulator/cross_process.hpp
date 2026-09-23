@@ -2,19 +2,30 @@
 
 #include "handles.hpp"
 #include "process_context.hpp"
+#include "process_control_channel.hpp"
 
 #include <variant>
 
 namespace sogen
 {
     struct syscall_context;
-    class process_control_channel;
 
     struct child_target
     {
         uint32_t record_id{};
         process_control_channel* channel{};
     };
+
+    // Thin wrapper around process_control_channel::request() shared by every cross-process syscall
+    // handler (NtReadVirtualMemory, NtWriteVirtualMemory, NtAllocateVirtualMemory{,Ex},
+    // NtProtectVirtualMemory, NtFreeVirtualMemory, NtQueryVirtualMemory, NtTerminateProcess,
+    // NtResumeThread, NtDuplicateObject's adopt_section/adopt_event/adopt_mutant/export_handle
+    // branches, ProcessWow64Information's query_wow64_info, ProcessCycleTime's query_cycle_time) -
+    // one place to log a full request/response, gated by SOGEN_TRACE_XPROC_CTRL, instead of
+    // duplicating the same diagnostic at every call site.
+    std::optional<process_control_response> send_process_control_request(const syscall_context& c, const child_target& target,
+                                                                         const process_control_request& request,
+                                                                         int timeout_ms = process_control_default_timeout_ms);
 
     // NT's generic-rights translation for a process object, applied to NtCreateUserProcess's
     // process_desired_access before it's stored as child_process_record::granted_access:
