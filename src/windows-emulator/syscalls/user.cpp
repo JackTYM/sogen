@@ -1706,6 +1706,17 @@ namespace sogen
             return 1;
         }
 
+        // Chromium's browser process queries this once during startup (GDI/USER handle-count
+        // diagnostics feeding crash-report annotations and UMA metrics). We don't track GDI/USER
+        // object handles at all, so 0 is the only honest answer for either GR_GDIOBJECTS or
+        // GR_USEROBJECTS - but the call must still be implemented: an unimplemented syscall stops
+        // the whole guest process's emulation, which silently kills the caller for a value nothing
+        // downstream actually depends on functionally.
+        uint32_t handle_NtUserGetGuiResources(const syscall_context&, handle /*process_handle*/, uint32_t /*flags*/)
+        {
+            return 0;
+        }
+
         hdesk handle_NtUserGetThreadDesktop(const syscall_context& c, const ULONG thread_id)
         {
             emulator_thread* target = nullptr;

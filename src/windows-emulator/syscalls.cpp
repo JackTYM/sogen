@@ -503,6 +503,7 @@ namespace sogen
                                                         emulator_pointer apfn_client_w, emulator_pointer apfn_client_worker,
                                                         emulator_pointer hmod_user);
         uint64_t handle_NtUserRemoteConnectState(const syscall_context& c);
+        uint32_t handle_NtUserGetGuiResources(const syscall_context& c, handle process_handle, uint32_t flags);
         hdesk handle_NtUserGetThreadDesktop(const syscall_context& c, ULONG thread_id);
         hdc handle_NtUserGetDCEx(const syscall_context& c, hwnd window, uint64_t clip_region, ULONG flags);
         hdc handle_NtUserGetDC(const syscall_context& c, hwnd window);
@@ -1507,6 +1508,7 @@ namespace sogen
         add_handler(NtUserProcessConnect);
         add_handler(NtUserInitializeClientPfnArrays);
         add_handler(NtUserRemoteConnectState);
+        add_handler(NtUserGetGuiResources);
         add_handler(NtUserGetThreadDesktop);
         add_handler(NtOpenKeyEx);
         add_handler(NtUserTraceLoggingSendMixedModeTelemetry);
