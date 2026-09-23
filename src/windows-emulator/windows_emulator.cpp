@@ -1403,31 +1403,61 @@ namespace sogen
         static const bool trace_mojo_write_path = std::getenv("SOGEN_TRACE_MOJO_WRITE_PATH") != nullptr;
         if (trace_mojo_write_path)
         {
-            static uint64_t connector_accept_addr = 0;
-            static uint64_t accept_and_get_result_addr = 0;
-            static uint64_t mojo_write_message_addr = 0;
-            static bool resolved_mojo_write_path_addrs = false;
+            struct mojo_write_path_site
+            {
+                uint64_t rva;
+                uint64_t resolved_addr;
+                const char* name;
+            };
 
+            static mojo_write_path_site sites[] = {
+                {0x1bf3d20ULL, 0, "Connector::Accept"},
+                {0x10c0ddeULL, 0, "Connector::AcceptAndGetResult"},
+                {0x51b3fbULL, 0, "MojoWriteMessage"},
+                {0x1469eb0ULL, 0, "SyncContext::OnChannelOpened"},
+                {0x1469fa0ULL, 0, "Context::OnChannelOpened"},
+                {0x2902f5cULL, 0, "Channel::Connect"},
+                {0x290323aULL, 0, "MessagePipeReader::FinishInitializationOnIOThread"},
+                {0x2903400ULL, 0, "mojom::ChannelProxy::SetPeerPid"},
+                {0x860658ULL, 0, "Router::SetOutwardLink"},
+                {0x1097694ULL, 0, "Router::Flush"},
+                {0x109c9d0ULL, 0, "Router::AcceptRouteClosureFrom"},
+                {0x81c660ULL, 0, "RemoteRouterLink::AcceptParcel"},
+                {0x10a16d0ULL, 0, "LocalRouterLink::AcceptParcel"},
+                {0x81f168ULL, 0, "NodeLink::Transmit"},
+                {0xab58e0ULL, 0, "ChannelWin::Write"},
+                {0x1c07620ULL, 0, "MessagePumpForIO::RegisterIOHandler"},
+                {0x1c075e0ULL, 0, "CurrentIOThread::RegisterIOHandler"},
+            };
+
+            static bool resolved_mojo_write_path_addrs = false;
             if (!resolved_mojo_write_path_addrs)
             {
                 const auto* mod = this->mod_manager.find_by_name("msedge.dll");
                 if (mod)
                 {
-                    connector_accept_addr = mod->image_base + 0x1bf3d20ULL;
-                    accept_and_get_result_addr = mod->image_base + 0x10c0ddeULL;
-                    mojo_write_message_addr = mod->image_base + 0x51b3fbULL;
+                    for (auto& site : sites)
+                    {
+                        site.resolved_addr = mod->image_base + site.rva;
+                    }
                     resolved_mojo_write_path_addrs = true;
                 }
             }
 
-            if (resolved_mojo_write_path_addrs &&
-                (address == connector_accept_addr || address == accept_and_get_result_addr || address == mojo_write_message_addr))
+            if (resolved_mojo_write_path_addrs)
             {
-                const char* site = address == connector_accept_addr        ? "Connector::Accept"
-                                   : address == accept_and_get_result_addr ? "Connector::AcceptAndGetResult"
-                                                                           : "MojoWriteMessage";
-                fprintf(stderr, "[MOJO_WRITE_PATH] pid=%d guest_pid=%u tid=%u site=%s rip=0x%llx\n", ::getpid(), this->process.process_id,
-                        thread.id, site, static_cast<unsigned long long>(address));
+                for (const auto& site : sites)
+                {
+                    if (address == site.resolved_addr)
+                    {
+                        const auto rcx = vcpu.cpu.reg<uint64_t>(x86_register::rcx);
+                        const auto rdx = vcpu.cpu.reg<uint64_t>(x86_register::rdx);
+                        fprintf(stderr, "[MOJO_WRITE_PATH] pid=%d guest_pid=%u tid=%u site=%s rip=0x%llx this=0x%llx arg1=0x%llx\n",
+                                ::getpid(), this->process.process_id, thread.id, site.name, static_cast<unsigned long long>(address),
+                                static_cast<unsigned long long>(rcx), static_cast<unsigned long long>(rdx));
+                        break;
+                    }
+                }
             }
         }
 
