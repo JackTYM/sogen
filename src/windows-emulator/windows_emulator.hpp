@@ -241,6 +241,15 @@ namespace sogen
         void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags, uint16_t button_data = 0);
         void deliver_raw_keyboard_input(uint16_t vkey, uint16_t scan_code, uint32_t message, bool extended);
 
+        // Standard positioned mouse messages (WM_MOUSEMOVE/WM_LBUTTONDOWN/etc, real x/y in
+        // lParam) for guests that don't use raw input -- most ordinary Win32 UI apps (dialogs,
+        // buttons, text fields) only ever listen for these, not WM_INPUT. Same threading
+        // constraint as deliver_raw_mouse_input: touches process state without kernel_lock_, so
+        // callers must not invoke this off the emulator thread (see ios_ui_backend's queue for
+        // how the iOS frontend handles this).
+        void deliver_mouse_move(int32_t x, int32_t y);
+        void deliver_mouse_button(int32_t x, int32_t y, uint32_t message, uint16_t button_data = 0);
+
         // Observer convenience for external consumers (gdb stub, analyzer, python
         // bindings) and legacy paths that don't thread a vcpu_context through. Resolves
         // to the vCPU whose handler is currently running: all handler/observer code runs

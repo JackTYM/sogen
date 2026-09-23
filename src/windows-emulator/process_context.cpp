@@ -1108,6 +1108,44 @@ namespace sogen
         return current == nullptr;
     }
 
+    hwnd process_context::resolve_foreground_window() const
+    {
+        // Prefer the window the user last interacted with, if it still exists.
+        if (this->foreground_window != 0 && this->windows.get(this->foreground_window) != nullptr)
+        {
+            return this->foreground_window;
+        }
+
+        // Otherwise fall back to any visible top-level window so a freshly-created game window is
+        // considered foreground before the first mouse event arrives (games gate input on this).
+        // foreground_window itself is only ever set by handle_ui_event(), the host-input-queue
+        // processor a desktop build's SDL loop drives -- backends with no such queue (e.g. the iOS
+        // app, which delivers input through ios_ui_backend's own queue instead) never call it, so
+        // foreground_window stays 0 for the guest's entire lifetime without this fallback.
+        //
+        // A real top-level window's parent_handle is the desktop's handle, not 0 (see
+        // handle_NtUserCreateWindowEx: non-child windows get default_desktop_window_handle as their
+        // parent) - only the desktop itself has parent_handle == 0. So "top-level" here means either
+        // value. That alone isn't enough to exclude every non-application window though: the
+        // synthetic shell windows sogen creates for compatibility (the desktop itself, and a
+        // "Progman" stand-in) are also visible top-level windows, but neither is ever given a real
+        // guest-code wndproc - routing input to one of them makes DispatchMessage silently no-op
+        // (confirmed live: an iOS touch delivered a genuine WM_MOUSEMOVE/WM_LBUTTONDOWN into one of
+        // their queues, GetMessage returned it correctly since it matched the same owning "thread",
+        // but nothing ever printed because that window's wnd_proc is 0). A real application window
+        // always has one - DispatchMessage itself depends on it - so require it here too.
+        for (const auto& [index, win] : this->windows)
+        {
+            const bool is_top_level = win.parent_handle == 0 || win.parent_handle == this->default_desktop_window_handle.bits;
+            if (win.wnd_proc != 0 && is_top_level && (win.style & WS_VISIBLE) != 0)
+            {
+                return win.handle;
+            }
+        }
+
+        return 0;
+    }
+
     // NOLINTNEXTLINE(cert-dcl50-cpp,readability-convert-member-functions-to-static)
     bool process_context::is_current_process_handle(const handle handle) const
     {
