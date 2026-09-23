@@ -1,10 +1,11 @@
-#include "std_include.hpp"
+﻿#include "std_include.hpp"
 #include "emulator_thread.hpp"
 
 #include "cpu_context.hpp"
 #include "process_context.hpp"
 #include "io_completion_wait.hpp"
 #include "syscall_utils.hpp"
+#include "wait_storm_diag.hpp"
 
 namespace sogen
 {
@@ -18,7 +19,7 @@ namespace sogen
             abandoned,
         };
 
-        void setup_wow64_fs_segment(memory_manager& memory, uint64_t teb32_addr)
+        void setup_wow64_fs_segment(memory_manager& memory, uint64_t teb32_addr, uint64_t gdt_base)
         {
             const uint64_t base = teb32_addr;
             const uint32_t limit = 0xFFF; // 4KB - size of TEB32 (matching Windows)
@@ -34,28 +35,28 @@ namespace sogen
             descriptor |= (0x40ULL << 48);                                        // G=0 (byte), D=1 (32-bit), L=0, AVL=0
             descriptor |= ((base & 0xFF000000) << 32);                            // Base[31:24]
 
-            // Write the updated descriptor to GDT index 10 (selector 0x53)
-            constexpr uint64_t fs_gdt_offset = GDT_ADDR + 10 * sizeof(uint64_t);
+            // Write the updated descriptor to GDT index 10 (selector 0x53) of this vCPU's own GDT.
+            const uint64_t fs_gdt_offset = gdt_base + 10 * sizeof(uint64_t);
             memory.write_memory(fs_gdt_offset, &descriptor, sizeof(descriptor));
         }
 
         template <typename T>
-        emulator_object<T> allocate_object_on_stack(x86_64_emulator& emu)
+        emulator_object<T> allocate_object_on_stack(x86_64_cpu& emu)
         {
             const auto old_sp = emu.reg(x86_register::rsp);
-            const auto new_sp = align_down(old_sp - sizeof(T), std::max(alignof(T), alignof(x86_64_emulator::pointer_type)));
+            const auto new_sp = align_down(old_sp - sizeof(T), std::max(alignof(T), alignof(x86_64_cpu::pointer_type)));
             emu.reg(x86_register::rsp, new_sp);
-            return {emu, new_sp};
+            return {emu.memory(), new_sp};
         }
 
-        void unalign_stack(x86_64_emulator& emu)
+        void unalign_stack(x86_64_cpu& emu)
         {
             auto sp = emu.reg(x86_register::rsp);
             sp = align_down(sp - 0x10, 0x10) + 8;
             emu.reg(x86_register::rsp, sp);
         }
 
-        void setup_stack(x86_64_emulator& emu, const process_context& context, const uint64_t stack_base, const size_t stack_size)
+        void setup_stack(x86_64_cpu& emu, const process_context& context, const uint64_t stack_base, const size_t stack_size)
         {
             if (!context.is_wow64_process)
             {
@@ -69,7 +70,8 @@ namespace sogen
             }
         }
 
-        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id)
+        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id,
+                                         const std::chrono::steady_clock::time_point now = {})
         {
             const auto type = h.value.type;
 
@@ -123,7 +125,16 @@ namespace sogen
             }
 
             case handle_types::timer: {
-                return wait_state::signaled; // TODO
+                const auto* t = c.timers.get(h);
+                if (!t || !t->signal_time.has_value())
+                {
+                    return wait_state::signaled;
+                }
+                if (now != std::chrono::steady_clock::time_point{} && now >= *t->signal_time)
+                {
+                    return wait_state::signaled;
+                }
+                break;
             }
 
             case handle_types::semaphore: {
@@ -295,12 +306,55 @@ namespace sogen
             case WM_PAINT:
                 return QS_PAINT;
 
+            case WM_HOTKEY:
+                return QS_HOTKEY;
+
             case WM_KEYDOWN:
             case WM_KEYUP:
+            case WM_SYSKEYDOWN:
+            case WM_SYSKEYUP:
+            case WM_CHAR:
+            case WM_DEADCHAR:
+            case WM_SYSCHAR:
+            case WM_SYSDEADCHAR:
+            case WM_UNICHAR:
                 return QS_KEY;
 
             case WM_INPUT:
+            case WM_INPUT_DEVICE_CHANGE:
                 return QS_RAWINPUT;
+
+            case WM_MOUSEMOVE:
+            case WM_NCMOUSEMOVE:
+                return QS_MOUSEMOVE;
+
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+            case WM_LBUTTONDBLCLK:
+            case WM_RBUTTONDOWN:
+            case WM_RBUTTONUP:
+            case WM_RBUTTONDBLCLK:
+            case WM_MBUTTONDOWN:
+            case WM_MBUTTONUP:
+            case WM_MBUTTONDBLCLK:
+            case WM_XBUTTONDOWN:
+            case WM_XBUTTONUP:
+            case WM_XBUTTONDBLCLK:
+            case WM_MOUSEWHEEL:
+            case WM_MOUSEHWHEEL:
+            case WM_NCLBUTTONDOWN:
+            case WM_NCLBUTTONUP:
+            case WM_NCLBUTTONDBLCLK:
+            case WM_NCRBUTTONDOWN:
+            case WM_NCRBUTTONUP:
+            case WM_NCRBUTTONDBLCLK:
+            case WM_NCMBUTTONDOWN:
+            case WM_NCMBUTTONUP:
+            case WM_NCMBUTTONDBLCLK:
+            case WM_NCXBUTTONDOWN:
+            case WM_NCXBUTTONUP:
+            case WM_NCXBUTTONDBLCLK:
+                return QS_MOUSEBUTTON;
 
             default:
                 return QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
@@ -355,14 +409,11 @@ namespace sogen
             this->teb64 = this->gs_segment->reserve<TEB64>();
 
             this->teb64->access([&](TEB64& teb_obj) {
-                // Skips GetCurrentNlsCache
-                // This hack can be removed once this is fixed:
-                // https://github.com/momo5502/emulator/issues/128
-                reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
-
                 teb_obj.ClientId.UniqueProcess = process_context::process_id;
                 teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
                 teb_obj.DeallocationStack = this->stack_base;
+                // TODO: Proper GuaranteedStack implementation.
+                teb_obj.GuaranteedStackBytes = static_cast<ULONG>(this->stack_size);
                 teb_obj.NtTib.StackLimit = this->stack_base;
                 teb_obj.NtTib.StackBase = this->stack_base + this->stack_size;
                 teb_obj.NtTib.Self = this->teb64->value();
@@ -415,9 +466,21 @@ namespace sogen
         // Reserve and initialize 64-bit TEB first
         this->teb64 = this->gs_segment->reserve<TEB64>();
 
-        // Allocate memory for native stack + WOW64_CPURESERVED structure
-        this->stack_base = memory.allocate_memory(WOW64_NATIVE_STACK_SIZE, memory_permission::read_write);
-        if (this->stack_base == 0)
+        // This is the *native* 64-bit stack - setup_registers()'s "Native 64-bit process setup"
+        // unconditionally uses this->stack_base/stack_size to set up RSP for the real 64-bit
+        // RtlUserThreadStart every wow64 thread genuinely starts executing. It must live in the low
+        // 4GB (WOW64_NATIVE_STACK_BASE_HINT): real WoW64 keeps the native stack 32-bit-addressable so
+        // wow64win.dll's win32k callback thunks can truncate the stack pointer to build the 32-bit
+        // window-proc call frame. Deliberately bounded, unlike the plain hint-based allocate_memory
+        // overload (which searches upward from the hint with no ceiling, risking a pick above 4GB) -
+        // and deliberately does NOT fall back to searching below the hint on failure, since that range
+        // is exactly the 32-bit module/heap region the hint exists to avoid.
+        constexpr uint64_t wow64_native_stack_below_4gb_ceiling = 0xFFFFFFFFULL;
+
+        this->stack_base = memory.find_free_host_allocation_base(WOW64_NATIVE_STACK_SIZE, WOW64_NATIVE_STACK_BASE_HINT,
+                                                                 wow64_native_stack_below_4gb_ceiling);
+
+        if (!this->stack_base || !memory.allocate_memory(this->stack_base, WOW64_NATIVE_STACK_SIZE, memory_permission::read_write))
         {
             throw std::runtime_error("Failed to allocate native stack + WOW64_CPURESERVED memory region");
             return;
@@ -437,6 +500,8 @@ namespace sogen
 
             // Native 64-bit stack
             teb_obj.DeallocationStack = this->stack_base;
+            // TODO: Proper GuaranteedStack implementation.
+            teb_obj.GuaranteedStackBytes = static_cast<ULONG>(this->stack_size);
             teb_obj.NtTib.StackLimit = this->stack_base;
             teb_obj.NtTib.StackBase = wow64_cpureserved_base;
             teb_obj.NtTib.Self = this->teb64->value();
@@ -491,6 +556,9 @@ namespace sogen
         // Initialize 32-bit TEB
         this->teb32->access([&](TEB32& teb32_obj) {
             // Set NT_TIB32 fields
+            teb32_obj.DeallocationStack = static_cast<uint32_t>(nttib32_stack_limit);
+            // TODO: Proper GuaranteedStack implementation.
+            teb32_obj.GuaranteedStackBytes = static_cast<ULONG>(this->wow64_stack_size.value());
             teb32_obj.NtTib.Self = static_cast<uint32_t>(teb32_addr);                // Self pointer to 32-bit TEB
             teb32_obj.NtTib.StackBase = static_cast<uint32_t>(nttib32_stack_base);   // Top of 32-bit stack (High address)
             teb32_obj.NtTib.StackLimit = static_cast<uint32_t>(nttib32_stack_limit); // Bottom of 32-bit stack (Low address)
@@ -604,10 +672,49 @@ namespace sogen
             static_assert(sizeof(xmm_state) <= sizeof(ctx.Context.ExtendedRegisters));
             memcpy(ctx.Context.ExtendedRegisters, &xmm_state, sizeof(xmm_state));
         });
+
+        // Real ntdll allocates a per-thread activation-context stack during thread init and stores it
+        // in TEB->ActivationContextStackPointer. Once real 32-bit loader code runs
+        // (LdrpLoadForwardedDll -> RtlActivateActivationContextUnsafeFast), it dereferences
+        // ActivationContextStackPointer (writing ->ActiveFrame) for any module that has a non-null
+        // activation context, crashing on a null pointer. Provide a minimal, valid, empty stack
+        // (ActiveFrame=0, FrameListCache as an empty circular list, cookie sequence starting at 1 like
+        // real ntdll) so those Rtl(De)ActivateActivationContextUnsafeFast paths operate on a real
+        // structure.
+        //
+        // Flags=2 (not 0) is load-bearing: real ntdll's own lazy-init path
+        // (RtlpInitializeThreadActivationContextStack) stores this exact struct embedded directly in
+        // the TEB - not a separate heap block - and sets this flag specifically so
+        // RtlFreeActivationContextStack (invoked via RtlFreeThreadActivationContextStack on
+        // ExitThread) skips its RtlFreeHeap call: `if ((a1->Flags & 2) == 0) RtlFreeHeap(...)`. This
+        // stack similarly isn't a real heap allocation (it lives in the gs_segment), so Flags=0 would
+        // make every WOW64 thread's exit free a pointer that was never allocated via RtlAllocateHeap,
+        // corrupting the heap.
+        {
+            const auto act_ctx_stack = this->gs_segment->reserve<ACTIVATION_CONTEXT_STACK32>();
+            const auto frame_list_cache_addr =
+                static_cast<uint32_t>(act_ctx_stack.value() + offsetof(ACTIVATION_CONTEXT_STACK32, FrameListCache));
+            act_ctx_stack.access([&](ACTIVATION_CONTEXT_STACK32& stack) {
+                stack.ActiveFrame = 0;
+                stack.FrameListCache.Flink = frame_list_cache_addr;
+                stack.FrameListCache.Blink = frame_list_cache_addr;
+                stack.Flags = 2;
+                stack.NextCookieSequenceNumber = 1;
+                stack.StackId = 0;
+            });
+            this->teb32->access(
+                [&](TEB32& teb32_obj) { teb32_obj.ActivationContextStackPointer = static_cast<uint32_t>(act_ctx_stack.value()); });
+        }
     }
 
     void emulator_thread::mark_as_ready(const NTSTATUS status)
     {
+        wait_storm_diag::record_wait_resolved(this->id);
+        if (this->await_host_condition)
+        {
+            wait_storm_diag::record_host_wait_resolved(this->id);
+        }
+
         this->pending_status = status;
         this->await_time = {};
         this->await_objects = {};
@@ -755,13 +862,22 @@ namespace sogen
             (void)this->synthesize_due_user_timer(win_emu);
         }
 
-        return this->message_queue_status_bits;
+        auto status = this->message_queue_status_bits;
+        const auto has_pending_paint = std::ranges::any_of(win_emu.process.windows, [this, &win_emu](const auto& entry) {
+            const auto& win = entry.second;
+            return win.thread_id == this->id && (win.update_pending || win.internal_paint_pending) &&
+                   win_emu.process.is_window_effectively_visible(win.handle);
+        });
+        if (has_pending_paint)
+        {
+            status |= QS_PAINT;
+        }
+
+        return status;
     }
 
     namespace
     {
-        // GetMessage(hWnd) retrieves messages for hWnd and all of its children (IsChild semantics),
-        // so a message targeted at a child control must match a filter naming any of its ancestors.
         bool window_matches_filter(const process_context& process, const hwnd target, const hwnd filter)
         {
             auto current = target;
@@ -831,6 +947,38 @@ namespace sogen
             return msg;
         }
 
+        if ((filter_min == 0 && filter_max == 0) || (filter_min <= WM_PAINT && WM_PAINT <= filter_max))
+        {
+            for (auto& [index, win] : win_emu.process.windows)
+            {
+                (void)index;
+                if (win.thread_id != this->id || (!win.update_pending && !win.internal_paint_pending) ||
+                    !win_emu.process.is_window_effectively_visible(win.handle))
+                {
+                    continue;
+                }
+
+                if (hwnd_filter == static_cast<hwnd>(-1))
+                {
+                    continue;
+                }
+                if (hwnd_filter != 0 && !window_matches_filter(win_emu.process, win.handle, hwnd_filter))
+                {
+                    continue;
+                }
+
+                win.internal_paint_pending = false;
+                return msg{
+                    .window = win.handle,
+                    .message = WM_PAINT,
+                    .wParam = 0,
+                    .lParam = 0,
+                    .time = get_current_message_time(win_emu.clock()),
+                    .pt = {.x = win_emu.process.cursor_x, .y = win_emu.process.cursor_y},
+                };
+            }
+        }
+
         return std::nullopt;
     }
 
@@ -884,6 +1032,33 @@ namespace sogen
         message_queue.push_back(msg);
     }
 
+    void emulator_thread::remove_window_messages(const hwnd window)
+    {
+        for (auto it = this->message_queue.begin(); it != this->message_queue.end();)
+        {
+            if (it->window != window)
+            {
+                ++it;
+                continue;
+            }
+
+            const auto removed_bits = get_message_queue_status_bits(*it);
+            for_each_queue_status_bit(removed_bits, [this](const uint32_t bit, const size_t index) {
+                if (this->message_queue_status_bit_counts[index] <= 1)
+                {
+                    this->message_queue_status_bit_counts[index] = 0;
+                    this->message_queue_status_bits &= ~bit;
+                }
+                else
+                {
+                    --this->message_queue_status_bit_counts[index];
+                }
+            });
+
+            it = this->message_queue.erase(it);
+        }
+    }
+
     bool emulator_thread::is_terminated() const
     {
         return this->exit_status.has_value();
@@ -928,11 +1103,12 @@ namespace sogen
             if (!this->await_objects.empty())
             {
                 all_signaled = true;
+                const auto now = clock.steady_now();
                 for (uint32_t i = 0; i < this->await_objects.size(); ++i)
                 {
                     const auto& obj = this->await_objects[i];
 
-                    const auto state = observe_object_signal(process, obj, this->id);
+                    const auto state = observe_object_signal(process, obj, this->id, now);
                     const auto signaled = state != wait_state::not_signaled;
                     all_signaled &= signaled;
 
@@ -1129,7 +1305,7 @@ namespace sogen
         return true;
     }
 
-    void emulator_thread::setup_registers(x86_64_emulator& emu, const process_context& context) const
+    void emulator_thread::setup_registers(x86_64_cpu& emu, const process_context& context) const
     {
         if (!this->gs_segment)
         {
@@ -1161,8 +1337,27 @@ namespace sogen
         setup_stack(emu, context, this->stack_base, static_cast<size_t>(this->stack_size));
         emu.set_segment_base(x86_register::gs, this->gs_segment->get_base());
 
+        // x86's power-on/reset FPU control word masks every floating-point exception (round-to-nearest);
+        // a zero-initialized control word instead leaves inexact/precision (PM) unmasked, and guest code
+        // that reads it via fnstcw (e.g. the CRT's pow/_except1 path) then raises
+        // STATUS_FLOAT_INEXACT_RESULT on the first inexact result - a crash real Windows never produces.
+        emu.reg<uint16_t>(x86_register::fpcw, 0x037F);
+        emu.reg<uint32_t>(x86_register::mxcsr, 0x1F80);
+
         CONTEXT64 ctx{};
         ctx.ContextFlags = CONTEXT64_ALL;
+
+        // Windows initializes a fresh thread's FPU/SSE control state with every exception
+        // masked (x87 control word 0x037F, MXCSR 0x1F80). sogen bypasses wow64cpu.dll (which
+        // would normally load this from WOW64_CPURESERVED) and the backend's default control
+        // state is all-zero, i.e. every FP exception UNMASKED. Without seeding it, the CRT
+        // startup's _control87(_PC_53, _MCW_PC) reads 0x0000 and writes back 0x0200 (masks
+        // still clear), so the first floor()/ceil()/SSE math on an ordinary value raises a
+        // fatal STATUS_FLOAT_INVALID_OPERATION. Save() below bakes these into the CONTEXT that
+        // LdrInitializeThunk restores via NtContinue, keeping backend and saved state in sync.
+        emu.reg<uint16_t>(x86_register::fpcw, 0x037F);
+        emu.reg<uint16_t>(x86_register::fptag, 0xFFFF);
+        emu.reg<uint32_t>(x86_register::mxcsr, 0x1F80);
 
         unalign_stack(emu);
         cpu_context::save(emu, ctx);
@@ -1170,6 +1365,18 @@ namespace sogen
         ctx.Rip = context.rtl_user_thread_start;
         ctx.Rcx = this->start_address;
         ctx.Rdx = this->argument;
+
+        // The Windows kernel initializes R11 to pWow64PerThreadData (TEB64.TlsSlots[1])
+        // for WoW64 threads so ntdll's instrumentation-callback handler can find the
+        // per-thread 32-bit context via [R11+0x68]. Backends that fire their SYSCALL hook
+        // before the hardware instruction executes (Unicorn) preserve the value that
+        // wow64cpu.dll places in R11; backends that let hardware execute SYSCALL first (KVM)
+        // see R11=RFLAGS instead. Initialise R11 here so LdrInitializeThunk → NtContinue
+        // propagates the correct pointer into the thread's first 64-bit register context.
+        if (context.is_wow64_process && this->wow64_cpu_reserved.has_value())
+        {
+            ctx.R11 = this->wow64_cpu_reserved->value();
+        }
 
         const auto ctx_obj = allocate_object_on_stack<CONTEXT64>(emu);
         ctx_obj.write(ctx);
@@ -1181,14 +1388,19 @@ namespace sogen
         emu.reg(x86_register::rip, context.ldr_initialize_thunk);
     }
 
-    void emulator_thread::refresh_execution_context(x86_64_emulator& emu) const
+    void emulator_thread::refresh_execution_context(x86_64_cpu& emu) const
     {
-        (void)emu;
+        // Point this vCPU's GDTR at its own per-vCPU GDT. The saved thread context restores whatever
+        // GDTR the thread last ran with (possibly another vCPU's GDT), so re-assert it here on every
+        // switch. Cheap and keeps each vCPU reading its own descriptors.
+        const auto gdt_base = gdt_base_for_vcpu(*this->memory_ptr, emu.index());
+        emu.load_gdt(gdt_base, GDT_LIMIT);
 
         if (this->teb32.has_value())
         {
-            // Refresh GDT entry for FS selector on context switch
-            setup_wow64_fs_segment(*this->memory_ptr, this->teb32->value());
+            // Refresh this vCPU's WOW64 FS descriptor with this thread's 32-bit TEB base, so a 64<->32
+            // transition that reloads FS reads the correct base regardless of which vCPU runs the thread.
+            setup_wow64_fs_segment(*this->memory_ptr, this->teb32->value(), gdt_base);
         }
     }
 
@@ -1205,7 +1417,7 @@ namespace sogen
 
     callback_frame::~callback_frame() = default;
 
-    void callback_frame::save_registers(x86_64_emulator& emu)
+    void callback_frame::save_registers(x86_64_cpu& emu)
     {
         if (this->rip != 0)
         {
@@ -1237,7 +1449,7 @@ namespace sogen
         this->gs = emu.reg<uint16_t>(x86_register::gs);
     }
 
-    void callback_frame::restore_registers(x86_64_emulator& emu) const
+    void callback_frame::restore_registers(x86_64_cpu& emu) const
     {
         if (this->rip == 0)
         {

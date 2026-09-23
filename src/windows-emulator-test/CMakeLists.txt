@@ -6,6 +6,13 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 
 list(SORT SRC_FILES)
 
+# Mirrors windows-emulator/CMakeLists.txt's SOGEN_HAS_VKD3D_SHADER exclusion: d3d9_host.cpp (and
+# the parse_vertex_decl() it defines) isn't compiled in on Android/iOS/Emscripten, so this test
+# for it can't be either.
+if(ANDROID OR IOS OR EMSCRIPTEN)
+  list(REMOVE_ITEM SRC_FILES "${CMAKE_CURRENT_LIST_DIR}/d3d9_vertex_decl_test.cpp")
+endif()
+
 add_executable(windows-emulator-test ${SRC_FILES})
 
 sogen_assign_source_group(${SRC_FILES})
@@ -29,3 +36,10 @@ add_test(NAME windows-emulator-test
 sogen_targets_set_folder("tests" windows-emulator-test)
 
 sogen_strip_target(windows-emulator-test)
+
+# See src/analyzer/CMakeLists.txt: entitlement for the FEX backend's opt-in HVF path.
+if(APPLE AND SOGEN_ENABLE_FEX)
+  add_custom_command(TARGET windows-emulator-test POST_BUILD
+    COMMAND codesign --sign - --force --entitlements "${PROJECT_SOURCE_DIR}/src/backends/fex-emulator/hvf/hvf-entitlements.plist" "$<TARGET_FILE:windows-emulator-test>"
+    COMMENT "Codesigning windows-emulator-test with the hypervisor entitlement")
+endif()

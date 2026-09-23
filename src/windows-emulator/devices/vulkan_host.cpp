@@ -1,18 +1,34 @@
 #include "vulkan_host.hpp"
 
+#include "d3d9_format.hpp"
+
 #include <address_utils.hpp>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <ranges>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
+// VkPhysicalDevicePortabilitySubsetFeaturesKHR (VK_KHR_portability_subset) lives here, not in
+// vulkan_core.h, in this vendored Vulkan-Headers copy -- self-contained, no macro gate needed.
+#include <vulkan/vulkan_beta.h>
 
 #include <gpu_bridge_protocol.hpp>
 #include <vk_feature_chain.hpp>
@@ -27,12 +43,37 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #endif
 
 namespace sogen
 {
     namespace
     {
+        // Extensions whose entry points the bridge does not marshal. They must never reach the guest: a guest
+        // that sees them enables them and then calls into nothing. DXVK, for instance, creates shared textures
+        // as soon as it sees VK_KHR_external_memory_win32 and crashes when the shim has no implementation.
+        // HANDLE-based interop cannot work across the bridge anyway - guest handles are emulator objects.
+        constexpr std::array unsupported_device_extensions{
+            std::string_view{"VK_KHR_external_memory_win32"},    //
+            std::string_view{"VK_KHR_external_semaphore_win32"}, //
+            std::string_view{"VK_KHR_external_fence_win32"},     //
+            std::string_view{"VK_KHR_win32_keyed_mutex"},        //
+            std::string_view{"VK_EXT_full_screen_exclusive"},    //
+        };
+
+        bool is_unsupported_extension_name(const std::string_view name)
+        {
+            return std::ranges::find(unsupported_device_extensions, name) != unsupported_device_extensions.end();
+        }
+
+        bool is_unsupported_device_extension(const VkExtensionProperties& extension)
+        {
+            return is_unsupported_extension_name(std::string_view{static_cast<const char*>(extension.extensionName)});
+        }
+
 #ifdef _WIN32
         using library_handle = HMODULE;
 
@@ -70,8 +111,19 @@ namespace sogen
             ::dlclose(handle);
         }
 
-#if defined(__APPLE__)
-        constexpr std::array<const char*, 3> vulkan_loader_names{"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib"};
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        // iOS ships no Vulkan loader, and dlopen() by leaf name never searches an app bundle, so
+        // MoltenVK is linked statically into the embedding app instead (see the -force_load in
+        // tools/sogen-ios/project.yml). A null path makes dlopen() return the main executable's
+        // own handle, which is where vkGetInstanceProcAddr then resolves from.
+        constexpr std::array<const char*, 1> vulkan_loader_names{nullptr};
+#elif defined(__APPLE__)
+        // Bare names rely on the dynamic linker's default search path, which covers Intel
+        // Homebrew's /usr/local/lib but not Apple Silicon Homebrew's /opt/homebrew/lib unless
+        // DYLD_LIBRARY_PATH is set; the absolute paths below are a fallback for that case.
+        constexpr std::array<const char*, 5> vulkan_loader_names{"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
+                                                                 "/opt/homebrew/lib/libvulkan.1.dylib",
+                                                                 "/opt/homebrew/lib/libMoltenVK.dylib"};
 #else
         constexpr std::array<const char*, 2> vulkan_loader_names{"libvulkan.so.1", "libvulkan.so"};
 #endif
@@ -93,6 +145,26 @@ namespace sogen
             }
 
             return size <= allocation_size - offset;
+        }
+
+        // The swapchain readback/present path assumes a 32-bit (4 bytes/texel) color format end to end:
+        // the readback buffer is sized width*height*4 and the present copy converts to BGRA8. Restricting
+        // swapchain formats to 4-byte formats keeps the present-time vkCmdCopyImageToBuffer (which writes
+        // width*height*texelSize bytes) from ever exceeding that buffer. The guest picks the format.
+        bool is_supported_swapchain_format(const VkFormat format)
+        {
+            switch (format)
+            {
+            case VK_FORMAT_B8G8R8A8_UNORM:
+            case VK_FORMAT_B8G8R8A8_SRGB:
+            case VK_FORMAT_R8G8B8A8_UNORM:
+            case VK_FORMAT_R8G8B8A8_SRGB:
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+            case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+                return true;
+            default:
+                return false;
+            }
         }
 
         // VkPhysicalDeviceProperties crosses the 32/64-bit ABI boundary unchanged except for
@@ -153,6 +225,17 @@ namespace sogen
         PFN_vkGetInstanceProcAddr get_instance_proc_addr{};
         PFN_vkCreateInstance create_instance{};
         PFN_vkEnumerateInstanceVersion enumerate_instance_version{};
+        PFN_vkEnumerateInstanceExtensionProperties enumerate_instance_extension_properties{};
+        // Set at each stage of the constructor below so available()'s caller (gdi.cpp's
+        // NtGdiDdDDICreateDevice) can report exactly which step failed instead of just "not
+        // available" -- dlopen(nullptr) itself failing, dlsym(vkGetInstanceProcAddr) failing
+        // (e.g. the symbol existing in the linked binary but not surviving Xcode's archive strip
+        // phase, or not being exported at all), or vkGetInstanceProcAddr resolving but returning
+        // null for "vkCreateInstance" specifically.
+        const char* init_diagnostic = "constructor did not run";
+        // Step-by-step trace of the most recent create_render_target() call -- see
+        // vulkan_host::render_target_diagnostic()'s own comment.
+        std::string last_render_target_diagnostic = "create_render_target() was never called";
 
         struct instance_data
         {
@@ -177,6 +260,148 @@ namespace sogen
         {
             VkPhysicalDevice handle{};
             uint64_t instance_id{};
+            std::optional<bool> portability{};
+        };
+
+        static bool has_device_extension(const instance_data& instance, VkPhysicalDevice device, const std::string_view name)
+        {
+            if (!instance.enumerate_device_extension_properties)
+            {
+                return false;
+            }
+
+            uint32_t count = 0;
+            if (instance.enumerate_device_extension_properties(device, nullptr, &count, nullptr) != VK_SUCCESS)
+            {
+                return false;
+            }
+
+            std::vector<VkExtensionProperties> extensions(count);
+            if (count > 0 && instance.enumerate_device_extension_properties(device, nullptr, &count, extensions.data()) != VK_SUCCESS)
+            {
+                return false;
+            }
+
+            return std::ranges::any_of(extensions, [&](const VkExtensionProperties& extension) {
+                return std::string_view{static_cast<const char*>(extension.extensionName)} == name;
+            });
+        }
+
+        // Apple's registered Vulkan/PCI vendor ID. The ICD reports it unconditionally via
+        // vkGetPhysicalDeviceProperties, making it a robust fallback signal independent of any
+        // extension-enumeration edge cases.
+        static constexpr uint32_t APPLE_VENDOR_ID = 0x106B;
+
+        // A device advertising VK_KHR_portability_subset, or reporting Apple's vendor ID, is a
+        // non-conformant translation layer (MoltenVK on macOS); conformant native drivers are neither.
+        static bool is_portability_device(const instance_data& instance, physical_device_data& device)
+        {
+            if (!device.portability)
+            {
+                bool portability = has_device_extension(instance, device.handle, "VK_KHR_portability_subset");
+
+                if (!portability && instance.get_physical_device_properties)
+                {
+                    VkPhysicalDeviceProperties properties{};
+                    instance.get_physical_device_properties(device.handle, &properties);
+                    portability = properties.vendorID == APPLE_VENDOR_ID;
+                }
+
+                device.portability = portability;
+            }
+
+            return *device.portability;
+        }
+
+        // Blocks a host thread on a device's progress timeline (start_gpu_progress_watch) so the
+        // emulator can learn that the GPU retired something without polling for it, and reports each
+        // advance through on_progress.
+        //
+        // A timeline semaphore rather than the fences the work already signals, because vkResetFences
+        // demands external synchronization on the fence: a fence the guest side may reset and re-submit
+        // at any moment cannot legally be waited on from a second thread. A timeline is monotonic, never
+        // reset, and carries no such requirement, so this may wait on it concurrently with the
+        // submissions that signal it.
+        //
+        // Everything the thread touches is resolved once and copied here: it never re-enters
+        // vulkan_host, whose object tables have no locking of their own and are safe only under the
+        // emulator's kernel lock -- which this thread must never take, or a guest thread blocked on the
+        // GPU could never be woken.
+        class gpu_progress_watch
+        {
+          public:
+            gpu_progress_watch(const VkDevice device, const VkSemaphore semaphore, const PFN_vkWaitSemaphores wait_semaphores,
+                               const PFN_vkGetSemaphoreCounterValue get_counter_value, std::function<void()> on_progress)
+                : device_(device),
+                  semaphore_(semaphore),
+                  wait_semaphores_(wait_semaphores),
+                  get_counter_value_(get_counter_value),
+                  on_progress_(std::move(on_progress))
+            {
+                this->thread_ = std::thread([this] { this->run(); });
+            }
+
+            gpu_progress_watch(const gpu_progress_watch&) = delete;
+            gpu_progress_watch& operator=(const gpu_progress_watch&) = delete;
+            gpu_progress_watch(gpu_progress_watch&&) = delete;
+            gpu_progress_watch& operator=(gpu_progress_watch&&) = delete;
+
+            ~gpu_progress_watch()
+            {
+                this->stop_.store(true, std::memory_order_relaxed);
+                this->thread_.join();
+            }
+
+          private:
+            // Nothing can signal the semaphore to release a wait that is no longer wanted, so the wait
+            // is bounded purely so the destructor's stop flag is eventually seen. It is a liveness net,
+            // not the wake path.
+            static constexpr uint64_t wait_timeout_ns = 50'000'000;
+
+            void run()
+            {
+                uint64_t observed = 0;
+                if (this->get_counter_value_(this->device_, this->semaphore_, &observed) != VK_SUCCESS)
+                {
+                    return;
+                }
+
+                while (!this->stop_.load(std::memory_order_relaxed))
+                {
+                    const uint64_t target = observed + 1;
+                    VkSemaphoreWaitInfo info{};
+                    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                    info.semaphoreCount = 1;
+                    info.pSemaphores = &this->semaphore_;
+                    info.pValues = &target;
+
+                    const VkResult wait_result = this->wait_semaphores_(this->device_, &info, wait_timeout_ns);
+                    if (wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT)
+                    {
+                        return;
+                    }
+
+                    uint64_t value = 0;
+                    if (this->get_counter_value_(this->device_, this->semaphore_, &value) != VK_SUCCESS)
+                    {
+                        return;
+                    }
+
+                    if (value != observed)
+                    {
+                        observed = value;
+                        this->on_progress_();
+                    }
+                }
+            }
+
+            VkDevice device_{};
+            VkSemaphore semaphore_{};
+            PFN_vkWaitSemaphores wait_semaphores_{};
+            PFN_vkGetSemaphoreCounterValue get_counter_value_{};
+            std::function<void()> on_progress_{};
+            std::atomic_bool stop_{false};
+            std::thread thread_{};
         };
 
         struct device_data
@@ -185,6 +410,15 @@ namespace sogen
             uint64_t instance_id{};
             VkPhysicalDevice physical_device{}; // the device this was created from (for memory queries)
             uint32_t queue_family_index{};      // the single family this device was created with
+            bool depth_clamp_enabled{};         // whether the depthClamp feature was enabled (gates pipeline depthClampEnable)
+
+            // Progress timeline (start_gpu_progress_watch). Null on a device nobody asked to watch, in
+            // which case every submit path below is unchanged. Not an entry in `semaphores`: it has no
+            // object id and is never reachable from the guest, so erase_device destroys it by hand.
+            VkSemaphore progress_semaphore{};
+            uint64_t progress_value{};
+            std::unique_ptr<gpu_progress_watch> progress_watch{};
+
             PFN_vkDestroyDevice destroy_device{};
             PFN_vkGetDeviceQueue get_device_queue{};
             PFN_vkQueueWaitIdle queue_wait_idle{};
@@ -201,6 +435,7 @@ namespace sogen
             PFN_vkDestroyFence destroy_fence{};
             PFN_vkResetFences reset_fences{};
             PFN_vkGetFenceStatus get_fence_status{};
+            PFN_vkWaitForFences wait_for_fences{};
             PFN_vkCreateEvent create_event{};
             PFN_vkDestroyEvent destroy_event{};
             PFN_vkGetEventStatus get_event_status{};
@@ -347,6 +582,7 @@ namespace sogen
         std::unordered_map<uint64_t, instance_data> instances;
         std::unordered_map<uint64_t, physical_device_data> physical_devices;
         std::unordered_map<VkPhysicalDevice, uint64_t> physical_device_ids;
+
         struct queue_data
         {
             VkQueue handle{};
@@ -391,6 +627,7 @@ namespace sogen
             void* persistent_host_pointer{};
             uint64_t mapped_size{};
             uint64_t allocation_size{};
+            bool is_host_coherent{};
         };
 
         struct buffer_data
@@ -415,6 +652,19 @@ namespace sogen
             uint64_t device_id{};
         };
 
+        // Joins the watcher thread and drops the timeline it waits on. Must run before anything
+        // destroys the device: the thread sits inside vkWaitSemaphores on it, and vkDestroyDevice frees
+        // what it is blocked in.
+        static void stop_progress_watch(device_data& device)
+        {
+            device.progress_watch.reset();
+            if (device.progress_semaphore && device.destroy_semaphore)
+            {
+                device.destroy_semaphore(device.handle, device.progress_semaphore, nullptr);
+                device.progress_semaphore = VK_NULL_HANDLE;
+            }
+        }
+
         std::unordered_map<uint64_t, device_data> devices;
         std::unordered_map<uint64_t, queue_data> queues;
         std::unordered_map<uint64_t, command_pool_data> command_pools;
@@ -435,58 +685,62 @@ namespace sogen
             VkShaderModule handle{};
             uint64_t device_id{};
         };
+
         struct image_view_data
         {
             VkImageView handle{};
             uint64_t device_id{};
         };
+
         struct buffer_view_data
         {
             VkBufferView handle{};
             uint64_t device_id{};
         };
+
         struct query_pool_data
         {
             VkQueryPool handle{};
             uint64_t device_id{};
+            uint32_t query_type{};
+            uint32_t pipeline_statistics{};
         };
+
         struct render_pass_data
         {
             VkRenderPass handle{};
             uint64_t device_id{};
             bool has_depth{};
         };
+
         struct framebuffer_data
         {
             VkFramebuffer handle{};
             uint64_t device_id{};
         };
+
         struct pipeline_layout_data
         {
             VkPipelineLayout handle{};
             uint64_t device_id{};
         };
+
         struct pipeline_data
         {
             VkPipeline handle{};
             uint64_t device_id{};
         };
+
         struct descriptor_set_layout_data
         {
             VkDescriptorSetLayout handle{};
             uint64_t device_id{};
         };
+
         struct descriptor_pool_data
         {
             VkDescriptorPool handle{};
             uint64_t device_id{};
-        };
-        struct bound_buffer_info
-        {
-            uint64_t buffer_id{};
-            uint64_t offset{};
-            uint64_t range{};
-            uint32_t type{};
         };
 
         struct descriptor_set_data
@@ -494,7 +748,6 @@ namespace sogen
             VkDescriptorSet handle{};
             uint64_t device_id{};
             uint64_t pool_id{};
-            std::unordered_map<uint32_t, bound_buffer_info> buffer_bindings;
         };
 
         std::unordered_map<uint64_t, shader_module_data> shader_modules;
@@ -509,6 +762,26 @@ namespace sogen
         std::unordered_map<uint64_t, descriptor_pool_data> descriptor_pools;
         std::unordered_map<uint64_t, descriptor_set_data> descriptor_sets;
         uint64_t next_id{1};
+
+        // A standalone render target for the native D3DKMT present path (no swapchain / no surface).
+        struct render_target_data
+        {
+            uint64_t device_id{};
+            uint32_t width{};
+            uint32_t height{};
+            VkFormat vk_format{};
+            VkImage image{};
+            VkDeviceMemory image_memory{};
+            VkBuffer readback_buffer{};
+            VkDeviceMemory readback_memory{};
+            VkCommandPool pool{};
+            VkCommandBuffer cmd{};
+            VkFence fence{};
+            VkQueue queue{};
+            VkImageLayout current_layout{VK_IMAGE_LAYOUT_UNDEFINED};
+        };
+
+        std::unordered_map<uint64_t, render_target_data> render_targets;
 
         static bool drain_readback(swapchain_data& sc, device_data& dev, vulkan_host::presented_frame& frame)
         {
@@ -526,6 +799,7 @@ namespace sogen
             frame.width = sc.width;
             frame.height = sc.height;
             frame.hwnd = sc.hwnd;
+            frame.vk_format = static_cast<uint32_t>(sc.format);
             sc.present_in_flight = false;
             return true;
         }
@@ -551,6 +825,78 @@ namespace sogen
                 }
             }
             return UINT32_MAX;
+        }
+
+        // Redirect a CPU-slow host-visible allocation to plain cached system RAM. DXVK places CPU-written
+        // buffers (vertex/uniform/dynamic) in the fastest-for-the-GPU host-visible memory it can find, which
+        // on modern GPUs is Resizable-BAR VRAM (DEVICE_LOCAL | HOST_VISIBLE) or write-combined system memory.
+        // Optimal on real hardware, but the guest's memcpy into it goes through the hypervisor to uncached/WC
+        // memory over PCIe, where reads run ~350x slower than cached RAM (~50 MB/s) and dominate frame time.
+        // Substituting a HOST_CACHED system-RAM type makes guest access near-native; the GPU then reads those
+        // buffers over PCIe instead of from local VRAM, which is what native drivers do for dynamic data
+        // anyway. Only substitute a type that is also HOST_COHERENT: DXVK relies on coherency and never issues
+        // vkFlushMappedMemoryRanges, so dropping it would leave the GPU reading stale data.
+        //
+        // Caveat: strictly, the substituted index must be set in the eventual resource's
+        // VkMemoryRequirements::memoryTypeBits, but a bare vkAllocateMemory (this path) carries no such
+        // bitmask and a VkDeviceMemory is not tied to one resource. We only ever swap one host-visible type
+        // for another host-visible type, which desktop drivers permit for every host-visible buffer, so the
+        // substituted type is compatible in practice. Set SOGEN_GPU_FORCE_CACHED=0 to disable.
+        uint32_t substitute_cached_memory_type(const device_data& dev, const uint32_t index)
+        {
+            static const bool disabled = [] {
+                const char* e = std::getenv("SOGEN_GPU_FORCE_CACHED");
+                return e != nullptr && e[0] == '0';
+            }();
+            if (disabled)
+            {
+                return index;
+            }
+
+            const auto instance = this->instances.find(dev.instance_id);
+            if (instance == this->instances.end() || !instance->second.get_physical_device_memory_properties)
+            {
+                return index;
+            }
+
+            VkPhysicalDeviceMemoryProperties props{};
+            instance->second.get_physical_device_memory_properties(dev.physical_device, &props);
+            if (index >= props.memoryTypeCount)
+            {
+                return index;
+            }
+
+            // Only touch host-visible memory that is not already cached (ReBAR VRAM or write-combined system
+            // memory). Leave pure device-local VRAM and already-cached memory alone.
+            const auto original = props.memoryTypes[index].propertyFlags;
+            if (!(original & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) || (original & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+            {
+                return index;
+            }
+
+            constexpr VkMemoryPropertyFlags want =
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            for (uint32_t i = 0; i < props.memoryTypeCount; ++i)
+            {
+                const auto flags = props.memoryTypes[i].propertyFlags;
+                if ((flags & want) == want && !(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+                {
+                    return i;
+                }
+            }
+            return index;
+        }
+
+        // Fills `props` from the device's physical device. Returns false if the query is unavailable.
+        bool query_memory_properties(const device_data& dev, VkPhysicalDeviceMemoryProperties& props)
+        {
+            const auto instance = this->instances.find(dev.instance_id);
+            if (instance == this->instances.end() || !instance->second.get_physical_device_memory_properties)
+            {
+                return false;
+            }
+            instance->second.get_physical_device_memory_properties(dev.physical_device, &props);
+            return true;
         }
 
         template <typename Map, typename Pred>
@@ -630,6 +976,8 @@ namespace sogen
             {
                 return;
             }
+
+            stop_progress_watch(it->second);
 
             // Tear down swapchains first: they own offscreen images (in the `images` table), a readback
             // buffer, and a present command pool/fence that must go before the device.
@@ -815,6 +1163,7 @@ namespace sogen
         {
             if constexpr (sizeof(size_t) != 8)
             {
+                this->init_diagnostic = "sizeof(size_t) != 8 (32-bit host, not supported)";
                 return;
             }
 
@@ -829,22 +1178,33 @@ namespace sogen
 
             if (!this->loader)
             {
+                this->init_diagnostic = "load_library() (dlopen) returned null for every loader name";
                 return;
             }
 
             this->get_instance_proc_addr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(get_symbol(this->loader, "vkGetInstanceProcAddr"));
             if (!this->get_instance_proc_addr)
             {
+                this->init_diagnostic = "dlopen succeeded but get_symbol(vkGetInstanceProcAddr) returned null";
                 return;
             }
 
             this->create_instance = reinterpret_cast<PFN_vkCreateInstance>(this->get_instance_proc_addr(nullptr, "vkCreateInstance"));
             this->enumerate_instance_version =
                 reinterpret_cast<PFN_vkEnumerateInstanceVersion>(this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceVersion"));
+            this->enumerate_instance_extension_properties = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+                this->get_instance_proc_addr(nullptr, "vkEnumerateInstanceExtensionProperties"));
+
+            this->init_diagnostic = this->create_instance ? "ok" : "vkGetInstanceProcAddr resolved but returned null for vkCreateInstance";
         }
 
         ~impl()
         {
+            for (auto& [id, device] : this->devices)
+            {
+                stop_progress_watch(device);
+            }
+
             for (auto& [id, device] : this->devices)
             {
                 if (device.handle && device.destroy_device)
@@ -881,6 +1241,16 @@ namespace sogen
 
     vulkan_host::~vulkan_host() = default;
 
+    const char* vulkan_host::diagnostic() const
+    {
+        return this->impl_->init_diagnostic;
+    }
+
+    const char* vulkan_host::render_target_diagnostic() const
+    {
+        return this->impl_->last_render_target_diagnostic.c_str();
+    }
+
     bool vulkan_host::available() const
     {
         return this->impl_->create_instance != nullptr;
@@ -909,9 +1279,37 @@ namespace sogen
         app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app_info.apiVersion = api_version;
 
+        // Non-conformant "portability" ICDs (MoltenVK on macOS, KosmicKrisp, ...) are only
+        // enumerated by loaders when VK_KHR_portability_enumeration is requested; enabling it
+        // is a no-op on loaders/platforms that don't advertise the extension.
+        std::vector<const char*> instance_extensions;
+        VkInstanceCreateFlags instance_flags = 0;
+        if (this->impl_->enumerate_instance_extension_properties)
+        {
+            uint32_t ext_count = 0;
+            if (this->impl_->enumerate_instance_extension_properties(nullptr, &ext_count, nullptr) == VK_SUCCESS && ext_count > 0)
+            {
+                std::vector<VkExtensionProperties> available(ext_count);
+                if (this->impl_->enumerate_instance_extension_properties(nullptr, &ext_count, available.data()) == VK_SUCCESS)
+                {
+                    const auto has_portability = std::any_of(available.begin(), available.end(), [](const VkExtensionProperties& e) {
+                        return std::string_view{e.extensionName} == VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+                    });
+                    if (has_portability)
+                    {
+                        instance_extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                        instance_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                    }
+                }
+            }
+        }
+
         VkInstanceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        create_info.flags = instance_flags;
         create_info.pApplicationInfo = &app_info;
+        create_info.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
+        create_info.ppEnabledExtensionNames = instance_extensions.empty() ? nullptr : instance_extensions.data();
 
         VkInstance instance{};
         const VkResult result = this->impl_->create_instance(&create_info, nullptr, &instance);
@@ -1130,6 +1528,13 @@ namespace sogen
         out.max_mip_levels = properties.maxMipLevels;
         out.max_array_layers = properties.maxArrayLayers;
         out.sample_counts = properties.sampleCounts;
+        // TEMPDIAG EXPERIMENT: report only 1x sample support, so DXVK itself chooses a non-multisampled
+        // backbuffer (and compiles its own shaders accordingly) instead of sogen silently overriding sample
+        // counts after DXVK has already committed to MSAA -- avoids an image/shader type mismatch.
+        if (std::getenv("SOGEN_DEBUG_FORCE_1X_SAMPLES"))
+        {
+            out.sample_counts = 1;
+        }
         out.max_extent_width = properties.maxExtent.width;
         out.max_extent_height = properties.maxExtent.height;
         out.max_extent_depth = properties.maxExtent.depth;
@@ -1245,9 +1650,48 @@ namespace sogen
             {
                 return result;
             }
+
+            extensions.resize(count);
         }
 
-        out_count = count;
+        const auto removed = std::ranges::remove_if(extensions, is_unsupported_device_extension);
+        extensions.erase(removed.begin(), removed.end());
+
+        // Inject VK_KHR_swapchain if absent: the bridge provides a virtual swapchain that
+        // doesn't require the host instance to have surface extensions.
+        const auto has_swapchain = std::any_of(extensions.begin(), extensions.end(), [](const VkExtensionProperties& e) {
+            return std::string_view{e.extensionName} == VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        });
+        if (!has_swapchain)
+        {
+            VkExtensionProperties ext{};
+            std::strncpy(ext.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE);
+            ext.specVersion = VK_KHR_SWAPCHAIN_SPEC_VERSION;
+            extensions.push_back(ext);
+        }
+
+        // MoltenVK lacks the static VK_EXT_depth_clip_enable extension, but DXVK's D3D adapter filter
+        // requires it (D3D9-relevant: it emulates D3D near-plane clipping). Advertise it on portability
+        // devices so the adapter passes the filter; create_device strips it again before it reaches the
+        // driver. The masking is invisible to DXVK, which keeps using its regular depth-clip path. D3D9's
+        // default depth-clip state matches Vulkan's default behavior, so most titles are unaffected; a
+        // title that explicitly disables D3D9 depth clipping silently misrenders, because the underlying
+        // pipeline state is never actually toggled -- an accepted limitation of running on MoltenVK.
+        if (impl::is_portability_device(instance->second, pd->second))
+        {
+            const bool has_depth_clip = std::ranges::any_of(extensions, [](const VkExtensionProperties& ext) {
+                return std::strcmp(ext.extensionName, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME) == 0;
+            });
+            if (!has_depth_clip)
+            {
+                VkExtensionProperties synthetic{};
+                std::strncpy(synthetic.extensionName, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME, sizeof(synthetic.extensionName) - 1);
+                synthetic.specVersion = VK_EXT_DEPTH_CLIP_ENABLE_SPEC_VERSION;
+                extensions.push_back(synthetic);
+            }
+        }
+
+        out_count = static_cast<uint32_t>(extensions.size());
 
         const size_t copy_bytes = std::min(out_size, extensions.size() * sizeof(VkExtensionProperties));
         if (copy_bytes > 0)
@@ -1309,6 +1753,46 @@ namespace sogen
         }
 
         instance->second.get_physical_device_features2(pd->second.handle, &features2);
+
+        // MoltenVK/Apple GPUs lack a geometry-shader stage and shader cull-distance support, but D3D9
+        // uses neither. DXVK's adapter filter requires both in a single unified baseline shared across
+        // D3D8/9/10/11, so it rejects the only adapter for a pure-D3D9 title. Advertise them on
+        // portability devices so the adapter passes that filter; create_device masks the enabled feature
+        // set back down to what the device genuinely supports, so MoltenVK is never asked to enable a
+        // capability it cannot provide.
+        //
+        // Same rationale for VK_EXT_depth_clip_enable (spoofed into enumerate_device_extension_properties,
+        // depth-clip caveat documented there) and for VK_EXT_robustness2: the extension is present on
+        // MoltenVK, but DXVK also requires its robustBufferAccess2/nullDescriptor features.
+        // robustBufferAccess2 only tightens out-of-bounds semantics that the core robustBufferAccess
+        // feature (which MoltenVK does support and DXVK also enables) already makes defined, so spoofing
+        // it is safe. nullDescriptor has no such fallback: DXVK binds VK_NULL_HANDLE descriptors for
+        // unbound resources and the bridge passes them through unchanged; MoltenVK/Metal tolerates that
+        // in practice even without the feature enabled, but that is empirical behavior, not a guaranteed
+        // contract -- an accepted residual risk.
+        if (impl::is_portability_device(instance->second, pd->second))
+        {
+            features2.features.geometryShader = VK_TRUE;
+            features2.features.shaderCullDistance = VK_TRUE;
+
+            for (auto& buffer : chained)
+            {
+                switch (reinterpret_cast<const VkBaseOutStructure*>(buffer.data())->sType)
+                {
+                case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT:
+                    reinterpret_cast<VkPhysicalDeviceDepthClipEnableFeaturesEXT*>(buffer.data())->depthClipEnable = VK_TRUE;
+                    break;
+                case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT: {
+                    auto* robustness2 = reinterpret_cast<VkPhysicalDeviceRobustness2FeaturesEXT*>(buffer.data());
+                    robustness2->robustBufferAccess2 = VK_TRUE;
+                    robustness2->nullDescriptor = VK_TRUE;
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+        }
 
         // Serialize one record + body per requested struct, in request order. The body is the guest's
         // pad-free VkBool32 run copied from after the (ABI-specific) header.
@@ -1463,10 +1947,17 @@ namespace sogen
         std::vector<std::vector<float>> priorities_store;
         queue_infos.reserve(entry_count);
         priorities_store.reserve(entry_count);
+        // A real queue family exposes only a handful of queues; reject an absurd guest-supplied
+        // queue_count before it sizes the priorities allocation below.
+        constexpr uint32_t max_queues_per_family = 64;
         for (size_t i = 0; i < entry_count; ++i)
         {
             const uint32_t family = entries ? entries[i].queue_family_index : 0;
             const uint32_t requested = entries ? entries[i].queue_count : 1;
+            if (requested > max_queues_per_family)
+            {
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
             const uint32_t queues = (requested == 0) ? 1 : requested;
 
             auto& priorities = priorities_store.emplace_back(queues, 1.0f);
@@ -1479,7 +1970,9 @@ namespace sogen
         }
         const uint32_t primary_family = queue_infos.front().queueFamilyIndex;
 
-        // Rebuild the enabled-extension name list from the blob (count NUL-terminated strings).
+        // Rebuild the enabled-extension name list from the blob (count NUL-terminated strings). Strip the same
+        // extensions enumeration hides from the guest -- a guest is untrusted and may enable one we never
+        // advertised, and we cannot marshal them across the bridge.
         std::vector<const char*> extensions;
         extensions.reserve(extension_count);
         {
@@ -1492,9 +1985,35 @@ namespace sogen
                 {
                     break;
                 }
-                extensions.push_back(cursor);
+                if (!is_unsupported_extension_name(std::string_view{cursor}))
+                {
+                    extensions.push_back(cursor);
+                }
                 cursor = terminator + 1;
             }
+        }
+
+        const bool portability = impl::is_portability_device(instance->second, pd->second);
+
+        // Vulkan requires VK_KHR_portability_subset to be enabled whenever the physical device advertises
+        // it (MoltenVK always does). The guest never asks for it, so add it here when present. `portability`
+        // can also be true purely from the vendorID fallback, so re-check the extension itself here rather
+        // than pushing an extension the device never actually advertised.
+        const bool requests_portability_subset =
+            std::ranges::any_of(extensions, [](const char* name) { return std::strcmp(name, "VK_KHR_portability_subset") == 0; });
+        if (portability && !requests_portability_subset &&
+            impl::has_device_extension(instance->second, pd->second.handle, "VK_KHR_portability_subset"))
+        {
+            extensions.push_back("VK_KHR_portability_subset");
+        }
+
+        // enumerate_device_extension_properties advertises VK_EXT_depth_clip_enable on portability devices
+        // so DXVK's adapter filter accepts MoltenVK, but vkCreateDevice rejects an unknown enabled
+        // extension. Drop it again unless the device genuinely implements it; the paired feature is masked
+        // off just below (depth-clip caveat documented at the spoof site).
+        if (portability && !impl::has_device_extension(instance->second, pd->second.handle, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME))
+        {
+            std::erase_if(extensions, [](const char* name) { return std::strcmp(name, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME) == 0; });
         }
 
         // Rebuild the pNext feature chain to enable (same record format as get_physical_device_features2);
@@ -1547,6 +2066,103 @@ namespace sogen
             }
         }
 
+        // Depth clamping (VkPipelineRasterizationStateCreateInfo::depthClampEnable) is required to honor a
+        // guest disabling primitive clipping (D3D9 D3DRS_CLIPPING = FALSE): with clamping the near/far
+        // planes clamp instead of clip. A pipeline may only set depthClampEnable when the depthClamp device
+        // feature is enabled, so force it on here whenever the physical device advertises support -- a core
+        // Vulkan 1.0 feature (universally available, incl. MoltenVK). Gated on support so this can never turn
+        // a successful vkCreateDevice into VK_ERROR_FEATURE_NOT_PRESENT; create_graphics_pipeline reads
+        // depth_clamp_enabled back and never sets depthClampEnable = VK_TRUE unless it was actually enabled.
+        bool depth_clamp_enabled = false;
+        if (instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDeviceFeatures2 supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            instance->second.get_physical_device_features2(pd->second.handle, &supported);
+            if (supported.features.depthClamp)
+            {
+                features2.features.depthClamp = VK_TRUE;
+                has_features = true;
+                depth_clamp_enabled = true;
+            }
+        }
+
+        const bool has_feature_chain = has_features || !chained.empty();
+
+        // get_physical_device_features2 advertises a few features portability devices do not actually
+        // support (see there) so DXVK's D3D9 adapter filter accepts MoltenVK. Requesting an unsupported
+        // feature fails vkCreateDevice, so mask the enabled feature set down to what the device really
+        // supports. D3D9 needs none of the spoofed capabilities, so beyond the depth-clip caveat noted at
+        // the spoof site this drops exactly the spurious requests and nothing real. Re-querying the same
+        // pNext chain lets this cover both the base features and every chained struct (e.g.
+        // depthClipEnable), and self-corrects any future spoof with no create-side edit.
+        if (portability && has_feature_chain && instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDeviceFeatures2 supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            std::vector<std::vector<std::byte>> supported_chained;
+            supported_chained.reserve(chained.size());
+            auto* supported_tail = reinterpret_cast<VkBaseOutStructure*>(&supported);
+            for (const auto& buffer : chained)
+            {
+                auto& mirror = supported_chained.emplace_back(buffer.size(), std::byte{});
+                auto* base = reinterpret_cast<VkBaseOutStructure*>(mirror.data());
+                base->sType = reinterpret_cast<const VkBaseOutStructure*>(buffer.data())->sType;
+                base->pNext = nullptr;
+                supported_tail->pNext = base;
+                supported_tail = base;
+            }
+            instance->second.get_physical_device_features2(pd->second.handle, &supported);
+
+            auto* enabled = reinterpret_cast<VkBool32*>(&features2.features);
+            const auto* real = reinterpret_cast<const VkBool32*>(&supported.features);
+            for (size_t i = 0; i < sizeof(features2.features) / sizeof(VkBool32); ++i)
+            {
+                enabled[i] &= real[i];
+            }
+            for (size_t c = 0; c < chained.size(); ++c)
+            {
+                const size_t body_bytes = chained[c].size() - gpu_bridge::feature_chain_header_size;
+                auto* enabled_body = reinterpret_cast<VkBool32*>(chained[c].data() + gpu_bridge::feature_chain_header_size);
+                const auto* real_body =
+                    reinterpret_cast<const VkBool32*>(supported_chained[c].data() + gpu_bridge::feature_chain_header_size);
+                for (size_t i = 0; i < body_bytes / sizeof(VkBool32); ++i)
+                {
+                    enabled_body[i] &= real_body[i];
+                }
+            }
+        }
+
+        // MoltenVK disables non-identity VkComponentMapping swizzles on image views by default --
+        // VkPhysicalDevicePortabilitySubsetFeaturesKHR::imageViewFormatSwizzle is VK_FALSE unless
+        // explicitly requested, and the validation layer then requires every swizzle component to be
+        // VK_COMPONENT_SWIZZLE_IDENTITY (see KhronosGroup/MoltenVK#1364). This struct type isn't in
+        // gpu_bridge::feature_struct_size's recognized set, so even if the guest (DXVK) requests it,
+        // the marshaling protocol silently drops it before it ever reaches this point -- same
+        // reasoning as the portability_subset extension force-add above, so force the feature on here
+        // too whenever the device supports it. Without this, any texture needing a real channel remap
+        // (e.g. D3D9's single/dual-channel luminance-alpha formats sampled through a swizzled image
+        // view) silently samples as if unswizzled.
+        if (portability && instance->second.get_physical_device_features2)
+        {
+            VkPhysicalDevicePortabilitySubsetFeaturesKHR supported_portability{};
+            supported_portability.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+            VkPhysicalDeviceFeatures2 supported2{};
+            supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            supported2.pNext = &supported_portability;
+            instance->second.get_physical_device_features2(pd->second.handle, &supported2);
+            if (supported_portability.imageViewFormatSwizzle)
+            {
+                auto& buffer = chained.emplace_back(sizeof(VkPhysicalDevicePortabilitySubsetFeaturesKHR), std::byte{});
+                auto* portability_features = reinterpret_cast<VkPhysicalDevicePortabilitySubsetFeaturesKHR*>(buffer.data());
+                portability_features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+                portability_features->imageViewFormatSwizzle = VK_TRUE;
+                auto* base = reinterpret_cast<VkBaseOutStructure*>(buffer.data());
+                feature_tail->pNext = base;
+                feature_tail = base;
+            }
+        }
+
         VkDeviceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
@@ -1555,7 +2171,7 @@ namespace sogen
         create_info.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
         // Enabled features ride the pNext chain (VkPhysicalDeviceFeatures2 + the chained structs); a
         // chain present means pEnabledFeatures must stay null.
-        if (has_features || feature_tail != reinterpret_cast<VkBaseOutStructure*>(&features2))
+        if (has_feature_chain || !chained.empty())
         {
             create_info.pNext = &features2;
         }
@@ -1572,6 +2188,7 @@ namespace sogen
         data.instance_id = pd->second.instance_id;
         data.physical_device = pd->second.handle;
         data.queue_family_index = primary_family;
+        data.depth_clamp_enabled = depth_clamp_enabled;
 
         if (const auto gdpa = instance->second.get_device_proc_addr)
         {
@@ -1604,6 +2221,7 @@ namespace sogen
             data.wait_semaphores = reinterpret_cast<PFN_vkWaitSemaphores>(resolve("vkWaitSemaphores"));
             data.get_buffer_device_address = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(resolve("vkGetBufferDeviceAddress"));
             data.get_fence_status = reinterpret_cast<PFN_vkGetFenceStatus>(resolve("vkGetFenceStatus"));
+            data.wait_for_fences = reinterpret_cast<PFN_vkWaitForFences>(resolve("vkWaitForFences"));
             data.queue_submit = reinterpret_cast<PFN_vkQueueSubmit>(resolve("vkQueueSubmit"));
             data.queue_submit2 = reinterpret_cast<PFN_vkQueueSubmit2>(resolve("vkQueueSubmit2"));
             data.allocate_memory = reinterpret_cast<PFN_vkAllocateMemory>(resolve("vkAllocateMemory"));
@@ -1714,7 +2332,7 @@ namespace sogen
         }
 
         const uint64_t id = this->impl_->next_id++;
-        this->impl_->devices.emplace(id, data);
+        this->impl_->devices.emplace(id, std::move(data));
         out_device = id;
         return VK_SUCCESS;
     }
@@ -1744,6 +2362,44 @@ namespace sogen
         const uint64_t id = this->impl_->next_id++;
         this->impl_->queues.emplace(id, impl::queue_data{.handle = queue, .device_id = device});
         out_queue = id;
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::start_gpu_progress_watch(uint64_t device, std::function<void()> on_progress)
+    {
+        const auto dev = this->impl_->devices.find(device);
+        if (dev == this->impl_->devices.end() || !dev->second.create_semaphore || !dev->second.wait_semaphores ||
+            !dev->second.get_semaphore_counter_value)
+        {
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+
+        if (dev->second.progress_watch)
+        {
+            return VK_SUCCESS;
+        }
+
+        VkSemaphoreTypeCreateInfo type_info{};
+        type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        type_info.initialValue = 0;
+
+        VkSemaphoreCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        info.pNext = &type_info;
+
+        VkSemaphore semaphore{};
+        const VkResult result = dev->second.create_semaphore(dev->second.handle, &info, nullptr, &semaphore);
+        if (result != VK_SUCCESS)
+        {
+            return result;
+        }
+
+        // Published before the thread starts so the very first submit after this already ticks the
+        // timeline the thread is about to wait on.
+        dev->second.progress_semaphore = semaphore;
+        dev->second.progress_watch = std::make_unique<impl::gpu_progress_watch>(
+            dev->second.handle, semaphore, dev->second.wait_semaphores, dev->second.get_semaphore_counter_value, std::move(on_progress));
         return VK_SUCCESS;
     }
 
@@ -1779,7 +2435,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->command_pools.find(pool);
-        if (it == this->impl_->command_pools.end())
+        if (it == this->impl_->command_pools.end() || it->second.device_id != device)
         {
             return;
         }
@@ -1800,7 +2456,8 @@ namespace sogen
 
         const auto dev = this->impl_->devices.find(device);
         const auto pool_it = this->impl_->command_pools.find(pool);
-        if (dev == this->impl_->devices.end() || pool_it == this->impl_->command_pools.end() || !dev->second.allocate_command_buffers)
+        if (dev == this->impl_->devices.end() || pool_it == this->impl_->command_pools.end() || pool_it->second.device_id != device ||
+            !dev->second.allocate_command_buffers)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -1829,13 +2486,13 @@ namespace sogen
         const auto dev = this->impl_->devices.find(device);
         const auto pool_it = this->impl_->command_pools.find(pool);
         const auto cb = this->impl_->command_buffers.find(command_buffer);
-        if (cb == this->impl_->command_buffers.end())
+        if (dev == this->impl_->devices.end() || pool_it == this->impl_->command_pools.end() || pool_it->second.device_id != device ||
+            cb == this->impl_->command_buffers.end() || cb->second.device_id != device || cb->second.pool_id != pool)
         {
             return;
         }
 
-        if (dev != this->impl_->devices.end() && pool_it != this->impl_->command_pools.end() && cb->second.handle &&
-            dev->second.free_command_buffers)
+        if (cb->second.handle && dev->second.free_command_buffers)
         {
             dev->second.free_command_buffers(dev->second.handle, pool_it->second.handle, 1, &cb->second.handle);
         }
@@ -1912,7 +2569,7 @@ namespace sogen
         for (const uint64_t id : secondaries)
         {
             const auto it = this->impl_->command_buffers.find(id);
-            if (it == this->impl_->command_buffers.end())
+            if (it == this->impl_->command_buffers.end() || it->second.device_id != cb->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -1949,7 +2606,7 @@ namespace sogen
         }
 
         const auto it = this->impl_->command_pools.find(pool);
-        if (it == this->impl_->command_pools.end())
+        if (it == this->impl_->command_pools.end() || it->second.device_id != device)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2033,7 +2690,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->fences.find(fence);
-        if (it == this->impl_->fences.end())
+        if (it == this->impl_->fences.end() || it->second.device_id != device)
         {
             return;
         }
@@ -2088,7 +2745,8 @@ namespace sogen
         out_value = 0;
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->semaphores.find(semaphore);
-        if (dev == this->impl_->devices.end() || it == this->impl_->semaphores.end() || !dev->second.get_semaphore_counter_value)
+        if (dev == this->impl_->devices.end() || it == this->impl_->semaphores.end() || it->second.device_id != device ||
+            !dev->second.get_semaphore_counter_value)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2099,7 +2757,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->semaphores.find(semaphore);
-        if (dev == this->impl_->devices.end() || it == this->impl_->semaphores.end() || !dev->second.signal_semaphore)
+        if (dev == this->impl_->devices.end() || it == this->impl_->semaphores.end() || it->second.device_id != device ||
+            !dev->second.signal_semaphore)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2126,7 +2785,7 @@ namespace sogen
         for (uint32_t i = 0; i < count; ++i)
         {
             const auto it = this->impl_->semaphores.find(records[i].semaphore);
-            if (it == this->impl_->semaphores.end())
+            if (it == this->impl_->semaphores.end() || it->second.device_id != device)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -2147,7 +2806,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->buffers.find(buffer);
-        if (dev == this->impl_->devices.end() || it == this->impl_->buffers.end() || !dev->second.get_buffer_device_address)
+        if (dev == this->impl_->devices.end() || it == this->impl_->buffers.end() || it->second.device_id != device ||
+            !dev->second.get_buffer_device_address)
         {
             return 0;
         }
@@ -2161,7 +2821,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->semaphores.find(semaphore);
-        if (it == this->impl_->semaphores.end())
+        if (it == this->impl_->semaphores.end() || it->second.device_id != device)
         {
             return;
         }
@@ -2178,7 +2838,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->fences.find(fence);
-        if (dev == this->impl_->devices.end() || it == this->impl_->fences.end() || !dev->second.reset_fences)
+        if (dev == this->impl_->devices.end() || it == this->impl_->fences.end() || it->second.device_id != device ||
+            !dev->second.reset_fences)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2201,6 +2862,23 @@ namespace sogen
         }
 
         return dev->second.get_fence_status(dev->second.handle, it->second.handle);
+    }
+
+    int32_t vulkan_host::wait_for_fence(uint64_t fence, uint64_t timeout_ns)
+    {
+        const auto it = this->impl_->fences.find(fence);
+        if (it == this->impl_->fences.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev = this->impl_->devices.find(it->second.device_id);
+        if (dev == this->impl_->devices.end() || !dev->second.wait_for_fences)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        return dev->second.wait_for_fences(dev->second.handle, 1, &it->second.handle, VK_TRUE, timeout_ns);
     }
 
     int32_t vulkan_host::create_event(uint64_t device, uint32_t flags, uint64_t& out_event)
@@ -2234,7 +2912,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->events.find(event);
-        if (it == this->impl_->events.end())
+        if (it == this->impl_->events.end() || it->second.device_id != device)
         {
             return;
         }
@@ -2266,7 +2944,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->events.find(event);
-        if (dev == this->impl_->devices.end() || it == this->impl_->events.end() || !dev->second.set_event)
+        if (dev == this->impl_->devices.end() || it == this->impl_->events.end() || it->second.device_id != device ||
+            !dev->second.set_event)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2278,7 +2957,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->events.find(event);
-        if (dev == this->impl_->devices.end() || it == this->impl_->events.end() || !dev->second.reset_event)
+        if (dev == this->impl_->devices.end() || it == this->impl_->events.end() || it->second.device_id != device ||
+            !dev->second.reset_event)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2286,8 +2966,60 @@ namespace sogen
         return dev->second.reset_event(dev->second.handle, it->second.handle);
     }
 
+    namespace
+    {
+        // Temporary diagnostic (EMULATOR_D3D9_SUBMIT_FREQ_DIAG=1): tallies real vkQueueSubmit(2) call
+        // frequency and command-buffers-per-call, printed every 5 seconds -- built to properly test
+        // (rather than infer from raw `sample` text, which doesn't encode call counts) whether
+        // native-UMD's per-draw-batch submission cadence (queue_submit, always 1 buffer/call) differs
+        // meaningfully from DXVK's own (queue_submit2, batches command_buffer_count per call). Placed
+        // here rather than in gpu_bridge.cpp's IOCTL handlers since native-UMD's d3d9_host.cpp calls
+        // these vulkan_host methods directly, bypassing the guest-facing IOCTL handlers entirely.
+        void submit_freq_diag_report(bool is_submit2, uint32_t command_buffer_count)
+        {
+            if (!std::getenv("EMULATOR_D3D9_SUBMIT_FREQ_DIAG"))
+            {
+                return;
+            }
+
+            static std::atomic<uint64_t> submit_calls{};
+            static std::atomic<uint64_t> submit_cmd_buffers{};
+            static std::atomic<uint64_t> submit2_calls{};
+            static std::atomic<uint64_t> submit2_cmd_buffers{};
+            static auto window_start = std::chrono::steady_clock::now();
+
+            if (is_submit2)
+            {
+                submit2_calls.fetch_add(1, std::memory_order_relaxed);
+                submit2_cmd_buffers.fetch_add(command_buffer_count, std::memory_order_relaxed);
+            }
+            else
+            {
+                submit_calls.fetch_add(1, std::memory_order_relaxed);
+                submit_cmd_buffers.fetch_add(command_buffer_count, std::memory_order_relaxed);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - window_start).count() >= 5.0)
+            {
+                const auto c1 = submit_calls.exchange(0);
+                const auto b1 = submit_cmd_buffers.exchange(0);
+                const auto c2 = submit2_calls.exchange(0);
+                const auto b2 = submit2_cmd_buffers.exchange(0);
+                fprintf(stderr,
+                        "[submit-freq-diag] queue_submit calls=%llu cmd_buffers=%llu avg=%.2f | "
+                        "queue_submit2 calls=%llu cmd_buffers=%llu avg=%.2f\n",
+                        static_cast<unsigned long long>(c1), static_cast<unsigned long long>(b1),
+                        c1 != 0 ? static_cast<double>(b1) / static_cast<double>(c1) : 0.0, static_cast<unsigned long long>(c2),
+                        static_cast<unsigned long long>(b2), c2 != 0 ? static_cast<double>(b2) / static_cast<double>(c2) : 0.0);
+                window_start = now;
+            }
+        }
+    } // namespace
+
     int32_t vulkan_host::queue_submit(uint64_t queue, uint64_t command_buffer, uint64_t fence)
     {
+        submit_freq_diag_report(false, command_buffer != 0 ? 1 : 0);
         const auto queue_it = this->impl_->queues.find(queue);
         if (queue_it == this->impl_->queues.end())
         {
@@ -2304,7 +3036,7 @@ namespace sogen
         if (fence != 0)
         {
             const auto fence_it = this->impl_->fences.find(fence);
-            if (fence_it == this->impl_->fences.end())
+            if (fence_it == this->impl_->fences.end() || fence_it->second.device_id != queue_it->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -2312,21 +3044,39 @@ namespace sogen
         }
 
         // Zero-command-buffer submission: still a valid fence signal operation (no work batched).
-        if (command_buffer == 0)
+        if (command_buffer == 0 && !dev->second.progress_semaphore)
         {
             return dev->second.queue_submit(queue_it->second.handle, 0, nullptr, fence_handle);
         }
 
-        const auto cb = this->impl_->command_buffers.find(command_buffer);
-        if (cb == this->impl_->command_buffers.end())
+        VkCommandBuffer command_buffer_handle = VK_NULL_HANDLE;
+        if (command_buffer != 0)
         {
-            return VK_ERROR_INITIALIZATION_FAILED;
+            const auto cb = this->impl_->command_buffers.find(command_buffer);
+            if (cb == this->impl_->command_buffers.end() || cb->second.device_id != queue_it->second.device_id)
+            {
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+            command_buffer_handle = cb->second.handle;
         }
 
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &cb->second.handle;
+        submit.commandBufferCount = command_buffer_handle != VK_NULL_HANDLE ? 1u : 0u;
+        submit.pCommandBuffers = &command_buffer_handle;
+
+        VkTimelineSemaphoreSubmitInfo progress{};
+        uint64_t progress_value = 0;
+        if (dev->second.progress_semaphore)
+        {
+            progress_value = ++dev->second.progress_value;
+            progress.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            progress.signalSemaphoreValueCount = 1;
+            progress.pSignalSemaphoreValues = &progress_value;
+            submit.pNext = &progress;
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores = &dev->second.progress_semaphore;
+        }
 
         return dev->second.queue_submit(queue_it->second.handle, 1, &submit, fence_handle);
     }
@@ -2335,6 +3085,7 @@ namespace sogen
                                        const void* command_buffer_ids, uint32_t command_buffer_count, const void* signal_entries,
                                        uint32_t signal_count)
     {
+        submit_freq_diag_report(true, command_buffer_count);
         const auto queue_it = this->impl_->queues.find(queue);
         if (queue_it == this->impl_->queues.end())
         {
@@ -2351,7 +3102,7 @@ namespace sogen
         if (fence != 0)
         {
             const auto fence_it = this->impl_->fences.find(fence);
-            if (fence_it == this->impl_->fences.end())
+            if (fence_it == this->impl_->fences.end() || fence_it->second.device_id != queue_it->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -2364,7 +3115,7 @@ namespace sogen
             for (uint32_t i = 0; i < count; ++i)
             {
                 const auto sem = this->impl_->semaphores.find(records[i].semaphore);
-                if (sem == this->impl_->semaphores.end())
+                if (sem == this->impl_->semaphores.end() || sem->second.device_id != queue_it->second.device_id)
                 {
                     return false;
                 }
@@ -2391,7 +3142,7 @@ namespace sogen
         for (uint32_t i = 0; i < command_buffer_count; ++i)
         {
             const auto cb = this->impl_->command_buffers.find(cmd_ids[i]);
-            if (cb == this->impl_->command_buffers.end())
+            if (cb == this->impl_->command_buffers.end() || cb->second.device_id != queue_it->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -2399,6 +3150,16 @@ namespace sogen
             info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
             info.commandBuffer = cb->second.handle;
             command_buffers.push_back(info);
+        }
+
+        if (dev->second.progress_semaphore)
+        {
+            VkSemaphoreSubmitInfo progress{};
+            progress.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            progress.semaphore = dev->second.progress_semaphore;
+            progress.value = ++dev->second.progress_value;
+            progress.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            signals.push_back(progress);
         }
 
         VkSubmitInfo2 submit{};
@@ -2481,6 +3242,15 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
+        VkPhysicalDeviceMemoryProperties mem_props{};
+        const bool have_props = this->impl_->query_memory_properties(dev->second, mem_props);
+        // The spec requires memoryTypeIndex < memoryTypeCount; drivers index their internal type/heap arrays
+        // with it unchecked, so an out-of-range guest value is an OOB read inside the host driver.
+        if (have_props && memory_type_index >= mem_props.memoryTypeCount)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
         // Round the allocation up to a whole number of guest pages. The map-direct path aliases the host
         // mapping straight into the guest, which can only be done at page granularity; rounding the actual
         // allocation up means the page-aligned alias never covers anything beyond this allocation, so the
@@ -2491,7 +3261,7 @@ namespace sogen
         VkMemoryAllocateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         info.allocationSize = aligned_size;
-        info.memoryTypeIndex = memory_type_index;
+        info.memoryTypeIndex = this->impl_->substitute_cached_memory_type(dev->second, memory_type_index);
 
         VkDeviceMemory memory{};
         const VkResult result = dev->second.allocate_memory(dev->second.handle, &info, nullptr, &memory);
@@ -2500,8 +3270,38 @@ namespace sogen
             return result;
         }
 
+        // Vulkan leaves VkDeviceMemory uninitialized. Host-visible memory is aliased/copied straight to the
+        // guest (map_memory / download_memory), so zero it here -- otherwise the guest can read stale host
+        // bytes from before it wrote anything (a host-process info leak).
+        const VkMemoryPropertyFlags type_flags = (have_props && info.memoryTypeIndex < mem_props.memoryTypeCount)
+                                                     ? mem_props.memoryTypes[info.memoryTypeIndex].propertyFlags
+                                                     : 0;
+        if ((type_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && dev->second.map_memory && dev->second.unmap_memory)
+        {
+            void* zeroed = nullptr;
+            if (dev->second.map_memory(dev->second.handle, memory, 0, VK_WHOLE_SIZE, 0, &zeroed) == VK_SUCCESS && zeroed)
+            {
+                std::memset(zeroed, 0, static_cast<size_t>(aligned_size));
+                // Non-coherent memory needs an explicit flush for the zero-fill to reach the device and later
+                // mappings; on coherent memory the write is already visible, so skip the extra call.
+                if (!(type_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) && dev->second.flush_mapped_memory_ranges)
+                {
+                    VkMappedMemoryRange range{};
+                    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+                    range.memory = memory;
+                    range.offset = 0;
+                    range.size = VK_WHOLE_SIZE;
+                    dev->second.flush_mapped_memory_ranges(dev->second.handle, 1, &range);
+                }
+                dev->second.unmap_memory(dev->second.handle, memory);
+            }
+        }
+
         const uint64_t id = this->impl_->next_id++;
-        this->impl_->memories.emplace(id, impl::memory_data{.handle = memory, .device_id = device, .allocation_size = aligned_size});
+        this->impl_->memories.emplace(id, impl::memory_data{.handle = memory,
+                                                            .device_id = device,
+                                                            .allocation_size = aligned_size,
+                                                            .is_host_coherent = (type_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0});
         out_memory = id;
         return VK_SUCCESS;
     }
@@ -2510,7 +3310,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->memories.find(memory);
-        if (it == this->impl_->memories.end())
+        // Only the owning device may free the memory; ignore a cross-device free request.
+        if (it == this->impl_->memories.end() || it->second.device_id != device)
         {
             return;
         }
@@ -2556,7 +3357,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->buffers.find(buffer);
-        if (it == this->impl_->buffers.end())
+        if (it == this->impl_->buffers.end() || it->second.device_id != device)
         {
             return;
         }
@@ -2578,7 +3379,8 @@ namespace sogen
 
         const auto dev = this->impl_->devices.find(device);
         const auto buf = this->impl_->buffers.find(buffer);
-        if (dev == this->impl_->devices.end() || buf == this->impl_->buffers.end() || !dev->second.get_buffer_memory_requirements)
+        if (dev == this->impl_->devices.end() || buf == this->impl_->buffers.end() || buf->second.device_id != device ||
+            !dev->second.get_buffer_memory_requirements)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2598,7 +3400,7 @@ namespace sogen
         const auto buf = this->impl_->buffers.find(buffer);
         const auto mem = this->impl_->memories.find(memory);
         if (dev == this->impl_->devices.end() || buf == this->impl_->buffers.end() || mem == this->impl_->memories.end() ||
-            !dev->second.bind_buffer_memory)
+            buf->second.device_id != device || mem->second.device_id != device || !dev->second.bind_buffer_memory)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2612,7 +3414,7 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto buf = this->impl_->buffers.find(buffer);
-        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end())
+        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end() || buf->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2631,7 +3433,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto mem = this->impl_->memories.find(memory);
-        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || !dev->second.map_memory || !dev->second.unmap_memory)
+        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || mem->second.device_id != device ||
+            !dev->second.map_memory || !dev->second.unmap_memory)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2659,7 +3462,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto mem = this->impl_->memories.find(memory);
-        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || !dev->second.map_memory || !dev->second.unmap_memory)
+        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || mem->second.device_id != device ||
+            !dev->second.map_memory || !dev->second.unmap_memory)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2687,7 +3491,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto mem = this->impl_->memories.find(memory);
-        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || !dev->second.flush_mapped_memory_ranges)
+        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || mem->second.device_id != device ||
+            !dev->second.flush_mapped_memory_ranges)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2709,7 +3514,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto mem = this->impl_->memories.find(memory);
-        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || !dev->second.invalidate_mapped_memory_ranges)
+        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || mem->second.device_id != device ||
+            !dev->second.invalidate_mapped_memory_ranges)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2733,7 +3539,8 @@ namespace sogen
         out_size = 0;
         const auto dev = this->impl_->devices.find(device);
         const auto mem = this->impl_->memories.find(memory);
-        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || !dev->second.map_memory)
+        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || mem->second.device_id != device ||
+            !dev->second.map_memory)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2764,13 +3571,20 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto mem = this->impl_->memories.find(memory);
-        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || !dev->second.unmap_memory)
+        if (dev == this->impl_->devices.end() || mem == this->impl_->memories.end() || mem->second.device_id != device ||
+            !dev->second.unmap_memory)
         {
             return;
         }
         dev->second.unmap_memory(dev->second.handle, mem->second.handle);
         mem->second.persistent_host_pointer = nullptr;
         mem->second.mapped_size = 0;
+    }
+
+    bool vulkan_host::is_memory_host_coherent(uint64_t memory) const
+    {
+        const auto mem = this->impl_->memories.find(memory);
+        return mem != this->impl_->memories.end() && mem->second.is_host_coherent;
     }
 
     int32_t vulkan_host::create_image(uint64_t device, uint32_t format, uint32_t width, uint32_t height, uint32_t usage, uint32_t tiling,
@@ -2817,7 +3631,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->images.find(image);
-        if (it == this->impl_->images.end())
+        if (it == this->impl_->images.end() || it->second.device_id != device)
         {
             return;
         }
@@ -2839,7 +3653,8 @@ namespace sogen
 
         const auto dev = this->impl_->devices.find(device);
         const auto img = this->impl_->images.find(image);
-        if (dev == this->impl_->devices.end() || img == this->impl_->images.end() || !dev->second.get_image_memory_requirements)
+        if (dev == this->impl_->devices.end() || img == this->impl_->images.end() || img->second.device_id != device ||
+            !dev->second.get_image_memory_requirements)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2865,7 +3680,8 @@ namespace sogen
 
         const auto dev = this->impl_->devices.find(device);
         const auto img = this->impl_->images.find(image);
-        if (dev == this->impl_->devices.end() || img == this->impl_->images.end() || !dev->second.get_image_subresource_layout)
+        if (dev == this->impl_->devices.end() || img == this->impl_->images.end() || img->second.device_id != device ||
+            !dev->second.get_image_subresource_layout)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2892,7 +3708,7 @@ namespace sogen
         const auto img = this->impl_->images.find(image);
         const auto mem = this->impl_->memories.find(memory);
         if (dev == this->impl_->devices.end() || img == this->impl_->images.end() || mem == this->impl_->memories.end() ||
-            !dev->second.bind_image_memory)
+            img->second.device_id != device || mem->second.device_id != device || !dev->second.bind_image_memory)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2933,7 +3749,7 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto img = this->impl_->images.find(image);
-        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end())
+        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end() || img->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2956,6 +3772,16 @@ namespace sogen
         barrier.subresourceRange = to_vk_range(range);
 
         dev->second.cmd_pipeline_barrier(cb->second.handle, src_stage_mask, dst_stage_mask, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        // Render targets (and depth-stencils, which share the same create_render_target/id space) are
+        // also tracked in render_targets for readback_render_target's layout safety check -- keep that
+        // mirror accurate for every barrier a render target goes through, not just submit_clear's own.
+        const auto rt = this->impl_->render_targets.find(image);
+        if (rt != this->impl_->render_targets.end())
+        {
+            rt->second.current_layout = barrier.newLayout;
+        }
+
         return VK_SUCCESS;
     }
 
@@ -2964,7 +3790,7 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto img = this->impl_->images.find(image);
-        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end())
+        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end() || img->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3020,7 +3846,7 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto img = this->impl_->images.find(image);
-        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end())
+        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end() || img->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3047,7 +3873,8 @@ namespace sogen
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto img = this->impl_->images.find(image);
         const auto buf = this->impl_->buffers.find(buffer);
-        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end() || buf == this->impl_->buffers.end())
+        if (cb == this->impl_->command_buffers.end() || img == this->impl_->images.end() || buf == this->impl_->buffers.end() ||
+            img->second.device_id != cb->second.device_id || buf->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3080,7 +3907,8 @@ namespace sogen
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto src = this->impl_->images.find(src_image);
         const auto dst = this->impl_->images.find(dst_image);
-        if (cb == this->impl_->command_buffers.end() || src == this->impl_->images.end() || dst == this->impl_->images.end())
+        if (cb == this->impl_->command_buffers.end() || src == this->impl_->images.end() || dst == this->impl_->images.end() ||
+            src->second.device_id != cb->second.device_id || dst->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3107,7 +3935,7 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto buf = this->impl_->buffers.find(buffer);
-        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end())
+        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end() || buf->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3128,7 +3956,8 @@ namespace sogen
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto buf = this->impl_->buffers.find(buffer);
         const auto img = this->impl_->images.find(image);
-        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end() || img == this->impl_->images.end())
+        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end() || img == this->impl_->images.end() ||
+            buf->second.device_id != cb->second.device_id || img->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3161,7 +3990,8 @@ namespace sogen
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto src = this->impl_->images.find(src_image);
         const auto dst = this->impl_->images.find(dst_image);
-        if (cb == this->impl_->command_buffers.end() || src == this->impl_->images.end() || dst == this->impl_->images.end())
+        if (cb == this->impl_->command_buffers.end() || src == this->impl_->images.end() || dst == this->impl_->images.end() ||
+            src->second.device_id != cb->second.device_id || dst->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3196,7 +4026,8 @@ namespace sogen
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto src = this->impl_->images.find(src_image);
         const auto dst = this->impl_->images.find(dst_image);
-        if (cb == this->impl_->command_buffers.end() || src == this->impl_->images.end() || dst == this->impl_->images.end())
+        if (cb == this->impl_->command_buffers.end() || src == this->impl_->images.end() || dst == this->impl_->images.end() ||
+            src->second.device_id != cb->second.device_id || dst->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3282,7 +4113,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->samplers.find(sampler);
-        if (it == this->impl_->samplers.end())
+        if (it == this->impl_->samplers.end() || it->second.device_id != device)
         {
             return;
         }
@@ -3360,8 +4191,23 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
+        // A real swapchain has only a handful of images; reject an absurd guest count before it drives the
+        // per-image allocation loop below (each iteration does create_image + allocate_memory). The bound is
+        // just a sanity ceiling well above any real use, not a hard Vulkan limit.
+        constexpr uint32_t max_swapchain_images = 128;
+        if (min_image_count > max_swapchain_images)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
         const uint32_t image_count = (min_image_count < 2) ? 2 : min_image_count;
         const auto vk_format = static_cast<VkFormat>(format);
+
+        // The readback buffer below is sized for 4 bytes/texel; reject wider guest-chosen formats so the
+        // present-time copy cannot overflow it.
+        if (!is_supported_swapchain_format(vk_format))
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
 
         impl::swapchain_data sc{};
         sc.device_id = device;
@@ -3381,7 +4227,6 @@ namespace sogen
         {
             VkImageCreateInfo info{};
             info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
             info.imageType = VK_IMAGE_TYPE_2D;
             info.format = vk_format;
             info.extent = {.width = width, .height = height, .depth = 1};
@@ -3499,10 +4344,10 @@ namespace sogen
         return VK_SUCCESS;
     }
 
-    void vulkan_host::destroy_swapchain(uint64_t /*device*/, uint64_t swapchain)
+    void vulkan_host::destroy_swapchain(uint64_t device, uint64_t swapchain)
     {
         const auto it = this->impl_->swapchains.find(swapchain);
-        if (it == this->impl_->swapchains.end())
+        if (it == this->impl_->swapchains.end() || it->second.device_id != device)
         {
             return;
         }
@@ -3559,7 +4404,7 @@ namespace sogen
         if (semaphore != 0)
         {
             const auto sem_it = this->impl_->semaphores.find(semaphore);
-            if (sem_it == this->impl_->semaphores.end())
+            if (sem_it == this->impl_->semaphores.end() || sem_it->second.device_id != it->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -3570,7 +4415,7 @@ namespace sogen
         if (fence != 0)
         {
             const auto fence_it = this->impl_->fences.find(fence);
-            if (fence_it == this->impl_->fences.end())
+            if (fence_it == this->impl_->fences.end() || fence_it->second.device_id != it->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -3608,12 +4453,13 @@ namespace sogen
     }
 
     int32_t vulkan_host::queue_present(uint64_t queue, uint64_t swapchain, uint32_t image_index, std::vector<std::byte>& out_pixels,
-                                       uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd)
+                                       uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd, uint32_t& out_vk_format)
     {
         out_pixels.clear();
         out_width = 0;
         out_height = 0;
         out_hwnd = 0;
+        out_vk_format = 0;
 
         const auto queue_it = this->impl_->queues.find(queue);
         const auto sc_it = this->impl_->swapchains.find(swapchain);
@@ -3622,7 +4468,8 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
         impl::swapchain_data& sc = sc_it->second;
-        if (image_index >= sc.image_ids.size())
+        out_vk_format = static_cast<uint32_t>(sc.format);
+        if (queue_it->second.device_id != sc.device_id || image_index >= sc.image_ids.size())
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3631,7 +4478,7 @@ namespace sogen
 
         const auto dev_it = this->impl_->devices.find(sc.device_id);
         const auto img_it = this->impl_->images.find(source_image_id);
-        if (dev_it == this->impl_->devices.end() || img_it == this->impl_->images.end())
+        if (dev_it == this->impl_->devices.end() || img_it == this->impl_->images.end() || img_it->second.device_id != sc.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3782,7 +4629,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->shader_modules.find(shader_module);
-        if (it == this->impl_->shader_modules.end())
+        if (it == this->impl_->shader_modules.end() || it->second.device_id != device)
         {
             return;
         }
@@ -3801,7 +4648,8 @@ namespace sogen
         out_view = 0;
         const auto dev = this->impl_->devices.find(device);
         const auto img = this->impl_->images.find(image);
-        if (dev == this->impl_->devices.end() || img == this->impl_->images.end() || !dev->second.create_image_view)
+        if (dev == this->impl_->devices.end() || img == this->impl_->images.end() || img->second.device_id != device ||
+            !dev->second.create_image_view)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3838,7 +4686,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->image_views.find(image_view);
-        if (it == this->impl_->image_views.end())
+        if (it == this->impl_->image_views.end() || it->second.device_id != device)
         {
             return;
         }
@@ -3855,7 +4703,8 @@ namespace sogen
         out_view = 0;
         const auto dev = this->impl_->devices.find(device);
         const auto buf = this->impl_->buffers.find(buffer);
-        if (dev == this->impl_->devices.end() || buf == this->impl_->buffers.end() || !dev->second.create_buffer_view)
+        if (dev == this->impl_->devices.end() || buf == this->impl_->buffers.end() || buf->second.device_id != device ||
+            !dev->second.create_buffer_view)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3884,7 +4733,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->buffer_views.find(buffer_view);
-        if (it == this->impl_->buffer_views.end())
+        if (it == this->impl_->buffer_views.end() || it->second.device_id != device)
         {
             return;
         }
@@ -3901,7 +4750,8 @@ namespace sogen
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto src = this->impl_->buffers.find(src_buffer);
         const auto dst = this->impl_->buffers.find(dst_buffer);
-        if (cb == this->impl_->command_buffers.end() || src == this->impl_->buffers.end() || dst == this->impl_->buffers.end())
+        if (cb == this->impl_->command_buffers.end() || src == this->impl_->buffers.end() || dst == this->impl_->buffers.end() ||
+            src->second.device_id != cb->second.device_id || dst->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3948,7 +4798,9 @@ namespace sogen
         }
 
         const uint64_t id = this->impl_->next_id++;
-        this->impl_->query_pools.emplace(id, impl::query_pool_data{.handle = pool, .device_id = device});
+        this->impl_->query_pools.emplace(
+            id, impl::query_pool_data{
+                    .handle = pool, .device_id = device, .query_type = query_type, .pipeline_statistics = pipeline_statistics});
         out_pool = id;
         return VK_SUCCESS;
     }
@@ -3957,7 +4809,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->query_pools.find(query_pool);
-        if (it == this->impl_->query_pools.end())
+        if (it == this->impl_->query_pools.end() || it->second.device_id != device)
         {
             return;
         }
@@ -3972,7 +4824,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto qp = this->impl_->query_pools.find(query_pool);
-        if (dev == this->impl_->devices.end() || qp == this->impl_->query_pools.end() || !dev->second.reset_query_pool)
+        if (dev == this->impl_->devices.end() || qp == this->impl_->query_pools.end() || qp->second.device_id != device ||
+            !dev->second.reset_query_pool)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3986,7 +4839,29 @@ namespace sogen
         out_written = 0;
         const auto dev = this->impl_->devices.find(device);
         const auto qp = this->impl_->query_pools.find(query_pool);
-        if (dev == this->impl_->devices.end() || qp == this->impl_->query_pools.end() || !dev->second.get_query_pool_results)
+        if (dev == this->impl_->devices.end() || qp == this->impl_->query_pools.end() || qp->second.device_id != device ||
+            !dev->second.get_query_pool_results)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        // vkGetQueryPoolResults writes one result element per query at out + i*stride. The element size is
+        // driver-determined by the query type and flags, and can exceed a guest-chosen (small) stride. Bound
+        // the total extent against out_size so the driver cannot write past the caller's buffer, regardless
+        // of the guest-supplied stride (including stride == 0).
+        const uint64_t value_size = (flags & VK_QUERY_RESULT_64_BIT) ? 8u : 4u;
+        uint64_t value_count = 1;
+        if (qp->second.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS)
+        {
+            value_count = static_cast<uint64_t>(std::popcount(qp->second.pipeline_statistics));
+        }
+        if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+        {
+            value_count += 1;
+        }
+        const uint64_t element_size = value_count * value_size;
+        const uint64_t effective_stride = std::max<uint64_t>(stride, element_size);
+        if (query_count > 0 && (static_cast<uint64_t>(query_count - 1) * effective_stride + element_size) > out_size)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4004,7 +4879,8 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto qp = this->impl_->query_pools.find(query_pool);
-        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end())
+        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end() ||
+            qp->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4021,7 +4897,8 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto qp = this->impl_->query_pools.find(query_pool);
-        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end())
+        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end() ||
+            qp->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4038,7 +4915,8 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto qp = this->impl_->query_pools.find(query_pool);
-        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end())
+        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end() ||
+            qp->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4055,7 +4933,8 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto qp = this->impl_->query_pools.find(query_pool);
-        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end())
+        if (cb == this->impl_->command_buffers.end() || qp == this->impl_->query_pools.end() ||
+            qp->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4153,7 +5032,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->render_passes.find(render_pass);
-        if (it == this->impl_->render_passes.end())
+        if (it == this->impl_->render_passes.end() || it->second.device_id != device)
         {
             return;
         }
@@ -4172,7 +5051,7 @@ namespace sogen
         const auto rp = this->impl_->render_passes.find(render_pass);
         const auto view = this->impl_->image_views.find(image_view);
         if (dev == this->impl_->devices.end() || rp == this->impl_->render_passes.end() || view == this->impl_->image_views.end() ||
-            !dev->second.create_framebuffer)
+            rp->second.device_id != device || view->second.device_id != device || !dev->second.create_framebuffer)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4182,7 +5061,7 @@ namespace sogen
         if (depth_view != 0)
         {
             const auto dview = this->impl_->image_views.find(depth_view);
-            if (dview == this->impl_->image_views.end())
+            if (dview == this->impl_->image_views.end() || dview->second.device_id != device)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -4216,7 +5095,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->framebuffers.find(framebuffer);
-        if (it == this->impl_->framebuffers.end())
+        if (it == this->impl_->framebuffers.end() || it->second.device_id != device)
         {
             return;
         }
@@ -4247,7 +5126,7 @@ namespace sogen
         for (const uint64_t id : set_layouts)
         {
             const auto sl = this->impl_->descriptor_set_layouts.find(id);
-            if (sl == this->impl_->descriptor_set_layouts.end())
+            if (sl == this->impl_->descriptor_set_layouts.end() || sl->second.device_id != device)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -4281,7 +5160,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->pipeline_layouts.find(pipeline_layout);
-        if (it == this->impl_->pipeline_layouts.end())
+        if (it == this->impl_->pipeline_layouts.end() || it->second.device_id != device)
         {
             return;
         }
@@ -4335,7 +5214,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->descriptor_set_layouts.find(layout);
-        if (it == this->impl_->descriptor_set_layouts.end())
+        if (it == this->impl_->descriptor_set_layouts.end() || it->second.device_id != device)
         {
             return;
         }
@@ -4387,7 +5266,8 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->descriptor_pools.find(pool);
-        if (dev == this->impl_->devices.end() || it == this->impl_->descriptor_pools.end() || !dev->second.reset_descriptor_pool)
+        if (dev == this->impl_->devices.end() || it == this->impl_->descriptor_pools.end() || it->second.device_id != device ||
+            !dev->second.reset_descriptor_pool)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4406,7 +5286,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->descriptor_pools.find(pool);
-        if (it == this->impl_->descriptor_pools.end())
+        if (it == this->impl_->descriptor_pools.end() || it->second.device_id != device)
         {
             return;
         }
@@ -4425,17 +5305,22 @@ namespace sogen
         out_count = 0;
         const auto dev = this->impl_->devices.find(device);
         const auto pool_it = this->impl_->descriptor_pools.find(pool);
-        if (dev == this->impl_->devices.end() || pool_it == this->impl_->descriptor_pools.end() || !dev->second.allocate_descriptor_sets)
+        if (dev == this->impl_->devices.end() || pool_it == this->impl_->descriptor_pools.end() || pool_it->second.device_id != device ||
+            !dev->second.allocate_descriptor_sets)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
-        std::vector<VkDescriptorSetLayout> vk_layouts;
+        // Called once per programmable draw (~100k/s in heavy scenes), so both scratch buffers are reused
+        // across calls instead of heap-allocated per call. Single emulator thread, no reentrancy.
+        static thread_local std::vector<VkDescriptorSetLayout> vk_layouts;
+        static thread_local std::vector<VkDescriptorSet> sets;
+        vk_layouts.clear();
         vk_layouts.reserve(set_layouts.size());
         for (const uint64_t id : set_layouts)
         {
             const auto sl = this->impl_->descriptor_set_layouts.find(id);
-            if (sl == this->impl_->descriptor_set_layouts.end())
+            if (sl == this->impl_->descriptor_set_layouts.end() || sl->second.device_id != device)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -4448,7 +5333,7 @@ namespace sogen
         info.descriptorSetCount = static_cast<uint32_t>(vk_layouts.size());
         info.pSetLayouts = vk_layouts.empty() ? nullptr : vk_layouts.data();
 
-        std::vector<VkDescriptorSet> sets(vk_layouts.size());
+        sets.assign(vk_layouts.size(), VK_NULL_HANDLE);
         const VkResult result = dev->second.allocate_descriptor_sets(dev->second.handle, &info, sets.data());
         if (result != VK_SUCCESS)
         {
@@ -4459,8 +5344,7 @@ namespace sogen
         for (size_t i = 0; i < sets.size(); ++i)
         {
             const uint64_t id = this->impl_->next_id++;
-            this->impl_->descriptor_sets.emplace(
-                id, impl::descriptor_set_data{.handle = sets[i], .device_id = device, .pool_id = pool, .buffer_bindings = {}});
+            this->impl_->descriptor_sets.emplace(id, impl::descriptor_set_data{.handle = sets[i], .device_id = device, .pool_id = pool});
             if (i < out_sets.size())
             {
                 out_sets[i] = id;
@@ -4478,24 +5362,39 @@ namespace sogen
         }
 
         // Each write carries exactly one descriptor. Buffer infos and image infos are kept in stable
-        // vectors so the VkWriteDescriptorSet pointers remain valid until the driver call below.
-        std::vector<VkWriteDescriptorSet> vk_writes;
-        std::vector<VkDescriptorBufferInfo> buffer_infos(writes.size());
-        std::vector<VkDescriptorImageInfo> image_infos(writes.size());
+        // vectors so the VkWriteDescriptorSet pointers remain valid until the driver call below. This runs
+        // ~100k times/s in heavy scenes, so the buffers are reused (single emulator thread, no reentrancy)
+        // instead of allocated per call.
+        static thread_local std::vector<VkWriteDescriptorSet> vk_writes;
+        static thread_local std::vector<VkDescriptorBufferInfo> buffer_infos;
+        static thread_local std::vector<VkDescriptorImageInfo> image_infos;
+        vk_writes.clear();
+        buffer_infos.resize(writes.size());
+        image_infos.resize(writes.size());
         vk_writes.reserve(writes.size());
+
+        // Consecutive writes usually target the same descriptor set; cache the last lookup to avoid a hash
+        // probe per write.
+        uint64_t cached_set_id = 0;
+        VkDescriptorSet cached_set_handle = VK_NULL_HANDLE;
 
         for (size_t i = 0; i < writes.size(); ++i)
         {
             const descriptor_write& w = writes[i];
-            const auto set = this->impl_->descriptor_sets.find(w.dst_set);
-            if (set == this->impl_->descriptor_sets.end())
+            if (w.dst_set != cached_set_id || cached_set_handle == VK_NULL_HANDLE)
             {
-                return VK_ERROR_INITIALIZATION_FAILED;
+                const auto set = this->impl_->descriptor_sets.find(w.dst_set);
+                if (set == this->impl_->descriptor_sets.end() || set->second.device_id != device)
+                {
+                    return VK_ERROR_INITIALIZATION_FAILED;
+                }
+                cached_set_id = w.dst_set;
+                cached_set_handle = set->second.handle;
             }
 
             VkWriteDescriptorSet vw{};
             vw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            vw.dstSet = set->second.handle;
+            vw.dstSet = cached_set_handle;
             vw.dstBinding = w.dst_binding;
             vw.dstArrayElement = w.dst_array_element;
             vw.descriptorCount = 1;
@@ -4508,12 +5407,16 @@ namespace sogen
             if (is_image)
             {
                 const auto view = this->impl_->image_views.find(w.image_view);
+                if (view != this->impl_->image_views.end() && view->second.device_id != device)
+                {
+                    return VK_ERROR_INITIALIZATION_FAILED;
+                }
                 VkDescriptorImageInfo& ii = image_infos[i];
                 ii.sampler = VK_NULL_HANDLE;
                 if (w.sampler != 0)
                 {
                     const auto smp = this->impl_->samplers.find(w.sampler);
-                    if (smp == this->impl_->samplers.end())
+                    if (smp == this->impl_->samplers.end() || smp->second.device_id != device)
                     {
                         return VK_ERROR_INITIALIZATION_FAILED;
                     }
@@ -4538,15 +5441,13 @@ namespace sogen
                 else
                 {
                     const auto buf = this->impl_->buffers.find(w.buffer);
-                    if (buf == this->impl_->buffers.end())
+                    if (buf == this->impl_->buffers.end() || buf->second.device_id != device)
                     {
                         return VK_ERROR_INITIALIZATION_FAILED;
                     }
                     bi.buffer = buf->second.handle;
                     bi.offset = w.offset;
                     bi.range = w.range;
-                    set->second.buffer_bindings[w.dst_binding] =
-                        impl::bound_buffer_info{.buffer_id = w.buffer, .offset = w.offset, .range = w.range, .type = w.descriptor_type};
                 }
                 vw.pBufferInfo = &bi;
             }
@@ -4567,7 +5468,8 @@ namespace sogen
                                                   uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
                                                   uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                                   const specialization& vs_spec, const specialization& fs_spec,
-                                                  std::span<const color_blend_attachment> blend_attachments_in, uint64_t& out_pipeline)
+                                                  std::span<const color_blend_attachment> blend_attachments_in, uint32_t depth_clip_enable,
+                                                  uint32_t cull_mode, uint32_t front_face, uint64_t& out_pipeline)
     {
         out_pipeline = 0;
         const auto dev = this->impl_->devices.find(device);
@@ -4575,8 +5477,8 @@ namespace sogen
         const auto vert = this->impl_->shader_modules.find(vertex_shader);
         const auto frag = this->impl_->shader_modules.find(fragment_shader);
         if (dev == this->impl_->devices.end() || layout == this->impl_->pipeline_layouts.end() ||
-            vert == this->impl_->shader_modules.end() || frag == this->impl_->shader_modules.end() ||
-            !dev->second.create_graphics_pipelines)
+            vert == this->impl_->shader_modules.end() || frag == this->impl_->shader_modules.end() || layout->second.device_id != device ||
+            vert->second.device_id != device || frag->second.device_id != device || !dev->second.create_graphics_pipelines)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4589,7 +5491,7 @@ namespace sogen
         if (!dynamic_rendering)
         {
             const auto rp = this->impl_->render_passes.find(render_pass);
-            if (rp == this->impl_->render_passes.end())
+            if (rp == this->impl_->render_passes.end() || rp->second.device_id != device)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -4600,6 +5502,23 @@ namespace sogen
         // the two info structs must outlive the vkCreateGraphicsPipelines call below.
         std::array<std::vector<VkSpecializationMapEntry>, 2> spec_map_entries;
         std::array<VkSpecializationInfo, 2> spec_infos{};
+
+        const auto valid_spec = [](const specialization& spec) {
+            for (const auto& e : spec.entries)
+            {
+                if (e.offset > spec.data.size() || e.size > spec.data.size() - e.offset)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        if (!valid_spec(vs_spec) || !valid_spec(fs_spec))
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
         const auto build_spec = [&](const specialization& spec, size_t idx) -> const VkSpecializationInfo* {
             if (spec.entries.empty() || spec.data.empty())
             {
@@ -4696,9 +5615,13 @@ namespace sogen
 
         VkPipelineRasterizationStateCreateInfo rasterization{};
         rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        // depth_clip_enable == 0 (guest disabled clipping) clamps near/far instead of clipping. Only honor it
+        // when the device enabled the depthClamp feature -- otherwise depthClampEnable = VK_TRUE is invalid
+        // usage, so fall back to VK_FALSE (clip), which is also the default whenever clipping stays enabled.
+        rasterization.depthClampEnable = (depth_clip_enable == 0 && dev->second.depth_clamp_enabled) ? VK_TRUE : VK_FALSE;
         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterization.cullMode = VK_CULL_MODE_NONE;
-        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.cullMode = static_cast<VkCullModeFlags>(cull_mode);
+        rasterization.frontFace = static_cast<VkFrontFace>(front_face);
         rasterization.lineWidth = 1.0f;
 
         VkPipelineMultisampleStateCreateInfo multisample{};
@@ -4793,7 +5716,8 @@ namespace sogen
         const auto layout = this->impl_->pipeline_layouts.find(pipeline_layout);
         const auto shader = this->impl_->shader_modules.find(shader_module);
         if (dev == this->impl_->devices.end() || layout == this->impl_->pipeline_layouts.end() ||
-            shader == this->impl_->shader_modules.end() || !dev->second.create_compute_pipelines)
+            shader == this->impl_->shader_modules.end() || layout->second.device_id != device || shader->second.device_id != device ||
+            !dev->second.create_compute_pipelines)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4823,7 +5747,7 @@ namespace sogen
     {
         const auto dev = this->impl_->devices.find(device);
         const auto it = this->impl_->pipelines.find(pipeline);
-        if (it == this->impl_->pipelines.end())
+        if (it == this->impl_->pipelines.end() || it->second.device_id != device)
         {
             return;
         }
@@ -4840,7 +5764,8 @@ namespace sogen
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto rp = this->impl_->render_passes.find(render_pass);
         const auto fb = this->impl_->framebuffers.find(framebuffer);
-        if (cb == this->impl_->command_buffers.end() || rp == this->impl_->render_passes.end() || fb == this->impl_->framebuffers.end())
+        if (cb == this->impl_->command_buffers.end() || rp == this->impl_->render_passes.end() || fb == this->impl_->framebuffers.end() ||
+            rp->second.device_id != cb->second.device_id || fb->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4875,7 +5800,8 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto pipe = this->impl_->pipelines.find(pipeline);
-        if (cb == this->impl_->command_buffers.end() || pipe == this->impl_->pipelines.end())
+        if (cb == this->impl_->command_buffers.end() || pipe == this->impl_->pipelines.end() ||
+            pipe->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4908,7 +5834,7 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto buf = this->impl_->buffers.find(buffer);
-        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end())
+        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end() || buf->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -4963,7 +5889,7 @@ namespace sogen
                 continue;
             }
             const auto buf = this->impl_->buffers.find(buffer_ids[i]);
-            if (buf == this->impl_->buffers.end())
+            if (buf == this->impl_->buffers.end() || buf->second.device_id != cb->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -4990,10 +5916,14 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
-        std::vector<VkBuffer> handles(count);
-        std::vector<VkDeviceSize> vk_offsets(count);
-        std::vector<VkDeviceSize> vk_sizes(count);
-        std::vector<VkDeviceSize> vk_strides(count);
+        static thread_local std::vector<VkBuffer> handles;
+        static thread_local std::vector<VkDeviceSize> vk_offsets;
+        static thread_local std::vector<VkDeviceSize> vk_sizes;
+        static thread_local std::vector<VkDeviceSize> vk_strides;
+        handles.resize(count);
+        vk_offsets.resize(count);
+        vk_sizes.resize(count);
+        vk_strides.resize(count);
         for (uint32_t i = 0; i < count; ++i)
         {
             if (buffer_ids[i] == 0)
@@ -5007,7 +5937,7 @@ namespace sogen
                 continue;
             }
             const auto buf = this->impl_->buffers.find(buffer_ids[i]);
-            if (buf == this->impl_->buffers.end())
+            if (buf == this->impl_->buffers.end() || buf->second.device_id != cb->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -5026,7 +5956,7 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto buf = this->impl_->buffers.find(buffer);
-        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end())
+        if (cb == this->impl_->command_buffers.end() || buf == this->impl_->buffers.end() || buf->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -5062,7 +5992,8 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto layout = this->impl_->pipeline_layouts.find(pipeline_layout);
-        if (cb == this->impl_->command_buffers.end() || layout == this->impl_->pipeline_layouts.end())
+        if (cb == this->impl_->command_buffers.end() || layout == this->impl_->pipeline_layouts.end() ||
+            layout->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -5072,12 +6003,12 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
-        std::vector<VkDescriptorSet> handles;
-        handles.reserve(sets.size());
+        static thread_local std::vector<VkDescriptorSet> handles;
+        handles.clear();
         for (const uint64_t id : sets)
         {
             const auto set = this->impl_->descriptor_sets.find(id);
-            if (set == this->impl_->descriptor_sets.end())
+            if (set == this->impl_->descriptor_sets.end() || set->second.device_id != cb->second.device_id)
             {
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -5122,13 +6053,19 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
+        bool valid_views = true;
         const auto view_handle = [&](uint64_t id) -> VkImageView {
             if (id == 0)
             {
                 return VK_NULL_HANDLE;
             }
             const auto it = this->impl_->image_views.find(id);
-            return it != this->impl_->image_views.end() ? it->second.handle : VK_NULL_HANDLE;
+            if (it == this->impl_->image_views.end() || it->second.device_id != cb->second.device_id)
+            {
+                valid_views = false;
+                return VK_NULL_HANDLE;
+            }
+            return it->second.handle;
         };
         const auto build = [&](const rendering_attachment& a) {
             VkRenderingAttachmentInfo info{};
@@ -5164,6 +6101,10 @@ namespace sogen
         if (stencil)
         {
             stencil_info = build(*stencil);
+        }
+        if (!valid_views)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
         }
 
         VkRenderingInfo info{};
@@ -5203,7 +6144,8 @@ namespace sogen
     {
         const auto cb = this->impl_->command_buffers.find(command_buffer);
         const auto layout = this->impl_->pipeline_layouts.find(pipeline_layout);
-        if (cb == this->impl_->command_buffers.end() || layout == this->impl_->pipeline_layouts.end())
+        if (cb == this->impl_->command_buffers.end() || layout == this->impl_->pipeline_layouts.end() ||
+            layout->second.device_id != cb->second.device_id)
         {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -5535,5 +6477,493 @@ namespace sogen
             return VK_ERROR_INITIALIZATION_FAILED;
         }
         return VK_SUCCESS;
+    }
+
+    namespace
+    {
+        // VkFormat's contiguous depth/depth-stencil range (D16_UNORM..D32_SFLOAT_S8_UINT) -- covers both
+        // depth formats d3d9_format_to_vulkan can produce (D32_SFLOAT_S8_UINT for D3DFMT_D24S8,
+        // D32_SFLOAT for D3DFMT_D24X8).
+        bool is_depth_format(const uint32_t vk_format)
+        {
+            return vk_format >= VK_FORMAT_D16_UNORM && vk_format <= VK_FORMAT_D32_SFLOAT_S8_UINT;
+        }
+    } // namespace
+
+    int32_t vulkan_host::create_render_target(const uint64_t device, const uint32_t width, const uint32_t height, const uint32_t format,
+                                              const bool transient, uint64_t& out_image)
+    {
+        out_image = 0;
+
+        std::string diag = "requested: width=" + std::to_string(width) + " height=" + std::to_string(height) +
+                           " format(input, D3DFORMAT)=" + std::to_string(format) + " transient=" + (transient ? "true" : "false");
+        // Always stored before returning, whichever path that turns out to be -- finish() below
+        // wraps every return in this function so no call site can forget to flush it.
+        const auto finish = [&](const int32_t result) -> int32_t {
+            diag += " -> result=" + std::to_string(result);
+            this->impl_->last_render_target_diagnostic = diag;
+            return result;
+        };
+
+        uint32_t vk_format = 0;
+        if (!d3d9_format_to_vulkan(format, vk_format))
+        {
+            diag += " | d3d9_format_to_vulkan(" + std::to_string(format) + ") returned false (not a recognized D3DFORMAT)";
+            return finish(VK_ERROR_INITIALIZATION_FAILED);
+        }
+        diag += " | vk_format=" + std::to_string(vk_format);
+
+        const auto dev_it = this->impl_->devices.find(device);
+        if (dev_it == this->impl_->devices.end())
+        {
+            diag += " | device 0x" + std::to_string(device) + " not found";
+            return finish(VK_ERROR_INITIALIZATION_FAILED);
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.create_image || !dev.allocate_memory || !dev.bind_image_memory || !dev.create_buffer || !dev.bind_buffer_memory ||
+            !dev.create_command_pool || !dev.allocate_command_buffers || !dev.create_fence || !dev.get_device_queue)
+        {
+            diag += " | one or more required device function pointers are null";
+            return finish(VK_ERROR_INITIALIZATION_FAILED);
+        }
+
+        impl::render_target_data rt{};
+        rt.device_id = device;
+        rt.width = width;
+        rt.height = height;
+        rt.vk_format = static_cast<VkFormat>(vk_format);
+
+        const auto fail = [&]() -> int32_t {
+            if (rt.image && dev.destroy_image)
+            {
+                dev.destroy_image(dev.handle, rt.image, nullptr);
+            }
+            if (rt.image_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.image_memory, nullptr);
+            }
+            if (rt.readback_buffer && dev.destroy_buffer)
+            {
+                dev.destroy_buffer(dev.handle, rt.readback_buffer, nullptr);
+            }
+            if (rt.readback_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.readback_memory, nullptr);
+            }
+            if (rt.pool && dev.destroy_command_pool)
+            {
+                dev.destroy_command_pool(dev.handle, rt.pool, nullptr);
+            }
+            if (rt.fence && dev.destroy_fence)
+            {
+                dev.destroy_fence(dev.handle, rt.fence, nullptr);
+            }
+            return VK_ERROR_INITIALIZATION_FAILED;
+        };
+
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = static_cast<VkFormat>(vk_format);
+        image_info.extent = {.width = width, .height = height, .depth = 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        // Depth-stencil resources (D3DUSAGE_DEPTHSTENCIL) reuse this same function -- give them
+        // DEPTH_STENCIL_ATTACHMENT usage instead of COLOR_ATTACHMENT, or using the image as a depth
+        // attachment (see d3d9_host::execute_draw) would be invalid.
+        // SAMPLED usage on top of that, for both kinds: a render target an app later binds as a texture
+        // (render-to-texture -- see d3d9_host::execute_draw's sampler loop) needs it, and an image
+        // created without it can never be given a sampled view at all, however it is used later. The bit
+        // is free when unused: it constrains nothing else about the image and every driver reports it as
+        // a supported optimal-tiling feature for the colour/depth formats that reach here.
+        // A transient depth-stencil (see this function's own header comment) drops TRANSFER_DST/SAMPLED
+        // entirely -- it can never be cleared via a standalone image-clear command or sampled, only
+        // rendered to as an attachment -- and adds TRANSIENT_ATTACHMENT, which is what actually lets
+        // MoltenVK back it with tile memory instead of VRAM on Apple Silicon.
+        const bool depth_transient = transient && is_depth_format(vk_format);
+        image_info.usage =
+            is_depth_format(vk_format)
+                ? (depth_transient
+                       ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)
+                       : (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+                : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                   VK_IMAGE_USAGE_SAMPLED_BIT);
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // D3DRS_SRGBWRITEENABLE is a per-draw render state, not a property of the surface: the same
+        // render target is written linearly by some draws and sRGB-encoded by others. Vulkan applies
+        // that conversion per colour-attachment VIEW, so the image has to be viewable through both its
+        // linear format and the matching _SRGB one -- which requires MUTABLE_FORMAT at creation, the one
+        // decision that cannot be deferred to the first draw that needs it. Only requested for formats
+        // that actually have an sRGB counterpart, so no other render target pays for it.
+        uint32_t srgb_vk_format = 0;
+        if (d3d9_format_to_vulkan_srgb(format, srgb_vk_format))
+        {
+            image_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+        }
+        {
+            const VkResult vk_res = dev.create_image(dev.handle, &image_info, nullptr, &rt.image);
+            diag += " | create_image usage=0x" + std::to_string(image_info.usage) + " flags=0x" +
+                    std::to_string(image_info.flags) + " -> vkCreateImage=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
+        }
+
+        VkMemoryRequirements image_reqs{};
+        dev.get_image_memory_requirements(dev.handle, rt.image, &image_reqs);
+        uint32_t image_type = UINT32_MAX;
+        if (depth_transient)
+        {
+            // The one memory-type combination that actually triggers MoltenVK's memoryless optimization
+            // on Apple Silicon; not every GPU/driver exposes it, so this falls through to the ordinary
+            // search below rather than failing outright when it's absent.
+            image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits,
+                                                       VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
+        if (image_type == UINT32_MAX)
+        {
+            image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
+        if (image_type == UINT32_MAX)
+        {
+            image_type = this->impl_->find_memory_type(dev, image_reqs.memoryTypeBits, 0);
+        }
+        diag += " | image_type=" + std::to_string(image_type) + " image_reqs.size=" + std::to_string(image_reqs.size);
+        VkMemoryAllocateInfo image_alloc{};
+        image_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        image_alloc.allocationSize = image_reqs.size;
+        image_alloc.memoryTypeIndex = image_type;
+        {
+            const VkResult vk_res = dev.allocate_memory(dev.handle, &image_alloc, nullptr, &rt.image_memory);
+            diag += " | vkAllocateMemory(image)=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
+        }
+        dev.bind_image_memory(dev.handle, rt.image, rt.image_memory, 0);
+
+        // A transient image can never be read back (by definition -- see this function's own header
+        // comment), so skip the readback staging buffer entirely; rt.readback_buffer/readback_memory
+        // stay VK_NULL_HANDLE, matching readback_render_target's own resting-layout guard, which already
+        // rejects a depth-stencil image (it never reaches TRANSFER_SRC_OPTIMAL) before either would be
+        // touched.
+        if (!depth_transient)
+        {
+            // Size the readback staging buffer at the render target's real per-format stride, not a
+            // hardcoded 4 bytes/texel BGRA8 -- lets non-BGRA8 off-screen render targets (R5G6B5,
+            // R16G16B16A16_SFLOAT) read back at their true tight packing.
+            const VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * vk_format_bytes_per_texel(vk_format);
+            VkBufferCreateInfo buffer_info{};
+            buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            buffer_info.size = readback_size;
+            buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            {
+                const VkResult vk_res = dev.create_buffer(dev.handle, &buffer_info, nullptr, &rt.readback_buffer);
+                diag += " | readback_size=" + std::to_string(readback_size) + " -> vkCreateBuffer=" + std::to_string(vk_res);
+                if (vk_res != VK_SUCCESS)
+                {
+                    return finish(fail());
+                }
+            }
+
+            VkMemoryRequirements buffer_reqs{};
+            dev.get_buffer_memory_requirements(dev.handle, rt.readback_buffer, &buffer_reqs);
+            uint32_t buffer_type = this->impl_->find_memory_type(
+                dev, buffer_reqs.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+            if (buffer_type == UINT32_MAX)
+            {
+                buffer_type = this->impl_->find_memory_type(dev, buffer_reqs.memoryTypeBits,
+                                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            }
+            diag += " | buffer_type=" + std::to_string(buffer_type);
+            if (buffer_type == UINT32_MAX)
+            {
+                diag += " (no host-visible+coherent memory type found)";
+                return finish(fail());
+            }
+            VkMemoryAllocateInfo buffer_alloc{};
+            buffer_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            buffer_alloc.allocationSize = buffer_reqs.size;
+            buffer_alloc.memoryTypeIndex = buffer_type;
+            {
+                const VkResult vk_res = dev.allocate_memory(dev.handle, &buffer_alloc, nullptr, &rt.readback_memory);
+                diag += " | vkAllocateMemory(buffer)=" + std::to_string(vk_res);
+                if (vk_res != VK_SUCCESS)
+                {
+                    return finish(fail());
+                }
+            }
+            dev.bind_buffer_memory(dev.handle, rt.readback_buffer, rt.readback_memory, 0);
+        }
+
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool_info.queueFamilyIndex = dev.queue_family_index;
+        {
+            const VkResult vk_res = dev.create_command_pool(dev.handle, &pool_info, nullptr, &rt.pool);
+            diag += " | vkCreateCommandPool=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
+        }
+
+        VkCommandBufferAllocateInfo cb_info{};
+        cb_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cb_info.commandPool = rt.pool;
+        cb_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cb_info.commandBufferCount = 1;
+        {
+            const VkResult vk_res = dev.allocate_command_buffers(dev.handle, &cb_info, &rt.cmd);
+            diag += " | vkAllocateCommandBuffers=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
+        }
+
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        {
+            const VkResult vk_res = dev.create_fence(dev.handle, &fence_info, nullptr, &rt.fence);
+            diag += " | vkCreateFence=" + std::to_string(vk_res);
+            if (vk_res != VK_SUCCESS)
+            {
+                return finish(fail());
+            }
+        }
+
+        dev.get_device_queue(dev.handle, dev.queue_family_index, 0, &rt.queue);
+        diag += " | get_device_queue rt.queue=" + std::string(rt.queue ? "non-null" : "null");
+        if (!rt.queue)
+        {
+            return finish(fail());
+        }
+
+        const uint64_t id = this->impl_->next_id++;
+        this->impl_->images.emplace(id, impl::image_data{.handle = rt.image, .device_id = device});
+        this->impl_->render_targets.emplace(id, std::move(rt));
+        out_image = id;
+        diag += " | SUCCESS id=" + std::to_string(id);
+        return finish(VK_SUCCESS);
+    }
+
+    int32_t vulkan_host::submit_clear(const uint64_t image, const float* color)
+    {
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::render_target_data& rt = rt_it->second;
+
+        const auto dev_it = this->impl_->devices.find(rt.device_id);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.begin_command_buffer || !dev.end_command_buffer || !dev.cmd_pipeline_barrier || !dev.cmd_clear_color_image ||
+            !dev.reset_fences || !dev.queue_submit || !dev.wait_for_fences)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (dev.begin_command_buffer(rt.cmd, &begin) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const VkImageSubresourceRange full_range{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
+
+        // Transition to TRANSFER_DST_OPTIMAL for the clear.
+        VkImageMemoryBarrier to_dst{};
+        to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_dst.srcAccessMask = 0;
+        to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_dst.oldLayout = rt.current_layout;
+        to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.image = rt.image;
+        to_dst.subresourceRange = full_range;
+        dev.cmd_pipeline_barrier(rt.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &to_dst);
+
+        VkClearColorValue clear_value{};
+        clear_value.float32[0] = color[0];
+        clear_value.float32[1] = color[1];
+        clear_value.float32[2] = color[2];
+        clear_value.float32[3] = color[3];
+        dev.cmd_clear_color_image(rt.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_value, 1, &full_range);
+
+        // Transition to TRANSFER_SRC_OPTIMAL ready for readback.
+        VkImageMemoryBarrier to_src{};
+        to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_src.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        to_src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.image = rt.image;
+        to_src.subresourceRange = full_range;
+        dev.cmd_pipeline_barrier(rt.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &to_src);
+
+        dev.end_command_buffer(rt.cmd);
+        dev.reset_fences(dev.handle, 1, &rt.fence);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &rt.cmd;
+        if (dev.queue_submit(rt.queue, 1, &submit, rt.fence) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        dev.wait_for_fences(dev.handle, 1, &rt.fence, VK_TRUE, UINT64_MAX);
+
+        rt.current_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        return VK_SUCCESS;
+    }
+
+    int32_t vulkan_host::readback_render_target(const uint64_t image, std::vector<std::byte>& out_pixels, uint32_t& out_width,
+                                                uint32_t& out_height)
+    {
+        out_pixels.clear();
+        out_width = 0;
+        out_height = 0;
+
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::render_target_data& rt = rt_it->second;
+
+        if (rt.current_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        const auto dev_it = this->impl_->devices.find(rt.device_id);
+        if (dev_it == this->impl_->devices.end())
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        impl::device_data& dev = dev_it->second;
+        if (!dev.begin_command_buffer || !dev.end_command_buffer || !dev.cmd_copy_image_to_buffer || !dev.reset_fences ||
+            !dev.queue_submit || !dev.wait_for_fences || !dev.map_memory || !dev.unmap_memory)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (dev.begin_command_buffer(rt.cmd, &begin) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {.x = 0, .y = 0, .z = 0};
+        region.imageExtent = {.width = rt.width, .height = rt.height, .depth = 1};
+        dev.cmd_copy_image_to_buffer(rt.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rt.readback_buffer, 1, &region);
+
+        dev.end_command_buffer(rt.cmd);
+        dev.reset_fences(dev.handle, 1, &rt.fence);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &rt.cmd;
+        if (dev.queue_submit(rt.queue, 1, &submit, rt.fence) != VK_SUCCESS)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        dev.wait_for_fences(dev.handle, 1, &rt.fence, VK_TRUE, UINT64_MAX);
+
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(rt.width) * rt.height * vk_format_bytes_per_texel(rt.vk_format);
+        void* mapped = nullptr;
+        if (dev.map_memory(dev.handle, rt.readback_memory, 0, readback_size, 0, &mapped) != VK_SUCCESS || !mapped)
+        {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        out_pixels.resize(static_cast<size_t>(readback_size));
+        std::memcpy(out_pixels.data(), mapped, out_pixels.size());
+        dev.unmap_memory(dev.handle, rt.readback_memory);
+
+        out_width = rt.width;
+        out_height = rt.height;
+        return VK_SUCCESS;
+    }
+
+    void vulkan_host::destroy_render_target(const uint64_t device, const uint64_t image)
+    {
+        const auto rt_it = this->impl_->render_targets.find(image);
+        if (rt_it == this->impl_->render_targets.end() || rt_it->second.device_id != device)
+        {
+            return;
+        }
+
+        const auto dev_it = this->impl_->devices.find(device);
+        if (dev_it != this->impl_->devices.end())
+        {
+            impl::device_data& dev = dev_it->second;
+            impl::render_target_data& rt = rt_it->second;
+            // submit_clear/readback_render_target both submit onto rt.cmd and wait on rt.fence inline, so
+            // the only work that can still be in flight against this image was submitted on d3d9_host's
+            // own queue -- which its flush_batch already waited out before reaching here. This is belt and
+            // braces for any future path that does not.
+            if (dev.device_wait_idle)
+            {
+                dev.device_wait_idle(dev.handle);
+            }
+            if (rt.fence && dev.destroy_fence)
+            {
+                dev.destroy_fence(dev.handle, rt.fence, nullptr);
+            }
+            if (rt.pool && dev.destroy_command_pool)
+            {
+                dev.destroy_command_pool(dev.handle, rt.pool, nullptr); // also frees rt.cmd
+            }
+            if (rt.readback_buffer && dev.destroy_buffer)
+            {
+                dev.destroy_buffer(dev.handle, rt.readback_buffer, nullptr);
+            }
+            if (rt.readback_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.readback_memory, nullptr);
+            }
+            if (rt.image && dev.destroy_image)
+            {
+                dev.destroy_image(dev.handle, rt.image, nullptr);
+            }
+            if (rt.image_memory && dev.free_memory)
+            {
+                dev.free_memory(dev.handle, rt.image_memory, nullptr);
+            }
+        }
+
+        this->impl_->render_targets.erase(rt_it);
+        this->impl_->images.erase(image);
     }
 }

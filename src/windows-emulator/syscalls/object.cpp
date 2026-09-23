@@ -2,12 +2,20 @@
 #include "../emulator_utils.hpp"
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
+#include "../wait_storm_diag.hpp"
+
+#include <utils/string.hpp>
 
 namespace sogen
 {
 
     namespace syscalls
     {
+        NTSTATUS handle_NtSetEvent(const syscall_context& c, uint64_t handle, emulator_object<LONG> previous_state);
+        NTSTATUS handle_NtReleaseMutant(const syscall_context& c, handle mutant_handle, emulator_object<LONG> previous_count);
+        NTSTATUS handle_NtReleaseSemaphore(const syscall_context& c, handle semaphore_handle, ULONG release_count,
+                                           emulator_object<LONG> previous_count);
+
         NTSTATUS handle_NtClose(const syscall_context& c, const handle h)
         {
             const auto value = h.value;
@@ -64,12 +72,14 @@ namespace sogen
             }
 
             uint64_t section_backing_address = 0;
+            uint32_t section_mapped_views = 0;
             if (value.type == handle_types::section)
             {
                 auto* section = c.proc.sections.get(h);
                 if (section && section->ref_count == 1)
                 {
                     section_backing_address = section->backing_address;
+                    section_mapped_views = section->mapped_view_count;
                 }
             }
 
@@ -78,7 +88,29 @@ namespace sogen
             {
                 if (section_backing_address != 0)
                 {
-                    c.win_emu.memory.release_memory(section_backing_address, 0);
+                    // Mapped views keep section memory alive past the last handle close on real Windows,
+                    // so defer the release until every view is unmapped.
+                    if (section_mapped_views == 0)
+                    {
+                        c.win_emu.memory.release_memory(section_backing_address, 0);
+
+                        if (c.win_emu.callbacks.on_generic_activity)
+                        {
+                            c.win_emu.callbacks.on_generic_activity(
+                                utils::string::va("Pagefile backing released on section close: base=0x%" PRIx64, section_backing_address));
+                        }
+                    }
+                    else
+                    {
+                        c.proc.orphaned_section_backings[section_backing_address] = section_mapped_views;
+
+                        if (c.win_emu.callbacks.on_generic_activity)
+                        {
+                            c.win_emu.callbacks.on_generic_activity(
+                                utils::string::va("Pagefile backing orphaned on section close: base=0x%" PRIx64 " views=%u",
+                                                  section_backing_address, section_mapped_views));
+                        }
+                    }
                 }
                 return STATUS_SUCCESS;
             }
@@ -95,7 +127,7 @@ namespace sogen
                 return STATUS_NOT_SUPPORTED;
             }
 
-            const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle);
+            const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
 
             if (resolved_source_handle.value.is_pseudo)
             {
@@ -163,6 +195,8 @@ namespace sogen
                 return u"Directory";
             case handle_types::process:
                 return u"Process";
+            case handle_types::keyed_event:
+                return u"KeyedEvent";
             default:
                 return u"";
             }
@@ -172,7 +206,7 @@ namespace sogen
                                       const OBJECT_INFORMATION_CLASS object_information_class, const emulator_pointer object_information,
                                       const ULONG object_information_length, const emulator_object<ULONG> return_length)
         {
-            const auto effective_handle = c.proc.resolve_object_pseudo_handle(handle);
+            const auto effective_handle = c.proc.resolve_object_pseudo_handle(handle, c.vcpu.active_thread);
 
             if (object_information_class == ObjectNameInformation)
             {
@@ -395,6 +429,13 @@ namespace sogen
 
             if (object_information_class == ObjectBasicInformation)
             {
+                // Kernel: if (v5 != 56) return STATUS_INFO_LENGTH_MISMATCH — exact size required
+                static_assert(sizeof(OBJECT_BASIC_INFORMATION) == 56, "OBJECT_BASIC_INFORMATION must be 56 bytes");
+                if (object_information_length != sizeof(OBJECT_BASIC_INFORMATION))
+                {
+                    return_length.write_if_valid(sizeof(OBJECT_BASIC_INFORMATION));
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
                 return handle_query<OBJECT_BASIC_INFORMATION>(c.emu, object_information, object_information_length, return_length,
                                                               [&](OBJECT_BASIC_INFORMATION& info) {
                                                                   info.GrantedAccess = GENERIC_ALL;
@@ -471,7 +512,7 @@ namespace sogen
         // same recovery the wait32 path does. WoW64 and some callers hand us handles without type bits.
         handle resolve_wait_handle(const syscall_context& c, const handle h)
         {
-            const auto resolved = c.proc.resolve_object_pseudo_handle(h);
+            const auto resolved = c.proc.resolve_object_pseudo_handle(h, c.vcpu.active_thread);
             if (resolved.value.type != handle_types::reserved || resolved.value.is_pseudo)
             {
                 return resolved;
@@ -494,7 +535,8 @@ namespace sogen
             switch (h.value.type)
             {
             case handle_types::process:
-                return h == GUEST_PROCESS_HANDLE ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+                // The synthetic Steam process never signals, so a liveness wait times out ("alive").
+                return (h == GUEST_PROCESS_HANDLE || h == STEAM_PROCESS_HANDLE) ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
 
             case handle_types::file:
                 if (h.value.is_pseudo)
@@ -549,8 +591,8 @@ namespace sogen
 
         NTSTATUS handle_NtCompareObjects(const syscall_context& c, const handle first, const handle second)
         {
-            const auto first_resolved = c.proc.resolve_object_pseudo_handle(first);
-            const auto second_resolved = c.proc.resolve_object_pseudo_handle(second);
+            const auto first_resolved = c.proc.resolve_object_pseudo_handle(first, c.vcpu.active_thread);
+            const auto second_resolved = c.proc.resolve_object_pseudo_handle(second, c.vcpu.active_thread);
             return (first_resolved == second_resolved) ? STATUS_SUCCESS : STATUS_NOT_SAME_OBJECT;
         }
 
@@ -567,7 +609,7 @@ namespace sogen
             }
 
             const bool wait_all = (flags & mwmo_waitall) != 0;
-            auto& t = c.win_emu.current_thread();
+            auto& t = c.thread();
             t.await_objects = {};
             t.await_any = false;
             t.await_msg_mask = {};
@@ -604,7 +646,7 @@ namespace sogen
                 t.await_time = c.win_emu.clock().steady_now() + std::chrono::milliseconds{timeout};
             }
 
-            c.win_emu.yield_thread(false);
+            c.win_emu.yield_thread(c.vcpu, false);
             return {};
         }
 
@@ -612,19 +654,19 @@ namespace sogen
                                                  const WAIT_TYPE wait_type, const BOOLEAN alertable,
                                                  const emulator_object<LARGE_INTEGER> timeout)
         {
-            if (wait_type != WaitAny && wait_type != WaitAll)
-            {
-                c.win_emu.log.error("Wait type not supported!\n");
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
-            }
-
+            // Kernel: if ( (unsigned int)(count - 1) > 0x3F ) return STATUS_INVALID_PARAMETER_1
             if (count == 0 || count > 64) // MAXIMUM_WAIT_OBJECTS
             {
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_INVALID_PARAMETER_1;
             }
 
-            auto& t = c.win_emu.current_thread();
+            // Kernel: if ( wait_type > 1 ) return STATUS_INVALID_PARAMETER_3
+            if (wait_type != WaitAny && wait_type != WaitAll)
+            {
+                return STATUS_INVALID_PARAMETER_3;
+            }
+
+            auto& t = c.thread();
             t.await_objects = {};
             t.await_any = false;
 
@@ -663,7 +705,7 @@ namespace sogen
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
             }
 
-            c.win_emu.yield_thread(alertable);
+            c.win_emu.yield_thread(c.vcpu, alertable);
             return STATUS_SUCCESS;
         }
 
@@ -671,19 +713,19 @@ namespace sogen
                                                    const WAIT_TYPE wait_type, const BOOLEAN alertable,
                                                    const emulator_object<LARGE_INTEGER> timeout)
         {
-            if (wait_type != WaitAny && wait_type != WaitAll)
-            {
-                c.win_emu.log.error("Wait type not supported!\n");
-                c.emu.stop();
-                return STATUS_NOT_SUPPORTED;
-            }
-
+            // Kernel: if ( (unsigned int)(count - 1) > 0x3F ) return STATUS_INVALID_PARAMETER_1
             if (count == 0 || count > 64) // MAXIMUM_WAIT_OBJECTS
             {
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_INVALID_PARAMETER_1;
             }
 
-            auto& t = c.win_emu.current_thread();
+            // Kernel: if ( wait_type > 1 ) return STATUS_INVALID_PARAMETER_3
+            if (wait_type != WaitAny && wait_type != WaitAll)
+            {
+                return STATUS_INVALID_PARAMETER_3;
+            }
+
+            auto& t = c.thread();
             t.await_objects = {};
             t.await_any = false;
 
@@ -724,7 +766,8 @@ namespace sogen
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
             }
 
-            c.win_emu.yield_thread(alertable);
+            wait_storm_diag::record_wait_enter(t.id, wait_storm_diag::wait_kind::multi_object);
+            c.win_emu.yield_thread(c.vcpu, alertable);
             return STATUS_SUCCESS;
         }
 
@@ -738,7 +781,7 @@ namespace sogen
                 return validation_status;
             }
 
-            auto& t = c.win_emu.current_thread();
+            auto& t = c.thread();
             t.await_objects = {resolved_handle};
             t.await_any = false;
 
@@ -747,21 +790,63 @@ namespace sogen
                 t.await_time = utils::convert_delay_interval_to_time_point(c.win_emu.clock(), timeout.read());
             }
 
-            c.win_emu.yield_thread(alertable);
+            wait_storm_diag::record_wait_enter(t.id, wait_storm_diag::wait_kind::single_object);
+            c.win_emu.yield_thread(c.vcpu, alertable);
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetInformationObject()
+        NTSTATUS handle_NtSignalAndWaitForSingleObject(const syscall_context& c, const handle signal_handle, const handle wait_handle,
+                                                       const BOOLEAN alertable, const emulator_object<LARGE_INTEGER> timeout)
         {
-            return STATUS_NOT_SUPPORTED;
+            const emulator_object<LONG> no_previous_state{c.emu.memory()};
+
+            NTSTATUS signal_status{};
+
+            switch (signal_handle.value.type)
+            {
+            case handle_types::event:
+                signal_status = handle_NtSetEvent(c, signal_handle.bits, no_previous_state);
+                break;
+
+            case handle_types::mutant:
+                signal_status = handle_NtReleaseMutant(c, signal_handle, no_previous_state);
+                break;
+
+            case handle_types::semaphore:
+                signal_status = handle_NtReleaseSemaphore(c, signal_handle, 1, no_previous_state);
+                break;
+
+            default:
+                return STATUS_OBJECT_TYPE_MISMATCH;
+            }
+
+            if (!NT_SUCCESS(signal_status))
+            {
+                return signal_status;
+            }
+
+            return handle_NtWaitForSingleObject(c, wait_handle, alertable, timeout);
+        }
+
+        NTSTATUS handle_NtSetInformationObject(const syscall_context& /*c*/, handle /*handle*/, uint32_t object_info_class,
+                                               uint64_t /*object_information*/, ULONG /*object_information_length*/)
+        {
+            // Kernel: a2 must be 4 (HandleInheritanceInformation/HandleFlagInformation), 5, or 6;
+            // else return STATUS_INVALID_INFO_CLASS. Artifact: v5 = -1073741821; if (a2-4 && ...)
+            if (object_info_class != 4 && object_info_class != 5 && object_info_class != 6)
+            {
+                return STATUS_INVALID_INFO_CLASS;
+            }
+            return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtQuerySecurityObject(const syscall_context& c, const handle /*h*/, const SECURITY_INFORMATION security_information,
                                               const emulator_pointer security_descriptor, const ULONG length,
                                               const emulator_object<ULONG> length_needed)
         {
-            if ((security_information &
-                 (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) == 0)
+            // Kernel does not reject SACL-only queries (security_information == SACL_SECURITY_INFORMATION == 0x8).
+            // The mask check against OWNER|GROUP|DACL|LABEL is used only for access-rights computation, not validation.
+            if (!security_information)
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -868,8 +953,15 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetSecurityObject()
+        NTSTATUS handle_NtSetSecurityObject(const syscall_context& /*c*/, handle /*object_handle*/,
+                                            SECURITY_INFORMATION /*security_information*/, uint64_t security_descriptor)
         {
+            // Kernel: if (!SecurityDescriptor) return STATUS_ACCESS_VIOLATION (0xC0000005).
+            // Artifact: if ( !SecurityDescriptor ) return -1073741819LL
+            if (!security_descriptor)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
             return STATUS_SUCCESS;
         }
     }

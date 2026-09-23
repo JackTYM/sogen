@@ -6,10 +6,14 @@
 #include <windows.h>
 #endif
 
+#include <chrono>
+#include <cstdio>
+
 namespace sogen
 {
     namespace
     {
+
 #ifdef _WIN32
         void apply_application_icon(SDL_Window* window)
         {
@@ -29,10 +33,147 @@ namespace sogen
         }
 #endif
 
+        std::string make_host_window_title(const std::u16string_view title)
+        {
+            auto guest_title = u16_to_u8(title);
+            if (guest_title.empty())
+            {
+                return guest_title;
+            }
+            return "Sogen - " + guest_title;
+        }
+
         uint64_t pack_point(const int x, const int y)
         {
             return (static_cast<uint64_t>(static_cast<uint32_t>(y) & 0xFFFFu) << 16) |
                    static_cast<uint64_t>(static_cast<uint32_t>(x) & 0xFFFFu);
+        }
+
+        uint16_t low_word(const uint64_t value)
+        {
+            return static_cast<uint16_t>(value & 0xFFFFu);
+        }
+
+        uint64_t make_high_word_wparam(const uint16_t key_state, const uint16_t high_word)
+        {
+            return static_cast<uint64_t>(key_state) | (static_cast<uint64_t>(high_word) << 16);
+        }
+
+        int16_t sdl_wheel_delta(const float amount)
+        {
+            const auto delta = static_cast<int32_t>(amount * static_cast<float>(WHEEL_DELTA));
+            if (delta > INT16_MAX)
+            {
+                return INT16_MAX;
+            }
+            if (delta < INT16_MIN)
+            {
+                return INT16_MIN;
+            }
+            return static_cast<int16_t>(delta);
+        }
+
+        uint16_t sdl_mouse_button_to_mk(const uint8_t button)
+        {
+            switch (button)
+            {
+            case SDL_BUTTON_LEFT:
+                return MK_LBUTTON;
+            case SDL_BUTTON_RIGHT:
+                return MK_RBUTTON;
+            case SDL_BUTTON_MIDDLE:
+                return MK_MBUTTON;
+            case SDL_BUTTON_X1:
+                return MK_XBUTTON1;
+            case SDL_BUTTON_X2:
+                return MK_XBUTTON2;
+            default:
+                return 0;
+            }
+        }
+
+        uint16_t sdl_mouse_mask_to_mk(const SDL_MouseButtonFlags buttons)
+        {
+            uint16_t result = 0;
+            if ((buttons & SDL_BUTTON_LMASK) != 0)
+            {
+                result |= MK_LBUTTON;
+            }
+            if ((buttons & SDL_BUTTON_RMASK) != 0)
+            {
+                result |= MK_RBUTTON;
+            }
+            if ((buttons & SDL_BUTTON_MMASK) != 0)
+            {
+                result |= MK_MBUTTON;
+            }
+            if ((buttons & SDL_BUTTON_X1MASK) != 0)
+            {
+                result |= MK_XBUTTON1;
+            }
+            if ((buttons & SDL_BUTTON_X2MASK) != 0)
+            {
+                result |= MK_XBUTTON2;
+            }
+            return result;
+        }
+
+        uint32_t sdl_mouse_button_down_message(const uint8_t button)
+        {
+            switch (button)
+            {
+            case SDL_BUTTON_LEFT:
+                return WM_LBUTTONDOWN;
+            case SDL_BUTTON_RIGHT:
+                return WM_RBUTTONDOWN;
+            case SDL_BUTTON_MIDDLE:
+                return WM_MBUTTONDOWN;
+            case SDL_BUTTON_X1:
+            case SDL_BUTTON_X2:
+                return WM_XBUTTONDOWN;
+            default:
+                return 0;
+            }
+        }
+
+        uint32_t sdl_mouse_button_up_message(const uint8_t button)
+        {
+            switch (button)
+            {
+            case SDL_BUTTON_LEFT:
+                return WM_LBUTTONUP;
+            case SDL_BUTTON_RIGHT:
+                return WM_RBUTTONUP;
+            case SDL_BUTTON_MIDDLE:
+                return WM_MBUTTONUP;
+            case SDL_BUTTON_X1:
+            case SDL_BUTTON_X2:
+                return WM_XBUTTONUP;
+            default:
+                return 0;
+            }
+        }
+
+        uint16_t sdl_mouse_button_to_xbutton(const uint8_t button)
+        {
+            switch (button)
+            {
+            case SDL_BUTTON_X1:
+                return XBUTTON1;
+            case SDL_BUTTON_X2:
+                return XBUTTON2;
+            default:
+                return 0;
+            }
+        }
+
+        uint64_t mouse_button_wparam(const uint16_t key_state, const uint8_t button)
+        {
+            if (const auto xbutton = sdl_mouse_button_to_xbutton(button); xbutton != 0)
+            {
+                return make_high_word_wparam(key_state, xbutton);
+            }
+            return key_state;
         }
 
         uint64_t map_sdl_keycode(const SDL_Keycode key)
@@ -470,7 +611,9 @@ namespace sogen
                 int texture_height{};
                 ui_surface_format texture_format{ui_surface_format::bgra8};
                 bool has_surface{};
+                SDL_FRect last_render_dst{0.0f, 0.0f, 0.0f, 0.0f};
             };
+
             ~sdl_ui_backend() override
             {
                 this->reset();
@@ -492,6 +635,7 @@ namespace sogen
                 this->windows_.clear();
                 this->guest_by_window_id_.clear();
                 this->active_window_ = 0;
+                this->mouse_button_state_ = 0;
                 this->key_down_.fill(false);
 
                 if (this->initialized_)
@@ -507,10 +651,21 @@ namespace sogen
 
             void pump_events() override
             {
+                {
+                    const std::lock_guard lock(this->command_mutex_);
+                    if (!this->ui_thread_known_)
+                    {
+                        this->ui_thread_id_ = std::this_thread::get_id();
+                        this->ui_thread_known_ = true;
+                    }
+                }
+
                 if (!this->ensure_initialized())
                 {
                     return;
                 }
+
+                this->drain_commands();
 
                 SDL_Event event{};
                 while (SDL_PollEvent(&event))
@@ -649,23 +804,46 @@ namespace sogen
                         break;
 
                     case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                        if (event.button.button == SDL_BUTTON_LEFT)
+                        if (const auto message = sdl_mouse_button_down_message(event.button.button); message != 0)
                         {
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
                                 this->set_window_active(guest, true);
-                                this->post_event(guest, WM_LBUTTONDOWN, MK_LBUTTON,
+                                this->mouse_button_state_ |= sdl_mouse_button_to_mk(event.button.button);
+                                this->post_event(guest, message, mouse_button_wparam(this->mouse_button_state_, event.button.button),
                                                  this->map_window_point(guest, event.button.x, event.button.y));
                             }
                         }
                         break;
 
                     case SDL_EVENT_MOUSE_BUTTON_UP:
-                        if (event.button.button == SDL_BUTTON_LEFT)
+                        if (const auto message = sdl_mouse_button_up_message(event.button.button); message != 0)
                         {
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
-                                this->post_event(guest, WM_LBUTTONUP, 0, this->map_window_point(guest, event.button.x, event.button.y));
+                                this->mouse_button_state_ &= static_cast<uint16_t>(~sdl_mouse_button_to_mk(event.button.button));
+                                this->post_event(guest, message, mouse_button_wparam(this->mouse_button_state_, event.button.button),
+                                                 this->map_window_point(guest, event.button.x, event.button.y));
+                            }
+                        }
+                        break;
+
+                    case SDL_EVENT_MOUSE_WHEEL:
+                        if (const auto guest = this->resolve_guest(event.wheel.windowID); guest != 0)
+                        {
+                            this->set_window_active(guest, true);
+
+                            const auto point = this->map_window_point(guest, event.wheel.mouse_x, event.wheel.mouse_y);
+
+                            if (const auto delta_y = sdl_wheel_delta(event.wheel.y); delta_y != 0)
+                            {
+                                this->post_event(guest, WM_MOUSEWHEEL,
+                                                 make_high_word_wparam(this->mouse_button_state_, static_cast<uint16_t>(delta_y)), point);
+                            }
+                            if (const auto delta_x = sdl_wheel_delta(event.wheel.x); delta_x != 0)
+                            {
+                                this->post_event(guest, WM_MOUSEHWHEEL,
+                                                 make_high_word_wparam(this->mouse_button_state_, static_cast<uint16_t>(delta_x)), point);
                             }
                         }
                         break;
@@ -674,8 +852,9 @@ namespace sogen
                         if (const auto guest = this->resolve_guest(event.motion.windowID); guest != 0)
                         {
                             this->set_window_active(guest, true);
-                            const uint64_t keys = (event.motion.state & SDL_BUTTON_LMASK) ? MK_LBUTTON : 0;
-                            this->post_event(guest, WM_MOUSEMOVE, keys, this->map_window_point(guest, event.motion.x, event.motion.y));
+                            this->mouse_button_state_ = sdl_mouse_mask_to_mk(event.motion.state);
+                            this->post_event(guest, WM_MOUSEMOVE, low_word(this->mouse_button_state_),
+                                             this->map_window_point(guest, event.motion.x, event.motion.y));
                         }
                         break;
 
@@ -686,6 +865,11 @@ namespace sogen
             }
 
             void create_window(const ui_window_desc& desc) override
+            {
+                this->queue_or_run([this, desc] { this->create_window_impl(desc); });
+            }
+
+            void create_window_impl(const ui_window_desc& desc)
             {
                 if (!this->ensure_initialized())
                 {
@@ -726,7 +910,7 @@ namespace sogen
                                                         desc.client_insets.right);
                 const auto height = std::max<int>(1, static_cast<int>(desc.rect.bottom - desc.rect.top) - desc.client_insets.top -
                                                          desc.client_insets.bottom);
-                const auto title = u16_to_u8(desc.title);
+                const auto title = make_host_window_title(desc.title);
                 auto* window = SDL_CreateWindow(title.c_str(), static_cast<int>(width), static_cast<int>(height), flags);
                 if (!window)
                 {
@@ -757,128 +941,224 @@ namespace sogen
 
             void destroy_window(const hwnd window) override
             {
-                if (const auto it = this->windows_.find(window); it != this->windows_.end())
-                {
-                    // Child (non-top-level) windows have no SDL window; only top-level windows do.
-                    if (it->second.window)
+                this->queue_or_run([this, window] {
+                    if (const auto it = this->windows_.find(window); it != this->windows_.end())
                     {
-                        SDL_StopTextInput(it->second.window);
-                        this->guest_by_window_id_.erase(SDL_GetWindowID(it->second.window));
+                        // Child (non-top-level) windows have no SDL window; only top-level windows do.
+                        if (it->second.window)
+                        {
+                            SDL_StopTextInput(it->second.window);
+                            this->guest_by_window_id_.erase(SDL_GetWindowID(it->second.window));
+                        }
+                        destroy_window_resources(it->second);
+                        this->windows_.erase(it);
                     }
-                    destroy_window_resources(it->second);
-                    this->windows_.erase(it);
-                }
+                });
             }
 
             void set_window_rect(const hwnd window, const RECT& rect) override
             {
-                if (auto* state = this->resolve_window(window))
-                {
-                    state->desc.rect = rect;
-                    if (state->desc.top_level)
+                this->queue_or_run([this, window, rect] {
+                    if (auto* state = this->resolve_window(window))
                     {
-                        const auto& insets = state->desc.client_insets;
-                        SDL_SetWindowPosition(state->window, rect.left, rect.top);
-                        SDL_SetWindowSize(state->window, std::max<int>(1, (rect.right - rect.left) - insets.left - insets.right),
-                                          std::max<int>(1, (rect.bottom - rect.top) - insets.top - insets.bottom));
+                        state->desc.rect = rect;
+                        if (state->desc.top_level)
+                        {
+                            const auto& insets = state->desc.client_insets;
+                            SDL_SetWindowPosition(state->window, rect.left, rect.top);
+                            SDL_SetWindowSize(state->window, std::max<int>(1, (rect.right - rect.left) - insets.left - insets.right),
+                                              std::max<int>(1, (rect.bottom - rect.top) - insets.top - insets.bottom));
+                        }
+                        this->redraw_related(window);
                     }
-                    this->redraw_related(window);
-                }
+                });
             }
 
             void set_window_visible(const hwnd window, const bool visible) override
             {
-                if (auto* state = this->resolve_window(window))
-                {
-                    state->desc.visible = visible;
-                    if (state->desc.top_level)
+                this->queue_or_run([this, window, visible] {
+                    if (auto* state = this->resolve_window(window))
                     {
-                        if (visible)
+                        state->desc.visible = visible;
+                        if (state->desc.top_level)
                         {
-                            SDL_ShowWindow(state->window);
+                            if (visible)
+                            {
+                                SDL_ShowWindow(state->window);
+                            }
+                            else
+                            {
+                                SDL_HideWindow(state->window);
+                            }
                         }
-                        else
-                        {
-                            SDL_HideWindow(state->window);
-                        }
+                        this->redraw_related(window);
                     }
-                    this->redraw_related(window);
-                }
+                });
             }
 
             void set_window_enabled(const hwnd window, const bool enabled) override
             {
-                if (auto* state = this->resolve_window(window))
-                {
-                    state->desc.enabled = enabled;
-                    this->redraw_related(window);
-                }
+                this->queue_or_run([this, window, enabled] {
+                    if (auto* state = this->resolve_window(window))
+                    {
+                        state->desc.enabled = enabled;
+                        this->redraw_related(window);
+                    }
+                });
             }
 
             void set_window_title(const hwnd window, std::u16string_view title) override
             {
-                if (auto* state = this->resolve_window(window))
-                {
-                    state->desc.title = std::u16string{title};
-                    if (state->desc.top_level)
+                this->queue_or_run([this, window, title = std::u16string{title}] {
+                    if (auto* state = this->resolve_window(window))
                     {
-                        const auto utf8 = u16_to_u8(title);
-                        SDL_SetWindowTitle(state->window, utf8.c_str());
+                        state->desc.title = title;
+                        if (state->desc.top_level)
+                        {
+                            const auto host_title = make_host_window_title(title);
+                            SDL_SetWindowTitle(state->window, host_title.c_str());
+                        }
+                        this->redraw_related(window);
                     }
-                    this->redraw_related(window);
-                }
+                });
             }
 
             void present_surface(const hwnd window, const ui_surface_desc& surface) override
             {
-                // The render target is frequently a child window (e.g. a D3D/Vulkan swap-chain child),
-                // which has no SDL renderer of its own. Composite its surface onto the top-level
-                // ancestor -- the window that actually owns the on-screen SDL window and renderer.
-                auto* state = this->resolve_window(window);
-                if (state && !state->renderer)
+                // The queued command runs on the pump thread after this call returns, by which point the
+                // guest's pixel buffer may be gone, so take a private copy of it now.
+                std::vector<uint8_t> pixels;
+                auto copy = surface;
+                if (surface.pixels && surface.stride > 0 && surface.height > 0)
                 {
-                    state = this->resolve_window(this->get_top_level_ancestor(window));
+                    const auto size = static_cast<size_t>(surface.stride) * static_cast<size_t>(surface.height);
+                    pixels.resize(size);
+                    std::memcpy(pixels.data(), surface.pixels, size);
                 }
-                if (state && state->renderer)
-                {
-                    update_surface_texture(*state, surface);
-                    render_window(*state);
-                }
+
+                this->queue_or_run([this, window, copy, pixels = std::move(pixels)]() mutable {
+                    copy.pixels = pixels.empty() ? nullptr : pixels.data();
+
+                    // The render target is frequently a child window (e.g. a D3D/Vulkan swap-chain child),
+                    // which has no SDL renderer of its own. Composite its surface onto the top-level
+                    // ancestor -- the window that actually owns the on-screen SDL window and renderer.
+                    auto* state = this->resolve_window(window);
+                    if (state && !state->renderer)
+                    {
+                        state = this->resolve_window(this->get_top_level_ancestor(window));
+                    }
+                    const bool presented = state != nullptr && state->renderer != nullptr;
+                    if (presented)
+                    {
+                        // Temporary diagnostic (EMULATOR_UI_PRESENT_DIAG=1): checks whether SDL's own
+                        // present call is where real per-frame wall-clock time goes (e.g. an implicit
+                        // vsync/frame-pacing wait), since D3D9-host-side per-draw cost reductions this
+                        // session haven't moved measured FPS at all.
+                        if (getenv("EMULATOR_UI_PRESENT_DIAG"))
+                        {
+                            const auto t0 = std::chrono::steady_clock::now();
+                            update_surface_texture(*state, copy);
+                            const auto t1 = std::chrono::steady_clock::now();
+                            render_window(*state);
+                            const auto t2 = std::chrono::steady_clock::now();
+                            static int counter = 0;
+                            if (++counter % 30 == 0)
+                            {
+                                fprintf(stderr, "[ui-present-diag] update_surface_texture=%.2fms render_window=%.2fms\n",
+                                        std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                                        std::chrono::duration<double, std::milli>(t2 - t1).count());
+                            }
+                        }
+                        else
+                        {
+                            update_surface_texture(*state, copy);
+                            render_window(*state);
+                        }
+                    }
+                    else
+                    {
+                        this->report_dropped_present(window);
+                    }
+
+                    report_present_rate(window, presented);
+                });
             }
 
             void set_cursor_position(const hwnd window, const int32_t screen_x, const int32_t screen_y) override
             {
-                // Top-levels are positioned at their emulated rect (SDL_SetWindowPosition), so emulated screen
-                // coordinates map to guest client pixels by subtracting that origin.
-                const auto top = this->get_top_level_ancestor(window);
-                if (auto* state = this->resolve_window(top); state && state->window)
-                {
-                    auto window_x = static_cast<float>(screen_x - state->desc.rect.left);
-                    auto window_y = static_cast<float>(screen_y - state->desc.rect.top);
-                    // The frame is letterboxed into the window, so guest pixels are not at the same position in
-                    // the host window; map through the same transform map_window_point inverts.
-                    if (state->renderer)
+                this->queue_or_run([this, window, screen_x, screen_y] {
+                    // Top-levels are positioned at their emulated rect (SDL_SetWindowPosition), so emulated screen
+                    // coordinates map to guest client pixels by subtracting that origin.
+                    const auto top = this->get_top_level_ancestor(window);
+                    if (auto* state = this->resolve_window(top); state && state->window)
                     {
-                        SDL_RenderCoordinatesToWindow(state->renderer, window_x, window_y, &window_x, &window_y);
+                        auto window_x = static_cast<float>(screen_x - state->desc.rect.left);
+                        auto window_y = static_cast<float>(screen_y - state->desc.rect.top);
+                        // The frame is letterboxed into the window, so guest pixels are not at the same position in
+                        // the host window; map through the same transform map_window_point inverts.
+                        if (state->renderer)
+                        {
+                            SDL_RenderCoordinatesToWindow(state->renderer, window_x, window_y, &window_x, &window_y);
+                        }
+                        SDL_WarpMouseInWindow(state->window, window_x, window_y);
                     }
-                    SDL_WarpMouseInWindow(state->window, window_x, window_y);
-                }
+                });
             }
 
             void set_cursor_visibility(const bool visible) override
             {
-                // SDL cursor visibility is process-global, which matches the single foreground guest game.
-                if (visible)
-                {
-                    SDL_ShowCursor();
-                }
-                else
-                {
-                    SDL_HideCursor();
-                }
+                this->queue_or_run([visible] {
+                    // SDL cursor visibility is process-global, which matches the single foreground guest game.
+                    if (visible)
+                    {
+                        SDL_ShowCursor();
+                    }
+                    else
+                    {
+                        SDL_HideCursor();
+                    }
+                });
             }
 
           private:
+            // SDL windows are thread-affine: only their owning thread's message pump services the
+            // cross-thread SendMessage that host calls such as SDL_ShowWindow issue, so every SDL
+            // operation must run on the one thread that calls pump_events. With multiple vCPUs the
+            // syscall handlers run on different worker threads, so operations they trigger are queued
+            // here and executed on the pump thread. Every ui_backend method returns void, so the
+            // callers never need a result and this can stay fully asynchronous.
+            // Guest windows already reported by report_dropped_present, so the diagnostic prints once
+            // per window rather than once per dropped frame.
+            std::unordered_set<hwnd> reported_drops_{};
+
+            void queue_or_run(std::function<void()> task)
+            {
+                {
+                    const std::lock_guard lock(this->command_mutex_);
+                    if (this->ui_thread_known_ && this->ui_thread_id_ != std::this_thread::get_id())
+                    {
+                        this->commands_.emplace_back(std::move(task));
+                        return;
+                    }
+                }
+
+                task();
+            }
+
+            void drain_commands()
+            {
+                std::vector<std::function<void()>> pending;
+                {
+                    const std::lock_guard lock(this->command_mutex_);
+                    pending.swap(this->commands_);
+                }
+
+                for (auto& task : pending)
+                {
+                    task();
+                }
+            }
+
             bool ensure_initialized()
             {
                 if (!this->initialized_)
@@ -1013,6 +1293,83 @@ namespace sogen
                 SDL_UpdateTexture(state.texture, nullptr, surface.pixels, surface.stride);
             }
 
+            // One line per distinct guest window whose frames are being discarded, with the whole
+            // window table, so the "which window should this frame have gone to" question is
+            // answerable from a single run. Shares EMULATOR_FPS_COUNTER's gate.
+            void report_dropped_present(const hwnd window)
+            {
+                static const bool enabled = [] {
+                    const auto* env = getenv("EMULATOR_FPS_COUNTER");
+                    return env != nullptr && env[0] == '1' && env[1] == '\0';
+                }();
+                if (!enabled || !this->reported_drops_.insert(window).second)
+                {
+                    return;
+                }
+
+                const auto* state = this->resolve_window(window);
+                printf("[present-drop] hwnd=0x%X known=%d top_level=%d parent=0x%X ancestor=0x%X\n", static_cast<unsigned>(window),
+                       state != nullptr ? 1 : 0, state != nullptr && state->desc.top_level ? 1 : 0,
+                       state != nullptr ? static_cast<unsigned>(state->desc.parent) : 0u,
+                       static_cast<unsigned>(this->get_top_level_ancestor(window)));
+                for (const auto& [handle, entry] : this->windows_)
+                {
+                    printf("[present-drop]   window 0x%X top_level=%d renderer=%d visible=%d style=0x%X rect=%dx%d\n",
+                           static_cast<unsigned>(handle), entry.desc.top_level ? 1 : 0, entry.renderer != nullptr ? 1 : 0,
+                           entry.desc.visible ? 1 : 0, static_cast<unsigned>(entry.desc.style),
+                           static_cast<int>(entry.desc.rect.right - entry.desc.rect.left),
+                           static_cast<int>(entry.desc.rect.bottom - entry.desc.rect.top));
+                }
+                fflush(stdout);
+            }
+
+            // Opt-in (EMULATOR_FPS_COUNTER=1) present-rate probe. Every rendering path -- the native
+            // D3D9 UMD, a guest-side translation layer's Vulkan swapchain and plain GDI blits -- funnels
+            // through present_surface, so this counts frames identically for all of them. Dropped
+            // presents (no SDL window/renderer resolved for the target guest window) are counted
+            // separately: from the emulated app's side those are indistinguishable from displayed ones,
+            // so an all-drops run looks exactly like a not-presenting one without this split.
+            static void report_present_rate(const hwnd window, const bool presented)
+            {
+                static const bool enabled = [] {
+                    const auto* env = getenv("EMULATOR_FPS_COUNTER");
+                    return env != nullptr && env[0] == '1' && env[1] == '\0';
+                }();
+                if (!enabled)
+                {
+                    return;
+                }
+
+                using clock = std::chrono::steady_clock;
+                static auto window_start = clock::now();
+                static uint64_t frames = 0;
+                static uint64_t dropped = 0;
+                static hwnd last_dropped_window = 0;
+
+                if (presented)
+                {
+                    ++frames;
+                }
+                else
+                {
+                    ++dropped;
+                    last_dropped_window = window;
+                }
+
+                const auto now = clock::now();
+                const auto elapsed = std::chrono::duration<double>(now - window_start).count();
+                if (elapsed >= 5.0)
+                {
+                    printf("[fps] %.2f (%llu frames / %.1fs, %llu dropped, last-dropped-hwnd=0x%X)\n",
+                           static_cast<double>(frames) / elapsed, static_cast<unsigned long long>(frames), elapsed,
+                           static_cast<unsigned long long>(dropped), static_cast<unsigned>(last_dropped_window));
+                    fflush(stdout);
+                    window_start = now;
+                    frames = 0;
+                    dropped = 0;
+                }
+            }
+
             static void render_window(window_state& state)
             {
                 if (state.has_surface && state.texture)
@@ -1024,7 +1381,15 @@ namespace sogen
                                                      SDL_LOGICAL_PRESENTATION_LETTERBOX);
                     SDL_SetRenderDrawColor(state.renderer, 0, 0, 0, 255);
                     SDL_RenderClear(state.renderer);
-                    SDL_RenderTexture(state.renderer, state.texture, nullptr, nullptr);
+
+                    int logical_w{};
+                    int logical_h{};
+                    SDL_GetWindowSize(state.window, &logical_w, &logical_h);
+
+                    const SDL_FRect dst{0.0f, 0.0f, static_cast<float>(logical_w), static_cast<float>(logical_h)};
+                    state.last_render_dst = dst;
+
+                    SDL_RenderTexture(state.renderer, state.texture, nullptr, &dst);
                     SDL_RenderPresent(state.renderer);
                     return;
                 }
@@ -1122,9 +1487,15 @@ namespace sogen
             event_sink sink_{};
             bool initialized_{};
             hwnd active_window_{};
+            uint16_t mouse_button_state_{};
             std::array<bool, SDL_SCANCODE_COUNT> key_down_{};
             std::unordered_map<hwnd, window_state> windows_{};
             std::unordered_map<SDL_WindowID, hwnd> guest_by_window_id_{};
+
+            std::mutex command_mutex_{};
+            std::vector<std::function<void()>> commands_{};
+            std::thread::id ui_thread_id_{};
+            bool ui_thread_known_{false};
         };
     }
 

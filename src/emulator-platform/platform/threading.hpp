@@ -88,12 +88,34 @@ namespace sogen
         EMULATOR_CAST(std::uint32_t, KPRIORITY) BasePriority;
     } THREAD_BASIC_INFORMATION64, *PTHREAD_BASIC_INFORMATION64;
 
+    // A 32-bit WOW64 caller passes this smaller layout (28 bytes: 32-bit TebBaseAddress/AffinityMask,
+    // CLIENT_ID32 instead of CLIENT_ID64), not THREAD_BASIC_INFORMATION64's 44 bytes.
+    typedef struct _THREAD_BASIC_INFORMATION32
+    {
+        NTSTATUS ExitStatus;
+        EMULATOR_CAST(uint32_t, PTEB32) TebBaseAddress;
+        CLIENT_ID32 ClientId;
+        EMULATOR_CAST(std::uint32_t, KAFFINITY) AffinityMask;
+        EMULATOR_CAST(std::uint32_t, KPRIORITY) Priority;
+        EMULATOR_CAST(std::uint32_t, KPRIORITY) BasePriority;
+    } THREAD_BASIC_INFORMATION32, *PTHREAD_BASIC_INFORMATION32;
+
     typedef struct _THREAD_TEB_INFORMATION
     {
         EmulatorTraits<Emu64>::PVOID TebInformation; // Buffer to write data into.
         ULONG TebOffset;                             // Offset in TEB to begin reading from.
         ULONG BytesToRead;                           // Number of bytes to read.
     } THREAD_TEB_INFORMATION, *PTHREAD_TEB_INFORMATION;
+
+    // A 32-bit caller (e.g. wow64.dll's own exception-preparation code, which queries
+    // ThreadTebInformation as 32-bit guest code) passes this smaller layout - TebInformation is a
+    // 32-bit pointer here, making the struct 12 bytes instead of THREAD_TEB_INFORMATION's 16.
+    typedef struct _THREAD_TEB_INFORMATION32
+    {
+        EmulatorTraits<Emu32>::PVOID TebInformation;
+        ULONG TebOffset;
+        ULONG BytesToRead;
+    } THREAD_TEB_INFORMATION32, *PTHREAD_TEB_INFORMATION32;
 
     typedef enum _KCONTINUE_TYPE
     {

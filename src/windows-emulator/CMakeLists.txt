@@ -12,9 +12,26 @@ endif()
 
 if(NOT TARGET SDL3::SDL3)
   list(REMOVE_ITEM SRC_FILES "${CMAKE_CURRENT_LIST_DIR}/ui_backends/sdl_ui_backend.cpp")
+  list(REMOVE_ITEM SRC_FILES "${CMAKE_CURRENT_LIST_DIR}/audio_backends/sdl_audio_backend.cpp")
   if(NOT EMSCRIPTEN)
     message(FATAL_ERROR "The SDL3 submodule (deps/SDL) is required for the host UI backend on this platform")
   endif()
+endif()
+
+# vkd3d-shader (real D3D9 SM2/3 shader translation) is a desktop-only feature: it's cross-compiled
+# from source via autotools and needs a widl IDL compiler plus GNU libtool/bison on the host, none of
+# which are meaningful (or available) on Android/iOS/Emscripten.
+if(NOT ANDROID AND NOT IOS AND NOT EMSCRIPTEN)
+  set(SOGEN_HAS_VKD3D_SHADER ON)
+endif()
+
+if(NOT SOGEN_HAS_VKD3D_SHADER)
+  list(REMOVE_ITEM SRC_FILES
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_host.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_host.hpp"
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_shader_translator.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/devices/d3d9_shader_translator.hpp"
+  )
 endif()
 
 add_library(windows-emulator ${SRC_FILES})
@@ -25,13 +42,76 @@ if(NOT SOGEN_ENABLE_CLANG_TIDY)
   target_precompile_headers(windows-emulator PRIVATE std_include.hpp)
 endif()
 
+# Real GDI text rendering (font_renderer.cpp) needs Freetype on every platform. Android/iOS have no
+# system package and no package-manager triplet covering them (vcpkg's community Android triplets
+# don't cover this project's ABIs either); unlike vkd3d-shader, Freetype is a small, plain-CMake
+# project with no autotools/widl dependency, so it's simplest to vendor and build it from source
+# for just those two platforms via the project's own cross-compilation toolchain files. Emscripten
+# ships Freetype as a built-in port instead (no vendoring needed there).
+if(ANDROID OR IOS)
+  set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+  set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+  # We only ever consume the `freetype` target from within this same CMake build, so skip
+  # Freetype's own install()/export() rules entirely. Left enabled, they generate a
+  # freetype-config.cmake package export whose INTERFACE_INCLUDE_DIRECTORIES fails CMake's
+  # relocatability check ("contains path ... which is prefixed in the source directory"), because
+  # add_subdirectory() nests deps/freetype inside this project's own source tree.
+  set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/deps/freetype ${CMAKE_BINARY_DIR}/deps/freetype EXCLUDE_FROM_ALL)
+  set(SOGEN_FREETYPE_TARGET freetype)
+
+  if(IOS)
+    # deps/freetype's vendored zlib shim (src/gzip/zutil.h) defines OS_CODE once for
+    # TARGET_OS_MAC and again, unguarded, for __APPLE__. Both macros are defined together once
+    # <TargetConditionals.h> is visible, which only happens transitively in this translation
+    # unit on the iOS SDK (not the macOS one), so only the iOS build sees the resulting
+    # -Werror,-Wmacro-redefined. Silence just that warning for just this one file instead of
+    # patching the vendored submodule.
+    set_property(SOURCE ${CMAKE_SOURCE_DIR}/deps/freetype/src/gzip/ftgzip.c
+      DIRECTORY ${CMAKE_SOURCE_DIR}/deps/freetype
+      APPEND PROPERTY COMPILE_OPTIONS -Wno-macro-redefined)
+  endif()
+elseif(NOT EMSCRIPTEN)
+  find_package(Freetype REQUIRED)
+  set(SOGEN_FREETYPE_TARGET Freetype::Freetype)
+endif()
+
 target_link_libraries(windows-emulator PUBLIC emulator minidump)
-target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol vulkan-headers)
+target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol dxgk-command-protocol d3d9-command-protocol vulkan-headers steam-bridge-protocol)
+
+# When the Steamworks SDK was provided, link the real Steam host backend (owns the SDK headers + the
+# real steamclient64.dll connection behind a clean C ABI) and let the device use it.
+if(TARGET steam-host-backend)
+  target_link_libraries(windows-emulator PRIVATE steam-host-backend)
+  target_compile_definitions(windows-emulator PRIVATE SOGEN_STEAM_REAL_BACKEND=1)
+endif()
+
+if(SOGEN_FREETYPE_TARGET)
+  target_link_libraries(windows-emulator PRIVATE ${SOGEN_FREETYPE_TARGET})
+endif()
+
+if(EMSCRIPTEN)
+  target_compile_options(windows-emulator PRIVATE "-sUSE_FREETYPE=1")
+  target_link_options(windows-emulator PUBLIC "-sUSE_FREETYPE=1")
+endif()
+
+if(SOGEN_HAS_VKD3D_SHADER)
+  target_link_libraries(windows-emulator PRIVATE vkd3d-shader-bridge)
+  target_compile_definitions(windows-emulator PRIVATE SOGEN_HAS_VKD3D_SHADER=1)
+endif()
 
 if(TARGET SDL3::SDL3)
   target_link_libraries(windows-emulator PRIVATE SDL3::SDL3)
   target_compile_definitions(windows-emulator PRIVATE SOGEN_HAS_SDL3=1)
 endif()
+
+# VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR's enum value in vulkan_core.h's
+# own VkStructureType enum is gated behind this macro (the struct body itself lives in the separate
+# vulkan_beta.h, included directly by vulkan_host.cpp -- this only unlocks the enum value).
+target_compile_definitions(windows-emulator PRIVATE VK_ENABLE_BETA_EXTENSIONS)
 
 target_include_directories(windows-emulator INTERFACE "${CMAKE_CURRENT_LIST_DIR}")
 

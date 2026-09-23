@@ -1,0 +1,20 @@
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include <arch_emulator.hpp>
+#include "platform/platform.hpp"
+
+#ifdef FEX_EMULATOR_IMPL
+#define FEX_EMULATOR_DLL_STORAGE EXPORT_SYMBOL
+#else
+#define FEX_EMULATOR_DLL_STORAGE IMPORT_SYMBOL
+#endif
+
+namespace sogen::fex
+{
+#if !SOGEN_BUILD_STATIC
+    FEX_EMULATOR_DLL_STORAGE
+#endif
+    std::unique_ptr<x86_64_emulator> create_x86_64_emulator(size_t vcpu_count = 1);
+} // namespace sogen::fex

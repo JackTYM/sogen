@@ -4,6 +4,163 @@
 
 namespace sogen
 {
+#ifndef OS_WINDOWS
+#define ANSI_CHARSET       0
+#define DEFAULT_CHARSET    1
+#define GREEK_CHARSET      161
+#define TURKISH_CHARSET    162
+#define VIETNAMESE_CHARSET 163
+#define HEBREW_CHARSET     177
+#define ARABIC_CHARSET     178
+#define BALTIC_CHARSET     186
+#define RUSSIAN_CHARSET    204
+#define EASTEUROPE_CHARSET 238
+
+#define DEFAULT_PITCH      0
+#define FF_SWISS           0x20
+#define FW_NORMAL          400
+#define FW_BOLD            700
+#define NTM_ITALIC         0x00000001
+#define NTM_BOLD           0x00000020
+#define NTM_REGULAR        0x00000040
+#define TRUETYPE_FONTTYPE  0x00000004
+#define RDH_RECTANGLES     1
+
+    struct ABC
+    {
+        int abcA;
+        UINT abcB;
+        int abcC;
+    };
+
+    struct RGNDATAHEADER
+    {
+        DWORD dwSize;
+        DWORD iType;
+        DWORD nCount;
+        DWORD nRgnSize;
+        RECT rcBound;
+    };
+#endif
+
+    struct EMU_LOGFONTW
+    {
+        LONG lfHeight;
+        LONG lfWidth;
+        LONG lfEscapement;
+        LONG lfOrientation;
+        LONG lfWeight;
+        BYTE lfItalic;
+        BYTE lfUnderline;
+        BYTE lfStrikeOut;
+        BYTE lfCharSet;
+        BYTE lfOutPrecision;
+        BYTE lfClipPrecision;
+        BYTE lfQuality;
+        BYTE lfPitchAndFamily;
+        char16_t lfFaceName[32];
+    };
+
+    static_assert(sizeof(EMU_LOGFONTW) == 0x5C);
+
+    struct EMU_ENUMLOGFONTEXW
+    {
+        EMU_LOGFONTW elfLogFont;
+        char16_t elfFullName[64];
+        char16_t elfStyle[32];
+        char16_t elfScript[32];
+    };
+
+    static_assert(sizeof(EMU_ENUMLOGFONTEXW) == 0x15C);
+
+    struct EMU_NEWTEXTMETRICW
+    {
+        LONG tmHeight;
+        LONG tmAscent;
+        LONG tmDescent;
+        LONG tmInternalLeading;
+        LONG tmExternalLeading;
+        LONG tmAveCharWidth;
+        LONG tmMaxCharWidth;
+        LONG tmWeight;
+        LONG tmOverhang;
+        LONG tmDigitizedAspectX;
+        LONG tmDigitizedAspectY;
+        char16_t tmFirstChar;
+        char16_t tmLastChar;
+        char16_t tmDefaultChar;
+        char16_t tmBreakChar;
+        BYTE tmItalic;
+        BYTE tmUnderlined;
+        BYTE tmStruckOut;
+        BYTE tmPitchAndFamily;
+        BYTE tmCharSet;
+        DWORD ntmFlags;
+        UINT ntmSizeEM;
+        UINT ntmCellHeight;
+        UINT ntmAvgWidth;
+    };
+
+    static_assert(sizeof(EMU_NEWTEXTMETRICW) == 0x4C);
+
+    struct EMU_NEWTEXTMETRICEXW
+    {
+        EMU_NEWTEXTMETRICW ntmTm;
+        DWORD fsUsb[4];
+        DWORD fsCsb[2];
+    };
+
+    static_assert(sizeof(EMU_NEWTEXTMETRICEXW) == 0x64);
+
+    struct FIXED
+    {
+        uint16_t fract;
+        int16_t value;
+    };
+
+    static_assert(sizeof(FIXED) == 0x04);
+
+    struct POINTFX
+    {
+        FIXED x;
+        FIXED y;
+    };
+
+    static_assert(sizeof(POINTFX) == 0x08);
+
+    struct EMU_TTPOLYGONHEADER
+    {
+        uint32_t cb{};
+        uint32_t dwType{};
+        POINTFX pfxStart{};
+    };
+
+    static_assert(sizeof(EMU_TTPOLYGONHEADER) == 0x10);
+
+    struct EMU_TTPOLYCURVE_HEADER
+    {
+        uint16_t wType{};
+        uint16_t cpfx{};
+    };
+
+    static_assert(sizeof(EMU_TTPOLYCURVE_HEADER) == 0x04);
+
+    struct EMU_BITMAPINFOHEADER
+    {
+        DWORD biSize;
+        LONG biWidth;
+        LONG biHeight;
+        WORD biPlanes;
+        WORD biBitCount;
+        DWORD biCompression;
+        DWORD biSizeImage;
+        LONG biXPelsPerMeter;
+        LONG biYPelsPerMeter;
+        DWORD biClrUsed;
+        DWORD biClrImportant;
+    };
+
+    static_assert(sizeof(EMU_BITMAPINFOHEADER) == 0x28);
 
     struct GDI_HANDLE_ENTRY64
     {
@@ -40,6 +197,7 @@ namespace sogen
         UCHAR Flags;
         uint32_t UserPointer;
     };
+
     static_assert(sizeof(GDI_HANDLE_ENTRY32) == 0x10);
 
 #define GDI_MAX_HANDLE_COUNT 0xFFFF // 0x4000
@@ -51,6 +209,7 @@ namespace sogen
         uint64_t Objects[0x20];
         uint64_t Data[0x200]; // ?
     };
+
     static_assert(offsetof(GDI_SHARED_MEMORY64, Objects) == 0x1800B0);
 
     struct EMU_D3DKMT_ADAPTERINFO
@@ -79,6 +238,7 @@ namespace sogen
         UINT32 Padding;
         UINT64 pAdapters;
     };
+
     static_assert(sizeof(EMU_D3DKMT_ENUMADAPTERS3) == 0x18);
 
     struct EMU_D3DKMT_GET_PROPERTIES
@@ -192,6 +352,31 @@ namespace sogen
         UINT32 PatchLocationListSize;
     };
 
+    struct EMU_D3DKMT_CREATEPAGINGQUEUE
+    {
+        UINT32 hDevice;
+        INT32 Priority;
+        UINT32 hPagingQueue;
+        UINT32 hSyncObject;
+        UINT64 FenceValueCPUVirtualAddress;
+        UINT32 PhysicalAdapterIndex;
+        UINT32 pad;
+    };
+
+    struct EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT
+    {
+        UINT32 hDevice;          // +0x00
+        UINT32 pad;              // +0x04
+        UINT32 InfoType;         // +0x08
+        UINT32 InfoFlags;        // +0x0C
+        UINT64 InfoData[8];      // +0x10 (64 bytes of union payload)
+        UINT32 InfoSharedHandle; // +0x50
+        UINT32 pad2;             // +0x54
+        UINT32 hSyncObject;      // +0x58
+        UINT32 pad3;             // +0x5C
+    };
+    static_assert(sizeof(EMU_D3DKMT_CREATESYNCHRONIZATIONOBJECT) == 0x60);
+
     struct EMU_D3DKMT_ESCAPE
     {
         UINT32 hAdapter;
@@ -221,6 +406,31 @@ namespace sogen
         UINT32 PatchLocationListSize;
         UINT64 CommandBuffer;
     };
+
+    struct EMU_D3DKMT_RENDER
+    {
+        UINT32 hContext;
+        UINT32 CommandOffset;
+        UINT32 CommandLength;
+        UINT32 AllocationCount;
+        UINT32 PatchLocationCount;
+        UINT64 pNewCommandBuffer;
+        UINT32 NewCommandBufferSize;
+        UINT64 pNewAllocationList;
+        UINT32 NewAllocationListSize;
+        UINT64 pNewPatchLocationList;
+        UINT32 NewPatchLocationListSize;
+        UINT32 Flags;
+        UINT64 PresentHistoryToken;
+        UINT32 BroadcastContextCount;
+        UINT32 BroadcastContext[64];
+        UINT32 QueuedBufferCount;
+        UINT64 NewCommandBuffer;
+        UINT64 pPrivateDriverData;
+        UINT32 PrivateDriverDataSize;
+    };
+
+    static_assert(sizeof(EMU_D3DKMT_RENDER) == 368);
 
     struct EMU_D3DDDI_ALLOCATIONINFO
     {
@@ -268,6 +478,7 @@ namespace sogen
         UINT64 GpuVirtualAddress;
         UINT64 Reserved[6];
     };
+
     static_assert(sizeof(EMU_D3DDDI_OPENALLOCATIONINFO2) == 80);
 
     struct EMU_D3DKMT_OPENRESOURCE
@@ -297,10 +508,30 @@ namespace sogen
         UINT64 GpuVirtualAddress;
     };
 
+    struct EMU_D3DKMT_LOCK2
+    {
+        UINT32 hDevice;
+        UINT32 hAllocation;
+        UINT32 Flags;
+        UINT32 pad;
+        UINT64 pData;
+    };
+    static_assert(sizeof(EMU_D3DKMT_LOCK2) == 0x18);
+
+    struct EMU_CURRENT_DPI_INFO
+    {
+        UINT32 pad0[2];
+        UINT32 DpiX;
+        UINT32 DpiY;
+        UINT32 pad1[20];
+    };
+    static_assert(sizeof(EMU_CURRENT_DPI_INFO) == 0x60);
+
     struct EMU_D3DKMT_GETDEVICESTATE
     {
         UINT32 hDevice;
         UINT32 StateType;
+
         union
         {
             UINT32 State;
@@ -315,6 +546,15 @@ namespace sogen
         UINT32 hDevice;
         UINT32 Reason;
     };
+
+    struct EMU_D3DKMT_MIRACAST_DISPLAY_DEVICE_CAPS
+    {
+        BOOLEAN HdcpSupported;
+        ULONG DefaultControlPort;
+        BOOLEAN UsesIhvSolution;
+    };
+
+    static_assert(sizeof(EMU_D3DKMT_MIRACAST_DISPLAY_DEVICE_CAPS) == 0xC);
 
     struct EMU_D3DKMT_DESTROYALLOCATION
     {
@@ -335,6 +575,7 @@ namespace sogen
                 UINT32 Reserved : 29;
                 UINT32 SystemUseOnly : 1;
             };
+
             UINT32 Value;
         };
     };
@@ -367,6 +608,13 @@ namespace sogen
         UINT32 Flags;
     };
 
+    struct EMU_D3DKMT_CURRENTDISPLAYMODE
+    {
+        UINT32 hAdapter;
+        UINT32 VidPnSourceId;
+        EMU_D3DKMT_DISPLAYMODE DisplayModeInfo;
+    };
+
     struct EMU_D3DKMT_GETDISPLAYMODELIST
     {
         UINT32 hAdapter;
@@ -394,6 +642,50 @@ namespace sogen
     {
         LUID AdapterLuid;
         UINT32 hAdapter;
+    };
+
+    struct EMU_D3DKMT_CREATEDCFROMMEMORY
+    {
+        UINT64 pMemory;
+        UINT32 Format;
+        UINT32 Width;
+        UINT32 Height;
+        UINT32 Pitch;
+        UINT64 hDeviceDc;
+        UINT64 pColorTable;
+        UINT64 hDc;
+        UINT64 hBitmap;
+    };
+
+    struct EMU_D3DKMT_DESTROYDCFROMMEMORY
+    {
+        UINT64 hDc;
+        UINT64 hBitmap;
+    };
+
+    // Minimal layout for NtGdiDdDDISubmitCommand (32-bit guest ABI).
+    // Fields at their real Windows offsets; unused tail fields are omitted.
+    struct EMU_D3DKMT_SUBMITCOMMAND
+    {
+        UINT64 Commands;              // +0x00 guest address of command data
+        UINT32 CommandLength;         // +0x08
+        UINT32 Flags;                 // +0x0C
+        UINT64 PresentHistoryToken;   // +0x10
+        UINT32 BroadcastContextCount; // +0x18
+        UINT32 pad0;                  // +0x1C alignment
+        UINT32 BroadcastContext[64];  // +0x20 .. +0x11F  (BroadcastContext[0] = hContext)
+        UINT32 pPrivateDriverData;    // +0x120 (32-bit ptr)
+        UINT32 PrivateDriverDataSize; // +0x124
+    };
+
+    // Minimal layout for NtGdiDdDDIPresent (32-bit guest ABI).
+    struct EMU_D3DKMT_PRESENT
+    {
+        UINT32 hDevice;       // +0x00 (hDevice / hContext union)
+        UINT32 hWindow;       // +0x04 (HWND in 32-bit)
+        UINT32 VidPnSourceId; // +0x08
+        UINT32 hSource;       // +0x0C render-target allocation to present
+        UINT32 hDestination;  // +0x10
     };
 } // namespace sogen
 

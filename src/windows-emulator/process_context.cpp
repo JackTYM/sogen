@@ -74,7 +74,20 @@ namespace sogen
         {
             uint64_t default_allocation_base =
                 (is_wow64_process == true) ? DEFAULT_ALLOCATION_ADDRESS_32BIT : DEFAULT_ALLOCATION_ADDRESS_64BIT;
-            uint64_t base = memory.find_free_allocation_base(size, default_allocation_base);
+
+            // For a WoW64 process, everything sub-allocated out of this allocator (PEB32, the cloned
+            // ApiSetMap, RTL_USER_PROCESS_PARAMETERS32, etc.) must be 32-bit addressable - process_context
+            // truncates this allocator's own base into 32-bit fields (e.g. p32.ApiSetMap =
+            // static_cast<uint32_t>(...)). The 2-arg find_free_allocation_base has no ceiling at all
+            // (defaults to MAX_ALLOCATION_END_EXCL - 1), so once the low ~4GB arena is tight enough (a
+            // WoW64 process maps ntdll32/kernel32/syswow64 modules, the GS segment, native/32-bit stacks,
+            // etc. before this runs), it can silently pick a base above 4GB - the subsequent uint32_t
+            // truncation then produces a garbage guest pointer, causing an access violation inside real
+            // ntdll's ApiSet-namespace binary search on any lookup against that base.
+            constexpr uint64_t below_4gb_ceiling = 0xFFFFFFFFULL;
+            const uint64_t highest_address = is_wow64_process ? below_4gb_ceiling : MAX_ALLOCATION_ADDRESS;
+            uint64_t base = memory.find_free_allocation_base(size, default_allocation_base, ALLOCATION_GRANULARITY, MIN_ALLOCATION_ADDRESS,
+                                                             highest_address);
             bool allocated = memory.allocate_memory(base, size, memory_permission::read_write);
 
             if (!allocated)
@@ -85,48 +98,211 @@ namespace sogen
             return emulator_allocator{memory, base, size};
         }
 
+        // RtlUpcaseUnicodeChar/RtlDowncaseUnicodeChar handle a-z inline and, for chars >= 0xC0, walk an
+        // internal table built from l_intl.nls (served via the type-14 NtGetNlsSectionPtr section
+        // handled in syscalls/locale.cpp), not these PEB-referenced NLSTABLEINFO tables. The guest only
+        // depends on ActiveCodePage=1252/OemCodePage=437 (GetACP()/GetOEMCP()) and non-null pointers
+        // here; this identity table is otherwise an inert placeholder.
+        std::vector<uint16_t> make_ascii_case_table(const bool uppercase)
+        {
+            std::vector<uint16_t> table(0x10000);
+            for (uint32_t i = 0; i < table.size(); ++i)
+            {
+                table[i] = static_cast<uint16_t>(i);
+            }
+
+            if (uppercase)
+            {
+                for (uint32_t c = u'a'; c <= u'z'; ++c)
+                {
+                    table[c] = static_cast<uint16_t>(c - u'a' + u'A');
+                }
+            }
+            else
+            {
+                for (uint32_t c = u'A'; c <= u'Z'; ++c)
+                {
+                    table[c] = static_cast<uint16_t>(c - u'A' + u'a');
+                }
+            }
+
+            return table;
+        }
+
+        // PEB.AnsiCodePageData/OemCodePageData point at a CPTABLEINFO describing the process's
+        // ANSI/OEM codepage. This builds a minimal, single-byte-codepage-1252-shaped identity table:
+        // WideCharTable[byte] treats every byte 0-255 as its own Unicode code point (correct for the
+        // printable ASCII range, imprecise for cp1252's 0x80-0x9F).
+        void fill_identity_codepage_table(emulator_allocator& allocator, CPTABLEINFO& t)
+        {
+            std::vector<uint16_t> wide_char_table(0x100);
+            std::vector<uint16_t> multi_byte_table(0x100);
+            for (uint32_t i = 0; i < 0x100; ++i)
+            {
+                wide_char_table[i] = static_cast<uint16_t>(i);
+                multi_byte_table[i] = static_cast<uint16_t>(i);
+            }
+
+            const auto wide_char_table_addr = allocator.reserve(wide_char_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            const auto multi_byte_table_addr = allocator.reserve(multi_byte_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            allocator.get_memory().write_memory(wide_char_table_addr, wide_char_table.data(), wide_char_table.size() * sizeof(uint16_t));
+            allocator.get_memory().write_memory(multi_byte_table_addr, multi_byte_table.data(), multi_byte_table.size() * sizeof(uint16_t));
+
+            t.CodePage = 1252;
+            t.MaximumCharacterSize = 1;
+            t.DefaultChar = '?';
+            t.UniDefaultChar = u'?';
+            t.TransDefaultChar = '?';
+            t.TransUniDefaultChar = u'?';
+            t.DBCSCodePage = 0;
+            t.MultiByteTable = multi_byte_table_addr;
+            t.WideCharTable = wide_char_table_addr;
+            t.DBCSRanges = 0;
+            t.DBCSOffsets = 0;
+        }
+
+        uint64_t make_identity_codepage_table(emulator_allocator& allocator)
+        {
+            const auto table = allocator.reserve<CPTABLEINFO>();
+            table.access([&](CPTABLEINFO& t) { fill_identity_codepage_table(allocator, t); });
+            return table.value();
+        }
+
+        // CPTABLEINFO32/NLSTABLEINFO32 (kernel_mapped.hpp) are the layouts real 32-bit ntdll parses
+        // under WoW64: they differ from CPTABLEINFO/NLSTABLEINFO only in pointer width and the
+        // resulting field offsets and struct size.
+        void fill_identity_codepage_table32(emulator_allocator& allocator, CPTABLEINFO32& t)
+        {
+            std::vector<uint16_t> wide_char_table(0x100);
+            std::vector<uint16_t> multi_byte_table(0x100);
+            for (uint32_t i = 0; i < 0x100; ++i)
+            {
+                wide_char_table[i] = static_cast<uint16_t>(i);
+                multi_byte_table[i] = static_cast<uint16_t>(i);
+            }
+
+            const auto wide_char_table_addr = allocator.reserve(wide_char_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            const auto multi_byte_table_addr = allocator.reserve(multi_byte_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            allocator.get_memory().write_memory(wide_char_table_addr, wide_char_table.data(), wide_char_table.size() * sizeof(uint16_t));
+            allocator.get_memory().write_memory(multi_byte_table_addr, multi_byte_table.data(), multi_byte_table.size() * sizeof(uint16_t));
+
+            t.CodePage = 1252;
+            t.MaximumCharacterSize = 1;
+            t.DefaultChar = '?';
+            t.UniDefaultChar = u'?';
+            t.TransDefaultChar = '?';
+            t.TransUniDefaultChar = u'?';
+            t.DBCSCodePage = 0;
+            t.MultiByteTable = static_cast<uint32_t>(multi_byte_table_addr);
+            t.WideCharTable = static_cast<uint32_t>(wide_char_table_addr);
+            t.DBCSRanges = 0;
+            t.DBCSOffsets = 0;
+        }
+
+        uint32_t make_identity_codepage_table32(emulator_allocator& allocator)
+        {
+            const auto table = allocator.reserve<CPTABLEINFO32>();
+            table.access([&](CPTABLEINFO32& t) { fill_identity_codepage_table32(allocator, t); });
+            return static_cast<uint32_t>(table.value());
+        }
+
         void setup_gdt(x86_64_emulator& emu, memory_manager& memory)
         {
-            // Allocate GDT with read-write permissions for segment descriptor setup
-            memory.allocate_memory(GDT_ADDR, static_cast<size_t>(page_align_up(GDT_LIMIT)), memory_permission::read_write);
-            emu.load_gdt(GDT_ADDR, GDT_LIMIT);
+            const auto vcpu_count = emu.vcpu_count();
+            const auto gdt_region_size = static_cast<size_t>(page_align_up(vcpu_count * GDT_LIMIT));
 
-            // Index 1 (selector 0x08) - 64-bit kernel code segment (Ring 0)
-            // P=1, DPL=0, S=1, Type=0xA (Code, Execute/Read), L=1 (Long mode)
-            emu.write_memory<uint64_t>(GDT_ADDR + (1 * sizeof(uint64_t)), 0x00AF9B000000FFFF);
+            // One GDT page per vCPU (see gdt_base_for_vcpu): the WOW64 FS descriptor holds a per-thread
+            // TEB base, so a shared GDT cannot serve WOW64 threads on different vCPUs at the same time.
+            //
+            // GDT_ADDR is a fixed guest address (see its doc comment), so this can fail on a backend
+            // that shares the guest address space with the host process (FEX on Apple) if that exact
+            // address isn't actually available there - confirmed on real iOS device hardware: the
+            // fixed mach_vm_allocate this requires can fail outright, not merely find the address
+            // occupied. The return value used to be discarded here entirely, so a failure silently
+            // left the GDT unmapped and every write below then faulted with a confusing "failed to
+            // write guest memory" error far from the actual cause.
+            //
+            // Try the fixed address first - every platform where it already works (desktop macOS,
+            // Simulator, Linux, every non-Apple backend) takes exactly the same path as before, with
+            // no behavior change at all. Only on failure, fall back to a dynamically-verified
+            // placement: the same find_free_allocation_base + host-level confirmation machinery
+            // (memory_manager's size-only allocate_memory overload) that already places every guest
+            // module/heap allocation on this exact device - already proven to work there, since
+            // setup_gdt runs after the executable/ntdll are mapped through it. Bounded to start at
+            // DEFAULT_ALLOCATION_ADDRESS_64BIT (4GB) so the pick can never land below it: anything
+            // under 4GB is the WOW64 32-bit guest's own architectural address space (subject to the
+            // FEX backend's guest-VA rebase), which the GDT - a fixed-up, always-64-bit-addressed
+            // construct regardless of process bitness - must never alias into.
+            uint64_t gdt_base_address = GDT_ADDR;
+            if (!memory.allocate_memory(GDT_ADDR, gdt_region_size, memory_permission::read_write))
+            {
+                gdt_base_address =
+                    memory.allocate_memory(gdt_region_size, memory_permission::read_write, false, DEFAULT_ALLOCATION_ADDRESS_64BIT);
 
-            // Index 2 (selector 0x10) - 64-bit kernel data segment (Ring 0)
-            // P=1, DPL=0, S=1, Type=0x2 (Data, Read/Write), L=1 (64-bit)
-            emu.write_memory<uint64_t>(GDT_ADDR + (2 * sizeof(uint64_t)), 0x00CF93000000FFFF);
+                if (gdt_base_address == 0)
+                {
+                    std::ostringstream message;
+                    message << "Failed to allocate GDT memory: fixed address 0x" << std::hex << GDT_ADDR << " size=0x" << gdt_region_size;
 
-            // Index 3 (selector 0x18) - 32-bit compatibility mode segment (Ring 0)
-            // P=1, DPL=0, S=1, Type=0xA (Code, Execute/Read), DB=1, G=1
-            emu.write_memory<uint64_t>(GDT_ADDR + (3 * sizeof(uint64_t)), 0x00CF9B000000FFFF);
+                    const auto occupants = emu.reserved_host_ranges_in(GDT_ADDR, gdt_region_size);
+                    if (occupants.empty())
+                    {
+                        message << " (no host-reserved range reported in that window - the fixed-address host "
+                                   "mapping call itself failed, e.g. the address may be outside this process's "
+                                   "mappable host VA range)";
+                    }
+                    else
+                    {
+                        message << " (occupied by: ";
+                        for (size_t i = 0; i < occupants.size(); ++i)
+                        {
+                            if (i > 0)
+                            {
+                                message << ", ";
+                            }
+                            message << "0x" << std::hex << occupants[i].address << "-0x" << std::hex
+                                    << (occupants[i].address + occupants[i].size);
+                        }
+                        message << ")";
+                    }
 
-            // Index 4 (selector 0x23) - 32-bit code segment for WOW64 (Ring 3)
-            // Real Windows: Code RE Ac 3 Bg Pg P Nl 00000cfb
-            // P=1, DPL=3, S=1, Type=0xA (Code, Execute/Read), DB=1, G=1
-            emu.write_memory<uint64_t>(GDT_ADDR + (4 * sizeof(uint64_t)), 0x00CFFB000000FFFF);
+                    message << "; the dynamically-placed fallback also failed to find any usable window";
 
-            // Index 5 (selector 0x2B) - Data segment for user mode (Ring 3)
-            // Real Windows: Data RW Ac 3 Bg Pg P Nl 00000cf3
-            // P=1, DPL=3, S=1, Type=0x2 (Data, Read/Write), G=1
-            emu.write_memory<uint64_t>(GDT_ADDR + (5 * sizeof(uint64_t)), 0x00CFF3000000FFFF);
+                    throw std::runtime_error(message.str());
+                }
+            }
+
+            memory.set_gdt_base(gdt_base_address);
+
+            for (size_t i = 0; i < vcpu_count; ++i)
+            {
+                const auto gdt_base = gdt_base_for_vcpu(memory, i);
+
+                // Index 1 (0x08) - 64-bit kernel code (Ring 0): P=1, DPL=0, S=1, Type=0xA, L=1
+                emu.write_memory<uint64_t>(gdt_base + (1 * sizeof(uint64_t)), 0x00AF9B000000FFFF);
+                // Index 2 (0x10) - 64-bit kernel data (Ring 0): P=1, DPL=0, S=1, Type=0x2, L=1
+                emu.write_memory<uint64_t>(gdt_base + (2 * sizeof(uint64_t)), 0x00CF93000000FFFF);
+                // Index 3 (0x18) - 32-bit compatibility code (Ring 0): P=1, DPL=0, S=1, Type=0xA, DB=1, G=1
+                emu.write_memory<uint64_t>(gdt_base + (3 * sizeof(uint64_t)), 0x00CF9B000000FFFF);
+                // Index 4 (0x23) - 32-bit WOW64 code (Ring 3): P=1, DPL=3, S=1, Type=0xA, DB=1, G=1
+                emu.write_memory<uint64_t>(gdt_base + (4 * sizeof(uint64_t)), 0x00CFFB000000FFFF);
+                // Index 5 (0x2B) - user data (Ring 3): P=1, DPL=3, S=1, Type=0x2, G=1
+                emu.write_memory<uint64_t>(gdt_base + (5 * sizeof(uint64_t)), 0x00CFF3000000FFFF);
+                // Index 6 (0x33) - 64-bit user code (Ring 3): P=1, DPL=3, S=1, Type=0xA, L=1
+                emu.write_memory<uint64_t>(gdt_base + (6 * sizeof(uint64_t)), 0x00AFFB000000FFFF);
+                // Index 10 (0x53) - WOW64 FS/TEB (Ring 3, byte granularity). The base is filled in
+                // per-thread by emulator_thread::refresh_execution_context.
+                emu.write_memory<uint64_t>(gdt_base + (10 * sizeof(uint64_t)), 0x0040F3000000FFFF);
+
+                emu.get_cpu(i).load_gdt(gdt_base, GDT_LIMIT);
+            }
+
+            // Initial selectors for the primary thread on the primary vCPU (per-thread bases applied later).
             emu.reg<uint16_t>(x86_register::ss, 0x2B);
             emu.reg<uint16_t>(x86_register::ds, 0x2B);
             emu.reg<uint16_t>(x86_register::es, 0x2B);
-            emu.reg<uint16_t>(x86_register::gs, 0x2B); // Initial GS value, will be overridden with proper base later
-
-            // Index 6 (selector 0x33) - 64-bit code segment (Ring 3)
-            // P=1, DPL=3, S=1, Type=0xA (Code, Execute/Read), L=1 (Long mode)
-            emu.write_memory<uint64_t>(GDT_ADDR + (6 * sizeof(uint64_t)), 0x00AFFB000000FFFF);
+            emu.reg<uint16_t>(x86_register::gs, 0x2B);
             emu.reg<uint16_t>(x86_register::cs, 0x33);
-
-            // Index 10 (selector 0x53) - FS segment for WOW64 TEB access
-            // Real Windows: Data RW Ac 3 Bg By P Nl 000004f3 (base=0x002c1000, limit=0xfff)
-            // Initially set with base=0, will be updated during thread creation
-            // P=1, DPL=3, S=1, Type=0x3 (Data, Read/Write, Accessed), G=0 (byte granularity), DB=1
-            emu.write_memory<uint64_t>(GDT_ADDR + (10 * sizeof(uint64_t)), 0x0040F3000000FFFF);
             emu.reg<uint16_t>(x86_register::fs, 0x53);
         }
 
@@ -252,23 +428,62 @@ namespace sogen
 
             return env_map;
         }
+
+        // ntdll copies PEB->CriticalSectionTimeout into its own RtlpTimeout and passes that as the wait
+        // interval in RtlpWaitOnCriticalSection, where zero means "time out immediately", not "wait
+        // forever": leaving the field unset makes every contended acquisition time out at once, emit
+        // three filtered DbgPrintEx calls and re-wait in a loop. Windows seeds it from MmCritsectTimeout,
+        // whose default is 30 days. The opt-out restores the historic zero, and exists only until the
+        // idle wait learns to wake on a cross-vCPU signal instead of a fixed sleep.
+        uint64_t get_critical_section_timeout()
+        {
+            static const bool legacy_zero = getenv("EMULATOR_LEGACY_ZERO_CRITSECT_TIMEOUT") != nullptr;
+            constexpr int64_t thirty_days = -25920000000000LL;
+            return legacy_zero ? 0 : static_cast<uint64_t>(thirty_days);
+        }
     }
 
-    void process_context::setup(x86_64_emulator& emu, memory_manager& memory, registry_manager& registry, file_system& file_system,
-                                windows_version_manager& version, const fake_environment_config& fake_env,
-                                const application_settings& app_settings, const mapped_module& executable, const mapped_module& ntdll,
-                                const apiset::container& apiset_container, const mapped_module* ntdll32)
+    void process_context::setup(windows_emulator& win_emu, const application_settings& app_settings, const mapped_module& executable,
+                                const mapped_module& ntdll, const apiset::container& apiset_container, const mapped_module* ntdll32)
     {
-        this->sid = get_sid(registry);
+        auto& emu = win_emu.emu();
+        const auto& version = win_emu.version;
+        const auto& fake_env = win_emu.fake_env;
 
-        setup_gdt(emu, memory);
+        io_device_container console{u"Console", win_emu, {}};
+        this->console_handle = this->devices.store(std::move(console));
 
-        this->kusd.setup(version, fake_env);
+        this->sid = get_sid(win_emu.registry);
 
-        this->base_allocator = create_allocator(memory, PEB_SEGMENT_SIZE, this->is_wow64_process);
+        setup_gdt(emu, win_emu.memory);
+
+        this->kusd.setup(version, fake_env, this->is_wow64_process);
+
+        this->base_allocator = create_allocator(win_emu.memory, PEB_SEGMENT_SIZE, this->is_wow64_process);
         auto& allocator = this->base_allocator;
 
         this->peb64 = allocator.reserve_page_aligned<PEB64>();
+
+        const auto load_nls_data = [&](const char* cp_path) -> uint64_t {
+            const auto nls_data = utils::io::read_file(win_emu.file_sys.translate(cp_path));
+            if (nls_data.empty())
+            {
+                return 0;
+            }
+            const auto addr = allocator.reserve(page_align_up(nls_data.size()), 0x1000);
+            emu.write_memory(addr, nls_data.data(), nls_data.size());
+            return addr;
+        };
+
+        // PEB.AnsiCodePageData/OemCodePageData are populated from synthesized identity tables below, so the
+        // NLS files are no longer mapped for the PEB's sake. This load survives purely as the probe for a
+        // Cyrillic emulation root: ansi_code_page drives the cp1251 window-title remap in syscalls/user.cpp.
+        const auto ansi_nls_addr = load_nls_data(R"(C:\Windows\System32\C_1251.NLS)");
+
+        if (ansi_nls_addr != 0)
+        {
+            this->ansi_code_page = 1251;
+        }
 
         /* Values of the following fields must be
          * allocated relative to the process_params themselves
@@ -304,7 +519,7 @@ namespace sogen
 
             proc_params.Environment = allocator.copy_string(u"=::=::\\");
 
-            const auto env_map = get_environment_variables(registry, version, app_settings);
+            const auto env_map = get_environment_variables(win_emu.registry, version, app_settings);
             for (const auto& [name, value] : env_map)
             {
                 std::u16string entry;
@@ -358,16 +573,36 @@ namespace sogen
             p.NumberOfHeaps = 0x00000000;
             p.MaximumNumberOfHeaps = 0x00000010;
             p.NumberOfProcessors = fake_env.number_of_processors;
+            p.CriticalSectionTimeout.QuadPart = get_critical_section_timeout();
             p.ImageSubsystemMajorVersion = 6;
 
+            // TODO: p.SessionId = 1;
             p.OSPlatformId = 2;
             p.OSMajorVersion = version.get_major_version();
             p.OSMinorVersion = version.get_minor_version();
             p.OSBuildNumber = static_cast<USHORT>(version.get_windows_build_number());
 
-            // p.AnsiCodePageData = allocator.reserve<CPTABLEINFO>().value();
-            // p.OemCodePageData = allocator.reserve<CPTABLEINFO>().value();
-            p.UnicodeCaseTableData = allocator.reserve<NLSTABLEINFO>().value();
+            p.AnsiCodePageData = make_identity_codepage_table(allocator);
+            p.OemCodePageData = make_identity_codepage_table(allocator);
+            const auto upper_table = make_ascii_case_table(true);
+            const auto lower_table = make_ascii_case_table(false);
+            const auto upper_table_addr = allocator.reserve(upper_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            const auto lower_table_addr = allocator.reserve(lower_table.size() * sizeof(uint16_t), alignof(uint16_t));
+            allocator.get_memory().write_memory(upper_table_addr, upper_table.data(), upper_table.size() * sizeof(uint16_t));
+            allocator.get_memory().write_memory(lower_table_addr, lower_table.data(), lower_table.size() * sizeof(uint16_t));
+
+            const auto case_table = allocator.reserve<NLSTABLEINFO>();
+            case_table.access([&](NLSTABLEINFO& t) {
+                fill_identity_codepage_table(allocator, t.OemTableInfo);
+                fill_identity_codepage_table(allocator, t.AnsiTableInfo);
+                t.UpperCaseTable = upper_table_addr;
+                t.LowerCaseTable = lower_table_addr;
+            });
+            p.UnicodeCaseTableData = case_table.value();
+
+            p.ActiveCodePage = 1252;
+            p.OemCodePage = 437;
+            p.UseCaseMapping = 1;
         });
 
         if (this->is_wow64_process)
@@ -450,30 +685,50 @@ namespace sogen
                 p32.NumberOfHeaps = 0;
                 p32.MaximumNumberOfHeaps = 0x10;
                 p32.NumberOfProcessors = fake_env.number_of_processors;
+                p32.CriticalSectionTimeout.QuadPart = get_critical_section_timeout();
                 p32.ImageSubsystemMajorVersion = 6;
 
+                // TODO: p32.SessionId = 1;
                 p32.OSPlatformId = 2;
                 p32.OSMajorVersion = version.get_major_version();
                 p32.OSMinorVersion = version.get_minor_version();
                 p32.OSBuildNumber = static_cast<USHORT>(version.get_windows_build_number());
 
-                // Initialize NLS tables for 32-bit processes
-                // These need to be in 32-bit addressable space
-                p32.UnicodeCaseTableData = static_cast<uint32_t>(allocator.reserve<NLSTABLEINFO>().value());
+                p32.ActiveCodePage = 1252;
+                p32.OemCodePage = 437;
+                p32.UseCaseMapping = 1;
 
-                // TODO: Initialize other PEB32 fields as needed
+                p32.AnsiCodePageData = make_identity_codepage_table32(allocator);
+                p32.OemCodePageData = make_identity_codepage_table32(allocator);
+
+                const auto upper_table32 = make_ascii_case_table(true);
+                const auto lower_table32 = make_ascii_case_table(false);
+                const auto upper_table32_addr = allocator.reserve(upper_table32.size() * sizeof(uint16_t), alignof(uint16_t));
+                const auto lower_table32_addr = allocator.reserve(lower_table32.size() * sizeof(uint16_t), alignof(uint16_t));
+                allocator.get_memory().write_memory(upper_table32_addr, upper_table32.data(), upper_table32.size() * sizeof(uint16_t));
+                allocator.get_memory().write_memory(lower_table32_addr, lower_table32.data(), lower_table32.size() * sizeof(uint16_t));
+
+                const auto case_table32 = allocator.reserve<NLSTABLEINFO32>();
+                case_table32.access([&](NLSTABLEINFO32& t) {
+                    fill_identity_codepage_table32(allocator, t.OemTableInfo);
+                    fill_identity_codepage_table32(allocator, t.AnsiTableInfo);
+                    t.UpperCaseTable = static_cast<uint32_t>(upper_table32_addr);
+                    t.LowerCaseTable = static_cast<uint32_t>(lower_table32_addr);
+                });
+                p32.UnicodeCaseTableData = static_cast<uint32_t>(case_table32.value());
             });
 
             if (ntdll32 != nullptr)
             {
                 this->rtl_user_thread_start32 = ntdll32->find_export("RtlUserThreadStart");
+                this->ki_user_exception_dispatcher32 = ntdll32->find_export("KiUserExceptionDispatcher");
             }
         }
 
         this->apiset = apiset::get_namespace_table(reinterpret_cast<const API_SET_NAMESPACE*>(apiset_container.data.data()));
         const auto& system_root = version.get_system_root();
-        this->build_knowndlls_section_table<uint64_t>(registry, file_system, apiset, system_root, false);
-        this->build_knowndlls_section_table<uint32_t>(registry, file_system, apiset, system_root, true);
+        this->build_knowndlls_section_table<uint64_t>(win_emu.registry, win_emu.file_sys, apiset, system_root, false);
+        this->build_knowndlls_section_table<uint32_t>(win_emu.registry, win_emu.file_sys, apiset, system_root, true);
 
         this->ntdll_image_base = ntdll.image_base;
         this->ldr_initialize_thunk = ntdll.find_export("LdrInitializeThunk");
@@ -489,7 +744,7 @@ namespace sogen
         this->gdi_bitmap_surfaces.clear();
         this->gdi_window_surfaces.clear();
         this->dxgk = {};
-        this->etw_notification_event.reset();
+        this->etw_notification_events.clear();
 
         const auto gdi_shared_table = this->base_allocator.reserve<GDI_SHARED_MEMORY64>();
         gdi_shared_table.access([](GDI_SHARED_MEMORY64& table) { memset(&table, 0, sizeof(table)); });
@@ -537,15 +792,18 @@ namespace sogen
             }
         });
 
-        auto [wh, desktop_win] = this->windows.create(memory);
+        auto [wh, desktop_win] = this->windows.create(win_emu.memory);
         this->default_desktop_window_handle = wh;
         desktop_win.handle = wh.bits;
+        desktop_win.class_name = u"#32769";
         desktop_win.style = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
         desktop_win.width = 1920;
         desktop_win.height = 1080;
+        const auto desktop_class = allocate_user_class(win_emu.memory, desktop_win.class_name);
         desktop_win.guest.access([&](USER_WINDOW& window) {
             window.hWnd = wh.bits;
             window.ptrBase = desktop_win.guest.value();
+            window.pcls = desktop_class;
             window.dwStyle = desktop_win.style;
             window.rcWindow = {.left = 0, .top = 0, .right = desktop_win.width, .bottom = desktop_win.height};
             window.rcClient = window.rcWindow;
@@ -555,20 +813,75 @@ namespace sogen
             window.processId = process_context::process_id;
         });
 
+        // Seed the shared foreground window with the desktop so the guest's client-side GetForegroundWindow
+        // never returns null before an app window activates (UI activation events later refine it).
+        this->user_handles.get_server_info().access([&](USER_SERVERINFO& server_info) {
+            server_info.foregroundWindow = this->default_desktop_window_handle.bits; //
+        });
+
+        const auto create_shell_window = [&](const std::u16string_view class_name, const std::u16string_view title, const int32_t x,
+                                             const int32_t y, const int32_t width, const int32_t height) {
+            auto [handle, shell_win] = this->windows.create(win_emu.memory);
+            shell_win.handle = handle.bits;
+            shell_win.parent_handle = this->default_desktop_window_handle.bits;
+            shell_win.class_name = class_name;
+            shell_win.name = title;
+            shell_win.style = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+            shell_win.x = x;
+            shell_win.y = y;
+            shell_win.width = width;
+            shell_win.height = height;
+            shell_win.host_surface_window = false;
+            const auto shell_class = allocate_user_class(win_emu.memory, class_name);
+            shell_win.guest.access([&](USER_WINDOW& window) {
+                window.hWnd = handle.bits;
+                window.ptrBase = shell_win.guest.value();
+                window.pcls = shell_class;
+                window.spwndParent = desktop_win.guest.value();
+                window.dwStyle = shell_win.style;
+                window.rcWindow = {.left = x, .top = y, .right = x + width, .bottom = y + height};
+                window.rcClient = window.rcWindow;
+                window.windowBand = 1; // ZBID_DESKTOP
+                window.dpiContext = USER_DEFAULT_DPI_CONTEXT;
+                window.processId = process_context::process_id;
+            });
+            return handle;
+        };
+
+        create_shell_window(u"Progman", u"Program Manager", 0, 0, desktop_win.width, desktop_win.height);
+        create_shell_window(u"Shell_TrayWnd", u"", 0, desktop_win.height - 40, desktop_win.width, 40);
+
         const auto user_display_info = this->user_handles.get_display_info();
         user_display_info.access([&](USER_DISPINFO& display_info) {
             display_info.dwMonitorCount = 1;
             display_info.pPrimaryMonitor = monitor_obj.value();
+            display_info.rcScreen = {.left = 0, .top = 0, .right = 1920, .bottom = 1080};
         });
     }
 
-    void process_context::serialize(utils::buffer_serializer& buffer) const
+    emulator_pointer process_context::allocate_user_class(memory_manager& memory, const std::u16string_view class_name)
+    {
+        const auto ansi_class_name = u16_to_cp1252(class_name);
+        const auto cls_size = static_cast<size_t>(page_align_up(sizeof(USER_CLASS) + ansi_class_name.size() + 1));
+        const auto cls_ptr = memory.allocate_memory(cls_size, memory_permission::read);
+        const auto ansi_class_name_ptr = cls_ptr + sizeof(USER_CLASS);
+
+        memory.write_memory(ansi_class_name_ptr, ansi_class_name.c_str(), ansi_class_name.size() + 1);
+
+        const emulator_object<USER_CLASS> cls{memory, cls_ptr};
+        cls.access([&](USER_CLASS& value) { value.lpszAnsiClassName = ansi_class_name_ptr; });
+
+        return cls_ptr;
+    }
+
+    void process_context::serialize(utils::buffer_serializer& buffer, const emulator_thread* active_thread) const
     {
         buffer.write_vector(this->sid);
         buffer.write(this->shared_section_address);
         buffer.write(this->shared_section_size);
         buffer.write(this->dbwin_buffer);
         buffer.write(this->dbwin_buffer_size);
+        buffer.write_map(this->orphaned_section_backings);
         buffer.write_optional(this->exit_status);
         buffer.write(this->base_allocator);
         buffer.write(this->peb64);
@@ -578,12 +891,15 @@ namespace sogen
         buffer.write(this->kusd);
 
         buffer.write(this->is_wow64_process);
+        buffer.write(this->ansi_code_page);
         buffer.write(this->ntdll_image_base);
         buffer.write(this->ldr_initialize_thunk);
         buffer.write(this->rtl_user_thread_start);
         buffer.write_optional(this->rtl_user_thread_start32);
         buffer.write(this->ki_user_apc_dispatcher);
         buffer.write(this->ki_user_exception_dispatcher);
+        buffer.write_optional(this->wow64_syscall_reentry_addr);
+        buffer.write(this->ki_user_exception_dispatcher32);
         buffer.write(this->ki_user_callback_dispatcher);
         buffer.write(this->instrumentation_callback);
         buffer.write(this->zw_callback_return);
@@ -594,7 +910,7 @@ namespace sogen
         buffer.write_map(this->gdi_bitmap_surfaces);
         buffer.write_map(this->gdi_window_surfaces);
         buffer.write(this->dxgk);
-        buffer.write_optional(this->etw_notification_event);
+        buffer.write_vector(this->etw_notification_events);
         buffer.write(this->mouse_capture_window);
         buffer.write(this->foreground_window);
         buffer.write(this->cursor_x);
@@ -603,6 +919,7 @@ namespace sogen
         buffer.write(this->cursor_show_count);
         buffer.write(this->cursor_shape_visible);
         buffer.write(this->key_state);
+        buffer.write(this->async_key_state);
         buffer.write(this->raw_mouse_registered);
         buffer.write(this->raw_mouse_target);
         buffer.write(this->raw_keyboard_registered);
@@ -618,6 +935,7 @@ namespace sogen
         buffer.write_map(this->file_locks);
         buffer.write(this->sections);
         buffer.write(this->devices);
+        buffer.write(this->console_handle);
         buffer.write(this->semaphores);
         buffer.write(this->io_completions);
         buffer.write(this->wait_completion_packets);
@@ -628,6 +946,7 @@ namespace sogen
         buffer.write(this->desktops);
         buffer.write(this->windows);
         buffer.write(this->timers);
+        buffer.write(this->accelerator_tables);
         buffer.write(this->registry_keys);
         buffer.write(this->private_namespaces);
         buffer.write_map(this->atoms);
@@ -647,16 +966,21 @@ namespace sogen
         buffer.write(this->spawned_thread_count);
         buffer.write(this->threads);
 
-        buffer.write(this->threads.find_handle(this->active_thread).bits);
+        buffer.write(this->threads.find_handle(active_thread).bits);
     }
 
-    void process_context::deserialize(utils::buffer_deserializer& buffer)
+    void process_context::deserialize(utils::buffer_deserializer& buffer, emulator_thread*& active_thread)
     {
+        // The lead-byte-table patch lives in guest memory and reverts with it, so it must be re-resolved
+        // after any restore.
+        this->nls_lead_byte_info_table_resolved.reset();
+
         buffer.read_vector(this->sid);
         buffer.read(this->shared_section_address);
         buffer.read(this->shared_section_size);
         buffer.read(this->dbwin_buffer);
         buffer.read(this->dbwin_buffer_size);
+        buffer.read_map(this->orphaned_section_backings);
         buffer.read_optional(this->exit_status);
         buffer.read(this->base_allocator);
         buffer.read(this->peb64);
@@ -666,12 +990,15 @@ namespace sogen
         buffer.read(this->kusd);
 
         buffer.read(this->is_wow64_process);
+        buffer.read(this->ansi_code_page);
         buffer.read(this->ntdll_image_base);
         buffer.read(this->ldr_initialize_thunk);
         buffer.read(this->rtl_user_thread_start);
         buffer.read_optional(this->rtl_user_thread_start32);
         buffer.read(this->ki_user_apc_dispatcher);
         buffer.read(this->ki_user_exception_dispatcher);
+        buffer.read_optional(this->wow64_syscall_reentry_addr);
+        buffer.read(this->ki_user_exception_dispatcher32);
         buffer.read(this->ki_user_callback_dispatcher);
         buffer.read(this->instrumentation_callback);
         buffer.read(this->zw_callback_return);
@@ -682,7 +1009,7 @@ namespace sogen
         buffer.read_map(this->gdi_bitmap_surfaces);
         buffer.read_map(this->gdi_window_surfaces);
         buffer.read(this->dxgk);
-        buffer.read_optional(this->etw_notification_event);
+        buffer.read_vector(this->etw_notification_events);
         buffer.read(this->mouse_capture_window);
         buffer.read(this->foreground_window);
         buffer.read(this->cursor_x);
@@ -691,6 +1018,7 @@ namespace sogen
         buffer.read(this->cursor_show_count);
         buffer.read(this->cursor_shape_visible);
         buffer.read(this->key_state);
+        buffer.read(this->async_key_state);
         buffer.read(this->raw_mouse_registered);
         buffer.read(this->raw_mouse_target);
         buffer.read(this->raw_keyboard_registered);
@@ -706,6 +1034,7 @@ namespace sogen
         buffer.read_map(this->file_locks);
         buffer.read(this->sections);
         buffer.read(this->devices);
+        buffer.read(this->console_handle);
         buffer.read(this->semaphores);
         buffer.read(this->io_completions);
         buffer.read(this->wait_completion_packets);
@@ -716,6 +1045,7 @@ namespace sogen
         buffer.read(this->desktops);
         buffer.read(this->windows);
         buffer.read(this->timers);
+        buffer.read(this->accelerator_tables);
         buffer.read(this->registry_keys);
         buffer.read(this->private_namespaces);
         buffer.read_map(this->atoms);
@@ -746,7 +1076,7 @@ namespace sogen
             this->thread_handles_by_id[thread.id] = this->threads.make_handle(index);
         }
 
-        this->active_thread = this->threads.get(buffer.read<uint64_t>());
+        active_thread = this->threads.get(buffer.read<uint64_t>());
     }
 
     generic_handle_store* process_context::get_handle_store(const handle handle)
@@ -832,16 +1162,75 @@ namespace sogen
         return nullptr;
     }
 
+    bool process_context::is_window_effectively_visible(const hwnd window) const
+    {
+        const auto* current = this->windows.get(window);
+        if (!current)
+        {
+            return false;
+        }
+
+        for (size_t guard = 0; current && guard < this->windows.size(); ++guard)
+        {
+            if (current->message_only || (current->style & WS_VISIBLE) == 0)
+            {
+                return false;
+            }
+
+            current = current->parent_handle != 0 ? this->windows.get(current->parent_handle) : nullptr;
+        }
+
+        return current == nullptr;
+    }
+
+    hwnd process_context::resolve_foreground_window() const
+    {
+        // Prefer the window the user last interacted with, if it still exists.
+        if (this->foreground_window != 0 && this->windows.get(this->foreground_window) != nullptr)
+        {
+            return this->foreground_window;
+        }
+
+        // Otherwise fall back to any visible top-level window so a freshly-created game window is
+        // considered foreground before the first mouse event arrives (games gate input on this).
+        // foreground_window itself is only ever set by handle_ui_event(), the host-input-queue
+        // processor a desktop build's SDL loop drives -- backends with no such queue (e.g. the iOS
+        // app, which delivers input through ios_ui_backend's own queue instead) never call it, so
+        // foreground_window stays 0 for the guest's entire lifetime without this fallback.
+        //
+        // A real top-level window's parent_handle is the desktop's handle, not 0 (see
+        // handle_NtUserCreateWindowEx: non-child windows get default_desktop_window_handle as their
+        // parent) - only the desktop itself has parent_handle == 0. So "top-level" here means either
+        // value. That alone isn't enough to exclude every non-application window though: the
+        // synthetic shell windows sogen creates for compatibility (the desktop itself, and a
+        // "Progman" stand-in) are also visible top-level windows, but neither is ever given a real
+        // guest-code wndproc - routing input to one of them makes DispatchMessage silently no-op
+        // (confirmed live: an iOS touch delivered a genuine WM_MOUSEMOVE/WM_LBUTTONDOWN into one of
+        // their queues, GetMessage returned it correctly since it matched the same owning "thread",
+        // but nothing ever printed because that window's wnd_proc is 0). A real application window
+        // always has one - DispatchMessage itself depends on it - so require it here too.
+        for (const auto& [index, win] : this->windows)
+        {
+            const bool is_top_level = win.parent_handle == 0 || win.parent_handle == this->default_desktop_window_handle.bits;
+            if (win.wnd_proc != 0 && is_top_level && (win.style & WS_VISIBLE) != 0)
+            {
+                return win.handle;
+            }
+        }
+
+        return 0;
+    }
+
     // NOLINTNEXTLINE(cert-dcl50-cpp,readability-convert-member-functions-to-static)
     bool process_context::is_current_process_handle(const handle handle) const
     {
         return handle == CURRENT_PROCESS || handle == GUEST_PROCESS_HANDLE;
     }
 
-    bool process_context::is_current_thread_handle(const handle handle) const
+    bool process_context::is_current_thread_handle(const handle handle, const emulator_thread* active_thread) const
     {
-        return handle == CURRENT_THREAD || (handle.value.type == handle_types::thread && this->active_thread &&
-                                            this->threads.find_handle(this->active_thread) == handle);
+        return handle == CURRENT_THREAD ||
+               (handle.value.type == handle_types::thread && active_thread && this->threads.find_handle(active_thread) == handle);
     }
 
     // NOLINTNEXTLINE(cert-dcl50-cpp,readability-convert-member-functions-to-static)
@@ -850,7 +1239,7 @@ namespace sogen
         return handle == CURRENT_PROCESS || handle == CURRENT_THREAD;
     }
 
-    handle process_context::resolve_object_pseudo_handle(const handle handle) const
+    handle process_context::resolve_object_pseudo_handle(const handle handle, const emulator_thread* active_thread) const
     {
         if (handle == CURRENT_PROCESS)
         {
@@ -859,7 +1248,12 @@ namespace sogen
 
         if (handle == CURRENT_THREAD)
         {
-            return this->threads.find_handle(this->active_thread);
+            return this->threads.find_handle(active_thread);
+        }
+
+        if (handle == CONSOLE_HANDLE)
+        {
+            return this->console_handle;
         }
 
         return handle;
@@ -878,6 +1272,20 @@ namespace sogen
         emulator_thread t{memory, *this, start_address, argument, stack_size, create_flags, thread_id, initial_thread};
         auto [h, thr] = this->threads.store_and_get(std::move(t));
         this->thread_handles_by_id[thr->id] = h;
+
+        // The desktop window is created during process setup, before any thread exists, so it has no owning
+        // thread. GetWindowThreadProcessId(GetDesktopWindow()) must return a real thread id (DirectSound, for
+        // one, stores it as the buffer's focus thread and rejects a zero id), so attribute the desktop window
+        // to the initial thread once it exists.
+        if (initial_thread)
+        {
+            if (auto* desktop = this->windows.get(this->default_desktop_window_handle))
+            {
+                desktop->thread_id = thread_id;
+            }
+            this->user_handles.set_owner(static_cast<uint32_t>(this->default_desktop_window_handle.value.id), thread_id);
+        }
+
         this->callbacks_->on_thread_create(h, *thr);
         return h;
     }
@@ -903,6 +1311,7 @@ namespace sogen
             }
 
             i->second.ref_count = 1;
+            this->gdi_window_surfaces.erase(static_cast<uint32_t>(i->second.handle));
             i = this->windows.erase(i).first;
         }
     }

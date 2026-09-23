@@ -12,6 +12,7 @@ namespace sogen
     struct syscall_context;
     class ui_backend;
     struct process_context;
+    class emulator_thread;
 
     struct window_destroy_step
     {
@@ -30,15 +31,16 @@ namespace sogen
       private:
         hwnd find_window_by_guest_pointer(uint64_t window_ptr) const;
         void unlink_window_from_parent_and_siblings(const window& win) const;
-        window_destroy_frame make_frame(const window& win) const;
-        void push_frame(const window& win) const;
+        window_destroy_frame make_frame(const window& win, bool is_direct_target) const;
+        void push_frame(const window& win, bool is_direct_target) const;
         void pop_frame_allocation(window_destroy_frame& frame) const;
         std::vector<hwnd> collect_dependents(const window& win) const;
         void finalize_frame(window_destroy_frame& frame, const window& win) const;
 
         window_destroy_state& state_;
-        x86_64_emulator& emu_;
+        x86_64_cpu& emu_;
         process_context& proc_;
+        emulator_thread& thread_;
         ui_backend& ui_;
     };
 

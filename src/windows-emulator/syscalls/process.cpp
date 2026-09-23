@@ -15,6 +15,40 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
+                // The synthetic Steam process: report it as alive so a guest steam_api's GetExitCodeProcess
+                // liveness check succeeds. Only ProcessBasicInformation is meaningful; any other class is
+                // rejected cleanly rather than falling through to the default (which stops the emulator).
+                if (process_handle == STEAM_PROCESS_HANDLE)
+                {
+                    if (info_class != ProcessBasicInformation)
+                    {
+                        return STATUS_NOT_SUPPORTED;
+                    }
+
+                    const auto init_steam_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
+                        basic_info = {};
+                        basic_info.ExitStatus = STATUS_PENDING; // STILL_ACTIVE
+                        basic_info.UniqueProcessId = STEAM_FAKE_PROCESS_ID;
+                    };
+
+                    switch (process_information_length)
+                    {
+                    case sizeof(PROCESS_BASIC_INFORMATION64):
+                        return handle_query<PROCESS_BASIC_INFORMATION64>(c.emu, process_information, process_information_length,
+                                                                         return_length, init_steam_info);
+                    case sizeof(PROCESS_EXTENDED_BASIC_INFORMATION):
+                        return handle_query<PROCESS_EXTENDED_BASIC_INFORMATION>(c.emu, process_information, process_information_length,
+                                                                                return_length,
+                                                                                [&](PROCESS_EXTENDED_BASIC_INFORMATION& ext) {
+                                                                                    ext = {};
+                                                                                    ext.Size = sizeof(PROCESS_EXTENDED_BASIC_INFORMATION);
+                                                                                    init_steam_info(ext.BasicInfo);
+                                                                                });
+                    default:
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+                }
+
                 return STATUS_NOT_SUPPORTED;
             }
 
@@ -23,8 +57,34 @@ namespace sogen
             switch (info_class)
             {
             case ProcessExecuteFlags:
-                return STATUS_NOT_SUPPORTED;
-            case ProcessGroupInformation:
+                return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length, [&](ULONG& flags) {
+                    constexpr ULONG dep_enabled_execute_flags = 0x0D;
+                    constexpr ULONG dep_disabled_execute_flags = 0x32;
+                    flags = c.win_emu.memory.is_dep_enabled() ? dep_enabled_execute_flags : dep_disabled_execute_flags;
+                });
+            case ProcessGroupInformation: {
+                constexpr uint32_t group_count = 1;
+                constexpr uint32_t required_length = group_count * sizeof(USHORT);
+
+                if (return_length)
+                {
+                    return_length.write(required_length);
+                }
+
+                // ProcessGroupInformation is a variable-length USHORT array,
+                // so a larger buffer is valid.
+                if (process_information_length < required_length)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const emulator_object<USHORT> info{c.emu, process_information};
+                info.access([](USHORT& group) {
+                    group = 0; // The process belongs to processor group 0.
+                });
+
+                return STATUS_SUCCESS;
+            }
             case ProcessMitigationPolicy: {
                 // ProcessMitigationPolicy requires special handling because the caller
                 // specifies which policy to query via the Policy field in the input buffer.
@@ -130,9 +190,22 @@ namespace sogen
                     c.emu, process_information, process_information_length, return_length,
                     [&](EmulatorTraits<Emu64>::ULONG_PTR& peb32) { peb32 = c.proc.peb32 ? c.proc.peb32->value() : 0; });
 
+            case ProcessHandleCount:
+                return handle_query<ULONG>(c.emu, process_information, process_information_length, return_length, [](ULONG& count) {
+                    count = 10; //
+                });
+
+            case ProcessAffinityMask:
+                return handle_query<EmulatorTraits<Emu64>::ULONG_PTR>(c.emu, process_information, process_information_length, return_length,
+                                                                      [](EmulatorTraits<Emu64>::ULONG_PTR& mask) { mask = 1; });
+
             case ProcessBasicInformation: {
                 const auto init_basic_info = [&](PROCESS_BASIC_INFORMATION64& basic_info) {
+                    basic_info.ExitStatus = STATUS_PENDING;
                     basic_info.PebBaseAddress = c.proc.peb64.value();
+                    const auto processor_count =
+                        c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return kusd.ActiveProcessorCount; });
+                    basic_info.AffinityMask = processor_count >= 64 ? ~0ull : ((1ull << processor_count) - 1);
                     basic_info.UniqueProcessId = process_context::process_id;
                 };
 
@@ -186,6 +259,30 @@ namespace sogen
                         i.CheckSum = optional_header.CheckSum;
                     });
 
+            case ProcessQuotaLimits: {
+                constexpr uint32_t quota_limits32_size = 0x20;
+                constexpr uint32_t quota_limits64_size = 0x30;
+
+                if (process_information_length != quota_limits32_size && process_information_length != quota_limits64_size)
+                {
+                    if (return_length)
+                    {
+                        return_length.write(quota_limits64_size);
+                    }
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const std::vector<std::byte> zeroed(process_information_length, std::byte{0});
+                c.emu.write_memory(process_information, zeroed.data(), zeroed.size());
+
+                if (return_length)
+                {
+                    return_length.write(process_information_length);
+                }
+
+                return STATUS_SUCCESS;
+            }
+
             case ProcessVmCounters: {
                 constexpr uint32_t vm_counters_size = 88;
                 constexpr uint32_t vm_counters_ex_size = 96;
@@ -209,6 +306,31 @@ namespace sogen
                     return_length.write(process_information_length);
                 }
 
+                return STATUS_SUCCESS;
+            }
+
+            case ProcessImageFileName: {
+                const auto image_path = c.win_emu.mod_manager.executable->module_path.to_device_path();
+                const auto string_length = image_path.size() * sizeof(char16_t);
+                const auto required_length = sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>) + string_length + sizeof(char16_t);
+
+                if (return_length)
+                {
+                    return_length.write(static_cast<uint32_t>(required_length));
+                }
+
+                if (process_information_length < required_length)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+
+                const auto buffer = process_information + sizeof(UNICODE_STRING<EmulatorTraits<Emu64>>);
+                c.emu.write_memory(buffer, image_path.c_str(), string_length + sizeof(char16_t));
+                emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, process_information}.write({
+                    .Length = static_cast<USHORT>(string_length),
+                    .MaximumLength = static_cast<USHORT>(string_length + sizeof(char16_t)),
+                    .Buffer = buffer,
+                });
                 return STATUS_SUCCESS;
             }
 
@@ -242,10 +364,8 @@ namespace sogen
             }
 
             default:
-                c.win_emu.log.error("Unsupported process info class: %X\n", info_class);
-                c.emu.stop();
-
-                return STATUS_NOT_SUPPORTED;
+                c.win_emu.log.print(color::gray, "Unsupported process info class: %X\n", info_class);
+                return STATUS_INVALID_INFO_CLASS;
             }
         }
 
@@ -254,7 +374,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             if (info_class == ProcessSchedulerSharedData                     //
@@ -266,14 +386,18 @@ namespace sogen
                 || info_class == ProcessPriorityBoost                        //
                 || info_class == ProcessPriorityClassEx                      //
                 || info_class == ProcessQuotaLimits                          //
-                || info_class == ProcessPriorityClass || info_class == ProcessAffinityMask)
+                || info_class == ProcessPriorityClass                        //
+                || info_class == ProcessAffinityMask                         //
+                || info_class == ProcessTelemetryCoverage)
             {
                 return STATUS_SUCCESS;
             }
 
             if (info_class == ProcessExecuteFlags)
             {
-                return STATUS_NOT_SUPPORTED;
+                // Kernel validates NX/execute flags at the MmSetExecuteOptions level;
+                // sogen doesn't track per-process execute options.
+                return STATUS_INVALID_PARAMETER;
             }
 
             if (info_class == ProcessTlsInformation)
@@ -430,15 +554,39 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            c.win_emu.log.error("Unsupported info process class: %X\n", info_class);
-            c.emu.stop();
-
-            return STATUS_NOT_SUPPORTED;
+            c.win_emu.log.print(color::gray, "Unsupported info process class: %X\n", info_class);
+            return STATUS_INVALID_INFO_CLASS;
         }
 
-        NTSTATUS handle_NtOpenProcess()
+        NTSTATUS handle_NtOpenProcess(const syscall_context& /*c*/, const emulator_object<handle> process_handle,
+                                      const ACCESS_MASK /*desired_access*/,
+                                      const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> /*object_attributes*/,
+                                      const emulator_object<CLIENT_ID64> client_id)
         {
-            return STATUS_NOT_SUPPORTED;
+            if (!process_handle || !client_id)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto id = client_id.read();
+
+            // The guest opening its own pid resolves to the real guest process handle.
+            if (id.UniqueProcess == process_context::process_id)
+            {
+                process_handle.write(GUEST_PROCESS_HANDLE);
+                return STATUS_SUCCESS;
+            }
+
+            // The one synthetic external process we vouch for: the Steam client. A guest steam_api reads
+            // this pid from HKCU\...\Valve\Steam\ActiveProcess and opens it to confirm Steam is running.
+            if (id.UniqueProcess == STEAM_FAKE_PROCESS_ID)
+            {
+                process_handle.write(STEAM_PROCESS_HANDLE);
+                return STATUS_SUCCESS;
+            }
+
+            // The emulator hosts a single process; any other pid does not exist.
+            return STATUS_INVALID_CID;
         }
 
         NTSTATUS handle_NtOpenProcessToken(const syscall_context& c, const handle process_handle, const ACCESS_MASK /*desired_access*/,
@@ -446,7 +594,7 @@ namespace sogen
         {
             if (!c.proc.is_current_process_handle(process_handle))
             {
-                return STATUS_NOT_SUPPORTED;
+                return STATUS_INVALID_HANDLE;
             }
 
             token_handle.write(CURRENT_PROCESS_TOKEN);
@@ -466,7 +614,7 @@ namespace sogen
             {
                 for (auto& thread : c.proc.threads | std::views::values)
                 {
-                    if (&thread != c.proc.active_thread)
+                    if (&thread != c.vcpu.active_thread)
                     {
                         c.proc.terminate_thread(thread, exit_status);
                     }
@@ -478,7 +626,7 @@ namespace sogen
             if (c.proc.is_current_process_handle(process_handle))
             {
                 c.proc.exit_status = exit_status;
-                c.emu.stop();
+                c.win_emu.stop();
                 return STATUS_SUCCESS;
             }
 

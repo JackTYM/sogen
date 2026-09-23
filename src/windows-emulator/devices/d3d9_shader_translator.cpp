@@ -1,0 +1,292 @@
+#include "d3d9_shader_translator.hpp"
+
+#include <vkd3d_shader.h>
+
+#include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+namespace sogen
+{
+    namespace
+    {
+        // out_output_or_input is a shallow copy aliasing info's heap-owned element array; info must stay
+        // alive (not be freed via vkd3d_shader_free_scan_signature_info) until the signature is done being used.
+        bool scan_signature(const void* tokens, const size_t token_size_bytes, vkd3d_shader_scan_signature_info& info,
+                            vkd3d_shader_signature& out_output_or_input, const bool want_output)
+        {
+            info = vkd3d_shader_scan_signature_info{};
+            info.type = VKD3D_SHADER_STRUCTURE_TYPE_SCAN_SIGNATURE_INFO;
+
+            vkd3d_shader_compile_info compile_info{};
+            compile_info.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;
+            compile_info.next = &info;
+            compile_info.source.code = tokens;
+            compile_info.source.size = token_size_bytes;
+            compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
+            // EMULATOR_D3D9_SHADERDIAG surfaces vkd3d-shader's own diagnostics, which are otherwise
+            // requested at LOG_NONE and freed unread. Every failure on this path degrades silently --
+            // translate_d3d9_shader_pair returns false, ensure_programmable_pipeline returns nullptr, and
+            // execute_draw drops the draw with a D3D_OK -- so without this the only visible symptom of a
+            // shader the translator cannot handle is missing geometry. vkd3d's message names the exact
+            // cause (an undeclared sampler register, an unsupported opcode, ...); guessing from the
+            // rendered result does not. Costs one getenv per translation, and translations are cached.
+            const bool diag = getenv("EMULATOR_D3D9_SHADERDIAG") != nullptr;
+            compile_info.log_level = diag ? VKD3D_SHADER_LOG_WARNING : VKD3D_SHADER_LOG_NONE;
+
+            char* messages = nullptr;
+            const int result = vkd3d_shader_scan(&compile_info, &messages);
+            if (diag && result < 0)
+            {
+                fprintf(stderr, "[d3d9-shaderdiag] scan(%s) failed rc=%d size=%zu ver=0x%08X msgs=%s\n", want_output ? "vs" : "ps", result,
+                        token_size_bytes, token_size_bytes >= 4 ? *static_cast<const uint32_t*>(tokens) : 0u,
+                        messages != nullptr ? messages : "(none)");
+            }
+            if (messages != nullptr)
+            {
+                vkd3d_shader_free_messages(messages);
+            }
+            if (result < 0)
+            {
+                return false;
+            }
+            out_output_or_input = want_output ? info.output : info.input;
+            return true;
+        }
+
+        bool compile_stage(const void* tokens, const size_t token_size_bytes, const vkd3d_shader_varying_map_info* varying_map_info,
+                           const vkd3d_shader_visibility shader_visibility, const unsigned int descriptor_set,
+                           const vkd3d_shader_combined_resource_sampler* combined_samplers, const unsigned int combined_sampler_count,
+                           std::vector<uint32_t>& out_spirv)
+        {
+            vkd3d_shader_spirv_target_info spirv_info{};
+            spirv_info.type = VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO;
+            spirv_info.next = varying_map_info;
+            spirv_info.environment = VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_0;
+
+            // Matches d3d9_host.cpp's ensure_programmable_pipeline bindings: float-const UBO at binding
+            // 0, int-const UBO at binding 2, bool-const UBO at binding 3 (binding 1 is the PS-only
+            // combined-image-sampler, declared separately below/at the call site, not here). All three
+            // are declared unconditionally, same rationale as the float one always was -- vkd3d only
+            // emits an actual SPIR-V descriptor for a register file a shader statically references.
+            const std::array<vkd3d_shader_resource_binding, 3> const_buffer_bindings{{
+                {
+                    .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
+                    .register_space = 0,
+                    .register_index = VKD3D_SHADER_D3DBC_FLOAT_CONSTANT_REGISTER,
+                    .shader_visibility = shader_visibility,
+                    .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
+                    .binding = {.set = descriptor_set, .binding = 0, .count = 1},
+                },
+                {
+                    .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
+                    .register_space = 0,
+                    .register_index = VKD3D_SHADER_D3DBC_INT_CONSTANT_REGISTER,
+                    .shader_visibility = shader_visibility,
+                    .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
+                    .binding = {.set = descriptor_set, .binding = 2, .count = 1},
+                },
+                {
+                    .type = VKD3D_SHADER_DESCRIPTOR_TYPE_CBV,
+                    .register_space = 0,
+                    .register_index = VKD3D_SHADER_D3DBC_BOOL_CONSTANT_REGISTER,
+                    .shader_visibility = shader_visibility,
+                    .flags = VKD3D_SHADER_BINDING_FLAG_BUFFER,
+                    .binding = {.set = descriptor_set, .binding = 3, .count = 1},
+                },
+            }};
+
+            vkd3d_shader_interface_info interface_info{};
+            interface_info.type = VKD3D_SHADER_STRUCTURE_TYPE_INTERFACE_INFO;
+            interface_info.next = &spirv_info;
+            interface_info.bindings = const_buffer_bindings.data();
+            interface_info.binding_count = static_cast<unsigned int>(const_buffer_bindings.size());
+            interface_info.combined_samplers = combined_samplers;
+            interface_info.combined_sampler_count = combined_sampler_count;
+
+            vkd3d_shader_compile_info compile_info{};
+            compile_info.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;
+            compile_info.next = &interface_info;
+            compile_info.source.code = tokens;
+            compile_info.source.size = token_size_bytes;
+            compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
+            compile_info.target_type = VKD3D_SHADER_TARGET_SPIRV_BINARY;
+            const bool diag = getenv("EMULATOR_D3D9_SHADERDIAG") != nullptr;
+            compile_info.log_level = diag ? VKD3D_SHADER_LOG_WARNING : VKD3D_SHADER_LOG_NONE;
+
+            vkd3d_shader_code out{};
+            char* messages = nullptr;
+            const int result = vkd3d_shader_compile(&compile_info, &out, &messages);
+            if (diag && result < 0)
+            {
+                fprintf(stderr, "[d3d9-shaderdiag] compile(vis=%d set=%u) failed rc=%d size=%zu ver=0x%08X msgs=%s\n",
+                        static_cast<int>(shader_visibility), descriptor_set, result, token_size_bytes,
+                        token_size_bytes >= 4 ? *static_cast<const uint32_t*>(tokens) : 0u, messages != nullptr ? messages : "(none)");
+            }
+            if (messages != nullptr)
+            {
+                vkd3d_shader_free_messages(messages);
+            }
+            if (result < 0)
+            {
+                return false;
+            }
+
+            out_spirv.resize(out.size / sizeof(uint32_t));
+            std::memcpy(out_spirv.data(), out.code, out.size);
+            vkd3d_shader_free_shader_code(&out);
+            return true;
+        }
+    } // namespace
+
+    bool translate_d3d9_shader_pair(const void* vs_tokens, const size_t vs_token_size_bytes, const void* ps_tokens,
+                                    const size_t ps_token_size_bytes, shader_pair_spirv& out)
+    {
+        out.vertex_spirv.clear();
+        out.pixel_spirv.clear();
+
+        if (vs_tokens == nullptr || vs_token_size_bytes == 0 || ps_tokens == nullptr || ps_token_size_bytes == 0)
+        {
+            return false;
+        }
+
+        vkd3d_shader_scan_signature_info vs_scan{};
+        vkd3d_shader_signature vs_output{};
+        if (!scan_signature(vs_tokens, vs_token_size_bytes, vs_scan, vs_output, /*want_output=*/true))
+        {
+            return false;
+        }
+
+        vkd3d_shader_scan_signature_info ps_scan{};
+        vkd3d_shader_signature ps_input{};
+        if (!scan_signature(ps_tokens, ps_token_size_bytes, ps_scan, ps_input, /*want_output=*/false))
+        {
+            vkd3d_shader_free_scan_signature_info(&vs_scan);
+            return false;
+        }
+
+        std::vector<vkd3d_shader_varying_map> varying_map(ps_input.element_count);
+        unsigned int varying_count = 0;
+        vkd3d_shader_build_varying_map(&vs_output, &ps_input, &varying_count, varying_map.data());
+        varying_map.resize(varying_count);
+
+        vkd3d_shader_free_scan_signature_info(&vs_scan);
+        vkd3d_shader_free_scan_signature_info(&ps_scan);
+
+        vkd3d_shader_varying_map_info varying_map_info{};
+        varying_map_info.type = VKD3D_SHADER_STRUCTURE_TYPE_VARYING_MAP_INFO;
+        varying_map_info.varying_map = varying_map.data();
+        varying_map_info.varying_count = varying_count;
+
+        // Combined-image-samplers for the vertex stage's texture registers s0..s3 (SM3.0 vertex texture
+        // fetch, e.g. tex2Dlod), declared into VS descriptor set 0 at the same bindings the pixel stage
+        // uses within its own set (1, 4, 5, 6 -- stepping over the int/bool-const UBOs at bindings 2/3),
+        // via the shared sampler_binding_for_stage formula. resource_index/sampler_index are the VS's own
+        // s# register numbers (0..3); the DDI-stage-to-register mapping (D3DVERTEXTEXTURESAMPLER0 == DDI
+        // stage 257 -> shader register 0) is a host-side concern (d3d9_host.cpp's execute_draw), not the
+        // translator's. Same over-declaration safety as the PS array below: vkd3d only emits a SPIR-V
+        // sampler variable for a stage the VS statically references, so a VS that fetches no texture (the
+        // overwhelmingly common case) emits zero extra SPIR-V and the unused set-0 sampler bindings stay
+        // inert -- confirmed byte-for-byte unchanged for every existing non-vertex-texture guest test.
+        std::array<vkd3d_shader_combined_resource_sampler, max_vs_sampler_stages> vs_sampler_bindings{};
+        for (unsigned int k = 0; k < vs_sampler_bindings.size(); ++k)
+        {
+            vs_sampler_bindings[k] = {
+                .resource_space = 0,
+                .resource_index = k,
+                .sampler_space = 0,
+                .sampler_index = k,
+                .shader_visibility = VKD3D_SHADER_VISIBILITY_VERTEX,
+                .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
+                .binding = {.set = 0, .binding = vs_sampler_binding_for_stage(k), .count = 1},
+            };
+        }
+        if (!compile_stage(vs_tokens, vs_token_size_bytes, &varying_map_info, VKD3D_SHADER_VISIBILITY_VERTEX, 0, vs_sampler_bindings.data(),
+                           static_cast<unsigned int>(vs_sampler_bindings.size()), out.vertex_spirv))
+        {
+            return false;
+        }
+
+        // Matches d3d9_host.cpp's ensure_programmable_pipeline PS descriptor set (set 1): binding 0 is the
+        // float-const UBO, bindings 2/3 the int/bool-const UBOs, and the combined-image-samplers for texture
+        // stages s0..s3 sit at bindings 1, 4, 5, 6 (s0 keeps its original binding 1; s(k) -> 3+k for k>=1,
+        // stepping over the const-UBO bindings). vkd3d's own D3DBC frontend addresses combined samplers by
+        // plain sampler-stage number (resource_index == sampler_index == the D3D9 s# register), while the
+        // Vulkan binding number is fully decoupled from that register -- confirmed against this vkd3d build.
+        //
+        // All four sampler stages are declared unconditionally even though most pixel shaders reference only
+        // s0. Over-declaring combined samplers a shader doesn't actually use is empirically proven inert:
+        // vkd3d's emit_combined_sampler_declarations only visits an entry when the shader statically declares
+        // the matching resource, so unreferenced entries emit zero SPIR-V (verified via SPIR-V disassembly).
+        // That makes this fixed s0..s3 scheme safe for single-sampler shaders. s0..s3 is a D3D9-realistic cap
+        // for real content (diffuse+normal, multi-texturing); raising it toward D3D9's 16-sampler max is a
+        // trivial, mechanical change here plus a matching bump to d3d9_host.cpp's ps_bindings/pool if needed.
+        std::array<vkd3d_shader_combined_resource_sampler, max_ps_sampler_stages> ps_sampler_bindings{};
+        for (unsigned int k = 0; k < ps_sampler_bindings.size(); ++k)
+        {
+            ps_sampler_bindings[k] = {
+                .resource_space = 0,
+                .resource_index = k,
+                .sampler_space = 0,
+                .sampler_index = k,
+                .shader_visibility = VKD3D_SHADER_VISIBILITY_PIXEL,
+                // Must be IMAGE, not BUFFER (unlike the CBV binding above): vkd3d matches this bitwise against
+                // the shader's own declared resource dimension and silently drops the binding on a mismatch --
+                // the sampler variable then never resolves and vkd3d-shader crashes when the shader references it.
+                .flags = VKD3D_SHADER_BINDING_FLAG_IMAGE,
+                .binding = {.set = 1, .binding = ps_sampler_binding_for_stage(k), .count = 1},
+            };
+        }
+        // varying_map_info is deliberately NOT passed here (unlike the VS call above) -- this is correct,
+        // not an asymmetry to fix. vkd3d_shader_varying_map_info remaps the *compiling stage's own output*
+        // signature (vsir_program_remap_output_signature in ir.c), and vkd3d-shader's own pipeline
+        // (ir.c's vsir_program_transform, which gates that transform on
+        // `shader_version.type != VKD3D_SHADER_TYPE_PIXEL`) never applies it to a pixel shader, since a PS
+        // has no "next stage" to remap its output for. Passing it here anyway was tried and confirmed
+        // byte-for-byte inert (same SPIR-V, same rendered pixels, both via a diagnostic PS visualizing
+        // TEXCOORD0 directly and via d3d9_texture_test.cpp's full run) -- see d3d9_texcoord_test.cpp and
+        // docs/d3d9-roadmap.md for the investigation this closed out.
+        if (!compile_stage(ps_tokens, ps_token_size_bytes, nullptr, VKD3D_SHADER_VISIBILITY_PIXEL, 1, ps_sampler_bindings.data(),
+                           static_cast<unsigned int>(ps_sampler_bindings.size()), out.pixel_spirv))
+        {
+            out.vertex_spirv.clear();
+            return false;
+        }
+        return true;
+    }
+
+    bool disassemble_d3d9_shader(const void* tokens, const size_t token_size_bytes, std::string& out_text)
+    {
+        out_text.clear();
+        if (tokens == nullptr || token_size_bytes == 0)
+        {
+            return false;
+        }
+
+        vkd3d_shader_compile_info compile_info{};
+        compile_info.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;
+        compile_info.source.code = tokens;
+        compile_info.source.size = token_size_bytes;
+        compile_info.source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
+        compile_info.target_type = VKD3D_SHADER_TARGET_D3D_ASM;
+        compile_info.log_level = VKD3D_SHADER_LOG_NONE;
+
+        vkd3d_shader_code out{};
+        char* messages = nullptr;
+        const int result = vkd3d_shader_compile(&compile_info, &out, &messages);
+        if (messages != nullptr)
+        {
+            vkd3d_shader_free_messages(messages);
+        }
+        if (result < 0)
+        {
+            return false;
+        }
+
+        out_text.assign(static_cast<const char*>(out.code), out.size);
+        vkd3d_shader_free_shader_code(&out);
+        return true;
+    }
+} // namespace sogen

@@ -349,6 +349,23 @@ namespace
             return false;
         }
 
+        constexpr DWORD negative_length_low = 0xFFFFFFFFUL;
+        constexpr DWORD negative_length_high = 0xFFFFFFFFUL;
+
+        OVERLAPPED negative_lock{};
+        if (!LockFileEx(first, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, negative_length_low, negative_length_high,
+                        &negative_lock))
+        {
+            puts("Failed to acquire negative-length file lock");
+            return false;
+        }
+
+        if (!UnlockFileEx(first, 0, negative_length_low, negative_length_high, &negative_lock))
+        {
+            puts("Failed to unlock negative-length file lock");
+            return false;
+        }
+
         return true;
     }
 
@@ -1288,6 +1305,169 @@ namespace
         return true;
     }
 
+    bool test_paint_message_queue()
+    {
+        WNDCLASSEXA wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpszClassName = "TestPaintMsgQueueClass";
+        wc.hInstance = GetModuleHandleA(nullptr);
+        wc.lpfnWndProc = DefWindowProcA;
+
+        if (!RegisterClassExA(&wc))
+        {
+            puts("Failed to register paint window class");
+            return false;
+        }
+
+        const auto unregister_class = sogen::utils::finally([&] { UnregisterClassA(wc.lpszClassName, wc.hInstance); });
+
+        const HWND hwnd = CreateWindowExA(0, wc.lpszClassName, nullptr, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, nullptr, nullptr,
+                                          wc.hInstance, nullptr);
+        if (!hwnd)
+        {
+            puts("Failed to create paint window");
+            return false;
+        }
+
+        const auto destroy_window = sogen::utils::finally([&] { DestroyWindow(hwnd); });
+
+        UpdateWindow(hwnd);
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_NOINTERNALPAINT | RDW_VALIDATE);
+        ValidateRect(hwnd, nullptr);
+
+        MSG msg = {};
+        while (PeekMessageA(&msg, hwnd, WM_PAINT, WM_PAINT, PM_REMOVE))
+        {
+            ValidateRect(hwnd, nullptr);
+        }
+
+        if (!RedrawWindow(hwnd, nullptr, nullptr, RDW_INTERNALPAINT))
+        {
+            puts("Failed to request internal paint");
+            return false;
+        }
+
+        if (!PeekMessageA(&msg, hwnd, WM_PAINT, WM_PAINT, PM_NOREMOVE))
+        {
+            puts("Internal WM_PAINT was not available");
+            return false;
+        }
+
+        if (PeekMessageA(&msg, hwnd, WM_PAINT, WM_PAINT, PM_NOREMOVE))
+        {
+            puts("PM_NOREMOVE did not consume internal WM_PAINT");
+            return false;
+        }
+
+        InvalidateRect(hwnd, nullptr, FALSE);
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INTERNALPAINT);
+
+        if (!PeekMessageA(&msg, hwnd, WM_PAINT, WM_PAINT, PM_REMOVE))
+        {
+            puts("Combined WM_PAINT was not available");
+            return false;
+        }
+
+        if (!PeekMessageA(&msg, hwnd, WM_PAINT, WM_PAINT, PM_NOREMOVE))
+        {
+            puts("PM_REMOVE consumed the invalid update region");
+            return false;
+        }
+
+        ValidateRect(hwnd, nullptr);
+        return true;
+    }
+
+    bool test_mutable_callbacks()
+    {
+        struct test_state
+        {
+            int changing_count{};
+            int size_width{};
+            int size_height{};
+            UINT changed_flags{};
+            bool mutate{true};
+            bool saw_size{};
+            bool saw_changed{};
+        };
+
+        thread_local test_state* active_state{};
+        test_state state{};
+        active_state = &state;
+
+        WNDCLASSEXA wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpszClassName = "TestMutMsgQueueClass";
+        wc.hInstance = GetModuleHandleA(nullptr);
+        wc.lpfnWndProc = [](HWND hwnd, const UINT msg, const WPARAM wp, const LPARAM lp) -> LRESULT {
+            if (active_state && msg == WM_WINDOWPOSCHANGING && active_state->mutate)
+            {
+                auto& position = *reinterpret_cast<WINDOWPOS*>(lp);
+                position.x = -123;
+                position.y = -456;
+                position.cx = 800;
+                position.cy = 600;
+                position.flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
+                ++active_state->changing_count;
+            }
+            else if (active_state && msg == WM_WINDOWPOSCHANGED)
+            {
+                active_state->changed_flags = reinterpret_cast<const WINDOWPOS*>(lp)->flags;
+                active_state->saw_changed = true;
+            }
+            else if (active_state && msg == WM_SIZE)
+            {
+                active_state->size_width = LOWORD(lp);
+                active_state->size_height = HIWORD(lp);
+                active_state->saw_size = true;
+            }
+
+            return DefWindowProcA(hwnd, msg, wp, lp);
+        };
+
+        if (!RegisterClassExA(&wc))
+        {
+            active_state = nullptr;
+            return false;
+        }
+
+        HWND hwnd{};
+        const auto cleanup = sogen::utils::finally([&] {
+            state.mutate = false;
+            if (hwnd)
+            {
+                DestroyWindow(hwnd);
+            }
+            UnregisterClassA(wc.lpszClassName, wc.hInstance);
+            active_state = nullptr;
+        });
+
+        hwnd = CreateWindowExA(0, wc.lpszClassName, nullptr, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 10, 20, 320, 240, nullptr, nullptr,
+                               wc.hInstance, nullptr);
+        state.mutate = false;
+        if (!hwnd)
+        {
+            return false;
+        }
+
+        RECT window_rect{};
+        RECT client_rect{};
+        if (!GetWindowRect(hwnd, &window_rect) || !GetClientRect(hwnd, &client_rect))
+        {
+            return false;
+        }
+
+        const auto window_width = window_rect.right - window_rect.left;
+        const auto window_height = window_rect.bottom - window_rect.top;
+        const auto client_width = client_rect.right - client_rect.left;
+        const auto client_height = client_rect.bottom - client_rect.top;
+
+        return state.changing_count == 2 && state.saw_changed && (state.changed_flags & SWP_SHOWWINDOW) != 0 && state.saw_size &&
+               window_rect.left == -123 && window_rect.top == -456 && window_width == 800 && window_height == 600 &&
+               client_width < window_width && client_height < window_height && state.size_width == client_width &&
+               state.size_height == client_height;
+    }
+
     bool test_private_namespace()
     {
         auto create_boundary_descriptor = [](const wchar_t* name) -> HANDLE {
@@ -1601,7 +1781,9 @@ int main(const int argc, const char* argv[])
     RUN_TEST(test_socket, "Socket")
     RUN_TEST(test_apc, "APC")
     RUN_TEST(test_user_callback, "User Callback")
-    RUN_TEST(test_message_queue, "Message Queue")
+    RUN_TEST(test_mutable_callbacks, "Mutable User Callback")
+    RUN_TEST(test_message_queue, "Message Queue (General)")
+    RUN_TEST(test_paint_message_queue, "Message Queue (Paint)")
     RUN_TEST(test_settimer, "User Timer")
     RUN_TEST(test_private_namespace, "Private Namespace")
     RUN_TEST(test_actctx, "Activation Context")

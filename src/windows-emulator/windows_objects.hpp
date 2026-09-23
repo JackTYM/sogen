@@ -4,6 +4,7 @@
 #include "memory_manager.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <string_view>
 #include <serialization_helper.hpp>
 #include <utils/file_handle.hpp>
@@ -15,6 +16,24 @@ namespace sogen
 {
 
     struct timer : ref_counted_object
+    {
+        std::u16string name{};
+        std::optional<std::chrono::steady_clock::time_point> signal_time{};
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->name);
+            buffer.write_optional(this->signal_time);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->name);
+            buffer.read_optional(this->signal_time);
+        }
+    };
+
+    struct keyed_event : ref_counted_object
     {
         std::u16string name{};
 
@@ -50,6 +69,15 @@ namespace sogen
         }
     };
 
+    struct accelerator_table_entry
+    {
+        uint8_t flags{};
+        uint16_t key{};
+        uint16_t command{};
+    };
+
+    static_assert(sizeof(accelerator_table_entry) == 6);
+
     template <typename GuestType>
     struct user_object : ref_counted_object
     {
@@ -69,6 +97,28 @@ namespace sogen
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->guest);
+        }
+    };
+
+    struct accelerator_table : user_object<USER_ACCELERATOR_TABLE>
+    {
+        std::vector<accelerator_table_entry> entries{};
+
+        accelerator_table(memory_interface& memory)
+            : user_object(memory)
+        {
+        }
+
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            user_object::serialize_object(buffer);
+            buffer.write_vector(this->entries);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            user_object::deserialize_object(buffer);
+            buffer.read_vector(this->entries);
         }
     };
 
@@ -104,7 +154,6 @@ namespace sogen
         {
             return u"ComboBox";
         }
-
         return class_name;
     }
 
@@ -124,12 +173,13 @@ namespace sogen
         uint32_t style{};
         RECT update_rect{};
         bool update_pending{};
-        bool paint_message_posted{};
+        bool internal_paint_pending{};
         bool erase_pending{};
         std::map<std::u16string, uint64_t> props{};
         emulator_pointer wnd_proc{};
         hmenu system_menu_handle{};
         bool host_surface_window{};
+        bool message_only{};
         bool unicode_proc{};
 
         window(memory_interface& memory)
@@ -180,12 +230,13 @@ namespace sogen
             buffer.write(this->style);
             buffer.write(this->update_rect);
             buffer.write(this->update_pending);
-            buffer.write(this->paint_message_posted);
+            buffer.write(this->internal_paint_pending);
             buffer.write(this->erase_pending);
             buffer.write_map(this->props);
             buffer.write(this->wnd_proc);
             buffer.write(this->system_menu_handle);
             buffer.write(this->host_surface_window);
+            buffer.write(this->message_only);
             buffer.write(this->unicode_proc);
         }
 
@@ -206,12 +257,13 @@ namespace sogen
             buffer.read(this->style);
             buffer.read(this->update_rect);
             buffer.read(this->update_pending);
-            buffer.read(this->paint_message_posted);
+            buffer.read(this->internal_paint_pending);
             buffer.read(this->erase_pending);
             buffer.read_map(this->props);
             buffer.read(this->wnd_proc);
             buffer.read(this->system_menu_handle);
             buffer.read(this->host_surface_window);
+            buffer.read(this->message_only);
             buffer.read(this->unicode_proc);
         }
     };
@@ -303,7 +355,7 @@ namespace sogen
             auto next_text = this->text_storage;
             for (size_t i = 0; i < this->items.size(); ++i)
             {
-                const auto& item = this->items[i];
+                const auto& item = this->items.at(i);
                 const auto text_ptr = !item.text.empty() ? next_text : 0;
                 const auto guest_item = make_guest_item(item, text_ptr);
                 write_guest_item_text(memory, item, text_ptr);
@@ -331,7 +383,7 @@ namespace sogen
                 return;
             }
 
-            const auto& item = this->items[index];
+            const auto& item = this->items.at(index);
             const auto text_ptr = this->get_guest_text_ptr(index);
             const auto guest_item = make_guest_item(item, text_ptr);
             write_guest_item_text(memory, item, text_ptr);
@@ -420,13 +472,14 @@ namespace sogen
             auto text_ptr = this->text_storage;
             for (size_t i = 0; i < index; ++i)
             {
-                if (!this->items[i].text.empty())
+                const auto& item = this->items.at(i);
+                if (!item.text.empty())
                 {
-                    text_ptr += (this->items[i].text.size() + 1) * sizeof(char16_t);
+                    text_ptr += (item.text.size() + 1) * sizeof(char16_t);
                 }
             }
 
-            return this->items[index].text.empty() ? 0 : text_ptr;
+            return this->items.at(index).text.empty() ? 0 : text_ptr;
         }
 
         size_t text_storage_size() const
@@ -545,12 +598,18 @@ namespace sogen
         std::filesystem::path file_path{};
         uint64_t file_size{};
         bool is_directory{};
+        LARGE_INTEGER creation_time{};
+        LARGE_INTEGER last_access_time{};
+        LARGE_INTEGER last_write_time{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->file_path);
             buffer.write(this->file_size);
             buffer.write(this->is_directory);
+            buffer.write(this->creation_time);
+            buffer.write(this->last_access_time);
+            buffer.write(this->last_write_time);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -558,6 +617,9 @@ namespace sogen
             buffer.read(this->file_path);
             buffer.read(this->file_size);
             buffer.read(this->is_directory);
+            buffer.read(this->creation_time);
+            buffer.read(this->last_access_time);
+            buffer.read(this->last_write_time);
         }
     };
 
@@ -663,8 +725,11 @@ namespace sogen
         uint32_t allocation_attributes{};
         // Shared backing for a pagefile-backed section: allocated once (lazily, on first map) and reused by
         // every view, so all views of the section see the same memory and section offsets resolve correctly.
-        // 0 until allocated. Freed when last section handle is closed.
+        // 0 until allocated. Freed once the last section handle is closed AND no mapped views remain —
+        // real Windows keeps section memory alive through mapped views after CloseHandle (DXVK's 32-bit
+        // D3D9 chunk allocator relies on this by leaking still-mapped views of chunks it destroys).
         uint64_t backing_address{};
+        uint32_t mapped_view_count{};
         std::optional<winpe::pe_image_basic_info> cached_image_info{};
 
         bool is_image() const
@@ -714,6 +779,7 @@ namespace sogen
             buffer.write(this->section_page_protection);
             buffer.write(this->allocation_attributes);
             buffer.write(this->backing_address);
+            buffer.write(this->mapped_view_count);
             buffer.write_optional<winpe::pe_image_basic_info>(this->cached_image_info);
         }
 
@@ -725,6 +791,7 @@ namespace sogen
             buffer.read(this->section_page_protection);
             buffer.read(this->allocation_attributes);
             buffer.read(this->backing_address);
+            buffer.read(this->mapped_view_count);
             buffer.read_optional(this->cached_image_info);
         }
     };
@@ -812,6 +879,22 @@ namespace sogen
         uint32_t number_of_concurrent_threads{};
         std::vector<io_completion_message> queue{};
 
+        // Handles of the wait completion packets currently associated with this port. Without it, every
+        // readiness check of a thread parked in NtRemoveIoCompletion has to walk the whole process-wide
+        // packet store, which a guest that keeps allocating thread pools grows without bound. Entries
+        // are added on association and dropped lazily by the reader once they no longer resolve to a
+        // packet associated with this port, so a stale entry costs one skipped visit and can never
+        // deliver a completion to a port the packet does not belong to.
+        std::vector<uint64_t> associated_wait_packets{};
+
+        void associate_wait_packet(const handle wait_packet_handle)
+        {
+            if (std::ranges::find(this->associated_wait_packets, wait_packet_handle.bits) == this->associated_wait_packets.end())
+            {
+                this->associated_wait_packets.push_back(wait_packet_handle.bits);
+            }
+        }
+
         void enqueue(const io_completion_message& message)
         {
             this->queue.push_back(message);
@@ -849,6 +932,7 @@ namespace sogen
             buffer.write(this->name);
             buffer.write(this->number_of_concurrent_threads);
             buffer.write_vector(this->queue);
+            buffer.write_vector(this->associated_wait_packets);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -856,6 +940,7 @@ namespace sogen
             buffer.read(this->name);
             buffer.read(this->number_of_concurrent_threads);
             buffer.read_vector(this->queue);
+            buffer.read_vector(this->associated_wait_packets);
         }
     };
 

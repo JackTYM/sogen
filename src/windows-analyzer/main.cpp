@@ -13,6 +13,7 @@
 #include "analysis.hpp"
 #include "analysis_reporter.hpp"
 #include "jsonl_reporter.hpp"
+#include "stdout_file_reporter.hpp"
 #include "tenet_tracer.hpp"
 
 #include <utils/finally.hpp>
@@ -60,13 +61,18 @@ namespace sogen
             bool pause_before_start{false};
 #endif
             std::optional<uint64_t> break_call{};
+            std::vector<std::pair<std::string, uint32_t>> click_dialog_rules{};
+            std::vector<input_action> input_script{};
+            std::filesystem::path block_profile{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
+            std::filesystem::path stdout_path{};
             std::string report_format{"jsonl"};
             std::string whp_execution_hook_mode{"auto"};
             std::optional<backend_type> backend{};
             bool disable_instruction_precision{false};
+            uint32_t vcpu_count{1};
             std::filesystem::path registry_path{get_current_binary_dir() / "registry"};
             std::filesystem::path emulation_root{};
             std::unordered_map<windows_path, std::filesystem::path> path_mappings{};
@@ -173,30 +179,32 @@ namespace sogen
                     return;
                 }
 
-                auto hook_handler = [state, env_ptr](const uint64_t address, const void*, const size_t size) {
-                    const auto rip = state->win_emu_.emu().read_instruction_pointer();
-                    const auto* mod = state->win_emu_.mod_manager.find_by_address(rip);
-                    const auto is_main_access =
-                        !mod || (mod == state->win_emu_.mod_manager.executable || state->modules_.contains(mod->name));
+                auto hook_handler = [state, env_ptr](cpu_interface& cpu, const uint64_t address, const void*, const size_t size) {
+                    state->win_emu_.dispatch_on_cpu(cpu, [&] {
+                        const auto rip = state->win_emu_.active_cpu().read_instruction_pointer();
+                        const auto* mod = state->win_emu_.mod_manager.find_by_address(rip);
+                        const auto is_main_access =
+                            !mod || (mod == state->win_emu_.mod_manager.executable || state->modules_.contains(mod->name));
 
-                    if (!is_main_access && !state->verbose_)
-                    {
-                        return;
-                    }
-
-                    if (state->concise_)
-                    {
-                        const auto count = ++state->env_module_cache_[mod ? mod->name : "<N/A>"];
-                        if (count > 30 && count % 1000 != 0)
+                        if (!is_main_access && !state->verbose_)
                         {
                             return;
                         }
-                    }
 
-                    state->context_.emit_observation<environment_access_event>([&](auto& event) {
-                        event.main_access = is_main_access;
-                        event.offset = address - env_ptr;
-                        event.size = size;
+                        if (state->concise_)
+                        {
+                            const auto count = ++state->env_module_cache_[mod ? mod->name : "<N/A>"];
+                            if (count > 30 && count % 1000 != 0)
+                            {
+                                return;
+                            }
+                        }
+
+                        state->context_.emit_observation<environment_access_event>([&](auto& event) {
+                            event.main_access = is_main_access;
+                            event.offset = address - env_ptr;
+                            event.size = size;
+                        });
                     });
                 };
 
@@ -208,7 +216,7 @@ namespace sogen
             auto& win_emu = state->win_emu_;
             return state->win_emu_.emu().hook_memory_write(
                 process_params.value() + offsetof(RTL_USER_PROCESS_PARAMETERS64, Environment), 0x8,
-                [&win_emu, install = std::move(install_env_access_hook)](const uint64_t address, const void*, size_t) {
+                [&win_emu, install = std::move(install_env_access_hook)](cpu_interface&, const uint64_t address, const void*, size_t) {
                     const auto new_process_params = get_process_params(win_emu);
 
                     const auto target_address = new_process_params.value() + offsetof(RTL_USER_PROCESS_PARAMETERS64, Environment);
@@ -255,7 +263,7 @@ namespace sogen
 
             win_emu.emu().hook_memory_write(
                 win_emu.process.peb64.value() + offsetof(PEB64, ProcessParameters), 0x8,
-                [state, emit_object_access, update_env = std::move(update_env_hook)](const uint64_t, const void*, size_t) {
+                [state, emit_object_access, update_env = std::move(update_env_hook)](cpu_interface&, const uint64_t, const void*, size_t) {
                     const auto new_ptr = state->win_emu_.process.peb64.read().ProcessParameters;
                     state->params_hook_ = watch_object<RTL_USER_PROCESS_PARAMETERS64>(
                         state->win_emu_, state->modules_, new_ptr, state->verbose_, emit_object_access, state->params_state_);
@@ -263,7 +271,7 @@ namespace sogen
                 });
 
             win_emu.emu().hook_memory_write(win_emu.process.peb64.value() + offsetof(PEB64, Ldr), 0x8,
-                                            [state, emit_object_access](const uint64_t, const void*, size_t) {
+                                            [state, emit_object_access](cpu_interface&, const uint64_t, const void*, size_t) {
                                                 const auto new_ptr = state->win_emu_.process.peb64.read().Ldr;
                                                 state->ldr_hook_ =
                                                     watch_object<PEB_LDR_DATA64>(state->win_emu_, state->modules_, new_ptr, state->verbose_,
@@ -490,9 +498,39 @@ namespace sogen
             throw std::runtime_error("WHP memory execution hook mode must be auto or int3");
         }
 
+        uint32_t parse_dialog_control_id(const std::string_view token)
+        {
+            if (token.empty())
+            {
+                throw std::runtime_error("Control id must not be empty");
+            }
+
+            for (const auto c : token)
+            {
+                if (c < '0' || c > '9')
+                {
+                    throw std::runtime_error("Control id must be a non-negative integer");
+                }
+            }
+
+            if (token.size() > 5)
+            {
+                throw std::runtime_error("Control id should be in range 0-65535");
+            }
+
+            const auto control_id = std::stoul(std::string(token));
+            if (control_id > 0xFFFF)
+            {
+                throw std::runtime_error("Control id should be in range 0-65535");
+            }
+
+            return static_cast<uint32_t>(control_id);
+        }
+
         std::unique_ptr<x86_64_emulator> create_configured_backend(const analysis_options& options)
         {
-            auto emu = options.backend ? create_x86_64_emulator(*options.backend) : create_x86_64_emulator_from_environment();
+            auto emu = options.backend ? create_x86_64_emulator(*options.backend, options.vcpu_count)
+                                       : create_x86_64_emulator_from_environment(options.vcpu_count);
             emu->set_memory_execution_hook_mode(parse_memory_execution_hook_mode(options.whp_execution_hook_mode));
             return emu;
         }
@@ -569,11 +607,45 @@ namespace sogen
             return "?";
         }
 
+        void flush_block_profile(const std::filesystem::path& path, const std::unordered_map<uint64_t, uint64_t>& histogram,
+                                 const module_manager& mod_manager)
+        {
+            const auto temp_path = std::filesystem::path(path).concat(".tmp");
+            std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+            if (!out)
+            {
+                return;
+            }
+
+            for (const auto& mod : mod_manager.modules() | std::views::values)
+            {
+                out << "M " << std::hex << mod.image_base << ' ' << mod.size_of_image << ' ' << std::dec << mod.name << '\n';
+                for (const auto& sym : mod.exports)
+                {
+                    if (sym.address != 0)
+                    {
+                        out << "E " << std::hex << sym.address << std::dec << ' ' << sym.name << '\n';
+                    }
+                }
+            }
+
+            for (const auto& [address, count] : histogram)
+            {
+                out << "B " << std::hex << address << std::dec << ' ' << count << '\n';
+            }
+
+            out.close();
+            std::error_code ec{};
+            std::filesystem::rename(temp_path, path, ec);
+        }
+
         bool run(const analysis_options& options, const std::span<const std::string_view> args)
         {
             analysis_context context{
                 .settings = &options,
                 .auto_break_before_call = options.break_call,
+                .click_dialog_rules = options.click_dialog_rules,
+                .input_script = options.input_script,
             };
 
             const auto concise_logging = options.concise_logging;
@@ -595,6 +667,11 @@ namespace sogen
                 }
 
                 reporters.emplace_back(create_jsonl_reporter(options.report_path));
+            }
+
+            if (!options.stdout_path.empty())
+            {
+                reporters.emplace_back(create_stdout_file_reporter(options.stdout_path));
             }
 
             context.reporters.reserve(reporters.size());
@@ -645,90 +722,95 @@ namespace sogen
             const auto& exe = *win_emu->mod_manager.executable;
             const auto is_whp = win_emu->emu().get_name() == "Windows Hypervisor Platform";
 
-            win_emu->emu().hook_instruction(x86_hookable_instructions::cpuid, [&] {
-                auto& emu = win_emu->emu();
+            win_emu->emu().hook_instruction(x86_hookable_instructions::cpuid, [&](cpu_interface& cpu, uint64_t) {
+                return win_emu->dispatch_on_cpu(cpu, [&] {
+                    auto& emu = win_emu->active_cpu();
 
-                const auto rip = emu.read_instruction_pointer();
-                const auto leaf = emu.reg<uint32_t>(x86_register::eax);
-                const auto mod = get_module_if_interesting(win_emu->mod_manager, options.modules, rip);
+                    const auto rip = emu.read_instruction_pointer();
+                    const auto leaf = emu.reg<uint32_t>(x86_register::eax);
+                    const auto mod = get_module_if_interesting(win_emu->mod_manager, options.modules, rip);
 
-                if (mod.has_value() && (!concise_logging || context.cpuid_cache.insert({rip, leaf}).second))
-                {
-                    context.emit_observation<cpuid_event>([&](auto& event) { event.leaf = leaf; });
-                }
+                    if (mod.has_value() && (!concise_logging || context.cpuid_cache.insert({rip, leaf}).second))
+                    {
+                        context.emit_observation<cpuid_event>([&](auto& event) { event.leaf = leaf; });
+                    }
 
-                if (leaf == 1 && !is_whp)
-                {
-                    // NOTE: We hard-code these values to disable SSE4.x and AVX
-                    //       See: https://github.com/momo5502/sogen/issues/560
-                    emu.reg<uint32_t>(x86_register::eax, 0x000906EA);
-                    emu.reg<uint32_t>(x86_register::ebx, 0x00100800);
-                    emu.reg<uint32_t>(x86_register::ecx, 0xEFE2F38F);
-                    emu.reg<uint32_t>(x86_register::edx, 0xBFEBFBFF);
+                    if (leaf == 1 && !is_whp)
+                    {
+                        // NOTE: We hard-code these values to disable SSE4.x and AVX
+                        //       See: https://github.com/momo5502/sogen/issues/560
+                        emu.reg<uint32_t>(x86_register::eax, 0x000906EA);
+                        emu.reg<uint32_t>(x86_register::ebx, 0x00100800);
+                        emu.reg<uint32_t>(x86_register::ecx, 0xEFE2F38F);
+                        emu.reg<uint32_t>(x86_register::edx, 0xBFEBFBFF);
 
-                    return instruction_hook_continuation::skip_instruction;
-                }
+                        return instruction_hook_continuation::skip_instruction;
+                    }
 
-                if (leaf == 0x40000000 && !is_whp)
-                {
-                    // Microsoft Hv vendor string
-                    emu.reg<uint32_t>(x86_register::eax, 0x40000003);
-                    emu.reg<uint32_t>(x86_register::ebx, 0x7263694d);
-                    emu.reg<uint32_t>(x86_register::ecx, 0x666f736f);
-                    emu.reg<uint32_t>(x86_register::edx, 0x76482074);
+                    if (leaf == 0x40000000 && !is_whp)
+                    {
+                        // Microsoft Hv vendor string
+                        emu.reg<uint32_t>(x86_register::eax, 0x40000003);
+                        emu.reg<uint32_t>(x86_register::ebx, 0x7263694d);
+                        emu.reg<uint32_t>(x86_register::ecx, 0x666f736f);
+                        emu.reg<uint32_t>(x86_register::edx, 0x76482074);
 
-                    return instruction_hook_continuation::skip_instruction;
-                }
+                        return instruction_hook_continuation::skip_instruction;
+                    }
 
-                if (leaf == 0x40000003 && !is_whp)
-                {
-                    emu.reg<uint32_t>(x86_register::eax, 0x00000000);
-                    emu.reg<uint32_t>(x86_register::ebx, 0x00000001);
-                    emu.reg<uint32_t>(x86_register::ecx, 0x00000000);
-                    emu.reg<uint32_t>(x86_register::edx, 0x00000000);
+                    if (leaf == 0x40000003 && !is_whp)
+                    {
+                        emu.reg<uint32_t>(x86_register::eax, 0x00000000);
+                        emu.reg<uint32_t>(x86_register::ebx, 0x00000001);
+                        emu.reg<uint32_t>(x86_register::ecx, 0x00000000);
+                        emu.reg<uint32_t>(x86_register::edx, 0x00000000);
 
-                    return instruction_hook_continuation::skip_instruction;
-                }
+                        return instruction_hook_continuation::skip_instruction;
+                    }
 
-                return instruction_hook_continuation::run_instruction;
+                    return instruction_hook_continuation::run_instruction;
+                });
             });
 
             if (options.log_foreign_module_access)
             {
                 auto module_cache = std::make_shared<std::map<std::string, uint64_t>>();
-                win_emu->emu().hook_memory_read(
-                    0, std::numeric_limits<uint64_t>::max(), [&, module_cache](const uint64_t address, const void*, size_t size) {
-                        const auto rip = win_emu->emu().read_instruction_pointer();
-                        const auto accessor = get_module_if_interesting(win_emu->mod_manager, options.modules, rip);
+                win_emu->emu().hook_memory_read(0, std::numeric_limits<uint64_t>::max(),
+                                                [&, module_cache](cpu_interface& cpu, const uint64_t address, const void*, size_t size) {
+                                                    win_emu->dispatch_on_cpu(cpu, [&] {
+                                                        const auto rip = win_emu->active_cpu().read_instruction_pointer();
+                                                        const auto accessor =
+                                                            get_module_if_interesting(win_emu->mod_manager, options.modules, rip);
 
-                        if (!accessor.has_value())
-                        {
-                            return;
-                        }
+                                                        if (!accessor.has_value())
+                                                        {
+                                                            return;
+                                                        }
 
-                        const auto* mod = win_emu->mod_manager.find_by_address(address);
-                        if (!mod || mod == *accessor)
-                        {
-                            return;
-                        }
+                                                        const auto* mod = win_emu->mod_manager.find_by_address(address);
+                                                        if (!mod || mod == *accessor)
+                                                        {
+                                                            return;
+                                                        }
 
-                        if (concise_logging)
-                        {
-                            const auto count = ++(*module_cache)[mod->name];
-                            if (count > 30 && count % 100000 != 0)
-                            {
-                                return;
-                            }
-                        }
+                                                        if (concise_logging)
+                                                        {
+                                                            const auto count = ++(*module_cache)[mod->name];
+                                                            if (count > 30 && count % 100000 != 0)
+                                                            {
+                                                                return;
+                                                            }
+                                                        }
 
-                        const auto* region_name = get_module_memory_region_name(*mod, address);
-                        context.emit_observation<foreign_module_read_event>([&](auto& event) {
-                            event.address = address;
-                            event.size = size;
-                            event.module_name = mod->name;
-                            event.region_name = region_name;
-                        });
-                    });
+                                                        const auto* region_name = get_module_memory_region_name(*mod, address);
+                                                        context.emit_observation<foreign_module_read_event>([&](auto& event) {
+                                                            event.address = address;
+                                                            event.size = size;
+                                                            event.module_name = mod->name;
+                                                            event.region_name = region_name;
+                                                        });
+                                                    });
+                                                });
             }
 
             if (options.log_executable_access)
@@ -743,7 +825,8 @@ namespace sogen
                     const auto read_count = std::make_shared<uint64_t>(0);
                     const auto write_count = std::make_shared<uint64_t>(0);
 
-                    auto read_handler = [&, section, concise_logging, read_count](const uint64_t address, const void*, size_t size) {
+                    auto read_handler = [&, section, concise_logging, read_count](cpu_interface&, const uint64_t address, const void*,
+                                                                                  size_t size) {
                         const auto rip = win_emu->emu().read_instruction_pointer();
                         const auto accessor = get_module_if_interesting(win_emu->mod_manager, options.modules, rip);
 
@@ -768,8 +851,8 @@ namespace sogen
                         });
                     };
 
-                    auto write_handler = [&, section, concise_logging, write_count](const uint64_t address, const void* value,
-                                                                                    size_t size) {
+                    auto write_handler = [&, section, concise_logging, write_count](cpu_interface&, const uint64_t address,
+                                                                                    const void* value, size_t size) {
                         if (concise_logging)
                         {
                             const auto count = ++*write_count;
@@ -794,11 +877,65 @@ namespace sogen
                 }
             }
 
-            return run_emulation(context, options);
+            std::shared_ptr<std::unordered_map<uint64_t, uint64_t>> profile_histogram{};
+            if (!options.block_profile.empty())
+            {
+                profile_histogram = std::make_shared<std::unordered_map<uint64_t, uint64_t>>();
+                auto counter = std::make_shared<uint64_t>(0);
+                auto last_flush = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+                auto* mod_manager = &win_emu->mod_manager;
+                const auto profile_path = options.block_profile;
+                auto histogram = profile_histogram;
+
+                win_emu->emu().hook_basic_block(
+                    [histogram, counter, last_flush, mod_manager, profile_path](cpu_interface&, const basic_block& block) {
+                        (*histogram)[block.address] += (block.instruction_count != 0 ? block.instruction_count : block.size);
+                        if ((++(*counter) & 0xFFFFF) == 0)
+                        {
+                            const auto now = std::chrono::steady_clock::now();
+                            if (now - *last_flush > std::chrono::seconds(15))
+                            {
+                                *last_flush = now;
+                                flush_block_profile(profile_path, *histogram, *mod_manager);
+                            }
+                        }
+                    });
+            }
+
+            const auto emulation_result = run_emulation(context, options);
+            if (profile_histogram)
+            {
+                flush_block_profile(options.block_profile, *profile_histogram, win_emu->mod_manager);
+            }
+            return emulation_result;
         }
+
+#ifdef __APPLE__
+        // AudioToolbox loads its spatial-audio HRTF presets lazily, guarded by a process-wide dispatch_once,
+        // the first time any AudioQueue starts. On this host, that first-ever load has repeatedly aborted the
+        // process with a libmalloc free-list corruption report inside AudioToolbox's own code (crash site,
+        // not necessarily cause: the same AudioQueue sequence never reproduces it in a freestanding program,
+        // so it is most likely surfacing corruption from elsewhere in the process rather than an Apple bug in
+        // isolation). Since the dispatch_once means this code path only ever runs once per process, forcing
+        // it here - before anything else in the process has run - guarantees it sees a pristine heap, so the
+        // guest's own first real audio playback later on never re-enters it.
+        void warm_up_host_audio()
+        {
+            const auto backend = create_sdl_audio_backend();
+            if (backend->start({.sample_rate = 44100, .channels = 2, .bits_per_sample = 32, .is_float = true}))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            backend->stop();
+        }
+#endif
 
         int run_main(int argc, char** argv)
         {
+#ifdef __APPLE__
+            warm_up_host_audio();
+#endif
+
 #ifndef _WIN32
             signal(SIGPIPE, SIG_IGN);
 #endif
@@ -855,14 +992,20 @@ namespace sogen
             app.add_option("--minidump", options.minidump_path, "Load minidump from path");
             app.add_option("--report", options.report_path, "Write machine-readable analysis events to a file");
             app.add_option("--report-format", options.report_format, "Report format (supported: jsonl)")->capture_default_str();
+            app.add_option("--stdout", options.stdout_path, "Write guest console output to a file");
             app.add_option("--whp-exec-hook", options.whp_execution_hook_mode, "WHP memory execution hook mode")
                 ->capture_default_str()
                 ->check(CLI::IsMember({"auto", "int3"}));
             app.add_option("-r,--registry", options.registry_path, "Set registry path");
+            app.add_option("--block-profile", options.block_profile,
+                           "Write a basic-block execution profile to a file (flushed periodically while running)");
+
+            app.add_option("--vcpus", options.vcpu_count, "Number of virtual CPUs (requires a backend with multi-vCPU support)")
+                ->capture_default_str();
 
             std::string backend_name{};
-            app.add_option("--backend", backend_name, "Select CPU backend: unicorn, icicle, whp or kvm (overrides env)")
-                ->check(CLI::IsMember({"unicorn", "icicle", "whp", "kvm"}));
+            app.add_option("--backend", backend_name, "Select CPU backend: unicorn, icicle, whp, kvm or fex (overrides env)")
+                ->check(CLI::IsMember({"unicorn", "icicle", "whp", "kvm", "fex"}));
 
             std::vector<std::string> tracked_modules{};
             app.add_option("-m,--module", tracked_modules, "Specify module(s) to track")->allow_extra_args(false);
@@ -876,6 +1019,28 @@ namespace sogen
             std::vector<std::pair<std::string, std::string>> environment{};
             app.add_option("--env", environment, "Set an environment variable")->type_name("NAME VALUE")->allow_extra_args(false);
 
+            std::vector<std::pair<std::string, std::string>> click_dialog_button_args{};
+            app.add_option("--click-dialog-button", click_dialog_button_args,
+                           "Auto-dismiss a modal dialog whose title contains TITLE by clicking control ID "
+                           "(repeatable, e.g. --click-dialog-button \"Safe Mode\" 7). A dialog whose title "
+                           "matches no rule is left alone rather than guessed at.")
+                ->type_name("TITLE ID")
+                ->allow_extra_args(false);
+
+            std::vector<std::string> send_input_args{};
+            app.add_option("--send-input", send_input_args,
+                           "Scripted synthetic input for the main window, starting once it exists. Semicolon-separated "
+                           "actions: wait:MS, waitclass:SUBSTRING:MAXMS, move:X:Y, click:X:Y, key:NAME, keydown:NAME, "
+                           "keyup:NAME, text:STRING. waitclass blocks until the window class of the current input "
+                           "target contains SUBSTRING, or MAXMS elapses, whichever comes first -- use it in place of a "
+                           "guessed wait: for anything gated on a specific window (e.g. a splash screen giving way to "
+                           "the real game window) rather than a fixed boot time, since boot speed varies with host "
+                           "load. Coordinates containing a decimal point are normalized (0..1) against the client "
+                           "area, integers are client pixels. NAME is e.g. enter, esc, space, up, f5, a, 3, grave, or "
+                           "a raw 0xNN virtual-key code. text: sends WM_CHAR per character. "
+                           "(repeatable, e.g. --send-input \"waitclass:IW4:200000; wait:2000; key:enter\")")
+                ->allow_extra_args(false);
+
             CLI11_PARSE(app, argc, argv);
 
             if (argc <= 1)
@@ -886,15 +1051,29 @@ namespace sogen
 
             try
             {
+                if (options.use_gdb && options.vcpu_count > 1)
+                {
+                    throw std::runtime_error("GDB debugging requires --vcpus 1");
+                }
+
                 if (!backend_name.empty())
                 {
                     static const std::map<std::string, backend_type> backends{
-                        {"unicorn", backend_type::unicorn},
-                        {"icicle", backend_type::icicle},
-                        {"whp", backend_type::whp},
-                        {"kvm", backend_type::kvm},
+                        {"unicorn", backend_type::unicorn}, {"icicle", backend_type::icicle}, {"whp", backend_type::whp},
+                        {"kvm", backend_type::kvm},         {"fex", backend_type::fex},
                     };
                     options.backend = backends.at(backend_name);
+                }
+
+                for (const auto& [title, id] : click_dialog_button_args)
+                {
+                    options.click_dialog_rules.emplace_back(title, parse_dialog_control_id(id));
+                }
+
+                for (const auto& script : send_input_args)
+                {
+                    auto actions = parse_input_script(script);
+                    options.input_script.insert(options.input_script.end(), actions.begin(), actions.end());
                 }
 
                 for (auto& module_name : tracked_modules)

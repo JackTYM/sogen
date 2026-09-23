@@ -100,12 +100,14 @@ namespace sogen
                 }
 
                 handle retained_io_completion_handle{};
-                if (!io_completion_wait::retain_handle_reference(c.proc, io_completion_handle, retained_io_completion_handle))
+                if (!io_completion_wait::retain_handle_reference(c.proc, c.vcpu.active_thread, io_completion_handle,
+                                                                 retained_io_completion_handle))
                 {
                     return STATUS_INVALID_HANDLE;
                 }
 
-                if (!io_completion_wait::retain_handle_reference(c.proc, io_completion_packet_handle, wait_packet_handle))
+                if (!io_completion_wait::retain_handle_reference(c.proc, c.vcpu.active_thread, io_completion_packet_handle,
+                                                                 wait_packet_handle))
                 {
                     io_completion_wait::release_handle_reference(c.proc, retained_io_completion_handle);
                     return STATUS_INVALID_HANDLE;
@@ -159,7 +161,7 @@ namespace sogen
                 return STATUS_TIMEOUT;
             }
 
-            auto& t = c.win_emu.current_thread();
+            auto& t = c.thread();
             t.await_objects = {};
             t.await_any = false;
             t.await_time = {};
@@ -186,7 +188,7 @@ namespace sogen
                 }
             }
 
-            c.win_emu.yield_thread(false);
+            c.win_emu.yield_thread(c.vcpu, false);
             return STATUS_SUCCESS;
         }
 
@@ -195,7 +197,8 @@ namespace sogen
             const emulator_object<FILE_IO_COMPLETION_INFORMATION<EmulatorTraits<Emu64>>> io_completion_information, const ULONG count,
             const emulator_object<ULONG> num_entries_removed, const emulator_object<LARGE_INTEGER> timeout, const BOOLEAN alertable)
         {
-            if (count == 0 || !io_completion_information)
+            // Kernel: (a3 - 1 > 0x7FFFFFE) catches count==0 and count>MaxWorkers.
+            if (count - 1 > 0x7FFFFFFu || !io_completion_information)
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -219,7 +222,7 @@ namespace sogen
                 return STATUS_TIMEOUT;
             }
 
-            auto& t = c.win_emu.current_thread();
+            auto& t = c.thread();
             t.await_objects = {};
             t.await_any = false;
             t.await_time = {};
@@ -247,7 +250,7 @@ namespace sogen
                 }
             }
 
-            c.win_emu.yield_thread(alertable);
+            c.win_emu.yield_thread(c.vcpu, alertable);
             return STATUS_SUCCESS;
         }
 
@@ -304,7 +307,7 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            const auto resolved_target_handle = c.proc.resolve_object_pseudo_handle(target_object_handle);
+            const auto resolved_target_handle = c.proc.resolve_object_pseudo_handle(target_object_handle, c.vcpu.active_thread);
 
             if (!io_completion_wait::is_wait_completion_target_type(resolved_target_handle))
             {
@@ -345,13 +348,14 @@ namespace sogen
             }
 
             handle retained_io_completion_handle{};
-            if (!io_completion_wait::retain_handle_reference(c.proc, io_completion_handle, retained_io_completion_handle))
+            if (!io_completion_wait::retain_handle_reference(c.proc, c.vcpu.active_thread, io_completion_handle,
+                                                             retained_io_completion_handle))
             {
                 return STATUS_INVALID_HANDLE;
             }
 
             handle retained_target_handle{};
-            if (!io_completion_wait::retain_handle_reference(c.proc, resolved_target_handle, retained_target_handle))
+            if (!io_completion_wait::retain_handle_reference(c.proc, c.vcpu.active_thread, resolved_target_handle, retained_target_handle))
             {
                 io_completion_wait::release_handle_reference(c.proc, retained_io_completion_handle);
                 return STATUS_INVALID_HANDLE;
@@ -365,6 +369,7 @@ namespace sogen
             wait_packet->io_status_block.Information = io_status_information;
             wait_packet->io_status_information = io_status_information;
             wait_packet->associated = true;
+            completion->associate_wait_packet(wait_completion_packet_handle);
 
             io_completion_wait::materialize_signaled_wait_packets(c.proc, io_completion_handle);
             already_signaled.write_if_valid(wait_packet->queued_completion ? TRUE : FALSE);

@@ -2,8 +2,9 @@
 
 // Helpers for marshalling VkPhysicalDevice*Features pNext chains across the GPU bridge. Unlike
 // gpu_bridge_protocol.hpp (which is dependency-free), this header needs the Vulkan struct layouts, so
-// it is included only by the two ends that speak Vulkan: the host wrapper (vulkan_host.cpp) and the
-// guest shim (vulkan_shim.cpp) -- never by the emulator-side dispatcher, which only shuttles bytes.
+// it is included only by the ends that speak Vulkan: the host wrapper (vulkan_host.cpp), the guest
+// shim (vulkan_shim.cpp) and d3d9_host.cpp, which builds its own device's feature chain rather than
+// relaying a guest one -- never by the emulator-side dispatcher, which only shuttles bytes.
 //
 // Every VkPhysicalDevice*Features struct is a { VkStructureType sType; void* pNext; } header followed
 // by a run of VkBool32 toggles. The header size differs by ABI (8 on x86, 16 on x64) but the bool run
@@ -48,6 +49,30 @@ namespace sogen::gpu_bridge
             return sizeof(VkPhysicalDeviceMaintenance8FeaturesKHR);
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_9_FEATURES_KHR:
             return sizeof(VkPhysicalDeviceMaintenance9FeaturesKHR);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:
+            return sizeof(VkPhysicalDeviceTimelineSemaphoreFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES:
+            return sizeof(VkPhysicalDeviceBufferDeviceAddressFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceTransformFeedbackFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES:
+            return sizeof(VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceMemoryPriorityFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:
+            return sizeof(VkPhysicalDeviceHostQueryResetFeatures);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceExtendedDynamicStateFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT:
+            return sizeof(VkPhysicalDeviceCustomBorderColorFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT:
+            return sizeof(VkPhysicalDevice4444FormatsFeaturesEXT);
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES:
+            return sizeof(VkPhysicalDeviceShaderDrawParametersFeatures);
         default:
             return 0;
         }

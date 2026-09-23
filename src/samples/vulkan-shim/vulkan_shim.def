@@ -176,4 +176,7 @@ EXPORTS
     vkUnmapMemory
     vkUpdateDescriptorSets
     vkWaitForFences
+    vk_icdEnumerateAdapterPhysicalDevices
     vk_icdGetInstanceProcAddr
+    vk_icdGetPhysicalDeviceProcAddr
+    vk_icdNegotiateLoaderICDInterfaceVersion

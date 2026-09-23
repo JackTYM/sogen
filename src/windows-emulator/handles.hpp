@@ -35,6 +35,8 @@ namespace sogen
             worker_factory,
             private_namespace,
             process,
+            accelerator_table,
+            keyed_event,
         };
     };
 
@@ -42,14 +44,22 @@ namespace sogen
 
 #pragma pack(push)
 #pragma pack(1)
+
     struct handle_value
     {
-        uint64_t id : 23;
+        // The low 2 bits of a Windows HANDLE are reserved: the kernel ignores them and user-mode code
+        // is free to use them as tag bits, so real handles are always 4-aligned. Genuine Windows
+        // binaries rely on this - e.g. wow64.dll's generic NtClose thunk (whNtClose) does
+        // `and handle, ~1` before the 64-bit syscall - so emitted handles must keep the low 2 bits
+        // clear for those masks to be the no-ops they are on real Windows.
+        uint64_t reserved : 2;
+        uint64_t id : 21;
         uint64_t type : 7;
         uint64_t is_system : 1;
         uint64_t is_pseudo : 1;
         uint64_t high_bits : 32;
     };
+
 #pragma pack(pop)
 
     static_assert(sizeof(handle_value) == 8);
@@ -167,7 +177,6 @@ namespace sogen
             return --e.ref_count == 0;
         }
 
-      private:
         virtual void serialize_object(utils::buffer_serializer& buffer) const = 0;
         virtual void deserialize_object(utils::buffer_deserializer& buffer) = 0;
     };
@@ -268,7 +277,7 @@ namespace sogen
             return h;
         }
 
-        std::pair<typename value_map::iterator, bool> erase(const typename value_map::iterator& entry)
+        std::pair<typename value_map::iterator, bool> erase(const value_map::iterator& entry)
         {
             if (this->block_mutation_)
             {
@@ -329,7 +338,7 @@ namespace sogen
             buffer.read_map(this->store_);
         }
 
-        typename value_map::iterator find(const T& value)
+        value_map::iterator find(const T& value)
         {
             auto i = this->store_.begin();
             for (; i != this->store_.end(); ++i)
@@ -343,7 +352,7 @@ namespace sogen
             return i;
         }
 
-        typename value_map::const_iterator find(const T& value) const
+        value_map::const_iterator find(const T& value) const
         {
             auto i = this->store_.begin();
             for (; i != this->store_.end(); ++i)
@@ -378,28 +387,28 @@ namespace sogen
             return this->find_handle(*value);
         }
 
-        typename value_map::iterator begin()
+        value_map::iterator begin()
         {
             return this->store_.begin();
         }
 
-        typename value_map::const_iterator begin() const
+        value_map::const_iterator begin() const
         {
             return this->store_.begin();
         }
 
-        typename value_map::iterator end()
+        value_map::iterator end()
         {
             return this->store_.end();
         }
 
-        typename value_map::const_iterator end() const
+        value_map::const_iterator end() const
         {
             return this->store_.end();
         }
 
       private:
-        typename value_map::iterator get_iterator(const handle_value h)
+        value_map::iterator get_iterator(const handle_value h)
         {
             if (h.type != Type || h.is_pseudo)
             {
@@ -556,22 +565,22 @@ namespace sogen
             return value ? this->find_handle(*value) : handle{};
         }
 
-        typename value_map::iterator begin()
+        value_map::iterator begin()
         {
             return this->store_.begin();
         }
 
-        typename value_map::const_iterator begin() const
+        value_map::const_iterator begin() const
         {
             return this->store_.begin();
         }
 
-        typename value_map::iterator end()
+        value_map::iterator end()
         {
             return this->store_.end();
         }
 
-        typename value_map::const_iterator end() const
+        value_map::const_iterator end() const
         {
             return this->store_.end();
         }
@@ -612,6 +621,13 @@ namespace sogen
     constexpr auto DUMMY_IMPERSONATION_TOKEN = make_pseudo_handle(0x1, handle_types::token);
 
     constexpr auto GUEST_PROCESS_HANDLE = make_handle(0x1, handle_types::process, false);
+
+    // Synthetic "Steam client" process. A guest steam_api reads a pid from
+    // HKCU\...\Valve\Steam\ActiveProcess\pid and opens it to confirm Steam is running; we hand back a
+    // pseudo handle for that one pid so the liveness check passes. STEAM_FAKE_PROCESS_ID must match the
+    // pid value seeded into that registry key.
+    constexpr uint32_t STEAM_FAKE_PROCESS_ID = 0x8B0;
+    constexpr auto STEAM_PROCESS_HANDLE = make_pseudo_handle(0x1, handle_types::process);
 
     constexpr auto CURRENT_PROCESS = make_handle(~0ULL);
     constexpr auto CURRENT_THREAD = make_handle(~1ULL);

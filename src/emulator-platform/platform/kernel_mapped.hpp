@@ -485,6 +485,34 @@ namespace sogen
         EMULATOR_CAST(uint64_t, USHORT*) LowerCaseTable;
     } NLSTABLEINFO, *PNLSTABLEINFO;
 
+    typedef struct _CPTABLEINFO32
+    {
+        USHORT CodePage;
+        USHORT MaximumCharacterSize;
+        USHORT DefaultChar;
+        USHORT UniDefaultChar;
+        USHORT TransDefaultChar;
+        USHORT TransUniDefaultChar;
+        USHORT DBCSCodePage;
+        UCHAR LeadByte[MAXIMUM_LEADBYTES];
+        EMULATOR_CAST(uint32_t, USHORT*) MultiByteTable;
+        EMULATOR_CAST(uint32_t, void*) WideCharTable;
+        EMULATOR_CAST(uint32_t, USHORT*) DBCSRanges;
+        EMULATOR_CAST(uint32_t, USHORT*) DBCSOffsets;
+    } CPTABLEINFO32, *PCPTABLEINFO32;
+
+    static_assert(sizeof(CPTABLEINFO32) == 0x2C);
+
+    typedef struct _NLSTABLEINFO32
+    {
+        CPTABLEINFO32 OemTableInfo;
+        CPTABLEINFO32 AnsiTableInfo;
+        EMULATOR_CAST(uint32_t, USHORT*) UpperCaseTable;
+        EMULATOR_CAST(uint32_t, USHORT*) LowerCaseTable;
+    } NLSTABLEINFO32, *PNLSTABLEINFO32;
+
+    static_assert(sizeof(NLSTABLEINFO32) == 0x60);
+
     typedef struct _CURDIR32
     {
         UNICODE_STRING<EmulatorTraits<Emu32>> DosPath;
@@ -684,9 +712,11 @@ namespace sogen
         BOOLEAN InheritedAddressSpace;
         BOOLEAN ReadImageFileExecOptions;
         BOOLEAN BeingDebugged;
+
         union
         {
             BOOLEAN BitField;
+
             struct
             {
                 BOOLEAN ImageUsesLargePages : 1;
@@ -714,6 +744,7 @@ namespace sogen
         union
         {
             ULONG CrossProcessFlags;
+
             struct
             {
                 ULONG ProcessInJob : 1;
@@ -727,11 +758,13 @@ namespace sogen
                 ULONG ReservedBits0 : 24;
             };
         };
+
         union
         {
             EMULATOR_CAST(std::uint32_t, PVOID32) KernelCallbackTable;
             EMULATOR_CAST(std::uint32_t, PVOID32) UserSharedInfoPtr;
         };
+
         ULONG SystemReserved;
         ULONG AtlThunkSListPtr32;
         EMULATOR_CAST(std::uint32_t, struct _API_SET_NAMESPACE*) ApiSetMap;
@@ -820,9 +853,11 @@ namespace sogen
         };
 
         EMULATOR_CAST(std::uint32_t, PVOID32) pImageHeaderHash;
+
         union
         {
             ULONG TracingFlags;
+
             struct
             {
                 ULONG HeapTracingEnabled : 1;
@@ -831,6 +866,7 @@ namespace sogen
                 ULONG SpareTracingBits : 29;
             };
         };
+
         ULONGLONG CsrServerReadOnlySharedMemoryBase;
         EMULATOR_CAST(std::uint32_t, struct _RTL_CRITICAL_SECTION32*) TppWorkerpListLock;
         LIST_ENTRY32 TppWorkerpList;
@@ -841,15 +877,18 @@ namespace sogen
         CHAR PlaceholderCompatibilityMode;
         ARRAY_CONTAINER<CHAR, 7> PlaceholderCompatibilityModeReserved;
         EMULATOR_CAST(std::uint32_t, struct _LEAP_SECOND_DATA*) LeapSecondData; // REDSTONE5
+
         union
         {
             ULONG LeapSecondFlags;
+
             struct
             {
                 ULONG SixtySecondEnabled : 1;
                 ULONG Reserved : 31;
             };
         };
+
         ULONG NtGlobalFlag2;
         ULONGLONG ExtendedFeatureDisableMask; // since WIN11
 
@@ -943,14 +982,6 @@ namespace sogen
     static_assert(sizeof(GDI_TEB_BATCH32) == 1248, "sizeof(GDI_TEB_BATCH32) is incorrect");
 
 #ifndef OS_WINDOWS
-    typedef struct _GUID
-    {
-        uint32_t Data1;
-        uint16_t Data2;
-        uint16_t Data3;
-        uint8_t Data4[8];
-    } GUID;
-
     typedef struct _PROCESSOR_NUMBER
     {
         WORD Group;
@@ -1237,6 +1268,7 @@ namespace sogen
         {
             EMULATOR_CAST(std::uint32_t, PROCESSOR_NUMBER) CurrentIdealProcessor;
             ULONG IdealProcessorValue;
+
             struct
             {
                 UCHAR ReservedPad0;
@@ -1273,9 +1305,11 @@ namespace sogen
             USHORT CrossTebFlags;
             USHORT SpareCrossTebBits : 16;
         };
+
         union
         {
             USHORT SameTebFlags;
+
             struct
             {
                 USHORT SafeThunkCall : 1;
@@ -1314,12 +1348,14 @@ namespace sogen
     static_assert(sizeof(TEB32) == 4120, "sizeof(TEB32) is incorrect");
 
 #pragma pack(push, 4)
+
     typedef struct _KSYSTEM_TIME
     {
         ULONG LowPart;
         LONG High1Time;
         LONG High2Time;
     } KSYSTEM_TIME, *PKSYSTEM_TIME;
+
 #pragma pack(pop)
 
     typedef enum _NT_PRODUCT_TYPE
@@ -1419,9 +1455,11 @@ namespace sogen
         std::uint64_t EnabledFeatures;
         std::uint64_t EnabledVolatileFeatures;
         ULONG Size;
+
         union
         {
             ULONG ControlFlags;
+
             struct
             {
                 ULONG OptimizedSave : 1;
@@ -1429,6 +1467,7 @@ namespace sogen
                 ULONG Reserved1 : 30;
             };
         };
+
         XSTATE_FEATURE Features[MAXIMUM_XSTATE_FEATURES];
         std::uint64_t EnabledSupervisorFeatures;
         std::uint64_t AlignedFeatures;
@@ -1554,22 +1593,22 @@ namespace sogen
     template <typename Traits>
     struct PS_ATTRIBUTE
     {
-        typename Traits::ULONG_PTR Attribute;
-        typename Traits::SIZE_T Size;
+        Traits::ULONG_PTR Attribute;
+        Traits::SIZE_T Size;
 
         union
         {
-            typename Traits::ULONG_PTR Value;
-            typename Traits::PVOID ValuePtr;
+            Traits::ULONG_PTR Value;
+            Traits::PVOID ValuePtr;
         };
 
-        EMULATOR_CAST(uint64_t, typename Traits::SIZE_T*) ReturnLength;
+        EMULATOR_CAST(uint64_t, Traits::SIZE_T*) ReturnLength;
     };
 
     template <typename Traits>
     struct PS_ATTRIBUTE_LIST
     {
-        typename Traits::SIZE_T TotalLength;
+        Traits::SIZE_T TotalLength;
         PS_ATTRIBUTE<Traits> Attributes[1];
     };
 
@@ -1661,9 +1700,11 @@ namespace sogen
     {
         EMULATOR_CAST(std::uint64_t, SIZE_T) Size; // Ignored as input, written with structure size on output
         PROCESS_BASIC_INFORMATION64 BasicInfo;
+
         union
         {
             ULONG Flags;
+
             struct
             {
                 ULONG IsProtectedProcess : 1;
@@ -1687,6 +1728,15 @@ namespace sogen
         LARGE_INTEGER KernelTime;
         LARGE_INTEGER UserTime;
     } KERNEL_USER_TIMES, *PKERNEL_USER_TIMES;
+
+    typedef struct _GROUP_AFFINITY
+    {
+        EMULATOR_CAST(EmulatorTraits<Emu64>::ULONG_PTR, KAFFINITY) Mask;
+        WORD Group;
+        WORD Reserved[3];
+    } GROUP_AFFINITY, *PGROUP_AFFINITY;
+
+    static_assert(sizeof(GROUP_AFFINITY) == 0x10);
 
     struct THREAD_TLS_INFORMATION
     {
@@ -1896,15 +1946,18 @@ namespace sogen
         ULONG64 SystemDllNativeRelocation;
         ULONG Wow64SharedInformation[16]; // use WOW64_SHARED_INFORMATION as index
         ULONG RngData;
+
         union
         {
             ULONG Flags;
+
             struct
             {
                 ULONG CfgOverride : 1; // since REDSTONE
                 ULONG Reserved : 31;
             };
         };
+
         ULONG64 MitigationOptions;
         ULONG64 CfgBitMap; // since WINBLUE
         ULONG64 CfgBitMapSize;
@@ -1920,15 +1973,18 @@ namespace sogen
         ULONG64 SystemDllNativeRelocation;
         ULONG64 Wow64SharedInformation[16]; // use WOW64_SHARED_INFORMATION as index
         ULONG RngData;
+
         union
         {
             ULONG Flags;
+
             struct
             {
                 ULONG CfgOverride : 1;
                 ULONG Reserved : 31;
             };
         };
+
         PS_MITIGATION_OPTIONS_MAP_V2 MitigationOptionsMap;
         ULONG64 CfgBitMap;
         ULONG64 CfgBitMapSize;
@@ -1945,15 +2001,18 @@ namespace sogen
         ULONG64 SystemDllNativeRelocation;
         ULONG64 Wow64SharedInformation[16]; // use WOW64_SHARED_INFORMATION_V5 as index
         ULONG RngData;
+
         union
         {
             ULONG Flags;
+
             struct
             {
                 ULONG CfgOverride : 1; // effectively since REDSTONE
                 ULONG Reserved : 31;
             };
         };
+
         PS_MITIGATION_OPTIONS_MAP_V3 MitigationOptionsMap;
         ULONG64 CfgBitMap; // effectively since WINBLUE
         ULONG64 CfgBitMapSize;

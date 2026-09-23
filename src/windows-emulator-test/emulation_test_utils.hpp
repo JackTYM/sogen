@@ -133,8 +133,17 @@ namespace sogen::test
             interfaces.socket_factory = network::create_static_socket_factory();
         }
 
+        if (!interfaces.ui)
+        {
+            // A real UI backend (SDL) shows an actual host window and pumps host-originated events (mouse
+            // motion, focus, ...) on a wall-clock-dependent schedule. Under a deterministic clock that races
+            // with guest completion and makes cursor/focus state non-reproducible between runs. Tests don't
+            // need a real window, so use the no-op backend unless one is explicitly injected.
+            interfaces.ui = std::make_unique<null_ui_backend>();
+        }
+
         return windows_emulator{
-            create_x86_64_emulator(),
+            create_x86_64_emulator_from_environment(),
             settings,
             std::move(callbacks),
             std::move(interfaces),
@@ -168,8 +177,19 @@ namespace sogen::test
             interfaces.dns_lookup = create_sample_dns_lookup();
         }
 
+        if (!interfaces.ui)
+        {
+            // See create_emulator() above: tests don't need a real (SDL) window, and a real UI backend's
+            // host-originated events would otherwise race with deterministic guest execution.
+            interfaces.ui = std::make_unique<null_ui_backend>();
+        }
+
         return windows_emulator{
-            create_x86_64_emulator(), get_sample_app_settings(config), settings, std::move(callbacks), std::move(interfaces),
+            create_x86_64_emulator_from_environment(),
+            get_sample_app_settings(config),
+            settings,
+            std::move(callbacks),
+            std::move(interfaces),
         };
     }
 

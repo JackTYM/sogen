@@ -1,6 +1,6 @@
 [submodule "deps/unicorn"]
 	path = deps/unicorn
-	url = https://github.com/momo5502/unicorn.git
+	url = https://github.com/JackTYM/unicorn.git
 	shallow = true
 	branch = dev
 [submodule "deps/reflect"]
@@ -53,4 +53,15 @@
 [submodule "deps/CLI11"]
 	path = deps/CLI11
 	url = https://github.com/CLIUtils/CLI11.git
+	shallow = true
+[submodule "deps/FEX"]
+	path = deps/FEX
+	url = https://github.com/JackTYM/FEX.git
+	shallow = true
+[submodule "deps/vkd3d"]
+	path = deps/vkd3d
+	url = https://gitlab.winehq.org/wine/vkd3d.git
+[submodule "deps/freetype"]
+	path = deps/freetype
+	url = https://github.com/freetype/freetype.git
 	shallow = true

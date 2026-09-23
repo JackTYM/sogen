@@ -4,6 +4,7 @@
 #include "utils/io.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <iostream>
 #include <utils/finally.hpp>
 #include <utils/wildcard.hpp>
@@ -20,6 +21,81 @@ namespace sogen
     {
         namespace
         {
+            bool has_valid_filename_characters(const std::u16string_view path)
+            {
+                constexpr std::u16string_view invalid_characters = u"\"<>|*?";
+                return path.find_first_of(invalid_characters) == std::u16string_view::npos;
+            }
+
+            std::u16string resolve_system_root_path(const syscall_context& c, std::u16string filename)
+            {
+                auto filename_upper = filename;
+                std::ranges::transform(filename_upper, filename_upper.begin(), ::towupper);
+
+                constexpr std::u16string_view system_root_prefix = u"\\SYSTEMROOT";
+                if (filename_upper != system_root_prefix &&
+                    !(filename_upper.size() > system_root_prefix.size() && filename_upper.starts_with(system_root_prefix) &&
+                      windows_path_detail::is_slash(filename_upper[system_root_prefix.size()])))
+                {
+                    return filename;
+                }
+
+                const auto system_root =
+                    c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return std::u16string{kusd.NtSystemRoot.arr}; });
+                const auto suffix = std::u16string_view{filename}.substr(system_root_prefix.size());
+                filename = system_root;
+
+                if (!suffix.empty() && windows_path_detail::is_slash(filename.back()) && windows_path_detail::is_slash(suffix.front()))
+                {
+                    filename.append(suffix.substr(1));
+                }
+                else
+                {
+                    filename.append(suffix);
+                }
+
+                return filename;
+            }
+
+            // The counterpart of windows_path::to_device_path. Sogen reports file names in volume-device form
+            // (NtQueryObject, NtQueryVirtualMemory, ...) and code that consumes them - ntmarta walking a
+            // directory's parents for an ACL check, for one - opens them again as-is. Rewrite the volume back
+            // into its drive letter so the path reaches the file system instead of the device registry. A bare
+            // volume with no path behind it is a real volume handle and stays a device.
+            std::u16string resolve_volume_device_path(std::u16string filename)
+            {
+                constexpr std::u16string_view volume_prefix = u"\\Device\\HarddiskVolume";
+                if (!filename.starts_with(volume_prefix))
+                {
+                    return filename;
+                }
+
+                const std::u16string_view remainder{filename};
+                const auto separator = remainder.find(u'\\', volume_prefix.size());
+                if (separator == std::u16string_view::npos)
+                {
+                    return filename;
+                }
+
+                const auto number = u16_to_u8(remainder.substr(volume_prefix.size(), separator - volume_prefix.size()));
+
+                int volume_index{};
+                const auto* number_start = number.data();
+                const auto* number_end = number_start + number.size();
+                const auto [parse_end, parse_error] = std::from_chars(number_start, number_end, volume_index);
+                if (parse_error != std::errc{} || parse_end != number_end || volume_index < 1 || volume_index > 26)
+                {
+                    return filename;
+                }
+
+                std::u16string path = u"\\??\\";
+                path.push_back(static_cast<char16_t>(u'a' + volume_index - 1));
+                path.push_back(u':');
+                path.append(remainder.substr(separator));
+
+                return path;
+            }
+
             std::pair<utils::file_handle, NTSTATUS> open_file(const file_system& file_sys, const windows_path& path,
                                                               const std::u16string& mode)
             {
@@ -92,8 +168,10 @@ namespace sogen
 
                 c.win_emu.log.warn("--> File rename requested: %s --> %s\n", u16_to_u8(f->name).c_str(), u16_to_u8(new_name).c_str());
 
+                const auto new_host_path = c.win_emu.file_sys.translate(new_name);
+
                 std::error_code ec{};
-                bool file_exists = std::filesystem::exists(new_name, ec);
+                bool file_exists = std::filesystem::exists(new_host_path, ec);
 
                 if (ec)
                 {
@@ -102,10 +180,15 @@ namespace sogen
 
                 if (!info.ReplaceIfExists && file_exists)
                 {
-                    return STATUS_OBJECT_NAME_EXISTS;
+                    return STATUS_OBJECT_NAME_COLLISION;
                 }
 
-                f->handle.defer_rename(c.win_emu.file_sys.translate(f->name), c.win_emu.file_sys.translate(new_name));
+                if (!std::filesystem::is_directory(new_host_path.parent_path(), ec))
+                {
+                    return STATUS_OBJECT_PATH_NOT_FOUND;
+                }
+
+                f->handle.defer_rename(c.win_emu.file_sys.translate(f->name), new_host_path);
 
                 return STATUS_SUCCESS;
             }
@@ -274,17 +357,47 @@ namespace sogen
             }
         }
 
+        // Host filesystem timestamps are real wall-clock time, not virtualized like KUSER_SHARED_DATA's clock -
+        // under the deterministic instruction-tick clock (windows_emulator::uses_relative_time), two runs that
+        // touch the same file at different real moments would otherwise observe different values. Substitute a
+        // fixed point in time instead of zeroing: a zero FILETIME is the 1601 epoch, and some directory
+        // enumeration consumers reject entries with a timestamp older than 1970 (see PR #1210).
+        LARGE_INTEGER get_file_time(const bool deterministic, const timespec ts)
+        {
+            if (deterministic)
+            {
+                return utils::convert_unix_to_windows_time(1700000000); // 2023-11-14, arbitrary but fixed
+            }
+
+            return convert_timespec_to_filetime(ts);
+        }
+
         std::vector<file_entry> scan_directory(const file_system& file_sys, const windows_path& win_path,
-                                               const std::u16string_view file_mask)
+                                               const std::u16string_view file_mask, const bool deterministic_time)
         {
             std::vector<file_entry> files{};
 
             const auto dir = file_sys.translate(win_path);
+            const auto make_file_entry = [deterministic_time](const std::filesystem::path& file_path,
+                                                              const std::filesystem::path& host_path, const bool is_directory) {
+                file_entry entry{.file_path = file_path, .is_directory = is_directory};
+
+                struct compat_stat file_stat{};
+                if (compat_stat(host_path, &file_stat))
+                {
+                    entry.file_size = is_directory ? 0 : static_cast<uint64_t>(file_stat.st_size);
+                    entry.creation_time = get_file_time(deterministic_time, file_stat.st_ctimespec);
+                    entry.last_access_time = get_file_time(deterministic_time, file_stat.st_atimespec);
+                    entry.last_write_time = get_file_time(deterministic_time, file_stat.st_mtimespec);
+                }
+
+                return entry;
+            };
 
             if (file_mask.empty() || file_mask == u"*")
             {
-                files.emplace_back(file_entry{.file_path = ".", .is_directory = true});
-                files.emplace_back(file_entry{.file_path = "..", .is_directory = true});
+                files.emplace_back(make_file_entry(".", dir, true));
+                files.emplace_back(make_file_entry("..", dir.parent_path(), true));
             }
 
             std::error_code ec{};
@@ -295,11 +408,7 @@ namespace sogen
                     continue;
                 }
 
-                files.emplace_back(file_entry{
-                    .file_path = file.path().filename(),
-                    .file_size = file.is_directory() ? 0 : file.file_size(),
-                    .is_directory = file.is_directory(),
-                });
+                files.emplace_back(make_file_entry(file.path().filename(), file.path(), file.is_directory()));
             }
 
             file_sys.access_mapped_entries(win_path, [&](const std::pair<windows_path, std::filesystem::path>& entry) {
@@ -316,11 +425,7 @@ namespace sogen
                     return;
                 }
 
-                files.emplace_back(file_entry{
-                    .file_path = filename,
-                    .file_size = dir_entry.is_directory() ? 0 : dir_entry.file_size(),
-                    .is_directory = dir_entry.is_directory(),
-                });
+                files.emplace_back(make_file_entry(filename, entry.second, dir_entry.is_directory()));
             });
 
             return files;
@@ -335,16 +440,16 @@ namespace sogen
             if (!f->enumeration_state || query_flags & SL_RESTART_SCAN)
             {
                 const auto mask = file_mask ? read_unicode_string(c.emu, file_mask) : u"";
-                c.win_emu.callbacks.on_generic_access("Enumerating directory", f->name);
+                c.win_emu.callbacks.on_generic_access("Enumerating directory", f->name + mask);
 
                 f->enumeration_state.emplace(file_enumeration_state{});
-                f->enumeration_state->files = scan_directory(c.win_emu.file_sys, f->name, mask);
+                f->enumeration_state->files = scan_directory(c.win_emu.file_sys, f->name, mask, c.win_emu.uses_relative_time());
             }
 
             auto& enum_state = *f->enumeration_state;
 
             uint64_t current_offset{0};
-            emulator_object<T> object{c.emu};
+            emulator_object<T> object{c.emu.memory()};
 
             size_t current_index = enum_state.current_index;
 
@@ -391,6 +496,12 @@ namespace sogen
                 T info{};
                 info.NextEntryOffset = 0;
                 info.FileIndex = static_cast<ULONG>(current_index);
+
+                info.CreationTime = current_file.creation_time;
+                info.LastAccessTime = current_file.last_access_time;
+                info.LastWriteTime = current_file.last_write_time;
+                info.ChangeTime = info.LastWriteTime;
+
                 info.FileAttributes = current_file.is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
                 info.FileNameLength = static_cast<ULONG>(file_name.size() * 2);
                 info.EndOfFile.QuadPart = current_file.file_size;
@@ -497,7 +608,12 @@ namespace sogen
                 return STATUS_ACCESS_VIOLATION;
             }
 
-            const auto _ = utils::finally([&] { io_status_block.write(block.value()); });
+            const auto _ = utils::finally([&] {
+                if (io_status_block)
+                {
+                    (void)io_status_block.try_write(block.value());
+                }
+            });
 
             const auto ret = [&](const NTSTATUS status, size_t size = 0) {
                 block->Status = status;
@@ -689,9 +805,9 @@ namespace sogen
 
                 const emulator_object<FILE_BASIC_INFORMATION> info{c.emu, address};
                 FILE_BASIC_INFORMATION i{};
-                i.CreationTime = convert_timespec_to_filetime(file_stat.st_ctimespec);
-                i.LastAccessTime = convert_timespec_to_filetime(file_stat.st_atimespec);
-                i.LastWriteTime = convert_timespec_to_filetime(file_stat.st_mtimespec);
+                i.CreationTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_ctimespec);
+                i.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
+                i.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
                 i.ChangeTime = i.LastWriteTime;
                 i.FileAttributes = is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
 
@@ -975,6 +1091,37 @@ namespace sogen
                 return ret(STATUS_SUCCESS, all_length);
             }
 
+            if (info_class == FileCompressionInformation)
+            {
+                struct file_compression_information
+                {
+                    LARGE_INTEGER CompressedFileSize;
+                    USHORT CompressionFormat;
+                    UCHAR CompressionUnitShift;
+                    UCHAR ChunkShift;
+                    UCHAR ClusterShift;
+                    UCHAR Reserved[3];
+                };
+
+                constexpr auto required_length = sizeof(file_compression_information);
+
+                if (length < required_length)
+                {
+                    return ret(STATUS_INFO_LENGTH_MISMATCH);
+                }
+
+                const emulator_object<file_compression_information> info{c.emu, file_information};
+                file_compression_information i{};
+
+                if (f->handle)
+                {
+                    i.CompressedFileSize.QuadPart = f->handle.size();
+                }
+
+                info.write(i);
+                return ret(STATUS_SUCCESS, required_length);
+            }
+
             c.win_emu.log.error("Unsupported query file info class: 0x%X\n", info_class);
             c.emu.stop();
 
@@ -993,7 +1140,7 @@ namespace sogen
             const auto _ = utils::finally([&] {
                 if (io_status_block)
                 {
-                    io_status_block.write(block);
+                    (void)io_status_block.try_write(block);
                 }
             });
 
@@ -1032,9 +1179,9 @@ namespace sogen
 
                 EMU_FILE_STAT_BASIC_INFORMATION i{};
 
-                i.CreationTime = convert_timespec_to_filetime(file_stat.st_ctimespec);
-                i.LastAccessTime = convert_timespec_to_filetime(file_stat.st_atimespec);
-                i.LastWriteTime = convert_timespec_to_filetime(file_stat.st_mtimespec);
+                i.CreationTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_ctimespec);
+                i.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
+                i.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
                 i.ChangeTime = i.LastWriteTime;
                 i.FileAttributes = is_directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
 
@@ -1053,7 +1200,7 @@ namespace sogen
             return ret(STATUS_NOT_SUPPORTED);
         }
 
-        void commit_file_data(const std::string_view data, emulator& emu,
+        void commit_file_data(const std::string_view data, memory_interface& emu,
                               const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block, const uint64_t buffer)
         {
             if (io_status_block)
@@ -1082,7 +1229,7 @@ namespace sogen
 
         std::optional<uint64_t> get_lock_range_end(const LARGE_INTEGER& byte_offset, const LARGE_INTEGER& length)
         {
-            if (byte_offset.QuadPart < 0 || length.QuadPart <= 0)
+            if (byte_offset.QuadPart < 0 || length.QuadPart == 0)
             {
                 return std::nullopt;
             }
@@ -1134,7 +1281,7 @@ namespace sogen
                     c.emu.write_memory(io_status_block.value() + sizeof(status32), &information32, sizeof(information32));
                 }
 
-                c.win_emu.current_thread().pending_apcs.push_back({
+                c.thread().pending_apcs.push_back({
                     .flags = 0,
                     .apc_routine = apc_routine,
                     .apc_argument1 = apc_context,
@@ -1190,20 +1337,21 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
-                    if (!pipe->write_queue.empty())
+                    auto* rq = pipe->read_queue.get();
+                    if (rq && !rq->empty())
                     {
-                        std::string_view data = pipe->write_queue.front();
+                        std::string_view data = rq->front();
                         const size_t to_copy = std::min<size_t>(data.size(), length);
 
                         commit_file_data(data.substr(0, to_copy), c.emu, io_status_block, buffer);
 
                         if (to_copy == data.size())
                         {
-                            pipe->write_queue.pop_front();
+                            rq->pop_front();
                         }
                         else
                         {
-                            pipe->write_queue.front().erase(0, to_copy);
+                            rq->front().erase(0, to_copy);
                         }
 
                         return STATUS_SUCCESS;
@@ -1239,6 +1387,12 @@ namespace sogen
             }
 
             const auto bytes_read = fread(temp_buffer.data(), 1, temp_buffer.size(), f->handle);
+
+            if (getenv("EMULATOR_BINK_IO_DIAG") && f->name.find(u".bik") != std::u16string::npos)
+            {
+                c.win_emu.log.warn("[bink-io-diag] NtReadFile name=%s requested=%u read=%zu\n", u16_to_u8(f->name).c_str(), length,
+                                   bytes_read);
+            }
 
             if (bytes_read > 0)
             {
@@ -1302,10 +1456,10 @@ namespace sogen
             {
                 if (auto* pipe = container->get_internal_device<named_pipe>())
                 {
-                    (void)pipe; // For future use: suppressing compiler issues
-                    // TODO c.win_emu.callbacks.on_named_pipe_write(pipe->name, temp_buffer);
-
-                    // TODO pipe->write_queue.push_back(temp_buffer);
+                    if (pipe->write_queue)
+                    {
+                        pipe->write_queue->push_back(temp_buffer);
+                    }
 
                     if (io_status_block)
                     {
@@ -1602,6 +1756,7 @@ namespace sogen
                 u"Nsi",
                 u"MountPointManager",
                 u"SogenGpu",
+                u"SogenSteam",
             };
 
             if (devices.contains(path))
@@ -1612,35 +1767,66 @@ namespace sogen
             return std::nullopt;
         }
 
-        NTSTATUS handle_named_pipe_create(const syscall_context& c, const emulator_object<handle>& out_handle,
-                                          const std::u16string_view filename, const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes,
-                                          ACCESS_MASK desired_access)
+        NTSTATUS handle_named_pipe_create(const syscall_context& c, const emulator_object<handle>& out_handle, std::u16string filename,
+                                          const OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>& attributes, ACCESS_MASK desired_access,
+                                          const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
         {
-            (void)attributes; // This isn't being consumed atm, suppressing errors
+            filename = normalize_pipe_path(std::move(filename));
+
+            // Resolve relative path via RootDirectory (same pattern as NtCreateNamedPipeFile).
+            if (!filename.starts_with(u"\\Device\\NamedPipe") && attributes.RootDirectory)
+            {
+                const auto* root = c.proc.devices.get(attributes.RootDirectory);
+                if (root)
+                {
+                    const auto* root_pipe = root->get_internal_device<named_pipe>();
+                    if (root_pipe)
+                    {
+                        std::u16string base = root_pipe->name;
+                        if (!base.empty() && base.back() == u'\\')
+                            base.pop_back();
+                        filename = base + u"\\" + filename;
+                    }
+                }
+            }
 
             c.win_emu.callbacks.on_generic_access("Creating/opening named pipe", filename);
 
             io_device_creation_data data{};
+            io_device_container container{u"NamedPipe", c.win_emu, data};
 
-            std::u16string device_name = u"NamedPipe";
-
-            io_device_container container{device_name, c.win_emu, data};
-
-            if (auto* pipe_device = container.get_internal_device<named_pipe>())
+            auto* pipe_device = container.get_internal_device<named_pipe>();
+            if (pipe_device)
             {
                 pipe_device->name = std::u16string(filename);
                 pipe_device->access = desired_access;
+
+                // Connect client end to existing server's shared buffers (client reads ab, writes ba).
+                auto it = c.proc.named_pipe_registry.find(std::u16string(filename));
+                if (it != c.proc.named_pipe_registry.end())
+                {
+                    pipe_device->read_queue = it->second.ab;
+                    pipe_device->write_queue = it->second.ba;
+                }
             }
 
-            const auto handle = c.proc.devices.store(std::move(container));
-            out_handle.write(handle);
+            const auto h = c.proc.devices.store(std::move(container));
+            out_handle.write(h);
+
+            if (io_status_block.value() != 0)
+            {
+                IO_STATUS_BLOCK<EmulatorTraits<Emu64>> iosb{};
+                iosb.Status = STATUS_SUCCESS;
+                iosb.Information = 1; // FILE_OPENED
+                io_status_block.write(iosb);
+            }
 
             return STATUS_SUCCESS;
         }
 
         NTSTATUS handle_NtCreateFile(const syscall_context& c, const emulator_object<handle> file_handle, ACCESS_MASK desired_access,
                                      const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                     const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> /*io_status_block*/,
+                                     const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block,
                                      const emulator_object<LARGE_INTEGER> /*allocation_size*/, ULONG /*file_attributes*/,
                                      ULONG /*share_access*/, ULONG create_disposition, ULONG create_options, uint64_t ea_buffer,
                                      ULONG ea_length)
@@ -1657,6 +1843,8 @@ namespace sogen
             // Convert to uppercase for case-insensitive comparison
             std::u16string filename_upper = filename;
             std::ranges::transform(filename_upper, filename_upper.begin(), ::towupper);
+
+            filename = resolve_volume_device_path(resolve_system_root_path(c, std::move(filename)));
 
             // Handle console output device
             if (filename_upper == u"\\??\\CONOUT$" || filename_upper == u"\\DEVICE\\CONOUT$" || filename_upper == u"CONOUT$" ||
@@ -1683,9 +1871,10 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            if (is_named_pipe_path(filename))
+            const auto* root_dev = attributes.RootDirectory ? c.proc.devices.get(attributes.RootDirectory) : nullptr;
+            if (is_named_pipe_path(filename) || (root_dev && root_dev->get_internal_device<named_pipe>()))
             {
-                return handle_named_pipe_create(c, file_handle, filename, attributes, desired_access);
+                return handle_named_pipe_create(c, file_handle, filename, attributes, desired_access, io_status_block);
             }
 
             auto printer = utils::finally([&] {
@@ -1695,6 +1884,15 @@ namespace sogen
             const auto io_device_name = get_io_device_name(filename);
             if (io_device_name.has_value())
             {
+                // \Device\DeviceApi\Dev\Query is the Windows 10+ "DevQuery" PnP enumeration object. Sogen has no PnP
+                // device tree, so this class is legitimately absent, exactly as on a real machine with no such devices;
+                // report the ordinary not-found status the caller expects instead of letting it reach create_device's
+                // throwing "unknown device" fallback, which would fatally halt emulation.
+                if (*io_device_name == u"DeviceApi\\Dev\\Query")
+                {
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+
                 const io_device_creation_data data{
                     .buffer = ea_buffer,
                     .length = ea_length,
@@ -1911,9 +2109,22 @@ namespace sogen
                 filename = root->name + (has_separator ? u"" : u"\\") + filename;
             }
 
+            filename = resolve_volume_device_path(resolve_system_root_path(c, std::move(filename)));
+
             c.win_emu.callbacks.on_generic_access("Querying file attributes", filename);
 
-            const auto local_filename = c.win_emu.file_sys.translate(filename);
+            const windows_path filepath(filename);
+            if (!has_valid_filename_characters(filepath.u16string()))
+            {
+                return STATUS_OBJECT_NAME_INVALID;
+            }
+
+            if (filepath.is_relative())
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            const auto local_filename = c.win_emu.file_sys.translate(filepath);
 
             struct compat_stat file_stat{};
             if (!compat_stat(local_filename, &file_stat))
@@ -1922,9 +2133,9 @@ namespace sogen
             }
 
             file_information.access([&](FILE_NETWORK_OPEN_INFORMATION& info) {
-                info.CreationTime = convert_timespec_to_filetime(file_stat.st_ctimespec);
-                info.LastAccessTime = convert_timespec_to_filetime(file_stat.st_atimespec);
-                info.LastWriteTime = convert_timespec_to_filetime(file_stat.st_mtimespec);
+                info.CreationTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_ctimespec);
+                info.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
+                info.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
                 info.AllocationSize.QuadPart = static_cast<LONGLONG>(file_stat.st_size);
                 info.EndOfFile.QuadPart = static_cast<LONGLONG>(file_stat.st_size);
                 info.ChangeTime = info.LastWriteTime;
@@ -1964,9 +2175,16 @@ namespace sogen
                 filename = root->name + (has_separator ? u"" : u"\\") + filename;
             }
 
+            filename = resolve_volume_device_path(resolve_system_root_path(c, std::move(filename)));
+
             c.win_emu.callbacks.on_generic_access("Querying file attributes", filename);
 
-            windows_path filepath(filename);
+            const windows_path filepath(filename);
+            if (!has_valid_filename_characters(filepath.u16string()))
+            {
+                return STATUS_OBJECT_NAME_INVALID;
+            }
+
             if (filepath.is_relative())
             {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -1981,9 +2199,9 @@ namespace sogen
             }
 
             file_information.access([&](FILE_BASIC_INFORMATION& info) {
-                info.CreationTime = convert_timespec_to_filetime(file_stat.st_ctimespec);
-                info.LastAccessTime = convert_timespec_to_filetime(file_stat.st_atimespec);
-                info.LastWriteTime = convert_timespec_to_filetime(file_stat.st_mtimespec);
+                info.CreationTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_ctimespec);
+                info.LastAccessTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_atimespec);
+                info.LastWriteTime = get_file_time(c.win_emu.uses_relative_time(), file_stat.st_mtimespec);
                 info.ChangeTime = info.LastWriteTime;
                 info.FileAttributes = (file_stat.st_mode & S_IFDIR) != 0 ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
             });
@@ -1996,8 +2214,8 @@ namespace sogen
                                    const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block, const ULONG share_access,
                                    const ULONG open_options)
         {
-            return handle_NtCreateFile(c, file_handle, desired_access, object_attributes, io_status_block, {c.emu}, 0, share_access,
-                                       FILE_OPEN, open_options, 0, 0);
+            return handle_NtCreateFile(c, file_handle, desired_access, object_attributes, io_status_block, {c.emu.memory()}, 0,
+                                       share_access, FILE_OPEN, open_options, 0, 0);
         }
 
         NTSTATUS handle_NtOpenDirectoryObject(const syscall_context& c, const emulator_object<handle> directory_handle,
@@ -2117,7 +2335,25 @@ namespace sogen
             (void)create_options;
 
             const auto attributes = object_attributes.read();
-            const auto filename = read_unicode_string(c.emu, attributes.ObjectName);
+            auto filename = normalize_pipe_path(read_unicode_string(c.emu, attributes.ObjectName));
+
+            // Resolve relative path via RootDirectory (CreatePipe opens \Device\NamedPipe
+            // as a directory first, then uses relative names for the pipe handles).
+            if (!filename.starts_with(u"\\Device\\NamedPipe") && attributes.RootDirectory)
+            {
+                const auto* root = c.proc.devices.get(attributes.RootDirectory);
+                if (root)
+                {
+                    const auto* root_pipe = root->get_internal_device<named_pipe>();
+                    if (root_pipe)
+                    {
+                        std::u16string base = root_pipe->name;
+                        if (!base.empty() && base.back() == u'\\')
+                            base.pop_back();
+                        filename = base + u"\\" + filename;
+                    }
+                }
+            }
 
             if (!is_named_pipe_path(filename))
             {
@@ -2129,28 +2365,33 @@ namespace sogen
             io_device_creation_data data{};
             io_device_container container{u"NamedPipe", c.win_emu, data};
 
-            if (auto* pipe_device = container.get_internal_device<named_pipe>())
-            {
-                pipe_device->name = filename;
-                pipe_device->pipe_type = named_pipe_type;
-                pipe_device->read_mode = read_mode;
-                pipe_device->completion_mode = completion_mode;
-                pipe_device->max_instances = maximum_instances;
-                pipe_device->inbound_quota = inbound_quota;
-                pipe_device->outbound_quota = outbound_quota;
-                pipe_device->default_timeout = default_timeout.read();
-            }
-            else
+            auto* pipe_device = container.get_internal_device<named_pipe>();
+            if (!pipe_device)
             {
                 return STATUS_NOT_SUPPORTED;
             }
+
+            pipe_device->name = filename;
+            pipe_device->pipe_type = named_pipe_type;
+            pipe_device->read_mode = read_mode;
+            pipe_device->completion_mode = completion_mode;
+            pipe_device->max_instances = maximum_instances;
+            pipe_device->inbound_quota = inbound_quota;
+            pipe_device->outbound_quota = outbound_quota;
+            pipe_device->default_timeout = default_timeout.read();
+
+            // Create shared buffers for this pipe (server=A end: writes to ab, reads from ba).
+            auto& entry = c.proc.named_pipe_registry[filename];
+            entry = process_context::named_pipe_shared_buffer{};
+            pipe_device->write_queue = entry.ab;
+            pipe_device->read_queue = entry.ba;
 
             handle pipe_handle = c.proc.devices.store(std::move(container));
             file_handle.write(pipe_handle);
 
             IO_STATUS_BLOCK<EmulatorTraits<Emu64>> iosb{};
             iosb.Status = STATUS_SUCCESS;
-            iosb.Information = 0;
+            iosb.Information = 2; // FILE_CREATED
             io_status_block.write(iosb);
 
             return STATUS_SUCCESS;
@@ -2193,6 +2434,7 @@ namespace sogen
             context.input_buffer_length = input_buffer_length;
             context.output_buffer = output_buffer;
             context.output_buffer_length = output_buffer_length;
+            context.vcpu = &c.vcpu;
 
             return device->execute_ioctl(c.win_emu, context);
         }
@@ -2213,6 +2455,67 @@ namespace sogen
 
             (void)fflush(f->handle);
             return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtFlushBuffersFileEx(const syscall_context& c, const handle file_handle, ULONG /*flags*/, uint64_t /*parameters*/,
+                                             ULONG /*parameters_size*/,
+                                             const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            return handle_NtFlushBuffersFile(c, file_handle, io_status_block);
+        }
+
+        NTSTATUS handle_NtDeleteFile(const syscall_context& c,
+                                     const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes)
+        {
+            if (!object_attributes)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto attributes = object_attributes.read();
+            if (!attributes.ObjectName)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const auto filename = read_unicode_string(c.emu, attributes.ObjectName);
+            const windows_path path{filename};
+            const auto host_path = c.win_emu.file_sys.translate(path);
+
+            std::error_code ec{};
+            if (!std::filesystem::exists(host_path, ec))
+            {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            if (!std::filesystem::remove(host_path, ec))
+            {
+                return STATUS_ACCESS_DENIED;
+            }
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCancelIoFile(const syscall_context& c, const handle file_handle,
+                                       const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            if (!c.proc.files.get(file_handle) && file_handle != STDOUT_HANDLE)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            io_status_block.access([](IO_STATUS_BLOCK<EmulatorTraits<Emu64>>& isb) {
+                isb.Status = STATUS_SUCCESS;
+                isb.Information = 0;
+            });
+
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtCancelIoFileEx(const syscall_context& c, const handle file_handle, uint64_t /*io_request_to_cancel*/,
+                                         const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            return handle_NtCancelIoFile(c, file_handle, io_status_block);
         }
     }
 

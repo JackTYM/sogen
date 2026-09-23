@@ -94,8 +94,8 @@ namespace sogen
             uint64_t ss;
         };
 
-        void dispatch_exception_pointers(x86_64_emulator& emu, const uint64_t dispatcher,
-                                         const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
+        void dispatch_exception_pointers(x86_64_cpu& emu, const uint64_t dispatcher, const uint64_t heaven_gate_code_base,
+                                         const uint64_t heaven_gate_stack_top, const EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers)
         {
             constexpr auto mach_frame_size = 0x40;
             constexpr auto context_record_size = 0x4F0;
@@ -154,8 +154,8 @@ namespace sogen
             emu.reg(x86_register::rbx, new_sp);
             emu.reg(x86_register::rcx, static_cast<uint64_t>(wow64::heaven_gate::kUserCodeSelector));
             emu.reg(x86_register::rdx, static_cast<uint64_t>(wow64::heaven_gate::kUserStackSelector));
-            emu.reg(x86_register::rsp, wow64::heaven_gate::kStackTop);
-            emu.reg(x86_register::rip, wow64::heaven_gate::kCodeBase);
+            emu.reg(x86_register::rsp, heaven_gate_stack_top);
+            emu.reg(x86_register::rip, heaven_gate_code_base);
         }
 
         WOW64_CONTEXT make_wow64_context(const CONTEXT64& ctx)
@@ -199,14 +199,14 @@ namespace sogen
             return result;
         }
 
-        void sync_wow64_cpu_reserved_context(windows_emulator& win_emu, const CONTEXT64& ctx)
+        void sync_wow64_cpu_reserved_context(windows_emulator& win_emu, x86_64_cpu& emu, emulator_thread& thread, const CONTEXT64& ctx)
         {
             if (!win_emu.process.is_wow64_process)
             {
                 return;
             }
 
-            const auto bitness = segment_utils::get_segment_bitness(win_emu.emu(), ctx.SegCs);
+            const auto bitness = segment_utils::get_segment_bitness(emu, ctx.SegCs);
             if (!bitness || *bitness != segment_utils::segment_bitness::bit32)
             {
                 return;
@@ -214,12 +214,75 @@ namespace sogen
 
             // Wow64PassExceptionToGuest rebuilds the 32-bit context from WOW64_CPURESERVED
             // (TEB64 TLS slot 1), not from the native exception ContextRecord below.
-            win_emu.current_thread().wow64_cpu_reserved->access([&](WOW64_CPURESERVED& cpu) {
+            thread.wow64_cpu_reserved->access([&](WOW64_CPURESERVED& cpu) {
                 cpu.Flags |= WOW64_CPURESERVED_FLAG_RESET_STATE;
                 cpu.Context = make_wow64_context(ctx);
             });
         }
 
+    }
+
+    // Dispatch a 32-bit WoW64 exception directly to the 32-bit KiUserExceptionDispatcher32
+    // in ntdll32.dll, bypassing the wow64 exception machinery entirely.
+    //
+    // The wow64 chain (64-bit KiUserExceptionDispatcher → Wow64PrepareForException →
+    // BTCpuResetToConsistentState → wow64cpu stub) relies on a fully-initialized WoW64
+    // thread environment (correct R13/R14/R15 pointing into wow64cpu.dll's per-thread
+    // structures) that sogen does not provide. Going directly to the 32-bit dispatcher
+    // avoids all of that.
+    //
+    // KiUserExceptionDispatcher32 entry (no return address on stack):
+    //   [ESP+0] = EXCEPTION_RECORD* (loaded into EBX → first arg to RtlDispatchException)
+    //   [ESP+4] = CONTEXT*          (loaded into ECX → second arg to RtlDispatchException)
+    void dispatch_exception_32bit(windows_emulator& win_emu, const CONTEXT64& ctx, const exception_record& record)
+    {
+        auto& emu = win_emu.emu();
+
+        const WOW64_CONTEXT wow64_ctx = make_wow64_context(ctx);
+
+        constexpr DWORD kMaxExceptionParameters = 15; // EXCEPTION_MAXIMUM_PARAMETERS
+
+        struct EXCEPTION_RECORD32
+        {
+            DWORD ExceptionCode;
+            DWORD ExceptionFlags;
+            DWORD ExceptionRecord;
+            DWORD ExceptionAddress;
+            DWORD NumberParameters;
+            DWORD ExceptionInformation[kMaxExceptionParameters];
+        };
+
+        EXCEPTION_RECORD32 record32{};
+        record32.ExceptionCode = record.ExceptionCode;
+        record32.ExceptionFlags = record.ExceptionFlags;
+        record32.ExceptionRecord = static_cast<DWORD>(record.ExceptionRecord);
+        record32.ExceptionAddress = static_cast<DWORD>(record.ExceptionAddress);
+        record32.NumberParameters = record.NumberParameters;
+        for (DWORD i = 0; i < record.NumberParameters && i < kMaxExceptionParameters; ++i)
+        {
+            record32.ExceptionInformation[i] = static_cast<DWORD>(record.ExceptionInformation[i]);
+        }
+
+        // Frame layout on the 32-bit stack (below current ESP):
+        //   [new_esp+0]  : DWORD = rec_ptr  (pointer to EXCEPTION_RECORD32)
+        //   [new_esp+4]  : DWORD = ctx_ptr  (pointer to WOW64_CONTEXT)
+        //   [new_esp+8]  : WOW64_CONTEXT    (0x2CC bytes)
+        //   [new_esp+8+sizeof(WOW64_CONTEXT)]: EXCEPTION_RECORD32
+        constexpr auto ptr_pair_size = 2 * sizeof(DWORD);
+        const auto frame_size = static_cast<uint32_t>(ptr_pair_size + sizeof(wow64_ctx) + sizeof(record32));
+        const auto new_esp = align_down(static_cast<uint32_t>(ctx.Rsp) - frame_size, 4u);
+
+        const DWORD ctx_ptr = new_esp + static_cast<DWORD>(ptr_pair_size);
+        const DWORD rec_ptr = ctx_ptr + static_cast<DWORD>(sizeof(wow64_ctx));
+
+        emu.write_memory(new_esp, &rec_ptr, sizeof(rec_ptr));
+        emu.write_memory(new_esp + 4, &ctx_ptr, sizeof(ctx_ptr));
+        emu.write_memory(ctx_ptr, &wow64_ctx, sizeof(wow64_ctx));
+        emu.write_memory(rec_ptr, &record32, sizeof(record32));
+
+        // CS is already 0x23 (we faulted in 32-bit mode); just redirect EIP and ESP.
+        emu.reg(x86_register::rsp, static_cast<uint64_t>(new_esp));
+        emu.reg(x86_register::rip, win_emu.process.ki_user_exception_dispatcher32);
     }
 
     bool dispatch_debug_exception(windows_emulator& win_emu, CONTEXT64& ctx, EMU_EXCEPTION_RECORD<EmulatorTraits<Emu64>>& record)
@@ -244,14 +307,38 @@ namespace sogen
         return false;
     }
 
-    void dispatch_exception(windows_emulator& win_emu, const DWORD status, const std::vector<EmulatorTraits<Emu64>::ULONG_PTR>& parameters)
+    void dispatch_exception(windows_emulator& win_emu, vcpu_context& vcpu, const DWORD status,
+                            const std::vector<EmulatorTraits<Emu64>::ULONG_PTR>& parameters)
     {
+        auto& thread = vcpu.thread();
+
+        win_emu.record_exception_trace({
+            .status = static_cast<uint32_t>(status),
+            .tid = thread.id,
+            .vcpu = static_cast<uint32_t>(vcpu.cpu.index()),
+            .rip = vcpu.cpu.read_instruction_pointer(),
+            .info = parameters.size() > 1 ? static_cast<uint64_t>(parameters[1]) : 0,
+        });
+
         CONTEXT64 ctx{};
         ctx.ContextFlags = CONTEXT64_ALL;
-        cpu_context::save(win_emu.emu(), ctx);
+        cpu_context::save(vcpu.cpu, ctx);
         ctx.Rip = win_emu.uses_instruction_precision() //
-                      ? win_emu.current_thread().current_ip
-                      : win_emu.emu().read_instruction_pointer();
+                      ? thread.current_ip
+                      : vcpu.cpu.read_instruction_pointer();
+
+        // FEXCore's JIT translation of INT3 reports RIP already advanced past the trapping 0xCC
+        // (see reports_breakpoint_rip_past_instruction's doc comment) - real hardware/NT
+        // (KiBreakpointTrap) always reports #BP at the INT3 itself, which is what guest SEH/VEH
+        // handlers and ContextRecord->Rip adjustments (e.g. `Rip += 1` to step past it) expect.
+        // KVM/WHP already report the pre-advance address like real hardware, so this is scoped to
+        // the one backend that actually needs it - applying it more broadly landed one byte short
+        // of where KVM/WHP's own guest-visible breakpoints (e.g. anti-debug INT3 padding probes)
+        // expect to resume, causing an infinite re-fault loop there.
+        if (status == STATUS_BREAKPOINT && vcpu.cpu.reports_breakpoint_rip_past_instruction())
+        {
+            ctx.Rip -= 1;
+        }
 
         exception_record record{};
         memset(&record, 0, sizeof(record));
@@ -266,6 +353,17 @@ namespace sogen
             is_debug_exception = dispatch_debug_exception(win_emu, ctx, record);
         }
 
+        // ContextRecord->Eip must reach the guest's first-chance handler UNADJUSTED (the int3's own
+        // address), matching the general real-hardware/NT contract documented on
+        // reports_breakpoint_rip_past_instruction() above and on every other backend. Do NOT add a
+        // wow64-32-bit-only +1 pre-advance here: guest top-level filters do `ContextRecord->Eip += 1`
+        // themselves (exactly the self-adjustment the NT contract expects callers to make), so a
+        // pre-advance double-advances by 2 bytes and lands execution mid-instruction past the int3.
+        // The corrupted resume then raises a new exception whose handler (ntdll's __except_handler4)
+        // returns ExceptionContinueExecution, which RtlDispatchException refuses (since
+        // EXCEPTION_NONCONTINUABLE is set) by raising a fresh STATUS_NONCONTINUABLE_EXCEPTION -
+        // recursing until the stack is exhausted. Excludes the dispatch_debug_exception (int 2dh)
+        // case above, which already advances ctx.Rip past its own, differently-sized instruction.
         if (!is_debug_exception)
         {
             record.NumberParameters = static_cast<DWORD>(parameters.size());
@@ -283,50 +381,54 @@ namespace sogen
 
         record.ExceptionAddress = ctx.Rip;
 
-        sync_wow64_cpu_reserved_context(win_emu, ctx);
+        sync_wow64_cpu_reserved_context(win_emu, vcpu.cpu, thread, ctx);
 
         EMU_EXCEPTION_POINTERS<EmulatorTraits<Emu64>> pointers{};
         pointers.ContextRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&ctx);
         pointers.ExceptionRecord = reinterpret_cast<EmulatorTraits<Emu64>::PVOID>(&record);
-        dispatch_exception_pointers(win_emu.emu(), win_emu.process.ki_user_exception_dispatcher, pointers);
+
+        dispatch_exception_pointers(vcpu.cpu, win_emu.process.ki_user_exception_dispatcher,
+                                    win_emu.mod_manager.wow64_heaven_gate_code_base(), win_emu.mod_manager.wow64_heaven_gate_stack_top(),
+                                    pointers);
     }
 
-    void dispatch_access_violation(windows_emulator& win_emu, const uint64_t address, const memory_operation operation)
+    void dispatch_access_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address, const memory_operation operation)
     {
-        dispatch_exception(win_emu, STATUS_ACCESS_VIOLATION,
+        dispatch_exception(win_emu, vcpu, STATUS_ACCESS_VIOLATION,
                            {
                                map_violation_operation_to_parameter(operation),
                                address,
                            });
     }
 
-    void dispatch_guard_page_violation(windows_emulator& win_emu, const uint64_t address, const memory_operation operation)
+    void dispatch_guard_page_violation(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address,
+                                       const memory_operation operation)
     {
-        dispatch_exception(win_emu, STATUS_GUARD_PAGE_VIOLATION,
+        dispatch_exception(win_emu, vcpu, STATUS_GUARD_PAGE_VIOLATION,
                            {
                                map_violation_operation_to_parameter(operation),
                                address,
                            });
     }
 
-    void dispatch_illegal_instruction_violation(windows_emulator& win_emu)
+    void dispatch_illegal_instruction_violation(windows_emulator& win_emu, vcpu_context& vcpu)
     {
-        dispatch_exception(win_emu, STATUS_ILLEGAL_INSTRUCTION, {});
+        dispatch_exception(win_emu, vcpu, STATUS_ILLEGAL_INSTRUCTION, {});
     }
 
-    void dispatch_integer_division_by_zero(windows_emulator& win_emu)
+    void dispatch_integer_division_by_zero(windows_emulator& win_emu, vcpu_context& vcpu)
     {
-        dispatch_exception(win_emu, STATUS_INTEGER_DIVIDE_BY_ZERO, {});
+        dispatch_exception(win_emu, vcpu, STATUS_INTEGER_DIVIDE_BY_ZERO, {});
     }
 
-    void dispatch_single_step(windows_emulator& win_emu)
+    void dispatch_single_step(windows_emulator& win_emu, vcpu_context& vcpu)
     {
-        dispatch_exception(win_emu, STATUS_SINGLE_STEP, {});
+        dispatch_exception(win_emu, vcpu, STATUS_SINGLE_STEP, {});
     }
 
-    void dispatch_breakpoint(windows_emulator& win_emu)
+    void dispatch_breakpoint(windows_emulator& win_emu, vcpu_context& vcpu)
     {
-        dispatch_exception(win_emu, STATUS_BREAKPOINT, {});
+        dispatch_exception(win_emu, vcpu, STATUS_BREAKPOINT, {});
     }
 
 } // namespace sogen

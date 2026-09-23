@@ -3,10 +3,13 @@
 
 #include <arch_emulator.hpp>
 
+#include <stop_reason.hpp>
 #include <utils/function.hpp>
 
 #include "syscall_dispatcher.hpp"
 #include "process_context.hpp"
+#include "kernel_lock.hpp"
+#include "host_wait_signal.hpp"
 #include "logger.hpp"
 #include "file_system.hpp"
 #include "memory_manager.hpp"
@@ -15,6 +18,7 @@
 #include "network/socket_factory.hpp"
 #include "version/windows_version_manager.hpp"
 #include <platform/ui_backend.hpp>
+#include <platform/audio_backend.hpp>
 
 namespace sogen
 {
@@ -44,16 +48,9 @@ namespace sogen
         utils::callback_list<void(std::string_view message)> on_debug_string{};
         utils::callback_list<void(const mapped_module& mod, const mapped_section& section, uint64_t address)> on_section_first_execution{};
         opt_func<void(uint64_t address)> on_instruction{};
+        opt_func<void()> on_event_pump{};
         opt_func<void(io_device& device, std::u16string_view device_name, ULONG code)> on_ioctrl{};
         opt_func<void(uint32_t fail_code)> on_fast_fail{};
-    };
-
-    enum class stop_reason : uint8_t
-    {
-        none,
-        unknown_syscall,
-        unimplemented_syscall,
-        syscall_exception,
     };
 
     struct application_settings
@@ -102,6 +99,12 @@ namespace sogen
         std::filesystem::path emulation_root{};
         std::filesystem::path registry_directory{"./registry"};
 
+        // When false, construct without loading the registry hives. Intended for headless harnesses
+        // (e.g. fuzzing) that never run the guest and don't read the registry, so they can construct
+        // with no emulation root / registry directory on disk. The registry ctor otherwise eagerly
+        // parses the mandatory hives (SYSTEM/SOFTWARE/SAM/...).
+        bool load_registry{true};
+
         std::unordered_map<uint16_t, uint16_t> port_mappings{};
         std::unordered_map<windows_path, std::filesystem::path> path_mappings{};
 
@@ -114,6 +117,27 @@ namespace sogen
         std::unique_ptr<network::dns_lookup> dns_lookup{};
         std::unique_ptr<network::socket_factory> socket_factory{};
         std::unique_ptr<ui_backend> ui{};
+        std::unique_ptr<audio_backend> audio{};
+    };
+
+    // Per-vCPU scheduler state: the guest thread a virtual CPU is currently executing
+    // and its yield request. Replaces the previous global "active thread" notion
+    // (docs/multi-vcpu-design.md, section 5.1).
+    struct vcpu_context
+    {
+        x86_64_cpu& cpu;
+        emulator_thread* active_thread{};
+        std::atomic_bool switch_thread{false};
+
+        emulator_thread& thread() const
+        {
+            if (!this->active_thread)
+            {
+                throw std::runtime_error("No active thread!");
+            }
+
+            return *this->active_thread;
+        }
     };
 
     class windows_emulator
@@ -126,7 +150,12 @@ namespace sogen
         std::unique_ptr<network::dns_lookup> dns_lookup_{};
         std::unique_ptr<network::socket_factory> socket_factory_{};
         std::unique_ptr<ui_backend> ui_backend_{};
+        std::unique_ptr<audio_backend> audio_backend_{};
         bool setup_completed_{false};
+
+        // Declared ahead of `process` on purpose: the host threads that signal it (the GPU-completion
+        // watcher) are owned by devices under `process`, so they are joined while this must still exist.
+        host_wait_signal host_wait_signal_{};
 
       public:
         const std::filesystem::path emulation_root{};
@@ -172,6 +201,7 @@ namespace sogen
         {
             return *this->clock_;
         }
+
         network::dns_lookup& dns_lookup()
         {
             return *this->dns_lookup_;
@@ -202,20 +232,121 @@ namespace sogen
             return *this->ui_backend_;
         }
 
+        audio_backend& audio()
+        {
+            return *this->audio_backend_;
+        }
+
+        const audio_backend& audio() const
+        {
+            return *this->audio_backend_;
+        }
+
         void handle_ui_event(const ui_event& event);
         void deliver_raw_input(const process_context::raw_input_payload& payload, hwnd explicit_target);
-        void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags);
-        void deliver_raw_keyboard_input(uint16_t vkey, uint16_t scan_code, bool release);
+        void deliver_raw_mouse_input(int32_t dx, int32_t dy, uint16_t button_flags, uint16_t button_data = 0);
+        void deliver_raw_keyboard_input(uint16_t vkey, uint16_t scan_code, uint32_t message, bool extended);
 
+        // Standard positioned mouse messages (WM_MOUSEMOVE/WM_LBUTTONDOWN/etc, real x/y in
+        // lParam) for guests that don't use raw input -- most ordinary Win32 UI apps (dialogs,
+        // buttons, text fields) only ever listen for these, not WM_INPUT. Same threading
+        // constraint as deliver_raw_mouse_input: touches process state without kernel_lock_, so
+        // callers must not invoke this off the emulator thread (see ios_ui_backend's queue for
+        // how the iOS frontend handles this).
+        void deliver_mouse_move(int32_t x, int32_t y);
+        void deliver_mouse_button(int32_t x, int32_t y, uint32_t message, uint16_t button_data = 0);
+
+        // Observer convenience for external consumers (gdb stub, analyzer, python
+        // bindings) and legacy paths that don't thread a vcpu_context through. Resolves
+        // to the vCPU whose handler is currently running: all handler/observer code runs
+        // under the kernel lock, so exactly one vCPU dispatches at a time and this is
+        // race-free. Falls back to vCPU 0 when no handler is active (e.g. setup).
         emulator_thread& current_thread() const
         {
-            if (!this->process.active_thread)
+            return (this->dispatch_vcpu_ ? this->dispatch_vcpu_ : this->vcpus_[0].get())->thread();
+        }
+
+        // The CPU of the vCPU currently dispatching a handler on the calling host thread (see
+        // scoped_dispatch). emu() is only the facade/vCPU 0, so handlers that inspect the faulting
+        // register state must go through here to observe the right vCPU when vcpu_count > 1.
+        x86_64_cpu& active_cpu() const
+        {
+            return (this->dispatch_vcpu_ ? this->dispatch_vcpu_ : this->vcpus_[0].get())->cpu;
+        }
+
+        // Run fn as a dispatched handler for the CPU that triggered a hook: takes the kernel lock and
+        // marks that vCPU as the dispatching one, so active_cpu()/current_thread() resolve to it. Meant
+        // for hooks installed outside setup_hooks (e.g. the analyzer's cpuid hook) which otherwise run
+        // lock-free and would observe only the facade/vCPU 0 when vcpu_count > 1.
+        template <typename Function>
+        auto dispatch_on_cpu(cpu_interface& cpu, Function&& fn)
+        {
+            const std::scoped_lock lock(this->kernel_lock_);
+            const scoped_dispatch dispatch(*this, this->vcpu(cpu.index()));
+            return std::forward<Function>(fn)();
+        }
+
+        vcpu_context& vcpu(const size_t index)
+        {
+            return *this->vcpus_.at(index);
+        }
+
+        // Marks vcpu as the one currently dispatching a handler on the calling host
+        // thread, so current_thread() resolves correctly. RAII; must be held only while
+        // the kernel lock is held.
+        class scoped_dispatch
+        {
+          public:
+            scoped_dispatch(windows_emulator& emu, vcpu_context& vcpu)
+                : emu_(&emu),
+                  previous_(emu.dispatch_vcpu_)
             {
-                throw std::runtime_error("No active thread!");
+                emu.dispatch_vcpu_ = &vcpu;
             }
 
-            return *this->process.active_thread;
+            ~scoped_dispatch()
+            {
+                this->emu_->dispatch_vcpu_ = this->previous_;
+            }
+
+            scoped_dispatch(const scoped_dispatch&) = delete;
+            scoped_dispatch& operator=(const scoped_dispatch&) = delete;
+            scoped_dispatch(scoped_dispatch&&) = delete;
+            scoped_dispatch& operator=(scoped_dispatch&&) = delete;
+
+          private:
+            windows_emulator* emu_{};
+            vcpu_context* previous_{};
+        };
+
+        // Post-mortem exception capture for multi-vCPU debugging. Recorded under the
+        // kernel lock (no I/O, no extra locking), dumped after the run ends, so it does
+        // not perturb the timing-sensitive races it is meant to catch.
+        struct exception_trace_entry
+        {
+            uint32_t status{};
+            uint32_t tid{};
+            uint32_t vcpu{};
+            uint64_t rip{};
+            uint64_t info{};
+        };
+
+        void record_exception_trace(const exception_trace_entry& entry)
+        {
+            this->exception_trace_[this->exception_trace_index_ % this->exception_trace_.size()] = entry;
+            ++this->exception_trace_index_;
         }
+
+        void dump_exception_trace();
+
+        // Prints BEL contention stats when SOGEN_LOCK_PROFILE is set (see kernel_lock).
+        void dump_lock_profile();
+
+        // Signal a guest event from a host-owned thread (e.g. the audio render thread). The handle is resolved
+        // under the kernel lock, so it cannot race a concurrent close on an emulator thread; a handle the guest
+        // has already closed is simply ignored. Returns false without signaling if the lock is busy -- callers
+        // here drive periodic work and can retry, and blocking would stall them behind long kernel operations.
+        bool try_signal_guest_event(handle event_handle);
 
         uint64_t get_executed_instructions() const
         {
@@ -225,6 +356,16 @@ namespace sogen
         bool uses_instruction_precision() const
         {
             return this->instruction_precision_;
+        }
+
+        bool uses_relative_time() const
+        {
+            return this->use_relative_time_;
+        }
+
+        uint32_t vcpu_count() const
+        {
+            return this->vcpu_count_;
         }
 
         stop_reason last_stop_reason() const
@@ -296,15 +437,44 @@ namespace sogen
             }
         }
 
-        void yield_thread(bool alertable = false);
-        bool perform_thread_switch();
-        bool activate_thread(uint32_t id);
+        uint64_t d3d9_stretchrect_null_source_hits() const
+        {
+            return this->d3d9_stretchrect_null_source_hits_;
+        }
+
+        void yield_thread(vcpu_context& vcpu, bool alertable = false);
+
+        // Wakes every vCPU idling on a parked host wait so it re-runs its readiness scan immediately.
+        // Callable from any host thread holding no emulator lock -- in particular the GPU-completion
+        // watcher, which must never touch the kernel lock to make progress.
+        void notify_host_wait_progress()
+        {
+            this->host_wait_signal_.signal();
+        }
+
+        bool perform_thread_switch(vcpu_context& vcpu, std::unique_lock<kernel_lock>& lock);
+        bool perform_thread_switch(vcpu_context& vcpu);
+        bool activate_thread(vcpu_context& vcpu, uint32_t id);
 
       private:
-        std::atomic_bool switch_thread_{false};
         bool use_relative_time_{false}; // TODO: Get rid of that
         bool instruction_precision_{true};
+        uint32_t vcpu_count_{1};
         std::atomic_bool should_stop{false};
+
+        // The emulator kernel lock: held by all code touching shared kernel state,
+        // released while guest code executes (docs/multi-vcpu-design.md, section 7).
+        kernel_lock kernel_lock_{};
+
+        // The vCPU currently running a handler under the kernel lock; drives
+        // current_thread(). See scoped_dispatch.
+        vcpu_context* dispatch_vcpu_{};
+
+        std::array<exception_trace_entry, 32> exception_trace_{};
+        size_t exception_trace_index_{0};
+
+        // unique_ptr because vcpu_context contains an atomic and must stay address-stable.
+        std::vector<std::unique_ptr<vcpu_context>> vcpus_{};
 
         std::unordered_map<uint16_t, uint16_t> port_mappings_{};
 
@@ -315,11 +485,33 @@ namespace sogen
         std::string last_stop_detail_{};
 
         std::map<uint64_t, std::vector<emulator_hook*>> section_first_execution_hooks_{};
+        std::map<uint64_t, emulator_hook*> d3d9_caps_hooks_{};
+        uint64_t d3d9_flip_null_target_fault_address_{};
+        uint64_t d3d9_stretchrect_null_source_fault_address_{};
+        uint64_t d3d9_set_render_target_null_desc_fault_address_{};
+        uint64_t d3d9_set_render_target_null_desc_fault_address2_{};
+        uint64_t d3d9_stretchrect_null_source_hits_{};
 
         void setup_hooks();
+        void install_d3d9_caps_patch_hook(const mapped_module& mod);
+        void install_d3d9_flip_target_hook(const mapped_module& mod);
+        void install_d3d9_stretchrect_null_source_hook(const mapped_module& mod);
+        void install_d3d9_set_render_target_null_desc_hook(const mapped_module& mod);
+        void install_ddraw_vidmem_hook(const mapped_module& mod);
         void setup_process();
-        void on_instruction_execution(uint64_t address);
-        void on_basic_block_execution(const basic_block& block);
+        void vcpu_worker(vcpu_context& vcpu);
+
+        // See vcpu_worker_thread_trampoline's doc comment (windows_emulator.cpp).
+        struct vcpu_worker_thread_args
+        {
+            windows_emulator* self;
+            uint32_t index;
+            std::atomic<uint32_t>* active_workers;
+        };
+
+        static void* vcpu_worker_thread_trampoline(void* raw_args);
+        void on_instruction_execution(vcpu_context& vcpu, uint64_t address);
+        void on_basic_block_execution(vcpu_context& vcpu, const basic_block& block);
 
         bool uses_section_first_execution_hooks() const;
         void clear_section_first_execution_hooks();

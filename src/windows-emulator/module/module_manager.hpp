@@ -1,5 +1,6 @@
 #pragma once
 #include <emulator.hpp>
+#include <arch_emulator.hpp>
 
 #include "mapped_module.hpp"
 #include "../file_system.hpp"
@@ -39,7 +40,8 @@ namespace sogen
     {
       public:
         virtual ~module_mapping_strategy() = default;
-        virtual mapped_module map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path) = 0;
+        virtual mapped_module map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path,
+                                            uint64_t relocation_base) = 0;
         virtual mapped_module map_from_memory(memory_manager& memory, uint64_t base_address, uint64_t image_size,
                                               windows_path module_path) = 0;
     };
@@ -47,7 +49,8 @@ namespace sogen
     class pe32_mapping_strategy : public module_mapping_strategy
     {
       public:
-        mapped_module map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path) override;
+        mapped_module map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path,
+                                    uint64_t relocation_base) override;
         mapped_module map_from_memory(memory_manager& memory, uint64_t base_address, uint64_t image_size,
                                       windows_path module_path) override;
     };
@@ -55,7 +58,8 @@ namespace sogen
     class pe64_mapping_strategy : public module_mapping_strategy
     {
       public:
-        mapped_module map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path) override;
+        mapped_module map_from_file(memory_manager& memory, std::filesystem::path file, windows_path module_path,
+                                    uint64_t relocation_base) override;
         mapped_module map_from_memory(memory_manager& memory, uint64_t base_address, uint64_t image_size,
                                       windows_path module_path) override;
     };
@@ -75,7 +79,7 @@ namespace sogen
     {
       public:
         static pe_detection_result detect_from_file(const std::filesystem::path& file);
-        static pe_detection_result detect_from_memory(uint64_t base_address, uint64_t image_size);
+        static pe_detection_result detect_from_memory(const memory_interface& memory, uint64_t base_address, uint64_t image_size);
         static execution_mode determine_execution_mode(winpe::pe_arch executable_arch);
     };
 
@@ -92,15 +96,16 @@ namespace sogen
 
         module_manager(memory_manager& memory, file_system& file_sys, callbacks& cb);
 
-        void map_main_modules(const windows_path& executable_path, windows_version_manager& version, process_context& context,
-                              const logger& logger);
+        void map_main_modules(x86_64_emulator& emu, const windows_path& executable_path, windows_version_manager& version,
+                              process_context& context, const logger& logger);
 
         std::optional<uint64_t> get_module_load_count_by_path(const windows_path& path);
-        mapped_module* map_module(windows_path file, const logger& logger, bool is_static = false, bool allow_duplicate = false);
+        mapped_module* map_module(windows_path file, const logger& logger, bool is_static = false, bool allow_duplicate = false,
+                                  uint64_t relocation_base = 0);
         mapped_module* map_module_or_throw(const windows_path& file, const logger& logger, bool is_static = false,
                                            bool allow_duplicate = false);
         mapped_module* map_local_module(const std::filesystem::path& file, windows_path module_path, const logger& logger,
-                                        bool is_static = false, bool allow_duplicate = false);
+                                        bool is_static = false, bool allow_duplicate = false, uint64_t relocation_base = 0);
         mapped_module* map_memory_module(uint64_t base_address, uint64_t image_size, windows_path module_path, const logger& logger,
                                          bool is_static = false, bool allow_duplicate = false);
 
@@ -143,6 +148,7 @@ namespace sogen
         void deserialize(utils::buffer_deserializer& buffer);
 
         bool unmap(uint64_t address);
+
         const module_map& modules() const
         {
             return modules_;
@@ -153,9 +159,26 @@ namespace sogen
         {
             return current_execution_mode_;
         }
+
         bool is_wow64_process() const
         {
             return current_execution_mode_ == execution_mode::wow64_32bit;
+        }
+
+        // The actual guest addresses install_wow64_heaven_gate placed the trampoline code page and
+        // stack at. Usually wow64::heaven_gate::kCodeBase/kStackTop (the preferred fixed addresses),
+        // but can differ if that fixed spot was already claimed by a foreign host mapping on a backend
+        // sharing the guest address space with the host process (FEX on Apple Silicon) - see
+        // install_wow64_heaven_gate's doc comment. exception_dispatch.cpp reads these instead of the
+        // compile-time constants so it always targets wherever the gate actually ended up.
+        uint64_t wow64_heaven_gate_code_base() const
+        {
+            return wow64_heaven_gate_code_base_;
+        }
+
+        uint64_t wow64_heaven_gate_stack_top() const
+        {
+            return wow64_heaven_gate_stack_top_;
         }
 
         // TODO: These should be properly encapsulated. A good mechanism for quick module access is needed.
@@ -184,6 +207,11 @@ namespace sogen
         mapping_strategy_factory strategy_factory_;
         execution_mode current_execution_mode_ = execution_mode::unknown;
 
+        // Set by install_wow64_heaven_gate to wherever it actually placed the gate; 0 until then (never
+        // read before that runs on a wow64 process). See the accessors' doc comment above.
+        uint64_t wow64_heaven_gate_code_base_{};
+        uint64_t wow64_heaven_gate_stack_top_{};
+
         mapped_module* map_module_core(const pe_detection_result& detection_result, const std::function<mapped_module()>& mapper,
                                        const logger& logger, bool is_static);
 
@@ -191,10 +219,11 @@ namespace sogen
 
         void load_native_64bit_modules(const windows_path& executable_path, const windows_path& ntdll_path, const windows_path& win32u_path,
                                        const logger& logger);
-        void load_wow64_modules(const windows_path& executable_path, const windows_path& ntdll_path, const windows_path& win32u_path,
-                                const windows_path& ntdll32_path, windows_version_manager& version, const logger& logger);
+        void load_wow64_modules(x86_64_emulator& emu, const windows_path& executable_path, const windows_path& ntdll_path,
+                                const windows_path& win32u_path, const windows_path& ntdll32_path, windows_version_manager& version,
+                                const logger& logger);
 
-        void install_wow64_heaven_gate(const logger& logger);
+        void install_wow64_heaven_gate(x86_64_emulator& emu, const logger& logger);
 
         module_map::iterator get_module(const uint64_t address)
         {

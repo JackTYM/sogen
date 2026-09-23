@@ -4,6 +4,7 @@
 #include "../memory_manager.hpp"
 
 #include <utils/io.hpp>
+#include <utils/string.hpp>
 
 namespace sogen
 {
@@ -34,6 +35,67 @@ namespace sogen
             };
 
             static_assert(sizeof(ini_file_mapping64) == 0x20);
+
+            template <typename Pointer>
+            bool loader_list_contains_image(const syscall_context& c, const uint64_t ldr_address, const uint64_t image_base)
+            {
+                if (!ldr_address)
+                {
+                    return false;
+                }
+
+                using ldr_data = std::conditional_t<sizeof(Pointer) == sizeof(uint32_t), PEB_LDR_DATA32, PEB_LDR_DATA64>;
+                constexpr auto dll_base_offset = sizeof(Pointer) == sizeof(uint32_t) ? 0x18 : 0x30;
+                const auto list_head = ldr_address + offsetof(ldr_data, InLoadOrderModuleList);
+                Pointer current{};
+                if (!c.win_emu.memory.try_read_memory(list_head, &current, sizeof(current)))
+                {
+                    return false;
+                }
+
+                for (size_t i = 0; i < 1024 && current != list_head; ++i)
+                {
+                    if (!current)
+                    {
+                        return false;
+                    }
+
+                    Pointer dll_base{};
+                    if (!c.win_emu.memory.try_read_memory(static_cast<uint64_t>(current) + dll_base_offset, &dll_base, sizeof(dll_base)))
+                    {
+                        return false;
+                    }
+
+                    if (dll_base == image_base)
+                    {
+                        return true;
+                    }
+
+                    if (!c.win_emu.memory.try_read_memory(current, &current, sizeof(current)))
+                    {
+                        return false;
+                    }
+                }
+
+                return false;
+            }
+
+            bool loader_list_contains_image(const syscall_context& c, const mapped_module& module)
+            {
+                if (module.machine == IMAGE_FILE_MACHINE_I386 && c.proc.peb32)
+                {
+                    const auto ldr = c.proc.peb32->read().Ldr;
+                    return loader_list_contains_image<uint32_t>(c, ldr, module.image_base);
+                }
+
+                if (module.machine != IMAGE_FILE_MACHINE_AMD64)
+                {
+                    return false;
+                }
+
+                const auto ldr = c.proc.peb64.read().Ldr;
+                return loader_list_contains_image<uint64_t>(c, ldr, module.image_base);
+            }
 
             NTSTATUS initialize_shared_section_base_static_server_data_mapping(const syscall_context& c,
                                                                                const uint64_t shared_section_address,
@@ -121,6 +183,33 @@ namespace sogen
                     ucs.Buffer = ucs.Buffer - obj_address;
                 });
             }
+
+            // find_free_host_allocation_base already retries internally against a stale pick (a foreign
+            // host mapping landing in the gap since the last scan), but the fixed-address allocate_memory
+            // call below can still fail on a genuine collision the pick itself couldn't foresee (a
+            // backend sharing the guest address space with the host process makes its claim atomic - see
+            // host_memory_collision's doc comment). Retrying with a fresh pick here, instead of ignoring
+            // the return value, mirrors handle_NtAllocateVirtualMemoryEx's own auto-placement retry.
+            uint64_t allocate_pagefile_section(const syscall_context& c, const uint64_t size)
+            {
+                constexpr int max_attempts = 8;
+                for (int attempt = 0; attempt < max_attempts; ++attempt)
+                {
+                    const auto address = c.win_emu.memory.find_free_host_allocation_base(size, 0);
+                    if (!address)
+                    {
+                        break;
+                    }
+
+                    if (c.win_emu.memory.allocate_memory(address, size, memory_permission::read_write, false,
+                                                         memory_region_kind::pagefile_section_view))
+                    {
+                        return address;
+                    }
+                }
+
+                return 0;
+            }
         }
 
         NTSTATUS handle_NtCreateSection(const syscall_context& c, const emulator_object<handle> section_handle,
@@ -193,9 +282,12 @@ namespace sogen
             {
                 constexpr auto shared_section_size = 0x10000;
 
-                const auto address = c.win_emu.memory.find_free_allocation_base(shared_section_size);
-                c.win_emu.memory.allocate_memory(address, shared_section_size, memory_permission::read_write, false,
-                                                 memory_region_kind::pagefile_section_view);
+                const auto address = allocate_pagefile_section(c, shared_section_size);
+                if (!address)
+                {
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+
                 c.proc.shared_section_address = address;
                 c.proc.shared_section_size = shared_section_size;
 
@@ -207,9 +299,12 @@ namespace sogen
             {
                 constexpr auto dbwin_buffer_section_size = 0x1000;
 
-                const auto address = c.win_emu.memory.find_free_allocation_base(dbwin_buffer_section_size);
-                c.win_emu.memory.allocate_memory(address, dbwin_buffer_section_size, memory_permission::read_write, false,
-                                                 memory_region_kind::pagefile_section_view);
+                const auto address = allocate_pagefile_section(c, dbwin_buffer_section_size);
+                if (!address)
+                {
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+
                 c.proc.dbwin_buffer = address;
                 c.proc.dbwin_buffer_size = dbwin_buffer_section_size;
 
@@ -232,7 +327,7 @@ namespace sogen
 
             if (!is_knowndll && attributes.RootDirectory != BASE_NAMED_OBJECTS_DIRECTORY)
             {
-                c.win_emu.log.error("Unsupported section\n");
+                c.win_emu.log.error("Unsupported section: %s\n", u16_to_u8(filename_sv).c_str());
                 c.emu.stop();
                 return STATUS_NOT_SUPPORTED;
             }
@@ -268,6 +363,12 @@ namespace sogen
             {
                 if (!section.name.empty() && utils::string::equals_ignore_case(section.name, filename))
                 {
+                    // This handle aliases the same stored section object as every other handle pointing at
+                    // it (make_handle just re-encodes the existing index), so the object's ref_count must be
+                    // bumped like any other handle-duplicating path. Without this, closing whichever handle
+                    // happens to have ref_count==1 releases the section's shared backing - even though this
+                    // handle, and any views mapped through it, are still alive.
+                    ++section.ref_count;
                     section_handle.write(c.proc.sections.make_handle(handle));
                     return STATUS_SUCCESS;
                 }
@@ -295,7 +396,8 @@ namespace sogen
                 const auto shared_section_size = c.proc.shared_section_size;
                 const auto address = c.proc.shared_section_address;
 
-                const std::u16string_view windows_dir = c.proc.kusd.get().NtSystemRoot.arr;
+                const auto windows_dir =
+                    c.proc.kusd.access([](const KUSER_SHARED_DATA64& kusd) { return std::u16string{kusd.NtSystemRoot.arr}; });
 
                 uint64_t obj_address{};
                 if (const auto status =
@@ -340,7 +442,20 @@ namespace sogen
 
             if (section_entry->is_image())
             {
-                const auto* binary = c.win_emu.mod_manager.map_module(section_entry->file_name, c.win_emu.log, false, true);
+                const auto file_path =
+                    std::filesystem::weakly_canonical(std::filesystem::absolute(c.win_emu.file_sys.translate(section_entry->file_name)));
+                uint64_t relocation_base{};
+                for (const auto& loaded_module : c.win_emu.mod_manager.modules() | std::views::values)
+                {
+                    if (loaded_module.path == file_path && loader_list_contains_image(c, loaded_module))
+                    {
+                        relocation_base = loaded_module.image_base;
+                        break;
+                    }
+                }
+
+                const auto* binary =
+                    c.win_emu.mod_manager.map_module(section_entry->file_name, c.win_emu.log, false, true, relocation_base);
                 if (!binary)
                 {
                     return STATUS_FILE_INVALID;
@@ -401,6 +516,12 @@ namespace sogen
                         return STATUS_NO_MEMORY;
                     }
                     section_entry->backing_address = backing;
+
+                    if (c.win_emu.callbacks.on_generic_activity)
+                    {
+                        c.win_emu.callbacks.on_generic_activity(
+                            utils::string::va("Pagefile section backing allocated: base=0x%" PRIx64 " size=0x%zx", backing, backing_size));
+                    }
                 }
 
                 const auto aligned_offset = page_align_down(static_cast<uint64_t>(offset));
@@ -409,17 +530,41 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                if (getenv("EMULATOR_AUDIO_RPC_DIAG"))
+                {
+                    c.win_emu.log.warn("[section-map-diag] thread_id=%u backing=0x%" PRIx64 " raw_offset=0x%" PRIx64
+                                       " aligned_offset=0x%" PRIx64 " backing_size=0x%zx\n",
+                                       c.thread().id, section_entry->backing_address, static_cast<uint64_t>(offset), aligned_offset,
+                                       backing_size);
+                }
+
                 if (view_size)
                 {
                     view_size.write(backing_size - aligned_offset);
                 }
                 base_address.write(section_entry->backing_address + aligned_offset);
+                ++section_entry->mapped_view_count;
+
+                if (c.win_emu.callbacks.on_generic_activity)
+                {
+                    c.win_emu.callbacks.on_generic_activity(
+                        utils::string::va("Pagefile view mapped: backing=0x%" PRIx64 " offset=0x%" PRIx64 " views=%u",
+                                          section_entry->backing_address, aligned_offset, section_entry->mapped_view_count));
+                }
+
                 return STATUS_SUCCESS;
             }
 
             // File-backed section: map a fresh copy of the file contents.
             std::vector<std::byte> file_data{};
             if (!utils::io::read_file(c.win_emu.file_sys.translate(section_entry->file_name), &file_data))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            // The guest fully controls the mapping offset. Reject anything past the file so the
+            // subtraction below cannot underflow into a huge copy that reads past file_data.
+            if (static_cast<uint64_t>(offset) > file_data.size())
             {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -439,6 +584,12 @@ namespace sogen
             if (view_size)
             {
                 view_size.write(aligned_size);
+            }
+
+            if (c.win_emu.callbacks.on_generic_activity)
+            {
+                c.win_emu.callbacks.on_generic_activity(
+                    utils::string::va("File section view mapped: base=0x%" PRIx64 " size=0x%zx", address, aligned_size));
             }
 
             base_address.write(address);
@@ -566,7 +717,8 @@ namespace sogen
 
             if (!base_address)
             {
-                return STATUS_INVALID_PARAMETER;
+                // Kernel returns STATUS_NOT_MAPPED_VIEW for NULL base, not STATUS_INVALID_PARAMETER
+                return STATUS_NOT_MAPPED_VIEW;
             }
 
             if (c.proc.shared_section_address && base_address >= c.proc.shared_section_address &&
@@ -601,15 +753,57 @@ namespace sogen
             if (region_info.is_reserved && memory_region_policy::is_section_kind(region_info.kind))
             {
                 // A pagefile section keeps one persistent backing shared by every view, so unmapping a view
-                // must not free it (other views and open section handles may still reference it); it is released
-                // when the last section handle is closed.
+                // must not free it (other views and open section handles may still reference it). The backing
+                // is released once no handle and no mapped view references it, matching real Windows, where
+                // mapped views keep section memory alive even after the last handle is closed.
                 if (region_info.kind == memory_region_kind::pagefile_section_view)
                 {
+                    const auto backing = region_info.allocation_base;
+
+                    for (auto& [_, section_entry] : c.proc.sections)
+                    {
+                        if (section_entry.backing_address == backing)
+                        {
+                            if (section_entry.mapped_view_count > 0)
+                            {
+                                --section_entry.mapped_view_count;
+                            }
+
+                            if (c.win_emu.callbacks.on_generic_activity)
+                            {
+                                c.win_emu.callbacks.on_generic_activity(
+                                    utils::string::va("Pagefile view unmapped: backing=0x%" PRIx64 " base=0x%" PRIx64 " views=%u", backing,
+                                                      base_address, section_entry.mapped_view_count));
+                            }
+
+                            return STATUS_SUCCESS;
+                        }
+                    }
+
+                    const auto orphan = c.proc.orphaned_section_backings.find(backing);
+                    if (orphan != c.proc.orphaned_section_backings.end() && --orphan->second == 0)
+                    {
+                        c.proc.orphaned_section_backings.erase(orphan);
+                        c.win_emu.memory.release_memory(backing, 0);
+
+                        if (c.win_emu.callbacks.on_generic_activity)
+                        {
+                            c.win_emu.callbacks.on_generic_activity(
+                                utils::string::va("Pagefile backing released after orphan drain: base=0x%" PRIx64, backing));
+                        }
+                    }
+
                     return STATUS_SUCCESS;
                 }
 
                 if (c.win_emu.memory.release_memory(region_info.allocation_base, 0))
                 {
+                    if (c.win_emu.callbacks.on_generic_activity)
+                    {
+                        c.win_emu.callbacks.on_generic_activity(
+                            utils::string::va("Section view released: base=0x%" PRIx64, region_info.allocation_base));
+                    }
+
                     return STATUS_SUCCESS;
                 }
             }
@@ -618,14 +812,19 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUnmapViewOfSectionEx(const syscall_context& c, const handle process_handle, const uint64_t base_address,
-                                               const ULONG /*flags*/)
+                                               const ULONG flags)
         {
+            // Kernel: if ( (flags & 0xFFFFFFFC) != 0 ) return STATUS_INVALID_PARAMETER_3
+            if ((flags & 0xFFFFFFFC) != 0)
+            {
+                return STATUS_INVALID_PARAMETER_3;
+            }
             return handle_NtUnmapViewOfSection(c, process_handle, base_address);
         }
 
-        NTSTATUS handle_NtAreMappedFilesTheSame()
+        NTSTATUS handle_NtAreMappedFilesTheSame(const syscall_context& /*c*/, uint64_t /*file1_address*/, uint64_t /*file2_address*/)
         {
-            return STATUS_NOT_SUPPORTED;
+            return STATUS_NOT_SAME_OBJECT;
         }
 
         NTSTATUS handle_NtQuerySection(const syscall_context& c, const handle section_handle,
@@ -838,11 +1037,11 @@ namespace sogen
             case SECTION_INFORMATION_CLASS::SectionRelocationInformation:
             case SECTION_INFORMATION_CLASS::SectionOriginalBaseInformation:
             case SECTION_INFORMATION_CLASS::SectionInternalImageInformation:
-                // These information classes are not implemented
                 return STATUS_NOT_SUPPORTED;
 
             default:
-                return STATUS_NOT_SUPPORTED;
+                // Kernel returns STATUS_INVALID_INFO_CLASS (0xC0000003) for unknown classes
+                return STATUS_INVALID_INFO_CLASS;
             }
         }
     }

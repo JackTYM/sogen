@@ -126,7 +126,8 @@ namespace sogen
             }
         }
 
-        bool retain_handle_reference(process_context& process, const handle source_handle, handle& retained_handle)
+        bool retain_handle_reference(process_context& process, const emulator_thread* active_thread, const handle source_handle,
+                                     handle& retained_handle)
         {
             if (source_handle.bits == 0)
             {
@@ -134,7 +135,7 @@ namespace sogen
                 return true;
             }
 
-            const auto resolved_source_handle = process.resolve_object_pseudo_handle(source_handle);
+            const auto resolved_source_handle = process.resolve_object_pseudo_handle(source_handle, active_thread);
 
             if (resolved_source_handle.value.is_pseudo)
             {
@@ -231,27 +232,36 @@ namespace sogen
                 return;
             }
 
-            for (auto& [packet_id, wait_packet] : process.wait_completion_packets)
+            auto& candidates = completion->associated_wait_packets;
+            for (size_t i = 0; i < candidates.size();)
             {
-                if (!wait_packet.associated || wait_packet.queued_completion)
+                handle packet_handle{};
+                packet_handle.bits = candidates[i];
+                auto* wait_packet = process.wait_completion_packets.get(packet_handle);
+
+                if (!wait_packet || !wait_packet->associated || wait_packet->io_completion_handle != io_completion_handle)
+                {
+                    candidates[i] = candidates.back();
+                    candidates.pop_back();
+                    continue;
+                }
+
+                ++i;
+
+                if (wait_packet->queued_completion)
                 {
                     continue;
                 }
 
-                if (wait_packet.io_completion_handle != io_completion_handle)
+                if (!is_wait_completion_target_signaled(process, wait_packet->target_object_handle))
                 {
                     continue;
                 }
 
-                if (!is_wait_completion_target_signaled(process, wait_packet.target_object_handle))
-                {
-                    continue;
-                }
+                consume_wait_completion_target(process, wait_packet->target_object_handle);
 
-                consume_wait_completion_target(process, wait_packet.target_object_handle);
-
-                enqueue_wait_packet_completion(process, *completion, process.wait_completion_packets.make_handle(packet_id), wait_packet);
-                wait_packet.queued_completion = true;
+                enqueue_wait_packet_completion(process, *completion, packet_handle, *wait_packet);
+                wait_packet->queued_completion = true;
             }
         }
 

@@ -6,6 +6,7 @@ namespace sogen
 {
 
     struct syscall_context;
+    struct user_callback_result;
     using syscall_handler = void (*)(const syscall_context& c);
 
     struct syscall_handler_entry
@@ -48,33 +49,45 @@ namespace sogen
     struct window_create_state : completion_state
     {
         hwnd handle{};
+        hwnd parent_handle{};
 
         emulator_stack_allocation min_max_info_alloc{};
         emulator_stack_allocation window_rect_alloc{};
         emulator_stack_allocation create_struct_alloc{};
         emulator_stack_allocation window_pos_alloc{};
+        emulator_stack_allocation activation_window_pos_alloc{};
+        emulator_stack_allocation changed_window_pos_alloc{};
 
         std::vector<qmsg> message_queue{};
+        uint64_t pending_window_pos_address{};
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->handle);
+            buffer.write(this->parent_handle);
             buffer.write(this->min_max_info_alloc);
             buffer.write(this->window_rect_alloc);
             buffer.write(this->create_struct_alloc);
             buffer.write(this->window_pos_alloc);
+            buffer.write(this->activation_window_pos_alloc);
+            buffer.write(this->changed_window_pos_alloc);
             buffer.write_vector(this->message_queue);
+            buffer.write(this->pending_window_pos_address);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->handle);
+            buffer.read(this->parent_handle);
             buffer.read(this->min_max_info_alloc);
             buffer.read(this->window_rect_alloc);
             buffer.read(this->create_struct_alloc);
             buffer.read(this->window_pos_alloc);
+            buffer.read(this->activation_window_pos_alloc);
+            buffer.read(this->changed_window_pos_alloc);
             buffer.read_vector(this->message_queue);
+            buffer.read(this->pending_window_pos_address);
         }
     };
 
@@ -89,40 +102,58 @@ namespace sogen
     struct window_destroy_frame
     {
         hwnd handle{};
+        hwnd parent_notify_handle{};
         emulator_stack_allocation window_pos_alloc{};
+        emulator_stack_allocation changed_window_pos_alloc{};
         std::vector<qmsg> message_queue{};
         window_destroy_phase phase{window_destroy_phase::messages};
+        bool unlink_pending{true};
+        uint64_t pending_window_pos_address{};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
             buffer.write(this->handle);
+            buffer.write(this->parent_notify_handle);
             buffer.write(this->window_pos_alloc);
+            buffer.write(this->changed_window_pos_alloc);
             buffer.write_vector(this->message_queue);
             buffer.write(this->phase);
+            buffer.write(this->unlink_pending);
+            buffer.write(this->pending_window_pos_address);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
         {
             buffer.read(this->handle);
+            buffer.read(this->parent_notify_handle);
             buffer.read(this->window_pos_alloc);
+            buffer.read(this->changed_window_pos_alloc);
             buffer.read_vector(this->message_queue);
             buffer.read(this->phase);
+            buffer.read(this->unlink_pending);
+            buffer.read(this->pending_window_pos_address);
         }
     };
 
     struct window_destroy_state : completion_state
     {
         std::vector<window_destroy_frame> frames{};
+        std::vector<window_destroy_frame> nc_destroy_frames{};
+        uint32_t nc_destroy_index{};
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write_vector(this->frames);
+            buffer.write_vector(this->nc_destroy_frames);
+            buffer.write(this->nc_destroy_index);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read_vector(this->frames);
+            buffer.read_vector(this->nc_destroy_frames);
+            buffer.read(this->nc_destroy_index);
         }
     };
 
@@ -130,21 +161,30 @@ namespace sogen
     {
         bool was_visible{};
         emulator_stack_allocation window_pos_alloc{};
+        emulator_stack_allocation activation_window_pos_alloc{};
+        emulator_stack_allocation changed_window_pos_alloc{};
         std::vector<qmsg> message_queue{};
+        uint64_t pending_window_pos_address{};
 
       private:
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->was_visible);
             buffer.write(this->window_pos_alloc);
+            buffer.write(this->activation_window_pos_alloc);
+            buffer.write(this->changed_window_pos_alloc);
             buffer.write_vector(this->message_queue);
+            buffer.write(this->pending_window_pos_address);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->was_visible);
             buffer.read(this->window_pos_alloc);
+            buffer.read(this->activation_window_pos_alloc);
+            buffer.read(this->changed_window_pos_alloc);
             buffer.read_vector(this->message_queue);
+            buffer.read(this->pending_window_pos_address);
         }
     };
 
@@ -191,6 +231,7 @@ namespace sogen
     };
 
     class windows_emulator;
+    struct vcpu_context;
 
     class syscall_dispatcher
     {
@@ -199,10 +240,10 @@ namespace sogen
         syscall_dispatcher(const exported_symbols& ntdll_exports, std::span<const std::byte> ntdll_data,
                            const exported_symbols& win32u_exports, std::span<const std::byte> win32u_data);
 
-        void dispatch(windows_emulator& win_emu);
+        void dispatch(windows_emulator& win_emu, vcpu_context& vcpu);
         static void dispatch_callback(windows_emulator& win_emu, std::string& syscall_name);
-        dispatch_result dispatch_completion(windows_emulator& win_emu, callback_id callback_id, completion_state* completion_state,
-                                            uint64_t callback_result);
+        dispatch_result dispatch_completion(windows_emulator& win_emu, vcpu_context& vcpu, callback_id callback_id,
+                                            completion_state* completion_state, const user_callback_result& callback_result);
 
         void serialize(utils::buffer_serializer& buffer) const;
         void deserialize(utils::buffer_deserializer& buffer);

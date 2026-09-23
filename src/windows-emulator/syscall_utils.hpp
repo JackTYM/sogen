@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "windows_emulator.hpp"
 #include <ctime>
@@ -10,10 +10,23 @@ namespace sogen
 
     struct completion_state;
 
+    struct user_callback_result
+    {
+        uint64_t value{};
+        uint32_t output_size{};
+        uint64_t output{};
+    };
+
+    static_assert(sizeof(user_callback_result) == 24);
+    static_assert(offsetof(user_callback_result, output) == 16);
+
     struct syscall_context
     {
         windows_emulator& win_emu;
-        x86_64_emulator& emu;
+        // The virtual CPU that issued this syscall. Register and memory access must go
+        // through this CPU, not windows_emulator::emu() (which always resolves vCPU 0).
+        x86_64_cpu& emu;
+        vcpu_context& vcpu;
         process_context& proc;
         mutable bool write_status{true};
         mutable bool retrigger_syscall{false};
@@ -21,7 +34,12 @@ namespace sogen
         mutable bool run_callback{false};
         bool is_callback_completion{false};
         completion_state* current_completion_state{};
-        uint64_t previous_callback_result{};
+        user_callback_result previous_callback_result{};
+
+        emulator_thread& thread() const
+        {
+            return this->vcpu.thread();
+        }
 
         template <typename T>
         T get_callback_result() const
@@ -30,7 +48,16 @@ namespace sogen
             {
                 throw std::runtime_error("Attempted to get callback result in a non-completion context");
             }
-            return static_cast<T>(this->previous_callback_result);
+            return static_cast<T>(this->previous_callback_result.value);
+        }
+
+        const user_callback_result& get_callback_result_object() const
+        {
+            if (!this->is_callback_completion)
+            {
+                throw std::runtime_error("Attempted to get callback result in a non-completion context");
+            }
+            return this->previous_callback_result;
         }
 
         template <typename T>
@@ -48,7 +75,7 @@ namespace sogen
         }
     };
 
-    inline uint64_t get_syscall_argument(x86_64_emulator& emu, const size_t index)
+    inline uint64_t get_syscall_argument(x86_64_cpu& emu, const size_t index)
     {
         return get_function_argument(emu, index, true);
     }
@@ -67,6 +94,19 @@ namespace sogen
     {
         return utils::string::starts_with_ignore_case(filename, {u"\\Device\\NamedPipe\\"}) ||
                utils::string::starts_with_ignore_case(filename, {u"\\??\\Pipe\\"});
+    }
+
+    // Canonicalise the Win32 \??\pipe\ prefix to \Device\NamedPipe\ so registry
+    // lookups always use the same key regardless of which NT path form was passed in.
+    inline std::u16string normalize_pipe_path(std::u16string filename)
+    {
+        constexpr std::u16string_view win32_prefix = u"\\??\\pipe\\";
+        constexpr std::u16string_view device_prefix = u"\\Device\\NamedPipe\\";
+        if (filename.starts_with(win32_prefix))
+        {
+            filename = std::u16string(device_prefix) + filename.substr(win32_prefix.size());
+        }
+        return filename;
     }
 
     inline std::optional<uint32_t> extract_syscall_id(const exported_symbol& symbol, std::span<const std::byte> data)
@@ -138,7 +178,7 @@ namespace sogen
 
     template <typename T>
         requires(std::is_integral_v<T> || std::is_enum_v<T>)
-    T resolve_argument(x86_64_emulator& emu, const size_t index)
+    T resolve_argument(x86_64_cpu& emu, const size_t index)
     {
         const auto arg = get_syscall_argument(emu, index);
         return static_cast<T>(arg);
@@ -146,7 +186,7 @@ namespace sogen
 
     template <typename T>
         requires(std::is_same_v<std::remove_cvref_t<T>, handle>)
-    handle resolve_argument(x86_64_emulator& emu, const size_t index)
+    handle resolve_argument(x86_64_cpu& emu, const size_t index)
     {
         handle h{};
         h.bits = resolve_argument<uint64_t>(emu, index);
@@ -155,14 +195,14 @@ namespace sogen
 
     template <typename T>
         requires(std::is_same_v<T, emulator_object<typename T::value_type>>)
-    T resolve_argument(x86_64_emulator& emu, const size_t index)
+    T resolve_argument(x86_64_cpu& emu, const size_t index)
     {
         const auto arg = get_syscall_argument(emu, index);
         return T(emu, arg);
     }
 
     template <typename T>
-    T resolve_indexed_argument(x86_64_emulator& emu, size_t& index)
+    T resolve_indexed_argument(x86_64_cpu& emu, size_t& index)
     {
         return resolve_argument<T>(emu, index++);
     }
@@ -177,7 +217,10 @@ namespace sogen
         const auto new_ip = c.emu.read_instruction_pointer();
         if ((initial_ip != new_ip || c.retrigger_syscall || c.run_callback) && !c.is_callback_completion)
         {
-            c.emu.reg(x86_register::rip, new_ip - 2);
+            if (c.emu.syscall_hook_requires_rip_compensation())
+            {
+                c.emu.reg(x86_register::rip, new_ip - 2);
+            }
         }
     }
 
@@ -212,7 +255,7 @@ namespace sogen
     }
 
     template <typename T, typename Traits>
-    void write_attribute(emulator& emu, const PS_ATTRIBUTE<Traits>& attribute, const T& value)
+    void write_attribute(memory_interface& emu, const PS_ATTRIBUTE<Traits>& attribute, const T& value)
     {
         if (attribute.ReturnLength)
         {
@@ -226,7 +269,7 @@ namespace sogen
     }
 
     template <typename ResponseType, typename Action, typename ReturnLengthSetter>
-    NTSTATUS handle_query_internal(x86_64_emulator& emu, const uint64_t buffer, const uint32_t length,
+    NTSTATUS handle_query_internal(x86_64_cpu& emu, const uint64_t buffer, const uint32_t length,
                                    const ReturnLengthSetter& return_length_setter, const Action& action)
     {
         constexpr auto required_size = sizeof(ResponseType);
@@ -261,8 +304,8 @@ namespace sogen
 
     template <typename ResponseType, typename Action, typename LengthType>
         requires(std::is_integral_v<LengthType>)
-    NTSTATUS handle_query(x86_64_emulator& emu, const uint64_t buffer, const uint32_t length,
-                          const emulator_object<LengthType> return_length, const Action& action)
+    NTSTATUS handle_query(x86_64_cpu& emu, const uint64_t buffer, const uint32_t length, const emulator_object<LengthType> return_length,
+                          const Action& action)
     {
         const auto length_setter = [&](const size_t required_size) {
             if (return_length)
@@ -275,7 +318,7 @@ namespace sogen
     }
 
     template <typename ResponseType, typename Action>
-    NTSTATUS handle_query(x86_64_emulator& emu, const uint64_t buffer, const uint32_t length,
+    NTSTATUS handle_query(x86_64_cpu& emu, const uint64_t buffer, const uint32_t length,
                           const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block, const Action& action)
     {
         IO_STATUS_BLOCK<EmulatorTraits<Emu64>> status_block{};

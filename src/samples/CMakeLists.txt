@@ -4,13 +4,15 @@ sogen_get_all_targets(EXISTING_TARGETS)
 
 add_subdirectory(bad-sample)
 add_subdirectory(hook-sample)
-add_subdirectory(messagebox-sample)
-add_subdirectory(manual-messagebox-sample)
-add_subdirectory(manual-controls-sample)
-add_subdirectory(custom-paint-sample)
 add_subdirectory(test-sample)
 add_subdirectory(vulkan-shim)
 add_subdirectory(vulkan-shim-test)
+add_subdirectory(steam-shim)
+add_subdirectory(cpu-bench-sample)
+add_subdirectory(wow64-test-sample)
+add_subdirectory(stress-sample)
+add_subdirectory(native-gpu-clear-sample)
+add_subdirectory(mouse-input-test-sample)
 
 ##########################################
 

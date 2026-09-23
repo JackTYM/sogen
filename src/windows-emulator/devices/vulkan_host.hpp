@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -30,6 +31,16 @@ namespace sogen
 
         // False if no Vulkan driver could be loaded on the host.
         bool available() const;
+
+        // Which specific step of loading the host Vulkan driver failed (or "ok" if available()
+        // is true). Meant for logging when available() is false, not for programmatic branching.
+        const char* diagnostic() const;
+
+        // Step-by-step trace of the most recent create_render_target() call (requested
+        // parameters, then the real VkResult of each Vulkan call in sequence, or which internal
+        // check rejected the request before any Vulkan call ran) -- always populated, whether
+        // that call succeeded or failed. Meant for logging, not programmatic branching.
+        const char* render_target_diagnostic() const;
 
         // Creates a bare instance (no layers/extensions). out_instance is set to a fresh object id
         // on success, or 0 on failure.
@@ -59,6 +70,7 @@ namespace sogen
             uint32_t max_extent_depth;
             uint64_t max_resource_size;
         };
+
         int32_t get_physical_device_image_format_properties(uint64_t physical_device, uint32_t format, uint32_t type, uint32_t tiling,
                                                             uint32_t usage, uint32_t flags, image_format_properties& out);
 
@@ -96,6 +108,15 @@ namespace sogen
         // Resolves a queue created with the device; out_queue receives a stable object id.
         int32_t get_device_queue(uint64_t device, uint32_t queue_family_index, uint32_t queue_index, uint64_t& out_queue);
 
+        // Starts a host thread that blocks until the GPU retires work submitted to this device, calling
+        // on_progress once per completion. Every subsequent queue_submit/queue_submit2 on the device
+        // additionally signals an internal timeline semaphore, which is what the thread waits on, so the
+        // device must have been created with the timelineSemaphore feature enabled; without it this
+        // fails and the caller is expected to fall back to polling. on_progress runs on that host thread
+        // and must not block on it, nor take any lock a submitting thread could be holding.
+        // Idempotent per device. The thread is stopped and joined by destroy_device.
+        int32_t start_gpu_progress_watch(uint64_t device, std::function<void()> on_progress);
+
         int32_t create_command_pool(uint64_t device, uint32_t queue_family_index, uint32_t flags, uint64_t& out_pool);
         void destroy_command_pool(uint64_t device, uint64_t pool);
 
@@ -130,6 +151,9 @@ namespace sogen
 
         // Non-blocking: returns VK_SUCCESS if signaled, VK_NOT_READY otherwise. Never waits.
         int32_t get_fence_status(uint64_t fence);
+
+        // Blocks the calling thread until the fence signals or timeout_ns elapses (UINT64_MAX = infinite).
+        int32_t wait_for_fence(uint64_t fence, uint64_t timeout_ns);
 
         int32_t queue_wait_idle(uint64_t queue);
         int32_t device_wait_idle(uint64_t device);
@@ -178,6 +202,10 @@ namespace sogen
         int32_t map_memory(uint64_t device, uint64_t memory, void*& out_host_pointer, uint64_t& out_size);
         // Unmaps a mapping previously returned by map_memory.
         void unmap_memory(uint64_t device, uint64_t memory);
+        // Whether this VkDeviceMemory's backing type reports VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        // per the memory type flags resolved at allocate_memory time. false (including for an
+        // unknown memory id) is the safe default - it means "flush explicitly".
+        bool is_memory_host_coherent(uint64_t memory) const;
 
         // A VkImageSubresourceRange as plain integers (this header stays free of Vulkan types).
         struct subresource_range
@@ -220,6 +248,8 @@ namespace sogen
             float height;
             float min_depth;
             float max_depth;
+
+            friend bool operator==(const viewport_entry&, const viewport_entry&) = default;
         };
 
         // One VkRect2D as plain integers (dynamic scissor state).
@@ -229,6 +259,8 @@ namespace sogen
             int32_t offset_y;
             uint32_t width;
             uint32_t height;
+
+            friend bool operator==(const scissor_entry&, const scissor_entry&) = default;
         };
 
         // Creates a 2D, single-mip, single-layer image (initial layout UNDEFINED). samples selects the
@@ -258,6 +290,7 @@ namespace sogen
         // Copies mip 0 / layer 0 of the image (tightly packed) into the buffer at offset 0.
         int32_t cmd_copy_image_to_buffer(uint64_t command_buffer, uint64_t image, uint32_t image_layout, uint64_t buffer, uint32_t width,
                                          uint32_t height, uint32_t aspect_mask);
+
         // Copies tightly-packed pixel data from the buffer (offset 0) into mip 0 / layer 0 of the image.
         // One VkBufferImageCopy region. DXVK sub-allocates uploads from a shared staging buffer, so
         // buffer_offset (and mip/layer/image_offset) are routinely non-zero and must be honoured.
@@ -280,6 +313,7 @@ namespace sogen
 
         int32_t cmd_copy_buffer_to_image(uint64_t command_buffer, uint64_t buffer, uint64_t image, uint32_t image_layout,
                                          const buffer_image_copy_region& region);
+
         // One VkImageCopy region of an image-to-image copy (vkCmdCopyImage[2]).
         struct image_copy_region
         {
@@ -301,6 +335,7 @@ namespace sogen
             uint32_t height;
             uint32_t depth;
         };
+
         struct image_blit_region
         {
             uint32_t src_aspect_mask;
@@ -325,6 +360,7 @@ namespace sogen
             int32_t dst_offset_z1;
             uint32_t filter;
         };
+
         int32_t cmd_copy_image(uint64_t command_buffer, uint64_t src_image, uint32_t src_layout, uint64_t dst_image, uint32_t dst_layout,
                                const image_copy_region& region);
         int32_t cmd_blit_image(uint64_t command_buffer, uint64_t src_image, uint32_t src_layout, uint64_t dst_image, uint32_t dst_layout,
@@ -373,7 +409,7 @@ namespace sogen
         // copy has already completed, out_pixels receives that frame immediately; otherwise it is later
         // returned by poll_presented_frames().
         int32_t queue_present(uint64_t queue, uint64_t swapchain, uint32_t image_index, std::vector<std::byte>& out_pixels,
-                              uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd);
+                              uint32_t& out_width, uint32_t& out_height, uint64_t& out_hwnd, uint32_t& out_vk_format);
 
         struct presented_frame
         {
@@ -381,6 +417,7 @@ namespace sogen
             uint32_t width{};
             uint32_t height{};
             uint64_t hwnd{};
+            uint32_t vk_format{};
         };
 
         // Collects readbacks whose GPU fences have completed without waiting. This lets the host UI
@@ -432,12 +469,14 @@ namespace sogen
             uint32_t descriptor_count;
             uint32_t stage_flags;
         };
+
         // VkDescriptorPoolSize as plain integers.
         struct descriptor_pool_size
         {
             uint32_t descriptor_type;
             uint32_t descriptor_count;
         };
+
         // A single descriptor write (one descriptor). For buffer types buffer/offset/range apply; for
         // image types (combined image sampler) sampler/image_view/image_layout apply.
         struct descriptor_write
@@ -452,6 +491,8 @@ namespace sogen
             uint64_t sampler;
             uint64_t image_view;
             uint32_t image_layout;
+
+            friend bool operator==(const descriptor_write&, const descriptor_write&) = default;
         };
 
         int32_t create_descriptor_set_layout(uint64_t device, std::span<const descriptor_binding> bindings, uint64_t& out_layout);
@@ -479,6 +520,7 @@ namespace sogen
             uint32_t stride;
             uint32_t input_rate;
         };
+
         struct vertex_attribute
         {
             uint32_t location;
@@ -493,6 +535,7 @@ namespace sogen
             uint32_t test_enable;
             uint32_t write_enable;
             uint32_t compare_op;
+            auto operator<=>(const depth_state&) const = default; // lets this struct key d3d9_host::pipeline_cache_key
         };
 
         struct spec_entry
@@ -514,6 +557,7 @@ namespace sogen
             uint32_t dst_alpha_blend_factor;
             uint32_t alpha_blend_op;
             uint32_t color_write_mask;
+            auto operator<=>(const color_blend_attachment&) const = default; // lets this struct key d3d9_host::pipeline_cache_key
         };
 
         // A shader stage's specialization constants. DXVK bakes d3d9 render state (alpha-test compare op, fog,
@@ -529,6 +573,10 @@ namespace sogen
         // depth test. Empty vertex input (no bindings/attributes) leaves vertices to be baked into the shader.
         // When render_pass == 0 the pipeline is built for dynamic rendering (VK_KHR_dynamic_rendering) using
         // color_formats/depth_format/stencil_format, with viewport and scissor as dynamic state.
+        // depth_clip_enable != 0 (the D3D9 default, D3DRS_CLIPPING = TRUE) leaves depthClampEnable = VK_FALSE
+        // (near/far depth clipping on); 0 clamps instead of clips, but only if the device enabled depthClamp.
+        // cull_mode/front_face are real VkCullModeFlags/VkFrontFace values, kept plain-integer like the rest
+        // of this API surface.
         int32_t create_graphics_pipeline(uint64_t device, uint64_t render_pass, uint64_t pipeline_layout, uint64_t vertex_shader,
                                          uint64_t fragment_shader, uint32_t width, uint32_t height,
                                          std::span<const vertex_binding> bindings, std::span<const vertex_attribute> attributes,
@@ -536,7 +584,8 @@ namespace sogen
                                          uint32_t stencil_format, uint32_t rasterization_samples, uint32_t primitive_topology,
                                          uint32_t primitive_restart_enable, std::span<const uint32_t> dynamic_states,
                                          const specialization& vs_spec, const specialization& fs_spec,
-                                         std::span<const color_blend_attachment> blend_attachments, uint64_t& out_pipeline);
+                                         std::span<const color_blend_attachment> blend_attachments, uint32_t depth_clip_enable,
+                                         uint32_t cull_mode, uint32_t front_face, uint64_t& out_pipeline);
         int32_t create_compute_pipeline(uint64_t device, uint64_t pipeline_layout, uint64_t shader_module, uint64_t& out_pipeline);
         void destroy_pipeline(uint64_t device, uint64_t pipeline);
 
@@ -577,6 +626,37 @@ namespace sogen
         int32_t cmd_set_stencil_op(uint64_t command_buffer, uint32_t face_mask, uint32_t fail_op, uint32_t pass_op, uint32_t depth_fail_op,
                                    uint32_t compare_op);
         int32_t cmd_set_dynamic_u32(uint64_t command_buffer, uint32_t state, uint32_t value);
+
+        // --- native render target (D3DKMT path; no swapchain / no surface) ---
+
+        // Creates a single DEVICE_LOCAL B8G8R8A8_UNORM image with COLOR_ATTACHMENT|TRANSFER_SRC usage,
+        // plus a host-visible readback buffer and the reusable command infrastructure needed to clear
+        // and read it back.  out_image receives a fresh object id.
+        //
+        // `transient` requests MoltenVK's memoryless-attachment optimization for a depth format: the
+        // image gets DEPTH_STENCIL_ATTACHMENT|TRANSIENT_ATTACHMENT usage only (no TRANSFER_DST/SAMPLED --
+        // it can never be cleared via a standalone vkCmdClear*Image or sampled), memory is preferred from
+        // a LAZILY_ALLOCATED heap (never actually backed by VRAM on a tile-based GPU as long as every
+        // render pass that touches it also uses STORE_OP_DONT_CARE), and no CPU-readback staging buffer
+        // is allocated at all. Ignored for a color format -- only a depth-stencil surface this codebase
+        // never samples or reads back (see d3d9_host's create_resource, which is the only caller that
+        // passes true) is eligible.
+        int32_t create_render_target(uint64_t device, uint32_t width, uint32_t height, uint32_t format, bool transient,
+                                     uint64_t& out_image);
+
+        // Records a clear of the render-target image to `color` (RGBA, 0..1), submits, and waits
+        // synchronously.  The image is left in TRANSFER_SRC_OPTIMAL after the call.
+        int32_t submit_clear(uint64_t image, const float* color);
+
+        // Copies the render-target image into the readback buffer, waits, and copies the result into
+        // out_pixels (BGRA8, tightly packed).  out_width / out_height are set from the image dims.
+        int32_t readback_render_target(uint64_t image, std::vector<std::byte>& out_pixels, uint32_t& out_width, uint32_t& out_height);
+
+        // Paired teardown for create_render_target: releases the image, its memory, the readback
+        // buffer/memory, the command pool and the fence, then drops the id from both the render-target
+        // and the generic image table it was registered in. destroy_image alone would leak everything
+        // except the VkImage itself, since the caller never sees any of those other objects' ids.
+        void destroy_render_target(uint64_t device, uint64_t image);
 
       private:
         struct impl;

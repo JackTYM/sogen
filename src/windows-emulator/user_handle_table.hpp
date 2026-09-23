@@ -12,6 +12,7 @@ namespace sogen
       public:
         static constexpr uint32_t MAX_HANDLES = 0xFFFF;
         static constexpr size_t CLIENT_MESSAGE_BITS_SIZE = 0xC8;
+        static constexpr size_t IME_MESSAGE_BITS_SIZE = 0x400;
         static constexpr size_t WND_MESSAGE_BITS_COUNT = FNID_ARRAY_SIZE + 2;
         static constexpr size_t DEF_WINDOW_MSGS_INDEX = FNID_ARRAY_SIZE;
         static constexpr size_t DEF_WINDOW_SPEC_MSGS_INDEX = FNID_ARRAY_SIZE + 1;
@@ -26,6 +27,7 @@ namespace sogen
             this->is_wow64_process_ = is_wow64_process;
 
             used_indices_.resize(MAX_HANDLES, false);
+            next_free_index_ = 1;
 
             const auto server_info_size = static_cast<size_t>(page_align_up(sizeof(USER_SERVERINFO)));
             server_info_addr_ = this->allocate_memory(server_info_size, memory_permission::read);
@@ -39,6 +41,21 @@ namespace sogen
                 srv.defaultFontHeightScale = -11;
                 srv.defaultFontWidthScale = 0;
                 srv.systemDpi = 96;
+                srv.systemMetrics[0] = 1920;  // SM_CXSCREEN
+                srv.systemMetrics[1] = 1080;  // SM_CYSCREEN
+                srv.systemMetrics[2] = 17;    // SM_CXVSCROLL
+                srv.systemMetrics[3] = 17;    // SM_CYHSCROLL
+                srv.systemMetrics[10] = 17;   // SM_CXHTHUMB
+                srv.systemMetrics[11] = 32;   // SM_CXICON
+                srv.systemMetrics[12] = 32;   // SM_CYICON
+                srv.systemMetrics[19] = 1;    // SM_MOUSEPRESENT
+                srv.systemMetrics[20] = 17;   // SM_CYVSCROLL
+                srv.systemMetrics[21] = 17;   // SM_CXHSCROLL
+                srv.systemMetrics[43] = 3;    // SM_CMOUSEBUTTONS
+                srv.systemMetrics[75] = 1;    // SM_MOUSEWHEELPRESENT
+                srv.systemMetrics[78] = 1920; // SM_CXVIRTUALSCREEN
+                srv.systemMetrics[79] = 1080; // SM_CYVIRTUALSCREEN
+                srv.systemMetrics[91] = 1;    // SM_MOUSEHORIZONTALWHEELPRESENT
             });
 
             const auto handle_table_size = static_cast<size_t>(page_align_up(sizeof(USER_HANDLEENTRY) * MAX_HANDLES));
@@ -51,15 +68,23 @@ namespace sogen
             uint64_t wnd_message_bits_cursor = wnd_message_bits_addr_;
             for (size_t i = 0; i < WND_MESSAGE_BITS.size(); ++i)
             {
-                const auto byte_size = get_wnd_message_bits_byte_size(WND_MESSAGE_BITS[i].max_msgs);
+                const auto byte_size = get_wnd_message_bits_byte_size(WND_MESSAGE_BITS.at(i).max_msgs);
                 if (byte_size == 0)
                 {
                     continue;
                 }
 
-                wnd_message_bits_addrs_[i] = wnd_message_bits_cursor;
-                memory_->write_memory(wnd_message_bits_cursor, WND_MESSAGE_BITS[i].bits.data(), byte_size);
+                wnd_message_bits_addrs_.at(i) = wnd_message_bits_cursor;
+                memory_->write_memory(wnd_message_bits_cursor, WND_MESSAGE_BITS.at(i).bits.data(), byte_size);
                 wnd_message_bits_cursor += align_up(byte_size, alignof(uint32_t));
+            }
+
+            if (is_wow64_process_)
+            {
+                wow64_wndmsg_bitmap_addr_ =
+                    this->allocate_memory(static_cast<size_t>(page_align_up(CLIENT_MESSAGE_BITS_SIZE)), memory_permission::read);
+                wow64_ime_msg_bitmap_addr_ =
+                    this->allocate_memory(static_cast<size_t>(page_align_up(IME_MESSAGE_BITS_SIZE)), memory_permission::read);
             }
         }
 
@@ -68,24 +93,31 @@ namespace sogen
             return {*memory_, server_info_addr_};
         }
 
-        // user32's client-side GetForegroundWindow reads the foreground HWND straight out of the shared
-        // SERVERINFO (gpsi) via win32u!_ABI_Get_ForegroundWindow, which indexes gpsi + 0x1DE0 -- past the
-        // fields we model but within the page-aligned allocation. Keep it in sync with the active window so
-        // games that gate their input loop on GetForegroundWindow() actually read the mouse.
-        static constexpr uint64_t SERVERINFO_FOREGROUND_WINDOW_OFFSET = 0x1DE0;
-        void set_foreground_window(const uint32_t window) const
-        {
-            memory_->write_memory(server_info_addr_ + SERVERINFO_FOREGROUND_WINDOW_OFFSET, &window, sizeof(window));
-        }
-
         emulator_object<USER_HANDLEENTRY> get_handle_table() const
         {
             return {*memory_, handle_table_addr_};
         }
 
+        // Map an internal handle id to the aheList slot the guest computes from the HANDLE's low 16 bits.
+        // Handles are 4-aligned (id at bit 2), so the slot is id << 2; keep it within the table bounds.
+        static uint32_t handle_index_to_ahe_slot(uint32_t index)
+        {
+            return static_cast<uint32_t>(make_handle(index, handle_types::window, false).bits & 0xFFFFu);
+        }
+
         emulator_object<USER_DISPINFO> get_display_info() const
         {
             return {*memory_, display_info_addr_};
+        }
+
+        uint64_t get_wow64_wndmsg_bitmap() const
+        {
+            return wow64_wndmsg_bitmap_addr_;
+        }
+
+        uint64_t get_wow64_ime_msg_bitmap() const
+        {
+            return wow64_ime_msg_bitmap_addr_;
         }
 
         USER_WNDMSG get_awm_control_message(const size_t index) const
@@ -107,6 +139,13 @@ namespace sogen
         std::pair<handle, emulator_object<T>> allocate_object(handle_types::type type)
         {
             const auto index = find_free_index();
+            const auto object_handle = make_handle(index, type, false);
+
+            // user32's client-side handle validation (HMValidateHandle and friends) indexes the shared
+            // aheList by the HANDLE's low 16 bits, not by our internal handle id. Handles are 4-aligned
+            // (low 2 bits reserved for the NtClose ABI), so the id lives at bit 2 and the aheList slot
+            // the guest reads is id << 2. Write the entry there so the client-side lookup resolves.
+            const auto ahe_slot = handle_index_to_ahe_slot(index);
 
             const auto alloc_size = static_cast<size_t>(page_align_up(sizeof(T)));
             const auto alloc_ptr = this->allocate_memory(alloc_size, memory_permission::read);
@@ -119,21 +158,30 @@ namespace sogen
                     entry.bType = get_native_type(type);
                     entry.wUniq = static_cast<uint16_t>(type << 7);
                 },
-                index);
+                ahe_slot);
 
-            used_indices_[index] = true;
+            used_indices_.at(index) = true;
 
-            return {make_handle(index, type, false), alloc_obj};
+            return {object_handle, alloc_obj};
+        }
+
+        // The handle entry's pOwner holds the owning thread. user32's client-side GetWindowThreadProcessId
+        // returns 0 outright when pOwner is 0, and short-circuits to the current thread id when pOwner equals
+        // it, so windows must record their owning thread here for that API (DirectSound relies on it).
+        void set_owner(const uint32_t index, const uint64_t owner)
+        {
+            const emulator_object<USER_HANDLEENTRY> handle_table_obj(*memory_, handle_table_addr_);
+            handle_table_obj.access([&](USER_HANDLEENTRY& entry) { entry.pOwner = owner; }, index);
         }
 
         void free_index(uint32_t index)
         {
-            if (index >= used_indices_.size() || !used_indices_[index])
+            if (index >= used_indices_.size() || !used_indices_.at(index))
             {
                 return;
             }
 
-            used_indices_[index] = false;
+            used_indices_.at(index) = false;
 
             const emulator_object<USER_HANDLEENTRY> handle_table_obj(*memory_, handle_table_addr_);
             handle_table_obj.access(
@@ -141,7 +189,7 @@ namespace sogen
                     memory_->release_memory(entry.pHead, 0);
                     entry = {};
                 },
-                index);
+                handle_index_to_ahe_slot(index));
         }
 
         void serialize(utils::buffer_serializer& buffer) const
@@ -150,8 +198,11 @@ namespace sogen
             buffer.write(handle_table_addr_);
             buffer.write(display_info_addr_);
             buffer.write(wnd_message_bits_addr_);
+            buffer.write(wow64_wndmsg_bitmap_addr_);
+            buffer.write(wow64_ime_msg_bitmap_addr_);
             buffer.write(wnd_message_bits_addrs_);
             buffer.write_vector(used_indices_);
+            buffer.write(next_free_index_);
             buffer.write(is_wow64_process_);
         }
 
@@ -161,8 +212,11 @@ namespace sogen
             buffer.read(handle_table_addr_);
             buffer.read(display_info_addr_);
             buffer.read(wnd_message_bits_addr_);
+            buffer.read(wow64_wndmsg_bitmap_addr_);
+            buffer.read(wow64_ime_msg_bitmap_addr_);
             buffer.read(wnd_message_bits_addrs_);
             buffer.read_vector(used_indices_);
+            buffer.read(next_free_index_);
             buffer.read(is_wow64_process_);
         }
 
@@ -214,7 +268,10 @@ namespace sogen
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},
-            {.max_msgs = 0x0000u, .bits = {}},
+            {.max_msgs = 0x0318u,
+             .bits = {0x00109406u, 0x00030000u, 0x00010000u, 0x00010000u, 0x00000086u, 0x0000000Au, 0x00000000u, 0x00000000u, 0x00080000u,
+                      0x00000100u, 0x00000000u, 0x000F0000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x0000000Au, 0x00000000u,
+                      0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x01000000u}},
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},
             {.max_msgs = 0x0000u, .bits = {}},
@@ -257,18 +314,27 @@ namespace sogen
             }
 
             USER_WNDMSG message{};
-            message.maxMsgs = WND_MESSAGE_BITS[index].max_msgs;
-            message.abMsgs = wnd_message_bits_addrs_[index];
+            message.maxMsgs = WND_MESSAGE_BITS.at(index).max_msgs;
+            message.abMsgs = wnd_message_bits_addrs_.at(index);
             return message;
         }
 
-        uint32_t find_free_index() const
+        uint32_t find_free_index()
         {
-            for (uint32_t i = 1; i < used_indices_.size(); ++i)
+            for (uint32_t attempts = 0; attempts < MAX_HANDLES - 1; ++attempts)
             {
-                if (!used_indices_[i])
+                const auto index = next_free_index_;
+                next_free_index_ = next_free_index_ + 1 < MAX_HANDLES ? next_free_index_ + 1 : 1;
+
+                if (!used_indices_.at(index))
                 {
-                    return i;
+                    // The aheList slot is id << 2; skip ids whose slot would fall outside the table
+                    // (checked before the 16-bit mask so it can't wrap into a live slot).
+                    if ((static_cast<uint64_t>(index) << 2) >= MAX_HANDLES)
+                    {
+                        continue;
+                    }
+                    return index;
                 }
             }
             throw std::runtime_error("No more user handles available");
@@ -284,6 +350,8 @@ namespace sogen
                 return TYPE_MENU;
             case handle_types::type::monitor:
                 return TYPE_MONITOR;
+            case handle_types::type::accelerator_table:
+                return TYPE_ACCELTABLE;
             default:
                 throw std::runtime_error("Unhandled handle type!");
             }
@@ -300,8 +368,11 @@ namespace sogen
         uint64_t handle_table_addr_{};
         uint64_t display_info_addr_{};
         uint64_t wnd_message_bits_addr_{};
+        uint64_t wow64_wndmsg_bitmap_addr_{};
+        uint64_t wow64_ime_msg_bitmap_addr_{};
         std::array<uint64_t, WND_MESSAGE_BITS_COUNT> wnd_message_bits_addrs_{};
         std::vector<bool> used_indices_{};
+        uint32_t next_free_index_{1};
         memory_manager* memory_{};
         bool is_wow64_process_{};
     };
@@ -434,7 +505,7 @@ namespace sogen
             return h;
         }
 
-        std::pair<typename value_map::iterator, bool> erase(const typename value_map::iterator& entry)
+        std::pair<typename value_map::iterator, bool> erase(const value_map::iterator& entry)
         {
             if (this->block_mutation_)
             {
@@ -515,7 +586,7 @@ namespace sogen
             return this->erase(make_handle(entry->first));
         }
 
-        typename value_map::iterator find(const T& value)
+        value_map::iterator find(const T& value)
         {
             auto i = this->store_.begin();
             for (; i != this->store_.end(); ++i)
@@ -528,7 +599,7 @@ namespace sogen
             return i;
         }
 
-        typename value_map::const_iterator find(const T& value) const
+        value_map::const_iterator find(const T& value) const
         {
             auto i = this->store_.begin();
             for (; i != this->store_.end(); ++i)
@@ -560,19 +631,22 @@ namespace sogen
             return this->find_handle(*value);
         }
 
-        typename value_map::iterator begin()
+        value_map::iterator begin()
         {
             return this->store_.begin();
         }
-        typename value_map::const_iterator begin() const
+
+        value_map::const_iterator begin() const
         {
             return this->store_.begin();
         }
-        typename value_map::iterator end()
+
+        value_map::iterator end()
         {
             return this->store_.end();
         }
-        typename value_map::const_iterator end() const
+
+        value_map::const_iterator end() const
         {
             return this->store_.end();
         }

@@ -230,8 +230,8 @@ namespace sogen
 
         ~callback_frame();
 
-        void save_registers(x86_64_emulator& emu);
-        void restore_registers(x86_64_emulator& emu) const;
+        void save_registers(x86_64_cpu& emu);
+        void restore_registers(x86_64_cpu& emu) const;
 
         void serialize(utils::buffer_serializer& buffer) const;
         void deserialize(utils::buffer_deserializer& buffer);
@@ -297,6 +297,12 @@ namespace sogen
         std::u16string name{};
 
         std::optional<NTSTATUS> exit_status{};
+
+        // Circuit breaker: detect a thread wedged in an unhandled-exception loop.
+        // Incremented each time the same RIP faults consecutively; reset on any forward progress.
+        uint64_t consecutive_fault_rip{0};
+        uint32_t consecutive_fault_count{0};
+
         std::vector<handle> await_objects{};
         bool await_any{false};
         bool waiting_for_alert{false};
@@ -371,23 +377,30 @@ namespace sogen
         std::optional<msg> peek_pending_message(windows_emulator& win_emu, hwnd hwnd_filter = 0, UINT filter_min = 0, UINT filter_max = 0,
                                                 bool remove = false);
         void post_message(windows_emulator& win_emu, msg msg, bool try_coalesce = false);
+        void remove_window_messages(hwnd window);
 
         bool is_terminated() const;
 
         bool is_thread_ready(windows_emulator& win_emu);
 
-        void save(x86_64_emulator& emu)
+        void save(x86_64_cpu& emu)
         {
             this->last_registers = emu.save_registers();
         }
 
-        void restore(x86_64_emulator& emu) const
+        void restore(x86_64_cpu& emu) const
         {
-            emu.restore_registers(this->last_registers);
+            // Must run before restore_registers: on a vCPU handling this thread for the very first
+            // time, restore_registers can lazily create the FEX engine (including, for a WoW64
+            // thread, the 32-bit engine via create_thread32), which needs this vCPU's own GDT base
+            // already loaded (see fex_vcpu::create_thread32's doc comment) - refresh_execution_context
+            // is what actually calls load_gdt for this vCPU. Reversed, a fresh vCPU's first WoW64
+            // thread would create its 32-bit engine's segment table pointing at GDT base 0.
             this->refresh_execution_context(emu);
+            emu.restore_registers(this->last_registers);
         }
 
-        void setup_if_necessary(x86_64_emulator& emu, const process_context& context)
+        void setup_if_necessary(x86_64_cpu& emu, const process_context& context)
         {
             if (!this->setup_done)
             {
@@ -553,8 +566,8 @@ namespace sogen
       private:
         bool can_coalesce_message(const msg& msg) const;
 
-        void setup_registers(x86_64_emulator& emu, const process_context& context) const;
-        void refresh_execution_context(x86_64_emulator& emu) const;
+        void setup_registers(x86_64_cpu& emu, const process_context& context) const;
+        void refresh_execution_context(x86_64_cpu& emu) const;
 
         void release()
         {
