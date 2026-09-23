@@ -931,6 +931,35 @@ namespace sogen
                 const auto requested_ms = quad_part < 0 ? static_cast<double>(-quad_part) / 10000.0 : -1.0;
                 c.win_emu.log.error("[wait-target-trace] tid=%u type=%s name=%s timeout=finite requested_ms=%.1f\n", c.thread().id,
                                     u16_to_u8(type_name).c_str(), name_u8.c_str(), requested_ms);
+
+                if (requested_ms > 1000.0 && std::getenv("SOGEN_TRACE_WAIT_TARGET_CALLER_STACK") != nullptr)
+                {
+                    const auto rip = c.emu.read_instruction_pointer();
+                    const auto rsp = c.emu.read_stack_pointer();
+                    const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+                    c.win_emu.log.error("[WAIT_TARGET_CALLER] tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx requested_ms=%.1f\n", c.thread().id,
+                                        static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                                        rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL,
+                                        static_cast<unsigned long long>(rsp), requested_ms);
+                    for (uint64_t i = 0; i < 64; ++i)
+                    {
+                        uint64_t value{};
+                        if (!c.win_emu.memory.try_read_memory(rsp + (i * 8), &value, sizeof(value)))
+                        {
+                            break;
+                        }
+                        const auto* mod = c.win_emu.mod_manager.find_by_address(value);
+                        char mod_suffix[128] = {};
+                        if (mod)
+                        {
+                            snprintf(mod_suffix, sizeof(mod_suffix), "%s+0x%llx", mod->name.c_str(),
+                                     static_cast<unsigned long long>(value - mod->image_base));
+                        }
+                        fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s\n", static_cast<unsigned long long>(i * 8),
+                                static_cast<unsigned long long>(value), mod_suffix);
+                    }
+                    fflush(stderr);
+                }
             }
             else
             {
