@@ -951,6 +951,40 @@ namespace sogen
 
             if (c.proc.is_current_process_handle(process_handle))
             {
+                if (std::getenv("SOGEN_DEBUG_TERMINATE_CALLER_STACK") != nullptr)
+                {
+                    const auto rip = c.emu.read_instruction_pointer();
+                    const auto rsp = c.emu.read_stack_pointer();
+                    const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+                    fprintf(stderr, "[TERMINATE_CALLER] self-terminate tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx exit_status=0x%x\n",
+                            c.thread().id, static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                            rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL,
+                            static_cast<unsigned long long>(rsp), static_cast<unsigned int>(exit_status));
+                    for (const auto& mod : c.win_emu.mod_manager.modules() | std::views::values)
+                    {
+                        fprintf(stderr, "  [MODULE] %s base=0x%llx size=0x%llx\n", mod.name.c_str(),
+                                static_cast<unsigned long long>(mod.image_base), static_cast<unsigned long long>(mod.size_of_image));
+                    }
+                    for (uint64_t i = 0; i < 64; ++i)
+                    {
+                        uint64_t value{};
+                        if (!c.win_emu.memory.try_read_memory(rsp + (i * 8), &value, sizeof(value)))
+                        {
+                            break;
+                        }
+                        const auto* mod = c.win_emu.mod_manager.find_by_address(value);
+                        char mod_suffix[128] = {};
+                        if (mod)
+                        {
+                            snprintf(mod_suffix, sizeof(mod_suffix), "%s+0x%llx", mod->name.c_str(),
+                                     static_cast<unsigned long long>(value - mod->image_base));
+                        }
+                        fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s\n", static_cast<unsigned long long>(i * 8),
+                                static_cast<unsigned long long>(value), mod_suffix);
+                    }
+                    fflush(stderr);
+                }
+
                 c.proc.exit_status = exit_status;
                 c.win_emu.stop();
                 return STATUS_SUCCESS;
@@ -1287,11 +1321,21 @@ namespace sogen
                                   inherited_pipes.size(), inherited_sections.size(), inherited_events.size());
                 for (const auto& p : inherited_pipes)
                 {
-                    c.win_emu.log.log("NtCreateUserProcess: child %u inherited pipe: %s\n", record_id, u16_to_u8(p.name).c_str());
+                    c.win_emu.log.log("NtCreateUserProcess: child %u inherited pipe: 0x%" PRIx64 " %s\n", record_id,
+                                      static_cast<uint64_t>(p.target_handle.bits), u16_to_u8(p.name).c_str());
                 }
                 for (const auto& e : inherited_events)
                 {
-                    c.win_emu.log.log("NtCreateUserProcess: child %u inherited event: %s\n", record_id, u16_to_u8(e.name).c_str());
+                    c.win_emu.log.log("NtCreateUserProcess: child %u inherited event: 0x%" PRIx64 " %s\n", record_id,
+                                      static_cast<uint64_t>(e.target_handle.bits), u16_to_u8(e.name).c_str());
+                }
+                if (std::getenv("SOGEN_DEBUG_RAW_HANDLE_LIST") != nullptr)
+                {
+                    for (const auto& src_handle : inherited_handles)
+                    {
+                        c.win_emu.log.log("NtCreateUserProcess: child %u raw handle list entry: 0x%" PRIx64 " type=%u\n", record_id,
+                                          static_cast<uint64_t>(src_handle.bits), static_cast<unsigned>(src_handle.value.type));
+                    }
                 }
             }
 
