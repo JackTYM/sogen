@@ -36,6 +36,12 @@ namespace sogen
             entry->signaled = true;
             record_object_signal(make_handle(handle), c.thread().id, "NtSetEvent");
 
+            if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+            {
+                fprintf(stderr, "[pipe-io-trace] NtSetEvent pid=%d guest_pid=%u handle=0x%llx tid=%u\n", ::getpid(), c.proc.process_id,
+                        static_cast<unsigned long long>(handle), c.thread().id);
+            }
+
             // The cooperative scheduler only re-evaluates a parked thread's readiness at a context
             // switch, so without this, a waiter isn't picked up until whatever the signaling thread
             // happens to do next (its own next blocking syscall, or the idle poll) - real, measured

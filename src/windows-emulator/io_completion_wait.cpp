@@ -251,10 +251,10 @@ namespace sogen
                     if (trace)
                     {
                         fprintf(stderr,
-                                "[pipe-io-trace] materialize_signaled_wait_packets io_completion=0x%llx packet=0x%llx associated=%d "
-                                "queued=%d target=0x%llx target_signaled=%d\n",
-                                static_cast<unsigned long long>(io_completion_handle.bits), static_cast<unsigned long long>(packet_id),
-                                wait_packet.associated, wait_packet.queued_completion,
+                                "[pipe-io-trace] materialize_signaled_wait_packets pid=%d guest_pid=%u io_completion=0x%llx "
+                                "packet=0x%llx associated=%d queued=%d target=0x%llx target_signaled=%d\n",
+                                ::getpid(), process.process_id, static_cast<unsigned long long>(io_completion_handle.bits),
+                                static_cast<unsigned long long>(packet_id), wait_packet.associated, wait_packet.queued_completion,
                                 static_cast<unsigned long long>(wait_packet.target_object_handle.bits),
                                 is_wait_completion_target_signaled(process, wait_packet.target_object_handle));
                     }
