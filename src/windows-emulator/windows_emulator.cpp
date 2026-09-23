@@ -1491,6 +1491,44 @@ namespace sogen
             }
         }
 
+        static const bool trace_gpu_device_init = std::getenv("SOGEN_TRACE_GPU_DEVICE_INIT") != nullptr;
+        if (trace_gpu_device_init)
+        {
+            struct gpu_device_init_site
+            {
+                const char* module_name;
+                uint64_t rva;
+                uint64_t resolved_addr;
+                const char* name;
+            };
+
+            static gpu_device_init_site sites[] = {
+                {"libGLESv2.dll", 0x382260ULL, 0, "Renderer9::initialize"},    {"libGLESv2.dll", 0x2fb830ULL, 0, "Renderer11::initialize"},
+                {"libGLESv2.dll", 0x336050ULL, 0, "DisplayD3D::initialize"},   {"d3d11.dll", 0x4a660ULL, 0, "D3D11CreateDevice"},
+                {"d3d11.dll", 0x4a7e0ULL, 0, "D3D11CreateDeviceAndSwapChain"},
+            };
+
+            for (auto& site : sites)
+            {
+                if (site.resolved_addr == 0)
+                {
+                    const auto* mod = this->mod_manager.find_by_name(site.module_name);
+                    if (mod)
+                    {
+                        site.resolved_addr = mod->image_base + site.rva;
+                        fprintf(stderr, "[GPU_DEVICE_INIT] pid=%d guest_pid=%u resolved site=%s at 0x%llx (module %s loaded)\n", ::getpid(),
+                                this->process.process_id, site.name, static_cast<unsigned long long>(site.resolved_addr), site.module_name);
+                    }
+                }
+
+                if (site.resolved_addr != 0 && address == site.resolved_addr)
+                {
+                    fprintf(stderr, "[GPU_DEVICE_INIT] pid=%d guest_pid=%u tid=%u site=%s rip=0x%llx\n", ::getpid(),
+                            this->process.process_id, thread.id, site.name, static_cast<unsigned long long>(address));
+                }
+            }
+        }
+
         this->callbacks.on_instruction(address);
     }
 

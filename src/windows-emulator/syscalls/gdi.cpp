@@ -4189,6 +4189,12 @@ namespace sogen
                 dxgk_warn(c, "NtGdiDdDDIQueryAdapterInfo: Querying unknown adapter handle 0x%X", query.hAdapter);
             }
 
+            if (std::getenv("SOGEN_TRACE_DXGK_QUERY_TYPES"))
+            {
+                fprintf(stderr, "[dxgk-query-type-trace] pid=%u tid=%u Type=%d PrivateDriverDataSize=%u\n", c.proc.process_id,
+                        c.thread().id, static_cast<int>(query.Type), query.PrivateDriverDataSize);
+            }
+
             switch (query.Type)
             {
             case KMTQAITYPE::KMTQAITYPE_UMDRIVERNAME: {
