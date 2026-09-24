@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <csignal>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
 
@@ -243,12 +244,40 @@ namespace sogen
 #endif
 
 #if defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
+        std::vector<std::byte> frame_message(const std::vector<std::byte>& payload)
+        {
+            const uint64_t length = payload.size();
+            std::vector<std::byte> framed(sizeof(length) + payload.size());
+            std::memcpy(framed.data(), &length, sizeof(length));
+            if (!payload.empty())
+            {
+                std::memcpy(framed.data() + sizeof(length), payload.data(), payload.size());
+            }
+
+            return framed;
+        }
+
+        // windows_emulator::pump_pipe_ipc relays every message it receives from one peer straight
+        // to every other peer, inline, on the same thread that's servicing the emulator's own
+        // scheduling loop (see its own doc comment). A peer that hasn't drained its socket in a
+        // while - because it's busy running guest code, or itself blocked writing back to us - can
+        // leave that socket's kernel buffer full; a plain blocking write() into it then freezes
+        // this whole host process (and with it, its vCPU) until the peer gets around to reading,
+        // which, if both sides end up blocked on each other this way, is never. Keep the fd
+        // non-blocking and queue whatever a write can't take right now, retried from here and from
+        // try_receive - both are already polled continuously by the scheduler - instead of ever
+        // blocking on the socket directly.
         class fd_pipe_ipc_channel final : public pipe_ipc_channel
         {
           public:
             explicit fd_pipe_ipc_channel(const int fd)
                 : fd_(fd)
             {
+                const auto flags = ::fcntl(this->fd_, F_GETFL, 0);
+                if (flags >= 0)
+                {
+                    ::fcntl(this->fd_, F_SETFL, flags | O_NONBLOCK);
+                }
             }
 
             fd_pipe_ipc_channel(const fd_pipe_ipc_channel&) = delete;
@@ -269,18 +298,44 @@ namespace sogen
                 buffer.write(message.pipe_name);
                 buffer.write(message.data);
                 buffer.write_optional(message.client_process_id);
-                send_framed(this->fd_, buffer.get_buffer());
+
+                const auto framed = frame_message(buffer.get_buffer());
+                this->pending_send_.insert(this->pending_send_.end(), framed.begin(), framed.end());
+                this->flush_pending_send();
             }
 
             std::optional<pipe_ipc_message> try_receive() override
             {
-                auto raw = recv_framed(this->fd_, 0);
-                if (!raw)
+                this->flush_pending_send();
+                this->fill_recv_buffer();
+
+                constexpr size_t header_size = sizeof(uint64_t);
+                if (this->recv_buffer_.size() < header_size)
                 {
                     return std::nullopt;
                 }
 
-                utils::buffer_deserializer deserializer{*raw};
+                uint64_t length = 0;
+                std::memcpy(&length, this->recv_buffer_.data(), header_size);
+
+                constexpr uint64_t max_reasonable_length = 64ull << 20;
+                if (length > max_reasonable_length)
+                {
+                    this->recv_buffer_.clear();
+                    return std::nullopt;
+                }
+
+                const auto frame_size = header_size + length;
+                if (this->recv_buffer_.size() < frame_size)
+                {
+                    return std::nullopt;
+                }
+
+                const std::vector<std::byte> payload(this->recv_buffer_.begin() + static_cast<ptrdiff_t>(header_size),
+                                                     this->recv_buffer_.begin() + static_cast<ptrdiff_t>(frame_size));
+                this->recv_buffer_.erase(this->recv_buffer_.begin(), this->recv_buffer_.begin() + static_cast<ptrdiff_t>(frame_size));
+
+                utils::buffer_deserializer deserializer{payload};
 
                 pipe_ipc_message message{};
                 uint8_t type{};
@@ -295,6 +350,59 @@ namespace sogen
 
           private:
             int fd_{-1};
+            std::vector<std::byte> pending_send_{};
+            std::vector<std::byte> recv_buffer_{};
+
+            void flush_pending_send()
+            {
+                while (!this->pending_send_.empty())
+                {
+                    const auto n = ::write(this->fd_, this->pending_send_.data(), this->pending_send_.size());
+                    if (n > 0)
+                    {
+                        this->pending_send_.erase(this->pending_send_.begin(), this->pending_send_.begin() + n);
+                        continue;
+                    }
+
+                    if (n < 0 && errno == EINTR)
+                    {
+                        continue;
+                    }
+
+                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    {
+                        return;
+                    }
+
+                    this->pending_send_.clear();
+                    return;
+                }
+            }
+
+            void fill_recv_buffer()
+            {
+                std::vector<std::byte> chunk(65536);
+                while (true)
+                {
+                    const auto n = ::read(this->fd_, chunk.data(), chunk.size());
+                    if (n > 0)
+                    {
+                        this->recv_buffer_.insert(this->recv_buffer_.end(), chunk.data(), chunk.data() + n);
+                        if (static_cast<size_t>(n) == chunk.size())
+                        {
+                            continue;
+                        }
+                        return;
+                    }
+
+                    if (n < 0 && errno == EINTR)
+                    {
+                        continue;
+                    }
+
+                    return;
+                }
+            }
         };
 #endif
 
