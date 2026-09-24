@@ -40,6 +40,21 @@ namespace sogen
             uint64_t rva;
         };
 
+        // ANGLE/D3D11 renderer-init entry points (same RVAs windows_emulator.cpp's own
+        // SOGEN_TRACE_GPU_DEVICE_INIT site table uses). Unlike the *_trace_va tables below, these are
+        // watched via a genuine narrow Unicorn execution hook (emulator::hook_memory_execution's
+        // single-address overload) installed once the owning module loads, instead of a per-instruction
+        // address compare - see project_solidworks_bringup.md #453.
+        constexpr std::array<traced_symbol, 3> GPU_DEVICE_INIT_LIBGLESV2_TARGETS{{
+            {"Renderer9::initialize", 0x382260},
+            {"Renderer11::initialize", 0x2fb830},
+            {"DisplayD3D::initialize", 0x336050},
+        }};
+        constexpr std::array<traced_symbol, 2> GPU_DEVICE_INIT_D3D11_TARGETS{{
+            {"D3D11CreateDevice", 0x4a660},
+            {"D3D11CreateDeviceAndSwapChain", 0x4a7e0},
+        }};
+
         // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
         // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270, #272, #277).
         constexpr std::array<traced_symbol, 16> NODE_CONNECT_TARGETS{{
@@ -3011,6 +3026,47 @@ namespace sogen
                                      "0x%llx (return point 0x%llx)\n",
                                      static_cast<unsigned long long>(g_platform_channel_delegate_call_trace_va),
                                      static_cast<unsigned long long>(g_platform_channel_delegate_return_trace_va));
+            }
+
+            if ((mod.name == "libGLESv2.dll" || mod.name == "d3d11.dll") && std::getenv("SOGEN_TRACE_GPU_DEVICE_INIT_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const std::span<const traced_symbol> targets = mod.name == "libGLESv2.dll"
+                                                                   ? std::span<const traced_symbol>(GPU_DEVICE_INIT_LIBGLESV2_TARGETS)
+                                                                   : std::span<const traced_symbol>(GPU_DEVICE_INIT_D3D11_TARGETS);
+
+                for (const auto& target : targets)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[gpu-device-init-hook-trace] watching %s at 0x%llx (%s loaded)\n", name,
+                                       static_cast<unsigned long long>(address), mod.name.c_str());
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto rsp = emu.read_stack_pointer();
+
+                        uint64_t return_address{};
+                        emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+                        const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+                        const auto rdx = emu.reg<uint64_t>(x86_register::rdx);
+                        const auto r8 = emu.reg<uint64_t>(x86_register::r8);
+                        const auto r9 = emu.reg<uint64_t>(x86_register::r9);
+
+                        const auto* caller_mod_name = win_emu->mod_manager.find_name(return_address);
+                        const auto* caller_mod = win_emu->mod_manager.find_by_address(return_address);
+                        const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+                        win_emu->log.error("[gpu-device-init-hook-trace] hit %s at 0x%llx, rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx "
+                                           "return=0x%llx (%s+0x%llx)\n",
+                                           name, static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
+                                           static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
+                                           static_cast<unsigned long long>(r9), static_cast<unsigned long long>(return_address),
+                                           caller_mod_name, static_cast<unsigned long long>(caller_offset));
+                    });
+                }
             }
         }
 
