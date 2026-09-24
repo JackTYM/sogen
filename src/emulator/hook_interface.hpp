@@ -77,6 +77,20 @@ namespace sogen
             }
         }
 
+        enum class memory_watch_hook_mode
+        {
+            automatic,
+            page_fault,
+        };
+
+        virtual void set_memory_watch_hook_mode(const memory_watch_hook_mode mode)
+        {
+            if (mode == memory_watch_hook_mode::page_fault)
+            {
+                throw std::runtime_error("The selected emulator backend does not support page-fault memory watch hooks");
+            }
+        }
+
         virtual bool supports_global_memory_execution_hooks() const
         {
             return true;

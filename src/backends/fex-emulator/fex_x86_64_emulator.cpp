@@ -57,6 +57,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -526,6 +527,82 @@ namespace sogen::fex
 
             return std::nullopt;
         }
+
+#ifdef __APPLE__
+        // "Load register (immediate pre/post-indexed)": decode_arm64_load's unscaled-immediate encoding with
+        // bits[11:10] != 00, which additionally writes Rn + imm9 back to Rn.
+        struct decoded_arm64_indexed_load
+        {
+            decoded_arm64_load load{};
+            uint32_t rn = 0;
+            int64_t offset = 0;
+            bool pre_index = false;
+        };
+
+        std::optional<decoded_arm64_indexed_load> decode_arm64_indexed_load(const uint32_t insn)
+        {
+            if ((insn & 0x3B200400U) != 0x38000400U)
+            {
+                return std::nullopt;
+            }
+
+            const auto load = decode_arm64_load(insn & ~0xC00U);
+            if (!load)
+            {
+                return std::nullopt;
+            }
+
+            return decoded_arm64_indexed_load{
+                .load = *load,
+                .rn = (insn >> 5) & 0x1FU,
+                .offset = static_cast<int64_t>(static_cast<int32_t>(insn << 11) >> 23),
+                .pre_index = (insn & 0x800U) != 0,
+            };
+        }
+
+        constexpr size_t max_arm64_data_access_size = 32;
+
+        // Total bytes a faulting load/store transfers, from the size fields of the AArch64 ISA C4.1.3
+        // load/store classes FEX emits. Darwin never reports ESR.ISV/SAS for EL0 data aborts, so the
+        // instruction is the only source. Returns 0 for anything not decoded (e.g. SIMD structure loads).
+        size_t decode_arm64_data_access_size(const uint32_t insn)
+        {
+            const uint32_t size_field = insn >> 30;
+            const bool is_vector = ((insn >> 26) & 1) != 0;
+
+            if ((insn & 0x3A000000U) == 0x38000000U)
+            {
+                const bool is_q_register = is_vector && size_field == 0 && ((insn >> 23) & 1) != 0;
+                return is_q_register ? 16 : size_t{1} << size_field;
+            }
+
+            if ((insn & 0x3A000000U) == 0x28000000U)
+            {
+                if (is_vector)
+                {
+                    return 2 * (size_t{4} << size_field);
+                }
+                return 2 * (size_field == 2 ? size_t{8} : size_t{4});
+            }
+
+            if ((insn & 0x3F000000U) == 0x08000000U)
+            {
+                const bool is_pair = ((insn >> 23) & 1) == 0 && ((insn >> 21) & 1) != 0;
+                if (is_pair)
+                {
+                    return 2 * (((insn >> 30) & 1) != 0 ? size_t{8} : size_t{4});
+                }
+                return size_t{1} << size_field;
+            }
+
+            if ((insn & 0x3F200C00U) == 0x19000000U)
+            {
+                return size_t{1} << size_field;
+            }
+
+            return 0;
+        }
+#endif
 #endif
 
         bool is_page_aligned(const uint64_t value)
@@ -1144,6 +1221,14 @@ namespace sogen::fex
             memory_execution_hook_callback callback{};
         };
 
+        struct memory_watch
+        {
+            uint64_t address{};
+            uint64_t end{};
+            memory_operation operation{};
+            memory_access_hook_callback callback{};
+        };
+
       public:
         fex_x86_64_emulator()
         {
@@ -1162,6 +1247,9 @@ namespace sogen::fex
         {
             utils::reset_object_with_delayed_destruction(this->memory_read_hooks_);
             utils::reset_object_with_delayed_destruction(this->memory_write_hooks_);
+#ifdef __APPLE__
+            utils::reset_object_with_delayed_destruction(this->memory_watches_);
+#endif
             utils::reset_object_with_delayed_destruction(this->memory_execution_hooks_);
             utils::reset_object_with_delayed_destruction(this->memory_violation_hooks_);
             utils::reset_object_with_delayed_destruction(this->interrupt_hooks_);
@@ -1246,6 +1334,10 @@ namespace sogen::fex
             // return, and it must be writable again before the JIT's per-block-entry store runs.
             ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
 
+#ifdef __APPLE__
+            this->reapply_lifted_memory_watch_restrictions();
+#endif
+
 #if defined(__APPLE__) || defined(__ANDROID__)
             if (this->deferred_patched_breakpoint_)
             {
@@ -1278,6 +1370,10 @@ namespace sogen::fex
             for (;;)
             {
                 this->context_->ExecuteThread(this->thread_);
+
+#ifdef __APPLE__
+                this->reapply_lifted_memory_watch_restrictions();
+#endif
 
                 const bool hook_dispatched = this->dispatch_pending_hook_if_any();
                 const bool interrupt_page_unwind = this->interrupt_page_unwind_.exchange(false);
@@ -1599,10 +1695,27 @@ namespace sogen::fex
             {
                 return false;
             }
+
+#ifdef __APPLE__
+            const bool lift_watch_restrictions = this->range_has_memory_watch_restriction(address, size, memory_operation::read);
+            if (lift_watch_restrictions)
+            {
+                this->set_memory_watch_restrictions_lifted(address, size, true);
+            }
+#endif
+
             // memmove, not memcpy: callers (e.g. the PE loader's section copy) can hand this a source
             // buffer that overlaps the guest destination range - overlapping memcpy is undefined
             // behaviour. This is a generic guest memory-copy primitive with no non-overlap contract.
             std::memmove(data, reinterpret_cast<const void*>(address), size);
+
+#ifdef __APPLE__
+            if (lift_watch_restrictions)
+            {
+                this->set_memory_watch_restrictions_lifted(address, size, false);
+            }
+#endif
+
             this->overlay_patched_breakpoints_on_read(address, data, size);
             return true;
         }
@@ -1630,7 +1743,7 @@ namespace sogen::fex
             // this backend's guest VA == host VA is backed by real host mprotect state, so the write
             // needs a temporary permission bump. Every page must be checked, not just the first: a write
             // straddling into a read-only region would otherwise fault mid-memmove.
-            const bool needs_temporary_write = !this->range_is_writable(address, size);
+            const bool needs_temporary_write = this->needs_temporary_write_access(address, size);
 
             if (needs_temporary_write)
             {
@@ -1656,12 +1769,21 @@ namespace sogen::fex
         // As with KVM, the guest runs natively, so fine-grained memory/execution/basic-block hooks
         // cannot fire; they are accepted and tracked (so delete_hook works) purely for API
         // compatibility. Only `syscall` instruction hooks are actually wired, plus single-address
-        // execution hooks in int3 mode, which plant real 0xCC breakpoints.
+        // execution hooks in int3 mode, which plant real 0xCC breakpoints, and on Apple hosts memory
+        // read/write hooks registered in page_fault watch mode, which trap through page protection.
 
 #if defined(__APPLE__) || defined(__ANDROID__)
         void set_memory_execution_hook_mode(const memory_execution_hook_mode mode) override
         {
             this->memory_execution_hook_mode_ = mode;
+        }
+#endif
+
+#ifdef __APPLE__
+        // Applies to hooks registered afterwards; hooks registered before keep their mode.
+        void set_memory_watch_hook_mode(const memory_watch_hook_mode mode) override
+        {
+            this->memory_watch_hook_mode_ = mode;
         }
 #endif
 
@@ -1701,16 +1823,32 @@ namespace sogen::fex
             return hook;
         }
 
-        emulator_hook* hook_memory_read(uint64_t /*address*/, uint64_t /*size*/, memory_access_hook_callback callback) override
+        emulator_hook* hook_memory_read([[maybe_unused]] const uint64_t address, [[maybe_unused]] const uint64_t size,
+                                        memory_access_hook_callback callback) override
         {
             auto* hook = this->make_hook();
+#ifdef __APPLE__
+            if (this->memory_watch_hook_mode_ == memory_watch_hook_mode::page_fault)
+            {
+                this->install_memory_watch(hook, address, size, memory_operation::read, std::move(callback));
+                return hook;
+            }
+#endif
             this->memory_read_hooks_[hook] = std::move(callback);
             return hook;
         }
 
-        emulator_hook* hook_memory_write(uint64_t /*address*/, uint64_t /*size*/, memory_access_hook_callback callback) override
+        emulator_hook* hook_memory_write([[maybe_unused]] const uint64_t address, [[maybe_unused]] const uint64_t size,
+                                         memory_access_hook_callback callback) override
         {
             auto* hook = this->make_hook();
+#ifdef __APPLE__
+            if (this->memory_watch_hook_mode_ == memory_watch_hook_mode::page_fault)
+            {
+                this->install_memory_watch(hook, address, size, memory_operation::write, std::move(callback));
+                return hook;
+            }
+#endif
             this->memory_write_hooks_[hook] = std::move(callback);
             return hook;
         }
@@ -1764,6 +1902,9 @@ namespace sogen::fex
             this->interrupt_hooks_.erase(hook);
             this->memory_read_hooks_.erase(hook);
             this->memory_write_hooks_.erase(hook);
+#ifdef __APPLE__
+            this->uninstall_memory_watch(hook);
+#endif
 
             const auto execution_it = this->memory_execution_hooks_.find(hook);
             if (execution_it != this->memory_execution_hooks_.end())
@@ -2323,6 +2464,17 @@ namespace sogen::fex
             return true;
         }
 
+        bool needs_temporary_write_access(const uint64_t address, const size_t size) const
+        {
+#ifdef __APPLE__
+            if (this->range_has_memory_watch_restriction(address, size, memory_operation::write))
+            {
+                return true;
+            }
+#endif
+            return !this->range_is_writable(address, size);
+        }
+
         // For loader-privileged writes: sogen itself writing guest memory it declared read-only, such as
         // a PE section's initial file content before its final permission is locked in. Needed because
         // this backend enforces the declared permission through real host protection, unlike Unicorn's
@@ -2530,26 +2682,28 @@ namespace sogen::fex
         // guard/reserved slot sharing a host page with mapped memory is folded in rather than made to
         // fault, a deliberate relaxation until a Mach exception handler can resolve faults on a
         // PROT_NONE page without breaking a legitimate access from a stricter neighbor.
-        void sync_host_page_apple(uint64_t host_page_addr)
+        std::optional<memory_permission> declared_host_page_permission_apple(const uint64_t host_page_addr) const
         {
-            memory_permission effective = memory_permission::none;
-            bool any_slot_present = false;
-
+            std::optional<memory_permission> declared{};
             for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
             {
                 const auto it = this->page_shadow_apple_.find(page);
-                if (it == this->page_shadow_apple_.end())
+                if (it != this->page_shadow_apple_.end())
                 {
-                    continue;
+                    declared = declared.value_or(memory_permission::none) | it->second;
                 }
-                any_slot_present = true;
-                effective = effective | it->second;
             }
+            return declared;
+        }
+
+        void sync_host_page_apple(uint64_t host_page_addr)
+        {
+            const auto declared = this->declared_host_page_permission_apple(host_page_addr);
 
             void* host_ptr = reinterpret_cast<void*>(host_page_addr);
             const bool currently_mapped = this->host_range_is_claimed(host_page_addr, host_page_size_apple);
 
-            if (!any_slot_present)
+            if (!declared)
             {
                 if (currently_mapped)
                 {
@@ -2568,6 +2722,7 @@ namespace sogen::fex
                 this->claim_host_range(host_page_addr, host_page_size_apple);
             }
 
+            const auto effective = this->watch_restricted_host_page_permission_apple(host_page_addr, *declared);
             if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
             {
                 throw std::runtime_error("FEX backend failed to change memory protection");
@@ -2581,6 +2736,154 @@ namespace sogen::fex
             for (uint64_t host_page = start; host_page < end; host_page += host_page_size_apple)
             {
                 this->sync_host_page_apple(host_page);
+            }
+        }
+
+        // A watch restricts a whole 16KB host page, since the per-slot union above would let any unwatched
+        // neighbor slot re-grant the access. Only slots actually present in the shadow count, so a watch
+        // spanning unmapped address space never costs anything there. Called from signal context too:
+        // read-only container lookups only.
+        memory_permission memory_watch_restriction_apple(const uint64_t host_page_addr) const
+        {
+            memory_permission restriction = memory_permission::none;
+            if (this->memory_watches_.empty())
+            {
+                return restriction;
+            }
+
+            for (uint64_t page = host_page_addr; page < host_page_addr + host_page_size_apple; page += page_size)
+            {
+                if (!this->page_shadow_apple_.contains(page))
+                {
+                    continue;
+                }
+                for (const auto& [_, watch] : this->memory_watches_)
+                {
+                    if (watch.address < page + page_size && page < watch.end)
+                    {
+                        restriction |= watch.operation;
+                    }
+                }
+            }
+
+            if (this->pending_execution_step_)
+            {
+                for (const auto& grant : this->pending_execution_step_->watch_grants)
+                {
+                    if (grant.host_page == host_page_addr)
+                    {
+                        restriction &= ~grant.permission;
+                    }
+                }
+            }
+
+            return restriction;
+        }
+
+        // There is no write-only host protection (PROT_WRITE pages stay readable), so trapping reads
+        // needs PROT_NONE, which traps unwatched writes on the page as well.
+        memory_permission watch_restricted_host_page_permission_apple(const uint64_t host_page_addr, const memory_permission declared) const
+        {
+            const auto restriction = this->memory_watch_restriction_apple(host_page_addr);
+            if (is_readable(restriction))
+            {
+                return memory_permission::none;
+            }
+            if (is_writable(restriction))
+            {
+                return declared & ~memory_permission::write;
+            }
+            return declared;
+        }
+
+        bool range_has_memory_watch_restriction(const uint64_t address, const size_t size, const memory_operation operation) const
+        {
+            if (this->memory_watches_.empty() || size == 0)
+            {
+                return false;
+            }
+
+            const uint64_t end = host_page_align_up_apple(address + size);
+            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            {
+                const auto declared = this->declared_host_page_permission_apple(host_page);
+                if (declared &&
+                    (this->watch_restricted_host_page_permission_apple(host_page, *declared) & operation) != (*declared & operation))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // For sogen's own accesses to guest memory, which must never trip a watch.
+        void set_memory_watch_restrictions_lifted(const uint64_t address, const size_t size, const bool lifted) const
+        {
+            const uint64_t end = host_page_align_up_apple(address + size);
+            for (uint64_t host_page = host_page_align_down_apple(address); host_page < end; host_page += host_page_size_apple)
+            {
+                const auto declared = this->declared_host_page_permission_apple(host_page);
+                if (!declared)
+                {
+                    continue;
+                }
+                const auto permission = lifted ? *declared : this->watch_restricted_host_page_permission_apple(host_page, *declared);
+                if (::mprotect(reinterpret_cast<void*>(host_page), host_page_size_apple, to_prot_apple(permission)) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to change memory protection");
+                }
+            }
+        }
+
+        void sync_watched_host_pages_apple(const uint64_t address, const uint64_t end)
+        {
+            std::optional<uint64_t> last_host_page{};
+            for (auto it = this->page_shadow_apple_.lower_bound(address & ~(page_size - 1));
+                 it != this->page_shadow_apple_.end() && it->first < end; ++it)
+            {
+                const auto host_page = host_page_align_down_apple(it->first);
+                if (host_page != last_host_page)
+                {
+                    this->sync_host_page_apple(host_page);
+                    last_host_page = host_page;
+                }
+            }
+        }
+
+        void install_memory_watch(emulator_hook* hook, const uint64_t address, const uint64_t size, const memory_operation operation,
+                                  memory_access_hook_callback callback)
+        {
+            const uint64_t end =
+                size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
+            this->memory_watches_[hook] =
+                memory_watch{.address = address, .end = end, .operation = operation, .callback = std::move(callback)};
+            this->sync_watched_host_pages_apple(address, end);
+        }
+
+        void uninstall_memory_watch(emulator_hook* hook)
+        {
+            const auto it = this->memory_watches_.find(hook);
+            if (it == this->memory_watches_.end())
+            {
+                return;
+            }
+
+            const auto address = it->second.address;
+            const auto end = it->second.end;
+            this->memory_watches_.erase(it);
+            this->sync_watched_host_pages_apple(address, end);
+        }
+
+        void reapply_lifted_memory_watch_restrictions()
+        {
+            if (!this->memory_watch_restrictions_lifted_.exchange(false))
+            {
+                return;
+            }
+
+            for (const auto& [_, watch] : this->memory_watches_)
+            {
+                this->sync_watched_host_pages_apple(watch.address, watch.end);
             }
         }
 #endif
@@ -2699,6 +3002,7 @@ namespace sogen::fex
         {
             none,
             memory_violation,
+            memory_watch,
             interrupt,
         };
 
@@ -2714,11 +3018,25 @@ namespace sogen::fex
 
         static constexpr uint64_t trap_flag_bit = 0x100;
 
+        struct watch_grant
+        {
+            uint64_t host_page{};
+            memory_permission permission{};
+        };
+
+        struct watch_access
+        {
+            uint64_t address{};
+            size_t size{};
+            memory_operation operation{};
+        };
+
         struct pending_execution_step
         {
             bool had_trap_flag{};
             std::optional<uint64_t> patched_breakpoint{};
-            std::optional<uint64_t> granted_watch_page{};
+            std::vector<watch_grant> watch_grants{};
+            std::vector<watch_access> watch_accesses{};
             bool stop_after_step{};
         };
 
@@ -2759,6 +3077,11 @@ namespace sogen::fex
                 this->set_patched_execution_breakpoint_state(*state.patched_breakpoint, true);
             }
 
+#ifdef __APPLE__
+            this->revoke_watch_grants(state);
+            this->dispatch_memory_watch_callbacks(state.watch_accesses);
+#endif
+
             if (state.stop_after_step)
             {
                 this->stop_requested_ = true;
@@ -2780,7 +3103,88 @@ namespace sogen::fex
             {
                 this->deferred_patched_breakpoint_ = state.patched_breakpoint;
             }
+
+#ifdef __APPLE__
+            this->revoke_watch_grants(state);
+#endif
         }
+
+#ifdef __APPLE__
+        void revoke_watch_grants(const pending_execution_step& state)
+        {
+            for (const auto& grant : state.watch_grants)
+            {
+                this->sync_host_page_apple(grant.host_page);
+            }
+        }
+
+        // Unlike Unicorn, which reports mid-instruction, callbacks run once the accessing instruction has
+        // retired, like an x86 data breakpoint trap, so the instruction pointer is already past it.
+        void dispatch_memory_watch_callbacks(const std::vector<watch_access>& accesses)
+        {
+            for (const auto& access : accesses)
+            {
+                const uint64_t access_end = access.address + access.size;
+
+                std::vector<memory_access_hook_callback> callbacks{};
+                for (const auto& [_, watch] : this->memory_watches_)
+                {
+                    if (watch.operation == access.operation && access.address < watch.end && watch.address < access_end)
+                    {
+                        callbacks.push_back(watch.callback);
+                    }
+                }
+
+                if (callbacks.empty())
+                {
+                    continue;
+                }
+
+                std::array<std::byte, max_arm64_data_access_size> data{};
+                this->try_read_memory(access.address, data.data(), access.size);
+
+                for (const auto& callback : callbacks)
+                {
+                    callback(*this, access.address, data.data(), access.size);
+                }
+            }
+        }
+
+        // A write grant includes read because no write-only host protection exists. A further fault during
+        // the same step (another page, or the other operation) only widens the grants, so the step always
+        // makes progress.
+        void handle_memory_watch_fault(const pending_fault_dispatch& dispatch)
+        {
+            if (this->pending_execution_step_)
+            {
+                // The fault used up the one instruction EmitTFCheck lets run after TF is set; without
+                // re-setting TF the #DB would fire before the retried instruction executes.
+                this->write_rflags(this->read_rflags() | trap_flag_bit);
+            }
+            else
+            {
+                this->arm_execution_single_step(false);
+            }
+
+            auto& step = *this->pending_execution_step_;
+            const auto host_page = host_page_align_down_apple(dispatch.address);
+            const auto granted = dispatch.operation == memory_operation::write ? memory_permission::read_write : memory_permission::read;
+
+            const auto grant = std::ranges::find(step.watch_grants, host_page, &watch_grant::host_page);
+            if (grant == step.watch_grants.end())
+            {
+                step.watch_grants.push_back(watch_grant{.host_page = host_page, .permission = granted});
+            }
+            else
+            {
+                grant->permission |= granted;
+            }
+
+            step.watch_accesses.push_back(
+                watch_access{.address = dispatch.address, .size = dispatch.size, .operation = dispatch.operation});
+            this->sync_host_page_apple(host_page);
+        }
+#endif
 
         bool handle_patched_execution_breakpoint(const uint64_t address)
         {
@@ -2858,6 +3262,11 @@ namespace sogen::fex
                     hook(*this, dispatch.address, dispatch.size, dispatch.operation, dispatch.type);
                 }
                 return true;
+#ifdef __APPLE__
+            case pending_fault_kind::memory_watch:
+                this->handle_memory_watch_fault(dispatch);
+                return true;
+#endif
             case pending_fault_kind::interrupt:
                 if (dispatch.vector == static_cast<int>(FEXCore::X86State::X86_TRAPNO_BP) &&
                     this->handle_patched_execution_breakpoint(this->thread_->CurrentFrame->State.rip))
@@ -2910,6 +3319,16 @@ namespace sogen::fex
             return context->uc_mcontext.pc;
 #endif
         }
+
+#ifdef __APPLE__
+        // ESR_EL1.WnR (ISS bit 6), which Darwin reports reliably for EL0 data aborts, unlike the
+        // decode_arm64_store heuristic that misclassifies plain STR stores as reads.
+        static memory_operation get_data_fault_operation(ucontext_t* context)
+        {
+            constexpr uint64_t esr_write_not_read = 1ULL << 6;
+            return (context->uc_mcontext->__es.__esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
+        }
+#endif
 
         static void set_host_pc(ucontext_t* context, uint64_t pc)
         {
@@ -3103,6 +3522,105 @@ namespace sogen::fex
             return false;
         }
 
+#ifdef __APPLE__
+        // FEXCore's frontend decodes guest code straight from guest memory, so a watched host page that also
+        // holds code faults inside the translator, which is not a guest access. The load is performed on its
+        // behalf rather than lifting the restriction: under TF the dispatcher recompiles, and so re-decodes, on
+        // every entry, yet the stepped instruction's own accesses to the page must still trap. Darwin reports a
+        // page-straddling access at the page boundary, so only a single byte is known to start there.
+        bool emulate_internal_watched_load(ucontext_t* uctx, const uint64_t host_page, const memory_permission declared,
+                                           const uint64_t fault_addr)
+        {
+            const uint64_t pc = get_host_pc(uctx);
+            const auto insn = *reinterpret_cast<const uint32_t*>(pc);
+
+            auto load = decode_arm64_load(insn);
+            const auto indexed = load ? std::nullopt : decode_arm64_indexed_load(insn);
+            if (indexed)
+            {
+                const uint64_t base = get_host_gpr(uctx, indexed->rn);
+                const uint64_t address = indexed->pre_index ? base + static_cast<uint64_t>(indexed->offset) : base;
+                if (indexed->rn == 31 || indexed->rn == indexed->load.rt || address != fault_addr)
+                {
+                    return false;
+                }
+                load = indexed->load;
+            }
+
+            if (!load || (fault_addr == host_page && load->size != 1) || fault_addr + load->size > host_page + host_page_size_apple)
+            {
+                return false;
+            }
+
+            auto* page = reinterpret_cast<void*>(host_page);
+            alignas(16) std::array<std::byte, 16> buffer{};
+            ::mprotect(page, host_page_size_apple, to_prot_apple(declared));
+            std::memcpy(buffer.data(), reinterpret_cast<const void*>(fault_addr), load->size);
+            ::mprotect(page, host_page_size_apple, to_prot_apple(this->watch_restricted_host_page_permission_apple(host_page, declared)));
+
+            this->complete_decoded_load(uctx, *load, buffer.data(), pc);
+            if (indexed)
+            {
+                set_host_gpr(uctx, indexed->rn, get_host_gpr(uctx, indexed->rn) + static_cast<uint64_t>(indexed->offset));
+            }
+            return true;
+        }
+
+        // Claims only faults caused by a watch restriction: an access the declared permission allows but
+        // the restricted host page does not. Anything else, including an access the declared permission
+        // also forbids, falls through to the ordinary violation handling unchanged.
+        bool handle_memory_watch_signal(ucontext_t* uctx, const uint64_t fault_addr)
+        {
+            const uint64_t pc = get_host_pc(uctx);
+            if (this->memory_watches_.empty() || fault_addr == pc)
+            {
+                return false;
+            }
+
+            const auto host_page = host_page_align_down_apple(fault_addr);
+            const auto declared = this->declared_host_page_permission_apple(host_page);
+            const auto operation = get_data_fault_operation(uctx);
+            if (!declared || (*declared & operation) != operation ||
+                (this->watch_restricted_host_page_permission_apple(host_page, *declared) & operation) == operation)
+            {
+                return false;
+            }
+
+            if (!this->context_->IsAddressInCodeBuffer(this->thread_, pc))
+            {
+                if (operation == memory_operation::read && this->emulate_internal_watched_load(uctx, host_page, *declared, fault_addr))
+                {
+                    return true;
+                }
+
+                // Lifted until start() re-applies it. Forcing that return right away is only possible
+                // without TF: under TF the recompile would fault here again, forever.
+                ::mprotect(reinterpret_cast<void*>(host_page), host_page_size_apple, to_prot_apple(*declared));
+                this->memory_watch_restrictions_lifted_ = true;
+                if (this->thread_->CurrentFrame->State.flags[FEXCore::X86State::RFLAG_TF_RAW_LOC] == 0)
+                {
+                    this->request_thread_stop();
+                }
+                return true;
+            }
+
+            if (const uint64_t recon_rip = this->context_->RestoreRIPFromHostPC(this->thread_, pc))
+            {
+                this->thread_->CurrentFrame->State.rip = recon_rip;
+            }
+
+            const auto access_size = decode_arm64_data_access_size(*reinterpret_cast<const uint32_t*>(pc));
+
+            pending_fault_dispatch dispatch{};
+            dispatch.kind = pending_fault_kind::memory_watch;
+            dispatch.address = fault_addr;
+            dispatch.size = access_size == 0 ? 1 : access_size;
+            dispatch.operation = operation;
+            this->defer_hook_dispatch(uctx, dispatch, /*state_already_spilled=*/false);
+            return true;
+        }
+#endif
+
         bool handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr)
         {
             const uint64_t pc = get_host_pc(uctx);
@@ -3291,6 +3809,12 @@ namespace sogen::fex
                 }
 
 #ifdef __APPLE__
+                // Before the BUS_ADRALN routing below: Darwin can report a PROT_NONE page's fault that way.
+                if (this->handle_memory_watch_signal(uctx, fault_addr))
+                {
+                    return true;
+                }
+
                 // A BUS_ADRALN whose address is inside the live CodeBuffer but whose PC is FEXCore's own
                 // host C++ code (ExitFunctionLink's self-modifying write) is not a real alignment fault
                 // at all - it decodes to an ordinary aligned 32-bit `str`. It is the JIT W^X race, which
@@ -3682,7 +4206,7 @@ namespace sogen::fex
 
         void write_breakpoint_byte(const uint64_t address, const std::byte value)
         {
-            const bool needs_temporary_write = !this->range_is_writable(address, 1);
+            const bool needs_temporary_write = this->needs_temporary_write_access(address, 1);
             if (needs_temporary_write)
             {
                 this->set_temporary_write_access(address, 1, true);
@@ -3920,6 +4444,11 @@ namespace sogen::fex
         // directly followed by .data (RW) share a host page. page_shadow_apple_ is the per-4KB source of
         // truth (absent = never requested, which must still fault).
         std::map<uint64_t, memory_permission> page_shadow_apple_;
+
+        memory_watch_hook_mode memory_watch_hook_mode_ = memory_watch_hook_mode::automatic;
+        std::unordered_map<emulator_hook*, memory_watch> memory_watches_;
+        // Set from signal context; see handle_memory_watch_signal.
+        std::atomic<bool> memory_watch_restrictions_lifted_{false};
 #endif
 
         hook_entry* syscall_hook_ = nullptr;

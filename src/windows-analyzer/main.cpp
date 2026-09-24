@@ -69,6 +69,7 @@ namespace sogen
             std::filesystem::path stdout_path{};
             std::string report_format{"jsonl"};
             std::string whp_execution_hook_mode{"auto"};
+            std::string fex_watch_hook_mode{"auto"};
             std::optional<backend_type> backend{};
             bool disable_instruction_precision{false};
             uint32_t vcpu_count{1};
@@ -518,6 +519,21 @@ namespace sogen
             throw std::runtime_error("Memory execution hook mode must be auto or int3");
         }
 
+        hook_interface::memory_watch_hook_mode parse_memory_watch_hook_mode(const std::string_view mode)
+        {
+            if (mode == "auto")
+            {
+                return hook_interface::memory_watch_hook_mode::automatic;
+            }
+
+            if (mode == "page_fault")
+            {
+                return hook_interface::memory_watch_hook_mode::page_fault;
+            }
+
+            throw std::runtime_error("Memory watch hook mode must be auto or page_fault");
+        }
+
         std::unique_ptr<x86_64_emulator> create_configured_backend(const analysis_options& options)
         {
             auto emu = options.backend ? create_x86_64_emulator(*options.backend, options.vcpu_count)
@@ -843,6 +859,10 @@ namespace sogen
                 }
             }
 
+            // Set only after the analyzer's own memory watches are registered, so they keep the automatic mode and
+            // only the debugger's watchpoints pay for page-fault trapping.
+            win_emu->emu().set_memory_watch_hook_mode(parse_memory_watch_hook_mode(options.fex_watch_hook_mode));
+
             return run_emulation(context, options);
         }
 
@@ -875,6 +895,12 @@ namespace sogen
                 ->check(CLI::IsMember({"auto", "64bits", "32bits"}))
                 ->needs(debug_option);
             app.add_option("--break-call", options.break_call, "In GDB mode, stop before the specified traced function/syscall call")
+                ->needs(debug_option);
+            app.add_option("--fex-watch-hook", options.fex_watch_hook_mode,
+                           "GDB watchpoint mode (auto/page_fault); page_fault makes the FEX backend honor watchpoints via page "
+                           "protection traps")
+                ->capture_default_str()
+                ->check(CLI::IsMember({"auto", "page_fault"}))
                 ->needs(debug_option);
 
             app.add_flag("-s,--silent", options.silent, "Silent mode");
