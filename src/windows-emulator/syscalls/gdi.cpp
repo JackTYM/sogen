@@ -2609,9 +2609,17 @@ namespace sogen
             return old;
         }
 
-        uint64_t handle_NtGdiSelectFont(const syscall_context&, const hdc dc, const uint64_t font)
+        uint64_t handle_NtGdiSelectFont(const syscall_context& c, const hdc dc, const uint64_t font)
         {
-            return dc != 0 ? font : 0;
+            if (dc == 0)
+            {
+                return 0;
+            }
+
+            auto& state = c.proc.gdi_dc_states[static_cast<uint32_t>(dc)];
+            const auto old = state.selected_font != 0 ? state.selected_font : static_cast<uint32_t>(font);
+            state.selected_font = static_cast<uint32_t>(font);
+            return old;
         }
 
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, const handle bitmap)
@@ -2961,12 +2969,43 @@ namespace sogen
                 }
             };
 
-            write_u32(0x00, k_default_font_height);
-            write_u32(0x04, k_default_font_ascent);
-            write_u32(0x08, k_default_font_descent);
+            auto height = k_default_font_height;
+            auto ascent = k_default_font_ascent;
+            auto descent = k_default_font_descent;
+            auto weight = k_default_font_weight;
+
+            const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (dc_it != c.proc.gdi_dc_states.end())
+            {
+                const auto font_it = c.proc.gdi_font_descriptors.find(dc_it->second.selected_font);
+                if (font_it != c.proc.gdi_font_descriptors.end() && font_it->second.logfont_bytes.size() == k_logfontw_size)
+                {
+                    const auto& bytes = font_it->second.logfont_bytes;
+
+                    int32_t lf_height{};
+                    std::memcpy(&lf_height, bytes.data(), sizeof(lf_height));
+                    if (lf_height != 0)
+                    {
+                        height = static_cast<uint32_t>(std::abs(lf_height));
+                        ascent = (height * 3) / 4;
+                        descent = height - ascent;
+                    }
+
+                    int32_t lf_weight{};
+                    std::memcpy(&lf_weight, bytes.data() + 16, sizeof(lf_weight));
+                    if (lf_weight != 0)
+                    {
+                        weight = static_cast<uint32_t>(lf_weight);
+                    }
+                }
+            }
+
+            write_u32(0x00, height);
+            write_u32(0x04, ascent);
+            write_u32(0x08, descent);
             write_u32(0x14, k_default_font_width);
             write_u32(0x18, k_default_font_width);
-            write_u32(0x1C, k_default_font_weight);
+            write_u32(0x1C, weight);
             write_u16(0x2C, 0x20);
             write_u16(0x2E, 0x7E);
             write_u16(0x30, 0x3F);
@@ -2974,6 +3013,24 @@ namespace sogen
             write_u8(0x38, 0x01);
 
             return 1;
+        }
+
+        std::u16string read_logfont_face_name(const std::vector<uint8_t>& logfont_bytes)
+        {
+            constexpr size_t face_name_offset = 28;
+            constexpr size_t face_name_chars = 32;
+
+            if (logfont_bytes.size() != k_logfontw_size)
+            {
+                return {};
+            }
+
+            std::u16string name(face_name_chars, u'\0');
+            std::memcpy(name.data(), logfont_bytes.data() + face_name_offset, face_name_chars * sizeof(char16_t));
+
+            const auto null_pos = name.find(u'\0');
+            name.resize(null_pos == std::u16string::npos ? face_name_chars : null_pos);
+            return name;
         }
 
         int32_t handle_NtGdiGetTextFaceW(const syscall_context& c, const hdc dc, const int32_t count, const emulator_pointer face_name,
@@ -2985,7 +3042,20 @@ namespace sogen
             }
 
             static constexpr std::u16string_view k_default_font_name = u"Segoe UI";
-            const auto required = static_cast<int32_t>(k_default_font_name.size() + 1);
+
+            std::u16string selected_name{};
+            const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (dc_it != c.proc.gdi_dc_states.end())
+            {
+                const auto font_it = c.proc.gdi_font_descriptors.find(dc_it->second.selected_font);
+                if (font_it != c.proc.gdi_font_descriptors.end())
+                {
+                    selected_name = read_logfont_face_name(font_it->second.logfont_bytes);
+                }
+            }
+
+            const std::u16string_view resolved_name = selected_name.empty() ? k_default_font_name : selected_name;
+            const auto required = static_cast<int32_t>(resolved_name.size() + 1);
 
             if (face_name == 0)
             {
@@ -2997,10 +3067,10 @@ namespace sogen
                 return 0;
             }
 
-            const auto writable_chars = std::min<int32_t>(count - 1, static_cast<int32_t>(k_default_font_name.size()));
+            const auto writable_chars = std::min<int32_t>(count - 1, static_cast<int32_t>(resolved_name.size()));
             if (writable_chars > 0)
             {
-                c.emu.write_memory(face_name, k_default_font_name.data(), static_cast<size_t>(writable_chars) * sizeof(char16_t));
+                c.emu.write_memory(face_name, resolved_name.data(), static_cast<size_t>(writable_chars) * sizeof(char16_t));
             }
 
             const char16_t terminator = u'\0';
