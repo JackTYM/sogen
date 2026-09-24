@@ -99,6 +99,12 @@ namespace sogen
             auto port_name = read_unicode_string(c.emu, server_port_name);
             c.win_emu.callbacks.on_generic_access("Connecting port", port_name);
 
+            if (std::getenv("SOGEN_TRACE_ALPC_CONNECT"))
+            {
+                fprintf(stderr, "[alpc-connect-trace] pid=%u tid=%u connecting to \"%s\"\n", c.proc.process_id, c.thread().id,
+                        u16_to_u8(port_name).c_str());
+            }
+
             port_container container{std::u16string(port_name), c.win_emu, {}};
 
             const auto handle = c.proc.ports.store(std::move(container));
