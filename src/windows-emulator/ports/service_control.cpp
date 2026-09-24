@@ -20,12 +20,19 @@ namespace sogen
         // distinct method from the classic ROpenSCManagerW: its [in] is just the "ServicesActive" database name
         // string + desired access, with no machine name or input handle. The other opnums here are the classic
         // MS-SCMR numbers.
-        constexpr uint32_t k_svcctl_close_handle = 0;       // RCloseServiceHandle ([in,out] handle)
-        constexpr uint32_t k_svcctl_open_service_w = 16;    // ROpenServiceW (SCM handle + name + access)
-        constexpr uint32_t k_svcctl_subscribe = 55;         // SubscribeServiceChangeNotifications (handle + mask)
-        constexpr uint32_t k_svcctl_open_sc_manager_w = 64; // ROpenSCManager2 (database string + access)
+        constexpr uint32_t k_svcctl_close_handle = 0;         // RCloseServiceHandle ([in,out] handle)
+        constexpr uint32_t k_svcctl_query_service_status = 6; // RQueryServiceStatus (handle -> SERVICE_STATUS)
+        constexpr uint32_t k_svcctl_open_service_w = 16;      // ROpenServiceW (SCM handle + name + access)
+        constexpr uint32_t k_svcctl_subscribe = 55;           // SubscribeServiceChangeNotifications (handle + mask)
+        constexpr uint32_t k_svcctl_open_sc_manager_w = 64;   // ROpenSCManager2 (database string + access)
 
         constexpr uint32_t k_error_success = 0;
+
+        // SERVICE_STATUS fields (MS-SCMR 2.2.47): dwServiceType, dwCurrentState, dwControlsAccepted,
+        // dwWin32ExitCode, dwServiceSpecificExitCode, dwCheckPoint, dwWaitHint.
+        constexpr uint32_t k_service_type_share_process = 0x00000020;
+        constexpr uint32_t k_service_state_running = 0x00000004;
+        constexpr uint32_t k_service_accept_stop = 0x00000001;
 
         // Fabricated SC_RPC_HANDLEs. The SCM is fully stubbed, so the bytes only need to round-trip: the client
         // stores the handle from Open* and hands it back on the follow-on Open/Close/Notify calls.
@@ -62,6 +69,18 @@ namespace sogen
 
                 case k_svcctl_open_service_w:
                     write_context_handle(writer, k_service_handle_uuid);
+                    write_return(writer, k_error_success);
+                    return STATUS_SUCCESS;
+
+                case k_svcctl_query_service_status:
+                    // [out,ref] SERVICE_STATUS: a ref pointer, so no NDR pointer referent precedes it.
+                    writer.write<uint32_t>(k_service_type_share_process);
+                    writer.write<uint32_t>(k_service_state_running);
+                    writer.write<uint32_t>(k_service_accept_stop);
+                    writer.write<uint32_t>(k_error_success); // dwWin32ExitCode
+                    writer.write<uint32_t>(0);               // dwServiceSpecificExitCode
+                    writer.write<uint32_t>(0);               // dwCheckPoint
+                    writer.write<uint32_t>(0);               // dwWaitHint
                     write_return(writer, k_error_success);
                     return STATUS_SUCCESS;
 
