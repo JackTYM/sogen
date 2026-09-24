@@ -4516,6 +4516,17 @@ namespace sogen
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
+                if (std::getenv("SOGEN_TRACE_DXGK_QUERYREGISTRY"))
+                {
+                    auto info = emulator_object<EMU_D3DDDI_QUERYREGISTRY_INFO>(c.emu, query.pPrivateDriverData).read();
+                    const std::u16string value_name(info.ValueName, std::char_traits<char16_t>::length(info.ValueName));
+                    fprintf(stderr,
+                            "[dxgk-queryregistry-trace] pid=%u tid=%u QueryType=%u QueryFlags=0x%X ValueName=\"%s\" "
+                            "ValueType=%u PhysicalAdapterIndex=%u\n",
+                            c.proc.process_id, c.thread().id, info.QueryType, info.QueryFlags, u16_to_u8(value_name).c_str(),
+                            info.ValueType, info.PhysicalAdapterIndex);
+                }
+
                 std::vector<uint8_t> zeros(query.PrivateDriverDataSize, 0);
                 c.emu.write_memory(query.pPrivateDriverData, zeros.data(), zeros.size());
 
