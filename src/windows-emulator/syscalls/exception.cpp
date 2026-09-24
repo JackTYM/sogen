@@ -32,11 +32,11 @@ namespace sogen
                             {
                                 const auto message =
                                     read_unicode_string(c.emu, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, params[i]});
-                                c.win_emu.log.error("Hard error parameter %u: %s\n", i, u16_to_u8(message).c_str());
+                                c.win_emu.log.error("Hard error parameter %u: %s\n", static_cast<uint32_t>(i), u16_to_u8(message).c_str());
                             }
                             else
                             {
-                                c.win_emu.log.error("Hard error parameter %u: 0x%" PRIx64 "\n", i, params[i]);
+                                c.win_emu.log.error("Hard error parameter %u: 0x%" PRIx64 "\n", static_cast<uint32_t>(i), params[i]);
                             }
                         }
                     }
