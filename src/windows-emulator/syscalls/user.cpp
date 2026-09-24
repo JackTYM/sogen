@@ -2201,6 +2201,31 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserEnableNonClientDpiScaling(const syscall_context& c, const hwnd window)
+        {
+            auto* win = c.proc.windows.get(window);
+            if (!win)
+            {
+                return FALSE;
+            }
+
+            return TRUE;
+        }
+
+        BOOL handle_NtUserGetWindowDisplayAffinity(const syscall_context& c, const hwnd window, const emulator_object<uint32_t> affinity)
+        {
+            constexpr uint32_t wda_none = 0;
+
+            auto* win = c.proc.windows.get(window);
+            if (!win)
+            {
+                return FALSE;
+            }
+
+            affinity.write(wda_none);
+            return TRUE;
+        }
+
         BOOL handle_NtUserBitBltSysBmp(const syscall_context& c, const hdc dc, const int x, const int y, const uint32_t bitmap_index)
         {
             (void)handle_NtGdiFlush(c);

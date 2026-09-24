@@ -525,6 +525,8 @@ namespace sogen
         BOOL handle_NtUserSetWindowState(const syscall_context& c, hwnd window, uint32_t flags);
         BOOL handle_NtUserClearWindowState(const syscall_context& c, hwnd window, uint32_t flags);
         BOOL handle_NtUserDisableProcessWindowsGhosting(const syscall_context& c);
+        BOOL handle_NtUserEnableNonClientDpiScaling(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserGetWindowDisplayAffinity(const syscall_context& c, hwnd window, emulator_object<uint32_t> affinity);
         BOOL handle_NtUserBitBltSysBmp(const syscall_context& c, hdc dc, int x, int y, uint32_t bitmap_index);
         BOOL handle_NtUserGetClientRect(const syscall_context& c, hwnd window, emulator_pointer rect_ptr);
         hdc handle_NtUserBeginPaint(const syscall_context& c, hwnd window, emulator_object<EMU_PAINTSTRUCT> paint_struct);
@@ -1587,6 +1589,8 @@ namespace sogen
         add_handler(NtUserSetWindowState);
         add_handler(NtUserClearWindowState);
         add_handler(NtUserDisableProcessWindowsGhosting);
+        add_handler(NtUserEnableNonClientDpiScaling);
+        add_handler(NtUserGetWindowDisplayAffinity);
         add_handler(NtUserBitBltSysBmp);
         add_handler(NtUserGetClientRect);
         add_handler(NtUserBeginPaint);

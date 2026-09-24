@@ -562,6 +562,12 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
+            if (index == 0 && std::getenv("SOGEN_TRACE_KEY_ENUM_ROOT"))
+            {
+                fprintf(stderr, "[key-enum-root-trace] pid=%u tid=%u NtEnumerateKey root=\"%s\"\n", c.proc.process_id, c.thread().id,
+                        u16_to_u8(key->to_string()).c_str());
+            }
+
             const auto subkey_name = c.win_emu.registry.get_sub_key_name(*key, index);
             if (!subkey_name)
             {
