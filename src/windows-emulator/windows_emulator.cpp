@@ -31,6 +31,88 @@ namespace sogen
         // TEMPDIAG: remove before finalizing. Dumps every thread's wait-state fields once the
         // idle loop has been spinning for a while with nothing ready, so a captured freeze
         // explains itself in the log instead of requiring live debugger inspection.
+        const char* describe_handle_type_diag(const handle_types::type type)
+        {
+            switch (type)
+            {
+            case handle_types::event:
+                return "event";
+            case handle_types::mutant:
+                return "mutant";
+            case handle_types::semaphore:
+                return "semaphore";
+            case handle_types::process:
+                return "process";
+            case handle_types::thread:
+                return "thread";
+            case handle_types::timer:
+                return "timer";
+            case handle_types::io_completion:
+                return "io_completion";
+            case handle_types::wait_completion_packet:
+                return "wait_completion_packet";
+            case handle_types::file:
+                return "file";
+            case handle_types::device:
+                return "device";
+            default:
+                return "other";
+            }
+        }
+
+        void dump_await_object_diag(process_context& process, const handle obj)
+        {
+            const auto type = static_cast<handle_types::type>(obj.value.type);
+            fprintf(stderr, "[SCHED_DIAG]     await_object handle=0x%llx type=%s", static_cast<unsigned long long>(obj.bits),
+                    describe_handle_type_diag(type));
+
+            if (type == handle_types::event)
+            {
+                if (const auto* e = process.events.get(obj))
+                {
+                    fprintf(stderr, " signaled=%d event_type=%d name='%s'", e->signaled ? 1 : 0, static_cast<int>(e->type),
+                            u16_to_u8(e->name).c_str());
+                }
+                else
+                {
+                    fprintf(stderr, " <not found>");
+                }
+            }
+            else if (type == handle_types::mutant)
+            {
+                if (const auto* m = process.mutants.get(obj))
+                {
+                    fprintf(stderr, " locked_count=%u owning_thread_id=%u abandoned=%d name='%s'", m->locked_count, m->owning_thread_id,
+                            m->abandoned ? 1 : 0, u16_to_u8(m->name).c_str());
+                }
+                else
+                {
+                    fprintf(stderr, " <not found>");
+                }
+            }
+            else if (type == handle_types::semaphore)
+            {
+                if (const auto* s = process.semaphores.get(obj))
+                {
+                    fprintf(stderr, " current_count=%u max_count=%u name='%s'", s->current_count, s->max_count, u16_to_u8(s->name).c_str());
+                }
+                else
+                {
+                    fprintf(stderr, " <not found>");
+                }
+            }
+            else if (type == handle_types::process)
+            {
+                fprintf(stderr, " <process wait>");
+            }
+            else if (type == handle_types::thread)
+            {
+                fprintf(stderr, " <thread wait>");
+            }
+
+            fprintf(stderr, "\n");
+        }
+
         void dump_thread_wait_states_diag(process_context& process, const vcpu_context& vcpu)
         {
             fprintf(stderr, "[SCHED_DIAG] pid=%d guest_pid=%u active_thread=%p id=%u\n", ::getpid(), process.process_id,
@@ -51,6 +133,22 @@ namespace sogen
                         thread.alerted ? 1 : 0, thread.await_objects.size(), thread.await_msg_mask.has_value() ? 1 : 0,
                         thread.await_time.has_value() ? 1 : 0, thread.await_host_condition ? 1 : 0,
                         thread.await_io_completion.has_value() ? 1 : 0);
+
+                for (const auto& obj : thread.await_objects)
+                {
+                    dump_await_object_diag(process, obj);
+                }
+
+                if (thread.await_io_completion.has_value())
+                {
+                    const auto& wait = *thread.await_io_completion;
+                    const auto* ioc = process.io_completions.get(wait.io_completion_handle);
+                    fprintf(stderr,
+                            "[SCHED_DIAG]     await_io_completion handle=0x%llx type=%s queue_depth=%zu "
+                            "max_entries=%u\n",
+                            static_cast<unsigned long long>(wait.io_completion_handle.bits),
+                            ioc ? "io_completion" : "io_completion<not found>", ioc ? ioc->queue.size() : 0u, wait.max_entries);
+                }
             }
         }
 
