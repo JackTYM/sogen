@@ -3,6 +3,7 @@
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
 #include "../cross_process.hpp"
+#include "../devices/named_pipe.hpp"
 #include "wait_trace.hpp"
 
 #include <utils/string.hpp>
@@ -326,6 +327,20 @@ namespace sogen
 
                         child_it->second.exit_status = STATUS_SUCCESS;
                         c.win_emu.drop_child_control_channel(record_id);
+                    }
+                }
+            }
+
+            if (value.type == handle_types::device)
+            {
+                auto* container = c.proc.devices.get(h);
+                if (auto* pipe = container ? container->get_internal_device<named_pipe>() : nullptr)
+                {
+                    if (std::getenv("SOGEN_TRACE_PIPE_CLOSE"))
+                    {
+                        c.win_emu.log.info("[pipe-close-trace] pid=%u tid=%u pipe='%s' ref_count=%u is_server_instance=%d\n",
+                                           c.proc.process_id, c.thread().id, u16_to_u8(pipe->name).c_str(), container->ref_count,
+                                           pipe->is_server_instance ? 1 : 0);
                     }
                 }
             }

@@ -1513,6 +1513,13 @@ namespace sogen
             const auto* f = c.proc.files.get(file_handle);
             if (!f)
             {
+                if (std::getenv("SOGEN_TRACE_PIPE_IO"))
+                {
+                    c.win_emu.log.info("[pipe-io-trace] NtReadFile INVALID_HANDLE handle=0x%llx type=%u tid=%u\n",
+                                       static_cast<unsigned long long>(file_handle.bits), static_cast<unsigned>(file_handle.value.type),
+                                       c.thread().id);
+                }
+
                 return STATUS_INVALID_HANDLE;
             }
 
