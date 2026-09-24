@@ -935,5 +935,81 @@ namespace sogen::test
         emu->start(0);
         EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 2u);
     }
+
+    TEST(FexBreakpointTest, AutomaticModeStaysNoOp)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        memory_manager memory{*emu};
+        // mov eax, 1; hlt
+        constexpr std::array<uint8_t, 11> guest_code = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xF4, 0x90, 0x90, 0x90, 0x90, 0x90};
+        const uint64_t code = setup_guest_code(*emu, memory, guest_code);
+        ASSERT_NE(code, 0u);
+        stop_on_interrupt(*emu);
+
+        bool fired = false;
+        auto* hook = emu->hook_memory_execution(code, [&](cpu_interface&, uint64_t) { fired = true; });
+        ASSERT_NE(hook, nullptr);
+
+        uint8_t byte_at_code = 0;
+        ASSERT_TRUE(emu->try_read_memory(code, &byte_at_code, 1));
+        EXPECT_EQ(byte_at_code, 0xB8);
+        EXPECT_EQ(*reinterpret_cast<const volatile uint8_t*>(code), 0xB8);
+
+        emu->reg(x86_register::rip, code);
+        emu->start(0);
+
+        EXPECT_FALSE(fired);
+        EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 1u);
+
+        emu->delete_hook(hook);
+    }
+
+    TEST(FexBreakpointTest, BreakpointInLoopReplantsAcrossStepOverContinueCycles)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        emu->set_memory_execution_hook_mode(hook_interface::memory_execution_hook_mode::int3);
+
+        memory_manager memory{*emu};
+        // loop: inc eax; jmp loop
+        constexpr std::array<uint8_t, 11> guest_code = {0xFF, 0xC0, 0xEB, 0xFC, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+        const uint64_t code = setup_guest_code(*emu, memory, guest_code);
+        ASSERT_NE(code, 0u);
+
+        int hit_count = 0;
+        auto* hook = emu->hook_memory_execution(code, [&](cpu_interface& cpu, uint64_t) {
+            ++hit_count;
+            cpu.stop();
+        });
+
+        emu->reg(x86_register::rip, code);
+        emu->reg<uint32_t>(x86_register::eax, 0);
+
+        constexpr int cycles = 3;
+        for (int i = 0; i < cycles; ++i)
+        {
+            EXPECT_NO_THROW(emu->start(0));
+            EXPECT_EQ(hit_count, i + 1);
+            EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), code);
+            EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), static_cast<uint32_t>(i));
+
+            EXPECT_NO_THROW(emu->start(1));
+            EXPECT_EQ(hit_count, i + 1);
+            EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), static_cast<uint32_t>(i + 1));
+            EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), code + 2);
+            EXPECT_EQ(*reinterpret_cast<const volatile uint8_t*>(code), 0xCC);
+        }
+
+        emu->delete_hook(hook);
+    }
 #endif
 } // namespace sogen::test
