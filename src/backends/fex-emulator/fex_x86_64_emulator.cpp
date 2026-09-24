@@ -2784,6 +2784,13 @@ namespace sogen::fex
 
         bool handle_patched_execution_breakpoint(const uint64_t address)
         {
+            if (this->pending_execution_step_ && this->pending_execution_step_->patched_breakpoint == address)
+            {
+                // The step-over restored the original byte, so this trap is the guest's own int3 there.
+                this->complete_execution_step();
+                return false;
+            }
+
             if (!this->patched_execution_breakpoints_.contains(address))
             {
                 return false;
