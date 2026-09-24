@@ -28,10 +28,10 @@ namespace sogen
                     {
                         for (ULONG i = 0; i < number_of_parameters; ++i)
                         {
-                            if (mask & (1u << i))
+                            if (mask & (1ull << i))
                             {
-                                const auto message = read_unicode_string(
-                                    c.emu, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, params[i]});
+                                const auto message =
+                                    read_unicode_string(c.emu, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, params[i]});
                                 c.win_emu.log.error("Hard error parameter %u: %s\n", i, u16_to_u8(message).c_str());
                             }
                             else
