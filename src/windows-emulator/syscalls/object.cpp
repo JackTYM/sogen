@@ -338,9 +338,9 @@ namespace sogen
                 {
                     if (std::getenv("SOGEN_TRACE_PIPE_CLOSE"))
                     {
-                        c.win_emu.log.info("[pipe-close-trace] pid=%u tid=%u pipe='%s' ref_count=%u is_server_instance=%d\n",
-                                           c.proc.process_id, c.thread().id, u16_to_u8(pipe->name).c_str(), container->ref_count,
-                                           pipe->is_server_instance ? 1 : 0);
+                        c.win_emu.log.info("[pipe-close-trace] pid=%u tid=%u handle=0x%llx pipe='%s' ref_count=%u is_server_instance=%d\n",
+                                           c.proc.process_id, c.thread().id, static_cast<unsigned long long>(h.bits),
+                                           u16_to_u8(pipe->name).c_str(), container->ref_count, pipe->is_server_instance ? 1 : 0);
                     }
                 }
             }
