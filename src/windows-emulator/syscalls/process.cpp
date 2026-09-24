@@ -992,8 +992,8 @@ namespace sogen
                     const auto rip = c.emu.read_instruction_pointer();
                     const auto rsp = c.emu.read_stack_pointer();
                     const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
-                    fprintf(stderr, "[TERMINATE_CALLER] self-terminate tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx exit_status=0x%x\n",
-                            c.thread().id, static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                    fprintf(stderr, "[TERMINATE_CALLER] self-terminate pid=%u tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx exit_status=0x%x\n",
+                            c.proc.process_id, c.thread().id, static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
                             rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL,
                             static_cast<unsigned long long>(rsp), static_cast<unsigned int>(exit_status));
                     for (const auto& mod : c.win_emu.mod_manager.modules() | std::views::values)
@@ -1045,10 +1045,10 @@ namespace sogen
                 const auto rip = c.emu.read_instruction_pointer();
                 const auto rsp = c.emu.read_stack_pointer();
                 const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
-                fprintf(stderr, "[TERMINATE_CALLER] child=%u tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx exit_status=0x%x\n", target.record_id,
-                        c.thread().id, static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
-                        rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL, static_cast<unsigned long long>(rsp),
-                        static_cast<unsigned int>(exit_status));
+                fprintf(stderr, "[TERMINATE_CALLER] child=%u caller_pid=%u tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx exit_status=0x%x\n",
+                        target.record_id, c.proc.process_id, c.thread().id, static_cast<unsigned long long>(rip),
+                        rip_mod ? rip_mod->name.c_str() : "?", rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL,
+                        static_cast<unsigned long long>(rsp), static_cast<unsigned int>(exit_status));
                 for (const auto& mod : c.win_emu.mod_manager.modules() | std::views::values)
                 {
                     fprintf(stderr, "  [MODULE] %s base=0x%llx size=0x%llx\n", mod.name.c_str(),
