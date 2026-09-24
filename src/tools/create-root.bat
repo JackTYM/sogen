@@ -97,6 +97,7 @@ CALL :collect msasn1.dll
 CALL :collect mscms.dll
 CALL :collect mscoree.dll
 CALL :collect msdmo.dll
+CALL :collect msimg32.dll
 CALL :collect msvcp140.dll
 CALL :collect msvcp140d.dll
 CALL :collect msvcp60.dll
@@ -129,6 +130,7 @@ CALL :collect rpcss.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
 CALL :collect sechost.dll
+CALL :collect sensapi.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll
 CALL :collect shell32.dll
