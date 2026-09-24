@@ -47,7 +47,18 @@ namespace sogen
             auto entry = c.win_emu.registry.get_key({*key});
             if (!entry.has_value())
             {
+                if (std::getenv("SOGEN_TRACE_REGISTRY_PROBES"))
+                {
+                    fprintf(stderr, "[registry-probe-trace] pid=%u tid=%u NtOpenKey \"%s\" -> 0x%X\n", c.proc.process_id, c.thread().id,
+                            u16_to_u8(*key).c_str(), STATUS_OBJECT_NAME_NOT_FOUND);
+                }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            if (std::getenv("SOGEN_TRACE_REGISTRY_PROBES"))
+            {
+                fprintf(stderr, "[registry-probe-trace] pid=%u tid=%u NtOpenKey \"%s\" -> 0x%X\n", c.proc.process_id, c.thread().id,
+                        u16_to_u8(*key).c_str(), STATUS_SUCCESS);
             }
 
             const auto handle = c.proc.registry_keys.store(std::move(entry.value()));
@@ -221,7 +232,19 @@ namespace sogen
             const auto value = c.win_emu.registry.get_value(*key, u16_to_u8(query_name));
             if (!value)
             {
+                if (std::getenv("SOGEN_TRACE_REGISTRY_PROBES"))
+                {
+                    fprintf(stderr, "[registry-probe-trace] pid=%u tid=%u NtQueryValueKey \"%s\\%s\" -> 0x%X\n", c.proc.process_id,
+                            c.thread().id, u16_to_u8(key->to_string()).c_str(), u16_to_u8(query_name).c_str(),
+                            STATUS_OBJECT_NAME_NOT_FOUND);
+                }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+
+            if (std::getenv("SOGEN_TRACE_REGISTRY_PROBES"))
+            {
+                fprintf(stderr, "[registry-probe-trace] pid=%u tid=%u NtQueryValueKey \"%s\\%s\" -> 0x%X\n", c.proc.process_id,
+                        c.thread().id, u16_to_u8(key->to_string()).c_str(), u16_to_u8(query_name).c_str(), STATUS_SUCCESS);
             }
 
             const std::u16string original_name(value->name.begin(), value->name.end());
