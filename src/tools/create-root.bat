@@ -16,11 +16,15 @@ SET EMU_SYSDIR=%EMU_WINDIR%\system32
 SET EMU_SYSDIR_WOW64=%EMU_WINDIR%\syswow64
 SET EMU_CURSORDIR=%EMU_WINDIR%\cursors
 SET EMU_REGDIR=%EMU_ROOT%\registry
+SET EMU_SXSDIR=%EMU_WINDIR%\WinSxS
+SET EMU_SXSMANIFESTDIR=%EMU_SXSDIR%\Manifests
 
 MKDIR %EMU_SYSDIR%
 MKDIR %EMU_SYSDIR_WOW64%
 MKDIR %EMU_CURSORDIR%
 MKDIR %EMU_REGDIR%
+MKDIR %EMU_SXSDIR%
+MKDIR %EMU_SXSMANIFESTDIR%
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-profile-dirs.ps1" "%EMU_FILESYS%"
 
@@ -29,6 +33,7 @@ REG SAVE HKLM\SAM %EMU_REGDIR%\SAM /Y
 REG SAVE HKLM\SECURITY %EMU_REGDIR%\SECURITY /Y
 REG SAVE HKLM\SOFTWARE %EMU_REGDIR%\SOFTWARE /Y
 REG SAVE HKLM\SYSTEM %EMU_REGDIR%\SYSTEM /Y
+REG SAVE HKLM\COMPONENTS %EMU_REGDIR%\COMPONENTS /Y
 COPY /B /Y C:\Users\Default\NTUSER.DAT "%EMU_REGDIR%\NTUSER.DAT"
 
 CALL :collect advapi32.dll
@@ -172,6 +177,13 @@ CALL :collect c_850.nls
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 
+REM POC: pull the Common-Controls v6 side-by-side assembly (its manifest, its versioned WinSxS
+REM folder, and any publisher policy manifest that redirects a requested "6.0.0.0" to it) so a
+REM manifested app's static COMCTL32.dll import can resolve through the same activation-context
+REM path a real Windows machine would use, instead of falling back to the flat system32 copy
+REM (the old unthemed v5.82 build, which is missing many ordinals modern apps import).
+CALL :collect_sxs common-controls_6595b64144ccf1df
+
 EXIT /B 0
 
 :normpath
@@ -191,5 +203,17 @@ EXIT /B
 :collect
 CALL :collect_file %SYSDIR%, %~1, %EMU_SYSDIR%
 CALL :collect_file %SYSDIR_WOW64%, %~1, %EMU_SYSDIR_WOW64%
+EXIT /B
+
+REM %1 = substring to match against WinSxS manifest/folder names (e.g. "common-controls_6595b64144ccf1df").
+:collect_sxs
+FOR %%F IN ("%WINDIR%\WinSxS\Manifests\*%~1*.manifest") DO (
+	ECHO %%F -^> %EMU_SXSMANIFESTDIR%\%%~nxF
+	COPY /B /Y "%%F" "%EMU_SXSMANIFESTDIR%\%%~nxF" >NUL
+)
+FOR /D %%D IN ("%WINDIR%\WinSxS\*%~1*") DO (
+	ECHO %%D -^> %EMU_SXSDIR%\%%~nxD
+	XCOPY /E /I /Y /Q "%%D" "%EMU_SXSDIR%\%%~nxD\" >NUL
+)
 EXIT /B
 
