@@ -1125,6 +1125,20 @@ namespace sogen::fex
             uint64_t code_buffer_generation = 0;
         };
 
+        struct patched_execution_breakpoint
+        {
+            std::optional<std::byte> original_byte{};
+            size_t hook_count{};
+            bool applied{};
+        };
+
+        struct execution_hook_entry
+        {
+            std::optional<uint64_t> address{};
+            bool patched_breakpoint{false};
+            memory_execution_hook_callback callback{};
+        };
+
       public:
         fex_x86_64_emulator()
         {
@@ -1202,12 +1216,19 @@ namespace sogen::fex
 
         void start(size_t count) override
         {
-            if (count != 0)
+            if (count > 1)
             {
                 // FEX has CompileRIPCount() for bounded execution, but wiring exact instruction counts
                 // through the JIT exit path is non-trivial; match the KVM backend and refuse for now.
                 throw std::runtime_error("FEX backend does not support exact instruction counts yet");
             }
+
+#if !(defined(__APPLE__) || defined(__ANDROID__))
+            if (count == 1)
+            {
+                throw std::runtime_error("FEX backend does not support single-stepping on this platform");
+            }
+#endif
 
             if (this->thread_ == nullptr)
             {
@@ -1227,6 +1248,26 @@ namespace sogen::fex
             // pending_fault_dispatch_) rather than genuinely stopping - dispatch it in normal call
             // context, where that is safe, then resume by calling ExecuteThread again; it always
             // restarts from CurrentFrame->State.rip, which the hook is free to have redirected.
+            if (this->deferred_patched_breakpoint_)
+            {
+                const auto deferred_address = *this->deferred_patched_breakpoint_;
+                this->deferred_patched_breakpoint_.reset();
+                if (this->thread_->CurrentFrame->State.rip == deferred_address)
+                {
+                    this->arm_execution_single_step(count == 1);
+                    this->pending_execution_step_->patched_breakpoint = deferred_address;
+                }
+                else
+                {
+                    this->set_patched_execution_breakpoint_state(deferred_address, true);
+                }
+            }
+
+            if (!this->pending_execution_step_ && count == 1)
+            {
+                this->arm_execution_single_step(true);
+            }
+
             for (;;)
             {
                 this->context_->ExecuteThread(this->thread_);
@@ -1553,6 +1594,7 @@ namespace sogen::fex
             // buffer that overlaps the guest destination range - overlapping memcpy is undefined
             // behaviour. This is a generic guest memory-copy primitive with no non-overlap contract.
             std::memmove(data, reinterpret_cast<const void*>(address), size);
+            this->overlay_patched_breakpoints_on_read(address, data, size);
             return true;
         }
 
@@ -1596,6 +1638,7 @@ namespace sogen::fex
 
             // Writing to a mapped region may overwrite already-translated code; drop FEX's cache for it.
             this->invalidate_code_range(address, size);
+            this->overlay_patched_breakpoints_on_write(address, size);
             return true;
         }
 
@@ -1603,27 +1646,49 @@ namespace sogen::fex
         //
         // As with KVM, the guest runs natively, so fine-grained memory/execution/basic-block hooks
         // cannot fire; they are accepted and tracked (so delete_hook works) purely for API
-        // compatibility. Only `syscall` instruction hooks are actually wired.
+        // compatibility. Only `syscall` instruction hooks are actually wired, plus single-address
+        // execution hooks in int3 mode, which plant real 0xCC breakpoints.
+
+#if defined(__APPLE__) || defined(__ANDROID__)
+        void set_memory_execution_hook_mode(const memory_execution_hook_mode mode) override
+        {
+            this->memory_execution_hook_mode_ = mode;
+        }
+#endif
 
         emulator_hook* hook_memory_execution(memory_execution_hook_callback callback) override
         {
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            this->memory_execution_hooks_[hook] = execution_hook_entry{.callback = std::move(callback)};
             return hook;
         }
 
-        emulator_hook* hook_memory_execution(uint64_t /*address*/, memory_execution_hook_callback callback) override
+        emulator_hook* hook_memory_execution(const uint64_t address, memory_execution_hook_callback callback) override
         {
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            if (this->memory_execution_hook_mode_ == memory_execution_hook_mode::int3)
+            {
+                this->install_patched_execution_breakpoint(address);
+                this->memory_execution_hooks_[hook] =
+                    execution_hook_entry{.address = address, .patched_breakpoint = true, .callback = std::move(callback)};
+            }
+            else
+            {
+                this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
+            }
             return hook;
         }
 
-        emulator_hook* hook_memory_range_execution(uint64_t /*address*/, uint64_t /*size*/,
+        emulator_hook* hook_memory_range_execution(const uint64_t address, const uint64_t size,
                                                    memory_execution_hook_callback callback) override
         {
+            if (size == 1)
+            {
+                return this->hook_memory_execution(address, std::move(callback));
+            }
+
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
             return hook;
         }
 
@@ -1690,7 +1755,17 @@ namespace sogen::fex
             this->interrupt_hooks_.erase(hook);
             this->memory_read_hooks_.erase(hook);
             this->memory_write_hooks_.erase(hook);
-            this->memory_execution_hooks_.erase(hook);
+
+            const auto execution_it = this->memory_execution_hooks_.find(hook);
+            if (execution_it != this->memory_execution_hooks_.end())
+            {
+                if (execution_it->second.patched_breakpoint && execution_it->second.address)
+                {
+                    this->uninstall_patched_execution_breakpoint(*execution_it->second.address);
+                }
+                this->memory_execution_hooks_.erase(execution_it);
+            }
+
             this->memory_violation_hooks_.erase(hook);
             this->basic_block_hooks_.erase(hook);
         }
@@ -1879,6 +1954,7 @@ namespace sogen::fex
             this->erase_region_range(address, size);
             this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = true};
             this->mark_executable_range(address, size, permissions);
+            this->apply_patched_execution_breakpoints_in_range(address, size);
         }
 
 #if defined(__APPLE__) || defined(__ANDROID__)
@@ -1992,6 +2068,7 @@ namespace sogen::fex
             this->erase_region_range(address, size);
             this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
             this->mark_executable_range(address, size, permissions);
+            this->apply_patched_execution_breakpoints_in_range(address, size);
         }
 
         bool host_memory_aliasing_is_coherent() const override
@@ -2066,6 +2143,7 @@ namespace sogen::fex
                 ::munmap(reinterpret_cast<void*>(address), size);
             }
 #endif
+            this->mark_patched_execution_breakpoints_unmapped_in_range(address, size);
             this->invalidate_code_range(address, size);
             this->erase_region_range(address, size);
         }
@@ -2625,6 +2703,90 @@ namespace sogen::fex
             int vector = 0;
         };
 
+        static constexpr uint64_t trap_flag_bit = 0x100;
+
+        struct pending_execution_step
+        {
+            bool had_trap_flag{};
+            std::optional<uint64_t> patched_breakpoint{};
+            std::optional<uint64_t> granted_watch_page{};
+            bool stop_after_step{};
+        };
+
+        bool arm_execution_single_step(const bool stop_after_step)
+        {
+            if (this->pending_execution_step_)
+            {
+                throw std::runtime_error("Nested FEX execution single-step state is not supported");
+            }
+
+            const auto rflags = this->read_rflags();
+            pending_execution_step state{};
+            state.had_trap_flag = (rflags & trap_flag_bit) != 0;
+            state.stop_after_step = stop_after_step;
+            this->pending_execution_step_ = state;
+            this->write_rflags(rflags | trap_flag_bit);
+            return true;
+        }
+
+        bool complete_execution_step()
+        {
+            if (!this->pending_execution_step_)
+            {
+                return false;
+            }
+
+            const auto state = std::exchange(this->pending_execution_step_, std::nullopt);
+            const auto rflags = this->read_rflags();
+            this->write_rflags(state->had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+
+            if (state->patched_breakpoint)
+            {
+                this->set_patched_execution_breakpoint_state(*state->patched_breakpoint, true);
+            }
+
+            if (state->stop_after_step)
+            {
+                this->stop_requested_ = true;
+            }
+
+            return true;
+        }
+
+        bool handle_patched_execution_breakpoint(const uint64_t address)
+        {
+            if (!this->patched_execution_breakpoints_.contains(address))
+            {
+                return false;
+            }
+
+            this->set_patched_execution_breakpoint_state(address, false);
+
+            std::vector<memory_execution_hook_callback> callbacks{};
+            for (const auto& [_, hook] : this->memory_execution_hooks_)
+            {
+                if (hook.patched_breakpoint && hook.address == address)
+                {
+                    callbacks.push_back(hook.callback);
+                }
+            }
+            for (const auto& callback : callbacks)
+            {
+                callback(*this, address);
+            }
+
+            if (this->stop_requested_)
+            {
+                this->deferred_patched_breakpoint_ = address;
+            }
+            else
+            {
+                this->arm_execution_single_step(false);
+                this->pending_execution_step_->patched_breakpoint = address;
+            }
+            return true;
+        }
+
         // Called only from start(), in normal call context, right after ExecuteThread returns. The
         // return value tells start()'s loop whether ExecuteThread came back because a hook was deferred
         // or because of a genuine stop.
@@ -2642,6 +2804,15 @@ namespace sogen::fex
                 }
                 return true;
             case pending_fault_kind::interrupt:
+                if (dispatch.vector == static_cast<int>(FEXCore::X86State::X86_TRAPNO_BP) &&
+                    this->handle_patched_execution_breakpoint(this->thread_->CurrentFrame->State.rip))
+                {
+                    return true;
+                }
+                if (dispatch.vector == static_cast<int>(FEXCore::X86State::X86_TRAPNO_DB) && this->complete_execution_step())
+                {
+                    return true;
+                }
                 for (auto& [_, hook] : this->interrupt_hooks_)
                 {
                     hook(*this, dispatch.vector);
@@ -3454,6 +3625,155 @@ namespace sogen::fex
             this->invalidate_code_range_in(this->context_.get(), this->thread_, address, size);
         }
 
+        void write_breakpoint_byte(const uint64_t address, const std::byte value)
+        {
+            const bool needs_temporary_write = !this->range_is_writable(address, 1);
+            if (needs_temporary_write)
+            {
+                this->set_temporary_write_access(address, 1, true);
+            }
+            *reinterpret_cast<volatile std::byte*>(address) = value;
+            if (needs_temporary_write)
+            {
+                this->set_temporary_write_access(address, 1, false);
+            }
+            this->invalidate_code_range(address, 1);
+        }
+
+        void try_apply_patched_execution_breakpoint(const uint64_t address, patched_execution_breakpoint& breakpoint)
+        {
+            if (!this->is_range_mapped(address, 1))
+            {
+                breakpoint.applied = false;
+                return;
+            }
+
+            const auto current = *reinterpret_cast<const std::byte*>(address);
+            if (breakpoint.applied && current == std::byte{0xCC})
+            {
+                return;
+            }
+
+            breakpoint.original_byte = current;
+            this->write_breakpoint_byte(address, std::byte{0xCC});
+            breakpoint.applied = true;
+        }
+
+        void install_patched_execution_breakpoint(const uint64_t address)
+        {
+            auto existing = this->patched_execution_breakpoints_.find(address);
+            if (existing != this->patched_execution_breakpoints_.end())
+            {
+                ++existing->second.hook_count;
+                if (!existing->second.applied)
+                {
+                    this->try_apply_patched_execution_breakpoint(address, existing->second);
+                }
+                return;
+            }
+
+            patched_execution_breakpoint breakpoint{.hook_count = 1};
+            this->try_apply_patched_execution_breakpoint(address, breakpoint);
+            this->patched_execution_breakpoints_[address] = breakpoint;
+        }
+
+        void uninstall_patched_execution_breakpoint(const uint64_t address)
+        {
+            auto existing = this->patched_execution_breakpoints_.find(address);
+            if (existing == this->patched_execution_breakpoints_.end())
+            {
+                return;
+            }
+
+            if (existing->second.hook_count > 1)
+            {
+                --existing->second.hook_count;
+                return;
+            }
+
+            if (existing->second.applied && existing->second.original_byte && this->is_range_mapped(address, 1))
+            {
+                this->write_breakpoint_byte(address, *existing->second.original_byte);
+            }
+
+            this->patched_execution_breakpoints_.erase(existing);
+        }
+
+        void set_patched_execution_breakpoint_state(const uint64_t address, const bool applied)
+        {
+            const auto existing = this->patched_execution_breakpoints_.find(address);
+            if (existing == this->patched_execution_breakpoints_.end())
+            {
+                return;
+            }
+
+            if (applied && !existing->second.original_byte)
+            {
+                this->try_apply_patched_execution_breakpoint(address, existing->second);
+                return;
+            }
+
+            if (!existing->second.original_byte || !this->is_range_mapped(address, 1))
+            {
+                return;
+            }
+
+            this->write_breakpoint_byte(address, applied ? std::byte{0xCC} : *existing->second.original_byte);
+            existing->second.applied = applied;
+        }
+
+        void apply_patched_execution_breakpoints_in_range(const uint64_t address, const size_t size)
+        {
+            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (bp_address >= address && bp_address < address + size)
+                {
+                    this->try_apply_patched_execution_breakpoint(bp_address, breakpoint);
+                }
+            }
+        }
+
+        void mark_patched_execution_breakpoints_unmapped_in_range(const uint64_t address, const size_t size)
+        {
+            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (bp_address >= address && bp_address < address + size)
+                {
+                    breakpoint.original_byte.reset();
+                    breakpoint.applied = false;
+                }
+            }
+        }
+
+        void overlay_patched_breakpoints_on_read(const uint64_t address, void* data, const size_t size) const
+        {
+            auto* cursor = static_cast<std::byte*>(data);
+            for (const auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (!breakpoint.original_byte || bp_address < address || bp_address >= address + size)
+                {
+                    continue;
+                }
+                cursor[bp_address - address] = *breakpoint.original_byte;
+            }
+        }
+
+        // Reads the just-written byte back from guest memory rather than the caller's source buffer,
+        // which try_write_memory allows to overlap the destination.
+        void overlay_patched_breakpoints_on_write(const uint64_t address, const size_t size)
+        {
+            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (bp_address < address || bp_address >= address + size)
+                {
+                    continue;
+                }
+                breakpoint.original_byte = *reinterpret_cast<const std::byte*>(bp_address);
+                this->write_breakpoint_byte(bp_address, std::byte{0xCC});
+                breakpoint.applied = true;
+            }
+        }
+
         void request_thread_stop()
         {
             // Forces the in-flight ExecuteThread to return, from this thread or another. With
@@ -3498,7 +3818,12 @@ namespace sogen::fex
         // C++ abstract machine has no signal-delivery control-flow edge, so an optimizer may treat this
         // as unmodified across the opaque ExecuteThread() call and cache a stale read.
         std::atomic<bool> interrupt_page_unwind_{false};
+        std::optional<pending_execution_step> pending_execution_step_{};
+        std::optional<uint64_t> deferred_patched_breakpoint_{};
 #endif
+
+        memory_execution_hook_mode memory_execution_hook_mode_ = memory_execution_hook_mode::automatic;
+        std::unordered_map<uint64_t, patched_execution_breakpoint> patched_execution_breakpoints_{};
 
         std::map<uint64_t, mapped_region> regions_;
         std::vector<mmio_region> mmio_regions_;
@@ -3525,7 +3850,7 @@ namespace sogen::fex
         std::unordered_map<emulator_hook*, interrupt_hook_callback> interrupt_hooks_;
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_read_hooks_;
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_write_hooks_;
-        std::unordered_map<emulator_hook*, memory_execution_hook_callback> memory_execution_hooks_;
+        std::unordered_map<emulator_hook*, execution_hook_entry> memory_execution_hooks_;
         std::unordered_map<emulator_hook*, memory_violation_hook_callback> memory_violation_hooks_;
         std::unordered_map<emulator_hook*, basic_block_hook_callback> basic_block_hooks_;
     };
