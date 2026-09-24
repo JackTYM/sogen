@@ -2011,7 +2011,8 @@ namespace sogen
                 dispatch_single_step(*this, vcpu);
                 return;
             case 3: {
-                const auto real_bp_address = acting.read_instruction_pointer() - (acting.reports_breakpoint_rip_past_instruction() ? 1 : 0);
+                const auto real_bp_address =
+                    acting.read_instruction_pointer() - (acting.reports_hook_observed_rip_past_instruction() ? 1 : 0);
                 if (!this->uses_instruction_precision() && this->try_warm_kernelbase_nls_cache_breakpoint(vcpu, real_bp_address))
                 {
                     return;

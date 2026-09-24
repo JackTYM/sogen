@@ -1210,6 +1210,11 @@ namespace sogen::fex
             return true;
         }
 
+        bool reports_hook_observed_rip_past_instruction() const override
+        {
+            return true;
+        }
+
         // FEXCore maintains separate context_/thread_ (64-bit) and context32_/thread32_ (32-bit)
         // engines for a WoW64 process, only one of which is active at a time.
         bool has_separate_bitness_engines() const override
@@ -1540,6 +1545,11 @@ namespace sogen::fex
         }
 
         bool reports_breakpoint_rip_past_instruction() const override
+        {
+            return true;
+        }
+
+        bool reports_hook_observed_rip_past_instruction() const override
         {
             return true;
         }

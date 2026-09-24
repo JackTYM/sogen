@@ -770,6 +770,14 @@ namespace sogen::unicorn
                 return this->violation_ip_.has_value();
             }
 
+            // Unicorn's UC_HOOK_INTR fires for a software INT3 with RIP already advanced past the
+            // trapping 0xCC byte (matching real x86 trap semantics), unlike KVM/WHP's own hypervisor
+            // exit convention that reports the pre-advance address.
+            bool reports_hook_observed_rip_past_instruction() const override
+            {
+                return true;
+            }
+
             bool supports_instruction_counting() const override
             {
                 return true;

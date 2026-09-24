@@ -52,6 +52,22 @@ namespace sogen
             return false;
         }
 
+        // Whether this backend's own hook_interrupt() callback (sogen's internal INT3 consumers,
+        // e.g. windows_emulator.cpp's try_warm_kernelbase_nls_cache_breakpoint and
+        // try_service_rtl_query_performance_counter) observes read_instruction_pointer() already
+        // advanced past the trapping 0xCC byte. Distinct from
+        // reports_breakpoint_rip_past_instruction(), which governs the separate guest-visible NT
+        // contract RIP correction in exception_dispatch.cpp: Unicorn's raw hook_interrupt() RIP is
+        // already advanced (matching FEX's JIT trap convention) even though broadening the
+        // guest-visible flag to true for Unicorn causes an infinite re-fault loop there (see
+        // reports_breakpoint_rip_past_instruction's own doc comment) - the two conventions coincide
+        // for FEX but diverge for Unicorn, so they must be tracked separately. Defaults to false
+        // (matches every backend except FEX and Unicorn).
+        virtual bool reports_hook_observed_rip_past_instruction() const
+        {
+            return false;
+        }
+
         // Whether this backend maintains separate, independently-active 32-bit and 64-bit CPU
         // engine contexts for a WoW64 thread ("dual-engine"/gate-crossing backends), as opposed to
         // a single unified CPU state that's already bitness-aware. Only a dual-engine backend can
