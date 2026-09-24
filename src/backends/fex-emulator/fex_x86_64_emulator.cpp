@@ -1130,6 +1130,11 @@ namespace sogen::fex
             std::optional<std::byte> original_byte{};
             size_t hook_count{};
             bool applied{};
+
+            bool suspended() const
+            {
+                return this->original_byte && !this->applied;
+            }
         };
 
         struct execution_hook_entry
@@ -1241,13 +1246,7 @@ namespace sogen::fex
             // return, and it must be writable again before the JIT's per-block-entry store runs.
             ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
 
-            // ExecuteThread runs the translated guest until the thread is asked to stop (which the
-            // syscall bridge does when a hook calls stop()), or the guest faults/exits.
 #if defined(__APPLE__) || defined(__ANDROID__)
-            // Here it can also return early because handle_fault_signal deferred a hook dispatch (see
-            // pending_fault_dispatch_) rather than genuinely stopping - dispatch it in normal call
-            // context, where that is safe, then resume by calling ExecuteThread again; it always
-            // restarts from CurrentFrame->State.rip, which the hook is free to have redirected.
             if (this->deferred_patched_breakpoint_)
             {
                 const auto deferred_address = *this->deferred_patched_breakpoint_;
@@ -1267,7 +1266,15 @@ namespace sogen::fex
             {
                 this->arm_execution_single_step(true);
             }
+#endif
 
+            // ExecuteThread runs the translated guest until the thread is asked to stop (which the
+            // syscall bridge does when a hook calls stop()), or the guest faults/exits.
+#if defined(__APPLE__) || defined(__ANDROID__)
+            // Here it can also return early because handle_fault_signal deferred a hook dispatch (see
+            // pending_fault_dispatch_) rather than genuinely stopping - dispatch it in normal call
+            // context, where that is safe, then resume by calling ExecuteThread again; it always
+            // restarts from CurrentFrame->State.rip, which the hook is free to have redirected.
             for (;;)
             {
                 this->context_->ExecuteThread(this->thread_);
@@ -1292,6 +1299,8 @@ namespace sogen::fex
                     ::mprotect(this->thread_->InterruptFaultPage, sizeof(this->thread_->InterruptFaultPage), PROT_READ | PROT_WRITE);
                 }
             }
+
+            this->abandon_execution_step();
 #else
             this->context_->ExecuteThread(this->thread_);
 #endif
@@ -2729,6 +2738,14 @@ namespace sogen::fex
             return true;
         }
 
+        pending_execution_step take_pending_execution_step()
+        {
+            const auto state = *std::exchange(this->pending_execution_step_, std::nullopt);
+            const auto rflags = this->read_rflags();
+            this->write_rflags(state.had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+            return state;
+        }
+
         bool complete_execution_step()
         {
             if (!this->pending_execution_step_)
@@ -2736,21 +2753,34 @@ namespace sogen::fex
                 return false;
             }
 
-            const auto state = std::exchange(this->pending_execution_step_, std::nullopt);
-            const auto rflags = this->read_rflags();
-            this->write_rflags(state->had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+            const auto state = this->take_pending_execution_step();
 
-            if (state->patched_breakpoint)
+            if (state.patched_breakpoint)
             {
-                this->set_patched_execution_breakpoint_state(*state->patched_breakpoint, true);
+                this->set_patched_execution_breakpoint_state(*state.patched_breakpoint, true);
             }
 
-            if (state->stop_after_step)
+            if (state.stop_after_step)
             {
                 this->stop_requested_ = true;
             }
 
             return true;
+        }
+
+        void abandon_execution_step()
+        {
+            if (!this->pending_execution_step_)
+            {
+                return;
+            }
+
+            const auto state = this->take_pending_execution_step();
+
+            if (state.patched_breakpoint)
+            {
+                this->deferred_patched_breakpoint_ = state.patched_breakpoint;
+            }
         }
 
         bool handle_patched_execution_breakpoint(const uint64_t address)
@@ -2778,12 +2808,25 @@ namespace sogen::fex
             if (this->stop_requested_)
             {
                 this->deferred_patched_breakpoint_ = address;
+                return true;
+            }
+
+            if (!this->pending_execution_step_)
+            {
+                this->arm_execution_single_step(false);
+            }
+            else if (this->pending_execution_step_->patched_breakpoint)
+            {
+                throw std::runtime_error("Nested FEX execution single-step state is not supported");
             }
             else
             {
-                this->arm_execution_single_step(false);
-                this->pending_execution_step_->patched_breakpoint = address;
+                // The trap on the 0xCC used up the one instruction EmitTFCheck lets run after TF is set,
+                // so without re-setting TF the #DB would fire before the original instruction executes.
+                this->write_rflags(this->read_rflags() | trap_flag_bit);
             }
+
+            this->pending_execution_step_->patched_breakpoint = address;
             return true;
         }
 
@@ -3665,7 +3708,7 @@ namespace sogen::fex
             if (existing != this->patched_execution_breakpoints_.end())
             {
                 ++existing->second.hook_count;
-                if (!existing->second.applied)
+                if (!existing->second.applied && !existing->second.suspended())
                 {
                     this->try_apply_patched_execution_breakpoint(address, existing->second);
                 }
@@ -3768,9 +3811,13 @@ namespace sogen::fex
                 {
                     continue;
                 }
+                const bool suspended = breakpoint.suspended();
                 breakpoint.original_byte = *reinterpret_cast<const std::byte*>(bp_address);
-                this->write_breakpoint_byte(bp_address, std::byte{0xCC});
-                breakpoint.applied = true;
+                if (!suspended)
+                {
+                    this->write_breakpoint_byte(bp_address, std::byte{0xCC});
+                    breakpoint.applied = true;
+                }
             }
         }
 

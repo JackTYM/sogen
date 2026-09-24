@@ -133,6 +133,44 @@ namespace sogen::test
         EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), code + 10);
     }
 
+    TEST(FexSingleStepTest, StepStoppedByFaultDoesNotLeakTrapFlag)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        memory_manager memory{*emu};
+        // hlt; mov eax, 7; hlt
+        constexpr std::array<uint8_t, 11> guest_code = {0xF4, 0xB8, 0x07, 0x00, 0x00, 0x00, 0xF4, 0x90, 0x90, 0x90, 0x90};
+        const uint64_t code = setup_guest_code(*emu, memory, guest_code);
+        ASSERT_NE(code, 0u);
+
+        std::vector<int> vectors{};
+        emu->hook_interrupt([&](cpu_interface& cpu, const int vector) {
+            vectors.push_back(vector);
+            if (vectors.size() == 1)
+            {
+                emu->reg(x86_register::rip, code + 1);
+            }
+            cpu.stop();
+        });
+
+        emu->reg(x86_register::rip, code);
+        emu->start(1);
+
+        ASSERT_EQ(vectors.size(), 1u);
+        EXPECT_EQ(vectors.front(), 13);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rflags) & 0x100, 0u);
+
+        emu->start(0);
+
+        EXPECT_EQ(vectors.size(), 2u);
+        EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 7u);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), code + 6);
+    }
+
     TEST(FexBreakpointTest, Int3BreakpointStopsAtAddressAndCanContinue)
     {
         const auto emu = try_create_fex_emulator();
@@ -245,6 +283,198 @@ namespace sogen::test
         EXPECT_NO_THROW(emu->start(0));
         EXPECT_EQ(hit_count, 2);
         EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 1u);
+
+        emu->delete_hook(hook);
+    }
+
+    TEST(FexBreakpointTest, WriteToStoppedOnBreakpointStillStepsOverIt)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        emu->set_memory_execution_hook_mode(hook_interface::memory_execution_hook_mode::int3);
+
+        memory_manager memory{*emu};
+        constexpr std::array<uint8_t, 11> guest_code = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xB8, 0x02, 0x00, 0x00, 0x00, 0xF4};
+        const uint64_t code = setup_guest_code(*emu, memory, guest_code);
+        ASSERT_NE(code, 0u);
+        stop_on_interrupt(*emu);
+
+        const uint64_t breakpoint_address = code + 5;
+        int hit_count = 0;
+        auto* hook = emu->hook_memory_execution(breakpoint_address, [&](cpu_interface& cpu, uint64_t) {
+            ++hit_count;
+            cpu.stop();
+        });
+
+        emu->reg(x86_register::rip, code);
+        emu->start(0);
+        ASSERT_EQ(hit_count, 1);
+        ASSERT_EQ(emu->reg<uint64_t>(x86_register::rip), breakpoint_address);
+
+        // mov ecx, 3
+        constexpr std::array<uint8_t, 5> replacement = {0xB9, 0x03, 0x00, 0x00, 0x00};
+        emu->write_memory(breakpoint_address, replacement.data(), replacement.size());
+
+        uint8_t byte_at_breakpoint = 0;
+        ASSERT_TRUE(emu->try_read_memory(breakpoint_address, &byte_at_breakpoint, 1));
+        EXPECT_EQ(byte_at_breakpoint, 0xB9);
+
+        EXPECT_NO_THROW(emu->start(0));
+        EXPECT_EQ(hit_count, 1);
+        EXPECT_EQ(emu->reg<uint32_t>(x86_register::ecx), 3u);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), code + 10);
+        EXPECT_EQ(*reinterpret_cast<const volatile uint8_t*>(breakpoint_address), 0xCC);
+
+        ASSERT_TRUE(emu->try_read_memory(breakpoint_address, &byte_at_breakpoint, 1));
+        EXPECT_EQ(byte_at_breakpoint, 0xB9);
+
+        emu->delete_hook(hook);
+    }
+
+    TEST(FexBreakpointTest, HookAddedAtStoppedOnBreakpointStillStepsOverIt)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        emu->set_memory_execution_hook_mode(hook_interface::memory_execution_hook_mode::int3);
+
+        memory_manager memory{*emu};
+        constexpr std::array<uint8_t, 11> guest_code = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xB8, 0x02, 0x00, 0x00, 0x00, 0xF4};
+        const uint64_t code = setup_guest_code(*emu, memory, guest_code);
+        ASSERT_NE(code, 0u);
+        stop_on_interrupt(*emu);
+
+        const uint64_t breakpoint_address = code + 5;
+        int hits_a = 0;
+        int hits_b = 0;
+        auto* hook_a = emu->hook_memory_execution(breakpoint_address, [&](cpu_interface& cpu, uint64_t) {
+            ++hits_a;
+            cpu.stop();
+        });
+
+        emu->reg(x86_register::rip, code);
+        emu->start(0);
+        ASSERT_EQ(hits_a, 1);
+        ASSERT_EQ(emu->reg<uint64_t>(x86_register::rip), breakpoint_address);
+
+        auto* hook_b = emu->hook_memory_execution(breakpoint_address, [&](cpu_interface&, uint64_t) { ++hits_b; });
+
+        EXPECT_NO_THROW(emu->start(0));
+        EXPECT_EQ(hits_a, 1);
+        EXPECT_EQ(hits_b, 0);
+        EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 2u);
+        EXPECT_EQ(*reinterpret_cast<const volatile uint8_t*>(breakpoint_address), 0xCC);
+
+        emu->reg(x86_register::rip, code);
+        emu->start(0);
+        EXPECT_EQ(hits_a, 2);
+        EXPECT_EQ(hits_b, 1);
+
+        emu->delete_hook(hook_a);
+        emu->delete_hook(hook_b);
+    }
+
+    TEST(FexBreakpointTest, SingleStepFromPlantedBreakpointFiresItAndExecutesOriginal)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        emu->set_memory_execution_hook_mode(hook_interface::memory_execution_hook_mode::int3);
+
+        memory_manager memory{*emu};
+        constexpr std::array<uint8_t, 11> guest_code = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xB8, 0x02, 0x00, 0x00, 0x00, 0xF4};
+        const uint64_t code = setup_guest_code(*emu, memory, guest_code);
+        ASSERT_NE(code, 0u);
+
+        const uint64_t breakpoint_address = code + 5;
+        bool stop_in_callback = true;
+        int hit_count = 0;
+        auto* hook = emu->hook_memory_execution(breakpoint_address, [&](cpu_interface& cpu, uint64_t) {
+            ++hit_count;
+            if (stop_in_callback)
+            {
+                cpu.stop();
+            }
+        });
+
+        emu->reg(x86_register::rip, breakpoint_address);
+        EXPECT_NO_THROW(emu->start(1));
+        EXPECT_EQ(hit_count, 1);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), breakpoint_address);
+        EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 0u);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rflags) & 0x100, 0u);
+
+        EXPECT_NO_THROW(emu->start(1));
+        EXPECT_EQ(hit_count, 1);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), code + 10);
+        EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 2u);
+        EXPECT_EQ(*reinterpret_cast<const volatile uint8_t*>(breakpoint_address), 0xCC);
+
+        stop_in_callback = false;
+        emu->reg(x86_register::rip, breakpoint_address);
+        emu->reg<uint32_t>(x86_register::eax, 0);
+        EXPECT_NO_THROW(emu->start(1));
+        EXPECT_EQ(hit_count, 2);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), code + 10);
+        EXPECT_EQ(emu->reg<uint32_t>(x86_register::eax), 2u);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rflags) & 0x100, 0u);
+        EXPECT_EQ(*reinterpret_cast<const volatile uint8_t*>(breakpoint_address), 0xCC);
+
+        emu->delete_hook(hook);
+    }
+
+    TEST(FexBreakpointTest, StepOverStoppedByFaultKeepsBreakpointArmed)
+    {
+        const auto emu = try_create_fex_emulator();
+        if (!emu)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+
+        emu->set_memory_execution_hook_mode(hook_interface::memory_execution_hook_mode::int3);
+
+        memory_manager memory{*emu};
+        // mov eax, 1; hlt
+        constexpr std::array<uint8_t, 11> guest_code = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xF4, 0x90, 0x90, 0x90, 0x90, 0x90};
+        const uint64_t code = setup_guest_code(*emu, memory, guest_code);
+        ASSERT_NE(code, 0u);
+
+        int interrupt_count = 0;
+        emu->hook_interrupt([&](cpu_interface& cpu, int) {
+            ++interrupt_count;
+            cpu.stop();
+        });
+
+        const uint64_t breakpoint_address = code + 5;
+        int hit_count = 0;
+        auto* hook = emu->hook_memory_execution(breakpoint_address, [&](cpu_interface& cpu, uint64_t) {
+            ++hit_count;
+            cpu.stop();
+        });
+
+        emu->reg(x86_register::rip, code);
+        emu->start(0);
+        ASSERT_EQ(hit_count, 1);
+
+        emu->start(0);
+        EXPECT_EQ(interrupt_count, 1);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rip), breakpoint_address);
+        EXPECT_EQ(emu->reg<uint64_t>(x86_register::rflags) & 0x100, 0u);
+
+        emu->reg(x86_register::rip, code);
+        emu->start(0);
+        EXPECT_EQ(hit_count, 2);
+        EXPECT_EQ(interrupt_count, 1);
 
         emu->delete_hook(hook);
     }
