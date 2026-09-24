@@ -2722,7 +2722,7 @@ namespace sogen::fex
             bool stop_after_step{};
         };
 
-        bool arm_execution_single_step(const bool stop_after_step)
+        void arm_execution_single_step(const bool stop_after_step)
         {
             if (this->pending_execution_step_)
             {
@@ -2735,7 +2735,6 @@ namespace sogen::fex
             state.stop_after_step = stop_after_step;
             this->pending_execution_step_ = state;
             this->write_rflags(rflags | trap_flag_bit);
-            return true;
         }
 
         pending_execution_step take_pending_execution_step()
@@ -2765,7 +2764,7 @@ namespace sogen::fex
                 this->stop_requested_ = true;
             }
 
-            return true;
+            return !state.had_trap_flag;
         }
 
         void abandon_execution_step()
@@ -2791,6 +2790,16 @@ namespace sogen::fex
             }
 
             this->set_patched_execution_breakpoint_state(address, false);
+            this->deferred_patched_breakpoint_ = address;
+
+            if (this->pending_execution_step_)
+            {
+                const auto vacated = std::exchange(this->pending_execution_step_->patched_breakpoint, std::nullopt);
+                if (vacated && *vacated != address)
+                {
+                    this->set_patched_execution_breakpoint_state(*vacated, true);
+                }
+            }
 
             std::vector<memory_execution_hook_callback> callbacks{};
             for (const auto& [_, hook] : this->memory_execution_hooks_)
@@ -2807,17 +2816,13 @@ namespace sogen::fex
 
             if (this->stop_requested_)
             {
-                this->deferred_patched_breakpoint_ = address;
                 return true;
             }
 
+            this->deferred_patched_breakpoint_.reset();
             if (!this->pending_execution_step_)
             {
                 this->arm_execution_single_step(false);
-            }
-            else if (this->pending_execution_step_->patched_breakpoint)
-            {
-                throw std::runtime_error("Nested FEX execution single-step state is not supported");
             }
             else
             {
@@ -3716,8 +3721,26 @@ namespace sogen::fex
             }
 
             patched_execution_breakpoint breakpoint{.hook_count = 1};
-            this->try_apply_patched_execution_breakpoint(address, breakpoint);
+            if (this->is_stepping_over_patched_breakpoint(address) && this->is_range_mapped(address, 1))
+            {
+                breakpoint.original_byte = *reinterpret_cast<const std::byte*>(address);
+            }
+            else
+            {
+                this->try_apply_patched_execution_breakpoint(address, breakpoint);
+            }
             this->patched_execution_breakpoints_[address] = breakpoint;
+        }
+
+        bool is_stepping_over_patched_breakpoint(const uint64_t address) const
+        {
+#if defined(__APPLE__) || defined(__ANDROID__)
+            return this->deferred_patched_breakpoint_ == address ||
+                   (this->pending_execution_step_ && this->pending_execution_step_->patched_breakpoint == address);
+#else
+            (void)address;
+            return false;
+#endif
         }
 
         void uninstall_patched_execution_breakpoint(const uint64_t address)
