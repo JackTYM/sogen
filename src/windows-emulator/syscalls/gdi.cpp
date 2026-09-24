@@ -4516,10 +4516,11 @@ namespace sogen
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
+                auto info = emulator_object<EMU_D3DDDI_QUERYREGISTRY_INFO>(c.emu, query.pPrivateDriverData).read();
+                const std::u16string value_name(info.ValueName, std::char_traits<char16_t>::length(info.ValueName));
+
                 if (std::getenv("SOGEN_TRACE_DXGK_QUERYREGISTRY"))
                 {
-                    auto info = emulator_object<EMU_D3DDDI_QUERYREGISTRY_INFO>(c.emu, query.pPrivateDriverData).read();
-                    const std::u16string value_name(info.ValueName, std::char_traits<char16_t>::length(info.ValueName));
                     fprintf(stderr,
                             "[dxgk-queryregistry-trace] pid=%u tid=%u QueryType=%u QueryFlags=0x%X ValueName=\"%s\" "
                             "ValueType=%u PhysicalAdapterIndex=%u\n",
@@ -4529,6 +4530,43 @@ namespace sogen
 
                 std::vector<uint8_t> zeros(query.PrivateDriverDataSize, 0);
                 c.emu.write_memory(query.pPrivateDriverData, zeros.data(), zeros.size());
+
+                const auto is_adapterkey_query =
+                    info.QueryType == static_cast<UINT32>(D3DDDI_QUERYREGISTRY_TYPE::D3DDDI_QUERYREGISTRY_ADAPTERKEY);
+                const auto is_dxcore_attributes = value_name == u"DXCoreAttributes" || value_name == u"DXAttributes";
+
+                if (is_adapterkey_query && is_dxcore_attributes)
+                {
+                    std::u16string attributes{};
+                    attributes += u"{B69EB219-3DED-4464-979F-A00BD4687006}"; // DXCORE_HARDWARE_TYPE_ATTRIBUTE_GPU
+                    attributes += char16_t{0};
+                    attributes += u"{8C47866B-7583-450D-F0F0-6BADA895AF4B}"; // DXCORE_ADAPTER_ATTRIBUTE_D3D11_GRAPHICS
+                    attributes += char16_t{0};
+                    attributes += char16_t{0};
+
+                    const auto output_offset = offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, OutputValue);
+                    const auto available_size =
+                        query.PrivateDriverDataSize > output_offset ? query.PrivateDriverDataSize - output_offset : 0;
+                    const auto required_size = static_cast<UINT32>(attributes.size() * sizeof(char16_t));
+
+                    D3DDDI_QUERYREGISTRY_STATUS status{};
+
+                    if (available_size >= required_size)
+                    {
+                        c.emu.write_memory(query.pPrivateDriverData + output_offset, attributes.data(), required_size);
+                        status = D3DDDI_QUERYREGISTRY_STATUS::D3DDDI_QUERYREGISTRY_STATUS_SUCCESS;
+                    }
+                    else
+                    {
+                        status = D3DDDI_QUERYREGISTRY_STATUS::D3DDDI_QUERYREGISTRY_STATUS_BUFFER_OVERFLOW;
+                    }
+
+                    c.emu.write_memory(query.pPrivateDriverData + offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, OutputValueSize), &required_size,
+                                       sizeof(required_size));
+                    c.emu.write_memory(query.pPrivateDriverData + offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, Status), &status, sizeof(status));
+
+                    return STATUS_SUCCESS;
+                }
 
                 constexpr auto fail_status = D3DDDI_QUERYREGISTRY_STATUS::D3DDDI_QUERYREGISTRY_STATUS_FAIL;
                 c.emu.write_memory(query.pPrivateDriverData + offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, Status), &fail_status,
