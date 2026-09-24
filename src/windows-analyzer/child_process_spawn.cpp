@@ -2,6 +2,8 @@
 #include "child_process_spawn.hpp"
 
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #if !defined(_WIN32) && !defined(OS_EMSCRIPTEN)
@@ -293,6 +295,11 @@ namespace sogen
 
             void send(const pipe_ipc_message& message) override
             {
+                if (this->dead_)
+                {
+                    return;
+                }
+
                 utils::buffer_serializer buffer{};
                 buffer.write(static_cast<uint8_t>(message.type));
                 buffer.write(message.pipe_name);
@@ -306,8 +313,11 @@ namespace sogen
 
             std::optional<pipe_ipc_message> try_receive() override
             {
-                this->flush_pending_send();
-                this->fill_recv_buffer();
+                if (!this->dead_)
+                {
+                    this->flush_pending_send();
+                    this->fill_recv_buffer();
+                }
 
                 constexpr size_t header_size = sizeof(uint64_t);
                 if (this->recv_buffer_.size() < header_size)
@@ -353,6 +363,18 @@ namespace sogen
             std::vector<std::byte> pending_send_{};
             std::vector<std::byte> recv_buffer_{};
 
+            // Set once fill_recv_buffer/flush_pending_send observes the peer's end of the socketpair
+            // is gone (EOF or a hard I/O error, as opposed to EAGAIN/EWOULDBLOCK, which just means "no
+            // data/backlog right now"). A dead channel is never removed from pipe_ipc_peers_ (see that
+            // member's own doc comment on the sibling-relay gap this doesn't attempt to close), but
+            // send()/try_receive() short-circuit on it instead of re-issuing read()/write() against an
+            // fd that can only ever report the same EOF/error again - without this, a channel whose
+            // peer process already exited gets polled as fast as the scheduler's own loop runs,
+            // forever, for the remaining lifetime of this process.
+            bool dead_{false};
+            bool send_error_logged_{false};
+            bool recv_eof_or_error_logged_{false};
+
             void flush_pending_send()
             {
                 while (!this->pending_send_.empty())
@@ -374,6 +396,16 @@ namespace sogen
                         return;
                     }
 
+                    if (!this->send_error_logged_ && std::getenv("SOGEN_TRACE_PIPE_RELAY_HEALTH"))
+                    {
+                        this->send_error_logged_ = true;
+                        std::fprintf(stderr,
+                                     "[pipe-relay-health-trace] pid=%d fd=%d flush_pending_send DROPPING %zu queued bytes (first "
+                                     "occurrence for this channel): write() returned %zd errno=%d (%s)\n",
+                                     ::getpid(), this->fd_, this->pending_send_.size(), n, errno, std::strerror(errno));
+                    }
+
+                    this->dead_ = true;
                     this->pending_send_.clear();
                     return;
                 }
@@ -398,6 +430,33 @@ namespace sogen
                     if (n < 0 && errno == EINTR)
                     {
                         continue;
+                    }
+
+                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    {
+                        return;
+                    }
+
+                    this->dead_ = true;
+
+                    if (!this->recv_eof_or_error_logged_ && std::getenv("SOGEN_TRACE_PIPE_RELAY_HEALTH"))
+                    {
+                        if (n == 0)
+                        {
+                            this->recv_eof_or_error_logged_ = true;
+                            std::fprintf(stderr,
+                                         "[pipe-relay-health-trace] pid=%d fd=%d fill_recv_buffer EOF (first occurrence for this "
+                                         "channel) - peer closed its write end, %zu bytes still buffered unparsed\n",
+                                         ::getpid(), this->fd_, this->recv_buffer_.size());
+                        }
+                        else
+                        {
+                            this->recv_eof_or_error_logged_ = true;
+                            std::fprintf(stderr,
+                                         "[pipe-relay-health-trace] pid=%d fd=%d fill_recv_buffer read() error (first occurrence for "
+                                         "this channel) errno=%d (%s)\n",
+                                         ::getpid(), this->fd_, errno, std::strerror(errno));
+                        }
                     }
 
                     return;

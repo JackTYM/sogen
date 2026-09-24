@@ -997,6 +997,12 @@ namespace sogen
 
     void windows_emulator::broadcast_named_pipe_write(const std::u16string_view name, const std::string_view data)
     {
+        if (std::getenv("SOGEN_TRACE_PIPE_RELAY_HEALTH"))
+        {
+            this->log.info("[pipe-relay-health-trace] broadcast_named_pipe_write name='%s' bytes=%zu peers=%zu\n", u16_to_u8(name).c_str(),
+                           data.size(), this->pipe_ipc_peers_.size());
+        }
+
         if (this->pipe_ipc_peers_.empty())
         {
             return;
