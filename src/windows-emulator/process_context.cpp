@@ -86,13 +86,42 @@ namespace sogen
             // ntdll's ApiSet-namespace binary search on any lookup against that base.
             constexpr uint64_t below_4gb_ceiling = 0xFFFFFFFFULL;
             const uint64_t highest_address = is_wow64_process ? below_4gb_ceiling : MAX_ALLOCATION_ADDRESS;
-            uint64_t base = memory.find_free_allocation_base(size, default_allocation_base, ALLOCATION_GRANULARITY, MIN_ALLOCATION_ADDRESS,
-                                                             highest_address);
-            bool allocated = memory.allocate_memory(base, size, memory_permission::read_write);
+
+            // find_free_host_allocation_base (not the plain bookkeeping-only find_free_allocation_base
+            // used above until this fix) confirms the pick is actually free at the host level - matters
+            // on backends sharing the guest address space with the host process (FEX on Apple: guest VA
+            // == host VA), where a host framework can occupy a VA sogen still believes is free. This is
+            // far more likely to fire here than at most other allocation-address picks: a full app
+            // process (iOS's UIKit/Foundation/SwiftUI stack, unlike sogen's own minimal desktop CLI
+            // process) has vastly more pre-existing host mappings that can land in the 4-5GB range this
+            // search starts from. The bounded outer retry additionally covers the narrow TOCTOU window
+            // between that check and the actual commit below, matching the same pattern
+            // module_mapping.cpp's relocation fallback already uses for this exact race class.
+            constexpr int max_host_allocation_retries = 8;
+            uint64_t base = 0;
+            bool allocated = false;
+            for (int attempt = 0; attempt <= max_host_allocation_retries; ++attempt)
+            {
+                base = memory.find_free_host_allocation_base(size, default_allocation_base, highest_address);
+                if (!base)
+                {
+                    break;
+                }
+
+                allocated = memory.allocate_memory(base, size, memory_permission::read_write);
+                if (allocated)
+                {
+                    break;
+                }
+            }
 
             if (!allocated)
             {
-                throw std::runtime_error("Failed to allocate memory for process structure");
+                std::ostringstream stream{};
+                stream << "Failed to allocate memory for process structure (size=0x" << std::hex << size
+                       << ", base=0x" << base << ", default_base=0x" << default_allocation_base << ", highest=0x"
+                       << highest_address << ")";
+                throw std::runtime_error(stream.str());
             }
 
             return emulator_allocator{memory, base, size};
