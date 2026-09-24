@@ -35,6 +35,13 @@ namespace sogen
         {
             fprintf(stderr, "[SCHED_DIAG] pid=%d guest_pid=%u active_thread=%p id=%u\n", ::getpid(), process.process_id,
                     static_cast<void*>(vcpu.active_thread), vcpu.active_thread ? vcpu.active_thread->id : 0);
+            if (vcpu.active_thread)
+            {
+                const auto& pending_call = vcpu.active_thread->pending_guest_call;
+                fprintf(stderr, "[SCHED_DIAG] active_thread pending_guest_call=%d deferred_preemptions=%u sentinel=0x%llx\n",
+                        pending_call.has_value() ? 1 : 0, pending_call.has_value() ? pending_call->deferred_preemptions : 0,
+                        pending_call.has_value() ? static_cast<unsigned long long>(pending_call->sentinel_address) : 0ULL);
+            }
             for (auto& [h, thread] : process.threads)
             {
                 fprintf(stderr,
