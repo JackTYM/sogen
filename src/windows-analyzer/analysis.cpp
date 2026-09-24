@@ -716,6 +716,82 @@ namespace sogen
             return instruction_hook_continuation::run_instruction;
         }
 
+        void handle_event_pump(analysis_context& c)
+        {
+            if (c.click_dialog_rules.empty())
+            {
+                return;
+            }
+
+            auto& proc = c.win_emu->process;
+
+            // Prune entries whose dialog window no longer exists so a later, unrelated dialog
+            // can't silently reuse the destroyed dialog's recycled HWND and get treated as
+            // already clicked.
+            std::erase_if(c.clicked_dialogs, [&](const uint64_t handle) { return proc.windows.get(static_cast<hwnd>(handle)) == nullptr; });
+
+            for (auto& win : proc.windows | std::views::values)
+            {
+                if (!win.is_dialog() || c.clicked_dialogs.contains(win.handle))
+                {
+                    continue;
+                }
+
+                // A dialog whose title matches none of the rules is left alone: it might be a
+                // real, unexpected error rather than one of the known dialogs to auto-dismiss.
+                const auto title = u16_to_u8(win.name);
+                const auto rule = std::ranges::find_if(c.click_dialog_rules,
+                                                       [&](const auto& entry) { return title.find(entry.first) != std::string::npos; });
+                if (rule == c.click_dialog_rules.end())
+                {
+                    continue;
+                }
+
+                const auto wanted = rule->second;
+
+                // The WM_COMMAND below is posted (queued), so the owning thread need not already
+                // be blocked in a message wait - a plain PeekMessage pump will still pick it up;
+                // do not gate this on await_msg/await_msg_mask.
+                const emulator_thread* owner = proc.find_thread_by_id(win.thread_id);
+                if (!owner)
+                {
+                    continue;
+                }
+
+                hwnd child_handle = 0;
+                for (auto& child : proc.windows | std::views::values)
+                {
+                    if (child.parent_handle != win.handle)
+                    {
+                        continue;
+                    }
+
+                    uint32_t control_id = 0;
+                    child.guest.access([&](const USER_WINDOW& gw) { control_id = static_cast<uint32_t>(gw.wID); });
+                    if (control_id == wanted)
+                    {
+                        child_handle = child.handle;
+                        break;
+                    }
+                }
+
+                if (child_handle == 0)
+                {
+                    continue;
+                }
+
+                ui_event event{};
+                event.window = win.handle;
+                event.message = WM_COMMAND;
+                event.wParam = wanted & 0xFFFF;
+                event.lParam = child_handle;
+
+                c.win_emu->handle_ui_event(event);
+                c.clicked_dialogs.insert(win.handle);
+                return;
+            }
+        }
+
         void handle_stdout(analysis_context& c, const std::string_view data)
         {
             c.emit_observation<stdout_chunk_event>([&](auto& event) { event.data = std::string(data); });
@@ -868,6 +944,7 @@ namespace sogen
         cb.on_thread_set_name = make_callback(c, handle_thread_set_name);
 
         cb.on_instruction = make_callback(c, handle_instruction);
+        cb.on_event_pump = make_callback(c, handle_event_pump);
         cb.on_debug_string.add(make_callback(c, handle_debug_string));
         cb.on_generic_access = make_callback(c, handle_generic_access);
         cb.on_generic_activity = make_callback(c, handle_generic_activity);
