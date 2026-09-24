@@ -820,6 +820,8 @@ namespace sogen
                                              uint32_t file_count, uint32_t flags, uint32_t thread_id, emulator_pointer design_vector);
         uint32_t handle_NtGdiGetTextMetricsW(const syscall_context& c, hdc dc, emulator_pointer ptm, uint32_t cj);
         int32_t handle_NtGdiGetTextFaceW(const syscall_context& c, hdc dc, int32_t count, emulator_pointer face_name, BOOL alias_name);
+        NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& c, uint32_t action, uint32_t param, emulator_pointer pv_param,
+                                                   uint32_t win_ini);
         uint32_t handle_NtGdiGetGlyphOutline(const syscall_context& c, hdc dc, UINT character, UINT format, emulator_pointer glyph_metrics,
                                              DWORD buffer_size, emulator_pointer buffer, emulator_pointer mat2);
         uint32_t handle_NtGdiGetOutlineTextMetricsInternalW(const syscall_context& c, hdc dc, uint32_t cj_copy, emulator_pointer metrics,
@@ -1096,11 +1098,6 @@ namespace sogen
         {
             c.win_emu.yield_thread(c.vcpu, true);
             return STATUS_SUCCESS;
-        }
-
-        NTSTATUS handle_NtUserSystemParametersInfo()
-        {
-            return STATUS_NOT_SUPPORTED;
         }
 
         NTSTATUS handle_NtUpdateWnfStateData()

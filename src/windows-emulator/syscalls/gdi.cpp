@@ -3078,6 +3078,52 @@ namespace sogen
             return required;
         }
 
+        NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& c, const uint32_t action, const uint32_t param,
+                                                   const emulator_pointer pv_param, const uint32_t win_ini)
+        {
+            if (std::getenv("SOGEN_DEBUG_SPI"))
+            {
+                c.win_emu.log.error("NtUserSystemParametersInfo: action=0x%x param=0x%x pv_param=0x%llx win_ini=0x%x\n", action, param,
+                                    static_cast<unsigned long long>(pv_param), win_ini);
+            }
+
+            if (action != SPI_GETNONCLIENTMETRICS || pv_param == 0 || param < offsetof(EMU_NONCLIENTMETRICSW, iPaddedBorderWidth))
+            {
+                return STATUS_NOT_SUPPORTED;
+            }
+
+            const auto fill_font = [](EMU_LOGFONTW& font, const LONG height) {
+                font = {};
+                font.lfHeight = height;
+                font.lfWeight = FW_NORMAL;
+                font.lfCharSet = DEFAULT_CHARSET;
+                font.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
+                utils::string::copy(font.lfFaceName, u"Segoe UI");
+            };
+
+            EMU_NONCLIENTMETRICSW metrics{};
+            metrics.cbSize = sizeof(metrics);
+            metrics.iBorderWidth = 1;
+            metrics.iScrollWidth = 17;
+            metrics.iScrollHeight = 17;
+            metrics.iCaptionWidth = 32;
+            metrics.iCaptionHeight = 23;
+            metrics.iSmCaptionWidth = 16;
+            metrics.iSmCaptionHeight = 19;
+            metrics.iMenuWidth = 32;
+            metrics.iMenuHeight = 23;
+            metrics.iPaddedBorderWidth = 0;
+            fill_font(metrics.lfCaptionFont, -12);
+            fill_font(metrics.lfSmCaptionFont, -11);
+            fill_font(metrics.lfMenuFont, -12);
+            fill_font(metrics.lfStatusFont, -12);
+            fill_font(metrics.lfMessageFont, -12);
+
+            const auto write_size = std::min<uint32_t>(param, sizeof(metrics));
+            c.emu.write_memory(pv_param, &metrics, write_size);
+            return STATUS_SUCCESS;
+        }
+
         BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const int32_t char_count,
                                        const emulator_pointer size, const ULONG /*flags*/)
         {

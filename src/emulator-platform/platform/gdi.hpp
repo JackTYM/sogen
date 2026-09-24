@@ -5,26 +5,28 @@
 namespace sogen
 {
 #ifndef OS_WINDOWS
-#define ANSI_CHARSET       0
-#define DEFAULT_CHARSET    1
-#define GREEK_CHARSET      161
-#define TURKISH_CHARSET    162
-#define VIETNAMESE_CHARSET 163
-#define HEBREW_CHARSET     177
-#define ARABIC_CHARSET     178
-#define BALTIC_CHARSET     186
-#define RUSSIAN_CHARSET    204
-#define EASTEUROPE_CHARSET 238
+#define ANSI_CHARSET            0
+#define DEFAULT_CHARSET         1
+#define GREEK_CHARSET           161
+#define TURKISH_CHARSET         162
+#define VIETNAMESE_CHARSET      163
+#define HEBREW_CHARSET          177
+#define ARABIC_CHARSET          178
+#define BALTIC_CHARSET          186
+#define RUSSIAN_CHARSET         204
+#define EASTEUROPE_CHARSET      238
 
-#define DEFAULT_PITCH      0
-#define FF_SWISS           0x20
-#define FW_NORMAL          400
-#define FW_BOLD            700
-#define NTM_ITALIC         0x00000001
-#define NTM_BOLD           0x00000020
-#define NTM_REGULAR        0x00000040
-#define TRUETYPE_FONTTYPE  0x00000004
-#define RDH_RECTANGLES     1
+#define DEFAULT_PITCH           0
+#define FF_SWISS                0x20
+#define FW_NORMAL               400
+#define FW_BOLD                 700
+#define NTM_ITALIC              0x00000001
+#define NTM_BOLD                0x00000020
+#define NTM_REGULAR             0x00000040
+#define TRUETYPE_FONTTYPE       0x00000004
+#define RDH_RECTANGLES          1
+
+#define SPI_GETNONCLIENTMETRICS 0x0029
 
     struct ABC
     {
@@ -72,6 +74,28 @@ namespace sogen
     };
 
     static_assert(sizeof(EMU_ENUMLOGFONTEXW) == 0x15C);
+
+    struct EMU_NONCLIENTMETRICSW
+    {
+        UINT cbSize;
+        int iBorderWidth;
+        int iScrollWidth;
+        int iScrollHeight;
+        int iCaptionWidth;
+        int iCaptionHeight;
+        EMU_LOGFONTW lfCaptionFont;
+        int iSmCaptionWidth;
+        int iSmCaptionHeight;
+        EMU_LOGFONTW lfSmCaptionFont;
+        int iMenuWidth;
+        int iMenuHeight;
+        EMU_LOGFONTW lfMenuFont;
+        EMU_LOGFONTW lfStatusFont;
+        EMU_LOGFONTW lfMessageFont;
+        int iPaddedBorderWidth;
+    };
+
+    static_assert(sizeof(EMU_NONCLIENTMETRICSW) == 0x1F8);
 
     struct EMU_NEWTEXTMETRICW
     {
