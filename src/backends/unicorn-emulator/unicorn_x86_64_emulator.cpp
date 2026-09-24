@@ -778,6 +778,11 @@ namespace sogen::unicorn
                 return true;
             }
 
+            void invalidate_code_cache(const uint64_t address, const size_t size) override
+            {
+                uce(uc_ctl_remove_cache(*this, address, address + size));
+            }
+
             bool supports_instruction_counting() const override
             {
                 return true;

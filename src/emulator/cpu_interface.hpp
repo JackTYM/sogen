@@ -68,6 +68,20 @@ namespace sogen
             return false;
         }
 
+        // Invalidate any translation this backend may have cached for [address, address + size),
+        // after the host has patched guest code memory directly (as opposed to the guest itself
+        // executing a store instruction there). A backend's JIT/TCG translation cache is not
+        // guaranteed to notice a host-initiated write to an address it already translated while
+        // that same translation is still the one about to be resumed into - Unicorn's own
+        // hook_interrupt() callbacks that patch/restore a byte at the very address they are
+        // resuming from (e.g. windows_emulator.cpp's kernelbase.dll entry-point INT3 patch) can
+        // otherwise re-execute the stale cached translation, still containing the just-removed
+        // 0xCC, producing a second spurious trap. Defaults to a no-op (matches every backend
+        // except Unicorn).
+        virtual void invalidate_code_cache(uint64_t /*address*/, size_t /*size*/)
+        {
+        }
+
         // Whether this backend maintains separate, independently-active 32-bit and 64-bit CPU
         // engine contexts for a WoW64 thread ("dual-engine"/gate-crossing backends), as opposed to
         // a single unified CPU state that's already bitness-aware. Only a dual-engine backend can

@@ -1587,6 +1587,8 @@ namespace sogen
             return;
         }
 
+        this->emu().invalidate_code_cache(address, sizeof(int3));
+
         this->process.kernelbase_nls_cache_breakpoint_address = address;
         this->process.kernelbase_nls_cache_breakpoint_original_byte = original;
     }
@@ -1601,6 +1603,8 @@ namespace sogen
         this->emu().try_write_memory(this->process.kernelbase_nls_cache_breakpoint_address,
                                      &this->process.kernelbase_nls_cache_breakpoint_original_byte,
                                      sizeof(this->process.kernelbase_nls_cache_breakpoint_original_byte));
+        this->emu().invalidate_code_cache(this->process.kernelbase_nls_cache_breakpoint_address,
+                                          sizeof(this->process.kernelbase_nls_cache_breakpoint_original_byte));
         this->process.kernelbase_nls_cache_breakpoint_address = 0;
     }
 
