@@ -453,6 +453,53 @@ namespace sogen::test
         this->emu_->delete_hook(breakpoint);
     }
 
+    TEST_F(FexWatchpointTest, BreakpointInstalledBeforeFirstStartOnReadWatchedHostPage)
+    {
+        this->emu_->set_memory_execution_hook_mode(hook_interface::memory_execution_hook_mode::int3);
+        this->enable_page_fault_watches();
+
+        // mov rbx, [rax]; mov [rax], rcx; hlt
+        constexpr std::array<uint8_t, 7> code = {0x48, 0x8B, 0x18, 0x48, 0x89, 0x08, 0xF4};
+        this->load_code(code);
+        this->emu_->write_memory<uint64_t>(this->data(), 0x66);
+
+        std::vector<observed_access> reads{};
+        auto* watch = this->record_reads(this->data(), sizeof(uint64_t), reads);
+
+        const uint64_t breakpoint_address = this->code() + 3;
+        int breakpoint_hits = 0;
+        auto* breakpoint = this->emu_->hook_memory_execution(breakpoint_address, [&](cpu_interface& cpu, uint64_t) {
+            ++breakpoint_hits;
+            cpu.stop();
+        });
+
+        this->emu_->write_memory<uint8_t>(breakpoint_address, 0x48);
+
+        std::array<uint8_t, code.size()> visible{};
+        ASSERT_TRUE(this->emu_->try_read_memory(this->code(), visible.data(), visible.size()));
+        EXPECT_EQ(visible, code);
+
+        this->emu_->reg(x86_register::rax, this->data());
+        this->emu_->reg(x86_register::rcx, 0x88);
+        this->run_code();
+
+        EXPECT_EQ(breakpoint_hits, 1);
+        EXPECT_EQ(this->emu_->reg<uint64_t>(x86_register::rip), breakpoint_address);
+        ASSERT_EQ(reads.size(), 1u);
+        EXPECT_EQ(reads.front().value, 0x66u);
+        EXPECT_EQ(this->emu_->reg<uint64_t>(x86_register::rbx), 0x66u);
+
+        this->emu_->start(0);
+
+        EXPECT_EQ(breakpoint_hits, 1);
+        EXPECT_EQ(this->guest_qword(this->data()), 0x88u);
+        EXPECT_EQ(this->emu_->reg<uint64_t>(x86_register::rip), this->code() + 6);
+        EXPECT_EQ(this->violations_, 0);
+
+        this->emu_->delete_hook(breakpoint);
+        this->emu_->delete_hook(watch);
+    }
+
     TEST_F(FexWatchpointTest, HostSideAccessesBypassWatches)
     {
         this->enable_page_fault_watches();

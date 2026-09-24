@@ -1696,26 +1696,7 @@ namespace sogen::fex
                 return false;
             }
 
-#ifdef __APPLE__
-            const bool lift_watch_restrictions = this->range_has_memory_watch_restriction(address, size, memory_operation::read);
-            if (lift_watch_restrictions)
-            {
-                this->set_memory_watch_restrictions_lifted(address, size, true);
-            }
-#endif
-
-            // memmove, not memcpy: callers (e.g. the PE loader's section copy) can hand this a source
-            // buffer that overlaps the guest destination range - overlapping memcpy is undefined
-            // behaviour. This is a generic guest memory-copy primitive with no non-overlap contract.
-            std::memmove(data, reinterpret_cast<const void*>(address), size);
-
-#ifdef __APPLE__
-            if (lift_watch_restrictions)
-            {
-                this->set_memory_watch_restrictions_lifted(address, size, false);
-            }
-#endif
-
+            this->copy_from_guest_memory(address, data, size);
             this->overlay_patched_breakpoints_on_read(address, data, size);
             return true;
         }
@@ -2462,6 +2443,38 @@ namespace sogen::fex
             }
 
             return true;
+        }
+
+        // Reads guest memory as it really is, patched breakpoint bytes included, for callers that have
+        // already checked the range is mapped.
+        void copy_from_guest_memory(const uint64_t address, void* data, const size_t size) const
+        {
+#ifdef __APPLE__
+            const bool lift_watch_restrictions = this->range_has_memory_watch_restriction(address, size, memory_operation::read);
+            if (lift_watch_restrictions)
+            {
+                this->set_memory_watch_restrictions_lifted(address, size, true);
+            }
+#endif
+
+            // memmove, not memcpy: callers (e.g. the PE loader's section copy) can hand this a source
+            // buffer that overlaps the guest destination range - overlapping memcpy is undefined
+            // behaviour. This is a generic guest memory-copy primitive with no non-overlap contract.
+            std::memmove(data, reinterpret_cast<const void*>(address), size);
+
+#ifdef __APPLE__
+            if (lift_watch_restrictions)
+            {
+                this->set_memory_watch_restrictions_lifted(address, size, false);
+            }
+#endif
+        }
+
+        std::byte read_guest_byte(const uint64_t address) const
+        {
+            std::byte value{};
+            this->copy_from_guest_memory(address, &value, sizeof(value));
+            return value;
         }
 
         bool needs_temporary_write_access(const uint64_t address, const size_t size) const
@@ -4227,7 +4240,7 @@ namespace sogen::fex
                 return;
             }
 
-            const auto current = *reinterpret_cast<const std::byte*>(address);
+            const auto current = this->read_guest_byte(address);
             if (breakpoint.applied && current == std::byte{0xCC})
             {
                 return;
@@ -4254,7 +4267,7 @@ namespace sogen::fex
             patched_execution_breakpoint breakpoint{.hook_count = 1};
             if (this->is_stepping_over_patched_breakpoint(address) && this->is_range_mapped(address, 1))
             {
-                breakpoint.original_byte = *reinterpret_cast<const std::byte*>(address);
+                breakpoint.original_byte = this->read_guest_byte(address);
             }
             else
             {
@@ -4366,7 +4379,7 @@ namespace sogen::fex
                     continue;
                 }
                 const bool suspended = breakpoint.suspended();
-                breakpoint.original_byte = *reinterpret_cast<const std::byte*>(bp_address);
+                breakpoint.original_byte = this->read_guest_byte(bp_address);
                 if (!suspended)
                 {
                     this->write_breakpoint_byte(bp_address, std::byte{0xCC});
