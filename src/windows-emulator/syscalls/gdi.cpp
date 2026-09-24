@@ -2573,6 +2573,7 @@ namespace sogen
 
             c.proc.gdi_dc_states.erase(handle_value);
             c.proc.gdi_bitmap_surfaces.erase(handle_value);
+            c.proc.gdi_font_descriptors.erase(handle_value);
             return 1;
         }
 
@@ -2710,9 +2711,24 @@ namespace sogen
             return TRUE;
         }
 
-        uint64_t handle_NtGdiHfontCreate(const syscall_context& c, const emulator_pointer /*logfont*/, const uint32_t /*angle*/)
+        uint64_t handle_NtGdiHfontCreate(const syscall_context& c, const emulator_pointer logfont, const uint32_t /*angle*/)
         {
-            return allocate_gdi_object(c, k_gdi_font_type, k_gdi_font_attr_size);
+            const auto handle_value = allocate_gdi_object(c, k_gdi_font_type, k_gdi_font_attr_size);
+            if (handle_value == 0)
+            {
+                return 0;
+            }
+
+            if (logfont != 0)
+            {
+                std::vector<uint8_t> logfont_bytes(k_logfontw_size);
+                if (c.emu.try_read_memory(logfont, logfont_bytes.data(), logfont_bytes.size()))
+                {
+                    c.proc.gdi_font_descriptors[handle_value].logfont_bytes = std::move(logfont_bytes);
+                }
+            }
+
+            return handle_value;
         }
 
         uint32_t handle_NtGdiExtGetObjectW(const syscall_context& c, const uint32_t handle_value, const uint32_t size,
@@ -2763,6 +2779,14 @@ namespace sogen
                     bitmap.as<uint16_t>(16).set(1);
                     bitmap.as<uint16_t>(18).set(bpp);
                     bitmap.as<uint32_t>(20).set(static_cast<uint32_t>(surface.guest_bits));
+                }
+            }
+            else if (entry.Type == k_gdi_font_type)
+            {
+                const auto font_it = c.proc.gdi_font_descriptors.find(handle_value);
+                if (font_it != c.proc.gdi_font_descriptors.end() && font_it->second.logfont_bytes.size() == object_data.size())
+                {
+                    object_data = font_it->second.logfont_bytes;
                 }
             }
 

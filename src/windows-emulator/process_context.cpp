@@ -673,6 +673,7 @@ namespace sogen
         this->gdi_dc_states.clear();
         this->gdi_dc_save_states.clear();
         this->gdi_bitmap_surfaces.clear();
+        this->gdi_font_descriptors.clear();
         this->gdi_window_surfaces.clear();
         this->dxgk = {};
         this->etw_notification_events.clear();
@@ -837,6 +838,7 @@ namespace sogen
         buffer.write_map(this->gdi_dc_states);
         buffer.write_map(this->gdi_dc_save_states);
         buffer.write_map(this->gdi_bitmap_surfaces);
+        buffer.write_map(this->gdi_font_descriptors);
         buffer.write_map(this->gdi_window_surfaces);
         buffer.write(this->dxgk);
         buffer.write_vector(this->etw_notification_events);
@@ -941,6 +943,7 @@ namespace sogen
         buffer.read_map(this->gdi_dc_states);
         buffer.read_map(this->gdi_dc_save_states);
         buffer.read_map(this->gdi_bitmap_surfaces);
+        buffer.read_map(this->gdi_font_descriptors);
         buffer.read_map(this->gdi_window_surfaces);
         buffer.read(this->dxgk);
         buffer.read_vector(this->etw_notification_events);

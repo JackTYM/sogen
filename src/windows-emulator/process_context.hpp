@@ -157,6 +157,21 @@ namespace sogen
         }
     };
 
+    struct gdi_font_descriptor
+    {
+        std::vector<uint8_t> logfont_bytes{};
+
+        void serialize(utils::buffer_serializer& buffer) const
+        {
+            buffer.write_vector(this->logfont_bytes);
+        }
+
+        void deserialize(utils::buffer_deserializer& buffer)
+        {
+            buffer.read_vector(this->logfont_bytes);
+        }
+    };
+
     struct gdi_dc_state
     {
         uint32_t selected_bitmap{};
@@ -625,6 +640,7 @@ namespace sogen
         // Per-DC stack of states pushed by NtGdiSaveDC and popped by NtGdiRestoreDC.
         std::map<uint32_t, std::vector<gdi_dc_state>> gdi_dc_save_states{};
         std::map<uint32_t, gdi_bitmap_surface> gdi_bitmap_surfaces{};
+        std::map<uint32_t, gdi_font_descriptor> gdi_font_descriptors{};
         // Persistent per-top-level-window paint surface; child controls composite into it at their offset.
         std::map<uint32_t, gdi_bitmap_surface> gdi_window_surfaces{};
         dxgk_state dxgk{};
