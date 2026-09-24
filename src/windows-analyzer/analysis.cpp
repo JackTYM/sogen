@@ -73,6 +73,18 @@ namespace sogen
             {"ipcz::DriverTransport::Close", 0x522b690},
         }};
 
+        // `Channel::TryDispatchMessage` has no symbol of its own in msedge.dll's public PDB (#473) -
+        // it is fully inlined into `Channel::OnReadComplete` (RVA 0x589b60). Statically disassembled
+        // this session (capstone/pefile against the real msedge.dll 150.0.4078.105) confirms the
+        // inlined header decode reads the raw message bytes directly through a pointer in r15 (no
+        // `base::span` ever gets materialized as a call argument, since there's no call): at RVA
+        // 0x589c89, r15 already points at the start of the next unparsed ipcz message, unconditionally,
+        // on every iteration of the dispatch loop, before any of the header fields have been read or
+        // branched on - see project_solidworks_bringup.md #474. The header layout confirmed by that
+        // disassembly is `{ uint16_t size; uint16_t num_handles; uint32_t num_bytes; }` at offsets
+        // 0/2/4 from r15.
+        constexpr uint64_t IPCZ_TRY_DISPATCH_MESSAGE_HEADER_RVA = 0x589c89;
+
         // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
         // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270, #272, #277).
         constexpr std::array<traced_symbol, 16> NODE_CONNECT_TARGETS{{
@@ -3123,6 +3135,37 @@ namespace sogen
                                            caller_mod_name, static_cast<unsigned long long>(caller_offset));
                     });
                 }
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_IPCZ_MESSAGE_HEADER_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + IPCZ_TRY_DISPATCH_MESSAGE_HEADER_RVA;
+
+                win_emu->log.error("[ipcz-message-header-hook-trace] watching Channel::OnReadComplete's inlined "
+                                   "TryDispatchMessage header decode at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto header_ptr = emu.reg<uint64_t>(x86_register::r15);
+                    const auto available_bytes = emu.reg<uint64_t>(x86_register::rsi);
+                    const auto channel_this = emu.reg<uint64_t>(x86_register::r10);
+
+                    struct
+                    {
+                        uint16_t size;
+                        uint16_t num_handles;
+                        uint32_t num_bytes;
+                    } header{};
+                    emu.try_read_memory(header_ptr, &header, sizeof(header));
+
+                    win_emu->log.error("[ipcz-message-header-hook-trace] hit at 0x%llx, channel=0x%llx header_ptr=0x%llx "
+                                       "available=0x%llx size=0x%x num_handles=0x%x num_bytes=0x%x\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(channel_this),
+                                       static_cast<unsigned long long>(header_ptr), static_cast<unsigned long long>(available_bytes),
+                                       header.size, header.num_handles, header.num_bytes);
+                });
             }
         }
 
