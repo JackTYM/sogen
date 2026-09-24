@@ -1364,6 +1364,11 @@ namespace sogen::fex
             // pending_fault_dispatch_) rather than genuinely stopping - dispatch it in normal call
             // context, where that is safe, then resume by calling ExecuteThread again; it always
             // restarts from CurrentFrame->State.rip, which the hook is free to have redirected.
+            // Bounds the raced-unwind retry below: a real gate-crossing round-trip only ever needs a
+            // handful of re-arms to settle, so this is generous headroom, not a tight budget - see the
+            // retry's own comment for why an unbounded loop is unsafe here.
+            constexpr uint32_t max_consecutive_raced_unwinds = 64;
+            uint32_t consecutive_raced_unwinds = 0;
             for (;;)
             {
                 this->active_context()->ExecuteThread(this->active_thread());
@@ -1398,6 +1403,31 @@ namespace sogen::fex
                 // no-op.
                 ::mprotect(this->active_thread()->InterruptFaultPage, sizeof(this->active_thread()->InterruptFaultPage),
                            PROT_READ | PROT_WRITE);
+
+                // A rapid gate-crossing round-trip (e.g. a WoW64 syscall thunk bouncing straight back)
+                // can flip active_thread_ again before this quantum ever gets a real instruction
+                // executed on the engine just re-armed above: each side's own first block-entry check
+                // then faults on the *other* side's still-PROT_NONE page in turn, live-verified as an
+                // unbounded alternation between both engines' InterruptFaultPage that never resolves on
+                // its own. Re-arming only the currently-active engine can never break that cycle, since
+                // by the time this line runs, active_thread() may already have flipped past the engine
+                // that actually faulted. Re-arm the inactive engine's page too, matching the "already
+                // writable is a no-op" tolerance the comment above already relies on for the active
+                // side, and cap the number of consecutive unresolved unwinds so a case this doesn't
+                // fully cover fails as a real stop instead of hanging forever.
+                if (this->is_wow64_process_ && this->thread32_ != nullptr)
+                {
+                    auto* const inactive = this->active_thread() == this->thread32_ ? this->thread_ : this->thread32_;
+                    ::mprotect(inactive->InterruptFaultPage, sizeof(inactive->InterruptFaultPage), PROT_READ | PROT_WRITE);
+                }
+
+                // Only the interrupt-page-unwind case is the unresolved-livelock risk this guards
+                // against; a real deferred-hook dispatch is unrelated forward progress and resets it.
+                consecutive_raced_unwinds = interrupt_page_unwind ? consecutive_raced_unwinds + 1 : 0;
+                if (consecutive_raced_unwinds > max_consecutive_raced_unwinds)
+                {
+                    break;
+                }
             }
 #else
             this->active_context()->ExecuteThread(this->active_thread());
@@ -1573,6 +1603,20 @@ namespace sogen::fex
                 std::memcpy(data.data() + kWow64SnapshotHeader, &this->thread_->CurrentFrame->State, sizeof(FEXCore::Core::CPUState));
                 std::memcpy(data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState), &this->thread32_->CurrentFrame->State,
                             sizeof(FEXCore::Core::CPUState));
+
+                // Both engines are single, shared instances multiplexed across every logical thread (see
+                // this function's own doc comment above): this snapshot's RIP in each engine is about to
+                // become a parked frame that outlives the buffer swap FEXCore's own CurrentCodeBuffer
+                // bookkeeping does for whichever *other* logical thread runs next on that engine.
+                // RetainCodeBufferAt takes a *host* CodeBuffer address, not a guest RIP - resolve each
+                // engine's current guest RIP through FindHostAddressForGuestRIP first. It keeps the
+                // buffer each RIP currently lives in alive until the matching restore_state_into (see
+                // its own comment) releases it on resume. Refcounted and a no-op if the address isn't
+                // in any known buffer, so this is safe even before the first real JIT compile.
+                this->context_->RetainCodeBufferAt(
+                    this->context_->FindHostAddressForGuestRIP(this->thread_, this->thread_->CurrentFrame->State.rip));
+                this->context32_->RetainCodeBufferAt(
+                    this->context32_->FindHostAddressForGuestRIP(this->thread32_, this->thread32_->CurrentFrame->State.rip));
                 return data;
             }
 
@@ -1580,6 +1624,14 @@ namespace sogen::fex
             const auto& state = this->cpu_state();
             std::vector<std::byte> data(sizeof(FEXCore::Core::CPUState));
             std::memcpy(data.data(), &state, sizeof(state));
+
+            // See the wow64 branch above for why this retain exists. No real thread yet means state is
+            // staged_state_, not a live engine's frame - nothing to retain.
+            if (this->active_thread() != nullptr)
+            {
+                this->active_context()->RetainCodeBufferAt(
+                    this->active_context()->FindHostAddressForGuestRIP(this->active_thread(), state.rip));
+            }
             return data;
         }
 
@@ -1595,6 +1647,19 @@ namespace sogen::fex
             std::memcpy(&state, src, sizeof(FEXCore::Core::CPUState));
             state.L1Pointer = l1_pointer;
             state.L1Mask = l1_mask;
+
+            // Mirrors save_registers' RetainCodeBufferAt on this same RIP when this logical thread was
+            // last parked (see that function's comment) - this engine is live again now, so the buffer
+            // is naturally protected by FEXCore's own CurrentCodeBuffer bookkeeping going forward, until
+            // it's parked again (which re-retains whatever RIP it has at that later point). Refcounted
+            // and a no-op if there's no outstanding retain on this address, so this is also safe the
+            // first time a snapshot that was never actually retained (e.g. one seeded from
+            // staged_state_/deserialize rather than a live save_registers) gets restored here.
+            // ReleaseCodeBufferAt takes a *host* address too - resolve state.rip the same way
+            // save_registers' matching retain did.
+            auto* const release_context = (thread == this->thread32_ ? this->context32_.get() : this->context_.get());
+            release_context->ReleaseCodeBufferAt(release_context->FindHostAddressForGuestRIP(thread, state.rip));
+
             this->ensure_callret_buffer(thread, state);
             thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
 
@@ -1633,8 +1698,18 @@ namespace sogen::fex
                 }
                 uint64_t active_is_32 = 0;
                 std::memcpy(&active_is_32, register_data.data(), sizeof(active_is_32));
-                this->restore_state_into(this->thread_, register_data.data() + kWow64SnapshotHeader);
-                this->restore_state_into(this->thread32_, register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
+
+                // Order matters here. active_context_/active_thread_ are read from another host
+                // thread at essentially any time (see their own doc comment on the request_thread_stop
+                // cross-thread path) - if they were updated only after both restore_state_into calls
+                // below, there would be a window where they still name the *previous* occupant's
+                // engine while that engine's CurrentFrame->State has already been overwritten with
+                // this restore's data, so a reader in that window would pair a stale identity with
+                // fresh state. Updating them first means a reader during the restore sees the engine
+                // that's about to become active, paired with that engine's own state - briefly stale
+                // (not yet overwritten) rather than mismatched, which restore_state_into's caller
+                // already tolerates elsewhere (this whole function only ever runs with kernel_lock_
+                // held, so no logic here depends on active_thread()/active_context() mid-restore).
                 if (active_is_32)
                 {
                     this->active_context_.store(this->context32_.get(), std::memory_order_release);
@@ -1645,6 +1720,9 @@ namespace sogen::fex
                     this->active_context_.store(this->context_.get(), std::memory_order_release);
                     this->active_thread_.store(this->thread_, std::memory_order_release);
                 }
+
+                this->restore_state_into(this->thread_, register_data.data() + kWow64SnapshotHeader);
+                this->restore_state_into(this->thread32_, register_data.data() + kWow64SnapshotHeader + sizeof(FEXCore::Core::CPUState));
                 return;
             }
 
@@ -4302,10 +4380,35 @@ namespace sogen::fex
             // suspend-time ReconstructThreadState and the InterruptFaultPage cooperative-stop path use);
             // the host PC is squarely inside a compiled block here, so this resolves accurately. Guard on
             // a non-zero result so a failed reconstruction never zeroes a usable stale rip.
-            auto* const thread = this->active_thread();
-            if (const uint64_t recon_rip = this->active_context()->RestoreRIPFromHostPC(thread, pc))
+            //
+            // active_thread()/active_context() are not necessarily who actually faulted: a gate crossing
+            // can flip which engine is "active" while this thread is still finishing host-side work for
+            // the engine it just left (see handle_fault_signal's own InterruptFaultPage check, which hits
+            // the identical mismatch). Reconstructing against the wrong context here doesn't fail safely
+            // like a bad address lookup would - RestoreRIPFromHostPC silently returns a garbage or zero
+            // rip for a pc that isn't in that context's own code buffers, and that garbage rip then gets
+            // written into CurrentFrame->State and later resumed into. Pick whichever engine's
+            // IsAddressInCodeBuffer actually recognizes pc, not just whichever the rest of the emulator
+            // currently considers active.
+            auto* thread = this->active_thread();
+            auto* context = this->active_context();
+            if (this->is_wow64_process_ && this->thread32_ != nullptr && context &&
+                !context->IsAddressInCodeBuffer(thread, pc))
             {
-                thread->CurrentFrame->State.rip = recon_rip;
+                auto* const other_thread = thread == this->thread32_ ? this->thread_ : this->thread32_;
+                auto* const other_context = other_thread == this->thread32_ ? this->context32_.get() : this->context_.get();
+                if (other_context && other_context->IsAddressInCodeBuffer(other_thread, pc))
+                {
+                    thread = other_thread;
+                    context = other_context;
+                }
+            }
+            if (context != nullptr)
+            {
+                if (const uint64_t recon_rip = context->RestoreRIPFromHostPC(thread, pc))
+                {
+                    thread->CurrentFrame->State.rip = recon_rip;
+                }
             }
 
             pending_fault_dispatch dispatch{};
@@ -4346,16 +4449,39 @@ namespace sogen::fex
                 // whatever the resulting nonsense exception dispatch touches downstream. Checking this
                 // first, before any signal/si_code-specific branch, means every InterruptFaultPage
                 // fault is caught here regardless of how Darwin classifies it.
-                auto* const faulting_thread = this->active_thread();
+                // Which thread actually faulted is not necessarily active_thread(): host-side work still
+                // in flight for the engine a gate crossing just deactivated (e.g. CompileBlock finishing
+                // a compile it started before the crossing) can still touch that engine's own
+                // InterruptFaultPage after active_thread_ has already moved on to the other one. Check
+                // whichever engine's range the fault address actually falls in, not just whichever the
+                // rest of the emulator currently considers "active".
+                auto* faulting_thread = this->active_thread();
+                auto* context = this->active_context();
 #ifdef __ANDROID__
-                const auto interrupt_page_addr = get_untagged_pointer_address(faulting_thread->InterruptFaultPage);
+                auto interrupt_page_addr = get_untagged_pointer_address(faulting_thread->InterruptFaultPage);
 #else
-                const auto interrupt_page_addr = reinterpret_cast<uint64_t>(faulting_thread->InterruptFaultPage);
+                auto interrupt_page_addr = reinterpret_cast<uint64_t>(faulting_thread->InterruptFaultPage);
 #endif
+                if (this->is_wow64_process_ && this->thread32_ != nullptr &&
+                    !(fault_addr >= interrupt_page_addr && fault_addr < interrupt_page_addr + sizeof(faulting_thread->InterruptFaultPage)))
+                {
+                    auto* const other_thread = faulting_thread == this->thread32_ ? this->thread_ : this->thread32_;
+#ifdef __ANDROID__
+                    const auto other_page_addr = get_untagged_pointer_address(other_thread->InterruptFaultPage);
+#else
+                    const auto other_page_addr = reinterpret_cast<uint64_t>(other_thread->InterruptFaultPage);
+#endif
+                    if (fault_addr >= other_page_addr && fault_addr < other_page_addr + sizeof(other_thread->InterruptFaultPage))
+                    {
+                        faulting_thread = other_thread;
+                        context = (other_thread == this->thread32_) ? this->context32_.get() : this->context_.get();
+                        interrupt_page_addr = other_page_addr;
+                    }
+                }
+
                 if (fault_addr >= interrupt_page_addr && fault_addr < interrupt_page_addr + sizeof(faulting_thread->InterruptFaultPage))
                 {
                     const auto fault_pc = get_host_pc(uctx);
-                    auto* const context = this->active_context();
                     const bool is_dispatch_code = context && context->IsAddressInCodeBuffer(faulting_thread, fault_pc);
 
                     // ExitFunctionLinkerAddress's OWN epilogue (EmitSignalGuardedRegion's closing
