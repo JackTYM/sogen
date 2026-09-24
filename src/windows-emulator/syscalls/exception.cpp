@@ -8,7 +8,7 @@ namespace sogen
     namespace syscalls
     {
         NTSTATUS handle_NtRaiseHardError(const syscall_context& c, const NTSTATUS error_status, const ULONG number_of_parameters,
-                                         const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*unicode_string_parameter_mask*/,
+                                         const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> unicode_string_parameter_mask,
                                          const uint64_t parameters, const HARDERROR_RESPONSE_OPTION /*valid_response_option*/,
                                          const emulator_object<HARDERROR_RESPONSE> response)
         {
@@ -17,17 +17,28 @@ namespace sogen
                 response.try_write(ResponseAbort);
             }
 
-            if (error_status & STATUS_SERVICE_NOTIFICATION && number_of_parameters >= 3)
+            if (number_of_parameters > 0)
             {
-                std::array<uint64_t, 3> params = {0, 0, 0};
+                std::array<uint64_t, 5> params{};
+                const auto mask = unicode_string_parameter_mask.value();
 
                 try
                 {
-                    if (c.emu.try_read_memory(parameters, &params, sizeof(params)))
+                    if (c.emu.try_read_memory(parameters, params.data(), number_of_parameters * sizeof(uint64_t)))
                     {
-                        const auto message =
-                            read_unicode_string(c.emu, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, params[0]});
-                        c.win_emu.log.error("Error Message: %s\n", u16_to_u8(message).c_str());
+                        for (ULONG i = 0; i < number_of_parameters; ++i)
+                        {
+                            if (mask & (1u << i))
+                            {
+                                const auto message = read_unicode_string(
+                                    c.emu, emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>>{c.emu, params[i]});
+                                c.win_emu.log.error("Hard error parameter %u: %s\n", i, u16_to_u8(message).c_str());
+                            }
+                            else
+                            {
+                                c.win_emu.log.error("Hard error parameter %u: 0x%" PRIx64 "\n", i, params[i]);
+                            }
+                        }
                     }
                 }
                 catch (...)
