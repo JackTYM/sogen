@@ -254,6 +254,61 @@ namespace sogen::test
         this->emu_->delete_hook(read_hook);
     }
 
+    TEST_F(FexWatchpointTest, WatchedReadAfterUnwatchedReadInOneInstructionFires)
+    {
+        this->enable_page_fault_watches();
+
+        // cmpsq; hlt
+        constexpr std::array<uint8_t, 3> code = {0x48, 0xA7, 0xF4};
+        this->load_code(code);
+
+        const uint64_t first = this->data();
+        const uint64_t second = this->data() + 0x100;
+        this->emu_->write_memory<uint64_t>(first, 0x11);
+        this->emu_->write_memory<uint64_t>(second, 0x22);
+
+        for (const auto watched : {first, second})
+        {
+            std::vector<observed_access> reads{};
+            auto* hook = this->record_reads(watched, sizeof(uint64_t), reads);
+
+            this->emu_->reg(x86_register::rsi, first);
+            this->emu_->reg(x86_register::rdi, second);
+            this->run_code();
+
+            ASSERT_EQ(reads.size(), 1u) << "watched 0x" << std::hex << watched;
+            EXPECT_EQ(reads.front().address, watched);
+            EXPECT_EQ(reads.front().value, watched == first ? 0x11u : 0x22u);
+            EXPECT_EQ(this->emu_->reg<uint64_t>(x86_register::rsi), first + 8);
+            EXPECT_EQ(this->emu_->reg<uint64_t>(x86_register::rdi), second + 8);
+
+            this->emu_->delete_hook(hook);
+        }
+
+        EXPECT_EQ(this->violations_, 0);
+    }
+
+    TEST_F(FexWatchpointTest, WatchedTailOfSplitX87LoadFires)
+    {
+        this->enable_page_fault_watches();
+
+        // fld tword [rax]; hlt
+        constexpr std::array<uint8_t, 3> code = {0xDB, 0x28, 0xF4};
+        this->load_code(code);
+
+        std::vector<observed_access> reads{};
+        auto* hook = this->record_reads(this->data() + 8, 2, reads);
+
+        this->emu_->reg(x86_register::rax, this->data());
+        this->run_code();
+
+        EXPECT_EQ(reads.size(), 1u);
+        EXPECT_EQ(this->emu_->reg<uint64_t>(x86_register::rip), this->code() + 2);
+        EXPECT_EQ(this->violations_, 0);
+
+        this->emu_->delete_hook(hook);
+    }
+
     TEST_F(FexWatchpointTest, OverlappingWatchesAreRefcountedUntilLastDeletion)
     {
         this->enable_page_fault_watches();

@@ -322,7 +322,7 @@ namespace sogen::fex
             uint32_t size = 0; // bytes: 1, 2, 4, 8, 16
             bool sign_extend = false;
             bool dest_is_64bit = false;
-            bool is_vector = false; // true: rt names a SIMD&FP register (Qt), not a GPR
+            bool is_vector = false; // true: rt names a SIMD&FP register, not a GPR
             uint32_t rt = 0;
         };
 
@@ -376,6 +376,10 @@ namespace sogen::fex
                 {0xB8400000U, 4, false, false},        // LDUR Wt
                 {0xB8800000U, 4, true, true},          // LDURSW
                 {0xF8400000U, 8, false, true},         // LDUR Xt
+                {0x3C400000U, 1, false, false, true},  // LDUR Bt
+                {0x7C400000U, 2, false, false, true},  // LDUR Ht
+                {0xBC400000U, 4, false, false, true},  // LDUR St
+                {0xFC400000U, 8, false, false, true},  // LDUR Dt
                 {0x3CC00000U, 16, false, false, true}, // LDUR Qt
 
                 {0x19400000U, 1, false, false}, // LDAPURB
@@ -405,10 +409,13 @@ namespace sogen::fex
                 {0xC8DFFC00U, 8, false, true},  // LDAR Xt
             };
 
-            // "Load SIMD&FP register (unsigned immediate), 128-bit" - shares unsigned_imm_loads' mask/
-            // position (V=1, size=00, opc=11 is the reserved combination meaning a 128-bit Q register
-            // rather than a scalar B/H/S/D FP register). FEX uses this for a wide (16-byte) guest read.
+            // "Load SIMD&FP register (unsigned immediate)" - shares unsigned_imm_loads' mask/position (V=1;
+            // size=00 with opc=11 is the 128-bit Q register). FEX uses these for x87 and SSE memory operands.
             static constexpr encoding vector_loads[] = {
+                {0x3D400000U, 1, false, false, true},  // LDR Bt
+                {0x7D400000U, 2, false, false, true},  // LDR Ht
+                {0xBD400000U, 4, false, false, true},  // LDR St
+                {0xFD400000U, 8, false, false, true},  // LDR Dt
                 {0x3DC00000U, 16, false, false, true}, // LDR Qt
             };
 
@@ -1764,6 +1771,14 @@ namespace sogen::fex
         // Applies to hooks registered afterwards; hooks registered before keep their mode.
         void set_memory_watch_hook_mode(const memory_watch_hook_mode mode) override
         {
+            // Watch grants are process-wide host page protections, while the single step that revokes them is
+            // per execution stream. Multiple vCPUs would need per-vCPU step state and locked shared watch and
+            // breakpoint tables (as WHP's partition_mutex_ guards), or one vCPU's grant would hide another's
+            // accesses.
+            if (mode == memory_watch_hook_mode::page_fault && this->vcpu_count() > 1)
+            {
+                throw std::runtime_error("FEX page-fault memory watch hooks require a single vCPU");
+            }
             this->memory_watch_hook_mode_ = mode;
         }
 #endif
@@ -3133,6 +3148,14 @@ namespace sogen::fex
 
         // Unlike Unicorn, which reports mid-instruction, callbacks run once the accessing instruction has
         // retired, like an x86 data breakpoint trap, so the instruction pointer is already past it.
+        bool overlaps_memory_watch(const uint64_t address, const size_t size, const memory_operation operation) const
+        {
+            return std::ranges::any_of(this->memory_watches_, [&](const auto& entry) {
+                const auto& watch = entry.second;
+                return watch.operation == operation && address < watch.end && watch.address < address + size;
+            });
+        }
+
         void dispatch_memory_watch_callbacks(const std::vector<watch_access>& accesses)
         {
             for (const auto& access : accesses)
@@ -3163,9 +3186,12 @@ namespace sogen::fex
             }
         }
 
-        // A write grant includes read because no write-only host protection exists. A further fault during
-        // the same step (another page, or the other operation) only widens the grants, so the step always
-        // makes progress.
+        // The grant covers the whole host page for the rest of the instruction, so once an instruction has
+        // been granted a page, its later accesses to that page no longer trap: a watched access that follows
+        // an unwatched store (or an unwatched load that emulate_restricted_load cannot decode) on the same
+        // host page within one instruction is silently missed, e.g. a partial xsave/fstp tword. A write grant
+        // includes read because no write-only host protection exists. A further fault during the same step
+        // (another page, or the other operation) only widens the grants, so the step always makes progress.
         void handle_memory_watch_fault(const pending_fault_dispatch& dispatch)
         {
             if (this->pending_execution_step_)
@@ -3441,7 +3467,7 @@ namespace sogen::fex
                 }
 
                 __uint128_t value{};
-                std::memcpy(&value, data, sizeof(value));
+                std::memcpy(&value, data, decoded.size);
                 fprs[decoded.rt] = value;
                 set_host_pc(uctx, pc + 4);
                 return true;
@@ -3536,13 +3562,14 @@ namespace sogen::fex
         }
 
 #ifdef __APPLE__
-        // FEXCore's frontend decodes guest code straight from guest memory, so a watched host page that also
-        // holds code faults inside the translator, which is not a guest access. The load is performed on its
-        // behalf rather than lifting the restriction: under TF the dispatcher recompiles, and so re-decodes, on
-        // every entry, yet the stepped instruction's own accesses to the page must still trap. Darwin reports a
-        // page-straddling access at the page boundary, so only a single byte is known to start there.
-        bool emulate_internal_watched_load(ucontext_t* uctx, const uint64_t host_page, const memory_permission declared,
-                                           const uint64_t fault_addr)
+        // Performs a load from a restricted host page without granting the page, so later accesses to it
+        // keep trapping. Used for FEXCore's frontend, which decodes guest code straight from guest memory (under
+        // TF the dispatcher re-decodes on every entry, yet the stepped instruction's own accesses must still
+        // trap), and for guest loads outside every read watch, since granting the page for the rest of the
+        // instruction would hide a later watched access on it (cmps, fld tword split into two loads). Darwin
+        // reports a page-straddling access at the page boundary, so only a single byte is known to start there.
+        bool emulate_restricted_load(ucontext_t* uctx, const uint64_t host_page, const memory_permission declared,
+                                     const uint64_t fault_addr, const bool only_if_unwatched)
         {
             const uint64_t pc = get_host_pc(uctx);
             const auto insn = *reinterpret_cast<const uint32_t*>(pc);
@@ -3560,7 +3587,8 @@ namespace sogen::fex
                 load = indexed->load;
             }
 
-            if (!load || (fault_addr == host_page && load->size != 1) || fault_addr + load->size > host_page + host_page_size_apple)
+            if (!load || (fault_addr == host_page && load->size != 1) || fault_addr + load->size > host_page + host_page_size_apple ||
+                (only_if_unwatched && this->overlaps_memory_watch(fault_addr, load->size, memory_operation::read)))
             {
                 return false;
             }
@@ -3601,7 +3629,8 @@ namespace sogen::fex
 
             if (!this->context_->IsAddressInCodeBuffer(this->thread_, pc))
             {
-                if (operation == memory_operation::read && this->emulate_internal_watched_load(uctx, host_page, *declared, fault_addr))
+                if (operation == memory_operation::read &&
+                    this->emulate_restricted_load(uctx, host_page, *declared, fault_addr, /*only_if_unwatched=*/false))
                 {
                     return true;
                 }
@@ -3614,6 +3643,12 @@ namespace sogen::fex
                 {
                     this->request_thread_stop();
                 }
+                return true;
+            }
+
+            if (operation == memory_operation::read &&
+                this->emulate_restricted_load(uctx, host_page, *declared, fault_addr, /*only_if_unwatched=*/true))
+            {
                 return true;
             }
 
