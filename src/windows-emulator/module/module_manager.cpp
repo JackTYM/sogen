@@ -16,6 +16,83 @@ namespace sogen
 
     namespace
     {
+        // gNlsProcessLocalCache's RVA drifts across Windows builds (confirmed between the 2022 and
+        // 2025 kernelbase.dll builds) - writing through a stale RVA is a guest access violation, not
+        // just a silent gap, so validate against the module's real section table before trusting it.
+        bool address_is_in_writable_section(const mapped_module& mod, const uint64_t address)
+        {
+            for (const auto& section : mod.sections)
+            {
+                const auto& region = section.region;
+                if (address >= region.start && address - region.start < region.length)
+                {
+                    return (region.permissions & memory_permission::write) != memory_permission::none;
+                }
+            }
+
+            return false;
+        }
+
+        // Locates gNlsProcessLocalCache by matching BaseNlsThreadCleanup's fixed TEB.NlsCache access
+        // sequence below - byte-identical across the 2022/2025 kernelbase.dll builds; only the
+        // trailing displacement (the global's actual address) differs per build, making this
+        // build-independent unlike a hardcoded RVA.
+        std::optional<uint64_t> scan_kernelbase_nls_cache_reference(const memory_manager& memory, const mapped_module& kernelbase)
+        {
+            static constexpr std::array<uint8_t, 19> pattern{
+                0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // mov rax, gs:[0x30]
+                0x48, 0x8B, 0x98, 0xA0, 0x17, 0x00, 0x00,             // mov rbx, [rax+0x17A0]
+                0x48, 0x8D, 0x05,                                     // lea rax, [rip+disp32]
+            };
+
+            for (const auto& section : kernelbase.sections)
+            {
+                const auto& region = section.region;
+                if (!is_executable(region.permissions) || region.length < pattern.size() + sizeof(int32_t))
+                {
+                    continue;
+                }
+
+                std::vector<uint8_t> data(region.length);
+                if (!memory.try_read_memory(region.start, data.data(), data.size()))
+                {
+                    continue;
+                }
+
+                const auto search_end = data.size() - pattern.size() - sizeof(int32_t);
+                for (size_t i = 0; i <= search_end; ++i)
+                {
+                    if (std::memcmp(data.data() + i, pattern.data(), pattern.size()) != 0)
+                    {
+                        continue;
+                    }
+
+                    int32_t displacement{};
+                    std::memcpy(&displacement, data.data() + i + pattern.size(), sizeof(displacement));
+
+                    const auto instruction_end = region.start + i + pattern.size() + sizeof(displacement);
+                    return static_cast<uint64_t>(static_cast<int64_t>(instruction_end) + displacement);
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        // Falls back to a hardcoded RVA (from static analysis of one known build) if the scan misses;
+        // both paths are validated against writable section data, returning 0 (unresolved) otherwise.
+        uint64_t resolve_kernelbase_nls_cache_address(const memory_manager& memory, const mapped_module& kernelbase)
+        {
+            if (const auto scanned = scan_kernelbase_nls_cache_reference(memory, kernelbase);
+                scanned.has_value() && address_is_in_writable_section(kernelbase, *scanned))
+            {
+                return *scanned;
+            }
+
+            constexpr uint64_t kernelbase_gnls_process_local_cache_rva = 0x326c00;
+            const auto address = kernelbase.image_base + kernelbase_gnls_process_local_cache_rva;
+            return address_is_in_writable_section(kernelbase, address) ? address : 0;
+        }
+
         uint64_t get_system_dll_init_block_size(const windows_version_manager& version)
         {
             if (version.is_build_after_or_equal(WINDOWS_VERSION::WINDOWS_11_24H2))
@@ -484,6 +561,38 @@ namespace sogen
         default:
             throw std::runtime_error("Unknown or unsupported execution mode detected");
         }
+
+        this->ensure_kernelbase_nls_cache_hook(context);
+    }
+
+    void module_manager::ensure_kernelbase_nls_cache_hook(process_context& context)
+    {
+        if (!this->kernelbase_nls_cache_hook_registered_)
+        {
+            this->kernelbase_nls_cache_hook_registered_ = true;
+
+            // kernelbase.dll loads later via the guest loader's own import resolution (unlike
+            // ntdll/win32u, it's not a process_context::setup() parameter), so this must resolve on
+            // on_module_load rather than at setup() time. The only thread alive when this first fires
+            // is the initial one, which never reaches BaseNlsThreadCleanup (DLL_THREAD_DETACH only
+            // fires for a non-final thread exiting, and kernelbase.dll loads before the guest's own
+            // code can call CreateThread).
+            this->callbacks_->on_module_load.add([this, &context](mapped_module& mod) {
+                if (mod.name != "kernelbase.dll")
+                {
+                    return;
+                }
+
+                context.kernelbase_nls_process_local_cache = resolve_kernelbase_nls_cache_address(*this->memory_, mod);
+            });
+        }
+
+        // Unlike the registration above, this runs on every call: kernelbase_nls_process_local_cache
+        // is host-side bookkeeping, not part of process_context's serialized state, so a
+        // deserialize()/restore_snapshot() reset to a pre-kernelbase.dll-load snapshot must re-derive
+        // it from the current module list (falling back to 0) instead of leaving it stale.
+        const auto* kernelbase = this->find_by_name("kernelbase.dll");
+        context.kernelbase_nls_process_local_cache = kernelbase ? resolve_kernelbase_nls_cache_address(*this->memory_, *kernelbase) : 0;
     }
 
     std::optional<uint64_t> module_manager::get_module_load_count_by_path(const windows_path& path)

@@ -454,6 +454,9 @@ namespace sogen
         kusd_mmio kusd;
 
         uint64_t ntdll_image_base{};
+        // Guest address of kernelbase.dll's gNlsProcessLocalCache global (0 if not yet mapped) - see
+        // emulator_thread.cpp's resolve_nls_cache for how this is consumed.
+        uint64_t kernelbase_nls_process_local_cache{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};

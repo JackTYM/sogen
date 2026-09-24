@@ -1823,6 +1823,10 @@ namespace sogen
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
         this->process.restore_after_state_restore(*this);
+
+        // A pure deserialize() target (create_empty_emulator) never ran map_main_modules, so the
+        // NLS-cache resolver was never registered - idempotent, so also a harmless no-op otherwise.
+        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
     }
 
     void windows_emulator::save_snapshot()
@@ -1878,6 +1882,9 @@ namespace sogen
         this->dispatcher.deserialize(buffer);
         this->process.deserialize(buffer, this->vcpus_[0]->active_thread);
         this->process.restore_after_state_restore(*this);
+
+        // See windows_emulator::deserialize's identical call above for why this is needed here too.
+        this->mod_manager.ensure_kernelbase_nls_cache_hook(this->process);
     }
 
 } // namespace sogen

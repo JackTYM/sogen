@@ -11,6 +11,26 @@ namespace sogen
 
     namespace
     {
+        // TEB.NlsCache must equal kernelbase.dll's gNlsProcessLocalCache global once it's known (see
+        // process_context::kernelbase_nls_process_local_cache) - BaseNlsThreadCleanup frees whatever
+        // TEB.NlsCache points at via RtlFreeHeap unless it's exactly that address, so any other
+        // non-null value corrupts the heap on thread exit. This zeroed placeholder is the only safe
+        // value before kernelbase.dll is mapped.
+        struct nls_cache_placeholder
+        {
+            std::array<std::byte, 0x100> reserved{};
+        };
+
+        uint64_t resolve_nls_cache(emulator_allocator& gs_segment, const process_context& context)
+        {
+            if (context.kernelbase_nls_process_local_cache != 0)
+            {
+                return context.kernelbase_nls_process_local_cache;
+            }
+
+            return gs_segment.reserve<nls_cache_placeholder>().value();
+        }
+
         enum class wait_state
         {
             not_signaled,
@@ -396,12 +416,16 @@ namespace sogen
             };
 
             this->teb64 = this->gs_segment->reserve<TEB64>();
+            const auto nls_cache_addr = resolve_nls_cache(*this->gs_segment, context);
 
             this->teb64->access([&](TEB64& teb_obj) {
                 // Skips GetCurrentNlsCache
                 // This hack can be removed once this is fixed:
                 // https://github.com/momo5502/emulator/issues/128
                 reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
+
+                // See nls_cache_placeholder's doc comment.
+                teb_obj.NlsCache = nls_cache_addr;
 
                 teb_obj.ClientId.UniqueProcess = process_context::process_id;
                 teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
@@ -460,6 +484,7 @@ namespace sogen
 
         // Reserve and initialize 64-bit TEB first
         this->teb64 = this->gs_segment->reserve<TEB64>();
+        const auto nls_cache_addr = resolve_nls_cache(*this->gs_segment, context);
 
         // Allocate memory for native stack + WOW64_CPURESERVED structure
         this->stack_base = memory.allocate_memory(WOW64_NATIVE_STACK_SIZE, memory_permission::read_write);
@@ -477,6 +502,9 @@ namespace sogen
             // This hack can be removed once this is fixed:
             // https://github.com/momo5502/emulator/issues/128
             reinterpret_cast<uint8_t*>(&teb_obj)[0x179C] = 1;
+
+            // See nls_cache_placeholder's doc comment.
+            teb_obj.NlsCache = nls_cache_addr;
 
             teb_obj.ClientId.UniqueProcess = process_context::process_id;
             teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
