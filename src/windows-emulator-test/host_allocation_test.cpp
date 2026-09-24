@@ -2,7 +2,10 @@
 #include <memory_manager.hpp>
 
 #include <algorithm>
+#include <optional>
+#include <random>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace sogen::test
@@ -274,5 +277,140 @@ namespace sogen::test
         ASSERT_EQ(host.released_ranges.size(), 1u);
         ASSERT_LE(host.released_ranges[0].address, base);
         ASSERT_GE(host.released_ranges[0].address + host.released_ranges[0].size, base + size);
+    }
+
+    namespace
+    {
+        std::optional<uint64_t> reference_checked_align_up(const uint64_t value, const uint64_t alignment)
+        {
+            if (value > UINT64_MAX - (alignment - 1))
+            {
+                return std::nullopt;
+            }
+
+            return (value + alignment - 1) & ~(alignment - 1);
+        }
+
+        // Independent reoccurrence of find_free_allocation_base's documented contract, re-derived
+        // from scratch (a plain per-candidate scan of the live region map, not reusing any of the
+        // seek-based production code under test) and used as a differential oracle below.
+        uint64_t reference_find_free_allocation_base(const memory_manager& mm, const size_t size, const uint64_t start,
+                                                     const uint64_t alignment, uint64_t lowest_address, uint64_t highest_address)
+        {
+            lowest_address = std::max<uint64_t>(lowest_address, MIN_ALLOCATION_ADDRESS);
+            highest_address =
+                std::min<uint64_t>(highest_address ? highest_address : MAX_ALLOCATION_END_EXCL - 1, MAX_ALLOCATION_END_EXCL - 1);
+            if (lowest_address > highest_address || size == 0)
+            {
+                return 0;
+            }
+
+            auto candidate = start ? start : mm.get_default_allocation_address();
+            if (candidate < lowest_address || candidate > highest_address)
+            {
+                candidate = lowest_address;
+            }
+
+            auto aligned = reference_checked_align_up(candidate, alignment);
+            if (!aligned)
+            {
+                return 0;
+            }
+
+            uint64_t start_address = *aligned;
+
+            while (start_address <= highest_address)
+            {
+                const auto end_address = start_address + size;
+                if (end_address < start_address || end_address > MAX_ALLOCATION_END_EXCL || end_address - 1 > highest_address)
+                {
+                    return 0;
+                }
+
+                bool conflict = false;
+                for (const auto& region : mm.get_reserved_regions())
+                {
+                    const auto region_end = region.first + region.second.length;
+                    if (region_end <= start_address)
+                    {
+                        continue;
+                    }
+
+                    if (region.first >= end_address)
+                    {
+                        break;
+                    }
+
+                    conflict = true;
+                    aligned = reference_checked_align_up(region_end, alignment);
+                    if (!aligned)
+                    {
+                        return 0;
+                    }
+
+                    start_address = *aligned;
+                    break;
+                }
+
+                if (!conflict)
+                {
+                    return start_address;
+                }
+            }
+
+            return 0;
+        }
+    }
+
+    // Differential regression coverage for find_free_allocation_base's seek-based gap search: builds up
+    // a heavily fragmented reserved_regions_ map through randomized (fixed-seed, deterministic)
+    // reserve/release churn, then cross-checks many queries - including ones whose candidate must skip
+    // past several consecutive reserved regions in one call - against reference_find_free_allocation_base
+    // above. The two must always agree; a mismatch would mean the seek-forward rewrite (which only ever
+    // advances its region-map iterator, never rescans from the beginning) skipped or misjudged a region.
+    TEST(HostAllocationTest, FindFreeAllocationBaseMatchesReferenceUnderFragmentation)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        std::mt19937 rng(0xC0FFEEu);
+        std::uniform_int_distribution<int> granule_count(1, 8);
+        constexpr nt_memory_permission perms{memory_permission::read_write};
+
+        std::vector<std::pair<uint64_t, size_t>> live{};
+
+        for (int i = 0; i < 400; ++i)
+        {
+            if (!live.empty() && (rng() % 3) == 0)
+            {
+                const auto idx = rng() % live.size();
+                const auto [addr, size] = live[idx];
+                ASSERT_TRUE(mm.release_memory(addr, size));
+                live.erase(live.begin() + static_cast<std::ptrdiff_t>(idx));
+            }
+            else
+            {
+                const size_t size = static_cast<size_t>(granule_count(rng)) * ALLOCATION_GRANULARITY;
+                const uint64_t base = mm.allocate_memory(size, perms, true);
+                if (base != 0)
+                {
+                    live.emplace_back(base, size);
+                }
+            }
+
+            for (int q = 0; q < 5; ++q)
+            {
+                const size_t query_size = static_cast<size_t>(granule_count(rng)) * ALLOCATION_GRANULARITY;
+                const uint64_t query_start = (rng() % 2 == 0) ? 0 : DEFAULT_ALLOCATION_ADDRESS_64BIT + (rng() % 0x10000000u);
+                constexpr auto highest_address = MAX_ALLOCATION_ADDRESS;
+
+                const auto actual =
+                    mm.find_free_allocation_base(query_size, query_start, ALLOCATION_GRANULARITY, MIN_ALLOCATION_ADDRESS, highest_address);
+                const auto expected = reference_find_free_allocation_base(mm, query_size, query_start, ALLOCATION_GRANULARITY,
+                                                                          MIN_ALLOCATION_ADDRESS, highest_address);
+                ASSERT_EQ(actual, expected) << "iteration=" << i << " query_size=" << query_size << " query_start=" << query_start
+                                            << " live_regions=" << mm.get_reserved_regions().size();
+            }
+        }
     }
 } // namespace sogen::test

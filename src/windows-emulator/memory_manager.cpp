@@ -1174,8 +1174,19 @@ namespace sogen
 
         uint64_t start_address = *aligned_start;
 
-        // Since reserved_regions_ is a sorted map, we can iterate through it
-        // and find gaps between regions
+        // reserved_regions_ is a sorted map keyed by region start address. Seek once to the
+        // first region that could possibly overlap start_address, then only ever advance `it`
+        // forward as start_address itself advances past rejected candidates - a region once
+        // passed can never conflict with a later, larger candidate again. Rescanning from
+        // begin() on every rejected candidate (the obvious per-candidate `for` loop) still
+        // looks correct but turns into an O(n^2) walk as the number of live reservations grows,
+        // since each of up to n candidates would redo an O(n) scan from the start.
+        auto it = this->reserved_regions_.upper_bound(start_address);
+        if (it != this->reserved_regions_.begin())
+        {
+            --it;
+        }
+
         while (start_address <= highest_address)
         {
             const auto end_address = start_address + size;
@@ -1184,47 +1195,37 @@ namespace sogen
                 return 0;
             }
 
-            bool conflict = false;
-
-            // Check if the proposed range [start_address, start_address+size) conflicts with any existing region
-            for (const auto& region : this->reserved_regions_)
+            while (it != this->reserved_regions_.end())
             {
-                const auto region_end = region.first + region.second.length;
-                if (region_end < region.first)
+                const auto region_end = it->first + it->second.length;
+                if (region_end < it->first)
                 {
                     return 0;
                 }
 
-                // If this region ends before our start, skip it
                 if (region_end <= start_address)
                 {
+                    ++it;
                     continue;
                 }
 
-                // If this region starts after our end, we're done checking (map is sorted)
-                if (region.first >= end_address)
-                {
-                    break;
-                }
-
-                // Otherwise, we have a conflict
-                conflict = true;
-                // Move start_address past this conflicting region
-                aligned_start = checked_align_up(region_end, alignment);
-                if (!aligned_start.has_value())
-                {
-                    return 0;
-                }
-
-                start_address = *aligned_start;
                 break;
             }
 
-            // If no conflict was found, we have our address
-            if (!conflict)
+            // If the next region starts at or past our end, the range is free
+            if (it == this->reserved_regions_.end() || it->first >= end_address)
             {
                 return start_address;
             }
+
+            // Otherwise, we have a conflict - move start_address past this region
+            aligned_start = checked_align_up(it->first + it->second.length, alignment);
+            if (!aligned_start.has_value())
+            {
+                return 0;
+            }
+
+            start_address = *aligned_start;
         }
 
         return 0;
