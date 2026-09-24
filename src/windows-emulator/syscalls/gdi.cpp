@@ -4535,6 +4535,22 @@ namespace sogen
                     info.QueryType == static_cast<UINT32>(D3DDDI_QUERYREGISTRY_TYPE::D3DDDI_QUERYREGISTRY_ADAPTERKEY);
                 const auto is_dxcore_attributes = value_name == u"DXCoreAttributes" || value_name == u"DXAttributes";
 
+                const auto is_servicekey_probe =
+                    info.QueryType == static_cast<UINT32>(D3DDDI_QUERYREGISTRY_TYPE::D3DDDI_QUERYREGISTRY_SERVICEKEY) && value_name.empty();
+
+                if (is_servicekey_probe)
+                {
+                    constexpr UINT32 zero_size = 0;
+                    constexpr auto success_status = D3DDDI_QUERYREGISTRY_STATUS::D3DDDI_QUERYREGISTRY_STATUS_SUCCESS;
+
+                    c.emu.write_memory(query.pPrivateDriverData + offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, OutputValueSize), &zero_size,
+                                       sizeof(zero_size));
+                    c.emu.write_memory(query.pPrivateDriverData + offsetof(EMU_D3DDDI_QUERYREGISTRY_INFO, Status), &success_status,
+                                       sizeof(success_status));
+
+                    return STATUS_SUCCESS;
+                }
+
                 if (is_adapterkey_query && is_dxcore_attributes)
                 {
                     std::u16string attributes{};
