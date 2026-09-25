@@ -634,6 +634,26 @@ namespace sogen
         uint64_t g_sldim_wndproc_dispatch_edx_trace_va = 0;
         uint64_t g_sldim_wndproc_dispatch_edx_hits = 0;
 
+        // The real `PostMessageW(hWnd, WM_CLOSE, 0, 0)` call site #501/#502 were unable to locate
+        // via raw `pefile`+`capstone` scanning (see project_solidworks_bringup.md #502's own
+        // CFG-hardening tooling-gap finding). Located this cycle with `idasql`'s IDA-backed xref/
+        // decompiler tables, which resolve calls through this binary's CFG-guarded indirection
+        // where naive address scanning cannot: `sldim.exe+0xa3fc89`, inside an unnamed function
+        // (`sldim.exe+0xa3fbf0`) in the same object file as several `"...\\sldim\\ApplicationManager.cpp"`
+        // log/string references. That function is reached via a two-hop ILT-thunk chain from a
+        // `switch (this[5])` case-34 state dispatcher (`sldim.exe+0xa3fab0`), itself reached from a
+        // large `ApplicationManager`-shaped state-machine function (`sldim.exe+0xa42f90`) behind a
+        // real conditional gate (`if (!byte_1BE84CC || (sub_4066D1(...), sub_4019C9(v93))) { ... go
+        // to the close path ... }`). This watch fires right at the `call ds:__imp_PostMessageW`
+        // instruction itself, where the four stdcall args are already pushed on the stack, to
+        // live-confirm (cross-correlated against the pre-existing `SOGEN_DEBUG_SHOWWINDOW_HIDE_
+        // CALLER_STACK` diagnostic in the same run) whether this exact call site is really what
+        // fires immediately before #497/#501's own already-established `ShowWindow(hMainFrame,
+        // SW_HIDE)` event.
+        constexpr uint64_t SLDIM_APPMGR_WMCLOSE_RVA = 0xa3fc89;
+        uint64_t g_sldim_appmgr_wmclose_trace_va = 0;
+        uint64_t g_sldim_appmgr_wmclose_hits = 0;
+
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
         // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
@@ -4522,6 +4542,29 @@ namespace sogen
                                  read_handler_ok ? 1 : 0, handler_mod_name, static_cast<unsigned long long>(handler_offset));
         }
 
+        void trace_sldim_appmgr_wmclose_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+
+            uint32_t hwnd{};
+            uint32_t msg{};
+            uint32_t wparam{};
+            uint32_t lparam{};
+            const auto read_hwnd_ok = emu.try_read_memory(esp, &hwnd, sizeof(hwnd));
+            const auto read_msg_ok = emu.try_read_memory(esp + 0x4, &msg, sizeof(msg));
+            const auto read_wparam_ok = emu.try_read_memory(esp + 0x8, &wparam, sizeof(wparam));
+            const auto read_lparam_ok = emu.try_read_memory(esp + 0xc, &lparam, sizeof(lparam));
+
+            ++g_sldim_appmgr_wmclose_hits;
+
+            c.win_emu->log.error("[sldim-appmgr-wmclose-trace] hit #%llu at 0x%llx tid=%u hWnd=0x%x (read_ok=%d) Msg=0x%x "
+                                 "(read_ok=%d) wParam=0x%x (read_ok=%d) lParam=0x%x (read_ok=%d)\n",
+                                 static_cast<unsigned long long>(g_sldim_appmgr_wmclose_hits), static_cast<unsigned long long>(address),
+                                 c.win_emu->current_thread().id, hwnd, read_hwnd_ok ? 1 : 0, msg, read_msg_ok ? 1 : 0, wparam,
+                                 read_wparam_ok ? 1 : 0, lparam, read_lparam_ok ? 1 : 0);
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5617,12 +5660,13 @@ namespace sogen
                     g_sldim_get_pending_command_state_trace_va = exe->image_base + SLDIM_GET_PENDING_COMMAND_STATE_RVA;
                     g_sldim_teardown_665460_trace_va = exe->image_base + SLDIM_TEARDOWN_665460_RVA;
                     g_sldim_wndproc_dispatch_edx_trace_va = exe->image_base + SLDIM_WNDPROC_DISPATCH_EDX_RVA;
+                    g_sldim_appmgr_wmclose_trace_va = exe->image_base + SLDIM_APPMGR_WMCLOSE_RVA;
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
                         "0x%llx, trypop entry at 0x%llx, trypop count check at 0x%llx, CMessagingThread ctor2/ctor0 at "
                         "0x%llx / 0x%llx, dtor entry/check at 0x%llx / 0x%llx, get_pending_command state at 0x%llx, teardown-665460 "
-                        "at 0x%llx, WindowProc dispatch edx at 0x%llx\n",
+                        "at 0x%llx, WindowProc dispatch edx at 0x%llx, ApplicationManager WM_CLOSE post at 0x%llx\n",
                         static_cast<unsigned long long>(exe->image_base), static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2),
                         static_cast<unsigned long long>(g_sldim_oncommand_trace_va),
@@ -5638,7 +5682,8 @@ namespace sogen
                         static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_check_trace_va),
                         static_cast<unsigned long long>(g_sldim_get_pending_command_state_trace_va),
                         static_cast<unsigned long long>(g_sldim_teardown_665460_trace_va),
-                        static_cast<unsigned long long>(g_sldim_wndproc_dispatch_edx_trace_va));
+                        static_cast<unsigned long long>(g_sldim_wndproc_dispatch_edx_trace_va),
+                        static_cast<unsigned long long>(g_sldim_appmgr_wmclose_trace_va));
                 }
             }
 
@@ -5716,6 +5761,11 @@ namespace sogen
             if (g_sldim_wndproc_dispatch_edx_trace_va != 0 && address == g_sldim_wndproc_dispatch_edx_trace_va)
             {
                 trace_sldim_wndproc_dispatch_edx_hit(c, address);
+            }
+
+            if (g_sldim_appmgr_wmclose_trace_va != 0 && address == g_sldim_appmgr_wmclose_trace_va)
+            {
+                trace_sldim_appmgr_wmclose_hit(c, address);
             }
 
             if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))
