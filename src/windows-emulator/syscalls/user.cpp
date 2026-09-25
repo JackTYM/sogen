@@ -3,6 +3,7 @@
 #include "../syscall_utils.hpp"
 #include "../win32k_userconnect.hpp"
 #include "../window_destroy_orchestrator.hpp"
+#include "segment_utils.hpp"
 #include "windows-emulator/user_callback_dispatch.hpp"
 #include <limits>
 
@@ -4042,27 +4043,56 @@ namespace sogen
 
                     if (std::getenv("SOGEN_DEBUG_SLDIM_SENDER_STACK") != nullptr && c.proc.is_wow64_process)
                     {
-                        auto ebp = c.emu.reg<uint32_t>(x86_register::ebp);
-                        fprintf(stderr, "  [sender-ebp-chain] initial ebp=0x%x\n", ebp);
+                        const auto rip = c.emu.read_instruction_pointer();
+                        const auto rsp = c.emu.read_stack_pointer();
+                        const auto ebp = c.emu.reg<uint32_t>(x86_register::ebp);
+                        const auto cs_selector = c.emu.reg<uint16_t>(x86_register::cs);
+                        const auto bitness = segment_utils::get_segment_bitness(c.emu, cs_selector);
+                        const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+                        fprintf(stderr,
+                                "  [sender-stack] rip=0x%llx (%s+0x%llx) rsp=0x%llx ebp=0x%x cs=0x%x bitness=%d "
+                                "callback_depth=%zu\n",
+                                static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                                rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL,
+                                static_cast<unsigned long long>(rsp), ebp, cs_selector, bitness ? static_cast<int>(*bitness) : -1,
+                                c.thread().callback_stack.size());
+
+                        for (uint64_t i = 0; i < 1024; ++i)
+                        {
+                            uint32_t value32{};
+                            if (!c.win_emu.memory.try_read_memory(rsp + (i * 4), &value32, sizeof(value32)))
+                            {
+                                break;
+                            }
+                            const auto* mod = c.win_emu.mod_manager.find_by_address(value32);
+                            if (mod)
+                            {
+                                fprintf(stderr, "  [sender-rsp32+0x%llx] = 0x%x %s+0x%llx\n", static_cast<unsigned long long>(i * 4),
+                                        value32, mod->name.c_str(), static_cast<unsigned long long>(value32 - mod->image_base));
+                            }
+                        }
+
+                        auto chain_ebp = ebp;
+                        fprintf(stderr, "  [sender-ebp-chain] initial ebp=0x%x\n", chain_ebp);
                         for (int depth = 0; depth < 32; ++depth)
                         {
                             uint32_t saved_ebp{};
                             uint32_t ret_addr{};
-                            if (!c.win_emu.memory.try_read_memory(static_cast<uint64_t>(ebp), &saved_ebp, sizeof(saved_ebp)) ||
-                                !c.win_emu.memory.try_read_memory(static_cast<uint64_t>(ebp) + 4, &ret_addr, sizeof(ret_addr)))
+                            if (!c.win_emu.memory.try_read_memory(static_cast<uint64_t>(chain_ebp), &saved_ebp, sizeof(saved_ebp)) ||
+                                !c.win_emu.memory.try_read_memory(static_cast<uint64_t>(chain_ebp) + 4, &ret_addr, sizeof(ret_addr)))
                             {
-                                fprintf(stderr, "  [sender-ebp-chain] depth=%d read failed at ebp=0x%x\n", depth, ebp);
+                                fprintf(stderr, "  [sender-ebp-chain] depth=%d read failed at ebp=0x%x\n", depth, chain_ebp);
                                 break;
                             }
                             const auto* mod = c.win_emu.mod_manager.find_by_address(ret_addr);
-                            fprintf(stderr, "  [sender-ebp-chain] depth=%d ebp=0x%x ret=0x%x %s+0x%llx\n", depth, ebp, ret_addr,
+                            fprintf(stderr, "  [sender-ebp-chain] depth=%d ebp=0x%x ret=0x%x %s+0x%llx\n", depth, chain_ebp, ret_addr,
                                     mod ? mod->name.c_str() : "?",
                                     mod ? static_cast<unsigned long long>(ret_addr - mod->image_base) : 0ULL);
-                            if (saved_ebp <= ebp)
+                            if (saved_ebp <= chain_ebp)
                             {
                                 break;
                             }
-                            ebp = saved_ebp;
+                            chain_ebp = saved_ebp;
                         }
                         fflush(stderr);
                     }
