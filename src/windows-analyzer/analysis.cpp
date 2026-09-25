@@ -23,6 +23,7 @@ namespace sogen
 {
 
     extern uint64_t g_sldim_dispatch_watch_va;
+    extern bool g_sldim_wmclose_dispatch_stop_at_sldim;
 
     namespace
     {
@@ -748,6 +749,27 @@ namespace sogen
 
         std::array<uint64_t, SLDIM_STATE_SETTER_SITES.size()> g_sldim_state_setter_trace_vas{};
         std::array<uint64_t, SLDIM_STATE_SETTER_SITES.size()> g_sldim_state_setter_hits{};
+
+        // `sub_A56BE0` -- the function chased live this cycle from `NtUserPostMessage`'s own
+        // syscall-return address, hop by hop, back through the WOW64 transition into sldim.exe's own
+        // code (see project_solidworks_bringup.md #507) -- is a small `AfxGetMainWnd()`-style utility
+        // that arms `byte_1BDE93D` (skips #506's own confirm dialog) and unconditionally
+        // `PostMessageW`s `WM_CLOSE` to the app's main window. `idasql xrefs` found its single caller
+        // is a compiler-generated ILT thunk with exactly two real callers of its own: `sub_A56670`
+        // (logs `"CWebBrowserWebView2::CorruptedWebView2 Prompting message and exit."`) and
+        // `sub_A56C20` (logs `"CWebBrowserWebView2::FailedToConnect starts."`, later
+        // `"...WebView2 could not re-installed."` on one path) -- both gated on `!byte_1BDE910` and
+        // both living in `WebBrowserWebView2.cpp`. These two entry watches distinguish, live, which
+        // of the two actually ran this session, since the chase itself only proves execution passed
+        // through the shared thunk, not which caller took it.
+        constexpr std::array<traced_symbol, 2> SLDIM_WEBVIEW2_ERROR_ENTRY_SITES{{
+            {"CorruptedWebView2", 0x656670},
+            {"FailedToConnect", 0x656c20},
+        }};
+        constexpr uint64_t SLDIM_WEBVIEW2_ERROR_BYTE_1BDE910_DATA_RVA = 0x17de910;
+        std::array<uint64_t, SLDIM_WEBVIEW2_ERROR_ENTRY_SITES.size()> g_sldim_webview2_error_entry_trace_vas{};
+        std::array<uint64_t, SLDIM_WEBVIEW2_ERROR_ENTRY_SITES.size()> g_sldim_webview2_error_entry_hits{};
+        uint64_t g_sldim_webview2_error_byte_1bde910_data_va = 0;
 
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
@@ -4740,6 +4762,24 @@ namespace sogen
                                  c.win_emu->current_thread().id, this_ptr, state, read_state_ok ? 1 : 0, flag, read_flag_ok ? 1 : 0);
         }
 
+        void trace_sldim_webview2_error_entry_hit(const analysis_context& c, const uint64_t address, const size_t site_idx)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint8_t byte_1bde910{};
+            const auto read_ok = g_sldim_webview2_error_byte_1bde910_data_va != 0 &&
+                                 emu.try_read_memory(g_sldim_webview2_error_byte_1bde910_data_va, &byte_1bde910, sizeof(byte_1bde910));
+
+            ++g_sldim_webview2_error_entry_hits[site_idx];
+
+            c.win_emu->log.error("[sldim-webview2-error-trace] hit #%llu site=%s at 0x%llx tid=%u this=0x%x byte_1BDE910=0x%x "
+                                 "(read_ok=%d)\n",
+                                 static_cast<unsigned long long>(g_sldim_webview2_error_entry_hits[site_idx]),
+                                 SLDIM_WEBVIEW2_ERROR_ENTRY_SITES[site_idx].name, static_cast<unsigned long long>(address),
+                                 c.win_emu->current_thread().id, this_ptr, byte_1bde910, read_ok ? 1 : 0);
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5008,6 +5048,16 @@ namespace sogen
             c.win_emu->log.error("[sldim-dispatch-trace] HOP %u: 0x%llx (%s+0x%llx) tid=%u\n", g_sldim_dispatch_hop_count,
                                  static_cast<unsigned long long>(address), mod_name, static_cast<unsigned long long>(offset),
                                  c.win_emu->current_thread().id);
+
+            if (g_sldim_wmclose_dispatch_stop_at_sldim && c.win_emu->mod_manager.executable->contains(address))
+            {
+                c.win_emu->log.error("[sldim-wmclose-dispatch-trace] REACHED sldim.exe's own code at 0x%llx (sldim.exe+0x%llx) -- "
+                                     "this is the WM_CLOSE sender's own call site, stopping chase\n",
+                                     static_cast<unsigned long long>(address), static_cast<unsigned long long>(offset));
+                g_sldim_wmclose_dispatch_stop_at_sldim = false;
+                g_sldim_dispatch_watch_va = 0;
+                return;
+            }
 
             if (g_sldim_dispatch_hop_count >= SLDIM_DISPATCH_MAX_HOPS)
             {
@@ -5848,6 +5898,14 @@ namespace sogen
                         c.win_emu->log.error("[sldim-state-setter-trace] watching %s at 0x%llx\n", SLDIM_STATE_SETTER_SITES[i].name,
                                              static_cast<unsigned long long>(g_sldim_state_setter_trace_vas[i]));
                     }
+                    g_sldim_webview2_error_byte_1bde910_data_va = exe->image_base + SLDIM_WEBVIEW2_ERROR_BYTE_1BDE910_DATA_RVA;
+                    for (size_t i = 0; i < SLDIM_WEBVIEW2_ERROR_ENTRY_SITES.size(); ++i)
+                    {
+                        g_sldim_webview2_error_entry_trace_vas[i] = exe->image_base + SLDIM_WEBVIEW2_ERROR_ENTRY_SITES[i].rva;
+                        c.win_emu->log.error("[sldim-webview2-error-trace] watching %s at 0x%llx\n",
+                                             SLDIM_WEBVIEW2_ERROR_ENTRY_SITES[i].name,
+                                             static_cast<unsigned long long>(g_sldim_webview2_error_entry_trace_vas[i]));
+                    }
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
@@ -5991,6 +6049,17 @@ namespace sogen
                     address == g_sldim_state_setter_trace_vas[sldim_state_setter_idx])
                 {
                     trace_sldim_state_setter_hit(c, address, sldim_state_setter_idx);
+                    break;
+                }
+            }
+
+            for (size_t sldim_webview2_error_idx = 0; sldim_webview2_error_idx < g_sldim_webview2_error_entry_trace_vas.size();
+                 ++sldim_webview2_error_idx)
+            {
+                if (g_sldim_webview2_error_entry_trace_vas[sldim_webview2_error_idx] != 0 &&
+                    address == g_sldim_webview2_error_entry_trace_vas[sldim_webview2_error_idx])
+                {
+                    trace_sldim_webview2_error_entry_hit(c, address, sldim_webview2_error_idx);
                     break;
                 }
             }

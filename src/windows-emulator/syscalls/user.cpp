@@ -16,6 +16,7 @@ namespace sogen
 
     uint64_t g_sldim_dispatch_watch_va = 0;
     uint32_t g_sldim_dispatch_chase_attempts = 0;
+    bool g_sldim_wmclose_dispatch_stop_at_sldim = false;
 
     namespace
     {
@@ -4510,6 +4511,8 @@ namespace sogen
             return dispatch_pending_window_paint(c, std::move(state));
         }
 
+        bool g_sldim_wmclose_post_sender_chase_armed = false;
+
         BOOL handle_NtUserPostMessage(const syscall_context& c, const hwnd hwnd, const UINT msg, const uint64_t wParam,
                                       const uint64_t lParam)
         {
@@ -4529,29 +4532,24 @@ namespace sogen
                                     static_cast<unsigned long long>(wParam), static_cast<unsigned long long>(lParam));
             }
 
-            if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && msg == WM_CLOSE && c.proc.is_wow64_process)
+            if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && msg == WM_CLOSE && c.proc.is_wow64_process &&
+                !g_sldim_wmclose_post_sender_chase_armed)
             {
+                g_sldim_wmclose_post_sender_chase_armed = true;
+
                 const auto rip = c.emu.read_instruction_pointer();
                 const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
-                fprintf(stderr, "[sldim-wmclose-post-sender] tid=%u rip=0x%llx (%s+0x%llx)\n", c.thread().id,
-                        static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
-                        rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL);
+                c.win_emu.log.error("[sldim-wmclose-post-sender] tid=%u rip=0x%llx (%s+0x%llx)\n", c.thread().id,
+                                    static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                                    rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL);
 
-                const auto rsp = c.emu.read_stack_pointer();
-                for (uint64_t i = 0; i < 4096; ++i)
+                if (g_sldim_dispatch_watch_va == 0)
                 {
-                    uint32_t value32{};
-                    if (!c.win_emu.memory.try_read_memory(rsp + (i * 4), &value32, sizeof(value32)))
-                    {
-                        break;
-                    }
-                    const auto* mod = c.win_emu.mod_manager.find_by_address(value32);
-                    if (mod)
-                    {
-                        fprintf(stderr, "  [sldim-wmclose-post-sender-rsp32+0x%llx] = 0x%x %s+0x%llx\n",
-                                static_cast<unsigned long long>(i * 4), value32, mod->name.c_str(),
-                                static_cast<unsigned long long>(value32 - mod->image_base));
-                    }
+                    g_sldim_dispatch_watch_va = rip + 2;
+                    g_sldim_wmclose_dispatch_stop_at_sldim = true;
+                    c.win_emu.log.error("[sldim-wmclose-dispatch-trace] armed post-syscall return watch at 0x%llx, chasing "
+                                        "forward through the WOW64 transition back into sldim.exe's own code\n",
+                                        static_cast<unsigned long long>(g_sldim_dispatch_watch_va));
                 }
             }
 
