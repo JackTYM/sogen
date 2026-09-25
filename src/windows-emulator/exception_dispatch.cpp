@@ -332,6 +332,39 @@ namespace sogen
             fflush(stderr);
         }
 
+        // Opt-in post-mortem aid for a real stack overflow: dumps the thread's own configured stack
+        // bounds alongside the faulting RSP, so a genuinely-undersized reservation (a sogen thread-
+        // creation bug) can be told apart from ordinary, deep-but-legitimate stack usage against a
+        // properly-sized reservation, plus a short stack window (module-resolved) to see the
+        // immediate calling context without a live debugger session.
+        if (status == STATUS_STACK_OVERFLOW && std::getenv("SOGEN_DEBUG_STACK_OVERFLOW_CALLER_STACK"))
+        {
+            const auto* rip_mod = win_emu.mod_manager.find_by_address(ctx.Rip);
+            const auto stack_top = thread.stack_base + thread.stack_size;
+            const auto consumed = stack_top - ctx.Rsp;
+            fprintf(stderr,
+                    "[STACK_OVERFLOW] tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx stack_base=0x%llx stack_size=0x%llx "
+                    "stack_guard_size=0x%llx stack_top=0x%llx consumed=0x%llx\n",
+                    thread.id, static_cast<unsigned long long>(ctx.Rip), rip_mod ? rip_mod->name.c_str() : "?",
+                    rip_mod ? static_cast<unsigned long long>(ctx.Rip - rip_mod->image_base) : 0ULL,
+                    static_cast<unsigned long long>(ctx.Rsp), static_cast<unsigned long long>(thread.stack_base),
+                    static_cast<unsigned long long>(thread.stack_size), static_cast<unsigned long long>(thread.stack_guard_size),
+                    static_cast<unsigned long long>(stack_top), static_cast<unsigned long long>(consumed));
+            for (uint64_t i = 0; i < 64; ++i)
+            {
+                uint64_t value{};
+                if (!win_emu.memory.try_read_memory(ctx.Rsp + (i * 8), &value, sizeof(value)))
+                {
+                    break;
+                }
+                const auto* mod = win_emu.mod_manager.find_by_address(value);
+                fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s%s%s\n", static_cast<unsigned long long>(i * 8),
+                        static_cast<unsigned long long>(value), mod ? mod->name.c_str() : "", mod ? "+0x" : "",
+                        mod ? std::to_string(value - mod->image_base).c_str() : "");
+            }
+            fflush(stderr);
+        }
+
         exception_record record{};
         memset(&record, 0, sizeof(record));
         record.ExceptionCode = status;
