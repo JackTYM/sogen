@@ -428,11 +428,16 @@ jobs:
       - name: CMake Build
         run: cmake --preset=release && cmake --build --preset=release --target dump-actctx-blob actctx-test-app-zero-deps actctx-test-app-one-dep
 
-      - name: Capture both blobs
+      - name: Report OS build
+        shell: cmd
+        run: ver
+
+      - name: Capture all three blobs (same run, same OS build, to rule out image drift)
         shell: cmd
         run: |
           build\release\artifacts\dump-actctx-blob.exe build\release\artifacts\actctx-test-app-zero-deps.exe > captured-zero-deps.bin
           build\release\artifacts\dump-actctx-blob.exe build\release\artifacts\actctx-test-app-one-dep.exe > captured-one-dep.bin
+          build\release\artifacts\dump-actctx-blob.exe C:\Windows\System32\mspaint.exe > captured-mspaint-fresh.bin
           DIR captured-*.bin
 
       - name: Upload the captured blobs
