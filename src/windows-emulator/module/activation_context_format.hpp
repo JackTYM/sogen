@@ -39,7 +39,7 @@ namespace sogen
         std::uint32_t hash_algorithm;
         std::uint32_t entry_count;
         std::uint32_t first_entry_offset;                  // from blob base, NOT biased (fixed-size array, not a section)
-        std::uint32_t assembly_information_section_offset; // from blob base, biased (see activation_context_data_toc_entry_offset_bias)
+        std::uint32_t assembly_information_section_offset; // from blob base, biased (see activation_context_data_roster_offset_bias)
     };
 
     struct activation_context_data_assembly_roster_entry
@@ -142,5 +142,5 @@ namespace sogen
     // its own section header) agreeing on the same absolute byte position every time. Fields
     // documented as "from the section header" (string/GUID section entries, and every offset
     // field inside ACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION) need no adjustment at all.
-    constexpr std::uint32_t activation_context_data_toc_entry_offset_bias = 1;
+    constexpr std::uint32_t activation_context_data_roster_offset_bias = 1;
 }

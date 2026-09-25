@@ -335,22 +335,20 @@ namespace sogen
         toc_header.flags = 2;
         append(blob, toc_header);
 
-        // TOC.offset does not point exactly at each section's real start in real Windows-
-        // generated blobs either - see the format doc's TOC-offset section. This generator
-        // clones the exact numeric relationship confirmed in the golden fixture: the first
-        // string-format section uses a -1 bias (matching the roster-field convention, since
-        // that section is also independently reachable via the roster header's own biased
-        // pointer), every subsequent string-format section uses -2.
+        // TOC.offset is read by real ntdll's RtlpLocateActivationContextSection as an exact,
+        // unbiased offset from the blob base (confirmed via disassembly of a real ntdll.dll -
+        // see the format doc's TOC-offset section) - no adjustment here, unlike the roster
+        // fields below.
         activation_context_data_toc_entry assembly_info_toc_entry{};
         assembly_info_toc_entry.id = activation_context_section_id_assembly_information;
-        assembly_info_toc_entry.offset = assembly_information_section_start - activation_context_data_toc_entry_offset_bias;
+        assembly_info_toc_entry.offset = assembly_information_section_start;
         assembly_info_toc_entry.length = static_cast<std::uint32_t>(assembly_info_section.bytes.size());
         assembly_info_toc_entry.format = activation_context_section_format_string_table;
         append(blob, assembly_info_toc_entry);
 
         activation_context_data_toc_entry dll_redirection_toc_entry{};
         dll_redirection_toc_entry.id = activation_context_section_id_dll_redirection;
-        dll_redirection_toc_entry.offset = dll_redirection_section_start - 2;
+        dll_redirection_toc_entry.offset = dll_redirection_section_start;
         dll_redirection_toc_entry.length = static_cast<std::uint32_t>(dll_redirection_section.bytes.size());
         dll_redirection_toc_entry.format = activation_context_section_format_string_table;
         append(blob, dll_redirection_toc_entry);
@@ -360,8 +358,7 @@ namespace sogen
         roster_header.hash_algorithm = 1;
         roster_header.entry_count = roster_entry_count;
         roster_header.first_entry_offset = assembly_roster_offset + roster_header_size;
-        roster_header.assembly_information_section_offset =
-            assembly_information_section_start - activation_context_data_toc_entry_offset_bias;
+        roster_header.assembly_information_section_offset = assembly_information_section_start - activation_context_data_roster_offset_bias;
         append(blob, roster_header);
 
         activation_context_data_assembly_roster_entry reserved_entry{};
@@ -371,7 +368,7 @@ namespace sogen
         activation_context_data_assembly_roster_entry root_entry{};
         root_entry.flags = 2;
         root_entry.assembly_information_offset = assembly_information_section_start + assembly_info_section.elements[0].value_offset -
-                                                 activation_context_data_toc_entry_offset_bias;
+                                                 activation_context_data_roster_offset_bias;
         root_entry.assembly_information_length = assembly_info_section.elements[0].value_length;
         append(blob, root_entry);
 
@@ -383,10 +380,10 @@ namespace sogen
             entry.flags = 0;
             entry.pseudo_key = compute_pseudo_key(assemblies[i].identity.name);
             entry.assembly_name_offset =
-                assembly_information_section_start + element.key_offset - activation_context_data_toc_entry_offset_bias;
+                assembly_information_section_start + element.key_offset - activation_context_data_roster_offset_bias;
             entry.assembly_name_length = element.key_length;
             entry.assembly_information_offset =
-                assembly_information_section_start + element.value_offset - activation_context_data_toc_entry_offset_bias;
+                assembly_information_section_start + element.value_offset - activation_context_data_roster_offset_bias;
             entry.assembly_information_length = element.value_length;
             append(blob, entry);
         }

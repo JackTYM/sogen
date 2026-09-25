@@ -47,6 +47,32 @@ namespace sogen
         EXPECT_EQ(header.total_size, blob.size());
     }
 
+    TEST(ActivationContextGenerator, TocEntriesResolveToSectionStartsWithZeroBias)
+    {
+        // Confirmed via real ntdll.dll disassembly (RtlpLocateActivationContextSection,
+        // called through RtlFindActivationContextSectionString -> RtlpFindNextActivationContextSection):
+        // the section pointer real ntdll computes is exactly blob_base + TocEntry.Offset, with
+        // no adjustment - unlike the roster fields, which do need a bias (see
+        // activation_context_data_roster_offset_bias).
+        const auto blob = generate_notepad_plus_plus_blob();
+
+        activation_context_data_header header{};
+        std::memcpy(&header, blob.data(), sizeof(header));
+
+        activation_context_data_toc_header toc_header{};
+        std::memcpy(&toc_header, blob.data() + header.default_toc_offset, sizeof(toc_header));
+        ASSERT_EQ(toc_header.entry_count, 2u);
+
+        for (std::uint32_t i = 0; i < toc_header.entry_count; ++i)
+        {
+            activation_context_data_toc_entry entry{};
+            std::memcpy(&entry, blob.data() + toc_header.first_entry_offset + i * sizeof(entry), sizeof(entry));
+
+            ASSERT_LE(entry.offset + 4, blob.size());
+            EXPECT_EQ(0, std::memcmp(blob.data() + entry.offset, "SsHd", 4)) << "TOC entry id=" << entry.id;
+        }
+    }
+
     TEST(ActivationContextGenerator, MagicTagScanFindsBothSections)
     {
         const auto blob = generate_notepad_plus_plus_blob();
@@ -131,7 +157,7 @@ namespace sogen
         std::memcpy(&common_controls_entry, blob.data() + roster_header.first_entry_offset + 2 * sizeof(common_controls_entry),
                     sizeof(common_controls_entry));
 
-        const auto info_offset = common_controls_entry.assembly_information_offset + activation_context_data_toc_entry_offset_bias;
+        const auto info_offset = common_controls_entry.assembly_information_offset + activation_context_data_roster_offset_bias;
         ASSERT_LE(info_offset + common_controls_entry.assembly_information_length, blob.size());
 
         activation_context_data_assembly_information info{};
