@@ -134,6 +134,16 @@ namespace sogen::fex
         // Config.Is64BitMode() gate in deps/FEX - expects to find it.
         constexpr uint64_t wow64_guest_address_space_size = 0x100000000ULL;
 
+        int traced_munmap(void* addr, size_t length, const char* site)
+        {
+            if (::getenv("SOGEN_TRACE_MUNMAP") != nullptr)
+            {
+                fprintf(stderr, "[munmap-trace] site=%s addr=%p len=0x%zx\n", site, addr, length);
+                fflush(stderr);
+            }
+            return ::munmap(addr, length);
+        }
+
         // The 64-bit user code-segment selector (matches sogen::wow64::heaven_gate::kUserCodeSelector
         // in src/windows-emulator/wow64_heaven_gate.hpp - kept as a local constant to avoid pulling
         // the windows-emulator include tree into this backend). A gate crossing whose target CS is
@@ -972,7 +982,7 @@ namespace sogen::fex
                         break;
                     }
 
-                    ::munmap(candidate, arena_size);
+                    traced_munmap(candidate, arena_size, "arena_install_retry");
                 }
 
                 if (base == MAP_FAILED)
@@ -1097,7 +1107,7 @@ namespace sogen::fex
 
                     // MAP_JIT | MAP_FIXED is rejected on Apple, so punch a hole in the arena and place
                     // the executable mapping there via a (non-fixed) address hint the kernel honors.
-                    ::munmap(reinterpret_cast<void*>(slot), exec_size);
+                    traced_munmap(reinterpret_cast<void*>(slot), exec_size, "jit_hole_punch");
                     void* result = ::mmap(reinterpret_cast<void*>(slot), exec_size, prot, flags, fd, offset);
                     if (result == reinterpret_cast<void*>(slot))
                     {
@@ -1108,7 +1118,7 @@ namespace sogen::fex
                     // the aliasing hazard, so fail loudly instead of handing it back.
                     if (result != MAP_FAILED)
                     {
-                        ::munmap(result, exec_size);
+                        traced_munmap(result, exec_size, "jit_hole_rollback");
                     }
                     // Restore the arena's PROT_NONE reservation over the whole slot (including the guard
                     // portion) so it never becomes an unmapped gap the guest could be handed.
@@ -1127,7 +1137,7 @@ namespace sogen::fex
             {
                 if (!this->owns(addr))
                 {
-                    return ::munmap(addr, length);
+                    return traced_munmap(addr, length, "arena_release_foreign");
                 }
 
                 const size_t rounded = host_page_align_up_apple(length);
@@ -1472,13 +1482,20 @@ namespace sogen::fex
             // munmap also requires host-page alignment, which regions_ entries don't guarantee.
             for (const auto host_page : this->mapped_host_pages_apple_)
             {
-                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
-                if (rebase != 0 && this->wow64_host_window_reserved_)
+                // reserve_wow64_host_window() bulk-inserts every window-relative page (0-based, up
+                // to wow64_guest_address_space_size) unconditionally at construction time, before
+                // this process's bitness is known - so this skip cannot be gated on
+                // is_wow64_process_ (rebase_for() always returns 0 for a native 64-bit process,
+                // which would otherwise hand every one of those window-relative "pages" - starting
+                // at literal address 0 - straight to munmap() below as if it were a real host
+                // address, hitting the same fatal EXC_GUARD DEALLOC_GAP this loop exists to avoid).
+                if (this->wow64_host_window_reserved_ && host_page < wow64_guest_address_space_size)
                 {
                     // Covered by the whole-window munmap below.
                     continue;
                 }
-                ::munmap(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple);
+                const auto rebase = rebase_for(this->is_wow64_process_, host_page);
+                traced_munmap(reinterpret_cast<void*>(host_page + rebase), host_page_size_apple, "dtor_per_page");
             }
 
             // Deliberately not released: a single munmap/mach_vm_deallocate over the whole
@@ -1507,7 +1524,7 @@ namespace sogen::fex
                 if (region.owned)
                 {
                     const auto rebase = rebase_for(this->is_wow64_process_, address);
-                    ::munmap(reinterpret_cast<void*>(address + rebase), region.size);
+                    traced_munmap(reinterpret_cast<void*>(address + rebase), region.size, "dtor_linux_regions");
                 }
             }
 #endif
@@ -2349,7 +2366,7 @@ namespace sogen::fex
                     for (const auto rollback_page : claimed_this_call)
                     {
                         const auto rollback_rebase = rebase_for(this->is_wow64_process_, rollback_page);
-                        ::munmap(reinterpret_cast<void*>(rollback_page + rollback_rebase), host_page_size_apple);
+                        traced_munmap(reinterpret_cast<void*>(rollback_page + rollback_rebase), host_page_size_apple, "rollback_page");
                         this->mapped_host_pages_apple_.erase(rollback_page);
                     }
                     return false;
@@ -2370,9 +2387,15 @@ namespace sogen::fex
             auto it = this->mapped_host_pages_apple_.lower_bound(start);
             while (it != this->mapped_host_pages_apple_.end() && *it + host_page_size_apple <= end)
             {
-                const auto rebase = rebase_for(this->is_wow64_process_, *it);
-                void* const host_ptr = reinterpret_cast<void*>(*it + rebase);
-                if (rebase != 0 && this->wow64_host_window_reserved_)
+                // As in ~fex_x86_64_emulator(), a page inside the up-front-reserved wow64 window is
+                // recognized by falling within its 0-based relative span, not by rebase_for()'s
+                // is_wow64_process_-gated result - the window's bulk-inserted pages exist regardless
+                // of the guest's eventual bitness, so gating on is_wow64_process_ would hand a native
+                // 64-bit process's own address-0-based "pages" straight to munmap() below as if they
+                // were real host addresses, hitting the same fatal EXC_GUARD DEALLOC_GAP this branch
+                // exists to avoid.
+                const bool in_wow64_window = this->wow64_host_window_reserved_ && *it < wow64_guest_address_space_size;
+                if (in_wow64_window)
                 {
                     // A page inside the up-front-reserved wow64 window is never actually released at
                     // the host level - it's re-armed as our own PROT_NONE placeholder, exactly as
@@ -2382,12 +2405,15 @@ namespace sogen::fex
                     // this placeholder), so a later claim attempt for it would incorrectly believe it
                     // needs a fresh mach_vm_allocate, which then correctly (but uselessly) fails since
                     // the page really is still ours, throwing a false-positive host_memory_collision.
-                    ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    void* const window_ptr = reinterpret_cast<void*>(*it + this->wow64_guest_rebase_);
+                    ::mmap(window_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
                     ++it;
                 }
                 else
                 {
-                    ::munmap(host_ptr, host_page_size_apple);
+                    const auto rebase = rebase_for(this->is_wow64_process_, *it);
+                    void* const host_ptr = reinterpret_cast<void*>(*it + rebase);
+                    traced_munmap(host_ptr, host_page_size_apple, "host_ptr_cleanup");
                     it = this->mapped_host_pages_apple_.erase(it);
                 }
             }
@@ -2513,7 +2539,7 @@ namespace sogen::fex
                         }
                         if (region.host_backing != nullptr)
                         {
-                            ::munmap(region.host_backing, region.host_backing_size);
+                            traced_munmap(region.host_backing, region.host_backing_size, "region_host_backing");
                         }
                         return true;
                     }))
@@ -2529,7 +2555,7 @@ namespace sogen::fex
                 // ever remapped (see apply_patched_execution_breakpoints_in_range).
                 this->mark_patched_execution_breakpoints_unmapped_in_range(address, size);
 #else
-                ::munmap(reinterpret_cast<void*>(address), size);
+                traced_munmap(reinterpret_cast<void*>(address), size, "release_memory");
 #endif
                 this->erase_region_range(address, size);
             }
@@ -3454,7 +3480,7 @@ namespace sogen::fex
                         break;
                     }
 
-                    ::munmap(candidate, total_size);
+                    traced_munmap(candidate, total_size, "wow64_candidate_cleanup");
                 }
 
                 if (base == MAP_FAILED)
