@@ -15,7 +15,7 @@ namespace sogen
                 .name = "Notepad++",
                 .version = "1.0.0.0",
                 .processor_architecture = "amd64",
-                .exe_path = "C:\\Program Files\\Notepad++\\notepad++.exe",
+                .exe_path = R"(C:\Program Files\Notepad++\notepad++.exe)",
             };
 
             const resolved_assembly common_controls{
@@ -25,8 +25,8 @@ namespace sogen
                              .public_key_token = "6595b64144ccf1df",
                              .language = "*"},
                 .concrete_directory_name = "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a",
-                .manifest_path = "C:\\Windows\\WinSxS\\manifests\\amd64_microsoft.windows.common-controls_"
-                                 "6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a.manifest",
+                .manifest_path = R"(C:\Windows\WinSxS\manifests\amd64_microsoft.windows.common-controls_)"
+                                 R"(6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a.manifest)",
                 .redirected_dlls = {"comctl32.dll"},
             };
 

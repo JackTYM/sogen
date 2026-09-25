@@ -21,7 +21,7 @@ namespace sogen
             std::vector<std::string> result{};
 
             std::error_code ec{};
-            const auto host_dir = files.translate(windows_path(u"C:\\Windows\\WinSxS\\Manifests"));
+            const auto host_dir = files.translate(windows_path(uR"(C:\Windows\WinSxS\Manifests)"));
             for (const auto& entry : std::filesystem::directory_iterator(host_dir, ec))
             {
                 if (entry.is_regular_file())
@@ -87,7 +87,7 @@ namespace sogen
             }
 
             const windows_path manifest_guest_path =
-                windows_path(u"C:\\Windows\\WinSxS\\Manifests") / windows_path(u8_to_u16(*directory_name + ".manifest"));
+                windows_path(uR"(C:\Windows\WinSxS\Manifests)") / windows_path(u8_to_u16(*directory_name + ".manifest"));
             const auto host_manifest_path = files.translate(manifest_guest_path);
 
             std::vector<std::string> redirected_dlls{};
