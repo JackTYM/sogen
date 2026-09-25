@@ -59,6 +59,61 @@ namespace sogen
             return u8_to_u16(volume);
         }
 
+        bool is_hex_digit(const char16_t ch)
+        {
+            return (ch >= u'0' && ch <= u'9') || (ch >= u'a' && ch <= u'f') || (ch >= u'A' && ch <= u'F');
+        }
+
+        // Inverse of make_volume() for the one shape query_points() ever emits: a drive letter
+        // encoded as the low byte of `low`, with `high` always 0. Resolving these synthetic GUIDs
+        // back to a drive letter lets get_drive_letter() answer a QUERY_DOS_VOLUME_PATH(S) call
+        // against a symbolic link this same device handed out via QUERY_POINTS.
+        std::optional<char> parse_synthetic_volume_guid(const std::u16string_view file)
+        {
+            constexpr std::u16string_view prefix = u"\\??\\Volume{";
+            constexpr std::u16string_view suffix = u"}";
+            if (!file.starts_with(prefix) || !file.ends_with(suffix) || file.size() < prefix.size() + suffix.size())
+            {
+                return std::nullopt;
+            }
+
+            const auto guid_body = file.substr(prefix.size(), file.size() - prefix.size() - suffix.size());
+
+            std::string hex{};
+            hex.reserve(32);
+            for (const auto ch : guid_body)
+            {
+                if (ch == u'-')
+                {
+                    continue;
+                }
+                if (!is_hex_digit(ch))
+                {
+                    return std::nullopt;
+                }
+                hex.push_back(static_cast<char>(ch));
+            }
+
+            if (hex.size() != 32)
+            {
+                return std::nullopt;
+            }
+
+            const auto bytes = utils::string::from_hex_string(hex);
+
+            uint64_t low{};
+            uint64_t high{};
+            std::memcpy(&low, bytes.data(), sizeof(low));
+            std::memcpy(&high, bytes.data() + sizeof(low), sizeof(high));
+
+            if (high != 0 || low < 'a' || low > 'z')
+            {
+                return std::nullopt;
+            }
+
+            return static_cast<char>(low);
+        }
+
         struct mount_point_manager : stateless_device
         {
             static NTSTATUS query_points(windows_emulator& win_emu, const io_device_context& c)
@@ -133,8 +188,15 @@ namespace sogen
 
             static NTSTATUS get_drive_letter(windows_emulator& win_emu, const io_device_context& c)
             {
+                const bool trace = std::getenv("SOGEN_TRACE_MOUNTMGR") != nullptr;
+
                 if (c.input_buffer_length < sizeof(mountdev_target_name_header))
                 {
+                    if (trace)
+                    {
+                        fprintf(stderr, "[mountmgr-trace] get_drive_letter: input_buffer_length=%u too small\n",
+                                static_cast<unsigned>(c.input_buffer_length));
+                    }
                     return STATUS_NOT_SUPPORTED;
                 }
 
@@ -142,6 +204,11 @@ namespace sogen
                 // cap the buffer we read to avoid a huge host allocation.
                 if (c.input_buffer_length > 0x1000)
                 {
+                    if (trace)
+                    {
+                        fprintf(stderr, "[mountmgr-trace] get_drive_letter: input_buffer_length=%u exceeds cap\n",
+                                static_cast<unsigned>(c.input_buffer_length));
+                    }
                     return STATUS_NOT_SUPPORTED;
                 }
 
@@ -153,33 +220,62 @@ namespace sogen
                 const auto name_length = static_cast<size_t>(target_name.device_name_length);
                 if (name_length == 0 || name_length % sizeof(char16_t) != 0 || data.size() - name_offset < name_length)
                 {
+                    if (trace)
+                    {
+                        fprintf(stderr, "[mountmgr-trace] get_drive_letter: bad name_length=%zu data_size=%zu\n", name_length, data.size());
+                    }
                     return STATUS_NOT_SUPPORTED;
                 }
 
                 const std::u16string_view file(reinterpret_cast<const char16_t*>(data.data() + name_offset),
                                                name_length / sizeof(char16_t));
 
+                if (trace)
+                {
+                    fprintf(stderr, "[mountmgr-trace] get_drive_letter: target='%s'\n", u16_to_u8(file).c_str());
+                }
+
                 constexpr std::u16string_view volume_prefix = u"\\Device\\HarddiskVolume";
-                if (!file.starts_with(volume_prefix))
+
+                std::optional<char> drive_letter{};
+
+                if (const auto synthetic_drive = parse_synthetic_volume_guid(file))
+                {
+                    drive_letter = static_cast<char>(*synthetic_drive - 'a' + 'A');
+                }
+                else if (file.starts_with(volume_prefix))
+                {
+                    const auto drive_number = file.substr(volume_prefix.size());
+                    const auto drive_number_u8 = u16_to_u8(drive_number);
+                    int drive_index{};
+                    const auto* number_start = drive_number_u8.data();
+                    const auto* number_end = number_start + drive_number_u8.size();
+                    const auto [parse_end, parse_error] = std::from_chars(number_start, number_end, drive_index);
+                    if (parse_error == std::errc{} && parse_end == number_end && drive_index >= 1 && drive_index <= 26)
+                    {
+                        drive_letter = static_cast<char>('A' + drive_index - 1);
+                    }
+                    else if (trace)
+                    {
+                        fprintf(stderr, "[mountmgr-trace] get_drive_letter: drive_number='%s' failed to parse as a bare index\n",
+                                drive_number_u8.c_str());
+                    }
+                }
+                else if (trace)
+                {
+                    fprintf(stderr,
+                            "[mountmgr-trace] get_drive_letter: '%s' matches neither the volume-GUID nor the "
+                            "HarddiskVolume<N> target format\n",
+                            u16_to_u8(file).c_str());
+                }
+
+                if (!drive_letter)
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
-
-                const auto drive_number = file.substr(volume_prefix.size());
-                const auto drive_number_u8 = u16_to_u8(drive_number);
-                int drive_index{};
-                const auto* number_start = drive_number_u8.data();
-                const auto* number_end = number_start + drive_number_u8.size();
-                const auto [parse_end, parse_error] = std::from_chars(number_start, number_end, drive_index);
-                if (parse_error != std::errc{} || parse_end != number_end || drive_index < 1 || drive_index > 26)
-                {
-                    return STATUS_NOT_SUPPORTED;
-                }
-
-                const auto drive_letter = static_cast<char>('A' + drive_index - 1);
 
                 std::string response{};
-                response.push_back(drive_letter);
+                response.push_back(*drive_letter);
                 response.push_back(':');
                 response.push_back(0);
                 response.push_back(0);
@@ -209,6 +305,11 @@ namespace sogen
 
             NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override
             {
+                if (std::getenv("SOGEN_TRACE_MOUNTMGR") != nullptr)
+                {
+                    fprintf(stderr, "[mountmgr-trace] io_control_code=0x%X\n", static_cast<uint32_t>(c.io_control_code));
+                }
+
                 if (c.io_control_code == IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH)
                 {
                     return get_drive_letter(win_emu, c);
