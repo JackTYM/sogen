@@ -3876,6 +3876,96 @@ namespace sogen
             return s.was_visible ? TRUE : FALSE;
         }
 
+        BOOL handle_NtUserShowOwnedPopups(const syscall_context& c, const hwnd owner, const BOOL show)
+        {
+            auto* owner_win = c.proc.windows.get(owner);
+            if (!owner_win)
+            {
+                return FALSE;
+            }
+
+            // Real ShowOwnedPopups only toggles popups that IT previously hid: a popup the guest
+            // hid itself must stay hidden when the owner reopens. We track that with the same
+            // technique Windows itself uses (a per-window property), so a later show only restores
+            // popups this call actually took down.
+            static const std::u16string needs_restore_prop{u"__sogen_show_owned_needs_restore"};
+
+            std::vector<hwnd> owned{};
+            for (const auto& [_, candidate] : c.proc.windows)
+            {
+                if (candidate.owner_handle == owner)
+                {
+                    owned.push_back(candidate.handle);
+                }
+            }
+
+            if (window_trace_enabled())
+            {
+                c.win_emu.log.error("[window-trace] ShowOwnedPopups owner=0x%llx show=%d owned_count=%zu\n",
+                                    static_cast<unsigned long long>(owner), show, owned.size());
+            }
+
+            for (const auto popup_handle : owned)
+            {
+                auto* popup = c.proc.windows.get(popup_handle);
+                if (!popup)
+                {
+                    continue;
+                }
+
+                const bool was_visible = (popup->style & WS_VISIBLE) != 0;
+                UINT status = 0;
+
+                if (show)
+                {
+                    const auto entry = popup->props.find(needs_restore_prop);
+                    if (entry == popup->props.end())
+                    {
+                        continue;
+                    }
+
+                    popup->props.erase(entry);
+                    popup->style |= WS_VISIBLE;
+                    status = SW_PARENTOPENING;
+                }
+                else
+                {
+                    if (!was_visible)
+                    {
+                        continue;
+                    }
+
+                    popup->props[needs_restore_prop] = 1;
+                    popup->style &= ~WS_VISIBLE;
+                    status = SW_PARENTCLOSING;
+                }
+
+                popup->guest.access([&](USER_WINDOW& guest_win) { guest_win.dwStyle = popup->style; });
+
+                if (popup->host_surface_window)
+                {
+                    c.win_emu.ui().set_window_visible(popup_handle, show != FALSE);
+                }
+
+                if (show)
+                {
+                    invalidate_window_tree(c, *popup);
+                }
+
+                if (auto* t = c.proc.find_thread_by_id(popup->thread_id))
+                {
+                    sogen::msg qmsg{};
+                    qmsg.window = popup_handle;
+                    qmsg.message = WM_SHOWWINDOW;
+                    qmsg.wParam = show != FALSE;
+                    qmsg.lParam = status;
+                    t->post_message(c.win_emu, qmsg);
+                }
+            }
+
+            return TRUE;
+        }
+
         uint64_t handle_NtUserMessageCall(const syscall_context& c, const hwnd hwnd, const UINT msg, const uint64_t w_param,
                                           const uint64_t l_param, const uint64_t result_info, const DWORD type, const BOOL ansi)
         {

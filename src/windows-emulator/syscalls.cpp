@@ -607,6 +607,7 @@ namespace sogen
         BOOL handle_NtUserChangeWindowMessageFilter();
         BOOL handle_NtUserShowWindow(const syscall_context& c, hwnd hwnd, LONG cmd_show);
         BOOL completion_NtUserShowWindow(const syscall_context& c, hwnd hwnd, LONG cmd_show);
+        BOOL handle_NtUserShowOwnedPopups(const syscall_context& c, hwnd owner, BOOL show);
         uint64_t handle_NtUserMessageCall(const syscall_context& c, hwnd hwnd, UINT msg, uint64_t w_param, uint64_t l_param,
                                           uint64_t result_info, DWORD type, BOOL ansi);
         uint64_t completion_NtUserMessageCall(const syscall_context& c, hwnd hwnd, UINT msg, uint64_t w_param, uint64_t l_param,
@@ -1660,6 +1661,7 @@ namespace sogen
         add_handler(NtUserUnhookWindowsHookEx);
         add_handler(NtUserCreateWindowEx);
         add_handler(NtUserShowWindow);
+        add_handler(NtUserShowOwnedPopups);
         add_handler(NtUserMessageCall);
         add_handler(NtUserDispatchMessage);
         add_handler(NtUserTranslateMessage);

@@ -217,6 +217,10 @@ namespace sogen
 #define SW_SHOWMINNOACTIVE          7
 #define SW_SHOWNA                   8
 
+// WM_SHOWWINDOW lParam status codes, not ShowWindow's nCmdShow values above.
+#define SW_PARENTCLOSING            1
+#define SW_PARENTOPENING            3
+
 #define WM_CREATE                   0x0001
 #define WM_DESTROY                  0x0002
 #define WM_MOVE                     0x0003
