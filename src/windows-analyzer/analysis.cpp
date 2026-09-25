@@ -771,6 +771,16 @@ namespace sogen
         std::array<uint64_t, SLDIM_WEBVIEW2_ERROR_ENTRY_SITES.size()> g_sldim_webview2_error_entry_hits{};
         uint64_t g_sldim_webview2_error_byte_1bde910_data_va = 0;
 
+        // `sub_A58A00` -- `CWebBrowserWebView2::OnCreateWebViewControllerCompleted`, found via
+        // `idasql xrefs` as the sole caller of the shared `sub_A56670`/`CorruptedWebView2` thunk
+        // (see project_solidworks_bringup.md #509) -- is the real WebView2 completion-handler
+        // callback: `void __thiscall(int this, int a2 /*HRESULT errorCode*/, int a3 /*controller*/)`,
+        // gated on `if (a2 >= 0 && a3)`. Watching its entry captures the actual HRESULT/pointer the
+        // runtime hands back, live, rather than only observing the downstream "gave up" log line.
+        constexpr uint64_t SLDIM_ONCREATECONTROLLER_COMPLETED_RVA = 0x658a00;
+        uint64_t g_sldim_oncreatecontroller_completed_trace_va = 0;
+        uint64_t g_sldim_oncreatecontroller_completed_hits = 0;
+
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
         // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
@@ -4780,6 +4790,26 @@ namespace sogen
                                  c.win_emu->current_thread().id, this_ptr, byte_1bde910, read_ok ? 1 : 0);
         }
 
+        void trace_sldim_oncreatecontroller_completed_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+
+            uint32_t error_code{};
+            uint32_t controller{};
+            const auto read_a2_ok = emu.try_read_memory(esp + 0x4, &error_code, sizeof(error_code));
+            const auto read_a3_ok = emu.try_read_memory(esp + 0x8, &controller, sizeof(controller));
+
+            ++g_sldim_oncreatecontroller_completed_hits;
+
+            c.win_emu->log.error("[sldim-oncreatecontroller-trace] hit #%llu at 0x%llx tid=%u this=0x%x errorCode=0x%x (read_ok=%d) "
+                                 "controller=0x%x (read_ok=%d)\n",
+                                 static_cast<unsigned long long>(g_sldim_oncreatecontroller_completed_hits),
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, this_ptr, error_code,
+                                 read_a2_ok ? 1 : 0, controller, read_a3_ok ? 1 : 0);
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5906,6 +5936,9 @@ namespace sogen
                                              SLDIM_WEBVIEW2_ERROR_ENTRY_SITES[i].name,
                                              static_cast<unsigned long long>(g_sldim_webview2_error_entry_trace_vas[i]));
                     }
+                    g_sldim_oncreatecontroller_completed_trace_va = exe->image_base + SLDIM_ONCREATECONTROLLER_COMPLETED_RVA;
+                    c.win_emu->log.error("[sldim-oncreatecontroller-trace] watching OnCreateWebViewControllerCompleted at 0x%llx\n",
+                                         static_cast<unsigned long long>(g_sldim_oncreatecontroller_completed_trace_va));
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
@@ -6062,6 +6095,11 @@ namespace sogen
                     trace_sldim_webview2_error_entry_hit(c, address, sldim_webview2_error_idx);
                     break;
                 }
+            }
+
+            if (g_sldim_oncreatecontroller_completed_trace_va != 0 && address == g_sldim_oncreatecontroller_completed_trace_va)
+            {
+                trace_sldim_oncreatecontroller_completed_hit(c, address);
             }
 
             if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))
