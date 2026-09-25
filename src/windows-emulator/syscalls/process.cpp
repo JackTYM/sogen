@@ -174,6 +174,12 @@ namespace sogen
                                                   const uint64_t process_information, const uint32_t process_information_length,
                                                   const emulator_object<uint32_t> return_length)
         {
+            if (std::getenv("SOGEN_DEBUG_QUERY_PROCESS_INFO_CLASS") != nullptr)
+            {
+                fprintf(stderr, "[QUERY_PROCESS_INFO_CLASS] tid=%u info_class=0x%x current_process=%d\n", c.thread().id, info_class,
+                        c.proc.is_current_process_handle(process_handle));
+            }
+
             if (!c.proc.is_current_process_handle(process_handle))
             {
                 // The synthetic Steam process: report it as alive so a guest steam_api's GetExitCodeProcess
@@ -388,8 +394,17 @@ namespace sogen
                 const emulator_object<PROCESS_MITIGATION_POLICY> policy_obj{c.emu, process_information};
                 const auto policy = policy_obj.read();
 
-                // We only support querying ProcessDynamicCodePolicy
-                if (policy != ProcessDynamicCodePolicy)
+                if (std::getenv("SOGEN_DEBUG_QUERY_PROCESS_INFO_CLASS") != nullptr)
+                {
+                    fprintf(stderr, "[QUERY_PROCESS_INFO_CLASS] tid=%u ProcessMitigationPolicy sub-policy=0x%x\n", c.thread().id,
+                            static_cast<unsigned int>(policy));
+                }
+
+                // We only support querying policies whose "no mitigation applied" state is
+                // representable as an all-zero PROCESS_MITIGATION_POLICY_RAW_DATA. A syscall
+                // filter is never applied to an ordinary, non-sandboxed process, so Value=0 is
+                // always correct for ProcessSystemCallFilterPolicy specifically.
+                if (policy != ProcessDynamicCodePolicy && policy != ProcessSystemCallFilterPolicy)
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
@@ -1017,6 +1032,25 @@ namespace sogen
                         }
                         fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s\n", static_cast<unsigned long long>(i * 8),
                                 static_cast<unsigned long long>(value), mod_suffix);
+                    }
+
+                    if (c.proc.is_wow64_process)
+                    {
+                        fprintf(stderr, "  [wow64-32bit-stack-scan] rsp=0x%llx\n", static_cast<unsigned long long>(rsp));
+                        for (uint64_t i = 0; i < 512; ++i)
+                        {
+                            uint32_t value32{};
+                            if (!c.win_emu.memory.try_read_memory(rsp + (i * 4), &value32, sizeof(value32)))
+                            {
+                                break;
+                            }
+                            const auto* mod = c.win_emu.mod_manager.find_by_address(value32);
+                            if (mod)
+                            {
+                                fprintf(stderr, "  [rsp32+0x%llx] = 0x%x %s+0x%llx\n", static_cast<unsigned long long>(i * 4), value32,
+                                        mod->name.c_str(), static_cast<unsigned long long>(value32 - mod->image_base));
+                            }
+                        }
                     }
                     fflush(stderr);
                 }

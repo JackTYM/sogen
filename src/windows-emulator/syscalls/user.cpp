@@ -3712,6 +3712,57 @@ namespace sogen
             const bool was_visible = (win->style & WS_VISIBLE) != 0;
             const bool activate_window = cmd_show != SW_SHOWNOACTIVATE && cmd_show != SW_SHOWMINNOACTIVE && cmd_show != SW_SHOWNA;
 
+            if (!want_visible && was_visible && std::getenv("SOGEN_DEBUG_SHOWWINDOW_HIDE_CALLER_STACK") != nullptr)
+            {
+                const auto rip = c.emu.read_instruction_pointer();
+                const auto rsp = c.emu.read_stack_pointer();
+                const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+                fprintf(stderr, "[SHOWWINDOW_HIDE_CALLER] hwnd=0x%llx cmd_show=%d rip=0x%llx (%s+0x%llx) rsp=0x%llx\n",
+                        static_cast<unsigned long long>(hwnd), static_cast<int>(cmd_show), static_cast<unsigned long long>(rip),
+                        rip_mod ? rip_mod->name.c_str() : "?", rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL,
+                        static_cast<unsigned long long>(rsp));
+                if (c.proc.is_wow64_process)
+                {
+                    for (uint64_t i = 0; i < 1024; ++i)
+                    {
+                        uint32_t value32{};
+                        if (!c.win_emu.memory.try_read_memory(rsp + (i * 4), &value32, sizeof(value32)))
+                        {
+                            break;
+                        }
+                        const auto* mod = c.win_emu.mod_manager.find_by_address(value32);
+                        if (mod)
+                        {
+                            fprintf(stderr, "  [rsp32+0x%llx] = 0x%x %s+0x%llx\n", static_cast<unsigned long long>(i * 4), value32,
+                                    mod->name.c_str(), static_cast<unsigned long long>(value32 - mod->image_base));
+                        }
+                    }
+
+                    auto ebp = c.emu.reg<uint32_t>(x86_register::ebp);
+                    fprintf(stderr, "  [ebp-chain] initial ebp=0x%x\n", ebp);
+                    for (int depth = 0; depth < 32; ++depth)
+                    {
+                        uint32_t saved_ebp{};
+                        uint32_t ret_addr{};
+                        if (!c.win_emu.memory.try_read_memory(static_cast<uint64_t>(ebp), &saved_ebp, sizeof(saved_ebp)) ||
+                            !c.win_emu.memory.try_read_memory(static_cast<uint64_t>(ebp) + 4, &ret_addr, sizeof(ret_addr)))
+                        {
+                            fprintf(stderr, "  [ebp-chain] depth=%d read failed at ebp=0x%x\n", depth, ebp);
+                            break;
+                        }
+                        const auto* mod = c.win_emu.mod_manager.find_by_address(ret_addr);
+                        fprintf(stderr, "  [ebp-chain] depth=%d ebp=0x%x ret=0x%x %s+0x%llx\n", depth, ebp, ret_addr,
+                                mod ? mod->name.c_str() : "?", mod ? static_cast<unsigned long long>(ret_addr - mod->image_base) : 0ULL);
+                        if (saved_ebp <= ebp)
+                        {
+                            break;
+                        }
+                        ebp = saved_ebp;
+                    }
+                }
+                fflush(stderr);
+            }
+
             if (want_visible == was_visible)
             {
                 return was_visible ? TRUE : FALSE;
@@ -3988,6 +4039,33 @@ namespace sogen
                     c.win_emu.log.error(
                         "[sldim-queue-trace] cross-thread WM_COMMAND: type=0x%x wParam=0x%llx target_tid=%u sender_tid=%u\n", type,
                         static_cast<unsigned long long>(w_param), win->thread_id, c.vcpu.active_thread->id);
+
+                    if (std::getenv("SOGEN_DEBUG_SLDIM_SENDER_STACK") != nullptr && c.proc.is_wow64_process)
+                    {
+                        auto ebp = c.emu.reg<uint32_t>(x86_register::ebp);
+                        fprintf(stderr, "  [sender-ebp-chain] initial ebp=0x%x\n", ebp);
+                        for (int depth = 0; depth < 32; ++depth)
+                        {
+                            uint32_t saved_ebp{};
+                            uint32_t ret_addr{};
+                            if (!c.win_emu.memory.try_read_memory(static_cast<uint64_t>(ebp), &saved_ebp, sizeof(saved_ebp)) ||
+                                !c.win_emu.memory.try_read_memory(static_cast<uint64_t>(ebp) + 4, &ret_addr, sizeof(ret_addr)))
+                            {
+                                fprintf(stderr, "  [sender-ebp-chain] depth=%d read failed at ebp=0x%x\n", depth, ebp);
+                                break;
+                            }
+                            const auto* mod = c.win_emu.mod_manager.find_by_address(ret_addr);
+                            fprintf(stderr, "  [sender-ebp-chain] depth=%d ebp=0x%x ret=0x%x %s+0x%llx\n", depth, ebp, ret_addr,
+                                    mod ? mod->name.c_str() : "?",
+                                    mod ? static_cast<unsigned long long>(ret_addr - mod->image_base) : 0ULL);
+                            if (saved_ebp <= ebp)
+                            {
+                                break;
+                            }
+                            ebp = saved_ebp;
+                        }
+                        fflush(stderr);
+                    }
                 }
 
                 // TODO: This is a bit incorrect. We're supposed to wait until the message is received, but this is fine for a first
