@@ -73,6 +73,19 @@ namespace sogen
             {"ipcz::DriverTransport::Close", 0x522b690},
         }};
 
+        // mojo::core::Channel construction/startup entry points in the real msedge.dll 150.0.4078.105,
+        // resolved from the same cached PDB publics table (msedge.table.txt) the targets above use -
+        // see project_solidworks_bringup.md #483. `ChannelWin`'s own constructor has no symbol of its
+        // own (fully inlined into its two callers below, the same class of inlining #474 already found
+        // for `Channel::TryDispatchMessage`), so `Start()` - the first out-of-line `ChannelWin` member
+        // reached after construction - is the earliest point a hit here can be attributed to a real,
+        // fully-constructed `ChannelWin` object rather than just a call into `Channel::Create`.
+        constexpr std::array<traced_symbol, 3> IPCZ_CHANNEL_CREATE_HOOK_TARGETS{{
+            {"mojo::core::Channel::CreateForIpczDriver", 0x1dabd30},
+            {"mojo::core::Channel::Create", 0x1dabdf0},
+            {"mojo::core::ChannelWin::Start", 0x252d760},
+        }};
+
         // `Channel::TryDispatchMessage` has no symbol of its own in msedge.dll's public PDB (#473) -
         // it is fully inlined into `Channel::OnReadComplete` (RVA 0x589b60). Statically disassembled
         // this session (capstone/pefile against the real msedge.dll 150.0.4078.105) confirms the
@@ -3128,6 +3141,44 @@ namespace sogen
                         const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
 
                         win_emu->log.error("[ipcz-channel-error-hook-trace] hit %s at 0x%llx, rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx "
+                                           "return=0x%llx (%s+0x%llx)\n",
+                                           name, static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
+                                           static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
+                                           static_cast<unsigned long long>(r9), static_cast<unsigned long long>(return_address),
+                                           caller_mod_name, static_cast<unsigned long long>(caller_offset));
+                    });
+                }
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_IPCZ_CHANNEL_CREATE_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                for (const auto& target : IPCZ_CHANNEL_CREATE_HOOK_TARGETS)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[ipcz-channel-create-hook-trace] watching %s at 0x%llx\n", name,
+                                       static_cast<unsigned long long>(address));
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto rsp = emu.read_stack_pointer();
+
+                        uint64_t return_address{};
+                        emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+                        const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+                        const auto rdx = emu.reg<uint64_t>(x86_register::rdx);
+                        const auto r8 = emu.reg<uint64_t>(x86_register::r8);
+                        const auto r9 = emu.reg<uint64_t>(x86_register::r9);
+
+                        const auto* caller_mod_name = win_emu->mod_manager.find_name(return_address);
+                        const auto* caller_mod = win_emu->mod_manager.find_by_address(return_address);
+                        const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+                        win_emu->log.error("[ipcz-channel-create-hook-trace] hit %s at 0x%llx, rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx "
                                            "return=0x%llx (%s+0x%llx)\n",
                                            name, static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
                                            static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
