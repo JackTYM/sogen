@@ -27,7 +27,8 @@ namespace sogen
             return std::string(tag.substr(value_start, value_end - value_start));
         }
 
-        constexpr std::uint32_t RT_MANIFEST = 24;
+        constexpr std::uint32_t k_resource_type_manifest =
+            24; // RT_MANIFEST - named to avoid colliding with the real winuser.h macro of the same name on Windows builds
         constexpr std::uint32_t RESOURCE_DATA_IS_DIRECTORY = 0x80000000;
 
         struct IMAGE_RESOURCE_DIRECTORY
@@ -258,7 +259,7 @@ namespace sogen
 
         const auto resource_directory_address = image_base + resource_directory_entry->VirtualAddress;
 
-        const auto type_offset = find_entry_offset_by_id(memory, resource_directory_address, RT_MANIFEST);
+        const auto type_offset = find_entry_offset_by_id(memory, resource_directory_address, k_resource_type_manifest);
         if (!type_offset || (*type_offset & RESOURCE_DATA_IS_DIRECTORY) == 0)
         {
             return std::nullopt;
