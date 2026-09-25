@@ -60,6 +60,7 @@
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #include <libproc.h>
+#include <mach-o/dyld.h>
 #endif
 
 #include <atomic>
@@ -1007,6 +1008,17 @@ namespace sogen::fex
 
                 FEXCore::Allocator::mmap = &fex_internal_arena::hook_mmap;
                 FEXCore::Allocator::munmap = &fex_internal_arena::hook_munmap;
+
+                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                {
+                    const auto main_image_base = reinterpret_cast<uint64_t>(_dyld_get_image_header(0));
+                    fprintf(stderr,
+                            "[alloc-fail-trace] fex_internal_arena::install: arena_base=0x%llx arena_end=0x%llx "
+                            "main_image_base=0x%llx\n",
+                            static_cast<unsigned long long>(this->base_), static_cast<unsigned long long>(this->base_ + arena_size),
+                            static_cast<unsigned long long>(main_image_base));
+                    fflush(stderr);
+                }
             }
 
             uintptr_t base() const
@@ -2109,6 +2121,12 @@ namespace sogen::fex
                 ranges.push_back({.address = address, .size = static_cast<size_t>(size)});
                 address += size;
             }
+
+            for (const auto unusable_page : this->unusable_host_pages_apple_)
+            {
+                ranges.push_back({.address = unusable_page, .size = host_page_size_apple});
+            }
+
             return ranges;
         }
 
@@ -2121,6 +2139,16 @@ namespace sogen::fex
             if (this->wow64_host_window_reserved_ && rebase != 0)
             {
                 return ranges;
+            }
+
+            const uint64_t window_probe_start = host_page_align_down_apple(address);
+            const uint64_t window_probe_end = host_page_align_up_apple(address + size);
+            for (auto unusable_page = window_probe_start; unusable_page < window_probe_end; unusable_page += host_page_size_apple)
+            {
+                if (this->unusable_host_pages_apple_.contains(unusable_page))
+                {
+                    ranges.push_back({.address = unusable_page, .size = host_page_size_apple});
+                }
             }
 
             const mach_vm_address_t window_start = address + rebase;
@@ -2369,6 +2397,41 @@ namespace sogen::fex
                 const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, host_page_size_apple, VM_FLAGS_FIXED);
                 if (result != KERN_SUCCESS)
                 {
+                    if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                    {
+                        mach_vm_address_t region_addr = host_page + rebase;
+                        mach_vm_size_t region_size = 0;
+                        vm_region_basic_info_data_64_t info{};
+                        mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+                        mach_port_t object_name = MACH_PORT_NULL;
+                        const kern_return_t probe_result =
+                            ::mach_vm_region(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+                                             reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+                        fprintf(stderr,
+                                "[alloc-fail-trace] reserve_guest_address_range: mach_vm_allocate(VM_FLAGS_FIXED) failed "
+                                "host_page=0x%llx rebase=0x%llx target=0x%llx kern_return=%d is_wow64_process=%d "
+                                "wow64_host_window_reserved=%d | probe(next-region-at-or-after-target): result=%d "
+                                "region_addr=0x%llx region_size=0x%llx protection=%d\n",
+                                static_cast<unsigned long long>(host_page), static_cast<unsigned long long>(rebase),
+                                static_cast<unsigned long long>(host_page + rebase), static_cast<int>(result), this->is_wow64_process_,
+                                this->wow64_host_window_reserved_, static_cast<int>(probe_result),
+                                static_cast<unsigned long long>(region_addr), static_cast<unsigned long long>(region_size),
+                                probe_result == KERN_SUCCESS ? info.protection : 0);
+                        fflush(stderr);
+                    }
+
+                    if (result == KERN_INVALID_ADDRESS)
+                    {
+                        // Unlike KERN_NO_SPACE (a real, mach_vm_region-visible occupant that
+                        // reserved_host_ranges()'s next rescan will discover and record on its own),
+                        // KERN_INVALID_ADDRESS means the kernel refuses this exact address regardless
+                        // of occupancy - there is no host range for mach_vm_region to ever report here,
+                        // so memory_manager's retry loop would otherwise keep re-picking this same
+                        // address forever. Record it so reserved_host_ranges()/reserved_host_ranges_in()
+                        // below can report it as occupied too.
+                        this->unusable_host_pages_apple_.insert(host_page);
+                    }
+
                     // Roll back every page claimed earlier in this same multi-page call so a partial
                     // claim never leaks as a permanently-orphaned host page. Collision means return
                     // false, not throw: the interface contract (memory_interface.hpp) has the caller
@@ -3133,6 +3196,14 @@ namespace sogen::fex
                                 static_cast<int>(probe_result));
                         fflush(stderr);
                     }
+                    if (probe_result == KERN_INVALID_ADDRESS)
+                    {
+                        // See reserve_guest_address_range's identical handling: KERN_INVALID_ADDRESS
+                        // means the kernel refuses this exact address regardless of occupancy, so
+                        // there is no host range for reserved_host_ranges()'s own mach_vm_region-based
+                        // enumeration to ever discover here on its own.
+                        this->unusable_host_pages_apple_.insert(host_page_addr);
+                    }
                     throw host_memory_collision{};
                 }
                 if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
@@ -3425,6 +3496,18 @@ namespace sogen::fex
 #ifdef __APPLE__
         std::map<uint64_t, memory_permission> page_shadow_apple_;
         std::set<uint64_t> mapped_host_pages_apple_;
+        // Pages where a real mach_vm_allocate(VM_FLAGS_FIXED) claim has already failed once, keyed by
+        // guest-relative address like mapped_host_pages_apple_ - not because anything is actually
+        // mapped there (mach_vm_region enumeration - what reserved_host_ranges()/
+        // reserved_host_ranges_in() are otherwise built from - only reports real occupants), but
+        // because the kernel refuses VM_FLAGS_FIXED at this exact address regardless of occupancy
+        // (e.g. a low-address floor extending past a PIE process's own __PAGEZERO boundary on
+        // Apple Silicon macOS). Since no host range exists for reserved_host_ranges() to discover,
+        // memory_manager's own auto-placement retry/rescan loop can never learn to avoid such an
+        // address on its own - it would keep re-picking the exact same unusable address forever.
+        // Recording it here and folding it into reserved_host_ranges()/reserved_host_ranges_in()'s
+        // own answers closes that gap.
+        std::set<uint64_t> unusable_host_pages_apple_;
 #endif
 
         hook_entry* syscall_hook_ = nullptr;

@@ -9,6 +9,8 @@
 #include <optional>
 #include <stdexcept>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 
 namespace sogen
 {
@@ -592,7 +594,15 @@ namespace sogen
         // it, with no bounded window and no way to recover. reserve_guest_address_range's own doc
         // comment already documents this call as required "both when reserved ... and when committed"
         // - this closes that gap for the one call site that wasn't honoring it.
-        if (reserve_only && !this->memory_->reserve_guest_address_range(address, size))
+        //
+        // host_reserved is exempt: those entries record territory this process never owns and never
+        // will (reserve_host_range_gaps's own recording of a backend-reported foreign/unusable range -
+        // see reserved_host_ranges's doc comment), so demanding reserve_guest_address_range succeed
+        // here is self-defeating - a genuinely foreign range is, by definition, never claimable, so
+        // requiring that first would mean such a range could never actually get recorded, and
+        // find_free_allocation_base would keep re-offering the exact same address forever instead of
+        // learning to skip past it.
+        if (reserve_only && kind != memory_region_kind::host_reserved && !this->memory_->reserve_guest_address_range(address, size))
         {
             return false;
         }
@@ -1047,6 +1057,14 @@ namespace sogen
             const uint64_t allocation_base = this->find_free_host_allocation_base(size, start);
             if (!allocation_base)
             {
+                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                {
+                    fprintf(stderr,
+                            "[alloc-fail-trace] allocate_memory(size-only): find_free_host_allocation_base gave up "
+                            "size=0x%zx start=0x%llx reserve_only=%d attempt=%d\n",
+                            size, static_cast<unsigned long long>(start), reserve_only, attempt);
+                    fflush(stderr);
+                }
                 return 0;
             }
 
@@ -1058,6 +1076,15 @@ namespace sogen
             // re-pick, same backstop as find_free_host_allocation_base.
             if (!this->memory_->reserve_guest_address_range(allocation_base, size))
             {
+                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                {
+                    fprintf(stderr,
+                            "[alloc-fail-trace] allocate_memory(size-only): reserve_guest_address_range collided "
+                            "candidate=0x%llx size=0x%zx attempt=%d\n",
+                            static_cast<unsigned long long>(allocation_base), size, attempt);
+                    fflush(stderr);
+                }
+
                 if (attempt >= max_host_reserved_retries)
                 {
                     return 0;
@@ -1076,6 +1103,14 @@ namespace sogen
             // confirm above already covers this window.
             if (!this->allocate_memory_raw(allocation_base, size, permissions, reserve_only, kind))
             {
+                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                {
+                    fprintf(stderr,
+                            "[alloc-fail-trace] allocate_memory(size-only): allocate_memory_raw failed "
+                            "candidate=0x%llx size=0x%zx reserve_only=%d\n",
+                            static_cast<unsigned long long>(allocation_base), size, reserve_only);
+                    fflush(stderr);
+                }
                 this->release_host_claims(allocation_base + size);
                 return 0;
             }
@@ -1118,6 +1153,14 @@ namespace sogen
                 this->find_free_allocation_base(size, start, ALLOCATION_GRANULARITY, MIN_ALLOCATION_ADDRESS, highest_address);
             if (!allocation_base)
             {
+                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                {
+                    fprintf(stderr,
+                            "[alloc-fail-trace] find_free_host_allocation_base: no bookkeeping candidate left "
+                            "size=0x%zx start=0x%llx highest_address=0x%llx attempt=%d\n",
+                            size, static_cast<unsigned long long>(start), static_cast<unsigned long long>(highest_address), attempt);
+                    fflush(stderr);
+                }
                 return 0;
             }
 
@@ -1126,8 +1169,25 @@ namespace sogen
                 return allocation_base;
             }
 
+            if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+            {
+                fprintf(stderr,
+                        "[alloc-fail-trace] find_free_host_allocation_base: host window occupied "
+                        "candidate=0x%llx size=0x%zx attempt=%d\n",
+                        static_cast<unsigned long long>(allocation_base), size, attempt);
+                fflush(stderr);
+            }
+
             if (attempt >= max_host_reserved_retries)
             {
+                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                {
+                    fprintf(stderr,
+                            "[alloc-fail-trace] find_free_host_allocation_base: retry cap reached, giving up "
+                            "size=0x%zx start=0x%llx highest_address=0x%llx\n",
+                            size, static_cast<unsigned long long>(start), static_cast<unsigned long long>(highest_address));
+                    fflush(stderr);
+                }
                 return 0;
             }
 

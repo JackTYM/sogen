@@ -804,7 +804,23 @@ namespace sogen
     {
         const auto ansi_class_name = u16_to_cp1252(class_name);
         const auto cls_size = static_cast<size_t>(page_align_up(sizeof(USER_CLASS) + ansi_class_name.size() + 1));
+        if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+        {
+            fprintf(stderr, "[alloc-fail-trace] allocate_user_class: BEGIN class_name=%s cls_size=0x%zx\n", ansi_class_name.c_str(),
+                    cls_size);
+            fflush(stderr);
+        }
         const auto cls_ptr = memory.allocate_memory(cls_size, memory_permission::read);
+        if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+        {
+            fprintf(stderr, "[alloc-fail-trace] allocate_user_class: END class_name=%s cls_ptr=0x%llx\n", ansi_class_name.c_str(),
+                    static_cast<unsigned long long>(cls_ptr));
+            fflush(stderr);
+        }
+        if (!cls_ptr)
+        {
+            throw std::runtime_error("Failed to allocate memory for a user window class");
+        }
         const auto ansi_class_name_ptr = cls_ptr + sizeof(USER_CLASS);
 
         memory.write_memory(ansi_class_name_ptr, ansi_class_name.c_str(), ansi_class_name.size() + 1);
