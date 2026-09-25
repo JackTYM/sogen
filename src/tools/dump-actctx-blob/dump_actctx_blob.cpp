@@ -54,6 +54,12 @@ int main(int argc, char** argv)
     ReadProcessMemory(pi.hProcess, reinterpret_cast<BYTE*>(pbi.PebBaseAddress) + process_assembly_storage_map_offset, &storage_map_ptr,
                       sizeof(storage_map_ptr), &bytes_read);
 
+    // CSRSS builds the activation context blob asynchronously relative to CreateProcess
+    // returning - reading immediately after CREATE_SUSPENDED risked a torn/partial read (seen
+    // empirically: a differential capture came back with a corrupted first TOC entry while an
+    // otherwise-identical capture didn't). Give it a moment to finish before reading memory.
+    Sleep(250);
+
     fprintf(stderr, "PEB=%p ActivationContextData=0x%llx ProcessAssemblyStorageMap=0x%llx\n", pbi.PebBaseAddress,
             static_cast<unsigned long long>(act_ctx_ptr), static_cast<unsigned long long>(storage_map_ptr));
 
