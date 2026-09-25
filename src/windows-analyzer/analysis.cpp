@@ -616,6 +616,24 @@ namespace sogen
         uint64_t g_sldim_teardown_665460_trace_va = 0;
         uint64_t g_sldim_teardown_665460_hits = 0;
 
+        // The real switch discriminant driving the jump-table dispatch that #497 found calling
+        // into `sldim.exe+0xba0892`'s own unconditional `ShowWindow(hMainFrame, SW_HIDE)` (see
+        // project_solidworks_bringup.md #501). Statically disassembled this cycle: a thiscall
+        // function at RVA 0xb86653 (`this` saved to `edi`, params `[ebp+8]`=message,
+        // `[ebp+0xc]`=wParam, `[ebp+0x10]`=lParam, matching `CWnd::WindowProc`'s own signature)
+        // hashes a per-window lookup key into a fixed table, loads the found entry's own `+0x10`
+        // field into `edx`, then does `lea eax,[edx-1]; cmp eax,0x5d; ja default;
+        // jmp [eax*4+0xb86e97]`. Jump-table index 18 (`edx=0x13`) is the one statically confirmed
+        // (via the jump table's own raw contents) to fall into the case block that ends by calling
+        // through `esi` into `sldim.exe+0xba0892`. This watch fires right after `edx` is loaded
+        // (RVA 0xb86909), capturing `edx`/`this`/message/wParam/lParam so a live run can show
+        // whether `edx` really is 0x13 on the hit that leads to the hide, and what real message
+        // produced it -- i.e. whether this is the already-known WM_COMMAND(0x464) relay reaching
+        // this function via a different route, or a genuinely different signal.
+        constexpr uint64_t SLDIM_WNDPROC_DISPATCH_EDX_RVA = 0xb86909;
+        uint64_t g_sldim_wndproc_dispatch_edx_trace_va = 0;
+        uint64_t g_sldim_wndproc_dispatch_edx_hits = 0;
+
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
         // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
@@ -4472,6 +4490,38 @@ namespace sogen
                                  static_cast<unsigned long long>(e8_offset), field_e8_plus_2c, read_e8_plus_2c_ok ? 1 : 0);
         }
 
+        void trace_sldim_wndproc_dispatch_edx_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::edi);
+            const auto edx = emu.reg<uint32_t>(x86_register::edx);
+            const auto eax = emu.reg<uint32_t>(x86_register::eax);
+            const auto ebp = emu.reg<uint32_t>(x86_register::ebp);
+
+            ++g_sldim_wndproc_dispatch_edx_hits;
+
+            uint32_t message{};
+            uint32_t wparam{};
+            uint32_t lparam{};
+            const auto read_message_ok = emu.try_read_memory(ebp + 0x8, &message, sizeof(message));
+            const auto read_wparam_ok = emu.try_read_memory(ebp + 0xc, &wparam, sizeof(wparam));
+            const auto read_lparam_ok = emu.try_read_memory(ebp + 0x10, &lparam, sizeof(lparam));
+
+            uint32_t handler{};
+            const auto read_handler_ok = emu.try_read_memory(eax + 0x14, &handler, sizeof(handler));
+            const auto* handler_mod_name = read_handler_ok ? c.win_emu->mod_manager.find_name(handler) : "?";
+            const auto* handler_mod = read_handler_ok ? c.win_emu->mod_manager.find_by_address(handler) : nullptr;
+            const auto handler_offset = handler_mod ? handler - handler_mod->image_base : handler;
+
+            c.win_emu->log.error("[sldim-wndproc-dispatch-trace] hit #%llu at 0x%llx tid=%u this=0x%x edx=0x%x "
+                                 "message=0x%x (read_ok=%d) wParam=0x%x (read_ok=%d) lParam=0x%x (read_ok=%d) "
+                                 "handler=0x%x (read_ok=%d, %s+0x%llx)\n",
+                                 static_cast<unsigned long long>(g_sldim_wndproc_dispatch_edx_hits),
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, this_ptr, edx, message,
+                                 read_message_ok ? 1 : 0, wparam, read_wparam_ok ? 1 : 0, lparam, read_lparam_ok ? 1 : 0, handler,
+                                 read_handler_ok ? 1 : 0, handler_mod_name, static_cast<unsigned long long>(handler_offset));
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5566,12 +5616,13 @@ namespace sogen
                     g_sldim_cmsgthread_dtor_check_trace_va = exe->image_base + SLDIM_CMSGTHREAD_DTOR_CHECK_RVA;
                     g_sldim_get_pending_command_state_trace_va = exe->image_base + SLDIM_GET_PENDING_COMMAND_STATE_RVA;
                     g_sldim_teardown_665460_trace_va = exe->image_base + SLDIM_TEARDOWN_665460_RVA;
+                    g_sldim_wndproc_dispatch_edx_trace_va = exe->image_base + SLDIM_WNDPROC_DISPATCH_EDX_RVA;
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
                         "0x%llx, trypop entry at 0x%llx, trypop count check at 0x%llx, CMessagingThread ctor2/ctor0 at "
                         "0x%llx / 0x%llx, dtor entry/check at 0x%llx / 0x%llx, get_pending_command state at 0x%llx, teardown-665460 "
-                        "at 0x%llx\n",
+                        "at 0x%llx, WindowProc dispatch edx at 0x%llx\n",
                         static_cast<unsigned long long>(exe->image_base), static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2),
                         static_cast<unsigned long long>(g_sldim_oncommand_trace_va),
@@ -5586,7 +5637,8 @@ namespace sogen
                         static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_entry_trace_va),
                         static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_check_trace_va),
                         static_cast<unsigned long long>(g_sldim_get_pending_command_state_trace_va),
-                        static_cast<unsigned long long>(g_sldim_teardown_665460_trace_va));
+                        static_cast<unsigned long long>(g_sldim_teardown_665460_trace_va),
+                        static_cast<unsigned long long>(g_sldim_wndproc_dispatch_edx_trace_va));
                 }
             }
 
@@ -5659,6 +5711,11 @@ namespace sogen
             if (g_sldim_teardown_665460_trace_va != 0 && address == g_sldim_teardown_665460_trace_va)
             {
                 trace_sldim_teardown_665460_hit(c, address);
+            }
+
+            if (g_sldim_wndproc_dispatch_edx_trace_va != 0 && address == g_sldim_wndproc_dispatch_edx_trace_va)
+            {
+                trace_sldim_wndproc_dispatch_edx_hit(c, address);
             }
 
             if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))
