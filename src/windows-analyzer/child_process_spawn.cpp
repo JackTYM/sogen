@@ -1,6 +1,8 @@
 #include "std_include.hpp"
 #include "child_process_spawn.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -162,7 +164,35 @@ namespace sogen
             });
         }
 
-        std::vector<std::string> build_child_argv(const child_process_spawn_config& config, const int ipc_fd, const int control_fd)
+        std::string to_lower(std::string value)
+        {
+            std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) { return std::tolower(c); });
+            return value;
+        }
+
+        std::string build_child_match_string(const application_settings& settings)
+        {
+            std::string result = settings.application.string();
+
+            if (settings.command_line)
+            {
+                result += ' ';
+                result += u16_to_u8(*settings.command_line);
+            }
+            else
+            {
+                for (const auto& argument : settings.arguments)
+                {
+                    result += ' ';
+                    result += u16_to_u8(argument);
+                }
+            }
+
+            return to_lower(result);
+        }
+
+        std::vector<std::string> build_child_argv(const child_process_spawn_config& config, const application_settings& settings,
+                                                  const int ipc_fd, const int control_fd)
         {
             std::vector<std::string> argv{};
             argv.push_back(config.executable_path.string());
@@ -233,6 +263,21 @@ namespace sogen
             if (config.disable_instruction_precision)
             {
                 argv.emplace_back("--no-inst-precision");
+            }
+
+            if (!config.debug_child_pattern.empty())
+            {
+                argv.emplace_back("--debug-child");
+                argv.push_back(config.debug_child_pattern);
+                argv.emplace_back("--bind");
+                argv.push_back(config.debug_host);
+                argv.emplace_back("--port");
+                argv.push_back(std::to_string(config.debug_port));
+
+                if (build_child_match_string(settings).find(to_lower(config.debug_child_pattern)) != std::string::npos)
+                {
+                    argv.emplace_back("-d");
+                }
             }
 
             argv.emplace_back("--child-ipc-fd");
@@ -811,7 +856,7 @@ namespace sogen
         const auto parent_control_fd = control_fds[0];
         const auto child_control_fd = control_fds[1];
 
-        const auto argv_strings = build_child_argv(config, child_fd, child_control_fd);
+        const auto argv_strings = build_child_argv(config, settings, child_fd, child_control_fd);
         std::vector<char*> argv{};
         argv.reserve(argv_strings.size() + 1);
         for (const auto& arg : argv_strings)

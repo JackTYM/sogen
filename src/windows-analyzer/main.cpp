@@ -58,6 +58,7 @@ namespace sogen
             mutable bool use_gdb{false};
             std::string gdb_host{"127.0.0.1"};
             uint16_t gdb_port{28960};
+            std::string debug_child_pattern{};
             bool log_executable_access{false};
             bool log_foreign_module_access{false};
             bool tenet_trace{false};
@@ -397,7 +398,14 @@ namespace sogen
             {
                 if (options.use_gdb)
                 {
-                    const auto address = network::address{options.gdb_host, options.gdb_port};
+                    auto gdb_port = options.gdb_port;
+#ifndef _WIN32
+                    if (options.child_ipc_fd >= 0)
+                    {
+                        gdb_port = static_cast<uint16_t>(options.gdb_port + (static_cast<uint32_t>(::getpid()) % 1000));
+                    }
+#endif
+                    const auto address = network::address{options.gdb_host, gdb_port};
                     win_emu.log.force_print(color::pink, "Waiting for GDB connection on %s...\n", address.to_string().c_str());
 
                     const auto should_stop = [&] { return signals_received > 0; };
@@ -625,6 +633,9 @@ namespace sogen
             config.skip_syscalls = options.skip_syscalls;
             config.reproducible = options.reproducible;
             config.disable_instruction_precision = options.disable_instruction_precision;
+            config.debug_child_pattern = options.debug_child_pattern;
+            config.debug_host = options.gdb_host;
+            config.debug_port = options.gdb_port;
             return config;
         }
 
@@ -1044,10 +1055,16 @@ namespace sogen
             analysis_options options{};
 
             auto* const debug_option = app.add_flag("-d,--debug", options.use_gdb, "Enable GDB debugging mode");
-            app.add_option("--bind", options.gdb_host, "IP or hostname to bind to in GDB mode")->capture_default_str()->needs(debug_option);
-            app.add_option("--port", options.gdb_port, "Port to listen to in GDB mode")->capture_default_str()->needs(debug_option);
+            app.add_option("--bind", options.gdb_host, "IP or hostname to bind to in GDB mode")->capture_default_str();
+            app.add_option("--port", options.gdb_port, "Port to listen to in GDB mode")->capture_default_str();
             app.add_option("--break-call", options.break_call, "In GDB mode, stop before the specified traced function/syscall call")
                 ->needs(debug_option);
+            app.add_option("--debug-child", options.debug_child_pattern,
+                           "Forward GDB debugging mode to a spawned child process whose image path or command "
+                           "line contains this substring (case-insensitive); other children run normally. Also "
+                           "propagated to every spawned child (matching or not) so the pattern keeps being "
+                           "checked further down the process tree, e.g. --debug-child gpu-process to attach to a "
+                           "Chromium-style GPU-process generation once it's spawned");
 
             app.add_flag("-s,--silent", options.silent, "Silent mode");
             app.add_flag("-v,--verbose", options.verbose_logging, "Verbose logging");
