@@ -669,6 +669,44 @@ namespace sogen
         uint64_t g_sldim_appmgr_gate_byte1be84cc_data_va = 0;
         uint64_t g_sldim_appmgr_gate_byte1be84cc_hits = 0;
 
+        // `sldim.exe+0xa3fab0`'s `case 33` ("Finished", per the `off_181C068` state-name table
+        // `idasql` recovered) reads `this[10]` (`[ecx+0x28]`) to decide what happens next: `==1`
+        // posts an internal message 30001 (a different continuation), `==2` transitions to state 34
+        // ("Shutdown") via `sub_42941A(34, 0)`, anything else is a no-op. `idasql`'s `ctree_call_args`
+        // confirmed this is the ONLY call site anywhere in the binary that ever requests state 34 --
+        // every other of the 15 `sub_42941A` callers targets state 33 ("Finished") or state 1
+        // ("Init"). This watch fires at the `mov eax, [ecx+0x28]` instruction itself, before it
+        // executes, to capture both `this` and the live `this[10]` value at the exact decision point.
+        constexpr uint64_t SLDIM_APPMGR_FINISHED_THIS10_GATE_RVA = 0xa3fb30;
+        uint64_t g_sldim_appmgr_finished_this10_gate_trace_va = 0;
+        uint64_t g_sldim_appmgr_finished_this10_gate_hits = 0;
+
+        // `sldim.exe+0xa3f170` handles worker-thread lifecycle messages (`CTMessage<int>` with
+        // values -1=Termination, 0=Ready, 1=InitCompleted, 2=ApplyChangesCompleted). Its
+        // InitCompleted case is the fork between continuing into state 2 ("Start", the real wizard
+        // flow) and aborting straight to state 33 ("Finished"): `if (dword_1BDE8FC) sub_42941A(2, 0);
+        // else { ...error dialog...; sub_42941A(33, 0); }`. `dword_1BDE8FC` is a progressive
+        // stage/completion bitmask written only by `sub_afdb00` (file evidence:
+        // `"...\\sldim\\Data\\GlobalData.cpp"`), which sets it to 1/2/4/0x10/8 as it advances and
+        // ORs in 0x200 on full success. This watch fires at the `mov ebx, dword_1BDE8FC` instruction
+        // itself (before the subsequent `test bl,bl` consumes it) to capture the live flag value at
+        // the exact Start-vs-Finished fork.
+        constexpr uint64_t SLDIM_GLOBALDATA_FLAG_CHECK_RVA = 0xa3f48c;
+        constexpr uint64_t SLDIM_GLOBALDATA_FLAG_DATA_RVA = 0x17de8fc;
+        uint64_t g_sldim_globaldata_flag_check_trace_va = 0;
+        uint64_t g_sldim_globaldata_flag_data_va = 0;
+        uint64_t g_sldim_globaldata_flag_check_hits = 0;
+
+        // Entry to `sub_afdb00` itself (`"...\\sldim\\Data\\GlobalData.cpp"`), the function that
+        // owns every write to `dword_1BDE8FC`. Watching entry (rather than just the flag's value at
+        // the fork above) distinguishes "GlobalData loading never ran in this process at all" from
+        // "it ran but never reached a stage that sets the flag" -- both would read as `0` at the fork
+        // above, but only the former means the worker-thread lifecycle and the GlobalData load never
+        // even got dispatched to run.
+        constexpr uint64_t SLDIM_GLOBALDATA_ENTRY_RVA = 0x6fdb00;
+        uint64_t g_sldim_globaldata_entry_trace_va = 0;
+        uint64_t g_sldim_globaldata_entry_hits = 0;
+
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
         // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
@@ -4597,6 +4635,49 @@ namespace sogen
                                  static_cast<unsigned long long>(g_sldim_appmgr_gate_byte1be84cc_data_va));
         }
 
+        void trace_sldim_appmgr_finished_this10_gate_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            uint32_t this10{};
+            const auto read_ok = emu.try_read_memory(this_ptr + 0x28, &this10, sizeof(this10));
+
+            ++g_sldim_appmgr_finished_this10_gate_hits;
+
+            c.win_emu->log.error("[sldim-appmgr-finished-this10-gate-trace] hit #%llu at 0x%llx tid=%u this=0x%x "
+                                 "this[10]=0x%x (read_ok=%d)\n",
+                                 static_cast<unsigned long long>(g_sldim_appmgr_finished_this10_gate_hits),
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, this_ptr, this10,
+                                 read_ok ? 1 : 0);
+        }
+
+        void trace_sldim_globaldata_flag_check_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+
+            uint32_t value{};
+            const auto read_ok =
+                g_sldim_globaldata_flag_data_va != 0 && emu.try_read_memory(g_sldim_globaldata_flag_data_va, &value, sizeof(value));
+
+            ++g_sldim_globaldata_flag_check_hits;
+
+            c.win_emu->log.error("[sldim-globaldata-flag-check-trace] hit #%llu at 0x%llx tid=%u dword_1BDE8FC=0x%x "
+                                 "(read_ok=%d) data_va=0x%llx\n",
+                                 static_cast<unsigned long long>(g_sldim_globaldata_flag_check_hits),
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, value, read_ok ? 1 : 0,
+                                 static_cast<unsigned long long>(g_sldim_globaldata_flag_data_va));
+        }
+
+        void trace_sldim_globaldata_entry_hit(const analysis_context& c, const uint64_t address)
+        {
+            ++g_sldim_globaldata_entry_hits;
+
+            c.win_emu->log.error("[sldim-globaldata-entry-trace] hit #%llu at 0x%llx tid=%u\n",
+                                 static_cast<unsigned long long>(g_sldim_globaldata_entry_hits), static_cast<unsigned long long>(address),
+                                 c.win_emu->current_thread().id);
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5695,6 +5776,10 @@ namespace sogen
                     g_sldim_appmgr_wmclose_trace_va = exe->image_base + SLDIM_APPMGR_WMCLOSE_RVA;
                     g_sldim_appmgr_gate_byte1be84cc_trace_va = exe->image_base + SLDIM_APPMGR_GATE_BYTE1BE84CC_RVA;
                     g_sldim_appmgr_gate_byte1be84cc_data_va = exe->image_base + SLDIM_APPMGR_GATE_BYTE1BE84CC_DATA_RVA;
+                    g_sldim_appmgr_finished_this10_gate_trace_va = exe->image_base + SLDIM_APPMGR_FINISHED_THIS10_GATE_RVA;
+                    g_sldim_globaldata_flag_check_trace_va = exe->image_base + SLDIM_GLOBALDATA_FLAG_CHECK_RVA;
+                    g_sldim_globaldata_flag_data_va = exe->image_base + SLDIM_GLOBALDATA_FLAG_DATA_RVA;
+                    g_sldim_globaldata_entry_trace_va = exe->image_base + SLDIM_GLOBALDATA_ENTRY_RVA;
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
@@ -5721,6 +5806,12 @@ namespace sogen
                         static_cast<unsigned long long>(g_sldim_appmgr_wmclose_trace_va),
                         static_cast<unsigned long long>(g_sldim_appmgr_gate_byte1be84cc_trace_va),
                         static_cast<unsigned long long>(g_sldim_appmgr_gate_byte1be84cc_data_va));
+                    c.win_emu->log.error("[sldim-queue-trace] ApplicationManager Finished-state this[10] gate at 0x%llx, GlobalData flag "
+                                         "check at 0x%llx (data at 0x%llx), GlobalData entry at 0x%llx\n",
+                                         static_cast<unsigned long long>(g_sldim_appmgr_finished_this10_gate_trace_va),
+                                         static_cast<unsigned long long>(g_sldim_globaldata_flag_check_trace_va),
+                                         static_cast<unsigned long long>(g_sldim_globaldata_flag_data_va),
+                                         static_cast<unsigned long long>(g_sldim_globaldata_entry_trace_va));
                 }
             }
 
@@ -5808,6 +5899,21 @@ namespace sogen
             if (g_sldim_appmgr_gate_byte1be84cc_trace_va != 0 && address == g_sldim_appmgr_gate_byte1be84cc_trace_va)
             {
                 trace_sldim_appmgr_gate_byte1be84cc_hit(c, address);
+            }
+
+            if (g_sldim_appmgr_finished_this10_gate_trace_va != 0 && address == g_sldim_appmgr_finished_this10_gate_trace_va)
+            {
+                trace_sldim_appmgr_finished_this10_gate_hit(c, address);
+            }
+
+            if (g_sldim_globaldata_flag_check_trace_va != 0 && address == g_sldim_globaldata_flag_check_trace_va)
+            {
+                trace_sldim_globaldata_flag_check_hit(c, address);
+            }
+
+            if (g_sldim_globaldata_entry_trace_va != 0 && address == g_sldim_globaldata_entry_trace_va)
+            {
+                trace_sldim_globaldata_entry_hit(c, address);
             }
 
             if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))
