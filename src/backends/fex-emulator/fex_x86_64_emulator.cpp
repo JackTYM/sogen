@@ -674,6 +674,48 @@ namespace sogen::fex
             instruction_hook_callback callback;
         };
 
+        // A patched (0xCC-planted) breakpoint's saved state. Refcounted: more than one
+        // execution_hook_entry can target the same address, and the byte is only ever restored once
+        // the last one is deleted. `applied` distinguishes an actually-planted 0xCC from a breakpoint
+        // temporarily "suspended" (original_byte known, but not currently written) while its own
+        // step-over is in flight - see try_apply_patched_execution_breakpoint's callers.
+        struct patched_execution_breakpoint
+        {
+            std::optional<std::byte> original_byte{};
+            size_t hook_count{};
+            bool applied{};
+
+            bool suspended() const
+            {
+                return this->original_byte.has_value() && !this->applied;
+            }
+        };
+
+        struct execution_hook_entry
+        {
+            std::optional<uint64_t> address{};
+            bool patched_breakpoint{false};
+            memory_execution_hook_callback callback{};
+        };
+
+#ifdef __APPLE__
+        // The x86 EFLAGS trap-flag bit, used by this backend's own internal single-step
+        // implementation (start(1) and breakpoint step-over both arm it directly on the guest's
+        // rflags rather than relying on any FEXCore-level single-step primitive).
+        constexpr uint64_t trap_flag_bit = 0x100;
+
+        // Per-vCPU record of an in-flight internal single-step (either an explicit start(1), or a
+        // breakpoint's automatic step-over of its own restored original instruction). Saved/restored
+        // around arming/consuming the trap flag so a step never leaks TF into the guest's own EFLAGS,
+        // and never clobbers a TF the guest had already armed for its own single-step trap.
+        struct pending_execution_step
+        {
+            bool had_trap_flag{};
+            std::optional<uint64_t> patched_breakpoint{};
+            bool stop_after_step{};
+        };
+#endif
+
 #ifdef __APPLE__
         bool sysctl_flag(const char* name)
         {
@@ -1315,11 +1357,24 @@ namespace sogen::fex
         bool dispatch_pending_hook_if_any();
         void defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled);
 
+        void arm_execution_single_step(bool stop_after_step);
+        pending_execution_step take_pending_execution_step();
+        bool complete_execution_step();
+        void abandon_execution_step();
+        bool handle_patched_execution_breakpoint(uint64_t address);
+
         pending_fault_dispatch pending_fault_dispatch_{};
         // Set by handle_fault_signal when it unwinds ExecuteThread through an InterruptFaultPage hit;
         // consumed by start()'s loop to tell that unwind apart from any other clean return. No atomics:
         // the signal handler runs on the same host thread whose start() consumes the flag.
         bool interrupt_page_unwind_ = false;
+
+        // Both only ever mutated in normal call context (dispatch_pending_hook_if_any/start(), never
+        // from inside a signal handler) while emulator_.tables_mutex_ is held - see
+        // handle_patched_execution_breakpoint's doc comment, mirroring the WHP backend's identical
+        // is_page_being_stepped()/pending_execution_step_ invariant.
+        std::optional<pending_execution_step> pending_execution_step_{};
+        std::optional<uint64_t> deferred_patched_breakpoint_{};
 
         // Per-vCPU alternate signal stack, registered on first entry into start() on this vCPU's own
         // host thread (a single shared static buffer, as a single-host-thread cooperative model used,
@@ -1663,6 +1718,12 @@ namespace sogen::fex
             // buffer that overlaps the guest destination range - overlapping memcpy is undefined
             // behaviour. This is a generic guest memory-copy primitive with no non-overlap contract.
             std::memmove(data, reinterpret_cast<const void*>(address + rebase), size);
+#ifdef __APPLE__
+            // A patched breakpoint's live guest byte is 0xCC - callers reading guest memory (a
+            // disassembler, a debugger's memory read, the loader re-reading a section) must see the
+            // original instruction byte instead.
+            this->overlay_patched_breakpoints_on_read(address, data, size);
+#endif
             return true;
         }
 
@@ -1709,6 +1770,9 @@ namespace sogen::fex
             // which needs tables_mutex_ (shared) - the reverse acquisition order from holding
             // tables_mutex_ into GetCodeInvalidationMutex here, a real ABBA deadlock hit on the very
             // first genuine --vcpus 2 run.
+#ifdef __APPLE__
+            std::vector<uint64_t> breakpoints_replanted;
+#endif
             {
                 const std::unique_lock lock(this->tables_mutex_);
 
@@ -1740,6 +1804,13 @@ namespace sogen::fex
                 {
                     this->set_temporary_write_access(address, size, false);
                 }
+
+#ifdef __APPLE__
+                // A guest write onto a patched breakpoint's own address must not silently drop the
+                // 0xCC the caller just overwrote with the real instruction byte - re-record the
+                // original byte and (unless the breakpoint is suspended, mid-step-over) re-plant it.
+                this->overlay_patched_breakpoints_on_write(address, size, breakpoints_replanted);
+#endif
             }
 
             if (invalidate_translations)
@@ -1747,40 +1818,83 @@ namespace sogen::fex
                 // Writing to a mapped region may overwrite already-translated code; drop FEX's cache for it.
                 this->invalidate_code_range_locked(address, size);
             }
+#ifdef __APPLE__
+            for (const auto bp_address : breakpoints_replanted)
+            {
+                this->invalidate_code_range_locked(bp_address, 1);
+            }
+#endif
             return true;
         }
 
         // --[ hook_interface ]-----------------------------------------------------------------------
         //
-        // Like the KVM backend, FEX runs the guest natively, so fine-grained memory/execution/basic-
-        // block hooks cannot fire. They are accepted (and tracked, so delete_hook works) for API
-        // compatibility. Only instruction hooks for `syscall` are actually wired (see the syscall
-        // bridge). Registered once globally (not per-vCPU): every fex_vcpu's hook_*() forwards here,
-        // since a hook must fire for whichever vCPU's guest thread triggers it, not just the vCPU it
-        // happened to be registered through.
+        // Like the KVM backend, FEX runs the guest natively, so fine-grained memory/basic-block hooks
+        // cannot fire. They are accepted (and tracked, so delete_hook works) for API compatibility.
+        // Only instruction hooks for `syscall` are actually wired (see the syscall bridge), plus
+        // single-address execution hooks in int3 mode (Apple only), which plant a real 0xCC. Hook
+        // tables are registered once globally (not per-vCPU): every fex_vcpu's hook_*() forwards
+        // here, since a hook must fire for whichever vCPU's guest thread triggers it, not just the
+        // vCPU it happened to be registered through.
+
+#ifdef __APPLE__
+        void set_memory_execution_hook_mode(const memory_execution_hook_mode mode) override
+        {
+            const std::unique_lock lock(this->tables_mutex_);
+            this->memory_execution_hook_mode_ = mode;
+        }
+#endif
 
         emulator_hook* hook_memory_execution(memory_execution_hook_callback callback) override
         {
             const std::unique_lock lock(this->tables_mutex_);
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            this->memory_execution_hooks_[hook] = execution_hook_entry{.callback = std::move(callback)};
             return hook;
         }
 
-        emulator_hook* hook_memory_execution(uint64_t /*address*/, memory_execution_hook_callback callback) override
+        emulator_hook* hook_memory_execution(const uint64_t address, memory_execution_hook_callback callback) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
-            auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+#ifdef __APPLE__
+            bool needs_invalidate = false;
+#endif
+            emulator_hook* hook = nullptr;
+            {
+                const std::unique_lock lock(this->tables_mutex_);
+                hook = this->make_hook();
+#ifdef __APPLE__
+                if (this->memory_execution_hook_mode_ == memory_execution_hook_mode::int3)
+                {
+                    needs_invalidate = this->install_patched_execution_breakpoint(address);
+                    this->memory_execution_hooks_[hook] =
+                        execution_hook_entry{.address = address, .patched_breakpoint = true, .callback = std::move(callback)};
+                }
+                else
+#endif
+                {
+                    this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
+                }
+            }
+#ifdef __APPLE__
+            if (needs_invalidate)
+            {
+                this->invalidate_code_range_locked(address, 1);
+            }
+#endif
             return hook;
         }
 
-        emulator_hook* hook_memory_range_execution(uint64_t /*address*/, uint64_t /*size*/,
+        emulator_hook* hook_memory_range_execution(const uint64_t address, const uint64_t size,
                                                    memory_execution_hook_callback callback) override
         {
+            if (size == 1)
+            {
+                return this->hook_memory_execution(address, std::move(callback));
+            }
+
             const std::unique_lock lock(this->tables_mutex_);
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
             return hook;
         }
 
@@ -1845,23 +1959,48 @@ namespace sogen::fex
 
         void delete_hook(emulator_hook* hook) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
-            if (this->syscall_hook_ != nullptr)
+#ifdef __APPLE__
+            bool needs_invalidate = false;
+            uint64_t invalidate_address = 0;
+#endif
             {
-                const auto it = this->instruction_hooks_.find(hook);
-                if (it != this->instruction_hooks_.end() && &it->second == this->syscall_hook_)
+                const std::unique_lock lock(this->tables_mutex_);
+                if (this->syscall_hook_ != nullptr)
                 {
-                    this->syscall_hook_ = nullptr;
+                    const auto it = this->instruction_hooks_.find(hook);
+                    if (it != this->instruction_hooks_.end() && &it->second == this->syscall_hook_)
+                    {
+                        this->syscall_hook_ = nullptr;
+                    }
                 }
-            }
 
-            this->instruction_hooks_.erase(hook);
-            this->interrupt_hooks_.erase(hook);
-            this->memory_read_hooks_.erase(hook);
-            this->memory_write_hooks_.erase(hook);
-            this->memory_execution_hooks_.erase(hook);
-            this->memory_violation_hooks_.erase(hook);
-            this->basic_block_hooks_.erase(hook);
+                this->instruction_hooks_.erase(hook);
+                this->interrupt_hooks_.erase(hook);
+                this->memory_read_hooks_.erase(hook);
+                this->memory_write_hooks_.erase(hook);
+
+                const auto execution_it = this->memory_execution_hooks_.find(hook);
+                if (execution_it != this->memory_execution_hooks_.end())
+                {
+#ifdef __APPLE__
+                    if (execution_it->second.patched_breakpoint && execution_it->second.address)
+                    {
+                        invalidate_address = *execution_it->second.address;
+                        needs_invalidate = this->uninstall_patched_execution_breakpoint(invalidate_address);
+                    }
+#endif
+                    this->memory_execution_hooks_.erase(execution_it);
+                }
+
+                this->memory_violation_hooks_.erase(hook);
+                this->basic_block_hooks_.erase(hook);
+            }
+#ifdef __APPLE__
+            if (needs_invalidate)
+            {
+                this->invalidate_code_range_locked(invalidate_address, 1);
+            }
+#endif
         }
 
         emulator_hook* make_hook()
@@ -2135,28 +2274,45 @@ namespace sogen::fex
 
         void map_memory(uint64_t address, size_t size, memory_permission permissions) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
-
-            if (!is_page_aligned(address) || !is_page_aligned(size))
+#ifdef __APPLE__
+            std::vector<uint64_t> breakpoints_applied;
+#endif
             {
-                throw std::runtime_error("FEX memory mappings must be page aligned");
-            }
+                const std::unique_lock lock(this->tables_mutex_);
+
+                if (!is_page_aligned(address) || !is_page_aligned(size))
+                {
+                    throw std::runtime_error("FEX memory mappings must be page aligned");
+                }
 
 #ifdef __APPLE__
-            this->set_shadow_range_apple(address, size, permissions);
-            this->sync_host_pages_covering_apple(address, size);
+                this->set_shadow_range_apple(address, size, permissions);
+                this->sync_host_pages_covering_apple(address, size);
 #else
-            void* result = ::mmap(reinterpret_cast<void*>(address), size, to_prot(permissions),
-                                  MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-            if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != address)
-            {
-                throw std::runtime_error("FEX backend failed to map guest memory at requested address");
-            }
+                void* result = ::mmap(reinterpret_cast<void*>(address), size, to_prot(permissions),
+                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != address)
+                {
+                    throw std::runtime_error("FEX backend failed to map guest memory at requested address");
+                }
 #endif
 
-            this->erase_region_range(address, size);
-            this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = true};
-            this->mark_executable_range_locked(address, size, permissions);
+                this->erase_region_range(address, size);
+                this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = true};
+                this->mark_executable_range_locked(address, size, permissions);
+#ifdef __APPLE__
+                // A breakpoint address can be (re-)mapped after its hook was registered (e.g. a
+                // module reloaded over the same address range) - re-plant any of its 0xCC bytes that
+                // now fall inside newly-mapped memory.
+                this->apply_patched_execution_breakpoints_in_range(address, size, breakpoints_applied);
+#endif
+            }
+#ifdef __APPLE__
+            for (const auto bp_address : breakpoints_applied)
+            {
+                this->invalidate_code_range_locked(bp_address, 1);
+            }
+#endif
         }
 
 #ifdef __APPLE__
@@ -2240,65 +2396,80 @@ namespace sogen::fex
 
         void map_host_memory(uint64_t address, size_t size, void* host_pointer, memory_permission permissions) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
-
-            if (!is_page_aligned(address) || !is_page_aligned(size))
+#ifdef __APPLE__
+            std::vector<uint64_t> breakpoints_applied;
+#endif
             {
-                throw std::runtime_error("FEX host memory mappings must be page aligned");
-            }
+                const std::unique_lock lock(this->tables_mutex_);
 
-            const auto rebase = rebase_for(this->is_wow64_process_, address);
-            const uint64_t host_address = address + rebase;
+                if (!is_page_aligned(address) || !is_page_aligned(size))
+                {
+                    throw std::runtime_error("FEX host memory mappings must be page aligned");
+                }
+
+                const auto rebase = rebase_for(this->is_wow64_process_, address);
+                const uint64_t host_address = address + rebase;
 
 #ifdef __APPLE__
-            // Same EXC_GUARD hazard as map_fixed_anonymous_apple (see its doc comment): try the plain,
-            // gap-checked remap first, and only fall back to VM_FLAGS_OVERWRITE if that proves the
-            // range is already fully covered (KERN_NO_SPACE/KERN_MEMORY_PRESENT), which rules out the
-            // unmapped gap that trips vm_map_delete()'s guard.
-            mach_vm_address_t target_address = host_address;
-            vm_prot_t cur_protection = VM_PROT_NONE;
-            vm_prot_t max_protection = VM_PROT_NONE;
-            kern_return_t result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED, mach_task_self(),
-                                                   reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection,
-                                                   &max_protection, VM_INHERIT_NONE);
-            if (result == KERN_NO_SPACE || result == KERN_MEMORY_PRESENT)
-            {
-                target_address = host_address;
-                cur_protection = VM_PROT_NONE;
-                max_protection = VM_PROT_NONE;
-                result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
-                                         reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection, &max_protection,
-                                         VM_INHERIT_NONE);
-            }
-            if (result != KERN_SUCCESS || target_address != host_address)
-            {
-                throw std::runtime_error("FEX backend failed to alias host memory into the guest");
-            }
+                // Same EXC_GUARD hazard as map_fixed_anonymous_apple (see its doc comment): try the plain,
+                // gap-checked remap first, and only fall back to VM_FLAGS_OVERWRITE if that proves the
+                // range is already fully covered (KERN_NO_SPACE/KERN_MEMORY_PRESENT), which rules out the
+                // unmapped gap that trips vm_map_delete()'s guard.
+                mach_vm_address_t target_address = host_address;
+                vm_prot_t cur_protection = VM_PROT_NONE;
+                vm_prot_t max_protection = VM_PROT_NONE;
+                kern_return_t result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED, mach_task_self(),
+                                                       reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection,
+                                                       &max_protection, VM_INHERIT_NONE);
+                if (result == KERN_NO_SPACE || result == KERN_MEMORY_PRESENT)
+                {
+                    target_address = host_address;
+                    cur_protection = VM_PROT_NONE;
+                    max_protection = VM_PROT_NONE;
+                    result = ::mach_vm_remap(mach_task_self(), &target_address, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                                             mach_task_self(), reinterpret_cast<mach_vm_address_t>(host_pointer), FALSE, &cur_protection,
+                                             &max_protection, VM_INHERIT_NONE);
+                }
+                if (result != KERN_SUCCESS || target_address != host_address)
+                {
+                    throw std::runtime_error("FEX backend failed to alias host memory into the guest");
+                }
 
-            // Without shadow entries, handle_general_memory_violation classifies any hardware fault in
-            // this range as an unmapped-memory violation - including the misaligned STLR-family faults
-            // (SIGBUS/BUS_ADRALN) FEX's TSO modeling routinely produces for x86-legal unaligned guest
-            // accesses, which must instead reach handle_misaligned_atomic_fault's emulation like they
-            // do for ordinary mappings. Registering the covering host pages additionally keeps the
-            // first-claim path from treating this live aliased range as free (same reasoning as
-            // map_mmio's KUSD-collision fix above).
-            this->set_shadow_range_apple(address, size, permissions);
-            for (uint64_t host_page = host_page_align_down_apple(address); host_page < address + size; host_page += host_page_size_apple)
-            {
-                this->mapped_host_pages_apple_.insert(host_page);
-            }
+                // Without shadow entries, handle_general_memory_violation classifies any hardware fault in
+                // this range as an unmapped-memory violation - including the misaligned STLR-family faults
+                // (SIGBUS/BUS_ADRALN) FEX's TSO modeling routinely produces for x86-legal unaligned guest
+                // accesses, which must instead reach handle_misaligned_atomic_fault's emulation like they
+                // do for ordinary mappings. Registering the covering host pages additionally keeps the
+                // first-claim path from treating this live aliased range as free (same reasoning as
+                // map_mmio's KUSD-collision fix above).
+                this->set_shadow_range_apple(address, size, permissions);
+                for (uint64_t host_page = host_page_align_down_apple(address); host_page < address + size;
+                     host_page += host_page_size_apple)
+                {
+                    this->mapped_host_pages_apple_.insert(host_page);
+                }
 #else
-            void* result = ::mremap(host_pointer, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(host_address));
-            if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
-            {
-                throw std::runtime_error("FEX backend failed to alias host memory into the guest");
-            }
+                void* result = ::mremap(host_pointer, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(host_address));
+                if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
+                {
+                    throw std::runtime_error("FEX backend failed to alias host memory into the guest");
+                }
 #endif
 
-            ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
-            this->erase_region_range(address, size);
-            this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
-            this->mark_executable_range_locked(address, size, permissions);
+                ::mprotect(reinterpret_cast<void*>(host_address), size, to_prot(permissions));
+                this->erase_region_range(address, size);
+                this->regions_[address] = mapped_region{.size = size, .permissions = permissions, .owned = false};
+                this->mark_executable_range_locked(address, size, permissions);
+#ifdef __APPLE__
+                this->apply_patched_execution_breakpoints_in_range(address, size, breakpoints_applied);
+#endif
+            }
+#ifdef __APPLE__
+            for (const auto bp_address : breakpoints_applied)
+            {
+                this->invalidate_code_range_locked(bp_address, 1);
+            }
+#endif
         }
 
         bool host_memory_aliasing_is_coherent() const override
@@ -2353,6 +2524,10 @@ namespace sogen::fex
 #ifdef __APPLE__
                 this->set_shadow_range_apple(address, size, std::nullopt);
                 this->sync_host_pages_covering_apple(address, size);
+                // The backing memory is gone - any breakpoint here no longer has a real 0xCC or
+                // original byte to track. map_memory/map_host_memory re-apply it if this range is
+                // ever remapped (see apply_patched_execution_breakpoints_in_range).
+                this->mark_patched_execution_breakpoints_unmapped_in_range(address, size);
 #else
                 ::munmap(reinterpret_cast<void*>(address), size);
 #endif
@@ -2580,6 +2755,222 @@ namespace sogen::fex
 
             return true;
         }
+
+#ifdef __APPLE__
+        // --[ patched execution breakpoints (0xCC planting, int3 hook mode) - callers already hold
+        //     tables_mutex_ (unique) ]-------------------------------------------------------------
+        //
+        // Poking a guest byte here is safe under tables_mutex_ (it's the same direct write
+        // try_write_memory_impl already does under this lock); invalidate_code_range_locked must
+        // never run while tables_mutex_ is held (see try_write_memory_impl's doc comment on the
+        // FEXCore GetCodeInvalidationMutex ABBA hazard), so every helper that may poke a byte returns
+        // (or collects) which address(es) the caller must invalidate after releasing the lock.
+
+        std::optional<std::byte> peek_breakpoint_byte(uint64_t address) const
+        {
+            if (!this->is_range_mapped(address, 1))
+            {
+                return std::nullopt;
+            }
+            const auto rebase = rebase_for(this->is_wow64_process_, address);
+            return *reinterpret_cast<const std::byte*>(address + rebase);
+        }
+
+        void poke_breakpoint_byte(uint64_t address, std::byte value)
+        {
+            const bool needs_temporary_write = !this->range_is_writable(address, 1);
+            if (needs_temporary_write)
+            {
+                this->set_temporary_write_access(address, 1, true);
+            }
+            const auto rebase = rebase_for(this->is_wow64_process_, address);
+            *reinterpret_cast<volatile std::byte*>(address + rebase) = value;
+            if (needs_temporary_write)
+            {
+                this->set_temporary_write_access(address, 1, false);
+            }
+        }
+
+        // All pending-step/deferred-breakpoint mutation happens under tables_mutex_ (see
+        // fex_vcpu::handle_patched_execution_breakpoint), so scanning every vCPU's state here is
+        // safe - mirrors the WHP backend's identical is_page_being_stepped().
+        bool is_stepping_over_patched_breakpoint(uint64_t address) const
+        {
+            for (const auto& vcpu : this->vcpus_)
+            {
+                if (vcpu->deferred_patched_breakpoint_ == address)
+                {
+                    return true;
+                }
+                if (vcpu->pending_execution_step_ && vcpu->pending_execution_step_->patched_breakpoint == address)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        bool try_apply_patched_execution_breakpoint(uint64_t address, patched_execution_breakpoint& breakpoint)
+        {
+            const auto current = this->peek_breakpoint_byte(address);
+            if (!current)
+            {
+                breakpoint.applied = false;
+                return false;
+            }
+            if (breakpoint.applied && *current == std::byte{0xCC})
+            {
+                return false;
+            }
+            breakpoint.original_byte = current;
+            this->poke_breakpoint_byte(address, std::byte{0xCC});
+            breakpoint.applied = true;
+            return true;
+        }
+
+        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        bool install_patched_execution_breakpoint(uint64_t address)
+        {
+            auto existing = this->patched_execution_breakpoints_.find(address);
+            if (existing != this->patched_execution_breakpoints_.end())
+            {
+                ++existing->second.hook_count;
+                if (!existing->second.applied && !existing->second.suspended())
+                {
+                    return this->try_apply_patched_execution_breakpoint(address, existing->second);
+                }
+                return false;
+            }
+
+            patched_execution_breakpoint breakpoint{.hook_count = 1};
+            bool wrote = false;
+            if (this->is_stepping_over_patched_breakpoint(address))
+            {
+                // The live byte here is mid-step-over (the original instruction, not 0xCC yet
+                // re-planted) - record it without planting, so the pending step-over still executes
+                // the real instruction; see fex_vcpu::handle_patched_execution_breakpoint.
+                breakpoint.original_byte = this->peek_breakpoint_byte(address);
+            }
+            else
+            {
+                wrote = this->try_apply_patched_execution_breakpoint(address, breakpoint);
+            }
+            this->patched_execution_breakpoints_[address] = breakpoint;
+            return wrote;
+        }
+
+        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        bool uninstall_patched_execution_breakpoint(uint64_t address)
+        {
+            auto existing = this->patched_execution_breakpoints_.find(address);
+            if (existing == this->patched_execution_breakpoints_.end())
+            {
+                return false;
+            }
+
+            if (existing->second.hook_count > 1)
+            {
+                --existing->second.hook_count;
+                return false;
+            }
+
+            bool wrote = false;
+            if (existing->second.applied && existing->second.original_byte && this->is_range_mapped(address, 1))
+            {
+                this->poke_breakpoint_byte(address, *existing->second.original_byte);
+                wrote = true;
+            }
+
+            this->patched_execution_breakpoints_.erase(existing);
+            return wrote;
+        }
+
+        // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
+        bool set_patched_execution_breakpoint_state(uint64_t address, bool applied)
+        {
+            const auto existing = this->patched_execution_breakpoints_.find(address);
+            if (existing == this->patched_execution_breakpoints_.end())
+            {
+                return false;
+            }
+
+            if (applied && !existing->second.original_byte)
+            {
+                return this->try_apply_patched_execution_breakpoint(address, existing->second);
+            }
+
+            if (!existing->second.original_byte || !this->is_range_mapped(address, 1))
+            {
+                return false;
+            }
+
+            this->poke_breakpoint_byte(address, applied ? std::byte{0xCC} : *existing->second.original_byte);
+            existing->second.applied = applied;
+            return true;
+        }
+
+        // Appends every address it wrote to `written` (caller must invalidate_code_range_locked for
+        // each, after releasing tables_mutex_).
+        void apply_patched_execution_breakpoints_in_range(uint64_t address, size_t size, std::vector<uint64_t>& written)
+        {
+            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (bp_address >= address && bp_address < address + size &&
+                    this->try_apply_patched_execution_breakpoint(bp_address, breakpoint))
+                {
+                    written.push_back(bp_address);
+                }
+            }
+        }
+
+        void mark_patched_execution_breakpoints_unmapped_in_range(uint64_t address, size_t size)
+        {
+            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (bp_address >= address && bp_address < address + size)
+                {
+                    breakpoint.original_byte.reset();
+                    breakpoint.applied = false;
+                }
+            }
+        }
+
+        void overlay_patched_breakpoints_on_read(uint64_t address, void* data, size_t size) const
+        {
+            auto* cursor = static_cast<std::byte*>(data);
+            for (const auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (!breakpoint.original_byte || bp_address < address || bp_address >= address + size)
+                {
+                    continue;
+                }
+                cursor[bp_address - address] = *breakpoint.original_byte;
+            }
+        }
+
+        // A guest write to a byte under a patched breakpoint updates the saved original byte instead
+        // of the live 0xCC (unless the breakpoint is currently suspended, mid-step-over - see
+        // patched_execution_breakpoint::suspended()). Appends every address it wrote to `written`.
+        void overlay_patched_breakpoints_on_write(uint64_t address, size_t size, std::vector<uint64_t>& written)
+        {
+            for (auto& [bp_address, breakpoint] : this->patched_execution_breakpoints_)
+            {
+                if (bp_address < address || bp_address >= address + size)
+                {
+                    continue;
+                }
+                const bool suspended = breakpoint.suspended();
+                breakpoint.original_byte = this->peek_breakpoint_byte(bp_address);
+                if (!suspended)
+                {
+                    this->poke_breakpoint_byte(bp_address, std::byte{0xCC});
+                    breakpoint.applied = true;
+                    written.push_back(bp_address);
+                }
+            }
+        }
+#endif
 
 #ifdef __APPLE__
         void set_shadow_range_apple(uint64_t address, size_t size, std::optional<memory_permission> permissions)
@@ -2947,10 +3338,15 @@ namespace sogen::fex
         std::unordered_map<emulator_hook*, interrupt_hook_callback> interrupt_hooks_;
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_read_hooks_;
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_write_hooks_;
-        std::unordered_map<emulator_hook*, memory_execution_hook_callback> memory_execution_hooks_;
+        std::unordered_map<emulator_hook*, execution_hook_entry> memory_execution_hooks_;
         std::unordered_map<emulator_hook*, memory_violation_hook_callback> memory_violation_hooks_;
         std::unordered_map<emulator_hook*, basic_block_hook_callback> basic_block_hooks_;
         uintptr_t next_hook_id_ = 1;
+
+#ifdef __APPLE__
+        memory_execution_hook_mode memory_execution_hook_mode_ = memory_execution_hook_mode::automatic;
+        std::unordered_map<uint64_t, patched_execution_breakpoint> patched_execution_breakpoints_;
+#endif
     };
 
 #ifdef __APPLE__
@@ -3094,7 +3490,7 @@ namespace sogen::fex
     {
         this->emulator_.refresh_mmio_backings();
 
-        if (count != 0)
+        if (count > 1)
         {
             // FEX has CompileRIPCount() for bounded execution, but wiring exact instruction counts
             // through the JIT exit path is non-trivial; match the KVM backend and refuse for now.
@@ -3132,6 +3528,38 @@ namespace sogen::fex
             ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
         }
 
+        // A breakpoint left deferred by the previous start() (see handle_patched_execution_breakpoint
+        // and abandon_execution_step) is only stepped over here, in normal call context, once
+        // execution is actually about to resume through it - if RIP moved away in the meantime (the
+        // debugger redirected it, or restored a snapshot), just re-plant instead of stepping.
+        if (this->deferred_patched_breakpoint_)
+        {
+            const auto deferred_address = *this->deferred_patched_breakpoint_;
+            this->deferred_patched_breakpoint_.reset();
+            if (this->cpu_state().rip == deferred_address)
+            {
+                this->arm_execution_single_step(count == 1);
+                this->pending_execution_step_->patched_breakpoint = deferred_address;
+            }
+            else
+            {
+                bool wrote = false;
+                {
+                    const std::unique_lock lock(this->emulator_.tables_mutex_);
+                    wrote = this->emulator_.set_patched_execution_breakpoint_state(deferred_address, true);
+                }
+                if (wrote)
+                {
+                    this->emulator_.invalidate_code_range_locked(deferred_address, 1);
+                }
+            }
+        }
+
+        if (!this->pending_execution_step_ && count == 1)
+        {
+            this->arm_execution_single_step(true);
+        }
+
         // ExecuteThread runs the translated guest until the thread is asked to stop (which the
         // syscall bridge does when a hook calls stop()), or the guest faults/exits. It can also
         // return early because handle_fault_signal deferred a hook dispatch rather than a genuine
@@ -3161,6 +3589,12 @@ namespace sogen::fex
             auto* const active = this->active_thread_.load();
             ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
         }
+
+        // A step still pending when start() returns (e.g. a hook stopped on an unrelated fault before
+        // our own #DB/#BP could complete it) must not leak TF into the next run, nor abandon the
+        // breakpoint it was stepping over - restore the guest's own trap-flag state and re-defer that
+        // breakpoint so the block above finishes it on the next start().
+        this->abandon_execution_step();
     }
 #else
     void fex_vcpu::start(size_t count)
@@ -3578,6 +4012,183 @@ namespace sogen::fex
         }
         set_flags_from_compacted_eflags(this->staged_state_, static_cast<uint32_t>(rflags));
     }
+
+#ifdef __APPLE__
+    void fex_vcpu::arm_execution_single_step(const bool stop_after_step)
+    {
+        if (this->pending_execution_step_)
+        {
+            throw std::runtime_error("Nested FEX execution single-step state is not supported");
+        }
+
+        const auto rflags = this->read_rflags();
+        pending_execution_step state{};
+        state.had_trap_flag = (rflags & trap_flag_bit) != 0;
+        state.stop_after_step = stop_after_step;
+        this->pending_execution_step_ = state;
+        this->write_rflags(rflags | trap_flag_bit);
+    }
+
+    pending_execution_step fex_vcpu::take_pending_execution_step()
+    {
+        const auto state = *std::exchange(this->pending_execution_step_, std::nullopt);
+        const auto rflags = this->read_rflags();
+        this->write_rflags(state.had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+        return state;
+    }
+
+    bool fex_vcpu::complete_execution_step()
+    {
+        if (!this->pending_execution_step_)
+        {
+            return false;
+        }
+
+        const auto state = this->take_pending_execution_step();
+
+        if (state.patched_breakpoint)
+        {
+            bool wrote = false;
+            {
+                const std::unique_lock lock(this->emulator_.tables_mutex_);
+                wrote = this->emulator_.set_patched_execution_breakpoint_state(*state.patched_breakpoint, true);
+            }
+            if (wrote)
+            {
+                this->emulator_.invalidate_code_range_locked(*state.patched_breakpoint, 1);
+            }
+        }
+
+        if (state.stop_after_step)
+        {
+            this->stop_requested_ = true;
+        }
+
+        // A #DB that completes an internal step is only consumed here (not forwarded to
+        // interrupt_hooks_) when the guest itself had not already armed TF - otherwise this same
+        // trap is also the guest's own single-step trap and must still reach interrupt_hooks_,
+        // matching WHP (see fex_vcpu::dispatch_pending_hook_if_any).
+        return !state.had_trap_flag;
+    }
+
+    void fex_vcpu::abandon_execution_step()
+    {
+        if (!this->pending_execution_step_)
+        {
+            return;
+        }
+
+        const auto state = this->take_pending_execution_step();
+
+        if (state.patched_breakpoint)
+        {
+            this->deferred_patched_breakpoint_ = state.patched_breakpoint;
+        }
+    }
+
+    // Called from dispatch_pending_hook_if_any() (normal call context) with the guest RIP the
+    // int3/#BP trap left behind. FEXCore's JIT translation of INT3 reports RIP already advanced past
+    // the trapping 0xCC (SetRIPToNext, OpcodeDispatcher.cpp), for a real guest int3 as much as for
+    // our own patched byte - `address` here is therefore rip-1, the candidate breakpoint address, not
+    // yet the confirmed one. Returns false for anything that is not one of ours (a real guest int3,
+    // or a step-over re-trapping its own restored int3 byte - see the early-return case below), which
+    // tells the caller to fall through to interrupt_hooks_ with RIP left exactly as FEXCore reported
+    // it, preserving reports_breakpoint_rip_past_instruction()'s contract for every other consumer.
+    bool fex_vcpu::handle_patched_execution_breakpoint(const uint64_t address)
+    {
+        if (this->pending_execution_step_ && this->pending_execution_step_->patched_breakpoint == address)
+        {
+            // The step-over just executed the original instruction at this address, and it was
+            // itself 0xCC (e.g. DbgBreakPoint sitting right under our own breakpoint) - this trap is
+            // the guest's own int3, not another hit of ours. Finish the step (re-planting the
+            // breakpoint) and report "not mine" so the vector-3 dispatch falls through to
+            // interrupt_hooks_.
+            this->complete_execution_step();
+            return false;
+        }
+
+        std::vector<memory_execution_hook_callback> callbacks;
+        uint64_t vacated_address = 0;
+        bool replant_vacated = false;
+        bool wrote_this_address = false;
+        {
+            const std::unique_lock lock(this->emulator_.tables_mutex_);
+            if (!this->emulator_.patched_execution_breakpoints_.contains(address))
+            {
+                return false;
+            }
+
+            // Confirmed match: normalize RIP back to the 0xCC's own address so the callback and the
+            // step-over below both see/resume from it, same as KVM/WHP already report for their own
+            // breakpoints.
+            this->cpu_state().rip = address;
+
+            wrote_this_address = this->emulator_.set_patched_execution_breakpoint_state(address, false);
+            this->deferred_patched_breakpoint_ = address;
+
+            if (this->pending_execution_step_)
+            {
+                const auto vacated = std::exchange(this->pending_execution_step_->patched_breakpoint, std::nullopt);
+                if (vacated && *vacated != address)
+                {
+                    vacated_address = *vacated;
+                    replant_vacated = true;
+                }
+            }
+
+            for (const auto& [_, hook] : this->emulator_.memory_execution_hooks_)
+            {
+                if (hook.patched_breakpoint && hook.address == address)
+                {
+                    callbacks.push_back(hook.callback);
+                }
+            }
+        }
+
+        if (wrote_this_address)
+        {
+            this->emulator_.invalidate_code_range_locked(address, 1);
+        }
+        if (replant_vacated)
+        {
+            bool wrote = false;
+            {
+                const std::unique_lock lock(this->emulator_.tables_mutex_);
+                wrote = this->emulator_.set_patched_execution_breakpoint_state(vacated_address, true);
+            }
+            if (wrote)
+            {
+                this->emulator_.invalidate_code_range_locked(vacated_address, 1);
+            }
+        }
+
+        for (const auto& callback : callbacks)
+        {
+            callback(*this, address);
+        }
+
+        if (this->stop_requested_)
+        {
+            return true;
+        }
+
+        this->deferred_patched_breakpoint_.reset();
+        if (!this->pending_execution_step_)
+        {
+            this->arm_execution_single_step(false);
+        }
+        else
+        {
+            // The trap on the 0xCC used up the one instruction EmitTFCheck lets run after TF is
+            // set, so without re-arming TF here the #DB would fire before the original instruction
+            // (now restored) executes.
+            this->write_rflags(this->read_rflags() | trap_flag_bit);
+        }
+
+        this->pending_execution_step_->patched_breakpoint = address;
+        return true;
+    }
+#endif
 
     uint16_t fex_vcpu::segment_selector(int index) const
     {
@@ -4109,6 +4720,17 @@ namespace sogen::fex
             }
             return true;
         case pending_fault_kind::interrupt:
+#ifdef __APPLE__
+            if (dispatch.vector == static_cast<int>(FEXCore::X86State::X86_TRAPNO_BP) &&
+                this->handle_patched_execution_breakpoint(this->cpu_state().rip - 1))
+            {
+                return true;
+            }
+            if (dispatch.vector == static_cast<int>(FEXCore::X86State::X86_TRAPNO_DB) && this->complete_execution_step())
+            {
+                return true;
+            }
+#endif
             for (auto& [_, hook] : this->emulator_.interrupt_hooks_)
             {
                 hook(*this, dispatch.vector);

@@ -510,7 +510,7 @@ namespace sogen
                 return hook_interface::memory_execution_hook_mode::int3;
             }
 
-            throw std::runtime_error("WHP memory execution hook mode must be auto or int3");
+            throw std::runtime_error("Memory execution hook mode must be auto or int3");
         }
 
         std::unique_ptr<x86_64_emulator> create_configured_backend(const analysis_options& options)
@@ -1085,7 +1085,8 @@ namespace sogen
             app.add_option("--report", options.report_path, "Write machine-readable analysis events to a file");
             app.add_option("--report-format", options.report_format, "Report format (supported: jsonl)")->capture_default_str();
             app.add_option("--stdout", options.stdout_path, "Write guest console output to a file");
-            app.add_option("--whp-exec-hook", options.whp_execution_hook_mode, "WHP memory execution hook mode")
+            app.add_option("--whp-exec-hook", options.whp_execution_hook_mode,
+                           "Memory execution hook mode (auto/int3); honored by the WHP and FEX backends")
                 ->capture_default_str()
                 ->check(CLI::IsMember({"auto", "int3"}));
             app.add_option("-r,--registry", options.registry_path, "Set registry path");
