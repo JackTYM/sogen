@@ -9,9 +9,14 @@ namespace sogen
 {
     namespace
     {
+        // Fixtures are copied next to the test binary at build time (see CMakeLists.txt) and
+        // read relative to the process's working directory, which ctest/the CI runner both set
+        // to that same directory - a compile-time absolute source-tree path doesn't survive
+        // this project's split build/test CI jobs (the smoke-test job runs a downloaded
+        // artifact, not a fresh checkout).
         std::vector<std::uint8_t> read_fixture(const std::string& relative_path)
         {
-            const std::string full_path = std::string(SOGEN_TEST_FIXTURES_DIR) + "/" + relative_path;
+            const std::string full_path = "fixtures/" + relative_path;
             std::ifstream file(full_path, std::ios::binary);
             return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
         }

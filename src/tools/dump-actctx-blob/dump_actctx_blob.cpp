@@ -8,7 +8,7 @@
 #pragma comment(lib, "ntdll.lib")
 #endif
 
-extern "C" NTSTATUS NTAPI NtQueryInformationProcess(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+// NtQueryInformationProcess is already declared by <winternl.h> - no need to redeclare it.
 
 // Dumps the real ACTIVATION_CONTEXT_DATA blob a suspended process's PEB points at, so it can be
 // used as a golden fixture. On real Windows this blob is built by CSRSS from the parent's CSR
