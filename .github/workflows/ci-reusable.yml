@@ -406,6 +406,51 @@ jobs:
           path: "build/${{matrix.preset}}/**/CTestTestfile.cmake"
           retention-days: 1
 
+  # SCRATCH/TEMPORARY - capture a real ACTIVATION_CONTEXT_DATA golden fixture from a suspended
+  # real Windows process (see docs/superpowers/plans/2026-09-24-comctl32-sxs-activation-context.md
+  # Task 2). Remove this job once the fixture has been captured and committed - it's a one-shot
+  # capture, not a permanent part of CI.
+  capture-actctx-fixture:
+    name: Capture ACTCTX Golden Fixture (scratch)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Enable Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: CMake Build
+        run: cmake --preset=release && cmake --build --preset=release --target dump-actctx-blob
+
+      - name: Capture the blob
+        shell: cmd
+        run: |
+          REM PowerShell's redirection operators can mangle a native exe's raw binary stdout
+          REM (re-encoding/translating it) - cmd's redirection preserves bytes exactly, same
+          REM reason create-root.bat uses COPY /B throughout this project.
+          build\release\artifacts\dump-actctx-blob.exe C:\Windows\System32\mspaint.exe > captured-actctx-blob.bin
+          IF %ERRORLEVEL% EQU 0 GOTO :done
+          build\release\artifacts\dump-actctx-blob.exe C:\Windows\System32\notepad.exe > captured-actctx-blob.bin
+          IF %ERRORLEVEL% EQU 0 GOTO :done
+          build\release\artifacts\dump-actctx-blob.exe C:\Windows\explorer.exe > captured-actctx-blob.bin
+          IF %ERRORLEVEL% EQU 0 GOTO :done
+          ECHO No candidate exe yielded a non-null ActivationContextData
+          EXIT /B 1
+          :done
+          DIR captured-actctx-blob.bin
+
+      - name: Upload the captured blob
+        uses: actions/upload-artifact@v7
+        with:
+          name: ACTCTX Golden Fixture
+          path: captured-actctx-blob.bin
+          retention-days: 3
+
   # Release is the same as Release from build step
   # However, that way the win tests can start without
   # waiting for other platforms
