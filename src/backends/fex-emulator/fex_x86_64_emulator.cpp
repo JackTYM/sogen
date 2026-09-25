@@ -524,6 +524,18 @@ namespace sogen::fex
             }
             return overwrite_result;
         }
+
+        kern_return_t traced_map_fixed_anonymous_apple_replace(void* target, size_t size, vm_prot_t cur_protection,
+                                                               vm_prot_t max_protection, const char* site)
+        {
+            const kern_return_t result = map_fixed_anonymous_apple_replace(target, size, cur_protection, max_protection);
+            if (::getenv("SOGEN_TRACE_MMAP") != nullptr)
+            {
+                fprintf(stderr, "[mmap-trace] site=%s addr=%p len=0x%zx kern_return=%d\n", site, target, size, static_cast<int>(result));
+                fflush(stderr);
+            }
+            return result;
+        }
 #endif
 
         // Bit-for-bit reimplementation of FEXCore::Context::ContextImpl::ReconstructCompactedEFLAGS /
@@ -2405,8 +2417,24 @@ namespace sogen::fex
                     // this placeholder), so a later claim attempt for it would incorrectly believe it
                     // needs a fresh mach_vm_allocate, which then correctly (but uselessly) fails since
                     // the page really is still ours, throwing a false-positive host_memory_collision.
+                    //
+                    // This page can legitimately already carry real backing - e.g. map_mmio's KUSD
+                    // real-memory optimization replaces the placeholder at KUSER_SHARED_DATA's rebased
+                    // address with genuine read/write memory (see mmio_region's doc comment) - so
+                    // re-arming it is exactly the "target may already be covered by a reservation"
+                    // case map_fixed_anonymous_apple_replace exists for, not a fresh, guaranteed-empty
+                    // placement. A raw POSIX mmap(MAP_FIXED) here is implicitly paired with
+                    // VM_FLAGS_OVERWRITE by the kernel (see map_fixed_anonymous_apple's doc comment)
+                    // and hits the exact same fatal EXC_GUARD DEALLOC_GAP that helper was built to
+                    // avoid - confirmed live: this call site alone reproduced it 100% of the time
+                    // against a real wow64 guest exercising KUSER_SHARED_DATA.
                     void* const window_ptr = reinterpret_cast<void*>(*it + this->wow64_guest_rebase_);
-                    ::mmap(window_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    const kern_return_t rearm_result = traced_map_fixed_anonymous_apple_replace(
+                        window_ptr, host_page_size_apple, VM_PROT_NONE, VM_PROT_ALL, "release_range_rearm");
+                    if (rearm_result != KERN_SUCCESS)
+                    {
+                        throw std::runtime_error("FEX backend failed to re-arm wow64 window placeholder");
+                    }
                     ++it;
                 }
                 else
@@ -3065,9 +3093,15 @@ namespace sogen::fex
             {
                 if (currently_mapped)
                 {
-                    void* result =
-                        ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                    if (result != host_ptr)
+                    // The page being decommitted here already carries real backing (this is a plain
+                    // re-arm-to-PROT_NONE over an existing mapping, not a fresh placement) - the same
+                    // "target may already be covered" case map_fixed_anonymous_apple_replace exists
+                    // for. A raw POSIX mmap(MAP_FIXED) here is implicitly paired with VM_FLAGS_OVERWRITE
+                    // by the kernel (see map_fixed_anonymous_apple's doc comment) and risks the same
+                    // fatal EXC_GUARD DEALLOC_GAP release_guest_address_range's own re-arm branch hit.
+                    const kern_return_t result = traced_map_fixed_anonymous_apple_replace(host_ptr, host_page_size_apple, VM_PROT_NONE,
+                                                                                          VM_PROT_ALL, "decommit_rearm");
+                    if (result != KERN_SUCCESS)
                     {
                         throw std::runtime_error("FEX backend failed to re-reserve decommitted guest memory");
                     }
