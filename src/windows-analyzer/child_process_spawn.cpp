@@ -265,6 +265,9 @@ namespace sogen
                 argv.emplace_back("--no-inst-precision");
             }
 
+            argv.emplace_back("--whp-exec-hook");
+            argv.push_back(config.whp_execution_hook_mode);
+
             if (!config.debug_child_pattern.empty())
             {
                 argv.emplace_back("--debug-child");

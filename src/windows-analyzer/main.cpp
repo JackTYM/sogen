@@ -633,6 +633,7 @@ namespace sogen
             config.skip_syscalls = options.skip_syscalls;
             config.reproducible = options.reproducible;
             config.disable_instruction_precision = options.disable_instruction_precision;
+            config.whp_execution_hook_mode = options.whp_execution_hook_mode;
             config.debug_child_pattern = options.debug_child_pattern;
             config.debug_host = options.gdb_host;
             config.debug_port = options.gdb_port;

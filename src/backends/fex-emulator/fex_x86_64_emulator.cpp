@@ -2832,13 +2832,28 @@ namespace sogen::fex
         // Returns true if it wrote a byte (caller must invalidate_code_range_locked(address, 1)).
         bool install_patched_execution_breakpoint(uint64_t address)
         {
+            static const bool trace = std::getenv("SOGEN_TRACE_PATCHED_BREAKPOINT") != nullptr;
+
             auto existing = this->patched_execution_breakpoints_.find(address);
             if (existing != this->patched_execution_breakpoints_.end())
             {
                 ++existing->second.hook_count;
                 if (!existing->second.applied && !existing->second.suspended())
                 {
-                    return this->try_apply_patched_execution_breakpoint(address, existing->second);
+                    const auto wrote = this->try_apply_patched_execution_breakpoint(address, existing->second);
+                    if (trace)
+                    {
+                        fprintf(stderr, "[patched-breakpoint-trace] re-arm existing 0x%llx hook_count=%llu applied=%d wrote=%d\n",
+                                static_cast<unsigned long long>(address), static_cast<unsigned long long>(existing->second.hook_count),
+                                existing->second.applied, wrote);
+                    }
+                    return wrote;
+                }
+                if (trace)
+                {
+                    fprintf(stderr, "[patched-breakpoint-trace] existing 0x%llx hook_count=%llu applied=%d suspended=%d (no-op)\n",
+                            static_cast<unsigned long long>(address), static_cast<unsigned long long>(existing->second.hook_count),
+                            existing->second.applied, existing->second.suspended());
                 }
                 return false;
             }
@@ -2851,10 +2866,22 @@ namespace sogen::fex
                 // re-planted) - record it without planting, so the pending step-over still executes
                 // the real instruction; see fex_vcpu::handle_patched_execution_breakpoint.
                 breakpoint.original_byte = this->peek_breakpoint_byte(address);
+                if (trace)
+                {
+                    fprintf(stderr, "[patched-breakpoint-trace] new 0x%llx deferred (mid step-over)\n",
+                            static_cast<unsigned long long>(address));
+                }
             }
             else
             {
+                const auto pre_peek = this->peek_breakpoint_byte(address);
                 wrote = this->try_apply_patched_execution_breakpoint(address, breakpoint);
+                if (trace)
+                {
+                    fprintf(stderr, "[patched-breakpoint-trace] new 0x%llx mapped=%d pre_byte=0x%02x applied=%d wrote=%d\n",
+                            static_cast<unsigned long long>(address), pre_peek.has_value(),
+                            pre_peek.has_value() ? static_cast<unsigned>(*pre_peek) : 0u, breakpoint.applied, wrote);
+                }
             }
             this->patched_execution_breakpoints_[address] = breakpoint;
             return wrote;

@@ -27,6 +27,7 @@ namespace sogen
         bool skip_syscalls{};
         bool reproducible{};
         bool disable_instruction_precision{};
+        std::string whp_execution_hook_mode{"auto"};
         // Empty (default): no GDB-debug-flag forwarding to spawned children at all, matching the
         // historical behavior. Non-empty: a case-insensitive substring matched (see build_child_argv)
         // against a spawned child's own application path plus command line - Chromium-style
