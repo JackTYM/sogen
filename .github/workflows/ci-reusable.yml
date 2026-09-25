@@ -406,6 +406,42 @@ jobs:
           path: "build/${{matrix.preset}}/**/CTestTestfile.cmake"
           retention-days: 1
 
+  # SCRATCH/TEMPORARY - differential capture of two ACTIVATION_CONTEXT_DATA blobs, from two
+  # trivial exes with deliberately different manifests (zero deps vs one dep, different
+  # self-identity name lengths), to reverse-engineer the exact per-assembly record format by
+  # diffing them. See docs/superpowers/plans/2026-09-24-comctl32-sxs-activation-context.md
+  # Task 6. Remove this job once the diff has been done.
+  capture-actctx-diff-fixtures:
+    name: Capture ACTCTX Diff Fixtures (scratch)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Enable Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: CMake Build
+        run: cmake --preset=release && cmake --build --preset=release --target dump-actctx-blob actctx-test-app-zero-deps actctx-test-app-one-dep
+
+      - name: Capture both blobs
+        shell: cmd
+        run: |
+          build\release\artifacts\dump-actctx-blob.exe build\release\artifacts\actctx-test-app-zero-deps.exe > captured-zero-deps.bin
+          build\release\artifacts\dump-actctx-blob.exe build\release\artifacts\actctx-test-app-one-dep.exe > captured-one-dep.bin
+          DIR captured-*.bin
+
+      - name: Upload the captured blobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: ACTCTX Diff Fixtures
+          path: captured-*.bin
+          retention-days: 3
+
   # Release is the same as Release from build step
   # However, that way the win tests can start without
   # waiting for other platforms
