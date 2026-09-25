@@ -49,10 +49,10 @@ int main(int argc, char** argv)
     std::uint64_t storage_map_ptr = 0;
     SIZE_T bytes_read = 0;
 
-    ReadProcessMemory(pi.hProcess, reinterpret_cast<BYTE*>(pbi.PebBaseAddress) + activation_context_data_offset,
-                       &act_ctx_ptr, sizeof(act_ctx_ptr), &bytes_read);
-    ReadProcessMemory(pi.hProcess, reinterpret_cast<BYTE*>(pbi.PebBaseAddress) + process_assembly_storage_map_offset,
-                       &storage_map_ptr, sizeof(storage_map_ptr), &bytes_read);
+    ReadProcessMemory(pi.hProcess, reinterpret_cast<BYTE*>(pbi.PebBaseAddress) + activation_context_data_offset, &act_ctx_ptr,
+                      sizeof(act_ctx_ptr), &bytes_read);
+    ReadProcessMemory(pi.hProcess, reinterpret_cast<BYTE*>(pbi.PebBaseAddress) + process_assembly_storage_map_offset, &storage_map_ptr,
+                      sizeof(storage_map_ptr), &bytes_read);
 
     fprintf(stderr, "PEB=%p ActivationContextData=0x%llx ProcessAssemblyStorageMap=0x%llx\n", pbi.PebBaseAddress,
             static_cast<unsigned long long>(act_ctx_ptr), static_cast<unsigned long long>(storage_map_ptr));

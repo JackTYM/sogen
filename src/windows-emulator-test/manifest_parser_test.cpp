@@ -31,7 +31,8 @@ namespace sogen
 
     TEST(ManifestParser, ExtractsRedirectedFileNames)
     {
-        constexpr auto assembly_manifest = R"(<assembly xmlns="urn:schemas-microsoft-com:asm.v1"><file name="comctl32.dll"></file></assembly>)";
+        constexpr auto assembly_manifest =
+            R"(<assembly xmlns="urn:schemas-microsoft-com:asm.v1"><file name="comctl32.dll"></file></assembly>)";
         const auto files = parse_redirected_file_names(assembly_manifest);
         ASSERT_EQ(files.size(), 1);
         EXPECT_EQ(files[0], "comctl32.dll");

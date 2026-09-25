@@ -55,7 +55,7 @@ namespace sogen
         };
 
         std::optional<std::uint32_t> find_entry_offset_by_id(memory_interface& memory, const std::uint64_t directory_address,
-                                                              const std::uint32_t id)
+                                                             const std::uint32_t id)
         {
             IMAGE_RESOURCE_DIRECTORY directory{};
             if (!memory.try_read_memory(directory_address, &directory, sizeof(directory)))
