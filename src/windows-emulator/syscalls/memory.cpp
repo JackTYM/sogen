@@ -10,6 +10,7 @@
 #include "../process_control_channel.hpp"
 
 #include <algorithm>
+#include <unistd.h>
 
 namespace sogen
 {
@@ -29,6 +30,18 @@ namespace sogen
             bool is_power_of_two(const uint64_t value)
             {
                 return value != 0 && (value & (value - 1)) == 0;
+            }
+
+            void trace_vm_accounting(const char* syscall_name, const bool success, const uint64_t bytes)
+            {
+                if (!std::getenv("SOGEN_TRACE_VM_ACCOUNTING"))
+                {
+                    return;
+                }
+
+                fprintf(stderr, "[vm-accounting] pid=%d %s success=%d bytes=0x%llx\n", static_cast<int>(::getpid()), syscall_name,
+                        success ? 1 : 0, static_cast<unsigned long long>(bytes));
+                fflush(stderr);
             }
 
             // Backstop for the auto-placement pick/confirm loop below (see its own comment). Every
@@ -764,14 +777,16 @@ namespace sogen
             if (commit && !reserve && c.win_emu.memory.commit_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection))
             {
                 c.win_emu.callbacks.on_memory_allocate(potential_base, allocation_bytes, *protection, true);
+                trace_vm_accounting("NtAllocateVirtualMemory", true, allocation_bytes);
                 return STATUS_SUCCESS;
             }
 
             c.win_emu.callbacks.on_memory_allocate(potential_base, allocation_bytes, *protection, false);
 
-            return c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit)
-                       ? STATUS_SUCCESS
-                       : STATUS_MEMORY_NOT_ALLOCATED;
+            const bool allocated =
+                c.win_emu.memory.allocate_memory(potential_base, static_cast<size_t>(allocation_bytes), *protection, !commit);
+            trace_vm_accounting("NtAllocateVirtualMemory", allocated, allocation_bytes);
+            return allocated ? STATUS_SUCCESS : STATUS_MEMORY_NOT_ALLOCATED;
         }
 
         NTSTATUS handle_NtAllocateVirtualMemory(const syscall_context& c, const handle process_handle,
@@ -861,6 +876,7 @@ namespace sogen
                 {
                     base_address.write(release_base);
                     bytes_to_allocate.write(static_cast<uint64_t>(released_length));
+                    trace_vm_accounting("NtFreeVirtualMemory(RELEASE)", true, released_length);
                     return STATUS_SUCCESS;
                 }
 
@@ -914,6 +930,7 @@ namespace sogen
 
                 base_address.write(decommit_base);
                 bytes_to_allocate.write(static_cast<uint64_t>(decommit_size));
+                trace_vm_accounting("NtFreeVirtualMemory(DECOMMIT)", true, decommit_size);
                 return STATUS_SUCCESS;
             }
 

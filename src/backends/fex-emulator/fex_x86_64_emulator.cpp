@@ -3066,6 +3066,13 @@ namespace sogen::fex
                 const kern_return_t probe_result = ::mach_vm_allocate(mach_task_self(), &target, host_page_size_apple, VM_FLAGS_FIXED);
                 if (probe_result != KERN_SUCCESS)
                 {
+                    if (std::getenv("SOGEN_TRACE_VM_ACCOUNTING"))
+                    {
+                        fprintf(stderr, "[vm-accounting] pid=%d mach_vm_allocate failed addr=0x%llx kern_return=%d\n",
+                                static_cast<int>(::getpid()), static_cast<unsigned long long>(host_page_addr),
+                                static_cast<int>(probe_result));
+                        fflush(stderr);
+                    }
                     throw host_memory_collision{};
                 }
                 if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)

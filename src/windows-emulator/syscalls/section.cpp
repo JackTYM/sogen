@@ -6,6 +6,8 @@
 #include <utils/io.hpp>
 #include <utils/string.hpp>
 
+#include <unistd.h>
+
 namespace sogen
 {
 
@@ -24,6 +26,18 @@ namespace sogen
             constexpr uint64_t k_base_static_server_data_legacy_time_zone_id_offset = 0x9c8;
             constexpr uint64_t k_base_static_server_data_win2019_time_zone_id_offset = 0xa70;
             constexpr uint32_t k_time_zone_id_invalid = 0xFFFFFFFF;
+
+            void trace_vm_accounting(const char* syscall_name, const bool success, const uint64_t bytes)
+            {
+                if (!std::getenv("SOGEN_TRACE_VM_ACCOUNTING"))
+                {
+                    return;
+                }
+
+                fprintf(stderr, "[vm-accounting] pid=%d %s success=%d bytes=0x%llx\n", static_cast<int>(::getpid()), syscall_name,
+                        success ? 1 : 0, static_cast<unsigned long long>(bytes));
+                fflush(stderr);
+            }
 
             struct ini_file_mapping64
             {
@@ -716,16 +730,20 @@ namespace sogen
                 base_address < c.proc.shared_section_address + c.proc.shared_section_size)
             {
                 const auto address = c.proc.shared_section_address;
+                const auto size = c.proc.shared_section_size;
                 c.proc.shared_section_address = 0;
-                c.win_emu.memory.release_memory(address, static_cast<size_t>(c.proc.shared_section_size));
+                c.win_emu.memory.release_memory(address, static_cast<size_t>(size));
+                trace_vm_accounting("NtUnmapViewOfSection(shared)", true, size);
                 return STATUS_SUCCESS;
             }
 
             if (c.proc.dbwin_buffer && is_within_start_and_length(base_address, c.proc.dbwin_buffer, c.proc.dbwin_buffer_size))
             {
                 const auto address = c.proc.dbwin_buffer;
+                const auto size = c.proc.dbwin_buffer_size;
                 c.proc.dbwin_buffer = 0;
-                c.win_emu.memory.release_memory(address, static_cast<size_t>(c.proc.dbwin_buffer_size));
+                c.win_emu.memory.release_memory(address, static_cast<size_t>(size));
+                trace_vm_accounting("NtUnmapViewOfSection(dbwin)", true, size);
                 return STATUS_SUCCESS;
             }
 
@@ -751,6 +769,7 @@ namespace sogen
                     // reference is what may allow the section to actually be destroyed, if no handle or other
                     // view references it anymore.
                     c.proc.section_views.erase(region_info.allocation_base);
+                    trace_vm_accounting("NtUnmapViewOfSection(section)", true, region_info.allocation_length);
                     return STATUS_SUCCESS;
                 }
             }
