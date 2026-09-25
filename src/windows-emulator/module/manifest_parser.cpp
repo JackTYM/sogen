@@ -290,6 +290,13 @@ namespace sogen
             return std::nullopt;
         }
 
+        // Every offset inside the resource directory tree (including the leaf
+        // IMAGE_RESOURCE_DATA_ENTRY's own position, though not the bytes it ultimately points
+        // to) is relative to the resource directory's own start, not the image base - confirmed
+        // against the PE/COFF spec and a real, multi-level resource tree (Notepad++.exe, which
+        // has 9 top-level resource types and exposed this immediately; a resource directory with
+        // only 1-2 small offsets can accidentally look right even when computed from the wrong
+        // base).
         const auto resource_directory_address = image_base + resource_directory_entry->VirtualAddress;
 
         const auto type_offset = find_entry_offset_by_id(memory, resource_directory_address, k_resource_type_manifest);
@@ -298,7 +305,7 @@ namespace sogen
             return std::nullopt;
         }
 
-        const auto name_directory_address = image_base + (*type_offset & ~RESOURCE_DATA_IS_DIRECTORY);
+        const auto name_directory_address = resource_directory_address + (*type_offset & ~RESOURCE_DATA_IS_DIRECTORY);
 
         const auto name_offset = find_first_entry_offset(memory, name_directory_address);
         if (!name_offset || (*name_offset & RESOURCE_DATA_IS_DIRECTORY) == 0)
@@ -306,7 +313,7 @@ namespace sogen
             return std::nullopt;
         }
 
-        const auto language_directory_address = image_base + (*name_offset & ~RESOURCE_DATA_IS_DIRECTORY);
+        const auto language_directory_address = resource_directory_address + (*name_offset & ~RESOURCE_DATA_IS_DIRECTORY);
 
         const auto language_offset = find_first_entry_offset(memory, language_directory_address);
         if (!language_offset)
@@ -314,7 +321,7 @@ namespace sogen
             return std::nullopt;
         }
 
-        const auto data_entry_address = image_base + *language_offset;
+        const auto data_entry_address = resource_directory_address + *language_offset;
 
         IMAGE_RESOURCE_DATA_ENTRY data_entry{};
         if (!memory.try_read_memory(data_entry_address, &data_entry, sizeof(data_entry)))
