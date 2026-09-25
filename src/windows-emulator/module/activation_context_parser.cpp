@@ -48,14 +48,14 @@ namespace sogen
             }
         }
 
-        std::sort(positions.begin(), positions.end());
+        std::ranges::sort(positions);
 
         std::vector<located_section> result{};
         result.reserve(positions.size());
         for (std::size_t i = 0; i < positions.size(); ++i)
         {
             const auto end = (i + 1 < positions.size()) ? positions[i + 1] : blob.size();
-            result.push_back({positions[i], end});
+            result.push_back(located_section{.start = positions[i], .end = end});
         }
 
         return result;

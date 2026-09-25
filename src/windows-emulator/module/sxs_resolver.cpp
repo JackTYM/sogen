@@ -10,8 +10,7 @@ namespace sogen
     {
         std::string to_lower(std::string value)
         {
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            std::ranges::transform(value, value.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
             return value;
         }
 
@@ -73,7 +72,7 @@ namespace sogen
         const auto winners_key = prefix.substr(0, prefix.size() - 1);
         if (const auto winner = winners(winners_key); winner.has_value())
         {
-            const auto it = std::find(matching_dirs.begin(), matching_dirs.end(), *winner);
+            const auto it = std::ranges::find(matching_dirs, *winner);
             if (it != matching_dirs.end())
             {
                 return *it;
@@ -82,7 +81,7 @@ namespace sogen
             // highest-version fallback below rather than failing outright.
         }
 
-        std::sort(matching_dirs.begin(), matching_dirs.end());
+        std::ranges::sort(matching_dirs);
         return matching_dirs.back();
     }
 }

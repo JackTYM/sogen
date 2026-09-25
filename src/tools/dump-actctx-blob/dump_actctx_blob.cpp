@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <vector>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "ntdll.lib")
+#endif
 
 extern "C" NTSTATUS NTAPI NtQueryInformationProcess(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
 
@@ -60,7 +62,7 @@ int main(int argc, char** argv)
     // otherwise-identical capture didn't). Give it a moment to finish before reading memory.
     Sleep(250);
 
-    fprintf(stderr, "PEB=%p ActivationContextData=0x%llx ProcessAssemblyStorageMap=0x%llx\n", pbi.PebBaseAddress,
+    fprintf(stderr, "PEB=%p ActivationContextData=0x%llx ProcessAssemblyStorageMap=0x%llx\n", static_cast<const void*>(pbi.PebBaseAddress),
             static_cast<unsigned long long>(act_ctx_ptr), static_cast<unsigned long long>(storage_map_ptr));
 
     if (act_ctx_ptr == 0)
