@@ -654,6 +654,21 @@ namespace sogen
         uint64_t g_sldim_appmgr_wmclose_trace_va = 0;
         uint64_t g_sldim_appmgr_wmclose_hits = 0;
 
+        // The `cmp byte_1BE84CC, 0` / `jz` gate that #503 found guarding the whole
+        // `sub_4066D1`/validator-walk sequence leading to SLDIM_APPMGR_WMCLOSE_RVA (see
+        // project_solidworks_bringup.md #504): `idasql` traced `byte_1BE84CC`'s own setter
+        // (`sub_E30960`) back through its single caller to `sldim.exe+0xa29e6c` (function
+        // `sub_E2B770`, filename evidence `"...\\sldim\\Automation\\Automator.cpp"`), which sets
+        // it to 1 only after successfully locating an "IMAutoResults" marker and loading/parsing
+        // an unattended-install Automation script file from disk. This watch fires at the `cmp`
+        // itself (before it executes) to capture the byte's live value in this run, independent of
+        // whether sogen's environment provides that automation-script setup at all.
+        constexpr uint64_t SLDIM_APPMGR_GATE_BYTE1BE84CC_RVA = 0xa43d44;
+        constexpr uint64_t SLDIM_APPMGR_GATE_BYTE1BE84CC_DATA_RVA = 0x17e84cc;
+        uint64_t g_sldim_appmgr_gate_byte1be84cc_trace_va = 0;
+        uint64_t g_sldim_appmgr_gate_byte1be84cc_data_va = 0;
+        uint64_t g_sldim_appmgr_gate_byte1be84cc_hits = 0;
+
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
         // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
@@ -4565,6 +4580,23 @@ namespace sogen
                                  read_wparam_ok ? 1 : 0, lparam, read_lparam_ok ? 1 : 0);
         }
 
+        void trace_sldim_appmgr_gate_byte1be84cc_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+
+            uint8_t value{};
+            const auto read_ok = g_sldim_appmgr_gate_byte1be84cc_data_va != 0 &&
+                                 emu.try_read_memory(g_sldim_appmgr_gate_byte1be84cc_data_va, &value, sizeof(value));
+
+            ++g_sldim_appmgr_gate_byte1be84cc_hits;
+
+            c.win_emu->log.error("[sldim-appmgr-gate-byte1be84cc-trace] hit #%llu at 0x%llx tid=%u byte_1BE84CC=0x%x "
+                                 "(read_ok=%d) data_va=0x%llx\n",
+                                 static_cast<unsigned long long>(g_sldim_appmgr_gate_byte1be84cc_hits),
+                                 static_cast<unsigned long long>(address), c.win_emu->current_thread().id, value, read_ok ? 1 : 0,
+                                 static_cast<unsigned long long>(g_sldim_appmgr_gate_byte1be84cc_data_va));
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5661,12 +5693,15 @@ namespace sogen
                     g_sldim_teardown_665460_trace_va = exe->image_base + SLDIM_TEARDOWN_665460_RVA;
                     g_sldim_wndproc_dispatch_edx_trace_va = exe->image_base + SLDIM_WNDPROC_DISPATCH_EDX_RVA;
                     g_sldim_appmgr_wmclose_trace_va = exe->image_base + SLDIM_APPMGR_WMCLOSE_RVA;
+                    g_sldim_appmgr_gate_byte1be84cc_trace_va = exe->image_base + SLDIM_APPMGR_GATE_BYTE1BE84CC_RVA;
+                    g_sldim_appmgr_gate_byte1be84cc_data_va = exe->image_base + SLDIM_APPMGR_GATE_BYTE1BE84CC_DATA_RVA;
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
                         "0x%llx, trypop entry at 0x%llx, trypop count check at 0x%llx, CMessagingThread ctor2/ctor0 at "
                         "0x%llx / 0x%llx, dtor entry/check at 0x%llx / 0x%llx, get_pending_command state at 0x%llx, teardown-665460 "
-                        "at 0x%llx, WindowProc dispatch edx at 0x%llx, ApplicationManager WM_CLOSE post at 0x%llx\n",
+                        "at 0x%llx, WindowProc dispatch edx at 0x%llx, ApplicationManager WM_CLOSE post at 0x%llx, "
+                        "ApplicationManager byte_1BE84CC gate at 0x%llx (data at 0x%llx)\n",
                         static_cast<unsigned long long>(exe->image_base), static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2),
                         static_cast<unsigned long long>(g_sldim_oncommand_trace_va),
@@ -5683,7 +5718,9 @@ namespace sogen
                         static_cast<unsigned long long>(g_sldim_get_pending_command_state_trace_va),
                         static_cast<unsigned long long>(g_sldim_teardown_665460_trace_va),
                         static_cast<unsigned long long>(g_sldim_wndproc_dispatch_edx_trace_va),
-                        static_cast<unsigned long long>(g_sldim_appmgr_wmclose_trace_va));
+                        static_cast<unsigned long long>(g_sldim_appmgr_wmclose_trace_va),
+                        static_cast<unsigned long long>(g_sldim_appmgr_gate_byte1be84cc_trace_va),
+                        static_cast<unsigned long long>(g_sldim_appmgr_gate_byte1be84cc_data_va));
                 }
             }
 
@@ -5766,6 +5803,11 @@ namespace sogen
             if (g_sldim_appmgr_wmclose_trace_va != 0 && address == g_sldim_appmgr_wmclose_trace_va)
             {
                 trace_sldim_appmgr_wmclose_hit(c, address);
+            }
+
+            if (g_sldim_appmgr_gate_byte1be84cc_trace_va != 0 && address == g_sldim_appmgr_gate_byte1be84cc_trace_va)
+            {
+                trace_sldim_appmgr_gate_byte1be84cc_hit(c, address);
             }
 
             if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))
