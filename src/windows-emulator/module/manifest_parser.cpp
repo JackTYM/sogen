@@ -249,6 +249,39 @@ namespace sogen
         return result;
     }
 
+    std::optional<assembly_identity> parse_self_identity(const std::string_view manifest_text)
+    {
+        constexpr std::string_view identity_tag_name = "<assemblyIdentity";
+
+        const auto identity_start = manifest_text.find(identity_tag_name);
+        if (identity_start == std::string_view::npos)
+        {
+            return std::nullopt;
+        }
+
+        const auto identity_tag_end = manifest_text.find('>', identity_start);
+        if (identity_tag_end == std::string_view::npos)
+        {
+            return std::nullopt;
+        }
+
+        const auto identity_tag = manifest_text.substr(identity_start, identity_tag_end - identity_start);
+
+        assembly_identity identity{};
+        identity.name = extract_attribute(identity_tag, "name").value_or("");
+        identity.version = extract_attribute(identity_tag, "version").value_or("");
+        identity.processor_architecture = extract_attribute(identity_tag, "processorArchitecture").value_or("");
+        identity.public_key_token = extract_attribute(identity_tag, "publicKeyToken").value_or("");
+        identity.language = extract_attribute(identity_tag, "language").value_or("");
+
+        if (identity.name.empty())
+        {
+            return std::nullopt;
+        }
+
+        return identity;
+    }
+
     std::optional<std::string> find_manifest_resource(memory_interface& memory, const std::uint64_t image_base)
     {
         const auto resource_directory_entry = find_resource_directory(memory, image_base);

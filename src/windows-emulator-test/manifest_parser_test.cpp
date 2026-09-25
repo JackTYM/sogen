@@ -37,4 +37,28 @@ namespace sogen
         ASSERT_EQ(files.size(), 1);
         EXPECT_EQ(files[0], "comctl32.dll");
     }
+
+    TEST(ManifestParser, ParsesSelfIdentityFromTopLevelAssemblyIdentity)
+    {
+        const auto identity = parse_self_identity(notepad_plus_plus_manifest);
+        ASSERT_TRUE(identity.has_value());
+        EXPECT_EQ(identity->name, "Notepad++");
+        EXPECT_EQ(identity->version, "1.0.0.0");
+        EXPECT_EQ(identity->processor_architecture, "*");
+        EXPECT_TRUE(identity->public_key_token.empty());
+    }
+
+    TEST(ManifestParser, SelfIdentityIgnoresDependentAssemblyIdentity)
+    {
+        // The dependent assembly's own <assemblyIdentity> (Common-Controls) must never be
+        // mistaken for the exe's own self-identity - only the first, top-level one counts.
+        const auto identity = parse_self_identity(notepad_plus_plus_manifest);
+        ASSERT_TRUE(identity.has_value());
+        EXPECT_NE(identity->name, "Microsoft.Windows.Common-Controls");
+    }
+
+    TEST(ManifestParser, NoManifestTextReturnsNulloptForSelfIdentity)
+    {
+        EXPECT_FALSE(parse_self_identity("").has_value());
+    }
 }
