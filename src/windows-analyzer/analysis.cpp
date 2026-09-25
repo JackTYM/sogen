@@ -707,6 +707,48 @@ namespace sogen
         uint64_t g_sldim_globaldata_entry_trace_va = 0;
         uint64_t g_sldim_globaldata_entry_hits = 0;
 
+        // idasql found exactly 15 real `call sub_42941A` instructions in the whole binary --
+        // sub_42941A is the ApplicationManager state-set thunk #503/#505 already established
+        // (`this` in ecx, target state pushed last/at [esp], a second flag byte at [esp+4]).
+        // Two are dynamic-argument (state read from a message payload at runtime, not a literal):
+        // `sldim.exe+0x9d2112` (HTMLControllerInterface.cpp's "Refresh" DHTML button handler,
+        // `sub_DD1C30`, reads `*(*(this+8)+20)`) and `sldim.exe+0xa3f8a4` (the
+        // `CTMessage<structWorkerStateDone>` handler, `sub_E3F850`, reads the message's own
+        // `+12`/`+16` fields directly -- the worker thread commanding an arbitrary target state).
+        // One address, `sldim.exe+0xa3f5e9` inside the worker-lifecycle handler `sub_E3F170`
+        // (#505's own GlobalData-flag-check function), is a *single physical instruction* the
+        // compiler tail-merged from three logically distinct call sites: a literal state=33 on the
+        // direct fallthrough (ApplyChangesCompleted), and two `jmp`-ins that push their own literal
+        // (state=2 from InitCompleted's `if (dword_1BDE8FC)` branch, state=34 from the Termination
+        // case's `if (this[5] == 33)` branch) before jumping into the shared call -- a live argument
+        // read at this one address is the only way to tell which of the three actually fired.
+        struct sldim_state_setter_site
+        {
+            const char* name;
+            uint64_t rva;
+        };
+
+        constexpr std::array<sldim_state_setter_site, 15> SLDIM_STATE_SETTER_SITES{{
+            {"sub_D68BB0/lit33", 0x968d2d},
+            {"sub_D7EF80/lit33", 0x97f304},
+            {"HTMLControllerInterface-okclose/lit33", 0x9d20e7},
+            {"HTMLControllerInterface-refresh/dyn", 0x9d2112},
+            {"sub_E3B6C0+0x47/lit33", 0xa3b707},
+            {"sub_E3B6C0+0x83/lit33", 0xa3b743},
+            {"sub_E3E830/lit33", 0xa3e9a5},
+            {"workerlifecycle-initcompleted-else/lit33", 0xa3f559},
+            {"workerlifecycle-merged-2or33or34/dyn", 0xa3f5e9},
+            {"workerstatedone-payload/dyn", 0xa3f8a4},
+            {"appmgr-finished-this10eq2/lit34", 0xa3fb40},
+            {"appmgr-finished-fallback/lit33", 0xa3fbce},
+            {"sub_E412C0/lit33", 0xa417b1},
+            {"sub_E42C10/lit1", 0xa42c77},
+            {"appmgr-byte1be84cc-close/lit33", 0xa43d7c},
+        }};
+
+        std::array<uint64_t, SLDIM_STATE_SETTER_SITES.size()> g_sldim_state_setter_trace_vas{};
+        std::array<uint64_t, SLDIM_STATE_SETTER_SITES.size()> g_sldim_state_setter_hits{};
+
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
         // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
@@ -4678,6 +4720,26 @@ namespace sogen
                                  c.win_emu->current_thread().id);
         }
 
+        void trace_sldim_state_setter_hit(const analysis_context& c, const uint64_t address, const size_t site_idx)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+            const auto esp = emu.reg<uint32_t>(x86_register::esp);
+
+            uint32_t state{};
+            uint32_t flag{};
+            const auto read_state_ok = emu.try_read_memory(esp, &state, sizeof(state));
+            const auto read_flag_ok = emu.try_read_memory(esp + 0x4, &flag, sizeof(flag));
+
+            ++g_sldim_state_setter_hits[site_idx];
+
+            c.win_emu->log.error("[sldim-state-setter-trace] hit #%llu site=%s at 0x%llx tid=%u this=0x%x "
+                                 "state=%u (read_ok=%d) flag=0x%x (read_ok=%d)\n",
+                                 static_cast<unsigned long long>(g_sldim_state_setter_hits[site_idx]),
+                                 SLDIM_STATE_SETTER_SITES[site_idx].name, static_cast<unsigned long long>(address),
+                                 c.win_emu->current_thread().id, this_ptr, state, read_state_ok ? 1 : 0, flag, read_flag_ok ? 1 : 0);
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5780,6 +5842,12 @@ namespace sogen
                     g_sldim_globaldata_flag_check_trace_va = exe->image_base + SLDIM_GLOBALDATA_FLAG_CHECK_RVA;
                     g_sldim_globaldata_flag_data_va = exe->image_base + SLDIM_GLOBALDATA_FLAG_DATA_RVA;
                     g_sldim_globaldata_entry_trace_va = exe->image_base + SLDIM_GLOBALDATA_ENTRY_RVA;
+                    for (size_t i = 0; i < SLDIM_STATE_SETTER_SITES.size(); ++i)
+                    {
+                        g_sldim_state_setter_trace_vas[i] = exe->image_base + SLDIM_STATE_SETTER_SITES[i].rva;
+                        c.win_emu->log.error("[sldim-state-setter-trace] watching %s at 0x%llx\n", SLDIM_STATE_SETTER_SITES[i].name,
+                                             static_cast<unsigned long long>(g_sldim_state_setter_trace_vas[i]));
+                    }
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
@@ -5914,6 +5982,17 @@ namespace sogen
             if (g_sldim_globaldata_entry_trace_va != 0 && address == g_sldim_globaldata_entry_trace_va)
             {
                 trace_sldim_globaldata_entry_hit(c, address);
+            }
+
+            for (size_t sldim_state_setter_idx = 0; sldim_state_setter_idx < g_sldim_state_setter_trace_vas.size();
+                 ++sldim_state_setter_idx)
+            {
+                if (g_sldim_state_setter_trace_vas[sldim_state_setter_idx] != 0 &&
+                    address == g_sldim_state_setter_trace_vas[sldim_state_setter_idx])
+                {
+                    trace_sldim_state_setter_hit(c, address, sldim_state_setter_idx);
+                    break;
+                }
             }
 
             if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))

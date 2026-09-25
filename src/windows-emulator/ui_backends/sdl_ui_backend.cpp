@@ -669,6 +669,11 @@ namespace sogen
                     switch (event.type)
                     {
                     case SDL_EVENT_QUIT:
+                        if (std::getenv("SOGEN_TRACE_SDL_CLOSE"))
+                        {
+                            std::fprintf(stderr, "[sdl-close-trace] SDL_EVENT_QUIT -> posting WM_CLOSE to %zu window(s)\n",
+                                         this->windows_.size());
+                        }
                         for (const auto& [guest, window] : this->windows_)
                         {
                             (void)window;
@@ -679,6 +684,13 @@ namespace sogen
                     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
                         if (const auto guest = this->resolve_guest(event.window.windowID); guest != 0)
                         {
+                            if (std::getenv("SOGEN_TRACE_SDL_CLOSE"))
+                            {
+                                std::fprintf(stderr,
+                                             "[sdl-close-trace] SDL_EVENT_WINDOW_CLOSE_REQUESTED windowID=%u guest=0x%llx -> "
+                                             "posting WM_CLOSE\n",
+                                             event.window.windowID, static_cast<unsigned long long>(guest));
+                            }
                             this->post_event(guest, WM_CLOSE, 0, 0);
                         }
                         break;

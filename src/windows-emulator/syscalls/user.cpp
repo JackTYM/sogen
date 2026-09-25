@@ -4529,6 +4529,32 @@ namespace sogen
                                     static_cast<unsigned long long>(wParam), static_cast<unsigned long long>(lParam));
             }
 
+            if (std::getenv("SOGEN_TRACE_SLDIM_QUEUE") != nullptr && msg == WM_CLOSE && c.proc.is_wow64_process)
+            {
+                const auto rip = c.emu.read_instruction_pointer();
+                const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+                fprintf(stderr, "[sldim-wmclose-post-sender] tid=%u rip=0x%llx (%s+0x%llx)\n", c.thread().id,
+                        static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                        rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL);
+
+                const auto rsp = c.emu.read_stack_pointer();
+                for (uint64_t i = 0; i < 4096; ++i)
+                {
+                    uint32_t value32{};
+                    if (!c.win_emu.memory.try_read_memory(rsp + (i * 4), &value32, sizeof(value32)))
+                    {
+                        break;
+                    }
+                    const auto* mod = c.win_emu.mod_manager.find_by_address(value32);
+                    if (mod)
+                    {
+                        fprintf(stderr, "  [sldim-wmclose-post-sender-rsp32+0x%llx] = 0x%x %s+0x%llx\n",
+                                static_cast<unsigned long long>(i * 4), value32, mod->name.c_str(),
+                                static_cast<unsigned long long>(value32 - mod->image_base));
+                    }
+                }
+            }
+
             if (auto* thread = c.proc.find_thread_by_id(target_thread_id))
             {
                 sogen::msg qmsg{};
