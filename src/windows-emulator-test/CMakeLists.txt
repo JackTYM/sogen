@@ -18,6 +18,10 @@ target_link_libraries(windows-emulator-test PRIVATE
   vulkan-bridge-marshal
 )
 
+target_compile_definitions(windows-emulator-test PRIVATE
+  SOGEN_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
   add_dependencies(windows-emulator-test test-sample)
 endif()
