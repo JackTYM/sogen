@@ -39,8 +39,18 @@ namespace sogen::test
             std::vector<host_reserved_range> claimed_ranges{};
             std::vector<host_reserved_range> released_ranges{};
 
+            // Lets a test simulate a foreign host mapping winning the reserve-time claim - the exact
+            // failure mode host_memory_collision otherwise reports via an atomic mach_vm_allocate on
+            // the real FEX/Apple backend.
+            bool fail_next_claim = false;
+
             bool reserve_guest_address_range(const uint64_t address, const size_t size) override
             {
+                if (this->fail_next_claim)
+                {
+                    this->fail_next_claim = false;
+                    return false;
+                }
                 this->claimed_ranges.push_back({.address = address, .size = size});
                 return true;
             }
@@ -277,6 +287,44 @@ namespace sogen::test
         ASSERT_EQ(host.released_ranges.size(), 1u);
         ASSERT_LE(host.released_ranges[0].address, base);
         ASSERT_GE(host.released_ranges[0].address + host.released_ranges[0].size, base + size);
+    }
+
+    // A fixed-address, reserve-only allocation (MEM_RESERVE without MEM_COMMIT at an explicit or
+    // auto-picked base - the path handle_NtAllocateVirtualMemoryEx always uses) must claim the host
+    // range immediately, exactly like the size-only overload already does - not defer the claim to
+    // whichever later commit_memory call first touches a page. Without this, a reserved-but-uncommitted
+    // range stays invisible to a shared-address-space backend's own host allocator until first commit.
+    TEST(HostAllocationTest, FixedAddressReserveOnlyClaimsHostRangeImmediately)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr uint64_t base = DEFAULT_ALLOCATION_ADDRESS_64BIT;
+        constexpr size_t size = 0x3000;
+
+        ASSERT_TRUE(mm.allocate_memory(base, size, nt_memory_permission{memory_permission::read_write}, true));
+
+        ASSERT_EQ(host.claimed_ranges.size(), 1u);
+        ASSERT_EQ(host.claimed_ranges[0].address, base);
+        ASSERT_EQ(host.claimed_ranges[0].size, size);
+    }
+
+    // A foreign host mapping winning the reserve-time claim must fail the reservation outright, rather
+    // than silently succeeding at the bookkeeping level while leaving a guest range that can never
+    // actually be committed.
+    TEST(HostAllocationTest, FixedAddressReserveOnlyFailsOnHostClaimCollision)
+    {
+        fake_host_memory host{};
+        memory_manager mm{host};
+
+        constexpr uint64_t base = DEFAULT_ALLOCATION_ADDRESS_64BIT;
+        constexpr size_t size = 0x3000;
+
+        host.fail_next_claim = true;
+
+        ASSERT_FALSE(mm.allocate_memory(base, size, nt_memory_permission{memory_permission::read_write}, true));
+        ASSERT_TRUE(host.claimed_ranges.empty());
+        ASSERT_FALSE(mm.overlaps_reserved_region(base, size));
     }
 
     namespace

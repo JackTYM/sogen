@@ -583,6 +583,20 @@ namespace sogen
             return false;
         }
 
+        // A reserve-only allocation (MEM_RESERVE without MEM_COMMIT - the common "reserve a big
+        // region, commit it incrementally later" pattern) previously registered no host-level claim
+        // at all: the !reserve_only branch below claims the host range immediately via map_memory,
+        // but this branch used to just record the bookkeeping entry and return, leaving the real host
+        // claim to whichever later commit_memory call first touches each page - by which time an
+        // unrelated host allocation (see host_memory_collision's doc comment) may already have taken
+        // it, with no bounded window and no way to recover. reserve_guest_address_range's own doc
+        // comment already documents this call as required "both when reserved ... and when committed"
+        // - this closes that gap for the one call site that wasn't honoring it.
+        if (reserve_only && !this->memory_->reserve_guest_address_range(address, size))
+        {
+            return false;
+        }
+
         const auto entry = this->reserved_regions_
                                .try_emplace(address,
                                             reserved_region{
