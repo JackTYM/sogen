@@ -35,37 +35,68 @@ namespace sogen
     {
         const auto blob = read_fixture("actctx/common_controls_v6_amd64.bin");
 
-        const auto entry = find_toc_entry(blob, 1);
-        ASSERT_TRUE(entry.has_value());
+        const auto sections = find_all_sections(blob);
+        ASSERT_FALSE(sections.empty());
 
-        const auto section = get_section_bytes(blob, *entry);
-        ASSERT_GE(section.size(), 4u);
-        EXPECT_EQ(0, std::memcmp(section.data(), "SsHd", 4));
+        const auto first = section_bytes(blob, sections[0]);
+        ASSERT_GE(first.size(), 4u);
+        EXPECT_EQ(0, std::memcmp(first.data(), "SsHd", 4));
     }
 
     TEST(ActivationContextFormat, ParserExtractsResolvedWinSxsDirectoryName)
     {
         const auto blob = read_fixture("actctx/common_controls_v6_amd64.bin");
 
-        const auto entry = find_toc_entry(blob, 1);
-        ASSERT_TRUE(entry.has_value());
+        const auto sections = find_all_sections(blob);
+        ASSERT_FALSE(sections.empty());
 
-        const auto section = get_section_bytes(blob, *entry);
+        const auto first = section_bytes(blob, sections[0]);
         const auto found = find_wide_string_in_section(
-            section, "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a");
+            first, "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.33438_none_ee36e391daefe08a");
 
         ASSERT_TRUE(found.has_value());
     }
 
-    TEST(ActivationContextFormat, InvalidTocEntriesAreSkipped)
+    TEST(ActivationContextFormat, ZeroDependencyCaptureHasSingleAssemblySection)
     {
-        // The golden fixture's TOC declares 9 slots but only 7 (ids 1,2,3,4,5,6,9) have real,
-        // in-bounds data - ids 7 and 8's slots contain stale offset/length values from
-        // uninitialized memory that would read far past the blob's actual size. A correct
-        // parser must not return those as if they were real sections.
-        const auto blob = read_fixture("actctx/common_controls_v6_amd64.bin");
+        // Independent real capture #2 (differential analysis): a manifest with only a
+        // self-identity, no external dependency. Confirms the format understanding
+        // generalizes, not just fits the one golden fixture.
+        const auto blob = read_fixture("actctx/zero-deps.bin");
 
-        EXPECT_FALSE(find_toc_entry(blob, 7).has_value());
-        EXPECT_FALSE(find_toc_entry(blob, 8).has_value());
+        const auto sections = find_all_sections(blob);
+        ASSERT_FALSE(sections.empty());
+
+        const auto first = section_bytes(blob, sections[0]);
+        ASSERT_GE(first.size(), 4u);
+        EXPECT_EQ(0, std::memcmp(first.data(), "SsHd", 4));
+    }
+
+    TEST(ActivationContextFormat, OneDependencyCaptureResolvesDespiteToArrayInconsistency)
+    {
+        // Independent real capture #3 (differential analysis): a manifest with one dependency
+        // on the same Common-Controls v6 identity as the golden fixture. This specific capture
+        // has a confirmed, reproducible real-Windows anomaly in its TOC entry array (a
+        // non-constant byte-position inconsistency, ruled out as a capture race, name-length
+        // effect, manifest-completeness effect, assembly-count effect, and CI OS-image drift -
+        // see the format doc's differential-analysis section for the full elimination). Magic-
+        // tag scanning must still locate every section correctly, since it never depends on the
+        // TOC array's exact per-entry byte positions at all.
+        const auto blob = read_fixture("actctx/one-dep.bin");
+
+        const auto sections = find_all_sections(blob);
+        ASSERT_GE(sections.size(), 3u);
+
+        const auto first = section_bytes(blob, sections[0]);
+        ASSERT_GE(first.size(), 4u);
+        EXPECT_EQ(0, std::memcmp(first.data(), "SsHd", 4));
+
+        // Version-agnostic: this capture's real CI runner had a different comctl32 patch
+        // revision than the golden fixture's runner (33296 vs 33438 - confirmed via `ver`
+        // matching the OS build number exactly in both cases), so the resolved WinSxS
+        // directory name legitimately differs in its version component. The prefix is what
+        // matters here.
+        const auto found = find_wide_string_in_section(first, "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.");
+        EXPECT_TRUE(found.has_value());
     }
 }

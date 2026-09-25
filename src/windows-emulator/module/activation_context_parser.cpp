@@ -2,77 +2,73 @@
 #include "activation_context_format.hpp"
 #include "activation_context_parser.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace sogen
 {
-    std::optional<activation_context_data_toc_entry> find_toc_entry(const std::vector<std::uint8_t>& blob, const std::uint32_t id)
+    namespace
     {
-        if (blob.size() < sizeof(activation_context_data_header))
-        {
-            return std::nullopt;
-        }
-
-        activation_context_data_header header{};
-        std::memcpy(&header, blob.data(), sizeof(header));
-
-        if (header.magic != activation_context_data_magic || header.format_version != activation_context_data_format_version)
-        {
-            return std::nullopt;
-        }
-
-        if (header.default_toc_offset + sizeof(activation_context_data_toc_header) > blob.size())
-        {
-            return std::nullopt;
-        }
-
-        activation_context_data_toc_header toc_header{};
-        std::memcpy(&toc_header, blob.data() + header.default_toc_offset, sizeof(toc_header));
-
-        for (std::uint32_t i = 0; i < toc_header.entry_count; ++i)
-        {
-            const auto entry_offset =
-                static_cast<std::uint64_t>(toc_header.first_entry_offset) + static_cast<std::uint64_t>(i) * toc_header.entry_size;
-            if (entry_offset + sizeof(activation_context_data_toc_entry) > blob.size())
-            {
-                continue;
-            }
-
-            activation_context_data_toc_entry entry{};
-            std::memcpy(&entry, blob.data() + entry_offset, sizeof(entry));
-
-            // Some TOC slots (observed for section ids not present in a given blob, e.g. ids 7/8
-            // when only 1/2/3/4/5/6/9 are populated) contain stale/uninitialized data rather than
-            // a real section - the offset+length sanity check filters those out reliably.
-            if (static_cast<std::uint64_t>(entry.offset) + entry.length > blob.size())
-            {
-                continue;
-            }
-
-            if (entry.id == id)
-            {
-                return entry;
-            }
-        }
-
-        return std::nullopt;
+        constexpr std::array<const char*, 2> section_magic_tags = {"SsHd", "GsHd"};
     }
 
-    std::vector<std::uint8_t> get_section_bytes(const std::vector<std::uint8_t>& blob, const activation_context_data_toc_entry& entry)
+    std::vector<located_section> find_all_sections(const std::vector<std::uint8_t>& blob)
     {
-        // See activation_context_data_toc_entry_offset_bias - the real content starts one byte
-        // after the entry's declared offset, consistently, across every section observed.
-        const auto real_start = static_cast<std::uint64_t>(entry.offset) + activation_context_data_toc_entry_offset_bias;
-        const auto real_length =
-            entry.length > activation_context_data_toc_entry_offset_bias ? entry.length - activation_context_data_toc_entry_offset_bias : 0;
+        std::vector<std::uint64_t> positions{};
 
-        if (real_start + real_length > blob.size())
+        if (blob.size() >= sizeof(activation_context_data_header))
+        {
+            activation_context_data_header header{};
+            std::memcpy(&header, blob.data(), sizeof(header));
+            if (header.magic != activation_context_data_magic || header.format_version != activation_context_data_format_version)
+            {
+                return {};
+            }
+        }
+        else
         {
             return {};
         }
 
-        return {blob.begin() + static_cast<std::ptrdiff_t>(real_start),
-                blob.begin() + static_cast<std::ptrdiff_t>(real_start + real_length)};
+        for (const auto* tag : section_magic_tags)
+        {
+            const auto tag_length = std::strlen(tag);
+            if (blob.size() < tag_length)
+            {
+                continue;
+            }
+
+            for (std::size_t i = 0; i + tag_length <= blob.size(); ++i)
+            {
+                if (std::memcmp(blob.data() + i, tag, tag_length) == 0)
+                {
+                    positions.push_back(i);
+                }
+            }
+        }
+
+        std::sort(positions.begin(), positions.end());
+
+        std::vector<located_section> result{};
+        result.reserve(positions.size());
+        for (std::size_t i = 0; i < positions.size(); ++i)
+        {
+            const auto end = (i + 1 < positions.size()) ? positions[i + 1] : blob.size();
+            result.push_back({positions[i], end});
+        }
+
+        return result;
+    }
+
+    std::vector<std::uint8_t> section_bytes(const std::vector<std::uint8_t>& blob, const located_section& section)
+    {
+        if (section.start > section.end || section.end > blob.size())
+        {
+            return {};
+        }
+
+        return {blob.begin() + static_cast<std::ptrdiff_t>(section.start), blob.begin() + static_cast<std::ptrdiff_t>(section.end)};
     }
 
     std::optional<std::string> find_wide_string_in_section(const std::vector<std::uint8_t>& section, const std::string& needle_utf8)
