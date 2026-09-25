@@ -92,6 +92,15 @@ namespace sogen
 
             if (!allocated)
             {
+                if (std::getenv("SOGEN_TRACE_ALLOC_FAIL") != nullptr)
+                {
+                    fprintf(stderr,
+                            "[alloc-fail-trace] create_allocator: base=0x%llx size=0x%zx "
+                            "default_allocation_base=0x%llx highest_address=0x%llx is_wow64_process=%d\n",
+                            static_cast<unsigned long long>(base), size, static_cast<unsigned long long>(default_allocation_base),
+                            static_cast<unsigned long long>(highest_address), is_wow64_process);
+                    fflush(stderr);
+                }
                 throw std::runtime_error("Failed to allocate memory for process structure");
             }
 
