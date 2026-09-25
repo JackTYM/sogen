@@ -605,6 +605,17 @@ namespace sogen
         uint64_t g_sldim_get_pending_command_state_trace_va = 0;
         bool g_sldim_pending_command_write_watch_armed = false;
 
+        // The two-field callback/notification-teardown routine reached, live, via the
+        // `[esi+0x68]` vtable slot at the end of sldim.exe's own CWnd::OnCmdMsg base-class-chain
+        // walker (statically disassembled and live-hit this cycle, see
+        // project_solidworks_bringup.md #499/#500). Its normal-path body reads `[this+0xdc]` and
+        // `[this+0xe8]`, uses each if non-null, then clears both fields. This watch fires at the
+        // function's own entry, where the thiscall `this` is still live in ecx (unmodified by the
+        // SEH prolog that follows), capturing `this` and both fields' pre-teardown values.
+        constexpr uint64_t SLDIM_TEARDOWN_665460_RVA = 0x665460;
+        uint64_t g_sldim_teardown_665460_trace_va = 0;
+        uint64_t g_sldim_teardown_665460_hits = 0;
+
         // Arms the moment ANY thread's own FSCTL_PIPE_LISTEN targets a "mojo."-prefixed pipe (the real
         // cross-process bootstrap pipe's own naming convention; see project_solidworks_bringup.md #279)
         // rather than watching a hardcoded tid: #296 found the accepting thread (tid=28 that cycle, not
@@ -4419,6 +4430,48 @@ namespace sogen
                                   });
         }
 
+        void trace_sldim_teardown_665460_hit(const analysis_context& c, const uint64_t address)
+        {
+            auto& emu = c.win_emu->emu();
+            const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+
+            ++g_sldim_teardown_665460_hits;
+
+            uint32_t field_dc{};
+            uint32_t field_e8{};
+            const auto read_dc_ok = emu.try_read_memory(this_ptr + 0xdc, &field_dc, sizeof(field_dc));
+            const auto read_e8_ok = emu.try_read_memory(this_ptr + 0xe8, &field_e8, sizeof(field_e8));
+
+            uint32_t field_dc_deref{};
+            const auto read_dc_deref_ok =
+                read_dc_ok && field_dc != 0 && emu.try_read_memory(field_dc, &field_dc_deref, sizeof(field_dc_deref));
+
+            uint32_t field_e8_plus_2c{};
+            const auto read_e8_plus_2c_ok =
+                read_e8_ok && field_e8 != 0 && emu.try_read_memory(field_e8 + 0x2c, &field_e8_plus_2c, sizeof(field_e8_plus_2c));
+
+            const auto* dc_mod_name = (read_dc_ok && field_dc != 0) ? c.win_emu->mod_manager.find_name(field_dc) : "?";
+            const auto* dc_mod = (read_dc_ok && field_dc != 0) ? c.win_emu->mod_manager.find_by_address(field_dc) : nullptr;
+            const auto dc_offset = dc_mod ? field_dc - dc_mod->image_base : field_dc;
+
+            const auto* dc_deref_mod_name = read_dc_deref_ok ? c.win_emu->mod_manager.find_name(field_dc_deref) : "?";
+            const auto* dc_deref_mod = read_dc_deref_ok ? c.win_emu->mod_manager.find_by_address(field_dc_deref) : nullptr;
+            const auto dc_deref_offset = dc_deref_mod ? field_dc_deref - dc_deref_mod->image_base : field_dc_deref;
+
+            const auto* e8_mod_name = (read_e8_ok && field_e8 != 0) ? c.win_emu->mod_manager.find_name(field_e8) : "?";
+            const auto* e8_mod = (read_e8_ok && field_e8 != 0) ? c.win_emu->mod_manager.find_by_address(field_e8) : nullptr;
+            const auto e8_offset = e8_mod ? field_e8 - e8_mod->image_base : field_e8;
+
+            c.win_emu->log.error("[sldim-teardown-trace] hit #%llu at 0x%llx tid=%u this=0x%x [this+0xdc]=0x%x (read_ok=%d, %s+0x%llx) "
+                                 "*[this+0xdc]=0x%x (read_ok=%d, %s+0x%llx) [this+0xe8]=0x%x (read_ok=%d, %s+0x%llx) "
+                                 "[ [this+0xe8]+0x2c ]=0x%x (read_ok=%d)\n",
+                                 static_cast<unsigned long long>(g_sldim_teardown_665460_hits), static_cast<unsigned long long>(address),
+                                 c.win_emu->current_thread().id, this_ptr, field_dc, read_dc_ok ? 1 : 0, dc_mod_name,
+                                 static_cast<unsigned long long>(dc_offset), field_dc_deref, read_dc_deref_ok ? 1 : 0, dc_deref_mod_name,
+                                 static_cast<unsigned long long>(dc_deref_offset), field_e8, read_e8_ok ? 1 : 0, e8_mod_name,
+                                 static_cast<unsigned long long>(e8_offset), field_e8_plus_2c, read_e8_plus_2c_ok ? 1 : 0);
+        }
+
         std::optional<uint64_t> read_x86_gp_register(x86_64_cpu& emu, const x86_reg reg)
         {
             switch (reg)
@@ -5512,11 +5565,13 @@ namespace sogen
                     g_sldim_cmsgthread_dtor_entry_trace_va = exe->image_base + SLDIM_CMSGTHREAD_DTOR_ENTRY_RVA;
                     g_sldim_cmsgthread_dtor_check_trace_va = exe->image_base + SLDIM_CMSGTHREAD_DTOR_CHECK_RVA;
                     g_sldim_get_pending_command_state_trace_va = exe->image_base + SLDIM_GET_PENDING_COMMAND_STATE_RVA;
+                    g_sldim_teardown_665460_trace_va = exe->image_base + SLDIM_TEARDOWN_665460_RVA;
                     c.win_emu->log.error(
                         "[sldim-queue-trace] sldim.exe running at 0x%llx, watching queue-check at 0x%llx / 0x%llx, OnCommand at "
                         "0x%llx, OnCommand branch at 0x%llx, OnCmdMsg at 0x%llx, findEntry result at 0x%llx, handler delegate at "
                         "0x%llx, trypop entry at 0x%llx, trypop count check at 0x%llx, CMessagingThread ctor2/ctor0 at "
-                        "0x%llx / 0x%llx, dtor entry/check at 0x%llx / 0x%llx, get_pending_command state at 0x%llx\n",
+                        "0x%llx / 0x%llx, dtor entry/check at 0x%llx / 0x%llx, get_pending_command state at 0x%llx, teardown-665460 "
+                        "at 0x%llx\n",
                         static_cast<unsigned long long>(exe->image_base), static_cast<unsigned long long>(g_sldim_queue_check_trace_va_1),
                         static_cast<unsigned long long>(g_sldim_queue_check_trace_va_2),
                         static_cast<unsigned long long>(g_sldim_oncommand_trace_va),
@@ -5530,7 +5585,8 @@ namespace sogen
                         static_cast<unsigned long long>(g_sldim_cmsgthread_ctor0_trace_va),
                         static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_entry_trace_va),
                         static_cast<unsigned long long>(g_sldim_cmsgthread_dtor_check_trace_va),
-                        static_cast<unsigned long long>(g_sldim_get_pending_command_state_trace_va));
+                        static_cast<unsigned long long>(g_sldim_get_pending_command_state_trace_va),
+                        static_cast<unsigned long long>(g_sldim_teardown_665460_trace_va));
                 }
             }
 
@@ -5598,6 +5654,11 @@ namespace sogen
             if (g_sldim_get_pending_command_state_trace_va != 0 && address == g_sldim_get_pending_command_state_trace_va)
             {
                 trace_sldim_pending_command_state_hit(c, address);
+            }
+
+            if (g_sldim_teardown_665460_trace_va != 0 && address == g_sldim_teardown_665460_trace_va)
+            {
+                trace_sldim_teardown_665460_hit(c, address);
             }
 
             if (is_thread_activity_traced_tid(c.win_emu->current_thread().id))
