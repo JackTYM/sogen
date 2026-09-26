@@ -565,6 +565,8 @@ namespace sogen
         std::map<uint32_t, raw_input_payload> raw_inputs{};
         uint32_t next_raw_input_token{1};
 
+        uint32_t next_cursor_icon_id{0x100};
+
         // For WOW64 processes
         std::optional<emulator_object<PEB32>> peb32;
         std::optional<emulator_object<RTL_USER_PROCESS_PARAMETERS32>> process_params32;
