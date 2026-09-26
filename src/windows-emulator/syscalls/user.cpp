@@ -6561,6 +6561,16 @@ namespace sogen
             return c.proc.foreground_window;
         }
 
+        hwnd handle_NtUserChildWindowFromPointEx(const syscall_context& /*c*/, const hwnd parent, const int32_t /*x*/, const int32_t /*y*/,
+                                                 const uint32_t /*flags*/)
+        {
+            // TODO: Properly resolve the topmost visible/enabled child window containing the
+            //       point, honoring CWP_* flags; this stub just returns the queried parent, matching
+            //       real ChildWindowFromPointEx's behavior when the point lies within the parent but
+            //       hits no child window.
+            return parent;
+        }
+
         BOOL handle_NtUserGetKeyboardState(const syscall_context& c, const emulator_pointer key_state)
         {
             if (key_state == 0)
