@@ -683,21 +683,30 @@ namespace sogen::fex
         // the acting vCPU on every platform) is not itself Apple-only.
         thread_local fex_vcpu* t_current_vcpu = nullptr;
 
-        // RAII guard for t_current_vcpu, scoped to fex_vcpu::start()'s ExecuteThread loop.
+        // RAII guard for t_current_vcpu, scoped to fex_vcpu::start()'s ExecuteThread loop. start()
+        // can recurse on the same host thread (e.g. call_guest_function's nested cpu.start(1) call,
+        // issued from deep inside a syscall handler while the outer start() call is still on the C++
+        // stack) - restoring the previous value rather than unconditionally nulling it keeps the
+        // outer scope's t_current_vcpu intact once the inner one unwinds, instead of leaving it null
+        // for the remainder of the outer quantum and misrouting every later fault/signal as unhandled.
         struct current_vcpu_scope
         {
             explicit current_vcpu_scope(fex_vcpu& vcpu)
+                : previous_(t_current_vcpu)
             {
                 t_current_vcpu = &vcpu;
             }
 
             ~current_vcpu_scope()
             {
-                t_current_vcpu = nullptr;
+                t_current_vcpu = previous_;
             }
 
             current_vcpu_scope(const current_vcpu_scope&) = delete;
             current_vcpu_scope& operator=(const current_vcpu_scope&) = delete;
+
+          private:
+            fex_vcpu* previous_;
         };
 
         // A synchronous fault taken while THIS thread already holds tables_mutex_ exclusively (e.g. a
@@ -1651,6 +1660,13 @@ namespace sogen::fex
 
         std::optional<uint64_t> deferred_breakpoint_rearm_{};
         std::optional<breakpoint_rearm_state> pending_breakpoint_rearm_{};
+
+        // A plain, caller-requested single instruction step (start(1), see call_guest_function's own
+        // doc comment for why a synchronous nested call needs this instead of a memory-patched
+        // breakpoint), built on the exact same EFLAGS.TF mechanism as a breakpoint rearm step above -
+        // just without an address to restore/re-patch afterward. See arm_plain_step.
+        bool pending_plain_step_ = false;
+        void arm_plain_step();
 
         // --[ HVF execution path (active only when g_hvf != nullptr) ]-------------------------------
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
@@ -4293,10 +4309,12 @@ namespace sogen::fex
 
         this->emulator_.refresh_mmio_backings();
 
-        if (count != 0)
+        if (count != 0 && count != 1)
         {
             // FEX has CompileRIPCount() for bounded execution, but wiring exact instruction counts
             // through the JIT exit path is non-trivial; match the KVM backend and refuse for now.
+            // count == 1 is handled below instead, via the same EFLAGS.TF single-step FEX's JIT
+            // already honors natively for software-breakpoint rearming (see arm_plain_step).
             throw std::runtime_error("FEX backend does not support exact instruction counts yet");
         }
 
@@ -4339,6 +4357,11 @@ namespace sogen::fex
         }
 
         this->rearm_pending_breakpoint_if_any();
+
+        if (count == 1)
+        {
+            this->arm_plain_step();
+        }
 
         {
             uint64_t tid = 0;
@@ -4400,6 +4423,19 @@ namespace sogen::fex
             auto* const active = this->active_thread_.load();
             ::mprotect(active->InterruptFaultPage, sizeof(active->InterruptFaultPage), PROT_READ | PROT_WRITE);
             std::atomic_ref<uint32_t>(active->CurrentFrame->StopRequestFlag).store(0, std::memory_order_relaxed);
+        }
+
+        if (count == 1)
+        {
+            // arm_plain_step's own trap always sets stop_requested_ to break out of this call's loop
+            // (see the pending_plain_step_ branch in handle_breakpoint_related_interrupt) - purely
+            // local bookkeeping for a single-instruction nested call (see call_guest_function), not a
+            // real stop() request. Left set, it would leak into whichever call - possibly the outer,
+            // still-in-progress quantum this one nested inside of - calls start() next: that call's
+            // own loop would see it already true and return after zero instructions, and
+            // HandleSyscall would keep calling request_thread_stop() on every subsequent syscall for
+            // the rest of the process's life.
+            this->stop_requested_ = false;
         }
     }
 #else
@@ -6050,6 +6086,14 @@ namespace sogen::fex
     {
         constexpr uint64_t trap_flag_bit = 0x100;
 
+        if (vector == 1 && this->pending_plain_step_)
+        {
+            this->pending_plain_step_ = false;
+            this->write_rflags(this->read_rflags() & ~trap_flag_bit);
+            this->stop_requested_ = true;
+            return true;
+        }
+
         if (vector == 1 && this->pending_breakpoint_rearm_)
         {
             const auto rearm = *std::exchange(this->pending_breakpoint_rearm_, std::nullopt);
@@ -6114,6 +6158,13 @@ namespace sogen::fex
         const uint64_t rflags = this->read_rflags();
         this->pending_breakpoint_rearm_ = breakpoint_rearm_state{.address = address, .had_trap_flag = (rflags & trap_flag_bit) != 0};
         this->write_rflags(rflags | trap_flag_bit);
+    }
+
+    void fex_vcpu::arm_plain_step()
+    {
+        constexpr uint64_t trap_flag_bit = 0x100;
+        this->pending_plain_step_ = true;
+        this->write_rflags(this->read_rflags() | trap_flag_bit);
     }
 
     void fex_vcpu::rearm_pending_breakpoint_if_any()
