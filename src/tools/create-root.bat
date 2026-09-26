@@ -15,12 +15,16 @@ SET EMU_WINDIR=%EMU_FILESYS%\c\windows
 SET EMU_SYSDIR=%EMU_WINDIR%\system32
 SET EMU_SYSDIR_WOW64=%EMU_WINDIR%\syswow64
 SET EMU_CURSORDIR=%EMU_WINDIR%\cursors
+SET EMU_SXSDIR=%EMU_WINDIR%\WinSxS
+SET EMU_SXSMANIFESTDIR=%EMU_SXSDIR%\Manifests
 SET EMU_REGDIR=%EMU_ROOT%\registry
 SET EMU_STEAMDIR=%EMU_FILESYS%\c\steam
 
 MKDIR %EMU_SYSDIR%
 MKDIR %EMU_SYSDIR_WOW64%
 MKDIR %EMU_CURSORDIR%
+MKDIR %EMU_SXSDIR%
+MKDIR %EMU_SXSMANIFESTDIR%
 MKDIR %EMU_REGDIR%
 MKDIR %EMU_STEAMDIR%
 
@@ -190,6 +194,12 @@ CALL :collect wdmaud.drv
 
 CALL :collect_file "%WINDIR%\Cursors", aero_arrow.cur, %EMU_CURSORDIR%
 
+REM Common-Controls v6 side-by-side assembly: a manifested app's static COMCTL32.dll import
+REM resolves through this on real Windows, not the flat system32 copy (the old unthemed v5.82
+REM build, missing many ordinals modern apps import). See docs/superpowers/specs/
+REM 2026-09-24-comctl32-sxs-activation-context-design.md for the full investigation.
+CALL :collect_sxs common-controls_6595b64144ccf1df
+
 EXIT /B 0
 
 :normpath
@@ -209,5 +219,17 @@ EXIT /B
 :collect
 CALL :collect_file %SYSDIR%, %~1, %EMU_SYSDIR%
 CALL :collect_file %SYSDIR_WOW64%, %~1, %EMU_SYSDIR_WOW64%
+EXIT /B
+
+REM %1 = substring to match against WinSxS manifest/folder names (e.g. "common-controls_6595b64144ccf1df").
+:collect_sxs
+FOR %%F IN ("%WINDIR%\WinSxS\Manifests\*%~1*.manifest") DO (
+	ECHO %%F -^> %EMU_SXSMANIFESTDIR%\%%~nxF
+	COPY /B /Y "%%F" "%EMU_SXSMANIFESTDIR%\%%~nxF" >NUL
+)
+FOR /D %%D IN ("%WINDIR%\WinSxS\*%~1*") DO (
+	ECHO %%D -^> %EMU_SXSDIR%\%%~nxD
+	XCOPY /E /I /Y /Q "%%D" "%EMU_SXSDIR%\%%~nxD\" >NUL
+)
 EXIT /B
 

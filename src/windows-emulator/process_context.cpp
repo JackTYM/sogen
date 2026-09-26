@@ -2,6 +2,7 @@
 #include "process_context.hpp"
 
 #include "emulator_utils.hpp"
+#include "module/activation_context_builder.hpp"
 #include "registry/registry_utils.hpp"
 #include "syscall_utils.hpp"
 #include "windows_emulator.hpp"
@@ -587,11 +588,22 @@ namespace sogen
             proc_params.MaximumLength = proc_params.Length;
         });
 
+        std::uint64_t activation_context_data_address = 0;
+        if (const auto activation_context_blob =
+                build_activation_context_blob(memory, registry, file_system, executable.image_base, executable.module_path);
+            activation_context_blob.has_value())
+        {
+            const auto blob_address = allocator.reserve(activation_context_blob->size(), alignof(std::uint32_t));
+            allocator.get_memory().write_memory(blob_address, activation_context_blob->data(), activation_context_blob->size());
+            activation_context_data_address = blob_address;
+        }
+
         this->peb64.access([&](PEB64& p) {
             p.BeingDebugged = 0;
             p.ImageBaseAddress = executable.image_base;
             p.ProcessParameters = this->process_params64.value();
             p.ApiSetMap = apiset::clone(emu, allocator, apiset_container).value();
+            p.ActivationContextData = activation_context_data_address;
 
             p.ProcessHeap = 0;
             p.ProcessHeaps = 0;
