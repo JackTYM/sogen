@@ -117,14 +117,23 @@ namespace sogen
 
         // Unlike Channel::TryDispatchMessage (#474) and InterfaceEndpointClient::HandleIncomingMessage
         // (#536), these are real, out-of-line, symbol-carrying functions in msedge.dll 150.0.4078.105's
-        // own private PDB table (msedge.table.txt) - see project_solidworks_bringup.md #537.
+        // own private PDB table (msedge.table.txt) - see project_solidworks_bringup.md #537/#538.
         // `NodeLink::OnAcceptParcel` is the concrete `NodeMessageListener` override that receives a
         // deserialized `AcceptParcel` message once `Channel::TryDispatchMessage` (or its ipcz-transport
         // equivalent) hands it off; `Router::AcceptInboundParcel` is the next call down that turns that
-        // message into a `Parcel` and enqueues it on the route's own inbound queue.
-        constexpr std::array<traced_symbol, 2> IPCZ_ACCEPT_PARCEL_DISPATCH_TARGETS{{
+        // message into a `Parcel` and enqueues it on the route's own inbound queue; `Router::Flush` is
+        // the next real, non-inlined hop down from there, the call a `Router` makes to actually forward
+        // a newly-accepted parcel onward to whatever is bound to consume it. `Router::Get` is the
+        // portal-level API a local reader (mojo bindings, via its ipcz driver) calls to actually pull a
+        // queued parcel's bytes back out; `MojoReadMessage` is the real, public Mojo C API entry point
+        // that calls it directly (`Router::Get`'s own observed return address always lands inside
+        // `MojoReadMessage`'s own body) - see project_solidworks_bringup.md #538.
+        constexpr std::array<traced_symbol, 5> IPCZ_ACCEPT_PARCEL_DISPATCH_TARGETS{{
             {"ipcz::NodeLink::OnAcceptParcel", 0x85d550},
             {"ipcz::Router::AcceptInboundParcel", 0x85e3e2},
+            {"ipcz::Router::Flush", 0x1097694},
+            {"ipcz::Router::Get", 0x474902},
+            {"MojoReadMessage", 0x101e997},
         }};
 
         // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
