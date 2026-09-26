@@ -115,6 +115,30 @@ namespace sogen
         // so edi already holds the live ordinal and rax/rbx are still untouched.
         constexpr uint64_t MOJO_MESSAGE_NAME_READ_RVA = 0x107328c;
 
+        // Static disassembly of the real msedge.dll 150.0.4078.105 (capstone/pefile) starting right
+        // after `mojo::MessageHeaderValidator::Accept` returns (RVA 0x101e11a) found no PostTask/
+        // task-runner hop at all: the byte/qword pair at [rsi+0x148]/[rsi+0x140] checked there is a
+        // `Connector::is_dispatching_`-shaped reentrancy guard, and a `weak_self_`-shaped WeakPtr
+        // acquisition (AddRef on [rsi+0x188]) immediately precedes it - both match real Chromium
+        // mojo/public/cpp/bindings/lib/connector.cc's `Connector::DispatchMessage` structurally, not a
+        // cross-thread post. The real dispatch itself is a same-thread, CFG-guarded virtual call at RVA
+        // 0x101e29b (`call qword ptr [rip+...]`, the standard `_guard_dispatch_icall` pattern): rcx
+        // holds `this->incoming_receiver_` (read from [rsi+0x18]), rax already holds the resolved
+        // vtable[2] target, rdx holds `&message` (the just-validated `mojo::Message*`) - see
+        // project_solidworks_bringup.md #540.
+        constexpr uint64_t CONNECTOR_DISPATCH_RECEIVER_CALL_RVA = 0x101e29b;
+
+        // Live-hooking CONNECTOR_DISPATCH_RECEIVER_CALL_RVA above resolved its call target to a real,
+        // exact-match (offset 0x0) PDB symbol: `mojo::MessageDispatcher::Accept` (RVA 0x1105ab0) - see
+        // project_solidworks_bringup.md #540. Static disassembly of that function found it is mostly
+        // `TRACE_EVENT_WITH_FLOW`-style tracing plumbing (TLS category-enabled checks, a sorted-array
+        // binary search over trace categories) wrapping one real forwarding call: at RVA 0x1105f33,
+        // the exact same CFG-guarded virtual-call shape as CONNECTOR_DISPATCH_RECEIVER_CALL_RVA (`mov
+        // rcx, [rdi+0x18]` loading `this->target_`, vtable slot 2, `mov rdx, rsi` restoring the
+        // untouched `Message*`), i.e. `MessageDispatcher` is a thin, traced forwarding wrapper around
+        // its own `target_` receiver, not the final destination.
+        constexpr uint64_t MESSAGE_DISPATCHER_FORWARD_CALL_RVA = 0x1105f33;
+
         // Unlike Channel::TryDispatchMessage (#474) and InterfaceEndpointClient::HandleIncomingMessage
         // (#536), these are real, out-of-line, symbol-carrying functions in msedge.dll 150.0.4078.105's
         // own private PDB table (msedge.table.txt) - see project_solidworks_bringup.md #537/#538.
@@ -3590,6 +3614,66 @@ namespace sogen
                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(endpoint_client_this),
                                        static_cast<unsigned long long>(message_ptr), static_cast<unsigned long long>(header_ptr), name,
                                        utils::string::to_hex_string(header.data(), header.size()).c_str());
+                });
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_MOJO_CONNECTOR_DISPATCH_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + CONNECTOR_DISPATCH_RECEIVER_CALL_RVA;
+
+                win_emu->log.error("[mojo-connector-dispatch-hook-trace] watching Connector::DispatchMessage's own "
+                                   "incoming_receiver_->Accept() virtual call site at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto receiver_this = emu.reg<uint64_t>(x86_register::rcx);
+                    const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
+                    const auto call_target = emu.reg<uint64_t>(x86_register::rax);
+
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
+                    const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
+                    const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
+
+                    win_emu->log.error("[mojo-connector-dispatch-hook-trace] hit at 0x%llx, receiver_this=0x%llx "
+                                       "message=0x%llx call_target=0x%llx (%s+0x%llx)\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(receiver_this),
+                                       static_cast<unsigned long long>(message_ptr), static_cast<unsigned long long>(call_target),
+                                       target_mod_name, static_cast<unsigned long long>(target_offset));
+                });
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_MOJO_CONNECTOR_DISPATCH_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + MESSAGE_DISPATCHER_FORWARD_CALL_RVA;
+
+                win_emu->log.error("[mojo-message-dispatcher-forward-hook-trace] watching MessageDispatcher::Accept's own "
+                                   "target_->Accept() virtual call site at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto target_this = emu.reg<uint64_t>(x86_register::rcx);
+                    const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
+                    const auto call_target = emu.reg<uint64_t>(x86_register::rax);
+
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
+                    const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
+                    const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
+
+                    uint64_t header_ptr{};
+                    emu.try_read_memory(message_ptr + 0x18, &header_ptr, sizeof(header_ptr));
+                    uint32_t ordinal{};
+                    emu.try_read_memory(header_ptr + 0xc, &ordinal, sizeof(ordinal));
+
+                    win_emu->log.error("[mojo-message-dispatcher-forward-hook-trace] hit at 0x%llx, target_this=0x%llx "
+                                       "message=0x%llx call_target=0x%llx (%s+0x%llx) header_ptr=0x%llx ordinal=0x%x\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(target_this),
+                                       static_cast<unsigned long long>(message_ptr), static_cast<unsigned long long>(call_target),
+                                       target_mod_name, static_cast<unsigned long long>(target_offset),
+                                       static_cast<unsigned long long>(header_ptr), ordinal);
                 });
             }
         }
