@@ -4968,6 +4968,31 @@ namespace sogen
             }
         }
 
+        BOOL handle_NtUserIsTopLevelWindow(const syscall_context& c, const hwnd window)
+        {
+            const auto* win = c.proc.windows.get(window);
+            if (!win)
+            {
+                return FALSE;
+            }
+
+            const hwnd desktop = c.proc.default_desktop_window_handle.bits;
+            return (!win->parent_handle || win->parent_handle == desktop) ? TRUE : FALSE;
+        }
+
+        BOOL handle_NtUserIsChildWindowDpiMessageEnabled(const syscall_context& /*c*/, const hwnd /*window*/)
+        {
+            // No window opts into per-child DPI-change messages (EnableChildWindowDpiMessage) unless it
+            // explicitly asks for it, which this emulator does not yet track - false matches every
+            // window's real-Windows default state.
+            return FALSE;
+        }
+
+        BOOL handle_NtUserIsWindowBroadcastingDpiToChildren(const syscall_context& /*c*/, const hwnd /*window*/)
+        {
+            return FALSE;
+        }
+
         BOOL handle_NtUserRedrawWindow(const syscall_context& c, const hwnd hwnd, const emulator_object<RECT> update_rect,
                                        const uint64_t /*update_rgn*/, const UINT flags)
         {
@@ -6139,6 +6164,11 @@ namespace sogen
         uint32_t handle_NtUserGetDoubleClickTime()
         {
             return 500;
+        }
+
+        uint32_t handle_NtUserGetCaretBlinkTime()
+        {
+            return 530;
         }
 
         BOOL handle_NtUserModifyWindowTouchCapability()

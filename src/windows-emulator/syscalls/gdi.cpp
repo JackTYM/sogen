@@ -3984,9 +3984,38 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiGetDCObject(const syscall_context& /*c*/)
+        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, const hdc dc, const uint32_t object_type)
         {
-            return STATUS_SUCCESS;
+            // object_type is win32k's internal GDI object-type tag shifted into the high word
+            // (e.g. k_gdi_bitmap_type/k_gdi_palette_type << 16), not the small OBJ_* values
+            // GetObjectType() exposes to user mode.
+            const auto internal_type = static_cast<uint8_t>(object_type >> 16);
+
+            if (internal_type == k_gdi_palette_type)
+            {
+                // Every DC starts with the same default system palette selected, and nothing in
+                // this emulator changes it - one shared, lazily-created handle covers every caller.
+                static uint64_t default_palette_handle = 0;
+                if (default_palette_handle == 0)
+                {
+                    default_palette_handle = allocate_gdi_object(c, k_gdi_palette_type, k_gdi_palette_attr_size);
+                }
+
+                return default_palette_handle;
+            }
+
+            if (internal_type != k_gdi_bitmap_type)
+            {
+                return 0;
+            }
+
+            const auto it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (it == c.proc.gdi_dc_states.end())
+            {
+                return 0;
+            }
+
+            return it->second.selected_bitmap;
         }
 
         BOOL handle_NtGdiUnrealizeObject(const syscall_context& c, const handle h)

@@ -664,6 +664,9 @@ namespace sogen
         emulator_pointer handle_NtUserGetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, BOOL Ansi);
         uint32_t handle_NtUserGetWindowLong(const syscall_context& c, handle hWnd, int nIndex, BOOL Ansi);
         uint64_t handle_NtUserGetAncestor(const syscall_context& c, hwnd child_hwnd, UINT flags);
+        BOOL handle_NtUserIsTopLevelWindow(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserIsChildWindowDpiMessageEnabled(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserIsWindowBroadcastingDpiToChildren(const syscall_context& c, hwnd window);
         BOOL handle_NtUserRedrawWindow(const syscall_context& c, hwnd hwnd, emulator_object<RECT> update_rect, uint64_t update_rgn,
                                        UINT flags);
         NTSTATUS handle_NtUserGetCPD(const syscall_context& c);
@@ -729,6 +732,7 @@ namespace sogen
         hwnd handle_NtUserWindowFromPoint(const syscall_context& c, int32_t x, int32_t y);
         BOOL handle_NtUserGetKeyboardState(const syscall_context& c, emulator_pointer key_state);
         uint32_t handle_NtUserGetDoubleClickTime();
+        uint32_t handle_NtUserGetCaretBlinkTime();
         BOOL handle_NtUserModifyWindowTouchCapability();
         uint32_t handle_NtUserGetClipboardSequenceNumber();
         BOOL handle_NtUserOpenClipboard();
@@ -847,7 +851,7 @@ namespace sogen
         NTSTATUS handle_NtGdiGetEntry(const syscall_context& c, uint32_t handle_value, emulator_pointer entry_ptr);
         int32_t handle_NtGdiSetIcmMode();
         NTSTATUS handle_NtGdiSetLayout(const syscall_context& c);
-        NTSTATUS handle_NtGdiGetDCObject(const syscall_context& c);
+        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, hdc dc, uint32_t object_type);
         BOOL handle_NtGdiUnrealizeObject(const syscall_context& c, handle h);
         BOOL handle_NtGdiMoveToEx(const syscall_context& c, hdc dc, LONG x, LONG y, emulator_pointer old_point_ptr);
         uint64_t handle_NtGdiSelectBrushLocal(const syscall_context& c, hdc dc, uint32_t brush, emulator_pointer old_brush_ptr);
@@ -1068,6 +1072,11 @@ namespace sogen
         }
 
         NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& /*c*/)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        NTSTATUS handle_NtUserSystemParametersInfoForDpi(const syscall_context& /*c*/)
         {
             return STATUS_SUCCESS;
         }
@@ -3890,6 +3899,7 @@ namespace sogen
         add_handler(NtQueryDirectoryFileEx);
         add_handler(NtQueryDirectoryFile);
         add_handler(NtUserSystemParametersInfo);
+        add_handler(NtUserSystemParametersInfoForDpi);
         add_handler(NtGetContextThread);
         add_handler(NtYieldExecution);
         add_handler(NtUserModifyUserStartupInfoFlags);
@@ -4054,6 +4064,9 @@ namespace sogen
         add_handler(NtUserGetWindowLongPtr);
         add_handler(NtUserGetWindowLong);
         add_handler(NtUserGetAncestor);
+        add_handler(NtUserIsTopLevelWindow);
+        add_handler(NtUserIsChildWindowDpiMessageEnabled);
+        add_handler(NtUserIsWindowBroadcastingDpiToChildren);
         add_handler(NtUserPostMessage);
         add_handler(NtUserPostThreadMessage);
         add_handler(NtUserRedrawWindow);
@@ -4176,6 +4189,7 @@ namespace sogen
         add_handler(NtUserWindowFromPoint);
         add_handler(NtUserSwapMouseButton);
         add_handler(NtUserGetDoubleClickTime);
+        add_handler(NtUserGetCaretBlinkTime);
         add_handler(NtGdiSetIcmMode);
         add_handler(NtUserGetKeyboardState);
         add_handler(NtUserSetKeyboardState);
