@@ -115,6 +115,18 @@ namespace sogen
         // so edi already holds the live ordinal and rax/rbx are still untouched.
         constexpr uint64_t MOJO_MESSAGE_NAME_READ_RVA = 0x107328c;
 
+        // Unlike Channel::TryDispatchMessage (#474) and InterfaceEndpointClient::HandleIncomingMessage
+        // (#536), these are real, out-of-line, symbol-carrying functions in msedge.dll 150.0.4078.105's
+        // own private PDB table (msedge.table.txt) - see project_solidworks_bringup.md #537.
+        // `NodeLink::OnAcceptParcel` is the concrete `NodeMessageListener` override that receives a
+        // deserialized `AcceptParcel` message once `Channel::TryDispatchMessage` (or its ipcz-transport
+        // equivalent) hands it off; `Router::AcceptInboundParcel` is the next call down that turns that
+        // message into a `Parcel` and enqueues it on the route's own inbound queue.
+        constexpr std::array<traced_symbol, 2> IPCZ_ACCEPT_PARCEL_DISPATCH_TARGETS{{
+            {"ipcz::NodeLink::OnAcceptParcel", 0x85d550},
+            {"ipcz::Router::AcceptInboundParcel", 0x85e3e2},
+        }};
+
         // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
         // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270, #272, #277).
         constexpr std::array<traced_symbol, 16> NODE_CONNECT_TARGETS{{
@@ -3408,7 +3420,130 @@ namespace sogen
                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(channel_this),
                                        static_cast<unsigned long long>(header_ptr), static_cast<unsigned long long>(available_bytes),
                                        header.size, header.num_handles, header.num_bytes);
+
+                    if (header.size == 0 || header.num_bytes < static_cast<uint32_t>(header.size) + 24)
+                    {
+                        return;
+                    }
+
+                    const auto ipcz_header_base = header_ptr + header.size;
+
+                    struct
+                    {
+                        uint8_t size;
+                        uint8_t version;
+                        uint8_t message_id;
+                        uint8_t reserved0[5];
+                        uint64_t node_sequence_number;
+                        uint32_t driver_object_data_array;
+                        uint32_t reserved1;
+                    } ipcz_header{};
+                    emu.try_read_memory(ipcz_header_base, &ipcz_header, sizeof(ipcz_header));
+
+                    win_emu->log.error("[ipcz-message-header-hook-trace] ipcz_header_base=0x%llx message_id=0x%x\n",
+                                       static_cast<unsigned long long>(ipcz_header_base), ipcz_header.message_id);
+
+                    constexpr uint8_t ACCEPT_PARCEL_MESSAGE_ID = 20;
+                    constexpr uint64_t INVALID_BUFFER_ID = 0xffffffffffffffffULL;
+
+                    if (ipcz_header.message_id != ACCEPT_PARCEL_MESSAGE_ID ||
+                        header.num_bytes < static_cast<uint32_t>(header.size) + 24 + 72)
+                    {
+                        return;
+                    }
+
+                    const auto params_base = ipcz_header_base + 24;
+
+                    struct
+                    {
+                        uint32_t struct_header_size;
+                        uint32_t struct_header_padding;
+                        uint64_t sublink;
+                        uint64_t sequence_number;
+                        uint32_t subparcel_index;
+                        uint32_t num_subparcels;
+                        uint64_t fragment_buffer_id;
+                        uint32_t fragment_offset;
+                        uint32_t fragment_size;
+                        uint32_t parcel_data;
+                        uint32_t handle_types;
+                        uint32_t new_routers;
+                        uint32_t padding;
+                        uint32_t driver_objects_first_index;
+                        uint32_t driver_objects_num_objects;
+                    } params{};
+                    emu.try_read_memory(params_base, &params, sizeof(params));
+
+                    win_emu->log.error("[ipcz-message-header-hook-trace] AcceptParcel sublink=0x%llx "
+                                       "sequence_number=0x%llx subparcel_index=%u num_subparcels=%u "
+                                       "fragment_buffer_id=0x%llx fragment_offset=0x%x fragment_size=0x%x "
+                                       "parcel_data=0x%x driver_objects_num=%u\n",
+                                       static_cast<unsigned long long>(params.sublink),
+                                       static_cast<unsigned long long>(params.sequence_number), params.subparcel_index,
+                                       params.num_subparcels, static_cast<unsigned long long>(params.fragment_buffer_id),
+                                       params.fragment_offset, params.fragment_size, params.parcel_data, params.driver_objects_num_objects);
+
+                    if (params.fragment_buffer_id != INVALID_BUFFER_ID || params.parcel_data == 0)
+                    {
+                        return;
+                    }
+
+                    const auto array_addr = ipcz_header_base + params.parcel_data;
+
+                    uint32_t array_num_bytes{};
+                    uint32_t array_num_elements{};
+                    emu.try_read_memory(array_addr, &array_num_bytes, sizeof(array_num_bytes));
+                    emu.try_read_memory(array_addr + 4, &array_num_elements, sizeof(array_num_elements));
+
+                    std::array<uint8_t, 56> mojo_header{};
+                    emu.try_read_memory(array_addr + 8, mojo_header.data(), mojo_header.size());
+
+                    uint32_t mojo_name{};
+                    memcpy(&mojo_name, mojo_header.data() + 0xc, sizeof(mojo_name));
+
+                    win_emu->log.error("[ipcz-message-header-hook-trace] inline parcel_data array at 0x%llx "
+                                       "array_num_bytes=%u array_num_elements=%u mojo_name=0x%x mojo_header_bytes=%s\n",
+                                       static_cast<unsigned long long>(array_addr), array_num_bytes, array_num_elements, mojo_name,
+                                       utils::string::to_hex_string(mojo_header.data(), mojo_header.size()).c_str());
                 });
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_IPCZ_ACCEPT_PARCEL_DISPATCH_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                for (const auto& target : IPCZ_ACCEPT_PARCEL_DISPATCH_TARGETS)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[ipcz-accept-parcel-dispatch-hook-trace] watching %s at 0x%llx\n", name,
+                                       static_cast<unsigned long long>(address));
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto rsp = emu.read_stack_pointer();
+
+                        uint64_t return_address{};
+                        emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+                        const auto rcx = emu.reg<uint64_t>(x86_register::rcx);
+                        const auto rdx = emu.reg<uint64_t>(x86_register::rdx);
+                        const auto r8 = emu.reg<uint64_t>(x86_register::r8);
+                        const auto r9 = emu.reg<uint64_t>(x86_register::r9);
+
+                        const auto* caller_mod_name = win_emu->mod_manager.find_name(return_address);
+                        const auto* caller_mod = win_emu->mod_manager.find_by_address(return_address);
+                        const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+                        win_emu->log.error("[ipcz-accept-parcel-dispatch-hook-trace] hit %s at 0x%llx, rcx=0x%llx rdx=0x%llx "
+                                           "r8=0x%llx r9=0x%llx return=0x%llx (%s+0x%llx)\n",
+                                           name, static_cast<unsigned long long>(address), static_cast<unsigned long long>(rcx),
+                                           static_cast<unsigned long long>(rdx), static_cast<unsigned long long>(r8),
+                                           static_cast<unsigned long long>(r9), static_cast<unsigned long long>(return_address),
+                                           caller_mod_name, static_cast<unsigned long long>(caller_offset));
+                    });
+                }
             }
 
             if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_MOJO_MESSAGE_NAME_HOOK"))
