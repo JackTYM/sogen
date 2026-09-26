@@ -511,6 +511,12 @@ namespace sogen
         dxgk_state dxgk{};
         std::vector<handle> etw_notification_events{};
         hwnd mouse_capture_window{};
+        // Host-side record of the window that most recently received a routed WM_LBUTTONDOWN and has not
+        // yet seen a matching WM_LBUTTONUP. handle_ui_event's Button-class BN_CLICKED synthesis (see
+        // windows_emulator.cpp) cannot wait for the guest's own SetCapture call to land in
+        // mouse_capture_window: a single input batch delivers WM_LBUTTONDOWN and WM_LBUTTONUP for the same
+        // tap before the guest thread ever runs, so mouse_capture_window is still unset when the up arrives.
+        hwnd last_button_down_window{};
         // The window that currently holds keyboard focus / is the foreground window, and the last known
         // cursor position in screen coordinates. Games poll these via GetForegroundWindow/GetActiveWindow
         // and GetCursorPos to drive menu cursors and gate their input loop on the window being active.

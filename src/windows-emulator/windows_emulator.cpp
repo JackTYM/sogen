@@ -2513,6 +2513,11 @@ namespace sogen
             // WM_MOUSEWHEEL/WM_MOUSEHWHEEL carry screen coordinates in lParam, unlike button/move
             // messages which carry client coordinates. Keep the routed target but preserve screen coords.
             m.lParam = is_mouse_wheel_message(event.message) ? pack_point(new_cursor_x, new_cursor_y) : pack_point(target.x, target.y);
+
+            if (event.message == WM_LBUTTONDOWN)
+            {
+                this->process.last_button_down_window = target.window;
+            }
         }
         else if ((event.message == WM_ACTIVATE && event.wParam != 0) || event.message == WM_SETFOCUS)
         {
@@ -2599,8 +2604,12 @@ namespace sogen
         // The 32-bit ButtonWndProc tracks BST_PUSHED via direct memory access into tagWND at
         // 32-bit offsets that don't match our 64-bit USER_WINDOW layout, so it never reads the
         // pushed state back and therefore never calls ReleaseCapture or posts WM_COMMAND(BN_CLICKED).
-        // Synthesize both here when WM_LBUTTONUP arrives for a captured Button-class window.
-        if (m.message == WM_LBUTTONUP && this->process.mouse_capture_window == m.window)
+        // Synthesize both here when WM_LBUTTONUP arrives for the Button-class window that took the
+        // matching WM_LBUTTONDOWN. last_button_down_window (not mouse_capture_window) is the source of
+        // truth for this: a single input batch delivers WM_LBUTTONDOWN and WM_LBUTTONUP for the same tap
+        // before the guest thread ever runs, so the guest's own SetCapture call - and therefore
+        // mouse_capture_window - has not happened yet by the time WM_LBUTTONUP is processed here.
+        if (m.message == WM_LBUTTONUP && this->process.last_button_down_window == m.window)
         {
             const auto* btn_win = this->process.windows.get(m.window);
             const auto& cn = btn_win ? btn_win->class_name : std::u16string{};
@@ -2625,6 +2634,10 @@ namespace sogen
 
                 this->process.mouse_capture_window = 0;
             }
+        }
+        if (m.message == WM_LBUTTONUP)
+        {
+            this->process.last_button_down_window = 0;
         }
 
         if (event.message == WM_CLOSE || event.message == WM_COMMAND || is_key_down_message(event.message) ||
