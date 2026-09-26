@@ -715,7 +715,8 @@ namespace sogen
         BOOL handle_NtUserSetWindowCompositionAttribute(const syscall_context& c, hwnd hwnd, emulator_pointer data);
         BOOL handle_NtUserCreateCaret();
         BOOL handle_NtUserDestroyCaret();
-        BOOL handle_NtUserSetCaretPos();
+        BOOL handle_NtUserSetCaretPos(const syscall_context& c, int32_t x, int32_t y);
+        BOOL handle_NtUserGetCaretPos(const syscall_context& c, emulator_pointer point_ptr);
         BOOL handle_NtUserShowCaret();
         BOOL handle_NtUserHideCaret();
         BOOL handle_NtUserGetObjectInformation();
@@ -735,6 +736,8 @@ namespace sogen
         BOOL handle_NtUserSwapMouseButton();
         hwnd handle_NtUserWindowFromPoint(const syscall_context& c, int32_t x, int32_t y);
         hwnd handle_NtUserChildWindowFromPointEx(const syscall_context& c, hwnd parent, int32_t x, int32_t y, uint32_t flags);
+        hwnd handle_NtUserRealChildWindowFromPoint(const syscall_context& c, hwnd parent, int32_t x, int32_t y);
+        DWORD handle_NtUserGetMessagePos(const syscall_context& c);
         BOOL handle_NtUserGetKeyboardState(const syscall_context& c, emulator_pointer key_state);
         uint32_t handle_NtUserGetDoubleClickTime();
         uint32_t handle_NtUserGetCaretBlinkTime();
@@ -826,6 +829,8 @@ namespace sogen
         int32_t handle_NtGdiGetTextFaceW(const syscall_context& c, hdc dc, int32_t count, emulator_pointer face_name, BOOL alias_name);
         NTSTATUS handle_NtUserSystemParametersInfo(const syscall_context& c, uint32_t action, uint32_t param, emulator_pointer pv_param,
                                                    uint32_t win_ini);
+        NTSTATUS handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, uint32_t action, uint32_t param,
+                                                         emulator_pointer pv_param, uint32_t dpi);
         uint32_t handle_NtGdiGetGlyphOutline(const syscall_context& c, hdc dc, UINT character, UINT format, emulator_pointer glyph_metrics,
                                              DWORD buffer_size, emulator_pointer buffer, emulator_pointer mat2);
         uint32_t handle_NtGdiGetOutlineTextMetricsInternalW(const syscall_context& c, hdc dc, uint32_t cj_copy, emulator_pointer metrics,
@@ -1573,6 +1578,7 @@ namespace sogen
         add_handler(NtQueryDirectoryFileEx);
         add_handler(NtQueryDirectoryFile);
         add_handler(NtUserSystemParametersInfo);
+        add_handler(NtUserSystemParametersInfoForDpi);
         add_handler(NtGetContextThread);
         add_handler(NtYieldExecution);
         add_handler(NtUserModifyUserStartupInfoFlags);
@@ -1610,6 +1616,7 @@ namespace sogen
         add_handler(NtGetNextThread);
         add_handler(NtSetInformationObject);
         add_handler(NtUserGetCursorPos);
+        add_handler(NtUserGetMessagePos);
         add_handler(NtUserGetClipCursor);
         add_handler(NtUserTransformPoint);
         add_handler(NtUserShowCursor);
@@ -1834,6 +1841,7 @@ namespace sogen
         add_handler(NtUserCreateCaret);
         add_handler(NtUserDestroyCaret);
         add_handler(NtUserSetCaretPos);
+        add_handler(NtUserGetCaretPos);
         add_handler(NtUserShowCaret);
         add_handler(NtUserHideCaret);
         add_handler(NtUserGetObjectInformation);
@@ -1851,6 +1859,7 @@ namespace sogen
         add_handler(NtUserGetKeyNameText);
         add_handler(NtUserWindowFromPoint);
         add_handler(NtUserChildWindowFromPointEx);
+        add_handler(NtUserRealChildWindowFromPoint);
         add_handler(NtUserSwapMouseButton);
         add_handler(NtUserGetDoubleClickTime);
         add_handler(NtUserGetCaretBlinkTime);

@@ -2329,6 +2329,16 @@ namespace sogen
             return TRUE;
         }
 
+        // GetMessagePos reports the cursor position at the time the last message was retrieved by
+        // GetMessage/PeekMessage on the calling thread. sogen does not stamp a cursor snapshot into the
+        // message queue at post time, so this approximates with the live cursor position, matching the
+        // common case where callers query it immediately after processing the message that reported it.
+        DWORD handle_NtUserGetMessagePos(const syscall_context& c)
+        {
+            return static_cast<DWORD>(static_cast<uint16_t>(c.proc.cursor_x)) |
+                   (static_cast<DWORD>(static_cast<uint16_t>(c.proc.cursor_y)) << 16);
+        }
+
         BOOL handle_NtUserGetCursorInfo(const syscall_context& c, const emulator_object<EMU_CURSORINFO> cursor_info)
         {
             if (!cursor_info)
@@ -6256,8 +6266,22 @@ namespace sogen
             return TRUE;
         }
 
-        BOOL handle_NtUserSetCaretPos()
+        BOOL handle_NtUserSetCaretPos(const syscall_context& c, const int32_t x, const int32_t y)
         {
+            c.proc.caret_x = x;
+            c.proc.caret_y = y;
+            return TRUE;
+        }
+
+        BOOL handle_NtUserGetCaretPos(const syscall_context& c, const emulator_pointer point_ptr)
+        {
+            if (point_ptr == 0)
+            {
+                return FALSE;
+            }
+
+            const std::array<int32_t, 2> pt = {c.proc.caret_x, c.proc.caret_y};
+            c.emu.write_memory(point_ptr, pt.data(), sizeof(pt));
             return TRUE;
         }
 
@@ -6568,6 +6592,15 @@ namespace sogen
             //       point, honoring CWP_* flags; this stub just returns the queried parent, matching
             //       real ChildWindowFromPointEx's behavior when the point lies within the parent but
             //       hits no child window.
+            return parent;
+        }
+
+        hwnd handle_NtUserRealChildWindowFromPoint(const syscall_context& /*c*/, const hwnd parent, const int32_t /*x*/,
+                                                   const int32_t /*y*/)
+        {
+            // TODO: Properly resolve the child window containing the point (RealChildWindowFromPoint does
+            //       not skip WS_EX_TRANSPARENT/disabled children, unlike ChildWindowFromPointEx); this
+            //       stub just returns the queried parent, matching the same sibling's approximation.
             return parent;
         }
 

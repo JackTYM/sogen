@@ -656,6 +656,11 @@ namespace sogen
         int32_t cursor_x{};
         int32_t cursor_y{};
         hcursor current_cursor{};
+        // The last position set via SetCaretPos, in the caret owner's client coordinates. GetCaretPos reads
+        // this back; real Win32 semantics report it relative to whichever window currently owns the caret,
+        // but sogen does not track caret ownership per-window, so this is process-wide like cursor_x/cursor_y.
+        int32_t caret_x{};
+        int32_t caret_y{};
         int32_t cursor_show_count{};
         // Whether the current cursor has a visible shape. SetCursor(NULL) clears it to hide the pointer
         // without touching the show count (some games hide the cursor that way). Defaults to true since a

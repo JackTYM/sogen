@@ -3124,6 +3124,17 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
+        // SystemParametersInfoForDpi scales DPI-dependent metrics for an explicitly given DPI instead of the
+        // calling thread's own DPI-awareness context. The emulated desktop is a single fixed-96-DPI space
+        // (see the identity conversion in handle_NtUserTransformPoint), so there is no scaling to apply and
+        // this can share NtUserSystemParametersInfo's own metrics table verbatim; the requested dpi is
+        // therefore unused, matching the fact that this variant never notifies/updates the system setting.
+        NTSTATUS handle_NtUserSystemParametersInfoForDpi(const syscall_context& c, const uint32_t action, const uint32_t param,
+                                                         const emulator_pointer pv_param, const uint32_t /*dpi*/)
+        {
+            return handle_NtUserSystemParametersInfo(c, action, param, pv_param, 0);
+        }
+
         BOOL handle_NtGdiGetTextExtent(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const int32_t char_count,
                                        const emulator_pointer size, const ULONG /*flags*/)
         {
