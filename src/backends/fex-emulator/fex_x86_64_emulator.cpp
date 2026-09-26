@@ -473,6 +473,84 @@ namespace sogen::fex
 
             return std::nullopt;
         }
+
+        // Classification-only counterpart to decode_arm64_store: also recognizes plain STR/STUR
+        // (scalar, non-release) encodings, unlike decode_arm64_store's deliberately narrow STLR-only
+        // table (see its doc comment for why that table must stay narrow - broadening it risks the
+        // real emulation path, not just classification). handle_general_memory_violation uses this
+        // only to decide whether a fault is a read or a write; it never emulates the access, so a
+        // wider table here carries none of that risk.
+        //
+        // Without this, a plain STR to read-only guest memory is misclassified as a read (the page's
+        // declared shadow permission then "matches" a read, since decode_arm64_store doesn't
+        // recognize the instruction as a store at all). That routes the fault into the
+        // misaligned-atomic fallback, which can't decode a plain STR either, and the fault surfaces
+        // as an unhandled host signal that aborts the whole emulator process - confirmed via a live
+        // repro: a plain 64-bit pre-indexed STR (encoding 0xf81f8d15) at the last aligned qword of a
+        // read-only region, immediately adjacent to a read-write one.
+        bool decode_arm64_plain_store(const uint32_t insn)
+        {
+            // Mirrors decode_arm64_load's unsigned_imm_loads/reg_offset_loads/unscaled_loads tables:
+            // same masks, opc bit (0x00400000) cleared to select the store (opc=00) encoding instead
+            // of the unsigned/unscaled load (opc=01). Also covers the post-indexed (mode=01) and
+            // pre-indexed (mode=11) immediate forms, which decode_arm64_load doesn't need to cover
+            // (FEX never emits indexed loads for this purpose) but FEX does emit for plain stores.
+            static constexpr uint32_t unsigned_imm_stores[] = {
+                0x39000000U, // STRB
+                0x79000000U, // STRH
+                0xB9000000U, // STR Wt
+                0xF9000000U, // STR Xt
+            };
+            static constexpr uint32_t reg_offset_stores[] = {
+                0x38200800U, // STRB (register)
+                0x78200800U, // STRH (register)
+                0xB8200800U, // STR Wt (register)
+                0xF8200800U, // STR Xt (register)
+            };
+            static constexpr uint32_t indexed_stores[] = {
+                0x38000000U, // STURB (unscaled)
+                0x78000000U, // STURH (unscaled)
+                0xB8000000U, // STUR Wt (unscaled)
+                0xF8000000U, // STUR Xt (unscaled)
+                0x38000400U, // STRB (post-indexed)
+                0x78000400U, // STRH (post-indexed)
+                0xB8000400U, // STR Wt (post-indexed)
+                0xF8000400U, // STR Xt (post-indexed)
+                0x38000C00U, // STRB (pre-indexed)
+                0x78000C00U, // STRH (pre-indexed)
+                0xB8000C00U, // STR Wt (pre-indexed)
+                0xF8000C00U, // STR Xt (pre-indexed)
+            };
+
+            const uint32_t top10 = insn & 0xFFC00000U;
+            const uint32_t top22_fixed_low = insn & 0xFFE00C00U;
+
+            for (const auto enc : unsigned_imm_stores)
+            {
+                if (top10 == enc)
+                {
+                    return true;
+                }
+            }
+
+            for (const auto enc : reg_offset_stores)
+            {
+                if (top22_fixed_low == enc)
+                {
+                    return true;
+                }
+            }
+
+            for (const auto enc : indexed_stores)
+            {
+                if (top22_fixed_low == enc)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
 #endif
 
         bool is_page_aligned(const uint64_t value)
@@ -5482,7 +5560,7 @@ namespace sogen::fex
         if (fault_addr != pc)
         {
             const auto insn = *reinterpret_cast<const uint32_t*>(pc);
-            operation = decode_arm64_store(insn) ? memory_operation::write : memory_operation::read;
+            operation = (decode_arm64_store(insn) || decode_arm64_plain_store(insn)) ? memory_operation::write : memory_operation::read;
         }
 
         if ((declared & operation) == operation)
