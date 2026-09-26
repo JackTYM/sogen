@@ -2560,7 +2560,7 @@ namespace sogen
                                    c.emu.reg<uint32_t>(x86_register::eip));
 
                 uint32_t frame_ebp = ebp;
-                for (int frame = 0; frame < 8; ++frame)
+                for (int frame = 0; frame < 32; ++frame)
                 {
                     uint32_t saved_ebp = 0;
                     uint32_t frame_return_address = 0;
