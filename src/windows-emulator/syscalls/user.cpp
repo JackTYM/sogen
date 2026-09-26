@@ -3557,6 +3557,11 @@ namespace sogen
 
         BOOL handle_NtUserDestroyWindow(const syscall_context& c, const hwnd window)
         {
+            if (std::getenv("SOGEN_DEBUG_WINDOW_TERMINATE_CALLER_STACK") != nullptr)
+            {
+                debug_log_syscall_caller_stack(c, "DESTROY_WINDOW_CALLER");
+            }
+
             auto* win = c.proc.windows.get(window);
             if (!win)
             {

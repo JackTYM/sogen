@@ -322,4 +322,42 @@ namespace sogen
         return status_block.Status;
     }
 
+    inline void debug_log_syscall_caller_stack(const syscall_context& c, const char* tag)
+    {
+        const auto rip = c.emu.read_instruction_pointer();
+        const auto rsp = c.emu.read_stack_pointer();
+        const auto* rip_mod = c.win_emu.mod_manager.find_by_address(rip);
+        fprintf(stderr, "[%s] pid=%u tid=%u rip=0x%llx (%s+0x%llx) rsp=0x%llx\n", tag, c.proc.process_id, c.thread().id,
+                static_cast<unsigned long long>(rip), rip_mod ? rip_mod->name.c_str() : "?",
+                rip_mod ? static_cast<unsigned long long>(rip - rip_mod->image_base) : 0ULL, static_cast<unsigned long long>(rsp));
+
+        for (const auto& mod : c.win_emu.mod_manager.modules() | std::views::values)
+        {
+            fprintf(stderr, "  [MODULE] %s base=0x%llx size=0x%llx\n", mod.name.c_str(), static_cast<unsigned long long>(mod.image_base),
+                    static_cast<unsigned long long>(mod.size_of_image));
+        }
+
+        for (uint64_t i = 0; i < 64; ++i)
+        {
+            uint64_t value{};
+            if (!c.win_emu.memory.try_read_memory(rsp + (i * 8), &value, sizeof(value)))
+            {
+                break;
+            }
+
+            const auto* mod = c.win_emu.mod_manager.find_by_address(value);
+            char mod_suffix[128] = {};
+            if (mod)
+            {
+                snprintf(mod_suffix, sizeof(mod_suffix), "%s+0x%llx", mod->name.c_str(),
+                         static_cast<unsigned long long>(value - mod->image_base));
+            }
+
+            fprintf(stderr, "  [rsp+0x%llx] = 0x%llx %s\n", static_cast<unsigned long long>(i * 8), static_cast<unsigned long long>(value),
+                    mod_suffix);
+        }
+
+        fflush(stderr);
+    }
+
 } // namespace sogen

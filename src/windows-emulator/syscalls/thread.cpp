@@ -783,6 +783,11 @@ namespace sogen
 
         NTSTATUS handle_NtTerminateThread(const syscall_context& c, const handle thread_handle, const NTSTATUS exit_status)
         {
+            if (std::getenv("SOGEN_DEBUG_WINDOW_TERMINATE_CALLER_STACK") != nullptr)
+            {
+                debug_log_syscall_caller_stack(c, "TERMINATE_THREAD_CALLER");
+            }
+
             auto* thread = !thread_handle.bits ? c.vcpu.active_thread : c.proc.threads.get(thread_handle);
 
             if (!thread)
