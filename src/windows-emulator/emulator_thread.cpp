@@ -398,7 +398,17 @@ namespace sogen
         if (!context.is_wow64_process)
         {
             this->stack_size = page_align_up(std::max(stack_size, static_cast<uint64_t>(STACK_SIZE)));
-            this->stack_base = memory.allocate_memory(static_cast<size_t>(this->stack_size), memory_permission::read_write);
+
+            // Real Windows always keeps a guard region mapped below the committed stack limit so that
+            // __chkstk's boundary probe (which routinely touches one page below the last-known-committed
+            // watermark to trigger on-demand growth) lands on real memory instead of faulting outright.
+            // This emulator has no on-demand stack growth, so the fixed-size allocation below is padded
+            // with an extra guard region that is never reported to the guest (stack_base/StackLimit still
+            // point past it), just mapped so that boundary probe doesn't hit unmapped host memory.
+            constexpr uint64_t stack_guard_size = 0x10000ULL; // 64KB
+            const auto stack_alloc_base =
+                memory.allocate_memory(static_cast<size_t>(this->stack_size + stack_guard_size), memory_permission::read_write);
+            this->stack_base = stack_alloc_base + stack_guard_size;
 
             this->gs_segment = emulator_allocator{
                 memory,

@@ -589,8 +589,8 @@ namespace sogen
         });
 
         std::uint64_t activation_context_data_address = 0;
-        if (const auto activation_context_blob =
-                build_activation_context_blob(memory, registry, file_system, executable.image_base, executable.module_path);
+        if (const auto activation_context_blob = build_activation_context_blob(win_emu.memory, win_emu.registry, win_emu.file_sys,
+                                                                               executable.image_base, executable.module_path);
             activation_context_blob.has_value())
         {
             const auto blob_address = allocator.reserve(activation_context_blob->size(), alignof(std::uint32_t));
