@@ -656,6 +656,14 @@ namespace sogen
         hwnd handle_NtUserSetParent(const syscall_context& c, hwnd hwnd_child, hwnd hwnd_new_parent);
         BOOL handle_NtUserSetWindowPos(const syscall_context& c, hwnd hWnd, hwnd hwnd_insert_after, int x, int y, int cx, int cy,
                                        UINT flags);
+        emulator_pointer handle_NtUserBeginDeferWindowPos(const syscall_context& c, int num_windows);
+        emulator_pointer handle_NtUserDeferWindowPos(const syscall_context& c, emulator_pointer win_pos_info, hwnd hWnd,
+                                                     hwnd hwnd_insert_after, int x, int y, int cx, int cy, UINT flags);
+        BOOL handle_NtUserEndDeferWindowPos(const syscall_context& c, emulator_pointer win_pos_info);
+        emulator_pointer handle_NtUserDeferWindowPosAndBand(const syscall_context& c, emulator_pointer win_pos_info, hwnd hWnd,
+                                                            hwnd hwnd_insert_after, int x, int y, int cx, int cy, UINT flags,
+                                                            UINT process_id, UINT band);
+        BOOL handle_NtUserEndDeferWindowPosEx(const syscall_context& c, emulator_pointer win_pos_info, BOOL is_async);
         NTSTATUS handle_NtUserSetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserGetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
@@ -4061,6 +4069,11 @@ namespace sogen
         add_handler(NtUserTransformRect);
         add_handler(NtUserSetParent);
         add_handler(NtUserSetWindowPos);
+        add_handler(NtUserBeginDeferWindowPos);
+        add_handler(NtUserDeferWindowPos);
+        add_handler(NtUserEndDeferWindowPos);
+        add_handler(NtUserDeferWindowPosAndBand);
+        add_handler(NtUserEndDeferWindowPosEx);
         add_handler(NtUserSetForegroundWindow);
         add_handler(NtUserGetForegroundWindow);
         add_handler(NtUserSetFocus);

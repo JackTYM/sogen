@@ -3319,8 +3319,6 @@ namespace sogen
             win.thread_id = c.thread().id;
             win.handle = handle.bits;
             win.message_only = is_message_only;
-            // Record the owning thread in the shared handle entry so client-side GetWindowThreadProcessId works.
-            c.proc.user_handles.set_owner(static_cast<uint32_t>(handle.value.id), win.thread_id);
             if (!is_message_only)
             {
                 win.parent_handle = has_child_parent ? parent : c.proc.default_desktop_window_handle.bits;
@@ -4907,6 +4905,49 @@ namespace sogen
             }
 
             return TRUE;
+        }
+
+        // BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos exist so callers can batch several
+        // SetWindowPos calls into one flicker-free update. Sogen has no windowing-manager-visible
+        // intermediate state to protect, so each DeferWindowPos call applies immediately via the same
+        // logic as SetWindowPos and the HDWP is just echoed back unchanged.
+        emulator_pointer handle_NtUserBeginDeferWindowPos(const syscall_context& /*c*/, const int /*num_windows*/)
+        {
+            return 1;
+        }
+
+        emulator_pointer handle_NtUserDeferWindowPos(const syscall_context& c, const emulator_pointer win_pos_info, const hwnd hWnd,
+                                                     const hwnd hwnd_insert_after, const int x, const int y, const int cx, const int cy,
+                                                     const UINT flags)
+        {
+            if (win_pos_info == 0)
+            {
+                return 0;
+            }
+
+            if (!handle_NtUserSetWindowPos(c, hWnd, hwnd_insert_after, x, y, cx, cy, flags))
+            {
+                return 0;
+            }
+
+            return win_pos_info;
+        }
+
+        BOOL handle_NtUserEndDeferWindowPos(const syscall_context& /*c*/, const emulator_pointer win_pos_info)
+        {
+            return win_pos_info != 0 ? TRUE : FALSE;
+        }
+
+        emulator_pointer handle_NtUserDeferWindowPosAndBand(const syscall_context& c, const emulator_pointer win_pos_info, const hwnd hWnd,
+                                                            const hwnd hwnd_insert_after, const int x, const int y, const int cx,
+                                                            const int cy, const UINT flags, const UINT /*process_id*/, const UINT /*band*/)
+        {
+            return handle_NtUserDeferWindowPos(c, win_pos_info, hWnd, hwnd_insert_after, x, y, cx, cy, flags);
+        }
+
+        BOOL handle_NtUserEndDeferWindowPosEx(const syscall_context& c, const emulator_pointer win_pos_info, const BOOL /*is_async*/)
+        {
+            return handle_NtUserEndDeferWindowPos(c, win_pos_info);
         }
 
         NTSTATUS handle_NtUserSetForegroundWindow(const syscall_context& /*c*/)
