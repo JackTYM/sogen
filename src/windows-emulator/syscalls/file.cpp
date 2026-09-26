@@ -2557,7 +2557,7 @@ namespace sogen
                 const auto* return_mod = c.win_emu.mod_manager.find_by_address(return_address);
                 const auto return_offset = return_mod ? return_address - return_mod->image_base : return_address;
 
-                std::array<uint32_t, 40> stack_words{};
+                std::array<uint32_t, 200> stack_words{};
                 const bool stack_read_ok = c.emu.try_read_memory(esp, stack_words.data(), sizeof(stack_words));
 
                 std::string stack_dump{};
@@ -2571,6 +2571,24 @@ namespace sogen
                                    c.thread().id, esp, return_address, return_mod_name ? return_mod_name : "<unknown>",
                                    static_cast<unsigned long long>(return_offset), return_address_read_ok ? 1 : 0, stack_dump.c_str(),
                                    stack_read_ok ? 1 : 0);
+
+                for (size_t i = 0; i + 1 < stack_words.size(); ++i)
+                {
+                    const auto candidate = stack_words.at(i);
+                    if (candidate == 0 || stack_words.at(i + 1) != 0)
+                    {
+                        continue;
+                    }
+
+                    uint32_t deref_value = 0;
+                    const bool deref_read_ok = c.emu.try_read_memory(candidate, &deref_value, sizeof(deref_value));
+                    const auto* deref_mod_name = c.win_emu.mod_manager.find_name(deref_value);
+
+                    c.win_emu.log.info("[pipe-io-trace] FSCTL_PIPE_LISTEN candidate esp+0x%zx=0x%x -> *candidate=0x%x "
+                                       "(read_ok=%d) resolves_to=%s\n",
+                                       i * sizeof(uint32_t), candidate, deref_value, deref_read_ok ? 1 : 0,
+                                       deref_mod_name ? deref_mod_name : "<unresolved>");
+                }
 
                 if (return_address_read_ok && !return_mod)
                 {
