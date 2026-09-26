@@ -116,7 +116,7 @@ namespace
     void init_passthrough()
     {
         // Bridge is reachable: act as the real shim, no forwarding.
-        if (bridge() != INVALID_HANDLE_VALUE)
+        if (ensure_adapter() != 0)
         {
             return;
         }
