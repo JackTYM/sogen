@@ -2571,6 +2571,79 @@ namespace sogen
                                    c.thread().id, esp, return_address, return_mod_name ? return_mod_name : "<unknown>",
                                    static_cast<unsigned long long>(return_offset), return_address_read_ok ? 1 : 0, stack_dump.c_str(),
                                    stack_read_ok ? 1 : 0);
+
+                if (return_address_read_ok && !return_mod)
+                {
+                    std::array<uint8_t, 16> code_bytes{};
+                    const bool code_read_ok = c.emu.try_read_memory(return_address, code_bytes.data(), code_bytes.size());
+                    std::string code_dump{};
+                    for (const auto byte : code_bytes)
+                    {
+                        code_dump += utils::string::to_hex_number(byte) + " ";
+                    }
+
+                    constexpr uint32_t max_scan_back = 0x400000;
+                    const uint32_t page_aligned = return_address & ~0xFFFu;
+                    uint32_t mz_base = 0;
+                    uint32_t readable_pages = 0;
+
+                    for (uint32_t offset = 0; offset <= max_scan_back; offset += 0x1000)
+                    {
+                        const uint32_t probe = page_aligned - offset;
+                        uint16_t mz_signature = 0;
+                        const bool page_readable = c.emu.try_read_memory(probe, &mz_signature, sizeof(mz_signature));
+                        if (page_readable)
+                        {
+                            ++readable_pages;
+                        }
+                        if (page_readable && mz_signature == 0x5A4D)
+                        {
+                            mz_base = probe;
+                            break;
+                        }
+                    }
+
+                    c.win_emu.log.info("[pipe-io-trace] FSCTL_PIPE_LISTEN caller unresolved by module_manager; "
+                                       "bytes at return_address (read_ok=%d)=[%s] readable_pages_scanned_back=%u/1025\n",
+                                       code_read_ok ? 1 : 0, code_dump.c_str(), readable_pages);
+
+                    if (mz_base != 0)
+                    {
+                        uint32_t e_lfanew = 0;
+                        c.emu.try_read_memory(mz_base + 0x3C, &e_lfanew, sizeof(e_lfanew));
+
+                        uint32_t pe_signature = 0;
+                        uint16_t machine = 0;
+                        uint32_t size_of_image = 0;
+                        uint32_t export_dir_rva = 0;
+                        std::string export_name{};
+
+                        c.emu.try_read_memory(mz_base + e_lfanew, &pe_signature, sizeof(pe_signature));
+                        c.emu.try_read_memory(mz_base + e_lfanew + 4, &machine, sizeof(machine));
+                        c.emu.try_read_memory(mz_base + e_lfanew + 0x50, &size_of_image, sizeof(size_of_image));
+                        c.emu.try_read_memory(mz_base + e_lfanew + 0x78, &export_dir_rva, sizeof(export_dir_rva));
+
+                        if (export_dir_rva != 0)
+                        {
+                            uint32_t export_name_rva = 0;
+                            if (c.emu.try_read_memory(mz_base + export_dir_rva + 0xC, &export_name_rva, sizeof(export_name_rva)) &&
+                                export_name_rva != 0)
+                            {
+                                std::array<char, 256> name_buffer{};
+                                if (c.emu.try_read_memory(mz_base + export_name_rva, name_buffer.data(), name_buffer.size() - 1))
+                                {
+                                    export_name = name_buffer.data();
+                                }
+                            }
+                        }
+
+                        c.win_emu.log.info("[pipe-io-trace] FSCTL_PIPE_LISTEN caller unresolved by module_manager; backward MZ scan "
+                                           "found header at 0x%x (-0x%llx from return_address) pe_sig=0x%x machine=0x%x "
+                                           "size_of_image=0x%x export_name='%s'\n",
+                                           mz_base, static_cast<unsigned long long>(return_address - mz_base), pe_signature, machine,
+                                           size_of_image, export_name.empty() ? "<none>" : export_name.c_str());
+                    }
+                }
             }
 
             io_device_context context{c.emu};
