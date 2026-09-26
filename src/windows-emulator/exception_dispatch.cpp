@@ -411,6 +411,11 @@ namespace sogen
                            });
     }
 
+    void dispatch_stack_overflow(windows_emulator& win_emu, vcpu_context& vcpu)
+    {
+        dispatch_exception(win_emu, vcpu, STATUS_STACK_OVERFLOW, {});
+    }
+
     void dispatch_illegal_instruction_violation(windows_emulator& win_emu, vcpu_context& vcpu)
     {
         dispatch_exception(win_emu, vcpu, STATUS_ILLEGAL_INSTRUCTION, {});

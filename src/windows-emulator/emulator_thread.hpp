@@ -13,6 +13,7 @@ namespace sogen
 
     struct completion_state;
     struct process_context;
+    struct vcpu_context;
 
     struct user_timer_key
     {
@@ -281,6 +282,8 @@ namespace sogen
 
         uint64_t stack_base{};                    // Native 64-bit stack base
         uint64_t stack_size{};                    // Native 64-bit stack size
+        uint64_t stack_reserve_base{};            // Lowest address of the native stack's whole reserved VA range (== TEB.DeallocationStack)
+        uint64_t stack_guard_page{};              // Current PAGE_GUARD boundary below the committed stack; 0 once fully consumed
         std::optional<uint64_t> wow64_stack_base; // WOW64 32-bit stack base
         std::optional<uint64_t> wow64_stack_size; // WOW64 32-bit stack size
         uint64_t start_address{};
@@ -383,6 +386,15 @@ namespace sogen
 
         bool is_thread_ready(windows_emulator& win_emu);
 
+        // Called when a guard-page fault lands exactly on this thread's stack_guard_page. Mirrors
+        // real Windows on-demand stack growth: commits the faulted page, removes its guard, and
+        // re-arms a new guard one page further down - unless the guaranteed reserve at the bottom
+        // of the stack has already been reached, in which case it delivers a real
+        // STATUS_STACK_OVERFLOW instead. Returns true if the fault was resolved by silent growth
+        // (caller should restart the faulting instruction), false if an exception was dispatched
+        // (caller should resume at the dispatcher).
+        bool grow_stack_or_report_overflow(windows_emulator& win_emu, vcpu_context& vcpu);
+
         void save(x86_64_cpu& emu)
         {
             this->last_registers = emu.save_registers();
@@ -426,6 +438,8 @@ namespace sogen
 
             buffer.write(this->stack_base);
             buffer.write(this->stack_size);
+            buffer.write(this->stack_reserve_base);
+            buffer.write(this->stack_guard_page);
             buffer.write(this->start_address);
             buffer.write(this->argument);
             buffer.write(this->executed_instructions);
@@ -495,6 +509,8 @@ namespace sogen
 
             buffer.read(this->stack_base);
             buffer.read(this->stack_size);
+            buffer.read(this->stack_reserve_base);
+            buffer.read(this->stack_guard_page);
             buffer.read(this->start_address);
             buffer.read(this->argument);
             buffer.read(this->executed_instructions);
@@ -583,7 +599,17 @@ namespace sogen
                     throw std::runtime_error("Emulator was never assigned!");
                 }
 
-                this->memory_ptr->release_memory(this->stack_base, static_cast<size_t>(this->stack_size));
+                if (this->stack_reserve_base)
+                {
+                    this->memory_ptr->release_memory(this->stack_reserve_base, 0);
+                    this->stack_reserve_base = 0;
+                    this->stack_guard_page = 0;
+                }
+                else
+                {
+                    this->memory_ptr->release_memory(this->stack_base, static_cast<size_t>(this->stack_size));
+                }
+
                 this->stack_base = 0;
             }
 

@@ -1908,8 +1908,16 @@ namespace sogen
                 return memory_violation_continuation::restart;
             }
 
-            auto region = this->memory.get_region_info(address);
-            if (region.permissions.is_guarded())
+            auto& acting_thread = vcpu.thread();
+            if (acting_thread.stack_guard_page != 0 && address >= acting_thread.stack_guard_page &&
+                address < acting_thread.stack_guard_page + STACK_GUARD_PAGE_SIZE)
+            {
+                if (acting_thread.grow_stack_or_report_overflow(*this, vcpu))
+                {
+                    return memory_violation_continuation::restart;
+                }
+            }
+            else if (auto region = this->memory.get_region_info(address); region.permissions.is_guarded())
             {
                 // Unset the GUARD_PAGE flag and dispatch a STATUS_GUARD_PAGE_VIOLATION
                 this->memory.protect_memory(region.allocation_base, region.length, region.permissions & ~memory_permission_ext::guard);

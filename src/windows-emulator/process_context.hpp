@@ -27,10 +27,20 @@ namespace sogen
 
     struct fake_environment_config;
 
-#define PEB_SEGMENT_SIZE (20 << 20) // 20 MB
-#define GS_SEGMENT_SIZE  (1 << 20)  // 1 MB
+#define PEB_SEGMENT_SIZE          (20 << 20) // 20 MB
+#define GS_SEGMENT_SIZE           (1 << 20)  // 1 MB
 
-#define STACK_SIZE       0x40000ULL // 256KB
+#define STACK_SIZE                0x40000ULL // 256KB
+
+// Native 64-bit thread stacks are reserved this much further beyond the initial commit
+// (STACK_SIZE/requested size), growing on demand via a moving PAGE_GUARD page - see
+// emulator_thread::grow_stack_or_report_overflow. STACK_GUARANTEE_SIZE stays permanently
+// committed at the very bottom of the reservation and is never guarded, so delivering the
+// eventual STATUS_STACK_OVERFLOW (itself a stack push of a CONTEXT/EXCEPTION_RECORD frame)
+// always has room to run.
+#define STACK_GUARD_PAGE_SIZE     0x1000ULL
+#define STACK_GUARANTEE_SIZE      0x3000ULL
+#define STACK_GROWTH_RESERVE_SIZE 0x400000ULL // 4MB
 
 #ifdef __APPLE__
 // Darwin refuses MAP_FIXED anywhere in the low ~4GB regardless of ASLR (the standard 64-bit
@@ -609,6 +619,7 @@ namespace sogen
             std::shared_ptr<std::deque<std::string>> ab = std::make_shared<std::deque<std::string>>();
             std::shared_ptr<std::deque<std::string>> ba = std::make_shared<std::deque<std::string>>();
         };
+
         utils::insensitive_u16string_map<named_pipe_shared_buffer> named_pipe_registry{};
         handle_store<handle_types::semaphore, semaphore> semaphores{};
         handle_store<handle_types::io_completion, io_completion> io_completions{};

@@ -6,6 +6,7 @@
 #include "io_completion_wait.hpp"
 #include "syscall_utils.hpp"
 #include "wait_storm_diag.hpp"
+#include "exception_dispatch.hpp"
 
 namespace sogen
 {
@@ -399,16 +400,25 @@ namespace sogen
         {
             this->stack_size = page_align_up(std::max(stack_size, static_cast<uint64_t>(STACK_SIZE)));
 
-            // Real Windows always keeps a guard region mapped below the committed stack limit so that
-            // __chkstk's boundary probe (which routinely touches one page below the last-known-committed
-            // watermark to trigger on-demand growth) lands on real memory instead of faulting outright.
-            // This emulator has no on-demand stack growth, so the fixed-size allocation below is padded
-            // with an extra guard region that is never reported to the guest (stack_base/StackLimit still
-            // point past it), just mapped so that boundary probe doesn't hit unmapped host memory.
-            constexpr uint64_t stack_guard_size = 0x10000ULL; // 64KB
-            const auto stack_alloc_base =
-                memory.allocate_memory(static_cast<size_t>(this->stack_size + stack_guard_size), memory_permission::read_write);
-            this->stack_base = stack_alloc_base + stack_guard_size;
+            // Mirrors real Windows: a thread stack reserves far more address space than it initially
+            // commits, growing on demand via a PAGE_GUARD page that faults, commits one more page, and
+            // re-arms itself one page further down (see grow_stack_or_report_overflow). The bottommost
+            // STACK_GUARANTEE_SIZE stays permanently committed and unguarded, so delivering the eventual
+            // STATUS_STACK_OVERFLOW - itself a stack push of a CONTEXT/EXCEPTION_RECORD frame - always
+            // has room to run even once the guarded region is fully consumed.
+            const auto stack_reserve_size = this->stack_size + STACK_GROWTH_RESERVE_SIZE + STACK_GUARANTEE_SIZE;
+            this->stack_reserve_base = memory.allocate_memory(static_cast<size_t>(stack_reserve_size), memory_permission::read_write, true);
+
+            const auto stack_top = this->stack_reserve_base + stack_reserve_size;
+            this->stack_base = stack_top - this->stack_size;
+
+            memory.commit_memory(this->stack_reserve_base, static_cast<size_t>(STACK_GUARANTEE_SIZE), memory_permission::read_write);
+
+            this->stack_guard_page = this->stack_base - STACK_GUARD_PAGE_SIZE;
+            memory.commit_memory(this->stack_guard_page, static_cast<size_t>(STACK_GUARD_PAGE_SIZE),
+                                 nt_memory_permission{memory_permission::read | memory_permission::write, memory_permission_ext::guard});
+
+            memory.commit_memory(this->stack_base, static_cast<size_t>(this->stack_size), memory_permission::read_write);
 
             this->gs_segment = emulator_allocator{
                 memory,
@@ -421,9 +431,8 @@ namespace sogen
             this->teb64->access([&](TEB64& teb_obj) {
                 teb_obj.ClientId.UniqueProcess = process_context::process_id;
                 teb_obj.ClientId.UniqueThread = static_cast<uint64_t>(this->id);
-                teb_obj.DeallocationStack = this->stack_base;
-                // TODO: Proper GuaranteedStack implementation.
-                teb_obj.GuaranteedStackBytes = static_cast<ULONG>(this->stack_size);
+                teb_obj.DeallocationStack = this->stack_reserve_base;
+                teb_obj.GuaranteedStackBytes = static_cast<ULONG>(STACK_GUARANTEE_SIZE);
                 teb_obj.NtTib.StackLimit = this->stack_base;
                 teb_obj.NtTib.StackBase = this->stack_base + this->stack_size;
                 teb_obj.NtTib.Self = this->teb64->value();
@@ -1072,6 +1081,41 @@ namespace sogen
     bool emulator_thread::is_terminated() const
     {
         return this->exit_status.has_value();
+    }
+
+    bool emulator_thread::grow_stack_or_report_overflow(windows_emulator& win_emu, vcpu_context& vcpu)
+    {
+        auto& memory = *this->memory_ptr;
+
+        const auto faulted_guard_page = this->stack_guard_page;
+        const auto guaranteed_high = this->stack_reserve_base + STACK_GUARANTEE_SIZE;
+
+        memory.protect_memory(faulted_guard_page, static_cast<size_t>(STACK_GUARD_PAGE_SIZE), memory_permission::read_write);
+
+        if (faulted_guard_page > guaranteed_high)
+        {
+            const auto new_guard_page = faulted_guard_page - STACK_GUARD_PAGE_SIZE;
+            memory.commit_memory(new_guard_page, static_cast<size_t>(STACK_GUARD_PAGE_SIZE),
+                                 nt_memory_permission{memory_permission::read | memory_permission::write, memory_permission_ext::guard});
+            this->stack_guard_page = new_guard_page;
+
+            if (this->teb64.has_value())
+            {
+                this->teb64->access([&](TEB64& teb) { teb.NtTib.StackLimit = faulted_guard_page; });
+            }
+
+            return true;
+        }
+
+        this->stack_guard_page = 0;
+
+        if (this->teb64.has_value())
+        {
+            this->teb64->access([&](TEB64& teb) { teb.NtTib.StackLimit = this->stack_reserve_base; });
+        }
+
+        dispatch_stack_overflow(win_emu, vcpu);
+        return false;
     }
 
     bool emulator_thread::is_thread_ready(windows_emulator& win_emu)
