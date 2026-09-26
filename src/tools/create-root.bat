@@ -81,6 +81,7 @@ CALL :collect gdiplus.dll
 CALL :collect glu32.dll
 CALL :collect hal.dll
 CALL :collect hid.dll
+CALL :collect IconCodecService.dll
 CALL :collect imm32.dll
 CALL :collect imagehlp.dll
 CALL :collect inputhost.dll
