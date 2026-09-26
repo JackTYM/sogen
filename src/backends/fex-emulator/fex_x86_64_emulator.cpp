@@ -2160,7 +2160,10 @@ namespace sogen::fex
         {
             if (!this->try_read_memory(address, data, size))
             {
-                throw std::runtime_error("Failed to read FEX guest memory");
+                char buf[96];
+                snprintf(buf, sizeof(buf), "Failed to read FEX guest memory at 0x%llx (size=0x%zx)",
+                         static_cast<unsigned long long>(address), size);
+                throw std::runtime_error(buf);
             }
         }
 

@@ -305,8 +305,13 @@ namespace sogen
         }
         catch (std::exception& e)
         {
-            win_emu.log.error("Syscall %s threw an exception: 0x%X (raw: 0x%X) (0x%" PRIx64 ") - %s\n", syscall_name, syscall_id,
-                              raw_syscall_id, address, e.what());
+            std::string module_info = "?";
+            if (const auto* mod = win_emu.mod_manager.find_by_address(address))
+            {
+                module_info = mod->name + "+0x" + utils::string::to_hex_number(address - mod->image_base);
+            }
+            win_emu.log.error("Syscall %s threw an exception: 0x%X (raw: 0x%X) (0x%" PRIx64 ", %s) - %s\n", syscall_name, syscall_id,
+                              raw_syscall_id, address, module_info.c_str(), e.what());
             win_emu.record_stop(stop_reason::syscall_exception, std::string(syscall_name) + ": " + e.what());
             emu.reg<uint64_t>(x86_register::rax, STATUS_UNSUCCESSFUL);
             win_emu.stop();

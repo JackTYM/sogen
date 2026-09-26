@@ -502,6 +502,11 @@ namespace sogen
         // yet, e.g. because ntdll's own codepage init hasn't happened. Not serialized; reset on
         // deserialize because the patch it gates lives in guest memory and reverts with it.
         std::optional<bool> nls_lead_byte_info_table_resolved{};
+        // Lazily allocated by call_guest_function (syscalls/user.cpp): one guest byte containing an
+        // INT3, used as the injected call's return address so the completing `ret` lands on real,
+        // mapped, executable content instead of an address the JIT would refuse to enter. Not
+        // serialized; call_guest_function re-allocates it on first use after a restore.
+        uint64_t call_guest_function_return_trap{};
         uint64_t ldr_initialize_thunk{};
         uint64_t rtl_user_thread_start{};
         uint64_t ki_user_apc_dispatcher{};

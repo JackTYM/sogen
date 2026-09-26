@@ -427,8 +427,32 @@ namespace sogen
         // backends already expose for GDB/Tenet stepping instead.
         uint64_t call_guest_function(const syscall_context& c, const uint64_t function_address, const std::initializer_list<uint64_t> args)
         {
-            constexpr uint64_t max_steps = 500'000;
-            constexpr uint64_t sentinel_return_address = 0;
+            constexpr uint64_t max_iterations = 10'000;
+
+            // RIP is set directly below rather than through the JIT's own Call codegen, so nothing is
+            // pushed onto FEXCore's per-thread call/ret shadow-stack cache for this injected call. The
+            // callee's eventual `ret` still pops whatever entry already sits at the current shadow-stack
+            // depth - freshly allocated cache memory, and FEXCore's own "unknown return target" call
+            // sites, both read back as an all-zero {GuestRIP, HostCode} pair. Using guest address 0 as
+            // the sentinel used to match that stale zero pair on pure coincidence, making the JIT branch
+            // through the paired (garbage/null) cached host pointer. A one-off allocated address can't
+            // coincidentally equal a real, previously-cached GuestRIP tag, so the mismatch always falls
+            // through to the slow dispatch path instead - which then needs to actually resolve real,
+            // mapped, executable content at the sentinel to hand back to the JIT, so the sentinel can't
+            // just be a recognizable-but-unmapped constant either; it has to be backed by a single INT3.
+            // A real software breakpoint on that INT3 (the same mechanism GDB/Tenet stepping already
+            // relies on) detects the return: the callee runs at full JIT speed and only traps once
+            // control genuinely reaches the sentinel, unlike single-stepping every instruction of a
+            // potentially deep, non-trivial call chain via EFLAGS.TF.
+            if (c.proc.call_guest_function_return_trap == 0)
+            {
+                c.proc.call_guest_function_return_trap = c.win_emu.memory.allocate_memory(page_align_up(1), memory_permission::read_exec);
+                constexpr uint8_t int3 = 0xCC;
+                c.win_emu.memory.write_memory(c.proc.call_guest_function_return_trap, &int3, sizeof(int3));
+                c.win_emu.emu().hook_memory_execution(c.proc.call_guest_function_return_trap,
+                                                      [](cpu_interface& cpu, uint64_t) { cpu.stop(); });
+            }
+            const uint64_t sentinel_return_address = c.proc.call_guest_function_return_trap;
 
             auto& cpu = c.emu;
             const auto saved_registers = cpu.save_registers();
@@ -453,9 +477,9 @@ namespace sogen
 
             cpu.reg(x86_register::rip, function_address);
 
-            for (uint64_t step = 0; step < max_steps; ++step)
+            for (uint64_t iteration = 0; iteration < max_iterations; ++iteration)
             {
-                c.win_emu.run_nested_guest_step(cpu, 1);
+                c.win_emu.run_nested_guest_step(cpu, 0);
                 if (c.run_callback)
                 {
                     throw std::runtime_error("Nested guest function call unexpectedly dispatched a user callback");
