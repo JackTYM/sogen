@@ -124,6 +124,19 @@ namespace sogen
             {
                 push_detail(read_arg_as_string<char16_t>(*c.win_emu, 0));
             }
+            else if (function == "LoadImageW")
+            {
+                auto& emu = c.win_emu->emu();
+                char buf[256]{};
+                snprintf(buf, sizeof(buf), "hInst=0x%llx name=0x%llx type=%llu cx=%llu cy=%llu flags=0x%llx",
+                         static_cast<unsigned long long>(get_function_argument(emu, 0)),
+                         static_cast<unsigned long long>(get_function_argument(emu, 1)),
+                         static_cast<unsigned long long>(get_function_argument(emu, 2)),
+                         static_cast<unsigned long long>(get_function_argument(emu, 3)),
+                         static_cast<unsigned long long>(get_function_argument(emu, 4)),
+                         static_cast<unsigned long long>(get_function_argument(emu, 5)));
+                push_detail(buf);
+            }
             else if (function == "MessageBoxA")
             {
                 push_detail(read_arg_as_string(*c.win_emu, 2));
