@@ -97,6 +97,11 @@ namespace sogen
             return std::make_unique<noop_port>();
         }
 
+        if (port == u"\\BaseNamedObjects\\FontCachePort")
+        {
+            return std::make_unique<noop_port>();
+        }
+
         return std::make_unique<dummy_port>(std::u16string(port));
     }
 
