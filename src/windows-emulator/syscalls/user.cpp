@@ -2558,8 +2558,18 @@ namespace sogen
             return make_pseudo_handle(c.proc.next_cursor_icon_id++, handle_types::reserved).bits;
         }
 
-        BOOL handle_NtUserSetCursorIconData()
+        BOOL handle_NtUserSetCursorIconData(const syscall_context& c, const hicon icon,
+                                            const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*module_name*/,
+                                            const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*resource_name*/,
+                                            const emulator_object<EMU_CURSORDATA> cursor_data)
         {
+            if (icon == 0 || !cursor_data)
+            {
+                return FALSE;
+            }
+
+            const auto data = cursor_data.read();
+            c.proc.cursor_icon_sizes[icon] = {data.cx, data.cy};
             return TRUE;
         }
 
@@ -2596,7 +2606,7 @@ namespace sogen
             return icon;
         }
 
-        BOOL handle_NtUserGetIconSize(const syscall_context&, const hicon icon, const UINT /*frame*/, const emulator_object<int> cx,
+        BOOL handle_NtUserGetIconSize(const syscall_context& c, const hicon icon, const UINT /*frame*/, const emulator_object<int> cx,
                                       const emulator_object<int> cy)
         {
             if (icon == 0 || !cx || !cy)
@@ -2604,8 +2614,18 @@ namespace sogen
                 return FALSE;
             }
 
-            cx.write(32);
-            cy.write(64);
+            const auto entry = c.proc.cursor_icon_sizes.find(icon);
+            if (entry != c.proc.cursor_icon_sizes.end())
+            {
+                cx.write(static_cast<int>(entry->second.cx));
+                cy.write(static_cast<int>(entry->second.cy));
+            }
+            else
+            {
+                cx.write(32);
+                cy.write(32);
+            }
+
             return TRUE;
         }
 

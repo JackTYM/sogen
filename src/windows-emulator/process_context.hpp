@@ -567,6 +567,14 @@ namespace sogen
 
         uint32_t next_cursor_icon_id{0x100};
 
+        struct cursor_icon_size
+        {
+            uint32_t cx{};
+            uint32_t cy{};
+        };
+
+        std::map<uint64_t, cursor_icon_size> cursor_icon_sizes{};
+
         // For WOW64 processes
         std::optional<emulator_object<PEB32>> peb32;
         std::optional<emulator_object<RTL_USER_PROCESS_PARAMETERS32>> process_params32;

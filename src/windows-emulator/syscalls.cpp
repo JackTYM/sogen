@@ -549,7 +549,10 @@ namespace sogen
         hcursor handle_NtUserSetCursor(const syscall_context& c, hcursor cursor);
         hcursor handle_NtUserGetCursor(const syscall_context& c);
         hicon handle_NtUserCreateEmptyCursorObject(const syscall_context& c);
-        BOOL handle_NtUserSetCursorIconData();
+        BOOL handle_NtUserSetCursorIconData(const syscall_context& c, hicon icon,
+                                            emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> module_name,
+                                            emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> resource_name,
+                                            emulator_object<EMU_CURSORDATA> cursor_data);
         BOOL handle_NtUserSetCursorIconDataEx();
         BOOL handle_NtUserGetRequiredCursorSizes();
         NTSTATUS handle_NtUserFindExistingCursorIcon();

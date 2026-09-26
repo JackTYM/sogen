@@ -99,6 +99,28 @@ namespace sogen
         hbitmap hbmColor;
     };
 
+    // Prefix of win32k's CURSORDATA (tagCURSORDATA), the struct real user32.dll passes to
+    // NtUserSetCursorIconData. Offsets 0x50/0x54/0x58 (bpp/cx/cy) were confirmed empirically by
+    // disassembling user32.dll's ConvertDIBIcon, which stores the real icon width/height there;
+    // trailing fields (cpcur, aspcur, ...) are omitted since nothing here reads them.
+    struct EMU_CURSORDATA
+    {
+        pointer lpName;
+        pointer lpModName;
+        uint8_t reserved0[8];
+        DWORD flags;
+        int16_t xHotspot;
+        int16_t yHotspot;
+        hbitmap hbmMask;
+        hbitmap hbmColor;
+        hbitmap hbmAlpha;
+        uint8_t rcBounds[16];
+        hbitmap hbmUserAlpha;
+        DWORD bpp;
+        DWORD cx;
+        DWORD cy;
+    };
+
     struct EMU_CURSORINFO
     {
         DWORD cbSize;
