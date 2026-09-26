@@ -3171,7 +3171,15 @@ namespace sogen
 
         NTSTATUS handle_NtUserSetWindowsHookEx(const syscall_context& /*c*/)
         {
-            return STATUS_SUCCESS;
+            // user32.dll's SetWindowsHookExW returns this syscall's raw return value directly as
+            // the HHOOK, not as an NTSTATUS - STATUS_SUCCESS (0) therefore reads back as a NULL
+            // hook, which real callers correctly treat as installation failure (e.g. Notepad++'s
+            // DockingManager::init pops an error dialog, and some callers recurse into guest-level
+            // exception handling trying to recover from it). Hook delivery itself isn't
+            // implemented, but a distinct non-null handle lets callers that merely check for
+            // failure proceed as they would on real Windows.
+            static uint32_t next_hook_handle = 1;
+            return next_hook_handle++;
         }
 
         NTSTATUS handle_NtUserUnhookWindowsHookEx(const syscall_context& /*c*/)
