@@ -471,6 +471,13 @@ namespace sogen
         bool perform_thread_switch(vcpu_context& vcpu);
         bool activate_thread(vcpu_context& vcpu, uint32_t id);
 
+        // Steps a vCPU that's already mid-syscall-handler (kernel lock held by the calling
+        // thread) for `count` instructions, releasing and re-acquiring the kernel lock around
+        // the run exactly like the normal vcpu_worker loop does - so hook callbacks the nested
+        // run triggers (further syscalls, exceptions) can re-acquire it without deadlocking on
+        // the non-recursive lock this thread already holds.
+        void run_nested_guest_step(x86_64_cpu& cpu, size_t count);
+
       private:
         bool use_relative_time_{false}; // TODO: Get rid of that
         bool instruction_precision_{true};

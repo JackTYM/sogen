@@ -1136,6 +1136,13 @@ namespace sogen
         this->stop();
     }
 
+    void windows_emulator::run_nested_guest_step(x86_64_cpu& cpu, const size_t count)
+    {
+        this->kernel_lock_.unlock();
+        cpu.start(count);
+        this->kernel_lock_.lock();
+    }
+
     bool windows_emulator::activate_thread(vcpu_context& vcpu, const uint32_t id)
     {
         const std::scoped_lock lock(this->kernel_lock_);

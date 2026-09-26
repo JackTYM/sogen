@@ -3,6 +3,7 @@
 #include "../syscall_utils.hpp"
 #include "../win32k_userconnect.hpp"
 #include "../window_destroy_orchestrator.hpp"
+#include "../module/activation_context_format.hpp"
 #include "windows-emulator/user_callback_dispatch.hpp"
 #include <limits>
 
@@ -322,6 +323,192 @@ namespace sogen
             c.proc.classes.insert_or_assign(std::u16string{normalized_name}, entry);
             c.proc.classes.insert_or_assign(std::u16string{class_name}, entry);
             return &c.proc.classes.find(class_name)->second;
+        }
+
+        // Real Windows registers a v6-manifested exe's Common-Controls window classes
+        // (msctls_statusbar32, ToolbarWindow32, ...) lazily: the first CreateWindowEx for one of
+        // them, if InitCommonControls(Ex) never explicitly registered it, is satisfied by the
+        // isolation layer calling back into the providing assembly's DLL to register the class on
+        // demand. comctl32.dll exports exactly this entry point, `RegisterClassNameW`, so this
+        // resolves the owning DLL from the process's own activation-context window-class
+        // redirection section (the same data sogen's own generator wrote) and calls it for real.
+        std::optional<std::string> find_window_class_owning_dll(const syscall_context& c, const std::u16string_view class_name)
+        {
+            const auto peb = c.proc.peb64.read();
+            if (!peb.ActivationContextData)
+            {
+                return std::nullopt;
+            }
+
+            const auto blob_address = static_cast<uint64_t>(peb.ActivationContextData);
+
+            activation_context_data_header header{};
+            if (!c.emu.try_read_memory(blob_address, &header, sizeof(header)) || header.magic != activation_context_data_magic ||
+                header.format_version != activation_context_data_format_version)
+            {
+                return std::nullopt;
+            }
+
+            activation_context_data_toc_header toc_header{};
+            if (!c.emu.try_read_memory(blob_address + header.default_toc_offset, &toc_header, sizeof(toc_header)))
+            {
+                return std::nullopt;
+            }
+
+            uint64_t section_offset = 0;
+            for (uint32_t i = 0; i < toc_header.entry_count; ++i)
+            {
+                activation_context_data_toc_entry toc_entry{};
+                const auto toc_entry_address = blob_address + toc_header.first_entry_offset + (i * sizeof(toc_entry));
+                if (!c.emu.try_read_memory(toc_entry_address, &toc_entry, sizeof(toc_entry)))
+                {
+                    return std::nullopt;
+                }
+
+                if (toc_entry.id == activation_context_section_id_window_class_redirection)
+                {
+                    section_offset = blob_address + toc_entry.offset;
+                    break;
+                }
+            }
+
+            if (section_offset == 0)
+            {
+                return std::nullopt;
+            }
+
+            activation_context_string_section_header section_header{};
+            if (!c.emu.try_read_memory(section_offset, &section_header, sizeof(section_header)) ||
+                section_header.magic != activation_context_string_section_magic)
+            {
+                return std::nullopt;
+            }
+
+            for (uint32_t i = 0; i < section_header.element_count; ++i)
+            {
+                activation_context_string_section_entry element{};
+                const auto element_address = section_offset + section_header.element_list_offset + (i * sizeof(element));
+                if (!c.emu.try_read_memory(element_address, &element, sizeof(element)))
+                {
+                    continue;
+                }
+
+                std::u16string key(element.key_length / sizeof(char16_t), u'\0');
+                if (!c.emu.try_read_memory(section_offset + element.key_offset, key.data(), element.key_length) ||
+                    !utils::string::equals_ignore_case(std::u16string_view(key), class_name))
+                {
+                    continue;
+                }
+
+                activation_context_data_window_class_redirection redirection{};
+                if (!c.emu.try_read_memory(section_offset + element.value_offset, &redirection, sizeof(redirection)))
+                {
+                    return std::nullopt;
+                }
+
+                std::u16string dll_name(redirection.dll_name_length / sizeof(char16_t), u'\0');
+                if (!c.emu.try_read_memory(section_offset + redirection.dll_name_offset, dll_name.data(), redirection.dll_name_length))
+                {
+                    return std::nullopt;
+                }
+
+                return u16_to_u8(dll_name);
+            }
+
+            return std::nullopt;
+        }
+
+        // Runs a plain (non-callback) guest function to completion on the calling thread's own
+        // vCPU and returns its eax/rax result. Distinct from dispatch_user_callback: that mechanism
+        // exists to satisfy the NT client/server ABI when the *kernel* side needs a real user-mode
+        // return path (KiUserCallbackDispatcher + NtCallbackReturn) for callbacks the guest itself
+        // must observe finishing later. Here the call is a host-orchestrated detour the guest never
+        // needs to know happened - it borrows the same save/restore-registers primitive the CPU
+        // backends already expose for GDB/Tenet stepping instead.
+        uint64_t call_guest_function(const syscall_context& c, const uint64_t function_address, const std::initializer_list<uint64_t> args)
+        {
+            constexpr uint64_t max_steps = 500'000;
+            constexpr uint64_t sentinel_return_address = 0;
+
+            auto& cpu = c.emu;
+            const auto saved_registers = cpu.save_registers();
+
+            const auto original_rsp = cpu.read_stack_pointer();
+            const auto call_rsp = align_down(original_rsp - 0x8, 16) - 0x28; // 0x20 shadow space + return address
+
+            cpu.write_memory(call_rsp, sentinel_return_address);
+            cpu.reg(x86_register::rsp, call_rsp);
+
+            constexpr std::array<x86_register, 4> arg_registers{x86_register::rcx, x86_register::rdx, x86_register::r8, x86_register::r9};
+            size_t arg_index = 0;
+            for (const auto arg : args)
+            {
+                if (arg_index >= arg_registers.size())
+                {
+                    throw std::runtime_error("call_guest_function only supports up to 4 arguments");
+                }
+                cpu.reg(arg_registers[arg_index], arg);
+                ++arg_index;
+            }
+
+            cpu.reg(x86_register::rip, function_address);
+
+            for (uint64_t step = 0; step < max_steps; ++step)
+            {
+                c.win_emu.run_nested_guest_step(cpu, 1);
+                if (c.run_callback)
+                {
+                    throw std::runtime_error("Nested guest function call unexpectedly dispatched a user callback");
+                }
+                if (cpu.read_instruction_pointer() == sentinel_return_address)
+                {
+                    break;
+                }
+            }
+
+            const auto result = cpu.reg<uint64_t>(x86_register::rax);
+            cpu.restore_registers(saved_registers);
+            return result;
+        }
+
+        process_context::class_entry* ensure_sxs_window_class(const syscall_context& c, const std::u16string_view class_name)
+        {
+            const auto dll_name = find_window_class_owning_dll(c, class_name);
+            if (!dll_name.has_value())
+            {
+                return nullptr;
+            }
+
+            auto* owning_module = c.win_emu.mod_manager.find_by_name(*dll_name);
+            if (!owning_module)
+            {
+                return nullptr;
+            }
+
+            const auto register_class_name_w = owning_module->find_export("RegisterClassNameW");
+            if (register_class_name_w == 0)
+            {
+                return nullptr;
+            }
+
+            std::u16string name_buffer{class_name};
+            name_buffer.push_back(u'\0');
+            const auto string_size = name_buffer.size() * sizeof(char16_t);
+
+            const auto scratch_address = align_down(c.emu.read_stack_pointer() - 0x1000, 16);
+            if (!c.emu.try_write_memory(scratch_address, name_buffer.data(), string_size))
+            {
+                return nullptr;
+            }
+
+            const auto result = call_guest_function(c, register_class_name_w, {scratch_address});
+            if (!result)
+            {
+                return nullptr;
+            }
+
+            const auto it = c.proc.classes.find(class_name);
+            return it != c.proc.classes.end() ? &it->second : nullptr;
         }
 
         void set_thread_window_context(const syscall_context& c, const uint64_t active_handle, const uint64_t active_window_ptr)
@@ -3034,6 +3221,15 @@ namespace sogen
                 {
                     cls_it = c.proc.classes.find(cls_name);
                     (void)builtin;
+                }
+            }
+
+            if (cls_it == c.proc.classes.end())
+            {
+                if (const auto* sxs_class = ensure_sxs_window_class(c, cls_name))
+                {
+                    cls_it = c.proc.classes.find(cls_name);
+                    (void)sxs_class;
                 }
             }
 
