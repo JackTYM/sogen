@@ -506,21 +506,37 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                const auto requested_base = base_address.read();
+
                 if (section_entry->backing_address == 0)
                 {
                     const auto reserve_only = section_entry->allocation_attributes == SEC_RESERVE;
-                    const auto backing = c.win_emu.memory.allocate_memory(backing_size, protection, reserve_only, 0,
-                                                                          memory_region_kind::pagefile_section_view);
-                    if (!backing)
+                    // A caller building a "magic ring buffer" (reserve a placeholder range, free it, then map
+                    // the same small section repeatedly across that range so a wrapping index reads/writes
+                    // coherently without special-casing the wrap) picks the placeholder's base as its first
+                    // map's requested address. Try to honor it so the natural offsets computed below for the
+                    // later, repeat maps of the same section land inside that same range instead of wherever
+                    // an unrelated auto-pick happened to end up.
+                    const auto backing = requested_base != 0
+                                             ? (c.win_emu.memory.allocate_memory(requested_base, backing_size, protection, reserve_only,
+                                                                                 memory_region_kind::pagefile_section_view)
+                                                    ? requested_base
+                                                    : 0)
+                                             : 0;
+                    const auto resolved_backing = backing != 0
+                                                      ? backing
+                                                      : c.win_emu.memory.allocate_memory(backing_size, protection, reserve_only, 0,
+                                                                                         memory_region_kind::pagefile_section_view);
+                    if (!resolved_backing)
                     {
                         return STATUS_NO_MEMORY;
                     }
-                    section_entry->backing_address = backing;
+                    section_entry->backing_address = resolved_backing;
 
                     if (c.win_emu.callbacks.on_generic_activity)
                     {
-                        c.win_emu.callbacks.on_generic_activity(
-                            utils::string::va("Pagefile section backing allocated: base=0x%" PRIx64 " size=0x%zx", backing, backing_size));
+                        c.win_emu.callbacks.on_generic_activity(utils::string::va(
+                            "Pagefile section backing allocated: base=0x%" PRIx64 " size=0x%zx", resolved_backing, backing_size));
                     }
                 }
 
@@ -538,11 +554,40 @@ namespace sogen
                                        backing_size);
                 }
 
+                const auto resolved_view_size = backing_size - aligned_offset;
                 if (view_size)
                 {
-                    view_size.write(backing_size - aligned_offset);
+                    view_size.write(resolved_view_size);
                 }
-                base_address.write(section_entry->backing_address + aligned_offset);
+
+                const auto natural_address = section_entry->backing_address + aligned_offset;
+
+                // A repeat map of the same section at a different requested fixed address is the other half
+                // of the magic-ring-buffer trick above: the guest wants this same 0x0-offset view to also
+                // appear a view-size further along, so a wrapping read/write across the boundary keeps
+                // landing on real, backed memory instead of the unmapped gap past the first copy. sogen has
+                // no cross-backend primitive to alias the same host bytes at a second guest address (unlike
+                // real Windows, which shares the same physical pages), so this gives the guest independently
+                // backed memory at the address it asked for instead - real content, just not coherently
+                // shared with the original view if the guest ever writes through one and reads the other.
+                if (requested_base != 0 && requested_base != natural_address &&
+                    c.win_emu.memory.allocate_memory(requested_base, resolved_view_size, protection, false,
+                                                     memory_region_kind::pagefile_section_view))
+                {
+                    base_address.write(requested_base);
+                    ++section_entry->mapped_view_count;
+
+                    if (c.win_emu.callbacks.on_generic_activity)
+                    {
+                        c.win_emu.callbacks.on_generic_activity(utils::string::va(
+                            "Pagefile view mapped at requested alias address: backing=0x%" PRIx64 " alias=0x%" PRIx64 " views=%u",
+                            section_entry->backing_address, requested_base, section_entry->mapped_view_count));
+                    }
+
+                    return STATUS_SUCCESS;
+                }
+
+                base_address.write(natural_address);
                 ++section_entry->mapped_view_count;
 
                 if (c.win_emu.callbacks.on_generic_activity)
