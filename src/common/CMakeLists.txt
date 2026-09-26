@@ -3,6 +3,10 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
   *.hpp
 )
 
+if(WIN)
+  list(REMOVE_ITEM SRC_FILES "${CMAKE_CURRENT_LIST_DIR}/utils/ios_device_jit_mmap_shim.cpp")
+endif()
+
 add_library(emulator-common ${SRC_FILES})
 
 sogen_assign_source_group(${SRC_FILES})
