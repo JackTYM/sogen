@@ -2930,6 +2930,23 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtGdiGetTextExtentExW(const syscall_context& c, const hdc dc, const emulator_pointer /*text*/, const ULONG char_count,
+                                          const ULONG /*max_extent*/, const emulator_pointer /*fit_count*/,
+                                          const emulator_pointer /*partial_extents*/, const emulator_pointer size, const ULONG /*flags*/)
+        {
+            if (dc == 0 || size == 0)
+            {
+                return FALSE;
+            }
+
+            const SIZE text_size{
+                .cx = static_cast<LONG>(k_default_font_width * char_count),
+                .cy = static_cast<LONG>(k_default_font_height),
+            };
+            c.emu.write_memory(size, &text_size, sizeof(text_size));
+            return TRUE;
+        }
+
         BOOL handle_NtGdiGetCharWidthW(const syscall_context& c, const hdc dc, const UINT /*first_char*/, const UINT char_count,
                                        const emulator_pointer /*chars*/, const UINT /*flags*/, const emulator_pointer buffer)
         {
