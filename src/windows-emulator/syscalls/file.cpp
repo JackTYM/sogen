@@ -2550,6 +2550,38 @@ namespace sogen
                                    static_cast<unsigned long long>(apc_routine), static_cast<unsigned long long>(apc_context));
 
                 const auto esp = c.emu.reg<uint32_t>(x86_register::esp);
+                const auto ebp = c.emu.reg<uint32_t>(x86_register::ebp);
+
+                c.win_emu.log.info("[pipe-io-trace] FSCTL_PIPE_LISTEN registers tid=%u eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x "
+                                   "esi=0x%x edi=0x%x esp=0x%x ebp=0x%x eip=0x%x\n",
+                                   c.thread().id, c.emu.reg<uint32_t>(x86_register::eax), c.emu.reg<uint32_t>(x86_register::ebx),
+                                   c.emu.reg<uint32_t>(x86_register::ecx), c.emu.reg<uint32_t>(x86_register::edx),
+                                   c.emu.reg<uint32_t>(x86_register::esi), c.emu.reg<uint32_t>(x86_register::edi), esp, ebp,
+                                   c.emu.reg<uint32_t>(x86_register::eip));
+
+                uint32_t frame_ebp = ebp;
+                for (int frame = 0; frame < 8; ++frame)
+                {
+                    uint32_t saved_ebp = 0;
+                    uint32_t frame_return_address = 0;
+                    const bool saved_ebp_ok = c.emu.try_read_memory(frame_ebp, &saved_ebp, sizeof(saved_ebp));
+                    const bool frame_ret_ok = c.emu.try_read_memory(frame_ebp + 4, &frame_return_address, sizeof(frame_return_address));
+                    const auto* frame_ret_mod_name = c.win_emu.mod_manager.find_name(frame_return_address);
+                    const auto* frame_ret_mod = c.win_emu.mod_manager.find_by_address(frame_return_address);
+                    const auto frame_ret_offset = frame_ret_mod ? frame_return_address - frame_ret_mod->image_base : frame_return_address;
+
+                    c.win_emu.log.info("[pipe-io-trace] FSCTL_PIPE_LISTEN ebp-chain frame=%d ebp=0x%x (esp+0x%llx) "
+                                       "saved_ebp=0x%x (ok=%d) return_address=0x%x (%s+0x%llx) (ok=%d)\n",
+                                       frame, frame_ebp, static_cast<unsigned long long>(frame_ebp - esp), saved_ebp, saved_ebp_ok ? 1 : 0,
+                                       frame_return_address, frame_ret_mod_name ? frame_ret_mod_name : "<unknown>",
+                                       static_cast<unsigned long long>(frame_ret_offset), frame_ret_ok ? 1 : 0);
+
+                    if (!saved_ebp_ok || saved_ebp == 0 || saved_ebp <= frame_ebp)
+                    {
+                        break;
+                    }
+                    frame_ebp = saved_ebp;
+                }
 
                 uint32_t return_address = 0;
                 const bool return_address_read_ok = c.emu.try_read_memory(esp, &return_address, sizeof(return_address));
