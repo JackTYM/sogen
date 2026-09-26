@@ -1199,6 +1199,13 @@ namespace sogen
 
             frame.restore_registers(c.emu);
 
+            // The callback's own real call chain may still have calls pending (never balanced by a
+            // matching ret, since we're jumping straight back to the pre-dispatch context instead of
+            // letting it unwind naturally) - see cpu_interface::reset_call_return_shadow_stack's doc
+            // comment for why a backend-side call/ret cache would otherwise accumulate unmatched
+            // entries across repeated callback dispatches.
+            c.emu.reset_call_return_shadow_stack();
+
             auto dispatch_result =
                 c.win_emu.dispatcher.dispatch_completion(c.win_emu, c.vcpu, frame.handler_id, frame.state.get(), callback_result);
 

@@ -1608,6 +1608,8 @@ namespace sogen::fex
             return true;
         }
 
+        void reset_call_return_shadow_stack() override;
+
         void set_segment_base(x86_register base, pointer_type value) override;
         pointer_type get_segment_base(x86_register base) override;
         void load_gdt(pointer_type address, uint32_t limit) override;
@@ -2048,6 +2050,11 @@ namespace sogen::fex
         void stop() override
         {
             this->vcpus_[0]->stop();
+        }
+
+        void reset_call_return_shadow_stack() override
+        {
+            this->vcpus_[0]->reset_call_return_shadow_stack();
         }
 
         size_t read_raw_register(const int reg, void* value, const size_t size) override
@@ -5505,6 +5512,19 @@ namespace sogen::fex
         }
         uctx->uc_mcontext->__ss.__x[25] = base + callret_stack_size / 4;
         return true;
+    }
+
+    void fex_vcpu::reset_call_return_shadow_stack()
+    {
+        auto* const active = this->active_thread_.load();
+        if (active == nullptr || active->CallRetStackBase == nullptr)
+        {
+            return;
+        }
+
+        constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+        const auto base = reinterpret_cast<uint64_t>(active->CallRetStackBase);
+        active->CurrentFrame->State.callret_sp = base + callret_stack_size / 4;
     }
 
     void fex_vcpu::dump_avdiag(const uint64_t fault_addr, const uint64_t recon_rip, const char* const site) const

@@ -444,15 +444,7 @@ namespace sogen
             // relies on) detects the return: the callee runs at full JIT speed and only traps once
             // control genuinely reaches the sentinel, unlike single-stepping every instruction of a
             // potentially deep, non-trivial call chain via EFLAGS.TF.
-            if (c.proc.call_guest_function_return_trap == 0)
-            {
-                c.proc.call_guest_function_return_trap = c.win_emu.memory.allocate_memory(page_align_up(1), memory_permission::read_exec);
-                constexpr uint8_t int3 = 0xCC;
-                c.win_emu.memory.write_memory(c.proc.call_guest_function_return_trap, &int3, sizeof(int3));
-                c.win_emu.emu().hook_memory_execution(c.proc.call_guest_function_return_trap,
-                                                      [](cpu_interface& cpu, uint64_t) { cpu.stop(); });
-            }
-            const uint64_t sentinel_return_address = c.proc.call_guest_function_return_trap;
+            const uint64_t sentinel_return_address = ensure_call_completion_trap(c);
 
             auto& cpu = c.emu;
             const auto saved_registers = cpu.save_registers();

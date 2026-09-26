@@ -86,6 +86,19 @@ namespace sogen
         {
             return true;
         }
+
+        // Resets this backend's internal call/ret shadow-stack cache (if it has one) to a neutral
+        // position. A callback completion that bypasses the guest's own unwind - see
+        // syscalls/thread.cpp's handle_NtCallbackReturn, which restores registers directly to jump
+        // straight back to the pre-dispatch context instead of letting the callback's real call
+        // chain `ret` all the way back out - leaves any real, still-pending guest calls made during
+        // the callback unmatched by a corresponding ret. On a backend that caches call sites for
+        // fast-pathing ret (FEXCore's shadow stack), those unmatched pushes accumulate across
+        // repeated callback dispatches and eventually walk the cache off the end of its buffer.
+        // Defaults to a no-op (matches every backend except FEX, which has no such cache to reset).
+        virtual void reset_call_return_shadow_stack()
+        {
+        }
     };
 
 } // namespace sogen

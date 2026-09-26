@@ -347,4 +347,23 @@ namespace sogen
         return status_block.Status;
     }
 
+    // Lazily allocates process_context::call_guest_function_return_trap: one guest byte holding an
+    // INT3, backed by a real software breakpoint (see call_guest_function's doc comment for why this
+    // needs to be genuine, mapped, executable content rather than a bare constant like guest address
+    // 0 - FEXCore's call/ret shadow-stack cache reads an unrelated, never-populated slot back as an
+    // all-zero {GuestRIP, HostCode} pair, so a plain 0 sentinel can collide with that by coincidence
+    // and send the JIT branching through a null host pointer).
+    inline uint64_t ensure_call_completion_trap(const syscall_context& c)
+    {
+        if (c.proc.call_guest_function_return_trap == 0)
+        {
+            c.proc.call_guest_function_return_trap = c.win_emu.memory.allocate_memory(page_align_up(1), memory_permission::read_exec);
+            constexpr uint8_t int3 = 0xCC;
+            c.win_emu.memory.write_memory(c.proc.call_guest_function_return_trap, &int3, sizeof(int3));
+            c.win_emu.emu().hook_memory_execution(c.proc.call_guest_function_return_trap, [](cpu_interface& cpu, uint64_t) { cpu.stop(); });
+        }
+
+        return c.proc.call_guest_function_return_trap;
+    }
+
 } // namespace sogen
