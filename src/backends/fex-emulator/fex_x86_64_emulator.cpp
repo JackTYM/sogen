@@ -657,6 +657,22 @@ namespace sogen::fex
             instruction_hook_callback callback;
         };
 
+        struct execution_hook_entry
+        {
+            std::optional<uint64_t> address{};
+            memory_execution_hook_callback callback;
+        };
+
+        // Tracks a single INT3-patched address (see install_software_breakpoint). hook_count is the
+        // number of hook_memory_execution registrations sharing this exact address - only the first
+        // installs the patch and only the last removes it. original_byte is the byte INT3 replaced,
+        // restored whenever the patch is temporarily lifted (a hit, or final removal).
+        struct software_breakpoint
+        {
+            uint8_t original_byte = 0;
+            size_t hook_count = 0;
+        };
+
         // POSIX synchronous signals (SIGSEGV/SIGBUS/SIGILL/SIGTRAP) always deliver to the thread that
         // caused them, so a thread_local pointer to whichever fex_vcpu this host thread is currently
         // driving is a lock-free, correct way to route a fault to the right vCPU's state under
@@ -1615,6 +1631,27 @@ namespace sogen::fex
         bool dispatch_pending_hook_if_any();
         void defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled);
 
+        // A software breakpoint hit restores the original byte so the real instruction can run once,
+        // which means it must be re-patched before it can trap again. Re-arming needs the CPU to
+        // actually execute that one real instruction first - done by setting EFLAGS.TF (respected
+        // natively by FEX's JIT, unlike the backend's own "exact instruction count" support, which
+        // start()/start_hvf reject) and catching the resulting vector-1 trap once, silently, before
+        // resuming normal execution. See rearm_pending_breakpoint_if_any (called at the top of
+        // start()/start_hvf, for a breakpoint whose hook requested a stop before it could be re-armed
+        // inline) and dispatch_pending_hook_if_any's handling of that vector-1 trap.
+        struct breakpoint_rearm_state
+        {
+            uint64_t address = 0;
+            bool had_trap_flag = false;
+        };
+
+        bool handle_breakpoint_related_interrupt(int vector);
+        void arm_breakpoint_rearm_step(uint64_t address);
+        void rearm_pending_breakpoint_if_any();
+
+        std::optional<uint64_t> deferred_breakpoint_rearm_{};
+        std::optional<breakpoint_rearm_state> pending_breakpoint_rearm_{};
+
         // --[ HVF execution path (active only when g_hvf != nullptr) ]-------------------------------
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
 
@@ -2058,6 +2095,19 @@ namespace sogen::fex
             // buffer that overlaps the guest destination range - overlapping memcpy is undefined
             // behaviour. This is a generic guest memory-copy primitive with no non-overlap contract.
             std::memmove(data, reinterpret_cast<const void*>(address + rebase), size);
+
+            // Software breakpoints patch a real INT3 into guest memory (see install_software_breakpoint),
+            // so a plain read of a patched address would otherwise hand back the 0xCC instead of the
+            // guest's own instruction byte - visible to the guest itself (self-checksumming code) and to
+            // a debugger disassembling around the breakpoint.
+            for (const auto& [bp_address, breakpoint] : this->software_breakpoints_)
+            {
+                if (bp_address >= address && bp_address < address + size)
+                {
+                    static_cast<uint8_t*>(data)[bp_address - address] = breakpoint.original_byte;
+                }
+            }
+
             return true;
         }
 
@@ -2145,28 +2195,137 @@ namespace sogen::fex
             return true;
         }
 
+        // Installs (or, for a second registration at the same address, just refcounts) a software
+        // breakpoint at `address`: an INT3 (0xCC) patched over the real first byte. FEX runs the guest
+        // natively, so this is the only way a single address can reliably intercept execution - unlike
+        // Unicorn's per-instruction callback, the underlying instruction really is replaced and really
+        // does trap, which is why a hit needs to restore the original byte, notify the hook, and single-
+        // step the real instruction back in before re-arming (see dispatch_pending_hook_if_any and
+        // fex_vcpu::arm_breakpoint_rearm_step).
+        bool install_software_breakpoint(uint64_t address)
+        {
+            {
+                const std::unique_lock lock(this->tables_mutex_);
+                auto [it, inserted] = this->software_breakpoints_.try_emplace(address);
+                if (!inserted)
+                {
+                    ++it->second.hook_count;
+                    return true;
+                }
+            }
+
+            uint8_t original_byte = 0;
+            if (!this->try_read_memory(address, &original_byte, sizeof(original_byte)))
+            {
+                const std::unique_lock lock(this->tables_mutex_);
+                this->software_breakpoints_.erase(address);
+                return false;
+            }
+
+            constexpr uint8_t int3_opcode = 0xCC;
+            if (!this->try_write_memory_impl(address, &int3_opcode, sizeof(int3_opcode), /*invalidate_translations=*/true))
+            {
+                const std::unique_lock lock(this->tables_mutex_);
+                this->software_breakpoints_.erase(address);
+                return false;
+            }
+
+            const std::unique_lock lock(this->tables_mutex_);
+            auto it = this->software_breakpoints_.find(address);
+            if (it != this->software_breakpoints_.end())
+            {
+                it->second.original_byte = original_byte;
+                it->second.hook_count = 1;
+            }
+
+            return true;
+        }
+
+        // Drops one reference on the software breakpoint at `address`, restoring the original byte once
+        // the last one is gone.
+        void remove_software_breakpoint(uint64_t address)
+        {
+            std::optional<uint8_t> original_byte{};
+
+            {
+                const std::unique_lock lock(this->tables_mutex_);
+                const auto it = this->software_breakpoints_.find(address);
+                if (it == this->software_breakpoints_.end())
+                {
+                    return;
+                }
+
+                if (--it->second.hook_count > 0)
+                {
+                    return;
+                }
+
+                original_byte = it->second.original_byte;
+                this->software_breakpoints_.erase(it);
+            }
+
+            if (original_byte)
+            {
+                this->try_write_memory_impl(address, &*original_byte, sizeof(*original_byte), /*invalidate_translations=*/true);
+            }
+        }
+
+        // Temporarily toggles a still-installed software breakpoint between its INT3 byte and the real
+        // instruction byte, without touching hook_count - used around a hit (apply=false, so the real
+        // instruction can execute once) and its rearm (apply=true).
+        void set_software_breakpoint_applied(uint64_t address, bool applied)
+        {
+            uint8_t original_byte = 0;
+            {
+                const std::shared_lock lock(this->tables_mutex_);
+                const auto it = this->software_breakpoints_.find(address);
+                if (it == this->software_breakpoints_.end())
+                {
+                    return;
+                }
+
+                original_byte = it->second.original_byte;
+            }
+
+            constexpr uint8_t int3_opcode = 0xCC;
+            const uint8_t value = applied ? int3_opcode : original_byte;
+            this->try_write_memory_impl(address, &value, sizeof(value), /*invalidate_translations=*/true);
+        }
+
         // --[ hook_interface ]-----------------------------------------------------------------------
         //
-        // Like the KVM backend, FEX runs the guest natively, so fine-grained memory/execution/basic-
-        // block hooks cannot fire. They are accepted (and tracked, so delete_hook works) for API
+        // Like the KVM backend, FEX runs the guest natively, so most fine-grained memory/execution/
+        // basic-block hooks cannot fire. They are accepted (and tracked, so delete_hook works) for API
         // compatibility. Only instruction hooks for `syscall` are actually wired (see the syscall
         // bridge). Registered once globally (not per-vCPU): every fex_vcpu's hook_*() forwards here,
         // since a hook must fire for whichever vCPU's guest thread triggers it, not just the vCPU it
         // happened to be registered through.
+        //
+        // The single-address overload is the one exception: it backs real software breakpoints (see
+        // install_software_breakpoint/dispatch_pending_hook_if_any), patching an INT3 into guest memory
+        // at that exact address and catching the resulting trap the same way a real INT3 already
+        // surfaces to interrupt_hooks_ (vector 3). A range or address-less registration would mean
+        // patching every byte of an arbitrary-sized region, which is not a valid INT3 placement, so
+        // those stay the pre-existing no-op.
 
         emulator_hook* hook_memory_execution(memory_execution_hook_callback callback) override
         {
             const std::unique_lock lock(this->tables_mutex_);
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            this->memory_execution_hooks_[hook] = execution_hook_entry{.address = std::nullopt, .callback = std::move(callback)};
             return hook;
         }
 
-        emulator_hook* hook_memory_execution(uint64_t /*address*/, memory_execution_hook_callback callback) override
+        emulator_hook* hook_memory_execution(uint64_t address, memory_execution_hook_callback callback) override
         {
+            if (!this->install_software_breakpoint(address))
+            {
+                throw std::runtime_error("Failed to install FEX software breakpoint");
+            }
+
             const std::unique_lock lock(this->tables_mutex_);
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            this->memory_execution_hooks_[hook] = execution_hook_entry{.address = address, .callback = std::move(callback)};
             return hook;
         }
 
@@ -2175,7 +2334,7 @@ namespace sogen::fex
         {
             const std::unique_lock lock(this->tables_mutex_);
             auto* hook = this->make_hook();
-            this->memory_execution_hooks_[hook] = std::move(callback);
+            this->memory_execution_hooks_[hook] = execution_hook_entry{.address = std::nullopt, .callback = std::move(callback)};
             return hook;
         }
 
@@ -2240,23 +2399,37 @@ namespace sogen::fex
 
         void delete_hook(emulator_hook* hook) override
         {
-            const std::unique_lock lock(this->tables_mutex_);
-            if (this->syscall_hook_ != nullptr)
+            std::optional<uint64_t> execution_breakpoint_address{};
+
             {
-                const auto it = this->instruction_hooks_.find(hook);
-                if (it != this->instruction_hooks_.end() && &it->second == this->syscall_hook_)
+                const std::unique_lock lock(this->tables_mutex_);
+                if (this->syscall_hook_ != nullptr)
                 {
-                    this->syscall_hook_ = nullptr;
+                    const auto it = this->instruction_hooks_.find(hook);
+                    if (it != this->instruction_hooks_.end() && &it->second == this->syscall_hook_)
+                    {
+                        this->syscall_hook_ = nullptr;
+                    }
                 }
+
+                if (const auto it = this->memory_execution_hooks_.find(hook); it != this->memory_execution_hooks_.end())
+                {
+                    execution_breakpoint_address = it->second.address;
+                }
+
+                this->instruction_hooks_.erase(hook);
+                this->interrupt_hooks_.erase(hook);
+                this->memory_read_hooks_.erase(hook);
+                this->memory_write_hooks_.erase(hook);
+                this->memory_execution_hooks_.erase(hook);
+                this->memory_violation_hooks_.erase(hook);
+                this->basic_block_hooks_.erase(hook);
             }
 
-            this->instruction_hooks_.erase(hook);
-            this->interrupt_hooks_.erase(hook);
-            this->memory_read_hooks_.erase(hook);
-            this->memory_write_hooks_.erase(hook);
-            this->memory_execution_hooks_.erase(hook);
-            this->memory_violation_hooks_.erase(hook);
-            this->basic_block_hooks_.erase(hook);
+            if (execution_breakpoint_address)
+            {
+                this->remove_software_breakpoint(*execution_breakpoint_address);
+            }
         }
 
         emulator_hook* make_hook()
@@ -3919,9 +4092,10 @@ namespace sogen::fex
         std::unordered_map<emulator_hook*, interrupt_hook_callback> interrupt_hooks_;
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_read_hooks_;
         std::unordered_map<emulator_hook*, memory_access_hook_callback> memory_write_hooks_;
-        std::unordered_map<emulator_hook*, memory_execution_hook_callback> memory_execution_hooks_;
+        std::unordered_map<emulator_hook*, execution_hook_entry> memory_execution_hooks_;
         std::unordered_map<emulator_hook*, memory_violation_hook_callback> memory_violation_hooks_;
         std::unordered_map<emulator_hook*, basic_block_hook_callback> basic_block_hooks_;
+        std::unordered_map<uint64_t, software_breakpoint> software_breakpoints_;
         uintptr_t next_hook_id_ = 1;
     };
 
@@ -4164,6 +4338,8 @@ namespace sogen::fex
             std::atomic_ref<uint32_t>(active->CurrentFrame->StopRequestFlag).store(0, std::memory_order_relaxed);
         }
 
+        this->rearm_pending_breakpoint_if_any();
+
         {
             uint64_t tid = 0;
             pthread_threadid_np(nullptr, &tid);
@@ -4246,6 +4422,7 @@ namespace sogen::fex
         }
 
         this->stop_requested_ = false;
+        this->rearm_pending_breakpoint_if_any();
         this->active_context_->ExecuteThread(this->active_thread_.load());
     }
 #endif
@@ -5378,6 +5555,8 @@ namespace sogen::fex
                            PROT_READ | PROT_WRITE);
         }
 
+        this->rearm_pending_breakpoint_if_any();
+
         hvf_exit_adapter adapter{*this};
         for (;;)
         {
@@ -5849,6 +6028,11 @@ namespace sogen::fex
             }
             return true;
         case pending_fault_kind::interrupt:
+            if (this->handle_breakpoint_related_interrupt(dispatch.vector))
+            {
+                return true;
+            }
+
             for (auto& [_, hook] : this->emulator_.interrupt_hooks_)
             {
                 hook(*this, dispatch.vector);
@@ -5859,6 +6043,94 @@ namespace sogen::fex
         case pending_fault_kind::none:
         default:
             return false;
+        }
+    }
+
+    bool fex_vcpu::handle_breakpoint_related_interrupt(const int vector)
+    {
+        constexpr uint64_t trap_flag_bit = 0x100;
+
+        if (vector == 1 && this->pending_breakpoint_rearm_)
+        {
+            const auto rearm = *std::exchange(this->pending_breakpoint_rearm_, std::nullopt);
+
+            const uint64_t rflags = this->read_rflags();
+            this->write_rflags(rearm.had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+
+            this->emulator_.set_software_breakpoint_applied(rearm.address, true);
+            return true;
+        }
+
+        if (vector != 3)
+        {
+            return false;
+        }
+
+        // FEXCore's INT3 handling sets RIP one past the trapping 0xCC (see
+        // reports_breakpoint_rip_past_instruction's doc comment), so the breakpoint's own address is
+        // one behind wherever the trap left RIP.
+        const uint64_t candidate = this->cpu_state().rip - 1;
+
+        std::vector<memory_execution_hook_callback> callbacks{};
+        {
+            const std::shared_lock lock(this->emulator_.tables_mutex_);
+            if (!this->emulator_.software_breakpoints_.contains(candidate))
+            {
+                return false;
+            }
+
+            for (const auto& [_, entry] : this->emulator_.memory_execution_hooks_)
+            {
+                if (entry.address == candidate)
+                {
+                    callbacks.push_back(entry.callback);
+                }
+            }
+        }
+
+        this->cpu_state().rip = candidate;
+        this->emulator_.set_software_breakpoint_applied(candidate, false);
+
+        for (const auto& callback : callbacks)
+        {
+            callback(*this, candidate);
+        }
+
+        if (this->stop_requested_)
+        {
+            this->deferred_breakpoint_rearm_ = candidate;
+        }
+        else
+        {
+            this->arm_breakpoint_rearm_step(candidate);
+        }
+
+        return true;
+    }
+
+    void fex_vcpu::arm_breakpoint_rearm_step(const uint64_t address)
+    {
+        constexpr uint64_t trap_flag_bit = 0x100;
+        const uint64_t rflags = this->read_rflags();
+        this->pending_breakpoint_rearm_ = breakpoint_rearm_state{.address = address, .had_trap_flag = (rflags & trap_flag_bit) != 0};
+        this->write_rflags(rflags | trap_flag_bit);
+    }
+
+    void fex_vcpu::rearm_pending_breakpoint_if_any()
+    {
+        if (!this->deferred_breakpoint_rearm_)
+        {
+            return;
+        }
+
+        const auto address = *std::exchange(this->deferred_breakpoint_rearm_, std::nullopt);
+        if (this->cpu_state().rip == address)
+        {
+            this->arm_breakpoint_rearm_step(address);
+        }
+        else
+        {
+            this->emulator_.set_software_breakpoint_applied(address, true);
         }
     }
 
