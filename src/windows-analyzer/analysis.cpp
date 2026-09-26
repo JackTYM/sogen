@@ -99,6 +99,22 @@ namespace sogen
         // 0/2/4 from r15.
         constexpr uint64_t IPCZ_TRY_DISPATCH_MESSAGE_HEADER_RVA = 0x589c89;
 
+        // `mojo::InterfaceEndpointClient::HandleIncomingMessage`/`HandleValidatedMessage` are fully
+        // merged into one symbol in the real msedge.dll 150.0.4078.105 (its own private PDB table,
+        // msedge.table.txt, gives it the former's mangled name at RVA 0x10731c6 - see
+        // project_solidworks_bringup.md #536). Statically disassembled this session (capstone/pefile
+        // against the real msedge.dll) confirms `message->name()` (`Message::name()` returns
+        // `header()->name`, i.e. `*(uint32_t*)(header_ptr+0xc)`) is read at RVA 0x1073289 as
+        // `mov edi, dword ptr [rax+0xc]`, where rax was just loaded from `[rbx+0x18]` (the Message
+        // object's own header-buffer pointer) and rbx holds the live `Message*` untouched since the
+        // function's own entry. rax at this point IS the header buffer's base address (offset 0xc is
+        // where `name` lives within `MessageHeaderV3`, per real Chromium source
+        // mojo/public/cpp/bindings/lib/message_internal.h), so dumping 56 bytes from rax gives the
+        // complete live `MessageHeaderV3` - ground truth to cross-check against #532's own manual
+        // wire-decode. The watched address is 0x107328c, the instruction immediately after the read,
+        // so edi already holds the live ordinal and rax/rbx are still untouched.
+        constexpr uint64_t MOJO_MESSAGE_NAME_READ_RVA = 0x107328c;
+
         // ipcz node-connection/transport-activation entry points in msedge.dll 150.0.7871.187,
         // resolved from Microsoft's own public PDB (see project_solidworks_bringup.md #270, #272, #277).
         constexpr std::array<traced_symbol, 16> NODE_CONNECT_TARGETS{{
@@ -3392,6 +3408,33 @@ namespace sogen
                                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(channel_this),
                                        static_cast<unsigned long long>(header_ptr), static_cast<unsigned long long>(available_bytes),
                                        header.size, header.num_handles, header.num_bytes);
+                });
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_MOJO_MESSAGE_NAME_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + MOJO_MESSAGE_NAME_READ_RVA;
+
+                win_emu->log.error("[mojo-message-name-hook-trace] watching InterfaceEndpointClient's inlined "
+                                   "HandleIncomingMessage/HandleValidatedMessage name read at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto name = emu.reg<uint32_t>(x86_register::edi);
+                    const auto header_ptr = emu.reg<uint64_t>(x86_register::rax);
+                    const auto message_ptr = emu.reg<uint64_t>(x86_register::rbx);
+                    const auto endpoint_client_this = emu.reg<uint64_t>(x86_register::r14);
+
+                    std::array<uint8_t, 56> header{};
+                    emu.try_read_memory(header_ptr, header.data(), header.size());
+
+                    win_emu->log.error("[mojo-message-name-hook-trace] hit at 0x%llx, endpoint_client=0x%llx message=0x%llx "
+                                       "header_ptr=0x%llx name=0x%x header_bytes=%s\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(endpoint_client_this),
+                                       static_cast<unsigned long long>(message_ptr), static_cast<unsigned long long>(header_ptr), name,
+                                       utils::string::to_hex_string(header.data(), header.size()).c_str());
                 });
             }
         }
