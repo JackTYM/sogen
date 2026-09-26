@@ -95,6 +95,7 @@
 #include <vector>
 
 #include <utils/object.hpp>
+#include <utils/finally.hpp>
 #include <utils/ios_device_log.hpp>
 
 // FEXCore embedding headers. These are only available when building against a FEX checkout/install;
@@ -1654,6 +1655,15 @@ namespace sogen::fex
 
         std::atomic<bool> stop_requested_{false};
 
+        // Tracks start()'s own recursion depth on the calling thread: call_guest_function's
+        // run_nested_guest_step recurses into start() from deep inside a syscall handler while the
+        // outer start() call is still on the C++ stack (see current_vcpu_scope's doc comment for the
+        // same recursion). A nested call's own stop_requested_ - set when it hits its private INT3
+        // return sentinel - must not survive past its own return: left set, the still-in-progress
+        // outer call's next loop iteration would read it as "stop this quantum" too, for a reason
+        // that was never about the outer quantum at all.
+        int nested_start_depth_{0};
+
       private:
         friend class fex_x86_64_emulator;
         friend class fex_syscall_handler;
@@ -1769,7 +1779,7 @@ namespace sogen::fex
             fex_vcpu& vcpu_;
         };
 
-        void start_hvf(size_t count);
+        void start_hvf(size_t count, bool is_nested_call);
         void hvf_shim_thread_pointers(FEXCore::Core::CpuStateFrame& frame) const;
         bool hvf_on_stage2_abort(hvf::hvf_vcpu_executor& vcpu, uint64_t va, uint64_t ipa, uint64_t syndrome);
         bool hvf_on_guest_exception(hvf::hvf_vcpu_executor& vcpu, uint32_t vector_entry);
@@ -4380,10 +4390,14 @@ namespace sogen::fex
 #ifdef __APPLE__
     void fex_vcpu::start(size_t count)
     {
+        const bool is_nested_call = this->nested_start_depth_ > 0;
+        ++this->nested_start_depth_;
+        const auto depth_guard = sogen::utils::finally([this] { --this->nested_start_depth_; });
+
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
         if (g_hvf != nullptr)
         {
-            this->start_hvf(count);
+            this->start_hvf(count, is_nested_call);
             return;
         }
 #endif
@@ -4506,16 +4520,15 @@ namespace sogen::fex
             std::atomic_ref<uint32_t>(active->CurrentFrame->StopRequestFlag).store(0, std::memory_order_relaxed);
         }
 
-        if (count == 1)
+        if (count == 1 || is_nested_call)
         {
-            // arm_plain_step's own trap always sets stop_requested_ to break out of this call's loop
-            // (see the pending_plain_step_ branch in handle_breakpoint_related_interrupt) - purely
-            // local bookkeeping for a single-instruction nested call (see call_guest_function), not a
-            // real stop() request. Left set, it would leak into whichever call - possibly the outer,
-            // still-in-progress quantum this one nested inside of - calls start() next: that call's
-            // own loop would see it already true and return after zero instructions, and
-            // HandleSyscall would keep calling request_thread_stop() on every subsequent syscall for
-            // the rest of the process's life.
+            // A single-instruction step (count == 1, arm_plain_step's own trap) or a nested call's own
+            // completion sentinel (call_guest_function's INT3, hit via the hook_memory_execution
+            // callback calling stop()) both set stop_requested_ to break out of this call's own loop -
+            // purely local bookkeeping for this call, not a real stop() request. Left set, it would
+            // leak into the outer, still-in-progress quantum this one nested inside of: that call's
+            // own loop would read it as "stop this quantum" too, for a reason that was never about the
+            // outer quantum at all, ending the run early with no violation and no thread switch.
             this->stop_requested_ = false;
         }
     }
@@ -5620,7 +5633,7 @@ namespace sogen::fex
     // -----------------------------------------------------------------------------------------------
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
 
-    void fex_vcpu::start_hvf(const size_t count)
+    void fex_vcpu::start_hvf(const size_t count, const bool is_nested_call)
     {
         this->emulator_.refresh_mmio_backings();
 
@@ -5697,6 +5710,16 @@ namespace sogen::fex
             auto* const now_active = this->active_thread_.load();
             g_hvf->protect(reinterpret_cast<uint64_t>(now_active->InterruptFaultPage), sizeof(now_active->InterruptFaultPage),
                            PROT_READ | PROT_WRITE);
+        }
+
+        if (is_nested_call)
+        {
+            // See the matching count == 1 || is_nested_call reset in the signal-based start()'s own
+            // loop above: a nested call's stop_requested_ (set here by call_guest_function's INT3
+            // return sentinel, via the hook_memory_execution callback calling stop()) is purely local
+            // bookkeeping for this call and must not leak into the outer, still-in-progress quantum
+            // this one nested inside of.
+            this->stop_requested_ = false;
         }
     }
 

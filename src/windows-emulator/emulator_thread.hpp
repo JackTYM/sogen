@@ -395,6 +395,15 @@ namespace sogen
         // (caller should resume at the dispatcher).
         bool grow_stack_or_report_overflow(windows_emulator& win_emu, vcpu_context& vcpu);
 
+        // A syscall with more than 4 arguments reads the extras straight off the caller's stack
+        // (see get_function_argument_x64_fastcall) instead of through a guest instruction, so a call
+        // chain deep enough to need that stack slot for the first time never takes the guest-side
+        // page fault that would otherwise grow the stack for it. Proactively repeats
+        // grow_stack_or_report_overflow until address is above the current guard page, so a
+        // host-side-only stack read never observes still-unmapped guard territory. Returns false only
+        // if that growth hit the guaranteed reserve and dispatched a real stack overflow.
+        bool ensure_stack_committed(windows_emulator& win_emu, vcpu_context& vcpu, uint64_t address);
+
         void save(x86_64_cpu& emu)
         {
             this->last_registers = emu.save_registers();

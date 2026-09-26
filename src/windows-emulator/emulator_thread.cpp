@@ -1118,6 +1118,19 @@ namespace sogen
         return false;
     }
 
+    bool emulator_thread::ensure_stack_committed(windows_emulator& win_emu, vcpu_context& vcpu, const uint64_t address)
+    {
+        while (this->stack_guard_page != 0 && address < this->stack_guard_page)
+        {
+            if (!this->grow_stack_or_report_overflow(win_emu, vcpu))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     bool emulator_thread::is_thread_ready(windows_emulator& win_emu)
     {
         if (this->is_terminated() || this->suspended > 0)

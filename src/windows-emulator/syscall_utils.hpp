@@ -238,6 +238,16 @@ namespace sogen
     {
         const auto ip = c.emu.read_instruction_pointer();
 
+        // A syscall with more than 4 arguments (the register-passed rcx/rdx/r8/r9) reads the rest
+        // straight off the caller's stack (get_function_argument_x64_fastcall's default branch)
+        // instead of through a guest instruction, so a call chain deep enough to touch that stack
+        // slot for the first time never takes the guest-side page fault that would otherwise grow
+        // the thread's stack for it - ensure_stack_committed closes that gap proactively.
+        if constexpr (sizeof...(Args) > 4)
+        {
+            c.thread().ensure_stack_committed(c.win_emu, c.vcpu, c.emu.read_stack_pointer());
+        }
+
         size_t index = 0;
         std::tuple<const syscall_context&, Args...> func_args{
             c, resolve_indexed_argument<std::remove_cv_t<std::remove_reference_t<Args>>>(c.emu, index)...};

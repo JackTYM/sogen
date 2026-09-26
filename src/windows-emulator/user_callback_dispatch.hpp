@@ -51,8 +51,10 @@ namespace sogen
     }
 
     template <typename... Args>
-    void prepare_call_stack(x86_64_cpu& emu, const uint32_t callback_index, const Args&... args)
+    void prepare_call_stack(const syscall_context& c, const uint32_t callback_index, const Args&... args)
     {
+        auto& emu = c.emu;
+
         const uint32_t arg_length = user_callback_args_size<Args...>();
         const uint64_t stack_args_size = align_up(arg_length, 0x10);
         const uint64_t current_rsp = emu.read_stack_pointer();
@@ -62,6 +64,11 @@ namespace sogen
         // arg length, and callback index stored in the 0x10 bytes above it.
         const uint64_t new_rsp = aligned_rsp - 0x30 - stack_args_size;
         const uint64_t arg_buffer = new_rsp + 0x30;
+
+        // This carves the callback frame directly out of guest memory via host writes rather than
+        // guest push/mov instructions, so a call chain deep enough to need this stack region for the
+        // first time never takes the guest-side page fault that would otherwise grow the stack for it.
+        c.thread().ensure_stack_committed(c.win_emu, c.vcpu, new_rsp);
 
         emu.reg(x86_register::rsp, new_rsp);
 
@@ -84,7 +91,7 @@ namespace sogen
     {
         push_callback_frame(c, completion_id, std::forward<StateT>(state_obj));
 
-        prepare_call_stack(c.emu, callback_index, args...);
+        prepare_call_stack(c, callback_index, args...);
 
         c.emu.reg(x86_register::rip, c.proc.ki_user_callback_dispatcher);
         c.run_callback = true;

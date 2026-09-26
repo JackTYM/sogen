@@ -460,6 +460,11 @@ namespace sogen
             const auto original_rsp = cpu.read_stack_pointer();
             const auto call_rsp = align_down(original_rsp - 0x8, 16) - 0x28; // 0x20 shadow space + return address
 
+            // Carves the call frame directly out of guest memory via a host write rather than a guest
+            // push/mov instruction, so a call chain deep enough to need this stack region for the
+            // first time never takes the guest-side page fault that would otherwise grow the stack.
+            c.thread().ensure_stack_committed(c.win_emu, c.vcpu, call_rsp);
+
             cpu.write_memory(call_rsp, sentinel_return_address);
             cpu.reg(x86_register::rsp, call_rsp);
 
