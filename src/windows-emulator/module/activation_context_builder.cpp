@@ -91,16 +91,31 @@ namespace sogen
             const auto host_manifest_path = files.translate(manifest_guest_path);
 
             std::vector<std::string> redirected_dlls{};
+            std::vector<std::string> window_classes{};
+            std::string resolved_version = identity.version;
             if (const auto assembly_manifest_text = read_file_as_string(host_manifest_path); assembly_manifest_text.has_value())
             {
                 redirected_dlls = parse_redirected_file_names(*assembly_manifest_text);
+                window_classes = parse_window_classes(*assembly_manifest_text);
+
+                // The assembly's own manifest carries its real, resolved version (e.g.
+                // "6.0.26100.33438") in its own <assemblyIdentity> - the requesting exe's
+                // manifest only ever asks for the policy version (e.g. "6.0.0.0"), which is
+                // not what real Windows uses for the "<version>!<class name>" redirected
+                // window class names.
+                if (const auto own_identity = parse_self_identity(*assembly_manifest_text); own_identity.has_value())
+                {
+                    resolved_version = own_identity->version;
+                }
             }
 
             resolved_assemblies.push_back(resolved_assembly{
                 .identity = identity,
                 .concrete_directory_name = *directory_name,
                 .manifest_path = manifest_guest_path.string(),
+                .resolved_version = resolved_version,
                 .redirected_dlls = std::move(redirected_dlls),
+                .window_classes = std::move(window_classes),
             });
         }
 

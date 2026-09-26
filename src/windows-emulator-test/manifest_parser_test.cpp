@@ -38,6 +38,22 @@ namespace sogen
         EXPECT_EQ(files[0], "comctl32.dll");
     }
 
+    TEST(ManifestParser, ExtractsWindowClasses)
+    {
+        constexpr auto assembly_manifest =
+            R"(<assembly xmlns="urn:schemas-microsoft-com:asm.v1"><file name="comctl32.dll"><windowClass>Button</windowClass><windowClass>SysListView32</windowClass></file></assembly>)";
+        const auto classes = parse_window_classes(assembly_manifest);
+        ASSERT_EQ(classes.size(), 2);
+        EXPECT_EQ(classes[0], "Button");
+        EXPECT_EQ(classes[1], "SysListView32");
+    }
+
+    TEST(ManifestParser, NoWindowClassesReturnsEmpty)
+    {
+        const auto classes = parse_window_classes(no_dependency_manifest);
+        EXPECT_TRUE(classes.empty());
+    }
+
     TEST(ManifestParser, ParsesSelfIdentityFromTopLevelAssemblyIdentity)
     {
         const auto identity = parse_self_identity(notepad_plus_plus_manifest);

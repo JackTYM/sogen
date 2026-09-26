@@ -249,6 +249,36 @@ namespace sogen
         return result;
     }
 
+    std::vector<std::string> parse_window_classes(const std::string_view manifest_text)
+    {
+        std::vector<std::string> result{};
+
+        constexpr std::string_view start_tag = "<windowClass>";
+        constexpr std::string_view end_tag = "</windowClass>";
+
+        std::size_t search_pos = 0;
+        while (true)
+        {
+            const auto content_start = manifest_text.find(start_tag, search_pos);
+            if (content_start == std::string_view::npos)
+            {
+                break;
+            }
+
+            const auto text_start = content_start + start_tag.size();
+            const auto content_end = manifest_text.find(end_tag, text_start);
+            if (content_end == std::string_view::npos)
+            {
+                break;
+            }
+
+            search_pos = content_end + end_tag.size();
+            result.push_back(std::string(manifest_text.substr(text_start, content_end - text_start)));
+        }
+
+        return result;
+    }
+
     std::optional<assembly_identity> parse_self_identity(const std::string_view manifest_text)
     {
         constexpr std::string_view identity_tag_name = "<assemblyIdentity";

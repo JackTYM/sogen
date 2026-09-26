@@ -39,16 +39,16 @@ namespace sogen
         std::uint32_t hash_algorithm;
         std::uint32_t entry_count;
         std::uint32_t first_entry_offset;                  // from blob base, NOT biased (fixed-size array, not a section)
-        std::uint32_t assembly_information_section_offset; // from blob base, biased (see activation_context_data_roster_offset_bias)
+        std::uint32_t assembly_information_section_offset; // from blob base, NOT biased
     };
 
     struct activation_context_data_assembly_roster_entry
     {
         std::uint32_t flags; // 0x1=unused/reserved, 0x2=ROOT (the exe's own identity)
         std::uint32_t pseudo_key;
-        std::uint32_t assembly_name_offset; // from blob base, biased; 0 for the unused/ROOT entries
+        std::uint32_t assembly_name_offset; // from blob base, NOT biased; 0 for the unused/ROOT entries
         std::uint32_t assembly_name_length;
-        std::uint32_t assembly_information_offset; // from blob base, biased
+        std::uint32_t assembly_information_offset; // from blob base, NOT biased
         std::uint32_t assembly_information_length;
     };
 
@@ -114,6 +114,16 @@ namespace sogen
         std::uint32_t path_segment_count;
         std::uint32_t path_segment_offset; // from the owning section header
     };
+
+    struct activation_context_data_window_class_redirection
+    {
+        std::uint32_t size; // 24
+        std::uint32_t flags;
+        std::uint32_t version_specific_class_name_length;
+        std::uint32_t version_specific_class_name_offset; // from this struct's own start
+        std::uint32_t dll_name_length;
+        std::uint32_t dll_name_offset; // from the owning section header
+    };
 #pragma pack(pop)
 
     static_assert(sizeof(activation_context_data_header) == 32);
@@ -125,6 +135,7 @@ namespace sogen
     static_assert(sizeof(activation_context_string_section_entry) == 24);
     static_assert(sizeof(activation_context_data_assembly_information) == 108);
     static_assert(sizeof(activation_context_data_dll_redirection) == 20);
+    static_assert(sizeof(activation_context_data_window_class_redirection) == 24);
 
     constexpr std::uint32_t activation_context_data_magic = 0x78746341;
     constexpr std::uint32_t activation_context_string_section_magic = 0x64487353;
@@ -132,15 +143,6 @@ namespace sogen
 
     constexpr std::uint32_t activation_context_section_id_assembly_information = 1;
     constexpr std::uint32_t activation_context_section_id_dll_redirection = 2;
+    constexpr std::uint32_t activation_context_section_id_window_class_redirection = 3;
     constexpr std::uint32_t activation_context_section_format_string_table = 1;
-
-    // Roster fields documented as "from ACTIVATION_CONTEXT_DATA base" (AssemblyNameOffset,
-    // AssemblyInformationOffset, and the roster header's own AssemblyInformationSectionOffset)
-    // store the real absolute offset minus this value. Confirmed against the golden fixture's
-    // ROOT and Common-Controls entries with zero exceptions, cross-checked via two independent
-    // paths (the roster's own info_off+1, and the string section entry's val_off relative to
-    // its own section header) agreeing on the same absolute byte position every time. Fields
-    // documented as "from the section header" (string/GUID section entries, and every offset
-    // field inside ACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION) need no adjustment at all.
-    constexpr std::uint32_t activation_context_data_roster_offset_bias = 1;
 }

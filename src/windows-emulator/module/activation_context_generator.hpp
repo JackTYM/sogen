@@ -13,7 +13,12 @@ namespace sogen
         assembly_identity identity;
         std::string concrete_directory_name;      // WinSxS directory name, e.g. "amd64_..._none_..."
         std::string manifest_path;                // full path to the assembly's own .manifest file
-        std::vector<std::string> redirected_dlls; // DLL file names this assembly redirects (its own manifest's <file> entries)
+        std::string resolved_version;             // the assembly's own real version, e.g. "6.0.26100.33438" -
+                                                    // from its own manifest's <assemblyIdentity>, not the
+                                                    // requesting exe's manifest (which may just say "6.0.0.0")
+        std::vector<std::string> redirected_dlls;  // DLL file names this assembly redirects (its own manifest's <file> entries)
+        std::vector<std::string> window_classes;   // window class names this assembly redirects (its own
+                                                    // manifest's <windowClass> entries, nested inside <file>)
     };
 
     struct root_assembly_info
