@@ -621,6 +621,7 @@ namespace sogen
         BOOL handle_NtUserInvalidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
         BOOL handle_NtUserValidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect);
         BOOL handle_NtUserGetUpdateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
+        int handle_NtUserGetUpdateRgn(const syscall_context& c, hwnd hwnd, uint64_t region, BOOL erase);
         BOOL handle_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
         BOOL completion_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
         int32_t handle_NtUserGetKeyNameText(const syscall_context& c, int32_t l_param, emulator_pointer buffer, int32_t character_count);
@@ -689,6 +690,7 @@ namespace sogen
         BOOL handle_NtUserDeleteMenu(const syscall_context& c, uint64_t menu, UINT position, UINT flags);
         uint64_t handle_NtUserGetSystemMenu(const syscall_context& c, hwnd hwnd, BOOL revert);
         BOOL handle_NtUserAllowSetForegroundWindow();
+        BOOL handle_NtUserLockWindowUpdate();
         ULONG handle_NtUserGetAtomName(const syscall_context& c, RTL_ATOM atom,
                                        emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> atom_name);
         NTSTATUS handle_NtUserGetDisplayConfigBufferSizes(const syscall_context& c, UINT32 flags,
@@ -734,6 +736,7 @@ namespace sogen
         int handle_NtUserSetScrollInfo();
         BOOL handle_NtUserIsTouchWindow();
         BOOL handle_NtUserGetWindowPlacement(const syscall_context& c, hwnd window, emulator_object<EMU_WINDOWPLACEMENT> placement);
+        BOOL handle_NtUserSetWindowPlacement(const syscall_context& c, hwnd window, emulator_object<EMU_WINDOWPLACEMENT> placement);
         BOOL handle_NtUserTrackMouseEvent();
         BOOL handle_NtUserSetWindowRgn();
         BOOL handle_NtUserAlterWindowStyle();
@@ -749,6 +752,8 @@ namespace sogen
         BOOL handle_NtUserOpenClipboard();
         BOOL handle_NtUserCloseClipboard();
         BOOL handle_NtUserEmptyClipboard();
+        BOOL handle_NtUserIsClipboardFormatAvailable();
+        BOOL handle_NtUserAddClipboardFormatListener();
         uint64_t handle_NtUserGetClipboardData();
         uint64_t handle_NtUserConvertMemHandle();
         uint64_t handle_NtUserSetClipboardData();
@@ -4011,6 +4016,7 @@ namespace sogen
         add_handler(NtUserInvalidateRect);
         add_handler(NtUserValidateRect);
         add_handler(NtUserGetUpdateRect);
+        add_handler(NtUserGetUpdateRgn);
         add_handler(NtUserUpdateWindow);
         add_handler(NtUserGetCursorInfo);
         add_handler(NtUserMapVirtualKeyEx);
@@ -4148,6 +4154,7 @@ namespace sogen
         add_handler(NtGdiDdDDIDestroyDCFromMemory);
         add_handler(NtAllocateLocallyUniqueId);
         add_handler(NtUserAllowSetForegroundWindow);
+        add_handler(NtUserLockWindowUpdate);
         add_handler(NtGdiOpenDCW);
         add_handler(NtGdiDdDDIOpenAdapterFromLuid);
         add_handler(NtGdiDdDDIOpenAdapterFromHdc);
@@ -4187,6 +4194,7 @@ namespace sogen
         add_handler(NtUserDrawMenuBar);
         add_handler(NtUserSetWindowCompositionAttribute);
         add_handler(NtUserGetWindowPlacement);
+        add_handler(NtUserSetWindowPlacement);
         add_handler(NtUserCreateCaret);
         add_handler(NtUserDestroyCaret);
         add_handler(NtUserSetCaretPos);
@@ -4217,6 +4225,8 @@ namespace sogen
         add_handler(NtUserOpenClipboard);
         add_handler(NtUserCloseClipboard);
         add_handler(NtUserEmptyClipboard);
+        add_handler(NtUserIsClipboardFormatAvailable);
+        add_handler(NtUserAddClipboardFormatListener);
         add_handler(NtUserGetClipboardData);
         add_handler(NtUserConvertMemHandle);
         add_handler(NtUserSetClipboardData);

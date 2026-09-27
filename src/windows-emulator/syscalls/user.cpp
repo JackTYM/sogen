@@ -4301,6 +4301,17 @@ namespace sogen
             return win->update_pending ? TRUE : FALSE;
         }
 
+        int handle_NtUserGetUpdateRgn(const syscall_context& c, const hwnd hwnd, const uint64_t /*region*/, const BOOL /*erase*/)
+        {
+            const auto* win = c.proc.windows.get(hwnd);
+            if (!win)
+            {
+                return 0; // ERROR
+            }
+
+            return win->update_pending ? 2 : 1; // SIMPLEREGION : NULLREGION
+        }
+
         void collect_pending_paint_tree(const syscall_context& c, window& win, std::vector<uint64_t>& order)
         {
             if (!c.proc.is_window_effectively_visible(win.handle))
@@ -5472,6 +5483,11 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserLockWindowUpdate()
+        {
+            return TRUE;
+        }
+
         ULONG handle_NtUserGetAtomName(const syscall_context& c, const RTL_ATOM atom,
                                        const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> atom_name)
         {
@@ -6254,6 +6270,36 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserSetWindowPlacement(const syscall_context& c, const hwnd window,
+                                             const emulator_object<EMU_WINDOWPLACEMENT> placement)
+        {
+            auto* win = c.proc.windows.get(window);
+            if (!win || !placement)
+            {
+                return FALSE;
+            }
+
+            const auto wp = placement.read();
+            const auto& rect = wp.rcNormalPosition;
+            update_window_geometry(c, *win, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, false);
+
+            win->style &= ~(WS_MINIMIZE | WS_MAXIMIZE);
+            if (wp.showCmd == SW_SHOWMINIMIZED)
+            {
+                win->style |= WS_MINIMIZE;
+            }
+            else if (wp.showCmd == SW_SHOWMAXIMIZED)
+            {
+                win->style |= WS_MAXIMIZE;
+            }
+
+            win->guest.access([&](USER_WINDOW& guest_win) { //
+                guest_win.dwStyle = win->style;
+            });
+
+            return TRUE;
+        }
+
         BOOL handle_NtUserTrackMouseEvent()
         {
             return TRUE;
@@ -6509,6 +6555,16 @@ namespace sogen
         }
 
         BOOL handle_NtUserEmptyClipboard()
+        {
+            return TRUE;
+        }
+
+        BOOL handle_NtUserIsClipboardFormatAvailable()
+        {
+            return FALSE;
+        }
+
+        BOOL handle_NtUserAddClipboardFormatListener()
         {
             return TRUE;
         }

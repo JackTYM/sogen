@@ -138,6 +138,31 @@ namespace sogen
             }
         }
 
+        // SERVERINFO.atomSysClass (gpsi+0x364, six WORDs) falls inside apfnClientWorker's real,
+        // populated span (that array only holds k_client_worker_pfn_array_size/18 live entries, and
+        // entry 11's upper half already starts at 0x360): the copy above overwrites it with pieces of
+        // real client pfn pointers every time it runs. user32's dialog manager (InternalCreateDialog)
+        // reads this table directly to turn a control-class ordinal (0x80=Button..0x85=ComboBox) into
+        // the atom it hands to NtUserCreateWindowEx, so it must be reseeded after every copy, exactly
+        // like seed_messagebox_button_strings. resolve_builtin_class_atom() matches these atoms back to
+        // a class name by re-reading the same table, so any nonzero, mutually distinct values work;
+        // 1-6 doubles as the "#1".."#6" aliases normalize_builtin_window_class_name() already accepts.
+        void seed_atom_sys_class(memory_interface& memory, const uint64_t serverinfo_base)
+        {
+            if (serverinfo_base == 0)
+            {
+                return;
+            }
+
+            constexpr uint64_t k_atom_sys_class_offset = 0x364;
+            constexpr std::array<uint16_t, 6> atoms = {1, 2, 3, 4, 5, 6}; // Button, Edit, Static, ListBox, ScrollBar, ComboBox
+
+            for (size_t i = 0; i < atoms.size(); ++i)
+            {
+                memory.write_memory(serverinfo_base + k_atom_sys_class_offset + i * sizeof(uint16_t), &atoms[i], sizeof(atoms[i]));
+            }
+        }
+
         bool try_copy_client_pfn_arrays(memory_interface& memory, process_context& process, const client_pfn_arrays arrays)
         {
             if (arrays.ansi == 0 || arrays.wide == 0 || arrays.worker == 0)
@@ -157,7 +182,9 @@ namespace sogen
                 return false;
             }
 
-            seed_messagebox_button_strings(memory, process.user_handles.get_server_info().value());
+            const auto serverinfo_base = process.user_handles.get_server_info().value();
+            seed_messagebox_button_strings(memory, serverinfo_base);
+            seed_atom_sys_class(memory, serverinfo_base);
 
             win32k_userconnect::refresh_dispatch_client_message(process);
             return true;
