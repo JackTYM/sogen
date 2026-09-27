@@ -3704,27 +3704,33 @@ namespace sogen
                     emu.try_read_memory(header_ptr + 0xc, &ordinal, sizeof(ordinal));
 
                     const auto is_embedded_browser = std::find(EMBEDDED_BROWSER_ORDINALS.begin(), EMBEDDED_BROWSER_ORDINALS.end(),
-                                                                ordinal) != EMBEDDED_BROWSER_ORDINALS.end();
+                                                               ordinal) != EMBEDDED_BROWSER_ORDINALS.end();
                     if (!is_embedded_browser)
                     {
                         return;
                     }
 
-                    uint64_t payload_offset{};
+                    // `payload` (MessageHeaderV2, offset 0x20) is a mojo-style relative offset:
+                    // measured from the address of the offset field itself, not from header_ptr -
+                    // confirmed live this cycle (a captured 0x18 value's target byte-for-byte matched
+                    // a nested StructHeader only once interpreted this way; see
+                    // project_solidworks_bringup.md #542).
+                    uint32_t payload_offset{};
                     emu.try_read_memory(header_ptr + 0x20, &payload_offset, sizeof(payload_offset));
+                    const auto payload_address = header_ptr + 0x20 + payload_offset;
 
                     std::array<uint8_t, 56> header{};
                     emu.try_read_memory(header_ptr, header.data(), header.size());
 
                     std::array<uint8_t, 256> payload{};
-                    emu.try_read_memory(header_ptr + payload_offset, payload.data(), payload.size());
+                    emu.try_read_memory(payload_address, payload.data(), payload.size());
 
-                    win_emu->log.error(
-                        "[embedded-browser-payload-hook-trace] hit at 0x%llx, ordinal=0x%x header_ptr=0x%llx "
-                        "payload_offset=0x%llx header_bytes=%s payload_bytes=%s\n",
-                        static_cast<unsigned long long>(address), ordinal, static_cast<unsigned long long>(header_ptr),
-                        static_cast<unsigned long long>(payload_offset), utils::string::to_hex_string(header.data(), header.size()).c_str(),
-                        utils::string::to_hex_string(payload.data(), payload.size()).c_str());
+                    win_emu->log.error("[embedded-browser-payload-hook-trace] hit at 0x%llx, ordinal=0x%x header_ptr=0x%llx "
+                                       "payload_address=0x%llx header_bytes=%s payload_bytes=%s\n",
+                                       static_cast<unsigned long long>(address), ordinal, static_cast<unsigned long long>(header_ptr),
+                                       static_cast<unsigned long long>(payload_address),
+                                       utils::string::to_hex_string(header.data(), header.size()).c_str(),
+                                       utils::string::to_hex_string(payload.data(), payload.size()).c_str());
                 });
             }
         }
