@@ -4072,7 +4072,7 @@ namespace sogen
             // remaining inferential gap: does this genuinely fire only once (main thread), explaining
             // why `sldim.exe`'s Worker Thread (per `#552`, `tid=36`) never gets its own registration -
             // see project_solidworks_bringup.md #553.
-            if (mod.name == "EmbeddedBrowserWebView.dll" && std::getenv("SOGEN_TRACE_SLDIM_BASEDLG_WEBVIEW2_HOOK"))
+            if (mod.name == "embeddedbrowserwebview.dll" && std::getenv("SOGEN_TRACE_SLDIM_BASEDLG_WEBVIEW2_HOOK"))
             {
                 auto* const win_emu = c.win_emu;
                 const auto address = mod.image_base + 0x171c76;
