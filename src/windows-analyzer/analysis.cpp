@@ -4065,6 +4065,28 @@ namespace sogen
                     });
                 }
             }
+
+            // `AppMojoEnvironment::GetOrCreateInstance`'s own real entry (RVA 0x171c76, real PDB name;
+            // `#550` found this is the ONLY place that establishes the per-thread TLS state
+            // `RunningOnUIThread()` checks). Reading tid at each hit directly tests `#552`'s own
+            // remaining inferential gap: does this genuinely fire only once (main thread), explaining
+            // why `sldim.exe`'s Worker Thread (per `#552`, `tid=36`) never gets its own registration -
+            // see project_solidworks_bringup.md #553.
+            if (mod.name == "EmbeddedBrowserWebView.dll" && std::getenv("SOGEN_TRACE_SLDIM_BASEDLG_WEBVIEW2_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + 0x171c76;
+
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching AppMojoEnvironment::GetOrCreateInstance at "
+                                   "0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit AppMojoEnvironment::GetOrCreateInstance at "
+                                       "0x%llx, tid=%u\n",
+                                       static_cast<unsigned long long>(address), win_emu->current_thread().id);
+                });
+            }
         }
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
