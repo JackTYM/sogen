@@ -717,7 +717,7 @@ namespace sogen
                                               emulator_object<EMU_MENUITEMINFO> item_info,
                                               emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> item_text);
         hmenu handle_NtUserCreatePopupMenu(const syscall_context& c);
-        BOOL handle_NtUserSetMenu();
+        BOOL handle_NtUserSetMenu(const syscall_context& c, hwnd wnd, hmenu menu, BOOL repaint);
         BOOL handle_NtUserSetMenuDefaultItem(const syscall_context& c, hmenu menu, UINT item, UINT by_position);
         BOOL handle_NtUserEndMenu();
         BOOL handle_NtUserRemoveMenu(const syscall_context& c, hmenu menu, UINT position, UINT flags);

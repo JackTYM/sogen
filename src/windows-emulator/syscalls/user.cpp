@@ -31,6 +31,7 @@ namespace sogen
         constexpr uint32_t k_fn_inout_nc_calc_size_callback_id = 0x15;
         constexpr size_t k_client_pfn_button_wndproc_index = 7;
         constexpr size_t k_client_pfn_dialog_wndproc_index = 10;
+        constexpr size_t k_client_pfn_edit_wndproc_index = 11;
         constexpr size_t k_client_pfn_static_wndproc_index = 14;
         constexpr uint32_t k_ctlcolor_edit = 1;
         constexpr uint32_t k_ctlcolor_listbox = 2;
@@ -206,7 +207,7 @@ namespace sogen
         bool is_builtin_window_class_name(const std::u16string_view class_name)
         {
             const auto normalized = normalize_builtin_window_class_name(class_name);
-            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Static";
+            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Static" || normalized == u"Edit";
         }
 
         uint16_t get_builtin_window_fnid(const std::u16string_view class_name)
@@ -219,6 +220,10 @@ namespace sogen
             if (normalized == builtin_dialog_class_name)
             {
                 return 0x02A4;
+            }
+            if (normalized == u"Edit")
+            {
+                return 0x02A5;
             }
             if (normalized == u"Static")
             {
@@ -283,6 +288,14 @@ namespace sogen
                         wnd_proc = server_info.apfnClientA[k_client_pfn_static_wndproc_index];
                     }
                 }
+                else if (normalized_name == u"Edit")
+                {
+                    wnd_proc = server_info.apfnClientW[k_client_pfn_edit_wndproc_index];
+                    if (wnd_proc == 0)
+                    {
+                        wnd_proc = server_info.apfnClientA[k_client_pfn_edit_wndproc_index];
+                    }
+                }
                 else if (normalized_name == builtin_dialog_class_name)
                 {
                     wnd_proc = server_info.apfnClientW[k_client_pfn_dialog_wndproc_index];
@@ -293,7 +306,7 @@ namespace sogen
                 }
             });
 
-            if (normalized_name == u"Button" || normalized_name == u"Static")
+            if (normalized_name == u"Button" || normalized_name == u"Static" || normalized_name == u"Edit")
             {
                 wnd_extra = 8;
             }
@@ -3387,6 +3400,10 @@ namespace sogen
                 {
                     guest_win.spmenu = menu;
                 }
+                else if (const auto* menu_obj = c.proc.menus.get(menu))
+                {
+                    guest_win.spmenu = menu_obj->guest.value();
+                }
                 guest_win.windowBand = 1; // ZBID_DESKTOP
                 guest_win.dpiContext = USER_DEFAULT_DPI_CONTEXT;
                 guest_win.fnid = get_builtin_window_fnid(normalized_class);
@@ -6067,8 +6084,28 @@ namespace sogen
             return handle.bits;
         }
 
-        BOOL handle_NtUserSetMenu()
+        BOOL handle_NtUserSetMenu(const syscall_context& c, const hwnd wnd, const hmenu menu, const BOOL /*repaint*/)
         {
+            auto* win = c.proc.windows.get(wnd);
+            if (!win)
+            {
+                set_guest_last_error(c, 1400); // ERROR_INVALID_WINDOW_HANDLE
+                return FALSE;
+            }
+
+            uint64_t menu_ptr = 0;
+            if (menu != 0)
+            {
+                const auto* menu_obj = c.proc.menus.get(menu);
+                if (!menu_obj)
+                {
+                    set_guest_last_error(c, 1401); // ERROR_INVALID_MENU_HANDLE
+                    return FALSE;
+                }
+                menu_ptr = menu_obj->guest.value();
+            }
+
+            win->guest.access([&](USER_WINDOW& guest_win) { guest_win.spmenu = menu_ptr; });
             return TRUE;
         }
 
