@@ -167,10 +167,34 @@ namespace sogen
         // `ContinueInitializeWithProfile`'s name and size (6907 bytes, by far the largest of the
         // three) make it the most likely candidate for whatever real async dependency this
         // investigation's rendering blocker is waiting on.
-        constexpr std::array<traced_symbol, 3> EMBEDDED_BROWSER_INIT_CHAIN_TARGETS{{
+        // The real `EmbeddedBrowser::Initialize` virtual override itself, found by following
+        // `ContinueInitializeWithProfile`'s own data (not code) xrefs - it's only ever referenced as
+        // a `base::BindOnce` callback target, and the binding site is this function
+        // (`?Initialize@EmbeddedBrowserImpl@embedded_browser@@...`, real PDB name, RVA 0xa46b0) -
+        // see project_solidworks_bringup.md #545. Decompiling it found a real, well-formed
+        // WebView2-documented failure branch, guarded by `!*(this+1453)`: it sets the
+        // `EmbeddedBrowserCreationData`'s error field to `0x8007139F` and returns the literal string
+        // "WebView2: Initialization failed due to incompatible environment configurations. Please
+        // check if there is already a WebView2 running with the same user data folder but different
+        // environment parameters." - never reaching `ContinueInitializeWithProfile` at all. Watched
+        // as the 4th entry below, at the exact instruction that stores that error code, right after
+        // the branch's own condition is evaluated.
+        // `EmbeddedBrowserImpl::Initialize`'s own decompiled body (see comment above) shows every one
+        // of its early, SYNCHRONOUS validation checks (DPI-awareness mismatch, browser shutting
+        // down, `--edge-webview-host-pid` PID mismatch, `EBWebView`-folder-name mismatch,
+        // `kEdgeTranslate` feature check) funnels into one common exit at RVA 0xa0d4b98 that
+        // immediately calls the real mojo response callback
+        // (`base::OnceCallback<void(EmbeddedBrowserCreationDataPtr)>::Run`) - i.e. this single site
+        // is where `Initialize` would synchronously reply to `sldim.exe`, success or failure, without
+        // ever reaching the async profile-fetch that eventually invokes `ContinueInitializeWithProfile`
+        // - see project_solidworks_bringup.md #545.
+        constexpr std::array<traced_symbol, 6> EMBEDDED_BROWSER_INIT_CHAIN_TARGETS{{
             {"embedded_browser::EmbeddedBrowserImpl::GetInitializeScript", 0x20d29d2},
             {"embedded_browser::EmbeddedBrowserImpl::ContinueInitializeWithProfile", 0x20d54c0},
             {"embedded_browser::EmbeddedBrowserImpl::InitializeWithWebContents", 0x20d7664},
+            {"EmbeddedBrowserImpl::Initialize incompatible-environment error branch", 0xa0d494c},
+            {"EmbeddedBrowserImpl::Initialize synchronous OnceCallback::Run", 0xa0d4b98},
+            {"embedded_browser::EmbeddedBrowserProfileImpl::GetOrCreateProfile", 0xa0ff940},
         }};
 
         // Unlike Channel::TryDispatchMessage (#474) and InterfaceEndpointClient::HandleIncomingMessage
