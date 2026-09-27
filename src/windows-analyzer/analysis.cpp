@@ -3722,7 +3722,7 @@ namespace sogen
                     std::array<uint8_t, 56> header{};
                     emu.try_read_memory(header_ptr, header.data(), header.size());
 
-                    std::array<uint8_t, 256> payload{};
+                    std::array<uint8_t, 1024> payload{};
                     emu.try_read_memory(payload_address, payload.data(), payload.size());
 
                     win_emu->log.error("[embedded-browser-payload-hook-trace] hit at 0x%llx, ordinal=0x%x header_ptr=0x%llx "
