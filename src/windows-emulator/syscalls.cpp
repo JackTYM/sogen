@@ -535,6 +535,7 @@ namespace sogen
         hdc handle_NtUserBeginPaint(const syscall_context& c, hwnd window, emulator_object<EMU_PAINTSTRUCT> paint_struct);
         BOOL handle_NtUserEndPaint(const syscall_context& c, hwnd window, emulator_object<EMU_PAINTSTRUCT> paint_struct);
         BOOL handle_NtUserGetCursorPos(const syscall_context& c, emulator_pointer point_ptr);
+        uint32_t handle_NtUserGetMessagePos(const syscall_context& c);
         BOOL handle_NtUserGetCursorInfo(const syscall_context& c, emulator_object<EMU_CURSORINFO> cursor_info);
         BOOL handle_NtUserGetClipCursor(const syscall_context& c, emulator_pointer rect_ptr);
         BOOL handle_NtUserTransformPoint(const syscall_context& c, emulator_pointer point, uint32_t from_dpi, uint32_t to_dpi,
@@ -3954,6 +3955,7 @@ namespace sogen
         add_handler(NtGetNextThread);
         add_handler(NtSetInformationObject);
         add_handler(NtUserGetCursorPos);
+        add_handler(NtUserGetMessagePos);
         add_handler(NtUserGetClipCursor);
         add_handler(NtUserTransformPoint);
         add_handler(NtUserShowCursor);

@@ -2567,6 +2567,15 @@ namespace sogen
             return TRUE;
         }
 
+        uint32_t handle_NtUserGetMessagePos(const syscall_context& c)
+        {
+            // Screen coordinates of the cursor at the time of the last message retrieved by GetMessage/
+            // PeekMessage. Messages aren't currently stamped with the cursor position they were posted
+            // with (msg::pt stays zeroed), so this reports the cursor's current position instead - the
+            // same approximation handle_NtUserGetCursorPos and handle_NtUserGetCursorInfo already make.
+            return (static_cast<uint32_t>(static_cast<uint16_t>(c.proc.cursor_y)) << 16) | static_cast<uint16_t>(c.proc.cursor_x);
+        }
+
         BOOL handle_NtUserGetCursorInfo(const syscall_context& c, const emulator_object<EMU_CURSORINFO> cursor_info)
         {
             if (!cursor_info)
