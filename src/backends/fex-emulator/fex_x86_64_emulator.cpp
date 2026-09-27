@@ -1748,7 +1748,13 @@ namespace sogen::fex
         void arm_breakpoint_rearm_step(uint64_t address);
         void rearm_pending_breakpoint_if_any();
 
-        std::optional<uint64_t> deferred_breakpoint_rearm_{};
+        // Addresses whose rearm couldn't happen inline because the hit stopped the vCPU - more than one
+        // can accumulate before rearm_pending_breakpoint_if_any() next runs, since call_guest_function's
+        // own return-trap sentinel (see its doc comment) is a software breakpoint like any other and can
+        // stop the vCPU independently of whatever GDB breakpoint is also pending here. A plain
+        // std::optional would let a second stop silently discard the first's address, leaking it as a
+        // permanently un-reinstalled breakpoint - see rearm_pending_breakpoint_if_any.
+        std::vector<uint64_t> deferred_breakpoint_rearm_{};
         std::optional<breakpoint_rearm_state> pending_breakpoint_rearm_{};
 
         // A plain, caller-requested single instruction step (start(1), see call_guest_function's own
@@ -6210,22 +6216,32 @@ namespace sogen::fex
     {
         constexpr uint64_t trap_flag_bit = 0x100;
 
-        if (vector == 1 && this->pending_plain_step_)
+        // A GDB "step" issued while sitting on a breakpoint address collides with the rearm this same
+        // resume already armed via rearm_pending_breakpoint_if_any(): both ride the same EFLAGS.TF trap,
+        // so a single vector-1 hit can carry both a pending rearm and a pending plain step at once. Each
+        // must still run its own bookkeeping (reinstalling the INT3, reporting the step as complete) or
+        // whichever one is skipped leaks into later, unrelated vector-1 traps - see pending_breakpoint_rearm_.
+        if (vector == 1 && (this->pending_breakpoint_rearm_ || this->pending_plain_step_))
         {
-            this->pending_plain_step_ = false;
-            this->write_rflags(this->read_rflags() & ~trap_flag_bit);
-            this->stop_requested_ = true;
-            return true;
-        }
+            if (this->pending_breakpoint_rearm_)
+            {
+                const auto rearm = *std::exchange(this->pending_breakpoint_rearm_, std::nullopt);
+                this->emulator_.set_software_breakpoint_applied(rearm.address, true);
 
-        if (vector == 1 && this->pending_breakpoint_rearm_)
-        {
-            const auto rearm = *std::exchange(this->pending_breakpoint_rearm_, std::nullopt);
+                if (!this->pending_plain_step_)
+                {
+                    const uint64_t rflags = this->read_rflags();
+                    this->write_rflags(rearm.had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+                }
+            }
 
-            const uint64_t rflags = this->read_rflags();
-            this->write_rflags(rearm.had_trap_flag ? (rflags | trap_flag_bit) : (rflags & ~trap_flag_bit));
+            if (this->pending_plain_step_)
+            {
+                this->pending_plain_step_ = false;
+                this->write_rflags(this->read_rflags() & ~trap_flag_bit);
+                this->stop_requested_ = true;
+            }
 
-            this->emulator_.set_software_breakpoint_applied(rearm.address, true);
             return true;
         }
 
@@ -6266,7 +6282,11 @@ namespace sogen::fex
 
         if (this->stop_requested_)
         {
-            this->deferred_breakpoint_rearm_ = candidate;
+            if (std::find(this->deferred_breakpoint_rearm_.begin(), this->deferred_breakpoint_rearm_.end(), candidate) ==
+                this->deferred_breakpoint_rearm_.end())
+            {
+                this->deferred_breakpoint_rearm_.push_back(candidate);
+            }
         }
         else
         {
@@ -6293,19 +6313,25 @@ namespace sogen::fex
 
     void fex_vcpu::rearm_pending_breakpoint_if_any()
     {
-        if (!this->deferred_breakpoint_rearm_)
+        if (this->deferred_breakpoint_rearm_.empty())
         {
             return;
         }
 
-        const auto address = *std::exchange(this->deferred_breakpoint_rearm_, std::nullopt);
-        if (this->cpu_state().rip == address)
+        const auto pending = std::exchange(this->deferred_breakpoint_rearm_, {});
+        bool armed_step = false;
+
+        for (const auto address : pending)
         {
-            this->arm_breakpoint_rearm_step(address);
-        }
-        else
-        {
-            this->emulator_.set_software_breakpoint_applied(address, true);
+            if (!armed_step && this->cpu_state().rip == address)
+            {
+                this->arm_breakpoint_rearm_step(address);
+                armed_step = true;
+            }
+            else
+            {
+                this->emulator_.set_software_breakpoint_applied(address, true);
+            }
         }
     }
 
