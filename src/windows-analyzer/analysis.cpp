@@ -147,6 +147,32 @@ namespace sogen
         // `EmbeddedBrowserFactoryStubDispatch::Accept` - see project_solidworks_bringup.md #540.
         constexpr std::array<uint32_t, 2> EMBEDDED_BROWSER_ORDINALS{{0x6d5a37bf, 0x62756596}};
 
+        // `idasql`/Hex-Rays decompilation of `EmbeddedBrowserStubDispatch::AcceptWithResponder`
+        // (msedge.dll 150.0.4078.105, RVA 0x6dd56a8, resolved by real PDB name) shows ordinal
+        // `0x6d5a37bf` is `EmbeddedBrowser::Initialize(EmbeddedBrowserParams)` - the actual method
+        // this whole investigation's "sldim.exe" string capture (#542/#543) was calling. On
+        // deserialization success it calls the real vtable slot (`this+8`); on failure it calls
+        // `mojo::internal::ReportValidationErrorForMessage(message, VALIDATION_ERROR_DESERIALIZATION_FAILED
+        // /* =17 */, "embedded_browser.mojom.EmbeddedBrowser", ...)` and `Initialize` never runs at
+        // all - see project_solidworks_bringup.md #544. `ReportValidationErrorForMessage` itself
+        // (RVA 0x515aeb0, real PDB name, signature
+        // `void(Message*, ValidationError, const char* interface_name, uint32_t, bool)`) is hooked
+        // generically below to directly test whether this rejection path is ever taken live.
+        constexpr uint64_t REPORT_VALIDATION_ERROR_FOR_MESSAGE_RVA = 0x515aeb0;
+
+        // Real, PDB-named functions along `EmbeddedBrowser::Initialize`'s own real (vtable slot 1,
+        // `AcceptWithResponder`'s `this+8` call) implementation chain in msedge.dll 150.0.4078.105,
+        // found via `idasql` name search once #544's `EmbeddedBrowser::Initialize` identification
+        // resolved which class to look in - see project_solidworks_bringup.md #544.
+        // `ContinueInitializeWithProfile`'s name and size (6907 bytes, by far the largest of the
+        // three) make it the most likely candidate for whatever real async dependency this
+        // investigation's rendering blocker is waiting on.
+        constexpr std::array<traced_symbol, 3> EMBEDDED_BROWSER_INIT_CHAIN_TARGETS{{
+            {"embedded_browser::EmbeddedBrowserImpl::GetInitializeScript", 0x20d29d2},
+            {"embedded_browser::EmbeddedBrowserImpl::ContinueInitializeWithProfile", 0x20d54c0},
+            {"embedded_browser::EmbeddedBrowserImpl::InitializeWithWebContents", 0x20d7664},
+        }};
+
         // Unlike Channel::TryDispatchMessage (#474) and InterfaceEndpointClient::HandleIncomingMessage
         // (#536), these are real, out-of-line, symbol-carrying functions in msedge.dll 150.0.4078.105's
         // own private PDB table (msedge.table.txt) - see project_solidworks_bringup.md #537/#538.
@@ -3732,6 +3758,61 @@ namespace sogen
                                        utils::string::to_hex_string(header.data(), header.size()).c_str(),
                                        utils::string::to_hex_string(payload.data(), payload.size()).c_str());
                 });
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_MOJO_VALIDATION_ERROR_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + REPORT_VALIDATION_ERROR_FOR_MESSAGE_RVA;
+
+                win_emu->log.error(
+                    "[mojo-validation-error-hook-trace] watching mojo::internal::ReportValidationErrorForMessage at 0x%llx\n",
+                    static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto message_ptr = emu.reg<uint64_t>(x86_register::rcx);
+                    const auto error = emu.reg<uint32_t>(x86_register::rdx);
+                    const auto interface_name_ptr = emu.reg<uint64_t>(x86_register::r8);
+                    const auto method_index = emu.reg<uint32_t>(x86_register::r9);
+
+                    const auto interface_name = read_string<char>(win_emu->memory, interface_name_ptr);
+
+                    win_emu->log.error("[mojo-validation-error-hook-trace] hit at 0x%llx, message=0x%llx error=%u "
+                                       "interface=%s method_index=%u\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(message_ptr), error,
+                                       interface_name.c_str(), method_index);
+                });
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_INIT_CHAIN_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                for (const auto& target : EMBEDDED_BROWSER_INIT_CHAIN_TARGETS)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[embedded-browser-init-chain-hook-trace] watching %s at 0x%llx\n", name,
+                                       static_cast<unsigned long long>(address));
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto rsp = emu.read_stack_pointer();
+
+                        uint64_t return_address{};
+                        emu.try_read_memory(rsp, &return_address, sizeof(return_address));
+
+                        const auto* caller_mod_name = win_emu->mod_manager.find_name(return_address);
+                        const auto* caller_mod = win_emu->mod_manager.find_by_address(return_address);
+                        const auto caller_offset = caller_mod ? return_address - caller_mod->image_base : return_address;
+
+                        win_emu->log.error("[embedded-browser-init-chain-hook-trace] hit %s at 0x%llx, return=0x%llx (%s+0x%llx)\n", name,
+                                           static_cast<unsigned long long>(address), static_cast<unsigned long long>(return_address),
+                                           caller_mod_name, static_cast<unsigned long long>(caller_offset));
+                    });
+                }
             }
         }
 
