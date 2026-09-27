@@ -359,8 +359,11 @@ namespace sogen
     // like any other hook installed from a syscall handler rather than at emulator setup time) and
     // restores this thread's pre-call registers, which puts RIP back on the original syscall
     // instruction call_guest_function's caller diverted away from. cpu.stop() then unwinds back to
-    // the scheduler's own loop exactly like any other syscall-driven stop; the next iteration simply
-    // re-enters the CPU there, re-executing that syscall instruction for real.
+    // the scheduler's own loop - which only keeps scheduling this vCPU if vcpu.switch_thread is set,
+    // since the FEX backend's has_violation() is unconditionally false and switch_thread is otherwise
+    // the sole signal that distinguishes "resume scheduling, nothing went wrong" from "nothing left to
+    // run" (see yield_thread). Setting it here re-enters the CPU with the restored RIP through the
+    // ordinary thread-switch path, re-executing that syscall instruction for real.
     inline uint64_t ensure_call_completion_trap(const syscall_context& c)
     {
         if (c.proc.call_guest_function_return_trap == 0)
@@ -371,8 +374,10 @@ namespace sogen
 
             c.win_emu.emu().hook_memory_execution(
                 c.proc.call_guest_function_return_trap, [&win_emu = c.win_emu](cpu_interface& cpu, uint64_t) {
+                    auto& vcpu = win_emu.vcpu(cpu.index());
+
                     win_emu.dispatch_on_cpu(cpu, [&] {
-                        auto& pending = win_emu.vcpu(cpu.index()).thread().pending_guest_function_calls;
+                        auto& pending = vcpu.thread().pending_guest_function_calls;
                         if (pending.empty())
                         {
                             win_emu.log.error("call_guest_function return trap hit with no pending guest function call\n");
@@ -382,6 +387,7 @@ namespace sogen
 
                         cpu.restore_registers(pending.back());
                         pending.pop_back();
+                        vcpu.switch_thread = true;
                     });
 
                     cpu.stop();
