@@ -188,13 +188,27 @@ namespace sogen
         // is where `Initialize` would synchronously reply to `sldim.exe`, success or failure, without
         // ever reaching the async profile-fetch that eventually invokes `ContinueInitializeWithProfile`
         // - see project_solidworks_bringup.md #545.
-        constexpr std::array<traced_symbol, 6> EMBEDDED_BROWSER_INIT_CHAIN_TARGETS{{
-            {"embedded_browser::EmbeddedBrowserImpl::GetInitializeScript", 0x20d29d2},
-            {"embedded_browser::EmbeddedBrowserImpl::ContinueInitializeWithProfile", 0x20d54c0},
-            {"embedded_browser::EmbeddedBrowserImpl::InitializeWithWebContents", 0x20d7664},
+        // `GetOrCreateProfile` (above) just delegates to `GetOrCreateProfileFromPath`, which - unless
+        // an in-memory cache already has this profile path (`HasProfileMarkedAsDeleted`/a real
+        // `std::map<FilePath,bool>` lookup, neither of which should ever hit on a fresh profile) -
+        // calls the real, public, well-known Chromium `ProfileManager::CreateProfileAsync` (two real
+        // overloads found; both watched since Hex-Rays' own demangled `BindState` name for the bound
+        // callback was ambiguous between them), binding
+        // `embedded_browser::_anonymous_namespace_::OnProfileLoaded` as ITS OWN completion callback -
+        // see project_solidworks_bringup.md #546. If `OnProfileLoaded` never fires even though
+        // `CreateProfileAsync` is confirmed called, the gap is inside real Chromium's own
+        // `ProfileManager`/profile-creation machinery (very possibly a sogen task-runner/sequence
+        // scheduling fidelity gap), not this investigation's own WebView2/embedded_browser code.
+        constexpr std::array<traced_symbol, 9> EMBEDDED_BROWSER_INIT_CHAIN_TARGETS{{
+            {"embedded_browser::EmbeddedBrowserImpl::GetInitializeScript", 0xa0d29d2},
+            {"embedded_browser::EmbeddedBrowserImpl::ContinueInitializeWithProfile", 0xa0d54c0},
+            {"embedded_browser::EmbeddedBrowserImpl::InitializeWithWebContents", 0xa0d7664},
             {"EmbeddedBrowserImpl::Initialize incompatible-environment error branch", 0xa0d494c},
             {"EmbeddedBrowserImpl::Initialize synchronous OnceCallback::Run", 0xa0d4b98},
             {"embedded_browser::EmbeddedBrowserProfileImpl::GetOrCreateProfile", 0xa0ff940},
+            {"ProfileManager::CreateProfileAsync (OnceCallback<void(Profile*)> overload)", 0x94a12e0},
+            {"ProfileManager::CreateProfileAsync (RepeatingCallback<void(Profile*,CreateStatus)> overload)", 0x94a1c2c},
+            {"embedded_browser::(anon)::OnProfileLoaded", 0xa100010},
         }};
 
         // Unlike Channel::TryDispatchMessage (#474) and InterfaceEndpointClient::HandleIncomingMessage
@@ -3837,6 +3851,120 @@ namespace sogen
                                            caller_mod_name, static_cast<unsigned long long>(caller_offset));
                     });
                 }
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_PROFILE_STATUS_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + 0xa100010;
+
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching embedded_browser::(anon)::OnProfileLoaded's "
+                                   "own args at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto rsp = emu.read_stack_pointer();
+                    const auto profile = emu.reg<uint64_t>(x86_register::r9);
+
+                    uint64_t create_status{};
+                    emu.try_read_memory(rsp + 0x28, &create_status, sizeof(create_status));
+
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit at 0x%llx, profile=0x%llx create_status=%llu\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(profile),
+                                       static_cast<unsigned long long>(create_status));
+                });
+            }
+
+            // The CFG-guarded indirect call inside the real, monomorphic
+            // `base::OnceCallback<void(WebViewErrorCode, scoped_refptr<EmbeddedBrowserProfileImpl>)>::Run`
+            // instantiation (`msedge.dll+0xa0fff68`) that `OnProfileLoaded` calls on success - this is
+            // the exact call that would invoke `ContinueInitializeWithProfile` if that's really what
+            // was bound. `rax` holds the resolved target immediately before the
+            // `__guard_dispatch_icall_fptr` dispatch, the same pattern already established for other
+            // mojo dispatch hooks in this file - see project_solidworks_bringup.md #546.
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_PROFILE_STATUS_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + 0xa0fff9c;
+
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching OnceCallback::Run's own "
+                                   "resolved dispatch target at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto call_target = emu.reg<uint64_t>(x86_register::rax);
+
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
+                    const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
+                    const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
+
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit at 0x%llx, call_target=0x%llx (%s+0x%llx)\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(call_target),
+                                       target_mod_name, static_cast<unsigned long long>(target_offset));
+                });
+            }
+
+            // The two branch outcomes of `InvokeHelper::MakeItSo`'s own inlined `base::WeakPtr`
+            // validity check (real disassembly confirmed: `mov rax,[rdx]; test rax,rax; jz <drop>;
+            // mov al,[rax+4]; test al,al; jnz <drop>; cmp [rdx+8],0; jnz <proceed>`) - `<drop>`
+            // (0xa0f1a5d) just returns with no further call at all; `<proceed>` (0xa0f1a78) goes on to
+            // build args and make the real call. Watching both directly answers whether
+            // `ContinueInitializeWithProfile` is silently skipped because its bound `WeakPtr` was
+            // already invalidated by the time this async callback fires - see
+            // project_solidworks_bringup.md #546.
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_PROFILE_STATUS_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                const std::array<traced_symbol, 2> weak_ptr_branches{{
+                    {"MakeItSo weak-ptr-invalid drop path", 0xa0f1a5d},
+                    {"MakeItSo weak-ptr-valid proceed path", 0xa0f1a78},
+                }};
+
+                for (const auto& target : weak_ptr_branches)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching %s at 0x%llx\n", name,
+                                       static_cast<unsigned long long>(address));
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit %s at 0x%llx\n", name,
+                                           static_cast<unsigned long long>(address));
+                    });
+                }
+            }
+
+            // `DecayedFunctorTraits::Invoke`'s own final CFG-guarded indirect call (real disassembly
+            // confirmed `rax` holds the resolved target, loaded at `mov rax,[rcx]` well before this
+            // call with no intervening reassignment - the same pattern established for every other
+            // mojo dispatch hook in this file). This is the LAST hop before the real target method
+            // (expected to be `ContinueInitializeWithProfile`) actually runs - see
+            // project_solidworks_bringup.md #546.
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_PROFILE_STATUS_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + 0xa0f1b4c;
+
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching DecayedFunctorTraits::Invoke's own final "
+                                   "dispatch at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto call_target = emu.reg<uint64_t>(x86_register::rax);
+
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(call_target);
+                    const auto* target_mod = win_emu->mod_manager.find_by_address(call_target);
+                    const auto target_offset = target_mod ? call_target - target_mod->image_base : call_target;
+
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit at 0x%llx, final_call_target=0x%llx (%s+0x%llx)\n",
+                                       static_cast<unsigned long long>(address), static_cast<unsigned long long>(call_target),
+                                       target_mod_name, static_cast<unsigned long long>(target_offset));
+                });
             }
         }
 
