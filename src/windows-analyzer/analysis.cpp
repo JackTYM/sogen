@@ -139,6 +139,14 @@ namespace sogen
         // its own `target_` receiver, not the final destination.
         constexpr uint64_t MESSAGE_DISPATCHER_FORWARD_CALL_RVA = 0x1105f33;
 
+        // The two rare ordinals #540 resolved, via a real `cmp` immediate in msedge.dll's own
+        // `*StubDispatch::Accept`/`AcceptWithResponder` functions, directly into the
+        // `embedded_browser::mojom` namespace itself: `0x6d5a37bf` ->
+        // `EmbeddedBrowserStubDispatch::AcceptWithResponder` (also independently resolved to a
+        // `OnceCallback<..., EmbeddedBrowserCreationDataPtr>::Run` call site) and `0x62756596` ->
+        // `EmbeddedBrowserFactoryStubDispatch::Accept` - see project_solidworks_bringup.md #540.
+        constexpr std::array<uint32_t, 2> EMBEDDED_BROWSER_ORDINALS{{0x6d5a37bf, 0x62756596}};
+
         // Unlike Channel::TryDispatchMessage (#474) and InterfaceEndpointClient::HandleIncomingMessage
         // (#536), these are real, out-of-line, symbol-carrying functions in msedge.dll 150.0.4078.105's
         // own private PDB table (msedge.table.txt) - see project_solidworks_bringup.md #537/#538.
@@ -3674,6 +3682,49 @@ namespace sogen
                                        static_cast<unsigned long long>(message_ptr), static_cast<unsigned long long>(call_target),
                                        target_mod_name, static_cast<unsigned long long>(target_offset),
                                        static_cast<unsigned long long>(header_ptr), ordinal);
+                });
+            }
+
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_PAYLOAD_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + MESSAGE_DISPATCHER_FORWARD_CALL_RVA;
+
+                win_emu->log.error("[embedded-browser-payload-hook-trace] watching MessageDispatcher::Accept's forward "
+                                   "call site at 0x%llx, filtering for embedded_browser::mojom ordinals\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto message_ptr = emu.reg<uint64_t>(x86_register::rdx);
+
+                    uint64_t header_ptr{};
+                    emu.try_read_memory(message_ptr + 0x18, &header_ptr, sizeof(header_ptr));
+                    uint32_t ordinal{};
+                    emu.try_read_memory(header_ptr + 0xc, &ordinal, sizeof(ordinal));
+
+                    const auto is_embedded_browser = std::find(EMBEDDED_BROWSER_ORDINALS.begin(), EMBEDDED_BROWSER_ORDINALS.end(),
+                                                                ordinal) != EMBEDDED_BROWSER_ORDINALS.end();
+                    if (!is_embedded_browser)
+                    {
+                        return;
+                    }
+
+                    uint64_t payload_offset{};
+                    emu.try_read_memory(header_ptr + 0x20, &payload_offset, sizeof(payload_offset));
+
+                    std::array<uint8_t, 56> header{};
+                    emu.try_read_memory(header_ptr, header.data(), header.size());
+
+                    std::array<uint8_t, 256> payload{};
+                    emu.try_read_memory(header_ptr + payload_offset, payload.data(), payload.size());
+
+                    win_emu->log.error(
+                        "[embedded-browser-payload-hook-trace] hit at 0x%llx, ordinal=0x%x header_ptr=0x%llx "
+                        "payload_offset=0x%llx header_bytes=%s payload_bytes=%s\n",
+                        static_cast<unsigned long long>(address), ordinal, static_cast<unsigned long long>(header_ptr),
+                        static_cast<unsigned long long>(payload_offset), utils::string::to_hex_string(header.data(), header.size()).c_str(),
+                        utils::string::to_hex_string(payload.data(), payload.size()).c_str());
                 });
             }
         }
