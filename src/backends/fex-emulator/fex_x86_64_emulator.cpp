@@ -763,11 +763,11 @@ namespace sogen::fex
         thread_local fex_vcpu* t_current_vcpu = nullptr;
 
         // RAII guard for t_current_vcpu, scoped to fex_vcpu::start()'s ExecuteThread loop. start()
-        // can recurse on the same host thread (e.g. call_guest_function's nested cpu.start(1) call,
-        // issued from deep inside a syscall handler while the outer start() call is still on the C++
-        // stack) - restoring the previous value rather than unconditionally nulling it keeps the
-        // outer scope's t_current_vcpu intact once the inner one unwinds, instead of leaving it null
-        // for the remainder of the outer quantum and misrouting every later fault/signal as unhandled.
+        // can in principle recurse on the same host thread (a hook callback issuing its own nested
+        // start() call while the outer start() call is still on the C++ stack) - restoring the
+        // previous value rather than unconditionally nulling it keeps the outer scope's
+        // t_current_vcpu intact once the inner one unwinds, instead of leaving it null for the
+        // remainder of the outer quantum and misrouting every later fault/signal as unhandled.
         struct current_vcpu_scope
         {
             explicit current_vcpu_scope(fex_vcpu& vcpu)
@@ -1657,13 +1657,12 @@ namespace sogen::fex
 
         std::atomic<bool> stop_requested_{false};
 
-        // Tracks start()'s own recursion depth on the calling thread: call_guest_function's
-        // run_nested_guest_step recurses into start() from deep inside a syscall handler while the
-        // outer start() call is still on the C++ stack (see current_vcpu_scope's doc comment for the
-        // same recursion). A nested call's own stop_requested_ - set when it hits its private INT3
-        // return sentinel - must not survive past its own return: left set, the still-in-progress
-        // outer call's next loop iteration would read it as "stop this quantum" too, for a reason
-        // that was never about the outer quantum at all.
+        // Tracks start()'s own recursion depth on the calling thread (see current_vcpu_scope's doc
+        // comment for how a nested call can happen at all). A nested call's own stop_requested_ - set
+        // when it hits whatever private completion condition ends that nested call - must not survive
+        // past its own return: left set, the still-in-progress outer call's next loop iteration would
+        // read it as "stop this quantum" too, for a reason that was never about the outer quantum at
+        // all.
         int nested_start_depth_{0};
 
       private:
@@ -4536,9 +4535,8 @@ namespace sogen::fex
         if (count == 1 || is_nested_call)
         {
             // A single-instruction step (count == 1, arm_plain_step's own trap) or a nested call's own
-            // completion sentinel (call_guest_function's INT3, hit via the hook_memory_execution
-            // callback calling stop()) both set stop_requested_ to break out of this call's own loop -
-            // purely local bookkeeping for this call, not a real stop() request. Left set, it would
+            // private completion condition both set stop_requested_ to break out of this call's own
+            // loop - purely local bookkeeping for this call, not a real stop() request. Left set, it would
             // leak into the outer, still-in-progress quantum this one nested inside of: that call's
             // own loop would read it as "stop this quantum" too, for a reason that was never about the
             // outer quantum at all, ending the run early with no violation and no thread switch.
@@ -5741,10 +5739,9 @@ namespace sogen::fex
         if (is_nested_call)
         {
             // See the matching count == 1 || is_nested_call reset in the signal-based start()'s own
-            // loop above: a nested call's stop_requested_ (set here by call_guest_function's INT3
-            // return sentinel, via the hook_memory_execution callback calling stop()) is purely local
-            // bookkeeping for this call and must not leak into the outer, still-in-progress quantum
-            // this one nested inside of.
+            // loop above: a nested call's stop_requested_ (set here by whatever private completion
+            // condition ends that nested call) is purely local bookkeeping for this call and must not
+            // leak into the outer, still-in-progress quantum this one nested inside of.
             this->stop_requested_ = false;
         }
     }

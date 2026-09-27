@@ -353,6 +353,14 @@ namespace sogen
     // 0 - FEXCore's call/ret shadow-stack cache reads an unrelated, never-populated slot back as an
     // all-zero {GuestRIP, HostCode} pair, so a plain 0 sentinel can collide with that by coincidence
     // and send the JIT branching through a null host pointer).
+    //
+    // Hitting the trap means the guest function call_guest_function redirected RIP into has just
+    // returned. dispatch_on_cpu takes the kernel lock (this hook runs outside setup_hooks, lock-free,
+    // like any other hook installed from a syscall handler rather than at emulator setup time) and
+    // restores this thread's pre-call registers, which puts RIP back on the original syscall
+    // instruction call_guest_function's caller diverted away from. cpu.stop() then unwinds back to
+    // the scheduler's own loop exactly like any other syscall-driven stop; the next iteration simply
+    // re-enters the CPU there, re-executing that syscall instruction for real.
     inline uint64_t ensure_call_completion_trap(const syscall_context& c)
     {
         if (c.proc.call_guest_function_return_trap == 0)
@@ -360,7 +368,24 @@ namespace sogen
             c.proc.call_guest_function_return_trap = c.win_emu.memory.allocate_memory(page_align_up(1), memory_permission::read_exec);
             constexpr uint8_t int3 = 0xCC;
             c.win_emu.memory.write_memory(c.proc.call_guest_function_return_trap, &int3, sizeof(int3));
-            c.win_emu.emu().hook_memory_execution(c.proc.call_guest_function_return_trap, [](cpu_interface& cpu, uint64_t) { cpu.stop(); });
+
+            c.win_emu.emu().hook_memory_execution(
+                c.proc.call_guest_function_return_trap, [&win_emu = c.win_emu](cpu_interface& cpu, uint64_t) {
+                    win_emu.dispatch_on_cpu(cpu, [&] {
+                        auto& pending = win_emu.vcpu(cpu.index()).thread().pending_guest_function_calls;
+                        if (pending.empty())
+                        {
+                            win_emu.log.error("call_guest_function return trap hit with no pending guest function call\n");
+                            win_emu.stop();
+                            return;
+                        }
+
+                        cpu.restore_registers(pending.back());
+                        pending.pop_back();
+                    });
+
+                    cpu.stop();
+                });
         }
 
         return c.proc.call_guest_function_return_trap;

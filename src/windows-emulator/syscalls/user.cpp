@@ -431,16 +431,29 @@ namespace sogen
             return std::nullopt;
         }
 
-        // Runs a plain (non-callback) guest function to completion on the calling thread's own
-        // vCPU and returns its eax/rax result. Distinct from dispatch_user_callback: that mechanism
-        // exists to satisfy the NT client/server ABI when the *kernel* side needs a real user-mode
-        // return path (KiUserCallbackDispatcher + NtCallbackReturn) for callbacks the guest itself
-        // must observe finishing later. Here the call is a host-orchestrated detour the guest never
-        // needs to know happened - it borrows the same save/restore-registers primitive the CPU
-        // backends already expose for GDB/Tenet stepping instead.
-        uint64_t call_guest_function(const syscall_context& c, const uint64_t function_address, const std::initializer_list<uint64_t> args)
+        // Redirects the calling thread's own vCPU into a plain (non-callback) guest function without
+        // ever nesting a second cpu.start() call: the caller's syscall handler must abort without
+        // completing (see ensure_sxs_window_class), exactly as if it had diverted into a real kernel
+        // callback via dispatch_user_callback (c.run_callback signals the same "handler redirected
+        // control flow, don't finalize its return value" contract to write_syscall_result). Distinct
+        // from dispatch_user_callback: that mechanism satisfies the NT client/server ABI for callbacks
+        // the guest itself must observe finishing later (KiUserCallbackDispatcher + NtCallbackReturn).
+        // Here the callee is a host-orchestrated detour the guest never needs to know happened, so
+        // completion is instead detected by the return address it lands on: ensure_call_completion_trap's
+        // INT3, hit via a normal execution hook once the callee's `ret` actually runs, at which point
+        // the pre-call registers pushed below are restored and the original syscall instruction -
+        // never advanced past, since c.run_callback skipped that - simply re-executes from scratch.
+        void call_guest_function(const syscall_context& c, const uint64_t function_address, const std::initializer_list<uint64_t> args)
         {
-            constexpr uint64_t max_iterations = 10'000;
+            if (c.run_callback)
+            {
+                throw std::runtime_error("A callback has already been dispatched");
+            }
+
+            if (args.size() > 4)
+            {
+                throw std::runtime_error("call_guest_function only supports up to 4 arguments");
+            }
 
             // RIP is set directly below rather than through the JIT's own Call codegen, so nothing is
             // pushed onto FEXCore's per-thread call/ret shadow-stack cache for this injected call. The
@@ -453,14 +466,10 @@ namespace sogen
             // through to the slow dispatch path instead - which then needs to actually resolve real,
             // mapped, executable content at the sentinel to hand back to the JIT, so the sentinel can't
             // just be a recognizable-but-unmapped constant either; it has to be backed by a single INT3.
-            // A real software breakpoint on that INT3 (the same mechanism GDB/Tenet stepping already
-            // relies on) detects the return: the callee runs at full JIT speed and only traps once
-            // control genuinely reaches the sentinel, unlike single-stepping every instruction of a
-            // potentially deep, non-trivial call chain via EFLAGS.TF.
             const uint64_t sentinel_return_address = ensure_call_completion_trap(c);
 
             auto& cpu = c.emu;
-            const auto saved_registers = cpu.save_registers();
+            c.thread().pending_guest_function_calls.push_back(cpu.save_registers());
 
             const auto original_rsp = cpu.read_stack_pointer();
             const auto call_rsp = align_down(original_rsp - 0x8, 16) - 0x28; // 0x20 shadow space + return address
@@ -477,52 +486,38 @@ namespace sogen
             size_t arg_index = 0;
             for (const auto arg : args)
             {
-                if (arg_index >= arg_registers.size())
-                {
-                    throw std::runtime_error("call_guest_function only supports up to 4 arguments");
-                }
                 cpu.reg(arg_registers[arg_index], arg);
                 ++arg_index;
             }
 
             cpu.reg(x86_register::rip, function_address);
-
-            for (uint64_t iteration = 0; iteration < max_iterations; ++iteration)
-            {
-                c.win_emu.run_nested_guest_step(cpu, 0);
-                if (c.run_callback)
-                {
-                    throw std::runtime_error("Nested guest function call unexpectedly dispatched a user callback");
-                }
-                if (cpu.read_instruction_pointer() == sentinel_return_address)
-                {
-                    break;
-                }
-            }
-
-            const auto result = cpu.reg<uint64_t>(x86_register::rax);
-            cpu.restore_registers(saved_registers);
-            return result;
+            c.run_callback = true;
         }
 
-        process_context::class_entry* ensure_sxs_window_class(const syscall_context& c, const std::u16string_view class_name)
+        struct sxs_class_lookup_result
+        {
+            process_context::class_entry* entry{};
+            bool call_pending{};
+        };
+
+        sxs_class_lookup_result ensure_sxs_window_class(const syscall_context& c, const std::u16string_view class_name)
         {
             const auto dll_name = find_window_class_owning_dll(c, class_name);
             if (!dll_name.has_value())
             {
-                return nullptr;
+                return {};
             }
 
             auto* owning_module = c.win_emu.mod_manager.find_by_name(*dll_name);
             if (!owning_module)
             {
-                return nullptr;
+                return {};
             }
 
             const auto register_class_name_w = owning_module->find_export("RegisterClassNameW");
             if (register_class_name_w == 0)
             {
-                return nullptr;
+                return {};
             }
 
             std::u16string name_buffer{class_name};
@@ -532,17 +527,11 @@ namespace sogen
             const auto scratch_address = align_down(c.emu.read_stack_pointer() - 0x1000, 16);
             if (!c.emu.try_write_memory(scratch_address, name_buffer.data(), string_size))
             {
-                return nullptr;
+                return {};
             }
 
-            const auto result = call_guest_function(c, register_class_name_w, {scratch_address});
-            if (!result)
-            {
-                return nullptr;
-            }
-
-            const auto it = c.proc.classes.find(class_name);
-            return it != c.proc.classes.end() ? &it->second : nullptr;
+            call_guest_function(c, register_class_name_w, {scratch_address});
+            return {.entry = nullptr, .call_pending = true};
         }
 
         void set_thread_window_context(const syscall_context& c, const uint64_t active_handle, const uint64_t active_window_ptr)
@@ -3268,10 +3257,15 @@ namespace sogen
 
             if (cls_it == c.proc.classes.end())
             {
-                if (const auto* sxs_class = ensure_sxs_window_class(c, cls_name))
+                const auto sxs_class = ensure_sxs_window_class(c, cls_name);
+                if (sxs_class.call_pending)
+                {
+                    return 0;
+                }
+
+                if (sxs_class.entry)
                 {
                     cls_it = c.proc.classes.find(cls_name);
-                    (void)sxs_class;
                 }
             }
 

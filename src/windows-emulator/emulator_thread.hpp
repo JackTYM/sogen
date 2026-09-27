@@ -348,6 +348,13 @@ namespace sogen
         std::vector<callback_frame> callback_stack;
         std::optional<uint64_t> callback_return_rax{};
 
+        // Non-reentrant continuation state for call_guest_function (syscalls/user.cpp): a stack of
+        // save_registers() blobs, one per synchronous guest-function call this thread currently has
+        // redirected RIP into but not yet returned from via the completion trap. Not serialized: the
+        // divert-to-return window is a handful of instructions, far too narrow to coincide with a
+        // snapshot.
+        std::vector<std::vector<std::byte>> pending_guest_function_calls{};
+
         std::map<user_timer_key, user_timer> user_timers{};
         uint64_t next_user_timer_id{1};
         std::vector<msg> message_queue;
