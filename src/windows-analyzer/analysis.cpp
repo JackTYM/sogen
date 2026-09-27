@@ -3966,6 +3966,32 @@ namespace sogen
                                        target_mod_name, static_cast<unsigned long long>(target_offset));
                 });
             }
+
+            // `ContinueInitializeWithProfile`'s own success path replies to `sldim.exe`'s original
+            // `EmbeddedBrowser::Initialize` mojo call HERE (a `base::OnceCallback<void
+            // (EmbeddedBrowserCreationDataPtr)>::Run`), architecturally BEFORE it goes on to create the
+            // real `content::WebContents` a few hundred bytes later in the same function - i.e. the
+            // WebView2 host may already receive its creation-data reply independent of whether
+            // rendering/WebContents creation ever succeeds. If this fires live, it directly tests
+            // whether findings #509's own original `OnCreateWebViewControllerCompleted(ERROR_TIMEOUT)`
+            // observation is still consistent with a real, successful reply at this layer - see
+            // project_solidworks_bringup.md #547.
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_PROFILE_STATUS_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+                const auto address = mod.image_base + 0xa0d6624;
+
+                win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching "
+                                   "ContinueInitializeWithProfile's own reply-to-sldim.exe call at 0x%llx\n",
+                                   static_cast<unsigned long long>(address));
+
+                win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    win_emu->log.error(
+                        "[embedded-browser-profile-status-hook-trace] hit ContinueInitializeWithProfile's reply-to-sldim.exe "
+                        "call at 0x%llx\n",
+                        static_cast<unsigned long long>(address));
+                });
+            }
         }
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
