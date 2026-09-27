@@ -4035,6 +4035,36 @@ namespace sogen
                     });
                 }
             }
+
+            // `sldim.exe` itself, unsymbolized but decompiled cleanly via RTTI/embedded-path-string
+            // identification: `BaseDlgWebView2::Initialize` (a second, previously-unknown WebView2
+            // host class, distinct from the already-known-successful `CWebBrowserWebView2`), called
+            // from a dialog's own `OnInitDialog`. Watching both, reading the current thread id at
+            // each, to test whether this runs on the Worker Thread - see
+            // project_solidworks_bringup.md #551/#552.
+            if (mod.name == "sldim.exe" && std::getenv("SOGEN_TRACE_SLDIM_BASEDLG_WEBVIEW2_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                const std::array<traced_symbol, 2> targets{{
+                    {"OnInitDialog (triggers BaseDlgWebView2::Initialize)", 0x65dde0},
+                    {"BaseDlgWebView2::Initialize", 0x65c480},
+                }};
+
+                for (const auto& target : targets)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching %s at 0x%llx\n", name,
+                                       static_cast<unsigned long long>(address));
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit %s at 0x%llx, tid=%u\n", name,
+                                           static_cast<unsigned long long>(address), win_emu->current_thread().id);
+                    });
+                }
+            }
         }
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
