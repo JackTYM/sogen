@@ -3986,10 +3986,25 @@ namespace sogen
                                    static_cast<unsigned long long>(address));
 
                 win_emu->emu().hook_memory_execution(address, [win_emu, address](cpu_interface&, uint64_t) {
+                    // Real disassembly: rdx points at a local `StructPtr<EmbeddedBrowserCreationData>`
+                    // wrapper whose own first field is the real `EmbeddedBrowserCreationData*`; that
+                    // struct's error field lives at byte offset 16 (DWORD index 4), matching the exact
+                    // `*((_DWORD *)v7 + 4) = <HRESULT>` pattern already confirmed in `Initialize`'s own
+                    // failure branches - see project_solidworks_bringup.md #549.
+                    auto& emu = win_emu->emu();
+                    const auto struct_ptr_wrapper = emu.reg<uint64_t>(x86_register::rdx);
+
+                    uint64_t creation_data_ptr{};
+                    emu.try_read_memory(struct_ptr_wrapper, &creation_data_ptr, sizeof(creation_data_ptr));
+
+                    uint32_t error_code{};
+                    emu.try_read_memory(creation_data_ptr + 16, &error_code, sizeof(error_code));
+
                     win_emu->log.error(
                         "[embedded-browser-profile-status-hook-trace] hit ContinueInitializeWithProfile's reply-to-sldim.exe "
-                        "call at 0x%llx\n",
-                        static_cast<unsigned long long>(address));
+                        "call at 0x%llx, creation_data=0x%llx error_code=0x%x (%d)\n",
+                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(creation_data_ptr), error_code,
+                        static_cast<int32_t>(error_code));
                 });
             }
 
@@ -3999,8 +4014,9 @@ namespace sogen
             {
                 auto* const win_emu = c.win_emu;
 
-                const std::array<traced_symbol, 3> bisection_checkpoints{{
+                const std::array<traced_symbol, 4> bisection_checkpoints{{
                     {"before profile-client connection setup", 0xa0d59fd},
+                    {"Browser::Create's own real entry point", 0x2a0afee},
                     {"right after Browser::Create returns", 0xa0d5fa8},
                     {"after widget/compositor setup", 0xa0d6153},
                 }};
