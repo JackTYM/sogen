@@ -3992,6 +3992,33 @@ namespace sogen
                         static_cast<unsigned long long>(address));
                 });
             }
+
+            // Coarse bisection through `ContinueInitializeWithProfile`'s own success-branch body,
+            // between its entry and the reply-call site above - see project_solidworks_bringup.md #548.
+            if (mod.name == "msedge.dll" && std::getenv("SOGEN_TRACE_EMBEDDED_BROWSER_PROFILE_STATUS_HOOK"))
+            {
+                auto* const win_emu = c.win_emu;
+
+                const std::array<traced_symbol, 3> bisection_checkpoints{{
+                    {"before profile-client connection setup", 0xa0d59fd},
+                    {"right after Browser::Create returns", 0xa0d5fa8},
+                    {"after widget/compositor setup", 0xa0d6153},
+                }};
+
+                for (const auto& target : bisection_checkpoints)
+                {
+                    const auto address = mod.image_base + target.rva;
+                    const auto* const name = target.name;
+
+                    win_emu->log.error("[embedded-browser-profile-status-hook-trace] watching checkpoint '%s' at 0x%llx\n", name,
+                                       static_cast<unsigned long long>(address));
+
+                    win_emu->emu().hook_memory_execution(address, [win_emu, address, name](cpu_interface&, uint64_t) {
+                        win_emu->log.error("[embedded-browser-profile-status-hook-trace] hit checkpoint '%s' at 0x%llx\n", name,
+                                           static_cast<unsigned long long>(address));
+                    });
+                }
+            }
         }
 
         void trace_accept_isolated_hit(const analysis_context& c, const uint64_t address)
