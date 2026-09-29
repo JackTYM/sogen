@@ -20,15 +20,78 @@ namespace sogen
     struct timer : ref_counted_object
     {
         std::u16string name{};
+        bool manual_reset{true};
+        bool active{false};
+        bool signaled{false};
+        std::chrono::steady_clock::time_point due{};
+        std::chrono::milliseconds period{0};
+
+        void arm(const std::chrono::steady_clock::time_point due_time, const std::chrono::milliseconds period_ms)
+        {
+            this->active = true;
+            this->signaled = false;
+            this->due = due_time;
+            this->period = period_ms;
+        }
+
+        bool is_signaled(const std::chrono::steady_clock::time_point now)
+        {
+            if (this->active && now >= this->due)
+            {
+                this->signaled = true;
+
+                if (this->period.count() > 0)
+                {
+                    const auto elapsed_periods = (now - this->due) / this->period + 1;
+                    this->due += elapsed_periods * this->period;
+                }
+                else
+                {
+                    this->active = false;
+                }
+            }
+
+            return this->signaled;
+        }
+
+        bool try_consume_signal(const std::chrono::steady_clock::time_point now)
+        {
+            if (!this->is_signaled(now))
+            {
+                return false;
+            }
+
+            if (!this->manual_reset)
+            {
+                this->signaled = false;
+            }
+
+            return true;
+        }
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
+            buffer.write(this->manual_reset);
+            buffer.write(this->active);
+            buffer.write(this->signaled);
+            buffer.write(static_cast<int64_t>(this->due.time_since_epoch().count()));
+            buffer.write(static_cast<int64_t>(this->period.count()));
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
             buffer.read(this->name);
+            buffer.read(this->manual_reset);
+            buffer.read(this->active);
+            buffer.read(this->signaled);
+
+            int64_t due_ticks{};
+            int64_t period_ms{};
+            buffer.read(due_ticks);
+            buffer.read(period_ms);
+            this->due = std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(due_ticks));
+            this->period = std::chrono::milliseconds(period_ms);
         }
     };
 

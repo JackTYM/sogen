@@ -5,6 +5,11 @@
 
 namespace sogen
 {
+    namespace
+    {
+        constexpr ULONG EX_TIMER_NOTIFICATION = 0x80000000;
+        constexpr ULONG NotificationTimer = 0;
+    }
 
     namespace syscalls
     {
@@ -34,8 +39,8 @@ namespace sogen
         }
 
         NTSTATUS handle_NtCreateTimer2(const syscall_context& c, const emulator_object<handle> timer_handle, uint64_t /*reserved*/,
-                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes,
-                                       ULONG /*attributes*/, ACCESS_MASK /*desired_access*/)
+                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG attributes,
+                                       ACCESS_MASK /*desired_access*/)
         {
             std::u16string name{};
             if (object_attributes)
@@ -63,6 +68,7 @@ namespace sogen
 
             timer t{};
             t.name = std::move(name);
+            t.manual_reset = (attributes & EX_TIMER_NOTIFICATION) != 0;
 
             const auto h = c.proc.timers.store(std::move(t));
             timer_handle.write(h);
@@ -73,7 +79,8 @@ namespace sogen
         NTSTATUS handle_NtCreateTimer(const syscall_context& c, const emulator_object<handle> timer_handle, ACCESS_MASK desired_access,
                                       const emulator_object<OBJECT_ATTRIBUTES<EmulatorTraits<Emu64>>> object_attributes, ULONG timer_type)
         {
-            return handle_NtCreateTimer2(c, timer_handle, 0, object_attributes, timer_type, desired_access);
+            return handle_NtCreateTimer2(c, timer_handle, 0, object_attributes, timer_type == NotificationTimer ? EX_TIMER_NOTIFICATION : 0,
+                                         desired_access);
         }
 
         NTSTATUS handle_NtOpenTimer(const syscall_context& c, const emulator_object<handle> timer_handle, ACCESS_MASK /*desired_access*/,
@@ -117,13 +124,44 @@ namespace sogen
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
 
-        NTSTATUS handle_NtSetTimer()
+        NTSTATUS handle_NtSetTimer(const syscall_context& c, const handle timer_handle, const emulator_object<LARGE_INTEGER> due_time,
+                                   const uint64_t /*timer_apc_routine*/, const uint64_t /*timer_context*/, const BOOLEAN /*resume_timer*/,
+                                   const LONG period, const emulator_object<BOOLEAN> previous_state)
         {
+            auto* const t = c.proc.timers.get(timer_handle);
+            if (!t)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (!due_time)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            const auto was_signaled = t->is_signaled(c.proc.steady_now());
+            t->arm(utils::convert_delay_interval_to_time_point(c.win_emu.clock(), due_time.read()), std::chrono::milliseconds(period));
+            previous_state.write_if_valid(was_signaled ? TRUE : FALSE);
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtSetTimer2()
+        NTSTATUS handle_NtSetTimer2(const syscall_context& c, const handle timer_handle, const emulator_object<LARGE_INTEGER> due_time,
+                                    const emulator_object<LARGE_INTEGER> period, const uint64_t /*parameters*/)
         {
+            auto* const t = c.proc.timers.get(timer_handle);
+            if (!t)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            if (!due_time)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
+
+            const auto period_100ns = period ? std::abs(period.read().QuadPart) : 0;
+            t->arm(utils::convert_delay_interval_to_time_point(c.win_emu.clock(), due_time.read()),
+                   std::chrono::milliseconds(period_100ns / 10000));
             return STATUS_SUCCESS;
         }
 
@@ -133,8 +171,17 @@ namespace sogen
             return STATUS_NOT_SUPPORTED;
         }
 
-        NTSTATUS handle_NtCancelTimer()
+        NTSTATUS handle_NtCancelTimer(const syscall_context& c, const handle timer_handle, const emulator_object<BOOLEAN> current_state)
         {
+            auto* const t = c.proc.timers.get(timer_handle);
+            if (!t)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            const auto was_signaled = t->is_signaled(c.proc.steady_now());
+            t->active = false;
+            current_state.write_if_valid(was_signaled ? TRUE : FALSE);
             return STATUS_SUCCESS;
         }
     }

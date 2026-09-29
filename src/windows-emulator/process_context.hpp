@@ -482,6 +482,7 @@ namespace sogen
 
         process_context(x86_64_emulator& emu, memory_manager& memory, utils::clock& clock, callbacks& cb)
             : callbacks_(&cb),
+              clock_(&clock),
               base_allocator(emu),
               peb64(emu),
               process_params64(emu),
@@ -535,6 +536,12 @@ namespace sogen
         bool is_wow64_process{false};
 
         callbacks* callbacks_{};
+        utils::clock* clock_{};
+
+        std::chrono::steady_clock::time_point steady_now() const
+        {
+            return this->clock_->steady_now();
+        }
 
         std::vector<uint8_t> sid{};
 

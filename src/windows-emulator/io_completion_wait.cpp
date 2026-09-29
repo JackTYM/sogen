@@ -49,8 +49,10 @@ namespace sogen
                     return mutant && mutant->locked_count() == 0;
                 }
 
-                case handle_types::timer:
-                    return false;
+                case handle_types::timer: {
+                    auto* timer = process.timers.get(target_object_handle);
+                    return timer && timer->is_signaled(process.steady_now());
+                }
 
                 default:
                     return false;
@@ -83,8 +85,17 @@ namespace sogen
                     break;
                 }
 
+                case handle_types::timer: {
+                    auto* timer = process.timers.get(target_object_handle);
+                    if (timer)
+                    {
+                        (void)timer->try_consume_signal(process.steady_now());
+                    }
+                    break;
+                }
+
                 default:
-                    // process/thread/timer are level-triggered or terminal; ports and mutants are left
+                    // process/thread are level-triggered or terminal; ports and mutants are left
                     // untouched (a wait packet does not take mutant ownership).
                     break;
                 }
