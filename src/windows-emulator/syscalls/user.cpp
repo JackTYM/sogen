@@ -755,7 +755,7 @@ namespace sogen
             }
             else
             {
-                changed_window_pos_alloc = c.emu.push_stack(changed_position);
+                changed_window_pos_alloc = push_stack_ensuring_commit(c, changed_position);
             }
 
             for (auto& message : message_queue)
@@ -3536,13 +3536,13 @@ namespace sogen
             cs.lpszClass =
                 class_name && class_name.value() > std::numeric_limits<uint16_t>::max() ? class_name.read().Buffer : class_name.value();
             cs.dwExStyle = ex_style;
-            state.create_struct_alloc = c.emu.push_stack(cs);
+            state.create_struct_alloc = push_stack_ensuring_commit(c, cs);
 
             RECT wr{};
-            state.window_rect_alloc = c.emu.push_stack(wr);
+            state.window_rect_alloc = push_stack_ensuring_commit(c, wr);
 
             EMU_MINMAXINFO mmi{};
-            state.min_max_info_alloc = c.emu.push_stack(mmi);
+            state.min_max_info_alloc = push_stack_ensuring_commit(c, mmi);
 
             state.message_queue = {
                 {.message = WM_CREATE, .wParam = 0, .lParam = state.create_struct_alloc.address()},
@@ -3603,9 +3603,9 @@ namespace sogen
                         .cy = height,
                         .flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE,
                     };
-                    state.window_pos_alloc = c.emu.push_stack(show_position);
-                    state.activation_window_pos_alloc = c.emu.push_stack(activation_position);
-                    state.changed_window_pos_alloc = c.emu.push_stack(changed_position);
+                    state.window_pos_alloc = push_stack_ensuring_commit(c, show_position);
+                    state.activation_window_pos_alloc = push_stack_ensuring_commit(c, activation_position);
+                    state.changed_window_pos_alloc = push_stack_ensuring_commit(c, changed_position);
 
                     std::vector<qmsg> show_messages = {
                         {.message = WM_MOVE, .wParam = 0, .lParam = move_lparam},
@@ -3891,8 +3891,8 @@ namespace sogen
                 .cy = win->height,
                 .flags = SWP_NOMOVE | SWP_NOSIZE | visibility_flags | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE,
             };
-            state.window_pos_alloc = c.emu.push_stack(changing_position);
-            state.changed_window_pos_alloc = c.emu.push_stack(changed_position);
+            state.window_pos_alloc = push_stack_ensuring_commit(c, changing_position);
+            state.changed_window_pos_alloc = push_stack_ensuring_commit(c, changed_position);
 
             if (win->host_surface_window)
             {
@@ -3925,7 +3925,7 @@ namespace sogen
                         .cy = 0,
                         .flags = SWP_NOMOVE | SWP_NOSIZE,
                     };
-                    state.activation_window_pos_alloc = c.emu.push_stack(activation_position);
+                    state.activation_window_pos_alloc = push_stack_ensuring_commit(c, activation_position);
 
                     state.message_queue.push_back({.message = WM_SETFOCUS, .wParam = 0, .lParam = 0});
                     state.message_queue.push_back({.message = WM_ACTIVATE, .wParam = 1, .lParam = 0});

@@ -80,6 +80,24 @@ namespace sogen
         return get_function_argument(emu, index, true);
     }
 
+    // A host write straight into guest stack memory (unlike a guest push/mov instruction) never
+    // takes the guest-side page fault that would otherwise grow the thread's stack for it - see
+    // forward_syscall's identical ensure_stack_committed call above for the same reasoning. Message-
+    // chain dispatch (CreateWindowEx/ShowWindow/SetWindowPos) stashes a WINDOWPOS/CREATESTRUCT-style
+    // payload on the guest stack this way before the callback frame itself is pushed, so it needs the
+    // same proactive guard.
+    template <typename T>
+    [[nodiscard]] emulator_stack_allocation push_stack_ensuring_commit(const syscall_context& c, const T& data)
+    {
+        // Mirrors push_stack<T>'s own alignment (emulator_stack_allocation::stack_alignment, private
+        // to that class) so the address checked here matches the one it actually writes to.
+        constexpr uint64_t stack_alignment = 16;
+        const auto old_rsp = c.emu.read_stack_pointer();
+        const auto new_rsp = (old_rsp - sizeof(T)) & ~(stack_alignment - 1);
+        c.thread().ensure_stack_committed(c.win_emu, c.vcpu, new_rsp);
+        return c.emu.push_stack(data);
+    }
+
     inline bool is_uppercase(const char character)
     {
         return toupper(character) == character;
