@@ -4,6 +4,7 @@
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
 #include "wait_trace.hpp"
+#include "../named_objects.hpp"
 
 namespace sogen
 {
@@ -70,12 +71,26 @@ namespace sogen
 
             for (auto& entry : c.proc.mutants)
             {
-                if (entry.second.name == name)
+                if (object_names_equal(entry.second.name, name))
                 {
                     ++entry.second.ref_count;
                     mutant_handle.write(c.proc.mutants.make_handle(entry.first));
                     return STATUS_SUCCESS;
                 }
+            }
+
+            mutant shared{};
+            const auto found = named_objects::open(c.proc, named_objects::kind::mutant, name, shared.state);
+            if (NT_SUCCESS(found))
+            {
+                shared.name = std::move(name);
+                mutant_handle.write(c.proc.mutants.store(std::move(shared)));
+                return STATUS_SUCCESS;
+            }
+
+            if (found == STATUS_OBJECT_TYPE_MISMATCH)
+            {
+                return found;
             }
 
             return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -101,12 +116,26 @@ namespace sogen
             {
                 for (auto& entry : c.proc.mutants)
                 {
-                    if (entry.second.name == name)
+                    if (object_names_equal(entry.second.name, name))
                     {
                         ++entry.second.ref_count;
                         mutant_handle.write(c.proc.mutants.make_handle(entry.first));
                         return STATUS_OBJECT_NAME_EXISTS;
                     }
+                }
+
+                mutant shared{};
+                const auto found = named_objects::open(c.proc, named_objects::kind::mutant, name, shared.state);
+                if (found == STATUS_OBJECT_TYPE_MISMATCH)
+                {
+                    return found;
+                }
+
+                if (NT_SUCCESS(found))
+                {
+                    shared.name = std::move(name);
+                    mutant_handle.write(c.proc.mutants.store(std::move(shared)));
+                    return STATUS_OBJECT_NAME_EXISTS;
                 }
             }
 
@@ -118,10 +147,15 @@ namespace sogen
                 e.try_lock(mutant::make_owner_key(c.proc.process_id, c.thread().id));
             }
 
-            const auto handle = c.proc.mutants.store(std::move(e));
+            const auto [handle, stored] = c.proc.mutants.store_and_get(std::move(e));
             mutant_handle.write(handle);
 
-            return STATUS_SUCCESS;
+            if (stored->name.empty())
+            {
+                return STATUS_SUCCESS;
+            }
+
+            return named_objects::publish(c.proc, named_objects::kind::mutant, stored->name, stored->state);
         }
     }
 

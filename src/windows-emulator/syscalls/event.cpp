@@ -2,6 +2,7 @@
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
 #include "wait_trace.hpp"
+#include "../named_objects.hpp"
 
 namespace sogen
 {
@@ -175,27 +176,50 @@ namespace sogen
             {
                 for (auto& entry : c.proc.events)
                 {
-                    if (entry.second.name == name)
+                    if (object_names_equal(entry.second.name, name))
                     {
                         ++entry.second.ref_count;
                         event_handle.write(c.proc.events.make_handle(entry.first));
                         return STATUS_OBJECT_NAME_EXISTS;
                     }
                 }
+
+                event shared{};
+                const auto found = named_objects::open(c.proc, named_objects::kind::event, name, shared.state);
+                if (found == STATUS_OBJECT_TYPE_MISMATCH)
+                {
+                    return found;
+                }
+
+                if (NT_SUCCESS(found))
+                {
+                    shared.type = static_cast<EVENT_TYPE>(shared.state.word(1).load());
+                    shared.name = std::move(name);
+                    event_handle.write(c.proc.events.store(std::move(shared)));
+                    return STATUS_OBJECT_NAME_EXISTS;
+                }
             }
 
             event e{};
             e.type = event_type;
             e.set_signaled(initial_state != FALSE);
+            e.state.word(1).store(static_cast<uint64_t>(event_type));
             e.name = std::move(name);
 
-            const auto handle = c.proc.events.store(std::move(e));
+            const auto [handle, stored] = c.proc.events.store_and_get(std::move(e));
             event_handle.write(handle);
 
             static_assert(sizeof(EVENT_TYPE) == sizeof(uint32_t));
             static_assert(sizeof(ACCESS_MASK) == sizeof(uint32_t));
 
-            return STATUS_SUCCESS;
+            if (stored->name.empty())
+            {
+                return STATUS_SUCCESS;
+            }
+
+            const auto published = named_objects::publish(c.proc, named_objects::kind::event, stored->name, stored->state);
+            stored->type = static_cast<EVENT_TYPE>(stored->state.word(1).load());
+            return published;
         }
 
         NTSTATUS handle_NtOpenEvent(const syscall_context& c, const emulator_object<uint64_t> event_handle,
@@ -244,12 +268,27 @@ namespace sogen
 
             for (auto& entry : c.proc.events)
             {
-                if (entry.second.name == name)
+                if (object_names_equal(entry.second.name, name))
                 {
                     ++entry.second.ref_count;
                     event_handle.write(c.proc.events.make_handle(entry.first).bits);
                     return STATUS_SUCCESS;
                 }
+            }
+
+            event shared{};
+            const auto found = named_objects::open(c.proc, named_objects::kind::event, name, shared.state);
+            if (found == STATUS_OBJECT_TYPE_MISMATCH)
+            {
+                return found;
+            }
+
+            if (NT_SUCCESS(found))
+            {
+                shared.type = static_cast<EVENT_TYPE>(shared.state.word(1).load());
+                shared.name = name;
+                event_handle.write(c.proc.events.store(std::move(shared)).bits);
+                return STATUS_SUCCESS;
             }
 
             return STATUS_NOT_FOUND;

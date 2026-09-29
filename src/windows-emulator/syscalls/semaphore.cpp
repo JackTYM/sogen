@@ -2,6 +2,7 @@
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
 #include "wait_trace.hpp"
+#include "../named_objects.hpp"
 
 namespace sogen
 {
@@ -32,14 +33,23 @@ namespace sogen
 
             for (const auto& semaphore : c.proc.semaphores)
             {
-                if (semaphore.second.name == name)
+                if (object_names_equal(semaphore.second.name, name))
                 {
                     semaphore_handle.write(c.proc.semaphores.make_handle(semaphore.first));
                     return STATUS_SUCCESS;
                 }
             }
 
-            return STATUS_OBJECT_NAME_NOT_FOUND;
+            semaphore shared{};
+            const auto found = named_objects::open(c.proc, named_objects::kind::semaphore, name, shared.state);
+            if (NT_SUCCESS(found))
+            {
+                shared.name = name;
+                semaphore_handle.write(c.proc.semaphores.store(std::move(shared)));
+                return STATUS_SUCCESS;
+            }
+
+            return found;
         }
 
         NTSTATUS handle_NtReleaseSemaphore(const syscall_context& c, const handle semaphore_handle, const ULONG release_count,
@@ -107,19 +117,38 @@ namespace sogen
             {
                 for (auto& entry : c.proc.semaphores)
                 {
-                    if (entry.second.name == s.name)
+                    if (object_names_equal(entry.second.name, s.name))
                     {
                         ++entry.second.ref_count;
                         semaphore_handle.write(c.proc.semaphores.make_handle(entry.first));
                         return STATUS_OBJECT_NAME_EXISTS;
                     }
                 }
+
+                semaphore shared{};
+                const auto found = named_objects::open(c.proc, named_objects::kind::semaphore, s.name, shared.state);
+                if (found == STATUS_OBJECT_TYPE_MISMATCH)
+                {
+                    return found;
+                }
+
+                if (NT_SUCCESS(found))
+                {
+                    shared.name = std::move(s.name);
+                    semaphore_handle.write(c.proc.semaphores.store(std::move(shared)));
+                    return STATUS_OBJECT_NAME_EXISTS;
+                }
             }
 
-            const auto handle = c.proc.semaphores.store(std::move(s));
+            const auto [handle, stored] = c.proc.semaphores.store_and_get(std::move(s));
             semaphore_handle.write(handle);
 
-            return STATUS_SUCCESS;
+            if (stored->name.empty())
+            {
+                return STATUS_SUCCESS;
+            }
+
+            return named_objects::publish(c.proc, named_objects::kind::semaphore, stored->name, stored->state);
         }
     }
 

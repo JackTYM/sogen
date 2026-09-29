@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 
 namespace sogen
 {
@@ -19,6 +21,22 @@ namespace sogen
       public:
         static constexpr size_t slot_count = 16384;
         static constexpr size_t words_per_slot = 4;
+        static constexpr size_t named_entry_count = 1024;
+        static constexpr size_t max_named_key_length = 200;
+
+        enum class named_object_kind : uint32_t
+        {
+            event = 1,
+            mutant = 2,
+            semaphore = 3,
+            section = 4,
+        };
+
+        struct named_object
+        {
+            named_object_kind kind{};
+            uint32_t slot{};
+        };
 
         static std::shared_ptr<kernel_arena> create();
         // Wraps a backing received from another process. Returns nullptr if it isn't an arena.
@@ -37,8 +55,24 @@ namespace sogen
         void release(uint32_t index);
         std::atomic<uint64_t>* words(uint32_t index) const;
 
+        // Named-object registry shared by every process of the tree: maps a canonical object name to the
+        // slot holding that object's state. An entry stays valid exactly as long as its slot is alive.
+        //
+        // find_named adds a reference to the found slot on behalf of the caller. register_named publishes
+        // `slot` under `key`; if another process already published a live object under that name it
+        // returns that object instead (reference added) and leaves `slot` unpublished.
+        std::optional<named_object> find_named(std::u16string_view key);
+        std::optional<named_object> register_named(std::u16string_view key, named_object_kind kind, uint32_t slot);
+
+        // A named section's pages are a named POSIX shm object rather than a passed descriptor, so that
+        // processes that never received a descriptor can still open it by name. The slot owns the shm
+        // name (its words hold the name and `meta`) and unlinks it when the last reference goes away.
+        bool set_shm_backing(uint32_t index, std::string_view shm_name, uint64_t meta);
+        bool get_shm_backing(uint32_t index, std::string& shm_name, uint64_t& meta) const;
+
         struct header;
         struct slot;
+        struct named_entry;
 
       private:
         explicit kernel_arena(std::shared_ptr<shared_backing> backing)
@@ -48,6 +82,9 @@ namespace sogen
 
         header* get_header() const;
         slot* get_slot(uint32_t index) const;
+        named_entry* get_named_entry(size_t index) const;
+        bool try_add_reference(uint32_t index);
+        bool is_live(uint32_t index, uint32_t generation) const;
 
         std::shared_ptr<shared_backing> backing_{};
     };

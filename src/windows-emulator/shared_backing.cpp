@@ -140,6 +140,74 @@ namespace sogen
         return create_heap(size);
     }
 
+    std::shared_ptr<shared_backing> shared_backing::create_named(const size_t size, std::string& shm_name)
+    {
+#if defined(SOGEN_SHARED_BACKING_POSIX)
+        if (size == 0)
+        {
+            return nullptr;
+        }
+
+        static std::atomic<uint64_t> counter{0};
+        const auto mapped_size = (size + host_page_size() - 1) & ~(host_page_size() - 1);
+
+        for (int attempt = 0; attempt < 8; ++attempt)
+        {
+            std::array<char, 24> name{};
+            std::snprintf(name.data(), name.size(), "/sgn.%x.%llx", static_cast<unsigned>(::getpid()),
+                          static_cast<unsigned long long>(counter.fetch_add(1)));
+
+            const int fd = ::shm_open(name.data(), O_CREAT | O_EXCL | O_RDWR, 0600);
+            if (fd < 0)
+            {
+                if (errno == EEXIST)
+                {
+                    continue;
+                }
+                return nullptr;
+            }
+
+            ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+            if (::ftruncate(fd, static_cast<off_t>(mapped_size)) != 0)
+            {
+                ::close(fd);
+                ::shm_unlink(name.data());
+                return nullptr;
+            }
+
+            shm_name = name.data();
+            auto backing = adopt_fd(fd, size);
+            if (!backing)
+            {
+                ::shm_unlink(name.data());
+            }
+            return backing;
+        }
+#else
+        (void)size;
+        (void)shm_name;
+#endif
+        return nullptr;
+    }
+
+    std::shared_ptr<shared_backing> shared_backing::open_named(const std::string& shm_name, const size_t size)
+    {
+#if defined(SOGEN_SHARED_BACKING_POSIX)
+        const int fd = ::shm_open(shm_name.c_str(), O_RDWR, 0600);
+        if (fd < 0)
+        {
+            return nullptr;
+        }
+
+        ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+        return adopt_fd(fd, size);
+#else
+        (void)shm_name;
+        (void)size;
+        return nullptr;
+#endif
+    }
+
     std::shared_ptr<shared_backing> shared_backing::adopt_fd(const int fd, const size_t size)
     {
 #if defined(SOGEN_SHARED_BACKING_POSIX)

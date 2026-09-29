@@ -872,6 +872,10 @@ namespace sogen
         // codebase (see memory_manager::allocate_host_memory) - content is best-effort-only across a
         // serialize/deserialize round trip.
         std::shared_ptr<shared_backing> backing{};
+        // Holds a reference to the section's slot in the shared kernel arena while it is published in the
+        // named-object registry; when the last reference in the whole process tree goes, the named shm
+        // object backing the section is unlinked (see kernel_arena::release).
+        kernel_state state{};
 
         // Makes sure the section owns at least `size` bytes of backing, growing (and copying) an
         // existing, too-small one. Growing detaches the section from any process it was already shared

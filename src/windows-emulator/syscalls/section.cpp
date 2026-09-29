@@ -2,6 +2,7 @@
 #include "../emulator_utils.hpp"
 #include "../syscall_utils.hpp"
 #include "../memory_manager.hpp"
+#include "../named_objects.hpp"
 
 #include <utils/io.hpp>
 #include <utils/string.hpp>
@@ -277,10 +278,39 @@ namespace sogen
                 }
             }
 
-            const auto h = c.proc.sections.store(std::move(s));
+            if (!named_objects::is_shareable_named_section(*s.object))
+            {
+                section_handle.write(c.proc.sections.store(std::move(s)));
+                return STATUS_SUCCESS;
+            }
+
+            for (auto& existing : c.proc.sections)
+            {
+                if (object_names_equal(existing.second->name, s->name))
+                {
+                    section_handle.write(c.proc.sections.store(existing.second.duplicate_for_access(desired_access)));
+                    return STATUS_OBJECT_NAME_EXISTS;
+                }
+            }
+
+            section shared{};
+            const auto found = named_objects::open_section(c.proc, s->name, *shared.object);
+            if (found == STATUS_OBJECT_TYPE_MISMATCH)
+            {
+                return found;
+            }
+
+            if (NT_SUCCESS(found))
+            {
+                shared.granted_access = desired_access;
+                section_handle.write(c.proc.sections.store(std::move(shared)));
+                return STATUS_OBJECT_NAME_EXISTS;
+            }
+
+            const auto [h, stored] = c.proc.sections.store_and_get(std::move(s));
             section_handle.write(h);
 
-            return STATUS_SUCCESS;
+            return named_objects::publish_section(c.proc, *stored->object);
         }
 
         NTSTATUS handle_NtOpenSection(const syscall_context& c, const emulator_object<handle> section_handle,
@@ -377,14 +407,23 @@ namespace sogen
             for (auto& existing : c.proc.sections)
             {
                 auto& section = existing.second;
-                if (!section->name.empty() && utils::string::equals_ignore_case(section->name, filename))
+                if (!section->name.empty() && object_names_equal(section->name, filename))
                 {
                     section_handle.write(c.proc.sections.store(section.duplicate_for_access(desired_access)));
                     return STATUS_SUCCESS;
                 }
             }
 
-            return STATUS_OBJECT_NAME_NOT_FOUND;
+            section shared{};
+            const auto found = named_objects::open_section(c.proc, filename, *shared.object);
+            if (NT_SUCCESS(found))
+            {
+                shared.granted_access = desired_access;
+                section_handle.write(c.proc.sections.store(std::move(shared)));
+                return STATUS_SUCCESS;
+            }
+
+            return found;
         }
 
         NTSTATUS handle_NtMapViewOfSection(const syscall_context& c, const handle section_handle, const handle process_handle,

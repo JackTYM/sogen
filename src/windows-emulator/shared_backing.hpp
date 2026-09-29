@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace sogen
@@ -25,6 +26,13 @@ namespace sogen
         static std::shared_ptr<shared_backing> adopt_fd(int fd, size_t size);
         // Heap backing initialised from a snapshot (the cross-process fallback path).
         static std::shared_ptr<shared_backing> create_from_content(const std::vector<std::byte>& content);
+
+        // A backing addressable by name instead of by passed descriptor: `shm_name` receives a POSIX shm name
+        // any process can open_named(). The object is not unlinked here; whoever owns the name is
+        // responsible for shm_unlink (see kernel_arena::set_shm_backing). Returns nullptr without shared
+        // memory support.
+        static std::shared_ptr<shared_backing> create_named(size_t size, std::string& shm_name);
+        static std::shared_ptr<shared_backing> open_named(const std::string& shm_name, size_t size);
 
         static bool supports_sharing();
 
