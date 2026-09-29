@@ -5105,6 +5105,38 @@ namespace sogen
                                        header_num_bytes, header_version, header_flags);
                 });
 
+                // ValidateStructHeaderAndClaimMemory failed on every call this run, before the
+                // version switch was ever reached. Its own checks, in order: (1) struct_ptr must
+                // be 8-byte aligned; (2) struct_ptr must be within the [ctx.next, ctx.end) window
+                // already claimed by the validation context; (3) struct_ptr+8 must not exceed
+                // ctx.end; (4) the struct's own declared num_bytes field must be > 7; (5) struct_ptr
+                // + num_bytes must not overflow or exceed ctx.end. Dump every input value at entry
+                // to determine which check is actually failing without guessing.
+                const auto validate_struct_header_entry = mod.image_base + 0x35c600;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching "
+                                   "ValidateStructHeaderAndClaimMemory entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(validate_struct_header_entry));
+                win_emu->emu().hook_memory_execution(
+                    validate_struct_header_entry, [win_emu, validate_struct_header_entry](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto esp = emu.reg<uint32_t>(x86_register::esp);
+                        uint32_t struct_ptr{};
+                        emu.try_read_memory(esp + 4, &struct_ptr, sizeof(struct_ptr));
+                        uint32_t validation_context{};
+                        emu.try_read_memory(esp + 8, &validation_context, sizeof(validation_context));
+                        uint32_t ctx_next{};
+                        emu.try_read_memory(validation_context + 0xc, &ctx_next, sizeof(ctx_next));
+                        uint32_t ctx_end{};
+                        emu.try_read_memory(validation_context + 0x10, &ctx_end, sizeof(ctx_end));
+                        uint32_t declared_num_bytes{};
+                        emu.try_read_memory(struct_ptr, &declared_num_bytes, sizeof(declared_num_bytes));
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit ValidateStructHeaderAndClaimMemory entry at "
+                                           "0x%llx, tid=%u struct_ptr=0x%x validation_context=0x%x ctx_next=0x%x ctx_end=0x%x "
+                                           "declared_num_bytes=%u\n",
+                                           static_cast<unsigned long long>(validate_struct_header_entry), win_emu->current_thread().id,
+                                           struct_ptr, validation_context, ctx_next, ctx_end, declared_num_bytes);
+                    });
+
                 const auto watch_id_check = mod.image_base + 0x364199;
                 win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching OnHandleReady's own watch-id "
                                    "validation check at 0x%llx\n",
