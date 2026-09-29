@@ -4560,6 +4560,29 @@ namespace sogen
                                        handle_count_field, handle_count_field == 0 ? 1 : 0);
                 });
 
+                // MAPPING ERROR FOUND AND CORRECTED (`#564`): the metrics-recording code our
+                // confirmed fast path runs through (RVA 0x6da50-0x6db46) does NOT fall through to
+                // `loc_1006DC15`/RVA 0x6dc95 at all - that convergence point is only reached via
+                // jumps from the "has attached handles" branch we never take. Our own path instead
+                // falls straight through, after the metrics code, into a SEPARATE, genuine vtable
+                // dispatch call at RVA 0x6dbb4 (`call edi`, resolved via `this[0x30]`'s own vtable
+                // slot +8 - the real `Channel::Delegate` dispatch), which itself falls straight
+                // through afterward into the function's own handle-cleanup/exit path. THIS is the
+                // real call our message actually reaches - watching it directly.
+                const auto real_delegate_dispatch = mod.image_base + 0x6dbb4;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching TryDispatchMessage_0's own real "
+                                   "delegate dispatch at 0x%llx\n",
+                                   static_cast<unsigned long long>(real_delegate_dispatch));
+                win_emu->emu().hook_memory_execution(real_delegate_dispatch, [win_emu, real_delegate_dispatch](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::edi);
+                    const auto delegate_this = emu.reg<uint32_t>(x86_register::ecx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit TryDispatchMessage_0's own real "
+                                       "delegate dispatch at 0x%llx, tid=%u resolved_target=0x%x delegate_this=0x%x\n",
+                                       static_cast<unsigned long long>(real_delegate_dispatch), win_emu->current_thread().id,
+                                       resolved_target, delegate_this);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
