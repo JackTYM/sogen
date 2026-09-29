@@ -773,6 +773,22 @@ namespace sogen
         // root process default below.
         uint32_t process_id = 4;
         uint32_t spawned_thread_count{0};
+
+        // The kernel-object arena shared with every other sogen host process of this process tree (see
+        // kernel_state.hpp). Absent until the first object is shared or a child is spawned; children
+        // receive their parent's arena at bootstrap. Not serialized: it is host-side plumbing.
+        std::shared_ptr<kernel_arena> shared_arena{};
+
+        kernel_arena* ensure_shared_arena()
+        {
+            if (!this->shared_arena)
+            {
+                this->shared_arena = kernel_arena::create();
+            }
+
+            return this->shared_arena.get();
+        }
+
         handle_store<handle_types::thread, emulator_thread> threads{};
 
         // Handles delivered with the most recent ALPC reply message (NtAlpcSendWaitReceivePort). rpcrt4's

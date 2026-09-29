@@ -141,7 +141,7 @@ namespace sogen
 
                 if (auto* e = win_emu.process.events.get(this->read_ready_event))
                 {
-                    e->signaled = true;
+                    e->set_signaled(true);
                 }
             }
 
@@ -164,7 +164,7 @@ namespace sogen
 
             if (this->pending_wait)
             {
-                if (const auto* e = win_emu.process.events.get(this->wait_event); e && e->signaled)
+                if (const auto* e = win_emu.process.events.get(this->wait_event); e && e->is_signaled())
                 {
                     const auto ctx = *this->pending_wait;
                     this->pending_wait.reset();
@@ -191,7 +191,7 @@ namespace sogen
             {
                 if (auto* e = win_emu.process.events.get(this->listen_event))
                 {
-                    e->signaled = true;
+                    e->set_signaled(true);
                 }
             }
         }
@@ -220,12 +220,12 @@ namespace sogen
             {
                 event e{};
                 e.type = NotificationEvent;
-                e.signaled = false;
+                e.set_signaled(false);
                 this->read_ready_event = win_emu.process.events.store(std::move(e));
             }
             else if (auto* e = win_emu.process.events.get(this->read_ready_event))
             {
-                e->signaled = false;
+                e->set_signaled(false);
             }
 
             // A synchronous handle blocks here, exactly like real Windows: park the calling thread and
@@ -272,7 +272,7 @@ namespace sogen
             {
                 if (auto* e = win_emu.process.events.get(ctx.event))
                 {
-                    e->signaled = true;
+                    e->set_signaled(true);
                 }
             }
 
@@ -476,7 +476,7 @@ namespace sogen
             {
                 event e{};
                 e.type = NotificationEvent;
-                e.signaled = false;
+                e.set_signaled(false);
                 this->listen_event = win_emu.process.events.store(std::move(e));
             }
 
@@ -525,7 +525,7 @@ namespace sogen
             {
                 event e{};
                 e.type = NotificationEvent;
-                e.signaled = false;
+                e.set_signaled(false);
                 this->wait_event = win_emu.process.events.store(std::move(e));
             }
 
@@ -595,7 +595,7 @@ namespace sogen
             {
                 if (auto* e = win_emu.process.events.get(ctx.event))
                 {
-                    e->signaled = true;
+                    e->set_signaled(true);
                 }
             }
 
@@ -680,7 +680,7 @@ namespace sogen
             {
                 if (auto* e = win_emu.process.events.get(ctx.event))
                 {
-                    e->signaled = true;
+                    e->set_signaled(true);
                 }
             }
 

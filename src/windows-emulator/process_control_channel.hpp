@@ -21,11 +21,9 @@ namespace sogen
         query_memory = 5,
         terminate = 6,
         resume_thread = 7,
-        adopt_section = 8,
+        adopt_object = 8,
         query_wow64_info = 9,
         query_cycle_time = 10,
-        adopt_event = 11,
-        adopt_mutant = 12,
         export_handle = 13,
     };
 

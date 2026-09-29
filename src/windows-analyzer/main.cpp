@@ -678,8 +678,12 @@ namespace sogen
         {
             event e{};
             e.type = inherited.type;
-            e.signaled = inherited.signaled;
+            e.set_signaled(inherited.signaled);
             e.name = inherited.name;
+            if (inherited.arena_slot >= 0)
+            {
+                e.state.adopt(win_emu.process.shared_arena, static_cast<uint32_t>(inherited.arena_slot));
+            }
 
             if (!win_emu.process.events.store_at(inherited.target_handle, std::move(e)))
             {
@@ -725,6 +729,8 @@ namespace sogen
                     utils::file_handle::pin_for_process_lifetime(child_application_host_path);
                     utils::file_handle::pin_image_directory_for_process_lifetime(child_application_host_path);
 
+                    win_emu->process.shared_arena = kernel_arena::adopt(child_bootstrap->kernel_arena_backing);
+
                     for (const auto& inherited : child_bootstrap->inherited_pipes)
                     {
                         recreate_inherited_pipe(*win_emu, inherited);
@@ -766,24 +772,24 @@ namespace sogen
             if (supports_child_process_spawning())
             {
                 spawn_config = build_child_process_spawn_config(options);
-                win_emu->callbacks.create_child_process = [&spawn_config,
-                                                           win_emu_ptr = win_emu.get()](uint32_t record_id, application_settings settings,
-                                                                                        std::vector<inherited_pipe_handle> pipes,
-                                                                                        std::vector<inherited_section_handle> sections,
-                                                                                        std::vector<inherited_event_handle> events) {
-                    auto outcome =
-                        spawn_child_process(spawn_config, std::move(settings), std::move(pipes), std::move(sections), std::move(events));
-                    if (outcome.success && outcome.ipc_fd >= 0)
-                    {
-                        win_emu_ptr->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
-                    }
-                    if (outcome.success && outcome.control_fd >= 0)
-                    {
-                        win_emu_ptr->register_child_control_channel(
-                            record_id, create_fd_process_control_channel(outcome.control_fd, outcome.host_pid));
-                    }
-                    return outcome;
-                };
+                win_emu->callbacks.create_child_process =
+                    [&spawn_config, win_emu_ptr = win_emu.get()](
+                        uint32_t record_id, application_settings settings, std::vector<inherited_pipe_handle> pipes,
+                        std::vector<inherited_section_handle> sections, std::vector<inherited_event_handle> events,
+                        std::shared_ptr<shared_backing> kernel_arena_backing) {
+                        auto outcome = spawn_child_process(spawn_config, std::move(settings), std::move(pipes), std::move(sections),
+                                                           std::move(events), std::move(kernel_arena_backing));
+                        if (outcome.success && outcome.ipc_fd >= 0)
+                        {
+                            win_emu_ptr->register_pipe_ipc_peer(create_fd_pipe_ipc_channel(outcome.ipc_fd));
+                        }
+                        if (outcome.success && outcome.control_fd >= 0)
+                        {
+                            win_emu_ptr->register_child_control_channel(
+                                record_id, create_fd_process_control_channel(outcome.control_fd, outcome.host_pid));
+                        }
+                        return outcome;
+                    };
             }
 
             if (child_bootstrap)

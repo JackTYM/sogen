@@ -126,7 +126,7 @@ namespace sogen::test
 
         auto* e = emu.process.events.get(pipe.read_ready_event);
         ASSERT_NE(e, nullptr);
-        ASSERT_TRUE(e->signaled);
+        ASSERT_TRUE(e->is_signaled());
     }
 
     // A synchronous WaitNamedPipeW (FSCTL_PIPE_WAIT) must keep blocking exactly as before: real Windows
@@ -202,6 +202,6 @@ namespace sogen::test
 
         auto* e = emu.process.events.get(pipe.wait_event);
         ASSERT_NE(e, nullptr);
-        ASSERT_TRUE(e->signaled);
+        ASSERT_TRUE(e->is_signaled());
     }
 } // namespace sogen::test

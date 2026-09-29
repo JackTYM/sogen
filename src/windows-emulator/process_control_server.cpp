@@ -4,6 +4,7 @@
 #include "cross_process_memory.hpp"
 #include "memory_utils.hpp"
 #include "windows_emulator.hpp"
+#include "shareable_object.hpp"
 #include "windows_objects.hpp"
 
 #include <address_utils.hpp>
@@ -391,122 +392,32 @@ namespace sogen
             response.status = STATUS_SUCCESS;
         }
 
-        void execute_adopt_section(windows_emulator& target, const process_control_request& request, process_control_response& response)
+        void execute_adopt_object(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
-            auto backing = request.backing ? request.backing : shared_backing::create_from_content(request.payload);
-            auto s = section::from_pagefile_backing(request.maximum_size, request.page_protection, request.allocation_attributes,
-                                                    request.granted_access, std::move(backing));
+            const auto description = read_description_from_request(request);
 
-            const auto h = target.process.sections.store(std::move(s));
-
-            response.minted_handle_bits = h.bits;
-            response.status = STATUS_SUCCESS;
+            handle adopted{};
+            response.status = adopt_shareable_object(target.process, description, adopted);
+            if (NT_SUCCESS(response.status))
+            {
+                response.minted_handle_bits = adopted.bits;
+            }
         }
 
-        // Mints a fresh, unnamed event local to the child rather than a genuinely shared kernel
-        // object - the same deliberate compromise execute_adopt_section documents for its own case
-        // (see duplicate_section_into_child's comment in syscalls/object.cpp): two separate host
-        // address spaces cannot share a guest event either, and the sandbox's ping/pong cross-call
-        // signaling this event is duplicated for is never actually exercised here, since sogen's
-        // intercepted syscalls resolve directly in the child instead of round-tripping through the
-        // broker's cross-call IPC.
-        void execute_adopt_event(windows_emulator& target, const process_control_request& request, process_control_response& response)
-        {
-            event e{};
-            e.type = static_cast<EVENT_TYPE>(request.allocation_type);
-            e.signaled = request.page_protection != 0;
-
-            const auto h = target.process.events.store(std::move(e));
-
-            response.minted_handle_bits = h.bits;
-            response.status = STATUS_SUCCESS;
-        }
-
-        // Mirrors execute_adopt_event for SharedMemIPCServer::Init's g_alive_mutex (duplicated into
-        // the child once, after all the ping/pong events - sandbox/win/src/sharedmem_ipc_server.cc):
-        // same unshared-local-object compromise, matching the broker's own lock state as a snapshot.
-        void execute_adopt_mutant(windows_emulator& target, const process_control_request& request, process_control_response& response)
-        {
-            mutant m{};
-            m.locked_count = request.allocation_type;
-            m.owning_thread_id = static_cast<uint32_t>(request.size);
-            m.abandoned = request.page_protection != 0;
-
-            const auto h = target.process.mutants.store(std::move(m));
-
-            response.minted_handle_bits = h.bits;
-            response.status = STATUS_SUCCESS;
-        }
-
-        // Mirrors execute_adopt_section/execute_adopt_event/execute_adopt_mutant for the opposite
-        // direction: the parent pulling a handle the child already owns back into itself (e.g. a
-        // mojo/sandbox broker pattern where the child hands a section it created back to its broker
-        // via DuplicateHandle). Only describes the object; the caller mints the local handle itself,
-        // the same split responsibility duplicate_section_into_child and friends already use for the
-        // forward direction.
+        // The opposite direction of execute_adopt_object: the parent pulling a handle the child already
+        // owns back into itself (e.g. a mojo/sandbox broker pattern where the child hands a section it
+        // created back to its broker via DuplicateHandle). Only describes the object; the caller mints the
+        // local handle itself.
         void execute_export_handle(windows_emulator& target, const process_control_request& request, process_control_response& response)
         {
             const auto h = make_handle(request.address);
 
-            if (h.value.type == handle_types::section)
+            shared_object_description description{};
+            response.status = describe_shareable_object(target.process, h, description);
+            if (NT_SUCCESS(response.status))
             {
-                auto* const source_section = target.process.sections.get(h);
-                if (!source_section || source_section->object->is_image() || !source_section->object->file_name.empty())
-                {
-                    response.status = STATUS_NOT_SUPPORTED;
-                    return;
-                }
-
-                response.exported_object_type = handle_types::section;
-                response.maximum_size = source_section->object->maximum_size;
-                response.page_protection = source_section->object->section_page_protection;
-                response.allocation_attributes = source_section->object->allocation_attributes;
-                response.granted_access = source_section->granted_access;
-                auto& backing =
-                    source_section->object->ensure_backing(static_cast<size_t>(page_align_up(source_section->object->maximum_size)));
-                response.backing = source_section->object->backing;
-                if (!backing.is_shared())
-                {
-                    response.payload = backing.content();
-                }
-                response.status = STATUS_SUCCESS;
-                return;
+                write_description_to_response(description, response);
             }
-
-            if (h.value.type == handle_types::event)
-            {
-                auto* const source_event = target.process.events.get(h);
-                if (!source_event)
-                {
-                    response.status = STATUS_NOT_SUPPORTED;
-                    return;
-                }
-
-                response.exported_object_type = handle_types::event;
-                response.allocation_type = static_cast<uint32_t>(source_event->type);
-                response.page_protection = source_event->signaled ? 1 : 0;
-                response.status = STATUS_SUCCESS;
-                return;
-            }
-
-            if (h.value.type == handle_types::mutant)
-            {
-                auto* const source_mutant = target.process.mutants.get(h);
-                if (!source_mutant)
-                {
-                    response.status = STATUS_NOT_SUPPORTED;
-                    return;
-                }
-
-                response.exported_object_type = handle_types::mutant;
-                response.allocation_type = source_mutant->locked_count;
-                response.size = source_mutant->owning_thread_id;
-                response.page_protection = source_mutant->abandoned ? 1 : 0;
-                response.status = STATUS_SUCCESS;
-                return;
-            }
-
-            response.status = STATUS_NOT_SUPPORTED;
         }
     }
 
@@ -542,14 +453,8 @@ namespace sogen
         case process_control_op::resume_thread:
             execute_resume_thread(target, request, response);
             break;
-        case process_control_op::adopt_section:
-            execute_adopt_section(target, request, response);
-            break;
-        case process_control_op::adopt_event:
-            execute_adopt_event(target, request, response);
-            break;
-        case process_control_op::adopt_mutant:
-            execute_adopt_mutant(target, request, response);
+        case process_control_op::adopt_object:
+            execute_adopt_object(target, request, response);
             break;
         case process_control_op::export_handle:
             execute_export_handle(target, request, response);

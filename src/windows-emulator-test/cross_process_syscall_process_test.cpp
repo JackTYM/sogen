@@ -598,15 +598,14 @@ namespace sogen::test
         ASSERT_EQ(status, STATUS_NOT_SUPPORTED);
     }
 
-    // TargetProcess::Init/SharedMemIPCServer::Init duplicate the sandbox's shared IPC section, its
-    // ping/pong events, and its g_alive_mutex into the child (all three handled below); any other
-    // object type stays unsupported.
-    TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsNonSectionNonEventNonMutantSource)
+    // Sections, events, mutants and semaphores can be shared with a child; any other object type stays
+    // unsupported.
+    TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsUnsupportedObjectTypeSource)
     {
         auto parent = create_empty_emulator();
         auto child = create_empty_emulator();
 
-        const auto source_handle = parent.process.semaphores.store({});
+        const auto source_handle = parent.process.timers.store({});
 
         process_context::child_process_record record{};
         record.granted_access = PROCESS_ALL_ACCESS;
@@ -633,7 +632,7 @@ namespace sogen::test
 
         event e{};
         e.type = SynchronizationEvent;
-        e.signaled = true;
+        e.set_signaled(true);
         const auto source_handle = parent.process.events.store(std::move(e));
 
         process_context::child_process_record record{};
@@ -659,7 +658,7 @@ namespace sogen::test
         auto* const child_event = child.process.events.get(minted);
         ASSERT_NE(child_event, nullptr);
         ASSERT_EQ(child_event->type, SynchronizationEvent);
-        ASSERT_TRUE(child_event->signaled);
+        ASSERT_TRUE(child_event->is_signaled());
     }
 
     // Mirrors NtDuplicateObjectSyscallDuplicatesEventIntoChild for SharedMemIPCServer::Init's
@@ -671,8 +670,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         mutant m{};
-        m.locked_count = 1;
-        m.owning_thread_id = 42;
+        m.restore(1, 42, false);
         const auto source_handle = parent.process.mutants.store(std::move(m));
 
         process_context::child_process_record record{};
@@ -697,9 +695,9 @@ namespace sogen::test
 
         auto* const child_mutant = child.process.mutants.get(minted);
         ASSERT_NE(child_mutant, nullptr);
-        ASSERT_EQ(child_mutant->locked_count, 1u);
-        ASSERT_EQ(child_mutant->owning_thread_id, 42u);
-        ASSERT_FALSE(child_mutant->abandoned);
+        ASSERT_EQ(child_mutant->locked_count(), 1u);
+        ASSERT_EQ(child_mutant->owner(), 42u);
+        ASSERT_FALSE(child_mutant->abandoned());
     }
 
     TEST(CrossProcessTest, NtDuplicateObjectSyscallRejectsNonCurrentSourceProcess)
@@ -811,7 +809,7 @@ namespace sogen::test
 
         event e{};
         e.type = SynchronizationEvent;
-        e.signaled = true;
+        e.set_signaled(true);
         const auto source_handle = child.process.events.store(std::move(e));
 
         process_context::child_process_record record{};
@@ -837,7 +835,7 @@ namespace sogen::test
         auto* const parent_event = parent.process.events.get(minted);
         ASSERT_NE(parent_event, nullptr);
         ASSERT_EQ(parent_event->type, SynchronizationEvent);
-        ASSERT_TRUE(parent_event->signaled);
+        ASSERT_TRUE(parent_event->is_signaled());
     }
 
     TEST(CrossProcessTest, NtDuplicateObjectSyscallDuplicatesMutantFromChild)
@@ -846,8 +844,7 @@ namespace sogen::test
         auto child = create_empty_emulator();
 
         mutant m{};
-        m.locked_count = 1;
-        m.owning_thread_id = 42;
+        m.restore(1, 42, false);
         const auto source_handle = child.process.mutants.store(std::move(m));
 
         process_context::child_process_record record{};
@@ -872,9 +869,9 @@ namespace sogen::test
 
         auto* const parent_mutant = parent.process.mutants.get(minted);
         ASSERT_NE(parent_mutant, nullptr);
-        ASSERT_EQ(parent_mutant->locked_count, 1u);
-        ASSERT_EQ(parent_mutant->owning_thread_id, 42u);
-        ASSERT_FALSE(parent_mutant->abandoned);
+        ASSERT_EQ(parent_mutant->locked_count(), 1u);
+        ASSERT_EQ(parent_mutant->owner(), 42u);
+        ASSERT_FALSE(parent_mutant->abandoned());
     }
 
     // Real Windows' DuplicateHandle has no direct-child-to-child path either without going through a
@@ -946,5 +943,140 @@ namespace sogen::test
                                                                emulator_object<handle>{parent.memory, 0}, 0, 0, DUPLICATE_SAME_ACCESS);
 
         ASSERT_EQ(status, STATUS_PROCESS_IS_TERMINATING);
+    }
+
+    namespace
+    {
+        struct duplicated_into_child
+        {
+            NTSTATUS status{};
+            handle minted{};
+        };
+
+        duplicated_into_child duplicate_into_child(windows_emulator& parent, windows_emulator& child, const handle source_handle)
+        {
+            process_context::child_process_record record{};
+            record.granted_access = PROCESS_ALL_ACCESS;
+            parent.process.child_processes[7] = record;
+            parent.register_child_control_channel(7, std::make_unique<loopback_process_control_channel>(child));
+
+            const auto c = make_context(parent);
+            const auto target_process = make_pseudo_handle(7, handle_types::process);
+
+            const auto handle_out = parent.memory.allocate_memory(0x1000, memory_permission::read_write);
+            const emulator_object<handle> target_handle{parent.memory, handle_out};
+
+            duplicated_into_child result{};
+            result.status = syscalls::handle_NtDuplicateObject(c, CURRENT_PROCESS, source_handle, target_process, target_handle, 0, 0,
+                                                               DUPLICATE_SAME_ACCESS);
+            result.minted = target_handle.read();
+            return result;
+        }
+    }
+
+    TEST(CrossProcessTest, DuplicatedEventStaysSharedWithChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        event e{};
+        e.type = SynchronizationEvent;
+        const auto source_handle = parent.process.events.store(std::move(e));
+
+        const auto duplicated = duplicate_into_child(parent, child, source_handle);
+        ASSERT_EQ(duplicated.status, STATUS_SUCCESS);
+
+        auto* const parent_event = parent.process.events.get(source_handle);
+        auto* const child_event = child.process.events.get(duplicated.minted);
+        ASSERT_NE(child_event, nullptr);
+        ASSERT_TRUE(parent_event->state.is_shared());
+        ASSERT_TRUE(child_event->state.is_shared());
+        ASSERT_FALSE(child_event->is_signaled());
+
+        parent_event->set_signaled(true);
+        ASSERT_TRUE(child_event->is_signaled());
+
+        ASSERT_TRUE(child_event->try_consume_signal());
+        ASSERT_FALSE(parent_event->is_signaled());
+        ASSERT_FALSE(parent_event->try_consume_signal());
+    }
+
+    TEST(CrossProcessTest, DuplicatedMutantIsContendedAcrossProcesses)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        const auto source_handle = parent.process.mutants.store(mutant{});
+
+        const auto duplicated = duplicate_into_child(parent, child, source_handle);
+        ASSERT_EQ(duplicated.status, STATUS_SUCCESS);
+
+        auto* const parent_mutant = parent.process.mutants.get(source_handle);
+        auto* const child_mutant = child.process.mutants.get(duplicated.minted);
+        ASSERT_NE(child_mutant, nullptr);
+
+        const auto parent_owner = mutant::make_owner_key(4, 4);
+        const auto child_owner = mutant::make_owner_key(8, 4);
+
+        ASSERT_TRUE(parent_mutant->try_lock(parent_owner).has_value());
+        ASSERT_FALSE(child_mutant->try_lock(child_owner).has_value());
+        ASSERT_FALSE(child_mutant->is_signaled(child_owner));
+
+        ASSERT_TRUE(parent_mutant->release(parent_owner).second);
+        ASSERT_TRUE(child_mutant->try_lock(child_owner).has_value());
+        ASSERT_FALSE(parent_mutant->try_lock(parent_owner).has_value());
+
+        child_mutant->abandon_if_owned_by(child_owner);
+        const auto acquired = parent_mutant->try_lock(parent_owner);
+        ASSERT_TRUE(acquired.has_value());
+        ASSERT_TRUE(*acquired);
+    }
+
+    TEST(CrossProcessTest, DuplicatedSemaphoreIsSharedWithChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        semaphore s{};
+        s.initialize(1, 3);
+        const auto source_handle = parent.process.semaphores.store(std::move(s));
+
+        const auto duplicated = duplicate_into_child(parent, child, source_handle);
+        ASSERT_EQ(duplicated.status, STATUS_SUCCESS);
+
+        auto* const parent_semaphore = parent.process.semaphores.get(source_handle);
+        auto* const child_semaphore = child.process.semaphores.get(duplicated.minted);
+        ASSERT_NE(child_semaphore, nullptr);
+        ASSERT_EQ(child_semaphore->max_count(), 3u);
+
+        ASSERT_TRUE(child_semaphore->try_lock());
+        ASSERT_FALSE(parent_semaphore->try_lock());
+
+        ASSERT_TRUE(parent_semaphore->release(2).second);
+        ASSERT_FALSE(child_semaphore->release(2).second);
+        ASSERT_TRUE(child_semaphore->try_lock());
+        ASSERT_TRUE(parent_semaphore->try_lock());
+        ASSERT_FALSE(child_semaphore->try_lock());
+    }
+
+    TEST(CrossProcessTest, SectionWritesStayVisibleAfterDuplicationIntoChild)
+    {
+        auto parent = create_empty_emulator();
+        auto child = create_empty_emulator();
+
+        auto s = make_pagefile_section({std::byte{1}, std::byte{2}}, 0x000F001F);
+        const auto source_handle = parent.process.sections.store(std::move(s));
+
+        const auto duplicated = duplicate_into_child(parent, child, source_handle);
+        ASSERT_EQ(duplicated.status, STATUS_SUCCESS);
+
+        auto* const parent_section = parent.process.sections.get(source_handle);
+        auto* const child_section = child.process.sections.get(duplicated.minted);
+        ASSERT_NE(child_section, nullptr);
+
+        parent_section->object->backing->data()[100] = std::byte{0x5e};
+        ASSERT_EQ(child_section->object->backing->data()[100], std::byte{0x5e});
+        child_section->object->backing->data()[200] = std::byte{0x6f};
+        ASSERT_EQ(parent_section->object->backing->data()[200], std::byte{0x6f});
     }
 } // namespace sogen::test

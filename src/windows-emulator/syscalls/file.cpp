@@ -1384,7 +1384,7 @@ namespace sogen
             {
                 if (auto* e = c.proc.events.get(event))
                 {
-                    e->signaled = true;
+                    e->set_signaled(true);
                 }
             }
 
@@ -2538,7 +2538,7 @@ namespace sogen
 
             if (auto* e = c.proc.events.get(event))
             {
-                e->signaled = false;
+                e->set_signaled(false);
             }
 
             if (pipe_io_trace_enabled() && fs_control_code == FSCTL_PIPE_LISTEN)

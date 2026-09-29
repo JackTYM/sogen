@@ -173,7 +173,7 @@ namespace sogen
         {
             if (auto* e = win_emu.process.events.get(c.event); e)
             {
-                e->signaled = true;
+                e->set_signaled(true);
             }
         }
 

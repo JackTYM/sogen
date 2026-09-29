@@ -30,10 +30,10 @@ namespace sogen
 
             if (previous_state.value())
             {
-                previous_state.write(entry->signaled ? 1ULL : 0ULL);
+                previous_state.write(entry->is_signaled() ? 1ULL : 0ULL);
             }
 
-            entry->signaled = true;
+            entry->set_signaled(true);
             record_object_signal(make_handle(handle), c.thread().id, "NtSetEvent");
 
             if (std::getenv("SOGEN_TRACE_PIPE_IO"))
@@ -69,14 +69,14 @@ namespace sogen
 
             if (previous_state.value())
             {
-                previous_state.write(entry->signaled ? 1ULL : 0ULL);
+                previous_state.write(entry->is_signaled() ? 1ULL : 0ULL);
             }
 
             // Pulse: momentarily signal the event so threads already blocked on it wake, then return it to
             // the non-signaled state. Threads that are not currently waiting miss the pulse, matching the
             // lossy NtPulseEvent semantics. The cooperative scheduler only re-evaluates readiness at context
             // switches, so wake the current waiters explicitly while the event is signaled.
-            entry->signaled = true;
+            entry->set_signaled(true);
 
             const auto event_handle = make_handle(handle);
             record_object_signal(event_handle, c.thread().id, "NtPulseEvent");
@@ -89,7 +89,7 @@ namespace sogen
                 }
             }
 
-            entry->signaled = false;
+            entry->set_signaled(false);
             return STATUS_SUCCESS;
         }
 
@@ -118,7 +118,7 @@ namespace sogen
             if (auto* entry = c.proc.events.get(event_handle))
             {
                 type = entry->type;
-                is_signaled = entry->signaled;
+                is_signaled = entry->is_signaled();
             }
             else if (event_handle.value.is_pseudo)
             {
@@ -151,7 +151,7 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            e->signaled = false;
+            e->set_signaled(false);
             return STATUS_SUCCESS;
         }
 
@@ -186,7 +186,7 @@ namespace sogen
 
             event e{};
             e.type = event_type;
-            e.signaled = initial_state != FALSE;
+            e.set_signaled(initial_state != FALSE);
             e.name = std::move(name);
 
             const auto handle = c.proc.events.store(std::move(e));

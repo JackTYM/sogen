@@ -1,5 +1,7 @@
 #include "emulation_test_utils.hpp"
 
+#include <shareable_object.hpp>
+
 #include <process_control_server.hpp>
 #include <cross_process_memory.hpp>
 #include <memory_utils.hpp>
@@ -519,13 +521,19 @@ namespace sogen::test
 
         const std::vector<std::byte> content = {std::byte{'h'}, std::byte{'i'}, std::byte{'!'}};
 
+        auto source = section::from_pagefile_backing(content.size(), PAGE_READWRITE, SEC_COMMIT, 0x000F001F,
+                                                     shared_backing::create_from_content(content));
+        utils::buffer_serializer serialized{};
+        source.serialize_object(serialized);
+
+        shared_object_description description{};
+        description.type = handle_types::section;
+        description.granted_access = 0x000F001F;
+        description.object_bytes = serialized.get_buffer();
+        description.fallback_content = content;
+
         process_control_request request{};
-        request.op = process_control_op::adopt_section;
-        request.maximum_size = content.size();
-        request.page_protection = PAGE_READWRITE;
-        request.allocation_attributes = SEC_COMMIT;
-        request.granted_access = 0x000F001F;
-        request.payload = content;
+        write_description_to_request(description, request);
 
         const auto response = channel.request(request, process_control_default_timeout_ms);
         ASSERT_TRUE(response.has_value());
@@ -618,7 +626,7 @@ namespace sogen::test
         constexpr std::array all_ops = {
             process_control_op::read_memory,    process_control_op::write_memory,  process_control_op::allocate_memory,
             process_control_op::protect_memory, process_control_op::free_memory,   process_control_op::query_memory,
-            process_control_op::terminate,      process_control_op::resume_thread, process_control_op::adopt_section,
+            process_control_op::terminate,      process_control_op::resume_thread, process_control_op::adopt_object,
         };
 
         for (const auto op : all_ops)

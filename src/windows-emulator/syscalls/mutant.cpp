@@ -25,7 +25,7 @@ namespace sogen
                 return STATUS_INVALID_HANDLE;
             }
 
-            const auto [old_count, succeeded] = mutant->release(c.thread().id);
+            const auto [old_count, succeeded] = mutant->release(mutant::make_owner_key(c.proc.process_id, c.thread().id));
 
             if (previous_count)
             {
@@ -115,7 +115,7 @@ namespace sogen
 
             if (initial_owner)
             {
-                e.try_lock(c.thread().id);
+                e.try_lock(mutant::make_owner_key(c.proc.process_id, c.thread().id));
             }
 
             const auto handle = c.proc.mutants.store(std::move(e));

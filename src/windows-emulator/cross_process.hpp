@@ -19,7 +19,7 @@ namespace sogen
     // Thin wrapper around process_control_channel::request() shared by every cross-process syscall
     // handler (NtReadVirtualMemory, NtWriteVirtualMemory, NtAllocateVirtualMemory{,Ex},
     // NtProtectVirtualMemory, NtFreeVirtualMemory, NtQueryVirtualMemory, NtTerminateProcess,
-    // NtResumeThread, NtDuplicateObject's adopt_section/adopt_event/adopt_mutant/export_handle
+    // NtResumeThread, NtDuplicateObject's adopt_object/export_handle
     // branches, ProcessWow64Information's query_wow64_info, ProcessCycleTime's query_cycle_time) -
     // one place to log a full request/response, gated by SOGEN_TRACE_XPROC_CTRL, instead of
     // duplicating the same diagnostic at every call site.

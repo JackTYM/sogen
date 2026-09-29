@@ -140,7 +140,7 @@ namespace sogen
                 }
 
                 const auto* e = c.events.get(h);
-                if (e && e->signaled)
+                if (e && e->is_signaled())
                 {
                     return wait_state::signaled;
                 }
@@ -161,9 +161,9 @@ namespace sogen
 
             case handle_types::mutant: {
                 const auto* e = c.mutants.get(h);
-                if (e && e->is_signaled(current_thread_id))
+                if (e && e->is_signaled(mutant::make_owner_key(c.process_id, current_thread_id)))
                 {
-                    return e->abandoned ? wait_state::abandoned : wait_state::signaled;
+                    return e->abandoned() ? wait_state::abandoned : wait_state::signaled;
                 }
 
                 break;
@@ -175,7 +175,7 @@ namespace sogen
 
             case handle_types::semaphore: {
                 const auto* s = c.semaphores.get(h);
-                if (s && s->current_count > 0)
+                if (s && s->current_count() > 0)
                 {
                     return wait_state::signaled;
                 }
@@ -251,14 +251,14 @@ namespace sogen
                 }
 
                 auto* event = c.events.get(h);
-                if (!event || !event->signaled)
+                if (!event || !event->is_signaled())
                 {
                     return std::nullopt;
                 }
 
-                if (event->type == SynchronizationEvent)
+                if (event->type == SynchronizationEvent && !event->try_consume_signal())
                 {
-                    event->signaled = false;
+                    return std::nullopt;
                 }
 
                 return wait_state::signaled;
@@ -280,7 +280,7 @@ namespace sogen
                     return std::nullopt;
                 }
 
-                const auto acquired = mutant->try_lock(current_thread_id);
+                const auto acquired = mutant->try_lock(mutant::make_owner_key(c.process_id, current_thread_id));
                 if (!acquired.has_value())
                 {
                     return std::nullopt;

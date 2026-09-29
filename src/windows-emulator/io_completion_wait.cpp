@@ -27,7 +27,7 @@ namespace sogen
 
                 case handle_types::event: {
                     const auto* e = process.events.get(target_object_handle);
-                    return e && e->signaled;
+                    return e && e->is_signaled();
                 }
                 case handle_types::thread: {
                     const auto* thread = process.threads.get(target_object_handle);
@@ -36,7 +36,7 @@ namespace sogen
 
                 case handle_types::semaphore: {
                     const auto* semaphore = process.semaphores.get(target_object_handle);
-                    return semaphore && semaphore->current_count > 0;
+                    return semaphore && semaphore->current_count() > 0;
                 }
 
                 case handle_types::port: {
@@ -46,7 +46,7 @@ namespace sogen
 
                 case handle_types::mutant: {
                     const auto* mutant = process.mutants.get(target_object_handle);
-                    return mutant && mutant->locked_count == 0;
+                    return mutant && mutant->locked_count() == 0;
                 }
 
                 case handle_types::timer:
@@ -69,7 +69,7 @@ namespace sogen
                     auto* e = process.events.get(target_object_handle);
                     if (e && e->type == SynchronizationEvent)
                     {
-                        e->signaled = false;
+                        (void)e->try_consume_signal();
                     }
                     break;
                 }

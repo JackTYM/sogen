@@ -141,6 +141,9 @@ namespace sogen
         EVENT_TYPE type{};
         bool signaled{};
         std::u16string name{};
+        // Slot in the kernel arena (see kernel_state.hpp) holding the event's state, so parent and child
+        // share one event; -1 when the event state could not be placed in shared memory.
+        int64_t arena_slot{-1};
 
         void serialize(utils::buffer_serializer& buffer) const
         {
@@ -148,6 +151,7 @@ namespace sogen
             buffer.write(this->type);
             buffer.write(this->signaled);
             buffer.write_string(std::u16string_view(this->name));
+            buffer.write(this->arena_slot);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -156,6 +160,7 @@ namespace sogen
             buffer.read(this->type);
             buffer.read(this->signaled);
             buffer.read_string(this->name);
+            buffer.read(this->arena_slot);
         }
     };
 
@@ -216,7 +221,8 @@ namespace sogen
         // by its minted process/thread pseudo handles), passed through so the embedder can register
         // the child's pipe_ipc_channel/process_control_channel under the same id.
         opt_func<child_process_outcome(uint32_t record_id, application_settings, std::vector<inherited_pipe_handle>,
-                                       std::vector<inherited_section_handle>, std::vector<inherited_event_handle>)>
+                                       std::vector<inherited_section_handle>, std::vector<inherited_event_handle>,
+                                       std::shared_ptr<shared_backing> kernel_arena_backing)>
             create_child_process{};
 
         opt_func<void(uint64_t address, uint64_t length, memory_permission)> on_memory_protect{};

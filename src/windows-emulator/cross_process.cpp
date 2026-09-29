@@ -32,16 +32,12 @@ namespace sogen
                 return "terminate";
             case process_control_op::resume_thread:
                 return "resume_thread";
-            case process_control_op::adopt_section:
-                return "adopt_section";
+            case process_control_op::adopt_object:
+                return "adopt_object";
             case process_control_op::query_wow64_info:
                 return "query_wow64_info";
             case process_control_op::query_cycle_time:
                 return "query_cycle_time";
-            case process_control_op::adopt_event:
-                return "adopt_event";
-            case process_control_op::adopt_mutant:
-                return "adopt_mutant";
             case process_control_op::export_handle:
                 return "export_handle";
             }

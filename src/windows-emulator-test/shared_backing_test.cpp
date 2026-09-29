@@ -90,7 +90,7 @@ namespace sogen::test
         std::memset(backing->data(), 0x11, backing->size());
 
         process_control_request request{};
-        request.op = process_control_op::adopt_section;
+        request.op = process_control_op::adopt_object;
         request.maximum_size = backing->size();
         request.backing = backing;
 
@@ -129,7 +129,7 @@ namespace sogen::test
         socket_pair channels{};
 
         process_control_request request{};
-        request.op = process_control_op::adopt_section;
+        request.op = process_control_op::adopt_object;
         request.backing = shared_backing::create_heap(8);
         request.payload = {std::byte{9}, std::byte{8}};
 

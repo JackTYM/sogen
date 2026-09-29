@@ -3,6 +3,7 @@
 #include "../io_completion_wait.hpp"
 #include "../syscall_utils.hpp"
 #include "../cross_process.hpp"
+#include "../shareable_object.hpp"
 #include "../devices/named_pipe.hpp"
 #include "wait_trace.hpp"
 
@@ -22,87 +23,36 @@ namespace sogen
         {
             constexpr ACCESS_MASK PROCESS_DUP_HANDLE = 0x0040;
 
-            // TargetProcess::Init hands the sandbox's shared pagefile-backed IPC section to a suspended child
-            // via DuplicateHandle(cur, shared_section_, child, &out, FILE_MAP_READ|FILE_MAP_WRITE|
-            // SECTION_QUERY, false, 0). On real Windows this is genuine shared memory, and mojo/ipcz's
-            // NodeLinkMemory depends on the same: the section's backing (shared_backing) is a real
-            // shared-memory mapping whose descriptor is passed to the child, so both host processes map the
-            // same physical pages. Only a host without shared memory (backing not is_shared()) degrades to a
-            // one-time content snapshot.
-            NTSTATUS duplicate_section_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
-                                                  const emulator_object<handle> target_handle, const ACCESS_MASK desired_access,
-                                                  const ULONG options)
+            // DuplicateHandle of a section, event, mutant or semaphore into a child host process. On real
+            // Windows the two handles refer to one kernel object. Here the object's state lives in shared
+            // memory (a section's backing, or a slot in the shared kernel arena) that the child maps too, so
+            // both processes observe and mutate the same state; only a host without shared memory degrades
+            // to a snapshot (see shared_object_description).
+            NTSTATUS duplicate_object_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
+                                                 const emulator_object<handle> target_handle, const ACCESS_MASK desired_access,
+                                                 const ULONG options)
             {
                 const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
-                if (resolved_source_handle.value.type != handle_types::section)
+                if (!is_shareable_object_type(static_cast<handle_types::type>(resolved_source_handle.value.type)))
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
 
-                auto* const source_section = c.proc.sections.get(resolved_source_handle);
-                if (!source_section || source_section->object->is_image() || !source_section->object->file_name.empty())
+                shared_object_description description{};
+                if (const auto status = describe_shareable_object(c.proc, resolved_source_handle, description); !NT_SUCCESS(status))
                 {
-                    return STATUS_NOT_SUPPORTED;
-                }
-
-                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
-                if (std::holds_alternative<NTSTATUS>(child))
-                {
-                    return std::get<NTSTATUS>(child);
+                    return status;
                 }
 
                 const bool same_access = (options & DUPLICATE_SAME_ACCESS) != 0;
-                if (!same_access && (desired_access & ~source_section->granted_access) != 0)
+                if (description.type == handle_types::section)
                 {
-                    return STATUS_ACCESS_DENIED;
-                }
+                    if (!same_access && (desired_access & ~description.granted_access) != 0)
+                    {
+                        return STATUS_ACCESS_DENIED;
+                    }
 
-                const auto& target = std::get<child_target>(child);
-
-                process_control_request request{};
-                request.op = process_control_op::adopt_section;
-                request.maximum_size = source_section->object->maximum_size;
-                request.page_protection = source_section->object->section_page_protection;
-                request.allocation_attributes = source_section->object->allocation_attributes;
-                request.granted_access = same_access ? source_section->granted_access : desired_access;
-
-                auto& backing =
-                    source_section->object->ensure_backing(static_cast<size_t>(page_align_up(source_section->object->maximum_size)));
-                request.backing = source_section->object->backing;
-                if (!backing.is_shared())
-                {
-                    request.payload = backing.content();
-                }
-
-                const auto response = send_process_control_request(c, target, request);
-                if (!response)
-                {
-                    c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
-                    return STATUS_PROCESS_IS_TERMINATING;
-                }
-
-                if (response->status != STATUS_SUCCESS)
-                {
-                    return static_cast<NTSTATUS>(response->status);
-                }
-
-                target_handle.write(make_handle(response->minted_handle_bits));
-                return STATUS_SUCCESS;
-            }
-
-            // Mirrors duplicate_section_into_child for SharedMemIPCServer::Init's ping/pong event pair
-            // (sandbox/win/src/sharedmem_ipc_server.cc), duplicated into the child right after the
-            // shared IPC section - see that function's comment for why minting an unshared local event
-            // (adopt_event, process_control_server.cpp) is survivable here rather than a real gap.
-            NTSTATUS duplicate_event_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
-                                                const emulator_object<handle> target_handle, const ACCESS_MASK /*desired_access*/,
-                                                const ULONG /*options*/)
-            {
-                const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
-                auto* const source_event = c.proc.events.get(resolved_source_handle);
-                if (!source_event)
-                {
-                    return STATUS_NOT_SUPPORTED;
+                    description.granted_access = same_access ? description.granted_access : desired_access;
                 }
 
                 const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
@@ -114,9 +64,7 @@ namespace sogen
                 const auto& target = std::get<child_target>(child);
 
                 process_control_request request{};
-                request.op = process_control_op::adopt_event;
-                request.allocation_type = static_cast<uint32_t>(source_event->type);
-                request.page_protection = source_event->signaled ? 1 : 0;
+                write_description_to_request(description, request);
 
                 const auto response = send_process_control_request(c, target, request);
                 if (!response)
@@ -134,58 +82,12 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            // Mirrors duplicate_event_into_child for SharedMemIPCServer::Init's g_alive_mutex
-            // (sandbox/win/src/sharedmem_ipc_server.cc), duplicated into the child once after all the
-            // ping/pong events - see that function's comment for why an unshared local mutant
-            // (adopt_mutant, process_control_server.cpp) is survivable here rather than a real gap.
-            NTSTATUS duplicate_mutant_into_child(const syscall_context& c, const handle source_handle, const handle target_process_handle,
-                                                 const emulator_object<handle> target_handle, const ACCESS_MASK /*desired_access*/,
-                                                 const ULONG /*options*/)
-            {
-                const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);
-                auto* const source_mutant = c.proc.mutants.get(resolved_source_handle);
-                if (!source_mutant)
-                {
-                    return STATUS_NOT_SUPPORTED;
-                }
-
-                const auto child = resolve_child_target(c, target_process_handle, PROCESS_DUP_HANDLE);
-                if (std::holds_alternative<NTSTATUS>(child))
-                {
-                    return std::get<NTSTATUS>(child);
-                }
-
-                const auto& target = std::get<child_target>(child);
-
-                process_control_request request{};
-                request.op = process_control_op::adopt_mutant;
-                request.allocation_type = source_mutant->locked_count;
-                request.size = source_mutant->owning_thread_id;
-                request.page_protection = source_mutant->abandoned ? 1 : 0;
-
-                const auto response = send_process_control_request(c, target, request);
-                if (!response)
-                {
-                    c.win_emu.log.error("NtDuplicateObject: control channel to child %u is dead/unresponsive\n", target.record_id);
-                    return STATUS_PROCESS_IS_TERMINATING;
-                }
-
-                if (response->status != STATUS_SUCCESS)
-                {
-                    return static_cast<NTSTATUS>(response->status);
-                }
-
-                target_handle.write(make_handle(response->minted_handle_bits));
-                return STATUS_SUCCESS;
-            }
-
-            // The reverse of duplicate_section_into_child/duplicate_event_into_child/
-            // duplicate_mutant_into_child above: the guest is pulling a handle the CHILD owns back
+            // The reverse of duplicate_object_into_child: the guest is pulling a handle the CHILD owns back
             // into itself (e.g. a mojo/sandbox broker receiving a section its child created via
-            // DuplicateHandle(child_handle, h, GetCurrentProcess(), &out, ...)). export_handle asks
-            // the child to describe the object; the new local handle is minted here, in the current
-            // process's own handle store, matching real DuplicateHandle's guarantee that the new
-            // handle always lands in whatever process target_process_handle names.
+            // DuplicateHandle(child_handle, h, GetCurrentProcess(), &out, ...)). export_handle asks the child
+            // to describe the object; the new local handle is minted here, in the current process's own
+            // handle store, matching real DuplicateHandle's guarantee that the new handle always lands in
+            // whatever process target_process_handle names.
             NTSTATUS duplicate_object_from_child(const syscall_context& c, const handle source_process_handle, const handle source_handle,
                                                  const emulator_object<handle> target_handle, const ACCESS_MASK desired_access,
                                                  const ULONG options)
@@ -214,46 +116,31 @@ namespace sogen
                     return static_cast<NTSTATUS>(response->status);
                 }
 
-                const bool same_access = (options & DUPLICATE_SAME_ACCESS) != 0;
-
-                if (response->exported_object_type == handle_types::section)
+                auto description = read_description_from_response(*response);
+                if (!is_shareable_object_type(description.type))
                 {
-                    if (!same_access && (desired_access & ~response->granted_access) != 0)
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                const bool same_access = (options & DUPLICATE_SAME_ACCESS) != 0;
+                if (description.type == handle_types::section)
+                {
+                    if (!same_access && (desired_access & ~description.granted_access) != 0)
                     {
                         return STATUS_ACCESS_DENIED;
                     }
 
-                    auto backing = response->backing ? response->backing : shared_backing::create_from_content(response->payload);
-                    auto s =
-                        section::from_pagefile_backing(response->maximum_size, response->page_protection, response->allocation_attributes,
-                                                       same_access ? response->granted_access : desired_access, std::move(backing));
-
-                    target_handle.write(c.proc.sections.store(std::move(s)));
-                    return STATUS_SUCCESS;
+                    description.granted_access = same_access ? description.granted_access : desired_access;
                 }
 
-                if (response->exported_object_type == handle_types::event)
+                handle adopted{};
+                if (const auto status = adopt_shareable_object(c.proc, description, adopted); !NT_SUCCESS(status))
                 {
-                    event e{};
-                    e.type = static_cast<EVENT_TYPE>(response->allocation_type);
-                    e.signaled = response->page_protection != 0;
-
-                    target_handle.write(c.proc.events.store(std::move(e)));
-                    return STATUS_SUCCESS;
+                    return status;
                 }
 
-                if (response->exported_object_type == handle_types::mutant)
-                {
-                    mutant m{};
-                    m.locked_count = response->allocation_type;
-                    m.owning_thread_id = static_cast<uint32_t>(response->size);
-                    m.abandoned = response->page_protection != 0;
-
-                    target_handle.write(c.proc.mutants.store(std::move(m)));
-                    return STATUS_SUCCESS;
-                }
-
-                return STATUS_NOT_SUPPORTED;
+                target_handle.write(adopted);
+                return STATUS_SUCCESS;
             }
         }
 
@@ -405,16 +292,7 @@ namespace sogen
                                        resolved_for_child.value.type);
                 }
 
-                if (resolved_for_child.value.type == handle_types::event)
-                {
-                    return duplicate_event_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
-                }
-                if (resolved_for_child.value.type == handle_types::mutant)
-                {
-                    return duplicate_mutant_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
-                }
-
-                return duplicate_section_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
+                return duplicate_object_into_child(c, source_handle, target_process_handle, target_handle, desired_access, options);
             }
 
             const auto resolved_source_handle = c.proc.resolve_object_pseudo_handle(source_handle, c.vcpu.active_thread);

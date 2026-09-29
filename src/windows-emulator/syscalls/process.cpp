@@ -1311,11 +1311,14 @@ namespace sogen
                         continue;
                     }
 
+                    const auto shared = c.proc.ensure_shared_arena() && event_object->state.promote(c.proc.shared_arena);
+
                     inherited_events.push_back({
                         .target_handle = src_handle,
                         .type = event_object->type,
-                        .signaled = event_object->signaled,
+                        .signaled = event_object->is_signaled(),
                         .name = event_object->name,
+                        .arena_slot = shared ? static_cast<int64_t>(event_object->state.slot()->index()) : -1,
                     });
                     continue;
                 }
@@ -1419,8 +1422,10 @@ namespace sogen
             child_process_outcome outcome{};
             try
             {
+                const auto* const arena = c.proc.ensure_shared_arena();
                 outcome = c.win_emu.callbacks.create_child_process(record_id, std::move(child_settings), std::move(inherited_pipes),
-                                                                   std::move(inherited_sections), std::move(inherited_events));
+                                                                   std::move(inherited_sections), std::move(inherited_events),
+                                                                   arena ? arena->backing() : nullptr);
             }
             catch (const std::exception& e)
             {

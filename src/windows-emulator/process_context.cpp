@@ -1255,10 +1255,7 @@ namespace sogen
 
         for (auto& mutant : this->mutants | std::views::values)
         {
-            if (mutant.owning_thread_id == thread.id && mutant.locked_count > 0)
-            {
-                mutant.abandon();
-            }
+            mutant.abandon_if_owned_by(mutant::make_owner_key(this->process_id, thread.id));
         }
 
         for (auto i = this->windows.begin(); i != this->windows.end();)

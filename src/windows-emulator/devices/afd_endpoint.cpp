@@ -507,7 +507,7 @@ namespace sogen
 
                         if (auto* event = win_emu.process.events.get(*this->event_select_event_))
                         {
-                            event->signaled = true;
+                            event->set_signaled(true);
                         }
                     }
                 }
@@ -545,7 +545,7 @@ namespace sogen
                     auto* e = win_emu.process.events.get(this->delayed_ioctl_->event);
                     if (e)
                     {
-                        e->signaled = true;
+                        e->set_signaled(true);
                     }
 
                     this->clear_pending_state();
@@ -1264,7 +1264,7 @@ namespace sogen
 
                 if (auto* event = win_emu.process.events.get(select_info.Event))
                 {
-                    event->signaled = false;
+                    event->set_signaled(false);
                 }
 
                 return STATUS_SUCCESS;
@@ -1291,7 +1291,7 @@ namespace sogen
 
                         if (auto* event = win_emu.process.events.get(h))
                         {
-                            event->signaled = false;
+                            event->set_signaled(false);
                         }
                     }
                     else

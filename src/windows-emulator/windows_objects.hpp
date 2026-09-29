@@ -2,6 +2,7 @@
 
 #include "handles.hpp"
 #include "memory_manager.hpp"
+#include "kernel_state.hpp"
 #include "shared_backing.hpp"
 
 #include <algorithm>
@@ -44,22 +45,43 @@ namespace sogen
 
     struct event : ref_counted_object
     {
-        bool signaled{};
         EVENT_TYPE type{};
         std::u16string name{};
+        // word 0: signaled. Shared across host processes once promoted into a kernel_arena slot.
+        kernel_state state{};
+
+        bool is_signaled() const
+        {
+            return this->state.word(0).load(std::memory_order_acquire) != 0;
+        }
+
+        void set_signaled(const bool signaled)
+        {
+            this->state.word(0).store(signaled ? 1 : 0, std::memory_order_release);
+        }
+
+        // Atomically clears the signal, so two processes waiting on one auto-reset event can never both
+        // consume it.
+        bool try_consume_signal()
+        {
+            uint64_t expected = 1;
+            return this->state.word(0).compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+        }
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
-            buffer.write(this->signaled);
+            buffer.write(this->is_signaled());
             buffer.write(this->type);
             buffer.write(this->name);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
-            buffer.read(this->signaled);
+            bool signaled{};
+            buffer.read(signaled);
             buffer.read(this->type);
             buffer.read(this->name);
+            this->set_signaled(signaled);
         }
     };
 
@@ -556,81 +578,149 @@ namespace sogen
         }
     };
 
+    // Word 0 packs the whole lock state so every transition is a single compare-exchange, which is what
+    // keeps a mutant consistent when several host processes contend for it:
+    //   bits 0-23   recursion count
+    //   bit  24     abandoned
+    //   bits 25-63  owner key (guest process id and thread id, see make_owner_key)
     struct mutant : ref_counted_object
     {
-        uint32_t locked_count{0};
-        uint32_t owning_thread_id{};
-        bool abandoned{false};
         std::u16string name{};
+        kernel_state state{};
 
-        bool is_signaled(const uint32_t thread_id) const
+        // Thread ids are only unique within one process, so the owner also carries the process id.
+        static uint64_t make_owner_key(const uint32_t process_id, const uint32_t thread_id)
         {
-            return this->abandoned || this->locked_count == 0 || this->owning_thread_id == thread_id;
+            return (static_cast<uint64_t>(process_id & 0x7FFF) << 24) | (thread_id & 0xFFFFFF);
         }
 
-        std::optional<bool> try_lock(const uint32_t thread_id)
+        uint32_t locked_count() const
         {
-            if (this->locked_count == 0)
-            {
-                ++this->locked_count;
-                this->owning_thread_id = thread_id;
-                const auto was_abandoned = this->abandoned;
-                this->abandoned = false;
-                return was_abandoned;
-            }
-
-            if (this->owning_thread_id != thread_id)
-            {
-                return std::nullopt;
-            }
-
-            ++this->locked_count;
-            return false;
+            return static_cast<uint32_t>(this->state.word(0).load(std::memory_order_acquire) & lock_count_mask);
         }
 
-        std::pair<uint32_t, bool> release(const uint32_t thread_id)
+        bool abandoned() const
         {
-            const auto old_count = this->locked_count;
+            return (this->state.word(0).load(std::memory_order_acquire) & abandoned_bit) != 0;
+        }
 
-            if (this->locked_count <= 0 || this->owning_thread_id != thread_id)
-            {
-                return {old_count, false};
-            }
+        uint64_t owner() const
+        {
+            return this->state.word(0).load(std::memory_order_acquire) >> owner_shift;
+        }
 
-            --this->locked_count;
-            if (this->locked_count == 0)
+        void restore(const uint32_t locked_count, const uint64_t owner_key, const bool abandoned)
+        {
+            this->state.word(0).store(pack(locked_count, abandoned, owner_key), std::memory_order_release);
+        }
+
+        bool is_signaled(const uint64_t owner_key) const
+        {
+            const auto value = this->state.word(0).load(std::memory_order_acquire);
+            return (value & abandoned_bit) != 0 || (value & lock_count_mask) == 0 || (value >> owner_shift) == owner_key;
+        }
+
+        std::optional<bool> try_lock(const uint64_t owner_key)
+        {
+            auto value = this->state.word(0).load(std::memory_order_acquire);
+            while (true)
             {
-                this->owning_thread_id = 0;
+                const auto count = value & lock_count_mask;
+                const auto was_abandoned = (value & abandoned_bit) != 0;
+
+                uint64_t next{};
+                if (count == 0)
+                {
+                    next = pack(1, false, owner_key);
+                }
+                else if ((value >> owner_shift) == owner_key)
+                {
+                    next = pack(static_cast<uint32_t>(count + 1), was_abandoned, owner_key);
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+
+                if (this->state.word(0).compare_exchange_weak(value, next, std::memory_order_acq_rel))
+                {
+                    return count == 0 ? was_abandoned : false;
+                }
             }
-            return {old_count, true};
+        }
+
+        std::pair<uint32_t, bool> release(const uint64_t owner_key)
+        {
+            auto value = this->state.word(0).load(std::memory_order_acquire);
+            while (true)
+            {
+                const auto count = static_cast<uint32_t>(value & lock_count_mask);
+                if (count == 0 || (value >> owner_shift) != owner_key)
+                {
+                    return {count, false};
+                }
+
+                const auto remaining = count - 1;
+                const auto next = pack(remaining, (value & abandoned_bit) != 0, remaining == 0 ? 0 : owner_key);
+                if (this->state.word(0).compare_exchange_weak(value, next, std::memory_order_acq_rel))
+                {
+                    return {count, true};
+                }
+            }
         }
 
         void abandon()
         {
-            if (this->locked_count == 0)
+            auto value = this->state.word(0).load(std::memory_order_acquire);
+            while ((value & lock_count_mask) != 0)
             {
-                return;
+                if (this->state.word(0).compare_exchange_weak(value, pack(0, true, 0), std::memory_order_acq_rel))
+                {
+                    return;
+                }
             }
+        }
 
-            this->locked_count = 0;
-            this->owning_thread_id = 0;
-            this->abandoned = true;
+        void abandon_if_owned_by(const uint64_t owner_key)
+        {
+            auto value = this->state.word(0).load(std::memory_order_acquire);
+            while ((value & lock_count_mask) != 0 && (value >> owner_shift) == owner_key)
+            {
+                if (this->state.word(0).compare_exchange_weak(value, pack(0, true, 0), std::memory_order_acq_rel))
+                {
+                    return;
+                }
+            }
         }
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
-            buffer.write(this->locked_count);
-            buffer.write(this->owning_thread_id);
-            buffer.write(this->abandoned);
+            buffer.write(this->locked_count());
+            buffer.write(this->owner());
+            buffer.write(this->abandoned());
             buffer.write(this->name);
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
-            buffer.read(this->locked_count);
-            buffer.read(this->owning_thread_id);
-            buffer.read(this->abandoned);
+            uint32_t locked_count{};
+            uint64_t owner_key{};
+            bool abandoned{};
+            buffer.read(locked_count);
+            buffer.read(owner_key);
+            buffer.read(abandoned);
             buffer.read(this->name);
+            this->restore(locked_count, owner_key, abandoned);
+        }
+
+      private:
+        static constexpr uint64_t lock_count_mask = 0xFFFFFF;
+        static constexpr uint64_t abandoned_bit = 1ULL << 24;
+        static constexpr unsigned owner_shift = 25;
+
+        static uint64_t pack(const uint32_t locked_count, const bool abandoned, const uint64_t owner_key)
+        {
+            return (locked_count & lock_count_mask) | (abandoned ? abandoned_bit : 0) | (owner_key << owner_shift);
         }
     };
 
@@ -930,15 +1020,34 @@ namespace sogen
     struct semaphore : ref_counted_object
     {
         std::u16string name{};
-        uint32_t current_count{};
-        uint32_t max_count{};
+        // word 0: current count, word 1: maximum count (immutable after creation).
+        kernel_state state{};
+
+        uint32_t current_count() const
+        {
+            return static_cast<uint32_t>(this->state.word(0).load(std::memory_order_acquire));
+        }
+
+        uint32_t max_count() const
+        {
+            return static_cast<uint32_t>(this->state.word(1).load(std::memory_order_acquire));
+        }
+
+        void initialize(const uint32_t initial_count, const uint32_t maximum_count)
+        {
+            this->state.word(0).store(initial_count, std::memory_order_release);
+            this->state.word(1).store(maximum_count, std::memory_order_release);
+        }
 
         bool try_lock()
         {
-            if (this->current_count > 0)
+            auto value = this->state.word(0).load(std::memory_order_acquire);
+            while (value > 0)
             {
-                --this->current_count;
-                return true;
+                if (this->state.word(0).compare_exchange_weak(value, value - 1, std::memory_order_acq_rel))
+                {
+                    return true;
+                }
             }
 
             return false;
@@ -946,30 +1055,37 @@ namespace sogen
 
         std::pair<uint32_t, bool> release(const uint32_t release_count)
         {
-            const auto old_count = this->current_count;
-
-            if (this->current_count + release_count > this->max_count)
+            const auto maximum = this->max_count();
+            auto value = this->state.word(0).load(std::memory_order_acquire);
+            while (true)
             {
-                return {old_count, false};
+                if (value + release_count > maximum)
+                {
+                    return {static_cast<uint32_t>(value), false};
+                }
+
+                if (this->state.word(0).compare_exchange_weak(value, value + release_count, std::memory_order_acq_rel))
+                {
+                    return {static_cast<uint32_t>(value), true};
+                }
             }
-
-            this->current_count += release_count;
-
-            return {old_count, true};
         }
 
         void serialize_object(utils::buffer_serializer& buffer) const override
         {
             buffer.write(this->name);
-            buffer.write(this->current_count);
-            buffer.write(this->max_count);
+            buffer.write(this->current_count());
+            buffer.write(this->max_count());
         }
 
         void deserialize_object(utils::buffer_deserializer& buffer) override
         {
+            uint32_t current_count{};
+            uint32_t max_count{};
             buffer.read(this->name);
-            buffer.read(this->current_count);
-            buffer.read(this->max_count);
+            buffer.read(current_count);
+            buffer.read(max_count);
+            this->initialize(current_count, max_count);
         }
     };
 

@@ -92,8 +92,7 @@ namespace sogen
             }
 
             semaphore s{};
-            s.current_count = initial_count;
-            s.max_count = maximum_count;
+            s.initialize(initial_count, maximum_count);
 
             if (object_attributes)
             {

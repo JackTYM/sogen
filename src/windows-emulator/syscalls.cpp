@@ -1056,7 +1056,7 @@ namespace sogen
 
             if (auto* e = c.proc.events.get(event))
             {
-                e->signaled = false;
+                e->set_signaled(false);
             }
 
             io_device_context context{c.emu};

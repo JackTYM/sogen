@@ -70,7 +70,7 @@ namespace sogen
             {
                 if (const auto* e = process.events.get(obj))
                 {
-                    fprintf(stderr, " signaled=%d event_type=%d name='%s'", e->signaled ? 1 : 0, static_cast<int>(e->type),
+                    fprintf(stderr, " signaled=%d event_type=%d name='%s'", e->is_signaled() ? 1 : 0, static_cast<int>(e->type),
                             u16_to_u8(e->name).c_str());
                 }
                 else
@@ -82,8 +82,8 @@ namespace sogen
             {
                 if (const auto* m = process.mutants.get(obj))
                 {
-                    fprintf(stderr, " locked_count=%u owning_thread_id=%u abandoned=%d name='%s'", m->locked_count, m->owning_thread_id,
-                            m->abandoned ? 1 : 0, u16_to_u8(m->name).c_str());
+                    fprintf(stderr, " locked_count=%u owner=%llx abandoned=%d name='%s'", m->locked_count(),
+                            static_cast<unsigned long long>(m->owner()), m->abandoned() ? 1 : 0, u16_to_u8(m->name).c_str());
                 }
                 else
                 {
@@ -94,7 +94,8 @@ namespace sogen
             {
                 if (const auto* s = process.semaphores.get(obj))
                 {
-                    fprintf(stderr, " current_count=%u max_count=%u name='%s'", s->current_count, s->max_count, u16_to_u8(s->name).c_str());
+                    fprintf(stderr, " current_count=%u max_count=%u name='%s'", s->current_count(), s->max_count(),
+                            u16_to_u8(s->name).c_str());
                 }
                 else
                 {
@@ -513,7 +514,7 @@ namespace sogen
                 {
                     return true;
                 }
-                event->signaled = true;
+                event->set_signaled(true);
                 return false;
             });
 
@@ -1292,7 +1293,7 @@ namespace sogen
         {
             if (auto* e = this->process.events.get(it->second))
             {
-                e->signaled = true;
+                e->set_signaled(true);
             }
         }
 
@@ -2808,7 +2809,7 @@ namespace sogen
             return false;
         }
 
-        entry->signaled = true;
+        entry->set_signaled(true);
         return true;
     }
 

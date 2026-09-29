@@ -1002,7 +1002,8 @@ namespace sogen
     child_process_outcome spawn_child_process(const child_process_spawn_config& config, application_settings settings,
                                               std::vector<inherited_pipe_handle> inherited_pipes,
                                               std::vector<inherited_section_handle> inherited_sections,
-                                              std::vector<inherited_event_handle> inherited_events)
+                                              std::vector<inherited_event_handle> inherited_events,
+                                              std::shared_ptr<shared_backing> kernel_arena_backing)
     {
 #if !defined(SOGEN_SUPPORTS_CHILD_PROCESS_SPAWNING)
         (void)config;
@@ -1010,6 +1011,7 @@ namespace sogen
         (void)inherited_pipes;
         (void)inherited_sections;
         (void)inherited_events;
+        (void)kernel_arena_backing;
         return {.success = false, .failure_detail = "Child process spawning is not supported on this platform"};
 #else
         install_sigchld_reaper();
@@ -1068,7 +1070,8 @@ namespace sogen
         ::close(child_fd);
         ::close(child_control_fd);
 
-        if (!send_child_bootstrap_data(parent_fd, settings, inherited_pipes, std::move(inherited_sections), inherited_events))
+        if (!send_child_bootstrap_data(parent_fd, settings, inherited_pipes, std::move(inherited_sections), inherited_events,
+                                       std::move(kernel_arena_backing)))
         {
             ::close(parent_fd);
             ::close(parent_control_fd);
@@ -1107,9 +1110,16 @@ namespace sogen
     bool send_child_bootstrap_data(const int fd, const application_settings& settings,
                                    const std::vector<inherited_pipe_handle>& inherited_pipes,
                                    std::vector<inherited_section_handle> inherited_sections,
-                                   const std::vector<inherited_event_handle>& inherited_events)
+                                   const std::vector<inherited_event_handle>& inherited_events,
+                                   std::shared_ptr<shared_backing> kernel_arena_backing)
     {
         std::vector<int> section_fds{};
+        const auto has_arena = kernel_arena_backing && kernel_arena_backing->is_shared();
+        if (has_arena)
+        {
+            section_fds.push_back(kernel_arena_backing->native_fd());
+        }
+
         for (auto& section : inherited_sections)
         {
             if (!section.backing || !section.backing->is_shared())
@@ -1131,6 +1141,8 @@ namespace sogen
         bootstrap.write_vector(inherited_pipes);
         bootstrap.write_vector(inherited_sections);
         bootstrap.write_vector(inherited_events);
+        bootstrap.write(has_arena);
+        bootstrap.write(static_cast<uint64_t>(has_arena ? kernel_arena_backing->size() : 0));
 
         return send_framed(fd, bootstrap.get_buffer(), section_fds);
     }
@@ -1152,7 +1164,17 @@ namespace sogen
         buffer.read_vector(data.inherited_sections);
         buffer.read_vector(data.inherited_events);
 
+        bool has_arena{};
+        uint64_t arena_size{};
+        buffer.read(has_arena);
+        buffer.read(arena_size);
+
         size_t next_fd = 0;
+        if (has_arena && next_fd < section_fds.size())
+        {
+            data.kernel_arena_backing = shared_backing::adopt_fd(section_fds[next_fd++], static_cast<size_t>(arena_size));
+        }
+
         for (auto& section : data.inherited_sections)
         {
             if (section.wire_backing_is_shared && next_fd < section_fds.size())
