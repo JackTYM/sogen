@@ -4618,6 +4618,40 @@ namespace sogen
                                        (result_code == 0 || result_code == 12) ? 1 : 0);
                 });
 
+                // `#564`'s own live run showed the ipcz accept call succeeds (`result_code=0`) for
+                // the overwhelming majority of messages, yet `HandleValidatedMessage` still never
+                // fires even then - ipcz-level acceptance is not the same as final interface
+                // delivery; there's a further hop through ipcz's own Router/NodeLink layer
+                // (mirroring the real, symbol-confirmed `ipcz::NodeLink::OnAcceptParcel`/
+                // `ipcz::Router::AcceptInboundParcel` functions this project already hooks on the
+                // msedge.dll side in `#558` - both exist as real PDB-named symbols in
+                // EmbeddedBrowserWebView.dll too). Watching both entries directly.
+                const auto node_link_accept_parcel = mod.image_base + 0x8fac0;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching ipcz::NodeLink::OnAcceptParcel "
+                                   "entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(node_link_accept_parcel));
+                win_emu->emu().hook_memory_execution(node_link_accept_parcel, [win_emu, node_link_accept_parcel](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit ipcz::NodeLink::OnAcceptParcel "
+                                       "entry at 0x%llx, tid=%u this=0x%x\n",
+                                       static_cast<unsigned long long>(node_link_accept_parcel), win_emu->current_thread().id, this_ptr);
+                });
+
+                const auto router_accept_inbound_parcel = mod.image_base + 0x9c01a;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching ipcz::Router::AcceptInboundParcel "
+                                   "entry at 0x%llx\n",
+                                   static_cast<unsigned long long>(router_accept_inbound_parcel));
+                win_emu->emu().hook_memory_execution(
+                    router_accept_inbound_parcel, [win_emu, router_accept_inbound_parcel](cpu_interface&, uint64_t) {
+                        auto& emu = win_emu->emu();
+                        const auto this_ptr = emu.reg<uint32_t>(x86_register::ecx);
+                        win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit ipcz::Router::AcceptInboundParcel entry at "
+                                           "0x%llx, tid=%u this=0x%x\n",
+                                           static_cast<unsigned long long>(router_accept_inbound_parcel), win_emu->current_thread().id,
+                                           this_ptr);
+                    });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
