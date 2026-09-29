@@ -4829,6 +4829,29 @@ namespace sogen
                                        current_watch_id, notified_watch_id == current_watch_id ? 1 : 0);
                 });
 
+                // The watch-id gate passes cleanly, so `OnHandleReady` proceeds to
+                // `base::RepeatingCallback<...>::Run` - a REAL, direct (non-CFG-guarded) call to a
+                // template-instantiated function, whose own name is misleading (an
+                // `IUnknown*`/`ResourceState*` signature almost certainly ICF-folded from an
+                // unrelated instantiation, matching the same artifact class `#559` already
+                // encountered once this session). Decompiled its own real body: it dispatches
+                // through the bound callback's own stored function pointer (`call ecx`, RVA
+                // 0x17a4ae) - resolving THIS live tells us, for the first time in this entire
+                // chain, exactly which real application-level function is the true final consumer.
+                const auto real_final_callback = mod.image_base + 0x17a4ae;
+                win_emu->log.error("[sldim-basedlg-webview2-hook-trace] watching RepeatingCallback::Run's own "
+                                   "real bound-callback call at 0x%llx\n",
+                                   static_cast<unsigned long long>(real_final_callback));
+                win_emu->emu().hook_memory_execution(real_final_callback, [win_emu, real_final_callback](cpu_interface&, uint64_t) {
+                    auto& emu = win_emu->emu();
+                    const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                    const auto* target_mod_name = win_emu->mod_manager.find_name(resolved_target);
+                    win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit RepeatingCallback::Run's own real "
+                                       "bound-callback call at 0x%llx, tid=%u resolved_target=0x%x (%s)\n",
+                                       static_cast<unsigned long long>(real_final_callback), win_emu->current_thread().id, resolved_target,
+                                       target_mod_name);
+                });
+
                 // Live testing (`#563`) showed even this real-dispatch hook never fires despite the
                 // size-sufficiency check passing every time - one more branch sits between them:
                 // `cmp dword ptr [eax+34h], 1` (RVA 0x6dc40, `eax` = `this`, the Channel object at
