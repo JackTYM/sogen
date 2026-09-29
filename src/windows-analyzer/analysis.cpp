@@ -4600,9 +4600,19 @@ namespace sogen
                 win_emu->emu().hook_memory_execution(ipcz_accept_call, [win_emu, ipcz_accept_call](cpu_interface&, uint64_t) {
                     auto& emu = win_emu->emu();
                     const auto resolved_target = emu.reg<uint32_t>(x86_register::ecx);
+                    // `#572` traced the resolved target (`ipcz::_anonymous_namespace_::NotifyTransport`,
+                    // real symbol) and found it builds a `RawMessage{a2, a3, a4, a5}` from its own
+                    // 2nd/3rd raw arguments and forwards it into real `ipcz::DriverTransport::Notify`.
+                    // At THIS call site those arguments are still live in `edi`/`ebx` (a2/a3, the
+                    // most likely data-pointer/byte-count pair) - capture them directly to see
+                    // whether the byte count is already zero here or still the real 184 bytes.
+                    const auto raw_message_a2 = emu.reg<uint32_t>(x86_register::edi);
+                    const auto raw_message_a3 = emu.reg<uint32_t>(x86_register::ebx);
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Transport::OnChannelMessage's own "
-                                       "inner ipcz accept call at 0x%llx, tid=%u resolved_target=0x%x\n",
-                                       static_cast<unsigned long long>(ipcz_accept_call), win_emu->current_thread().id, resolved_target);
+                                       "inner ipcz accept call at 0x%llx, tid=%u resolved_target=0x%x "
+                                       "raw_message_a2=0x%x raw_message_a3=0x%x\n",
+                                       static_cast<unsigned long long>(ipcz_accept_call), win_emu->current_thread().id, resolved_target,
+                                       raw_message_a2, raw_message_a3);
                 });
 
                 const auto ipcz_accept_result = mod.image_base + 0x7addc;
