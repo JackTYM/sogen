@@ -4447,6 +4447,8 @@ namespace sogen
                     emu.try_read_memory(buffer_ptr, &buffer_base, sizeof(buffer_base));
                     uint32_t buffer_consumed{};
                     emu.try_read_memory(buffer_ptr + 12, &buffer_consumed, sizeof(buffer_consumed));
+                    uint32_t buffer_filled{};
+                    emu.try_read_memory(buffer_ptr + 16, &buffer_filled, sizeof(buffer_filled));
                     const uint32_t header_ptr = buffer_base + buffer_consumed;
                     uint32_t header_num_bytes{};
                     emu.try_read_memory(header_ptr, &header_num_bytes, sizeof(header_num_bytes));
@@ -4456,10 +4458,11 @@ namespace sogen
                     emu.try_read_memory(header_ptr + 12, &header_name, sizeof(header_name));
 
                     win_emu->log.error("[sldim-basedlg-webview2-hook-trace] hit Channel::OnReadComplete entry at 0x%llx, tid=%u "
-                                       "this=0x%x bytes_transferred=%u header_ptr=0x%x header_num_bytes=%u "
-                                       "header_message_type=%u header_name=0x%x\n",
+                                       "this=0x%x bytes_transferred=%u buffer_ptr=0x%x buffer_base=0x%x buffer_consumed=%u "
+                                       "buffer_filled=%u header_ptr=0x%x header_num_bytes=%u header_message_type=%u header_name=0x%x\n",
                                        static_cast<unsigned long long>(on_read_complete_entry), win_emu->current_thread().id, this_ptr,
-                                       bytes_transferred, header_ptr, header_num_bytes, header_message_type, header_name);
+                                       bytes_transferred, buffer_ptr, buffer_base, buffer_consumed, buffer_filled, header_ptr,
+                                       header_num_bytes, header_message_type, header_name);
                 });
 
                 // Decompiled `Channel::TryDispatchMessage_0` (called from `OnReadComplete`'s own
